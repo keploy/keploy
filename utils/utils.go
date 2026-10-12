@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -44,9 +42,6 @@ import (
 )
 
 var WarningSign = "\U000026A0"
-
-var TemplatizedValues = map[string]interface{}{}
-var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -315,20 +310,6 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
-	}
-}
-
-// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
-// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
-// For example:
-// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
-// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
-func RemoveDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
 	}
 }
 
@@ -791,74 +772,6 @@ const (
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
-
-func ToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			fmt.Printf("failed to convert string to int: %v", err)
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-	case json.Number:
-		// Try int64 first
-		if i, err := v.Int64(); err == nil {
-			return int(i)
-		}
-		if f, err := v.Float64(); err == nil {
-			return int(f)
-		}
-
-	}
-	return 0
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
-}
-
-func ToFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			fmt.Printf("failed to convert string to float: %v", err)
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
 
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
@@ -1700,90 +1613,6 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
-}
-
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
-// executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces by using a strict regex.
-func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	// This regex is specifically designed to match valid Keploy templates:
-	// - It must start with {{ and optional whitespace.
-	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
-	// - It MUST contain a dot (.) to indicate a field access.
-	// - It non-greedily matches characters until the closing braces.
-	// This prevents it from matching invalid syntax like {{u^2}}.
-	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
-
-	funcMap := template.FuncMap{
-		"int":    ToInt,
-		"string": ToString,
-		"float":  ToFloat,
-	}
-
-	var firstErr error
-
-	// Check if the entire input string is a single template placeholder.
-	// This is more efficient than using MatchString and FindString separately.
-	matchIndexes := re.FindStringIndex(input)
-	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
-
-	result := re.ReplaceAllStringFunc(input, func(match string) string {
-		// Only parse and execute the matched placeholder, not the entire string.
-		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
-		if err != nil {
-
-			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
-			return match
-		}
-
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, templateData)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
-			}
-			return match
-		}
-
-		if isExactPlaceholderMatch {
-			return output.String()
-		}
-
-		// Ensure the placeholder result is safe to embed inside JSON strings by
-		// escaping control characters like newlines, quotes, and backslashes.
-		// This prevents errors such as `invalid character '\n' in string literal`
-		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(logger, output.String())
-	})
-
-	return result, firstErr
-}
-
-// jsonEscapeString returns a JSON-safe representation of s suitable for
-// embedding directly inside a JSON string literal. It escapes characters
-// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
-// but does not add surrounding quotes.
-func jsonEscapeString(logger *zap.Logger, s string) string {
-	if s == "" {
-		return ""
-	}
-	b, err := json.Marshal(s)
-	// json.Marshal on a string should rarely fail, but if it does, log it
-	// and return the original string to avoid breaking the flow.
-	if err != nil {
-		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
-		return s
-	}
-
-	// The result of marshaling a string is a JSON string literal, which includes
-	// surrounding quotes. We need to strip them.
-	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
-		// This case is highly unlikely if json.Marshal succeeded without error.
-		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
-		return s
-	}
-	// Strip the surrounding quotes added by json.Marshal.
-	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}

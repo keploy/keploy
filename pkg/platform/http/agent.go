@@ -2973,10 +2973,16 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 	return windows, nil
 }
 
-func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error {
+func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := maps.Clone(sets)
+			a.session().record(stepSetTable, func(c context.Context) error { return a.PushSetTable(c, root, recorded) })
+		}
+	}()
 	body, err := json.Marshal(models.ScopeTableReq{Root: root, Sets: sets})
 	if err != nil {
-		return fmt.Errorf("failed to marshal the app start table: %w", err)
+		return fmt.Errorf("failed to marshal the set table: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
 	if err != nil {
@@ -2985,7 +2991,7 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	req.Header.Set("Content-Type", "application/json")
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to push the app start table: %w", err)
+		return fmt.Errorf("failed to push the set table: %w", err)
 	}
 	defer func() {
 		io.Copy(io.Discard, res.Body)
@@ -2993,7 +2999,7 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	}()
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
-		return fmt.Errorf("app start table returned status %d: %s", res.StatusCode, string(b))
+		return fmt.Errorf("set table returned status %d: %s", res.StatusCode, string(b))
 	}
 	return nil
 }

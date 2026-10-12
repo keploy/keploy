@@ -250,6 +250,8 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	httpReq.URL = orig.String()
 	tcCopy.HTTPReq = httpReq
 
+	// Sent as written: one test case run alone has no test set's template
+	// values, which belong to a replay of the whole set (pkg/templates).
 	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
 	if err != nil {
 		return false, models.RespCompare{}, err

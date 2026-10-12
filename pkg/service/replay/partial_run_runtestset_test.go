@@ -167,7 +167,16 @@ func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]mode
 func (f *prReportDB) GetReport(context.Context, string, string) (*models.TestReport, error) {
 	return nil, nil
 }
-func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {}
+
+// ClearTestCaseResults drops every result kept, as the YAML report store
+// (reportdb) does. Replayer.Start clears the run's results before every
+// attempt at a test set, so a --must-pass or flaky-check rerun reads only its
+// own results.
+func (f *prReportDB) ClearTestCaseResults(context.Context, string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = nil
+}
 func (f *prReportDB) InsertTestCaseResult(_ context.Context, _ string, _ string, r *models.TestResult) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

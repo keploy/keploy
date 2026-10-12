@@ -609,8 +609,12 @@ func TestEachTemplatizingCallerUsesTheHelper(t *testing.T) {
 	// Banning the write is not enough on its own: a caller could drop
 	// the write entirely and silently stop persisting templates.
 	for path, wantCalls := range map[string]int{
-		// RunTestSet's templatized write, and UpdateTestSetTemplate.
-		"replay.go": 2,
+		// None: keploy test never writes config.yaml's template. It holds
+		// the values as recorded, and a run's own values (what its
+		// {{capture ...}} placeholders took) belong to that run only. A
+		// write here would start the next run from a value the recording
+		// never held.
+		"replay.go": 0,
 		// ProcessTestCasesV2's.
 		"../tools/templatize.go": 1,
 	} {
