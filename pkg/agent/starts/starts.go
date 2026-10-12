@@ -77,6 +77,7 @@ type Registry struct {
 	universe map[string]struct{}
 	free     map[string]map[string]map[string]struct{}
 	blind    int
+	gen      uint64
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
@@ -102,6 +103,7 @@ func (r *Registry) Reset() {
 	r.universe = nil
 	r.free = nil
 	r.blind = 0
+	r.gen++
 	r.marked = false
 }
 
@@ -671,7 +673,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 
 func (r *Registry) caseView(set string, f *frame, test string) func(string) bool {
 	cases := r.sets[set].Cases[test]
-	if len(cases) == 0 || f == nil || r.blind > 0 || f.open[-1] > 0 {
+	if len(cases) == 0 || f == nil || f.used == nil || r.blind > 0 || f.open[-1] > 0 {
 		return nil
 	}
 	free := r.free[set][test]
@@ -681,8 +683,13 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) bool
 			mine = append(mine, cases[i].Mocks...)
 		}
 	}
-	if f.last > 0 && f.last <= len(cases) {
-		mine = append(mine, cases[f.last-1].Mocks...)
+	if len(f.open) == 0 {
+		if f.last > 0 && f.last <= len(cases) {
+			mine = append(mine, cases[f.last-1].Mocks...)
+		}
+		if i := slices.Index(f.used, false); i >= 0 && i < len(cases) {
+			mine = append(mine, cases[i].Mocks...)
+		}
 	}
 	return func(name string) bool {
 		_, ok := free[name]
@@ -706,12 +713,13 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 			return func() {}
 		}
 		r.blind++
+		gen := r.gen
 		var once sync.Once
 		return func() {
 			once.Do(func() {
 				r.mu.Lock()
 				defer r.mu.Unlock()
-				if r.blind > 0 {
+				if r.gen == gen && r.blind > 0 {
 					r.blind--
 				}
 			})
@@ -721,7 +729,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	if len(cases) == 0 {
 		return func() {}
 	}
-	if f.used == nil {
+	if f.used == nil || len(f.used) != len(cases) {
 		f.used = make([]bool, len(cases))
 		f.open = map[int]int{}
 	}
@@ -767,14 +775,10 @@ func (r *Registry) exchangeFrame(port uint16) (*frame, string) {
 			}
 		}
 	}
-	if w == nil {
+	if w == nil || len(w.frames) < 2 {
 		return nil, ""
 	}
-	f := r.currentFrame(w)
-	if f == nil {
-		return nil, ""
-	}
-	return f, r.setOf(w.dir)
+	return w.frames[len(w.frames)-1], r.setOf(w.dir)
 }
 
 func (r *Registry) alive(pid uint32, born time.Time) bool {

@@ -410,18 +410,20 @@ func oneTest(sets map[string]models.SetTable) (*fake, *Registry) {
 
 func TestACallSeesOnlyTheMocksOfTheCaseInFlight(t *testing.T) {
 	_, r := oneTest(caseTable())
-	sees(t, r, 101, "before the first case", "fx")
+	sees(t, r, 101, "before any request is paired", "fx", "m1", "m2", "m3")
 	end := r.Exchange(0, "GET", "/a")
 	sees(t, r, 101, "first GET /a", "fx", "m1")
 	end()
 	end()
-	sees(t, r, 101, "after the first case, until the next one", "fx", "m1")
+	sees(t, r, 101, "between the first and second case", "fx", "m1", "m2")
 	end = r.Exchange(0, "GET", "/a")
 	sees(t, r, 101, "second GET /a", "fx", "m2")
 	end()
+	sees(t, r, 101, "between the second and third case", "fx", "m2", "m3")
 	end = r.Exchange(0, "POST", "/b/43/")
 	sees(t, r, 101, "POST /b by its path", "fx", "m3")
 	end()
+	sees(t, r, 101, "after the last case", "fx", "m3")
 }
 
 func TestARequestNoCaseRecordedSeesTheWholeTest(t *testing.T) {
@@ -456,7 +458,7 @@ func TestATestWithoutCasesInASetWithCasesIsServedWhole(t *testing.T) {
 	sees(t, r, 101, "test U", "u1")
 }
 
-func TestTwoOpenTestsPairEachRequestByItsAppsPort(t *testing.T) {
+func twoPackages() (*fake, *Registry) {
 	f, r := oneTest(caseTable())
 	r.Ready(101, 8080, at(3))
 	f.spawn(200, 1, at(0), "/tmp/other.test")
@@ -464,19 +466,50 @@ func TestTwoOpenTestsPairEachRequestByItsAppsPort(t *testing.T) {
 	f.spawn(201, 200, at(2), "/tmp/shop")
 	r.Ready(201, 9090, at(3))
 	r.Begin(200, "T", "/repo/e2e", false, at(10))
+	return f, r
+}
 
-	end := r.Exchange(8080, "GET", "/a")
-	sees(t, r, 101, "first package's GET /a", "fx", "m1")
-	sees(t, r, 201, "second package between cases", "fx")
+func TestTwoOpenTestsPairEachRequestByItsAppsPort(t *testing.T) {
+	_, r := twoPackages()
+	end := r.Exchange(9090, "GET", "/a")
+	sees(t, r, 201, "second package's GET /a", "fx", "m1")
+	sees(t, r, 101, "first package, nothing paired yet", "fx", "m1", "m2", "m3")
 	end()
-	end = r.Exchange(9090, "POST", "/b/7")
-	sees(t, r, 201, "second package's POST", "fx", "m3")
+	end = r.Exchange(8080, "POST", "/b/7")
+	sees(t, r, 101, "first package's POST", "fx", "m3")
 	end()
-
 	end = r.Exchange(0, "GET", "/a")
 	sees(t, r, 101, "a request no app port places", "fx", "m1", "m2", "m3")
 	end()
-	sees(t, r, 101, "after it", "fx", "m1")
+	sees(t, r, 101, "after it, the last case and the first one not yet served", "fx", "m1", "m3")
+}
+
+func TestARequestToAnAppBetweenTestsLeavesOtherTestsCasesAlone(t *testing.T) {
+	_, r := twoPackages()
+	r.End(100, "T", false, at(11))
+	end := r.Exchange(8080, "GET", "/a")
+	sees(t, r, 201, "the other package while it is in flight", "fx", "m1", "m2", "m3")
+	end()
+	end = r.Exchange(9090, "GET", "/a")
+	defer end()
+	sees(t, r, 201, "the other package's own first GET /a", "fx", "m1")
+}
+
+func TestAPlacelessRequestFromBeforeAResetDoesNotEndOneAfterIt(t *testing.T) {
+	f, r := twoPackages()
+	old := r.Exchange(0, "GET", "/a")
+	r.Reset()
+	r.Begin(100, "/repo/e2e", "/repo/e2e", true, at(1))
+	r.Begin(200, "/repo/e2e", "/repo/e2e", true, at(1))
+	r.SetTable("/repo", caseTable())
+	r.Begin(100, "T", "/repo/e2e", false, at(10))
+	r.Begin(200, "T", "/repo/e2e", false, at(10))
+	f.spawn(102, 100, at(12), "/tmp/shop")
+	r.Exchange(0, "GET", "/a")()
+	end := r.Exchange(0, "GET", "/a")
+	defer end()
+	old()
+	sees(t, r, 102, "the new run's placeless request", "fx", "m1", "m2", "m3")
 }
 
 func TestATestWhoseProcessDiedDoesNotBlockPairing(t *testing.T) {
@@ -492,13 +525,15 @@ func TestATestWhoseProcessDiedDoesNotBlockPairing(t *testing.T) {
 
 func TestASiblingsMockInAnotherTestsCaseStaysVisible(t *testing.T) {
 	_, r := oneTest(map[string]models.SetTable{"e2e": {
-		Tests: map[string][]models.Owned{"T": {{Name: "x"}, {Name: "fx"}}, "T/a": {{Name: "a1"}}},
+		Tests: map[string][]models.Owned{"T": {{Name: "x"}, {Name: "t1"}, {Name: "t2"}}, "T/a": {{Name: "a1"}}},
 		Cases: map[string][]models.Case{
-			"T":   {{Name: "test-1", Method: "GET", URL: "/t", Mocks: []string{"fx"}}},
+			"T":   {{Name: "test-1", Method: "GET", URL: "/t", Mocks: []string{"t1"}}, {Name: "test-3", Method: "GET", URL: "/u", Mocks: []string{"t2"}}},
 			"T/a": {{Name: "test-2", Method: "GET", URL: "/a", Mocks: []string{"a1", "x"}}},
 		},
 	}})
-	sees(t, r, 101, "T between cases", "x")
+	end := r.Exchange(0, "GET", "/u")
+	defer end()
+	sees(t, r, 101, "T's second case", "t2", "x")
 }
 
 func TestPickCaseKeys(t *testing.T) {
