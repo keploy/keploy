@@ -995,9 +995,10 @@ type ReplayOutcome struct {
 	// Cases is each recorded request replayed, with the app's answer compared to the recording.
 	Cases []CaseOutcome
 	// Mocks is what each test used and missed, next to what it recorded.
-	Mocks  []FlowMocks
-	Starts map[string]int
-	Sets   []string
+	Mocks    []FlowMocks
+	Unplaced []models.UnmatchedCall
+	Starts   map[string]int
+	Sets     []string
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -1137,6 +1138,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Missed:   len(misses),
 				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
 				Mocks:    flows,
+				Unplaced: unplacedMisses(detail.windows, misses),
 				Starts:   startsByTest(detail.windows, detail.starts),
 				Sets:     ranSets(detail.windows),
 			})

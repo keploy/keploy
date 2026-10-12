@@ -545,3 +545,12 @@ func TestCapturedCallsAreAppendedOnlyWhenTheSetCanBeNumbered(t *testing.T) {
 		})
 	}
 }
+
+func TestUnplacedMissesAreTheOnesNoTestWindowHolds(t *testing.T) {
+	in := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "in", At: runnerT0.Add(220 * time.Millisecond)}
+	outside := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "outside", At: runnerT0.Add(-time.Hour)}
+	untimed := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "untimed"}
+	require.Equal(t, []models.UnmatchedCall{outside, untimed}, unplacedMisses(replayWindows, []models.UnmatchedCall{in, outside, untimed}))
+	require.Nil(t, unplacedMisses(replayWindows, []models.UnmatchedCall{in}))
+	require.Equal(t, []models.UnmatchedCall{in}, unplacedMisses(nil, []models.UnmatchedCall{in}))
+}

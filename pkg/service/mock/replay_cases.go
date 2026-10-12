@@ -271,6 +271,16 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	return out
 }
 
+func unplacedMisses(windows []models.ScopeWindow, misses []models.UnmatchedCall) []models.UnmatchedCall {
+	var out []models.UnmatchedCall
+	for _, m := range misses {
+		if _, ok := flowAt[bool](windows, m.At, nil); m.At.IsZero() || !ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // compareCase checks the app's answer against the recorded one, forgiving the case's own noise and volatile headers.
 func (m *mockService) compareCase(tc *models.TestCase, actual *models.HTTPResp) (bool, *models.Result) {
 	tc = m.withRunIDs(tc)
