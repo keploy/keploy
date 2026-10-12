@@ -6,15 +6,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/rlimit"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // newTestHooks constructs a Hooks value that is safe to call GetProxyInfo on
@@ -175,51 +181,41 @@ func TestGetProxyInfo_NonDocker_CfgPortOverrideStillForcesV6(t *testing.T) {
 // kernels do. cilium/ebpf before v0.22.0 refused such a header ("parsing .BTF
 // header: header contains non-zero trailer"), and with it the kernel's whole
 // BTF, so load() could not apply the objects' CO-RE relocations and the agent
-// refused to start on those kernels. load() reads /sys/kernel/btf/vmlinux with
-// the parser this test calls. The blob is laid out as such a kernel's is: types,
-// then the layout section, then the strings.
+// refused to start on those kernels. v0.22.0 accepts the two fields; it does
+// not read the section they point to, so this pins the header, and the layout
+// bytes are only there to lay the blob out as such a kernel's is: types, then
+// the layout section, then the strings. load() reads /sys/kernel/btf/vmlinux
+// with the parser this test calls.
 func TestKernelBTFWithALayoutSectionLoads(t *testing.T) {
 	le := binary.LittleEndian
-	var types bytes.Buffer
+	var types []byte
 	// One type, BTF_KIND_INT (1) named "int": 32 bits, signed.
 	for _, v := range []uint32{1, 1 << 24, 4, 1<<24 | 32} {
-		_ = binary.Write(&types, le, v)
+		types = le.AppendUint32(types, v)
 	}
-	// struct btf_layout {info_sz, elem_sz u8; flags u16} for kinds 0 to 19,
-	// as libbpf writes it (tools/lib/bpf/btf.c, layouts[]).
-	var layout bytes.Buffer
+	// struct btf_layout {info_sz, elem_sz u8; flags u16} for kinds 0 to 19, as
+	// libbpf writes it (tools/lib/bpf/btf.c, layouts[]) and 7.2.7's BTF has it.
+	var layout []byte
 	for _, sz := range [][2]uint8{
 		{0, 0}, {4, 0}, {0, 0}, {12, 0}, {0, 12}, {0, 12}, {0, 8}, {0, 0}, {0, 0}, {0, 0},
 		{0, 0}, {0, 0}, {0, 0}, {0, 8}, {4, 0}, {0, 12}, {0, 0}, {4, 0}, {0, 0}, {0, 12},
 	} {
-		_ = binary.Write(&layout, le, struct {
-			InfoSz, ElemSz uint8
-			Flags          uint16
-		}{sz[0], sz[1], 0})
+		layout = append(layout, sz[0], sz[1], 0, 0)
 	}
 	strs := []byte("\x00int\x00")
-	header := struct {
-		Magic                            uint16
-		Version, Flags                   uint8
-		HdrLen                           uint32
-		TypeOff, TypeLen, StrOff, StrLen uint32
-		LayoutOff, LayoutLen             uint32
-	}{
-		Magic: 0xeB9F, Version: 1, HdrLen: 32,
-		TypeOff: 0, TypeLen: uint32(types.Len()),
-		LayoutOff: uint32(types.Len()), LayoutLen: uint32(layout.Len()),
-		StrOff: uint32(types.Len() + layout.Len()), StrLen: uint32(len(strs)),
+	blob := le.AppendUint16(nil, 0xeB9F)
+	blob = append(blob, 1, 0) // version, flags
+	for _, v := range []uint32{
+		32,                    // hdr_len
+		0, uint32(len(types)), // type_off, type_len
+		uint32(len(types) + len(layout)), uint32(len(strs)), // str_off, str_len
+		uint32(len(types)), uint32(len(layout)), // layout_off, layout_len
+	} {
+		blob = le.AppendUint32(blob, v)
 	}
-	var blob bytes.Buffer
-	_ = binary.Write(&blob, le, header)
-	if blob.Len() != 32 {
-		t.Fatalf("the header is %d bytes, want 32", blob.Len())
-	}
-	blob.Write(types.Bytes())
-	blob.Write(layout.Bytes())
-	blob.Write(strs)
+	blob = append(append(append(blob, types...), layout...), strs...)
 
-	spec, err := btf.LoadSpecFromReader(bytes.NewReader(blob.Bytes()))
+	spec, err := btf.LoadSpecFromReader(bytes.NewReader(blob))
 	if err != nil {
 		t.Fatalf("the BTF of a kernel with a layout section does not load: %v", err)
 	}
@@ -230,4 +226,63 @@ func TestKernelBTFWithALayoutSectionLoads(t *testing.T) {
 	if i.Size != 4 || i.Encoding != btf.Signed {
 		t.Fatalf("int is %d bytes, encoding %v, want 4 and signed", i.Size, i.Encoding)
 	}
+}
+
+// This kernel's BTF loads, every type of it, with the parser load() uses: on a
+// kernel whose BTF format cilium/ebpf does not know, here is where it shows,
+// without root. Skipped on a kernel without BTF in sysfs.
+func TestThisKernelsBTFLoads(t *testing.T) {
+	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
+		t.Skipf("this kernel has no /sys/kernel/btf/vmlinux: %v", err)
+	}
+	spec, err := btf.LoadKernelSpec()
+	if err != nil {
+		t.Fatalf("this kernel's BTF (%s) does not load: %v", kernelRelease(), err)
+	}
+	n := 0
+	for _, err := range spec.All() {
+		if err != nil {
+			t.Fatalf("type %d of this kernel's BTF (%s) does not decode: %v", n+1, kernelRelease(), err)
+		}
+		n++
+	}
+	if n == 0 {
+		t.Fatalf("this kernel's BTF (%s) has no types", kernelRelease())
+	}
+}
+
+// The agent's objects load on this kernel as load() loads them: the call that
+// failed where cilium/ebpf could not read the kernel's BTF, since each
+// object's CO-RE relocations are applied against it. Nothing is attached.
+// Needs root.
+func TestTheHooksLoadOnThisKernel(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("loading the agent's eBPF objects needs root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("remove the memlock limit: %v", err)
+	}
+	spec, err := hookSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objs bpfObjects
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
+		var ve *ebpf.VerifierError
+		if errors.As(err, &ve) {
+			t.Fatalf("the verifier refused the hooks on this kernel (%s): %v\n%s", kernelRelease(), err, strings.Join(ve.Log, "\n"))
+		}
+		t.Fatalf("the hooks do not load on this kernel (%s): %v", kernelRelease(), err)
+	}
+	if err := objs.Close(); err != nil {
+		t.Fatalf("close the hooks: %v", err)
+	}
+}
+
+func kernelRelease() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return "unknown kernel"
+	}
+	return unix.ByteSliceToString(u.Release[:])
 }

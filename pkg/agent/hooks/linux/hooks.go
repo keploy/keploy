@@ -186,6 +186,31 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
+// hookSpec is the collection load() loads into the kernel: the compiled
+// objects, with k_sockops's program and attach types set.
+func hookSpec() (*ebpf.CollectionSpec, error) {
+	spec, err := loadBpf()
+	if err != nil {
+		return nil, err
+	}
+
+	programs := []struct {
+		name  string
+		pType ebpf.ProgramType
+		aType ebpf.AttachType
+	}{
+		{"k_sockops", ebpf.SockOps, ebpf.AttachCGroupSockOps},
+	}
+
+	for _, p := range programs {
+		if prog, ok := spec.Programs[p.name]; ok {
+			prog.Type = p.pType
+			prog.AttachType = p.aType
+		}
+	}
+	return spec, nil
+}
+
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -202,25 +227,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		},
 	}
 
-	spec, err := loadBpf()
+	spec, err := hookSpec()
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to load BPF spec")
 		return err
-	}
-
-	programs := []struct {
-		name  string
-		pType ebpf.ProgramType
-		aType ebpf.AttachType
-	}{
-		{"k_sockops", ebpf.SockOps, ebpf.AttachCGroupSockOps},
-	}
-
-	for _, p := range programs {
-		if prog, ok := spec.Programs[p.name]; ok {
-			prog.Type = p.pType
-			prog.AttachType = p.aType
-		}
 	}
 
 	// Now load and assign into the kernel with the corrected spec.
