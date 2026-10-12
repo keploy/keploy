@@ -118,12 +118,8 @@ func dataPlaneMisses(calls []models.UnmatchedCall) int {
 // than one result counts once, by its least favourable one, so a duplicate row
 // can never make a run greener.
 func verdictCounts(results []models.TestResult) (passed, failed, obsolete, ignored int) {
-	rank := map[models.TestStatus]int{
-		models.TestStatusIgnored:  1,
-		models.TestStatusPassed:   2,
-		models.TestStatusObsolete: 3,
-		models.TestStatusFailed:   4,
-	}
+	// A status that is no verdict (PENDING, RUNNING, or anything a hook made
+	// up) counts as failed: nothing vouches for the test.
 	worst := make(map[string]models.TestStatus, len(results))
 	var order []string
 	for _, r := range results {
@@ -131,7 +127,7 @@ func verdictCounts(results []models.TestResult) (passed, failed, obsolete, ignor
 		if !seen {
 			order = append(order, r.TestCaseID)
 		}
-		if !seen || rank[r.Status] > rank[prev] {
+		if !seen || statusRank(r.Status) > statusRank(prev) {
 			worst[r.TestCaseID] = r.Status
 		}
 	}
@@ -139,12 +135,12 @@ func verdictCounts(results []models.TestResult) (passed, failed, obsolete, ignor
 		switch worst[id] {
 		case models.TestStatusPassed:
 			passed++
-		case models.TestStatusFailed:
-			failed++
 		case models.TestStatusObsolete:
 			obsolete++
 		case models.TestStatusIgnored:
 			ignored++
+		default:
+			failed++
 		}
 	}
 	return passed, failed, obsolete, ignored
@@ -254,28 +250,198 @@ func missCategory(r *models.TestResult) {
 // answer (KEPLOY_PROVEN=1).
 const vetoUnmatchedCall = "a call this test made got no recorded answer (" + provenswitch.Env + "=1)"
 
-// holdEvidenceFloor sets back to FAILED, under the proven switch, every test a
-// hook (BeforeTestResult) left PASSED or OBSOLETE while evidence stands
-// against it: a call it made that no mock answered, or a recorded call it did
-// not make. A hook may still quarantine such a test (IGNORED). It returns the
-// tests it set back.
-func holdEvidenceFloor(results []models.TestResult) []string {
+// testEvidence is the evidence against a test, as its results carried it
+// before the BeforeTestResult hook ran: the calls of it no mock answered
+// (data-plane only), the recorded calls it did not make, and the categories
+// that name them.
+type testEvidence struct {
+	misses     []models.UnmatchedCall
+	unconsumed []models.UnconsumedMock
+	categories []models.FailureCategory
+}
+
+// hookSnapshot is what the set's results said before the hook ran, under the
+// proven switch: every test, in order, its least favourable row, and the
+// evidence against it. Copied, so what the hook does to the results cannot
+// reach it.
+type hookSnapshot struct {
+	tests    []string
+	rows     map[string]models.TestResult
+	evidence map[string]testEvidence
+}
+
+// dataPlaneCalls are the calls of calls that are not DNS lookups.
+func dataPlaneCalls(calls []models.UnmatchedCall) []models.UnmatchedCall {
+	var out []models.UnmatchedCall
+	for _, c := range calls {
+		if !strings.EqualFold(c.Protocol, "DNS") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// statusRank orders verdicts from the most to the least favourable; a status
+// that is no verdict ranks with FAILED.
+func statusRank(s models.TestStatus) int {
+	switch s {
+	case models.TestStatusIgnored:
+		return 1
+	case models.TestStatusPassed:
+		return 2
+	case models.TestStatusObsolete:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// cloneResult copies r with the slices the floor reads or restores, so the
+// copy and r share nothing the hook could change.
+func cloneResult(r models.TestResult) models.TestResult {
+	r.FailureInfo.UnmatchedCalls = slices.Clone(r.FailureInfo.UnmatchedCalls)
+	r.FailureInfo.UnconsumedMocks = slices.Clone(r.FailureInfo.UnconsumedMocks)
+	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
+	return r
+}
+
+// snapshotEvidence takes, under the proven switch, what the set's results say
+// before the hook runs (nil with the switch off).
+func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 	if !provenswitch.On() {
 		return nil
 	}
-	var held []string
-	for i := range results {
-		r := &results[i]
-		if r.Status != models.TestStatusPassed && r.Status != models.TestStatusObsolete {
+	snap := &hookSnapshot{rows: make(map[string]models.TestResult), evidence: make(map[string]testEvidence)}
+	for _, r := range results {
+		prev, seen := snap.rows[r.TestCaseID]
+		if !seen {
+			snap.tests = append(snap.tests, r.TestCaseID)
+		}
+		if !seen || statusRank(r.Status) > statusRank(prev.Status) {
+			snap.rows[r.TestCaseID] = cloneResult(r)
+		}
+		misses := dataPlaneCalls(r.FailureInfo.UnmatchedCalls)
+		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
 			continue
 		}
-		if dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
-			continue
+		e := snap.evidence[r.TestCaseID]
+		e.misses = append(e.misses, misses...)
+		e.unconsumed = append(e.unconsumed, r.FailureInfo.UnconsumedMocks...)
+		for _, c := range r.FailureInfo.Category {
+			if c == models.CallUnmatched || c == models.DependencyMissing {
+				e.categories = appendCategoryUnique(e.categories, c)
+			}
 		}
-		r.Status = models.TestStatusFailed
-		held = append(held, r.TestCaseID)
+		snap.evidence[r.TestCaseID] = e
 	}
-	return held
+	return snap
+}
+
+// holdEvidenceFloor holds, under the proven switch, the set's verdicts against
+// what the hook (BeforeTestResult) did to them; before is what they said
+// before it ran (snapshotEvidence). It returns the results, with any it put
+// back, and the tests it held. Each test is decided as a whole, over all its
+// rows, because the tally counts a test by its least favourable row
+// (verdictCounts):
+//
+//   - Every test keeps a row. A test the hook removed (or whose row it renamed
+//     or overwrote) is put back, as its least favourable row was, FAILED, or
+//     IGNORED if every row of it was IGNORED before the hook: a hook cannot
+//     make a test vanish from the tally. A row of a test that did not exist
+//     before the hook is FAILED.
+//   - A test with evidence against it (a call it made that no mock answered,
+//     or a recorded call it did not make, before the hook or still) counts
+//     FAILED, unless every row of it is quarantined (IGNORED). When none of
+//     its rows is FAILED, every row that is not IGNORED is set FAILED;
+//     a test that has a FAILED row already counts FAILED, and its other rows
+//     (a clean duplicate from an earlier cycle) are left as they are.
+//   - A kind of evidence the hook cleared from every row of a test is put
+//     back, with its category, on the row that carries the test's verdict.
+func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]models.TestResult, []string) {
+	if !provenswitch.On() || before == nil {
+		return results, nil
+	}
+	var held []string
+	rowsOf := make(map[string][]int, len(results))
+	for i, r := range results {
+		rowsOf[r.TestCaseID] = append(rowsOf[r.TestCaseID], i)
+	}
+	for i := range results {
+		if _, known := before.rows[results[i].TestCaseID]; !known && results[i].Status != models.TestStatusFailed {
+			results[i].Status = models.TestStatusFailed
+			held = appendOnce(held, results[i].TestCaseID)
+		}
+	}
+	for _, id := range before.tests {
+		if len(rowsOf[id]) > 0 {
+			continue
+		}
+		row := cloneResult(before.rows[id])
+		if row.Status != models.TestStatusIgnored {
+			row.Status = models.TestStatusFailed
+		}
+		results = append(results, row)
+		rowsOf[id] = []int{len(results) - 1}
+		held = appendOnce(held, id)
+	}
+	for _, id := range before.tests {
+		rows := rowsOf[id]
+		snap := before.evidence[id]
+		misses, unconsumed, allIgnored, failedRow := false, false, true, -1
+		for _, i := range rows {
+			misses = misses || dataPlaneMisses(results[i].FailureInfo.UnmatchedCalls) > 0
+			unconsumed = unconsumed || len(results[i].FailureInfo.UnconsumedMocks) > 0
+			allIgnored = allIgnored && results[i].Status == models.TestStatusIgnored
+			if failedRow < 0 && results[i].Status == models.TestStatusFailed {
+				failedRow = i
+			}
+		}
+		if !misses && !unconsumed && len(snap.misses) == 0 && len(snap.unconsumed) == 0 {
+			continue
+		}
+		// The row that carries the test's verdict, and so its evidence.
+		verdictRow := rows[0]
+		if failedRow >= 0 {
+			verdictRow = failedRow
+		} else if !allIgnored {
+			for _, i := range rows {
+				if results[i].Status != models.TestStatusIgnored {
+					verdictRow = i
+					break
+				}
+			}
+		}
+		v := &results[verdictRow]
+		if !misses && len(snap.misses) > 0 {
+			v.FailureInfo.UnmatchedCalls = append(slices.Clone(v.FailureInfo.UnmatchedCalls), snap.misses...)
+		}
+		if !unconsumed && len(snap.unconsumed) > 0 {
+			v.FailureInfo.UnconsumedMocks = slices.Clone(snap.unconsumed)
+		}
+		if failedRow < 0 && !allIgnored {
+			for _, i := range rows {
+				if results[i].Status != models.TestStatusIgnored {
+					results[i].Status = models.TestStatusFailed
+				}
+			}
+			held = appendOnce(held, id)
+		}
+		for _, i := range rows {
+			r := &results[i]
+			if r.Status != models.TestStatusFailed && r.Status != models.TestStatusIgnored {
+				continue
+			}
+			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
+				continue
+			}
+			cats := slices.Clone(r.FailureInfo.Category)
+			for _, c := range snap.categories {
+				cats = appendCategoryUnique(cats, c)
+			}
+			r.FailureInfo.Category = cats
+		}
+	}
+	return results, held
 }
 
 // attachStreamDepResults writes a streamed test's dependency rows, under the

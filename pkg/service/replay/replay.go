@@ -4041,6 +4041,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", missed))
 	}
+	// The evidence against each test, as the loop wrote it, before any hook can
+	// touch it (holdEvidenceFloor reads it back).
+	evidence := snapshotEvidence(testCaseResults)
 	err = r.hookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
@@ -4050,14 +4053,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// drive the set: its counters, its status, and so the report, JUnit and the
 	// exit code. A hook may quarantine a test (IGNORED), but a test with
 	// evidence against it (a call no mock answered, a recorded call it did not
-	// make) stays FAILED whatever the hook said: that is held here, once, for
-	// every hook. The verdicts drive the set only when every test's result
-	// row is there to count; otherwise the loop's status stands. A set whose
-	// tests' consumption could not all be read has no verdict at all.
+	// make, as the loop wrote it before the hook ran) stays FAILED whatever the
+	// hook set, removed or cleared: that is held here, once, for every hook,
+	// test by test. A status that is no verdict counts as failed. The verdicts
+	// drive the set only when every test's result row is there to count;
+	// otherwise the loop's status stands. A set whose tests' consumption could
+	// not all be read has no verdict at all.
 	notJudged := ""
 	if provenswitch.On() {
-		if held := holdEvidenceFloor(testCaseResults); len(held) > 0 {
-			r.logger.Error("a before-test-result hook passed tests with evidence against them; they stay FAILED (KEPLOY_PROVEN=1)",
+		var held []string
+		scored := len(testCaseResults)
+		testCaseResults, held = holdEvidenceFloor(testCaseResults, evidence)
+		// A test the floor put back is written to the report store too: the
+		// run's failed-test list is read back from it.
+		for i := scored; i < len(testCaseResults); i++ {
+			if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &testCaseResults[i]); insErr != nil {
+				utils.LogError(r.logger, insErr, "failed to insert a test result the evidence floor put back")
+			}
+		}
+		if len(held) > 0 {
+			r.logger.Error("a before-test-result hook passed, relabelled or removed tests with evidence against them, or cleared that evidence; they stay FAILED (KEPLOY_PROVEN=1)",
 				zap.String("test-set", testSetID),
 				zap.Strings("tests", held))
 		}
