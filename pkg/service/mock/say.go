@@ -56,6 +56,14 @@ func (m *mockService) ended(err error) error {
 	return err
 }
 
+func (m *mockService) note(f func()) {
+	if m.held != nil {
+		*m.held = append(*m.held, f)
+		return
+	}
+	f()
+}
+
 func (m *mockService) ends() bool {
 	_, ok := m.store.(Summarizer)
 	return ok

@@ -110,12 +110,18 @@ func (m *mockService) replay(ctx context.Context) (err error) {
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 	ctx, cancel := context.WithCancel(ctx)
 
+	var held []func()
+	m.held = &held
 	defer func() {
 		m.notifyShutdown()
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
 		cancel()
 		if err := utils.DrainErrGroup(m.logger, "mock-replay", errGrp, 30*time.Second); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
+		}
+		m.held = nil
+		for _, f := range held {
+			f()
 		}
 	}()
 
@@ -1108,7 +1114,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		summary = append(summary, zap.Int("missed", len(misses)))
 	}
 	if consumedErr == nil && missesErr == nil {
-		m.logger.Info(fmt.Sprintf("outgoing calls: %d recorded, %d answered from the recording, %d not in the recording", loaded, len(consumed), len(misses)), append(summary, m.show())...)
+		m.note(func() {
+			m.logger.Info(fmt.Sprintf("outgoing calls: %d recorded, %d answered from the recording, %d not in the recording", loaded, len(consumed), len(misses)), append(summary, m.show())...)
+		})
 	} else {
 		next := "check the agent logs for why it stopped before the run ended"
 		if fromCompose {

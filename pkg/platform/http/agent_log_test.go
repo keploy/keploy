@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -140,9 +141,18 @@ func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 }
 
 func TestAMockRunWithoutATerminalDoesNotWaitForASudoPassword(t *testing.T) {
-	err := askSudo(context.Background(), zap.NewNop(), false)
-	if err == nil || !strings.Contains(err.Error(), "run it with sudo: sudo -E keploy ") {
+	prev := sudoProbe
+	t.Cleanup(func() { sudoProbe = prev })
+	sudoProbe = func(context.Context, string) (string, error) {
+		return "sudo: a password is required", errors.New("exit status 1")
+	}
+	err := askSudo(context.Background(), zap.NewNop(), "/opt/keploy", false)
+	if err == nil || !strings.Contains(err.Error(), "sudo -n -l /opt/keploy refused (sudo: a password is required); run keploy as root: sudo -E env PATH=") {
 		t.Fatalf("err = %v", err)
+	}
+	sudoProbe = func(context.Context, string) (string, error) { return "", nil }
+	if err := askSudo(context.Background(), zap.NewNop(), "/opt/keploy", false); err != nil {
+		t.Fatalf("a sudoers rule for keploy alone is enough: %v", err)
 	}
 }
 

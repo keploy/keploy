@@ -405,7 +405,8 @@ func TestQuoteArgsKeepsACommandOnOneLine(t *testing.T) {
 		"a^b":             "'a^b'",
 		"go test\n-run A": `$'go test\n-run A'`,
 		"it's\r\v":        `$'it\'s\r\x0b'`,
-		"x\u2028y":        `$'x\u2028y'`,
+		"x\u2028y":        `$'x\xe2\x80\xa8y'`,
+		"=x":              "'=x'",
 		"plain":           "plain",
 	} {
 		if got := QuoteArgs([]string{in}); got != want {

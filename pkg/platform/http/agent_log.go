@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,14 +138,32 @@ func (a *AgentClient) agentOutput() (io.Writer, io.Writer) {
 	return f, f
 }
 
-func askSudo(ctx context.Context, logger *zap.Logger, tty bool) error {
+var sudoProbe = func(ctx context.Context, bin string) (string, error) {
+	out, err := exec.CommandContext(ctx, "sudo", "-n", "-l", bin).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func askSudo(ctx context.Context, logger *zap.Logger, bin string, tty bool) error {
+	said, err := sudoProbe(ctx, bin)
+	if err == nil {
+		return nil
+	}
+	again := utils.QuoteArgs(append([]string{"sudo", "-E", "env", "PATH=" + os.Getenv("PATH"), bin}, os.Args[1:]...))
 	if !tty {
-		return fmt.Errorf("keploy needs root on Linux and sudo asks for a password; run it with sudo: sudo -E %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
+		first, _, _ := strings.Cut(said, "\n")
+		return fmt.Errorf("keploy's agent needs root on Linux, and sudo -n -l %s refused (%s); run keploy as root: %s", bin, cmpOr(first, err.Error()), again)
 	}
 	if err := utils.CacheSudoCredentials(ctx, logger); err != nil {
-		return fmt.Errorf("sudo did not give keploy root: %w", err)
+		return fmt.Errorf("sudo did not give keploy root (%w); run keploy as root: %s", err, again)
 	}
 	return nil
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func (a *AgentClient) watchStart() {

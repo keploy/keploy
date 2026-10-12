@@ -1692,7 +1692,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	if elevates && !sudoCached && a.mock && !a.conf.Debug {
-		if err := askSudo(ctx, a.logger, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
+		if err := askSudo(ctx, a.logger, keployBin, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
 			return err
 		}
 		sudoCached = true
@@ -2591,11 +2591,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
-	if a.mock && !a.conf.Debug && strings.Contains(cmd.String(), "sudo ") {
-		if err := askSudo(ctx, logger, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
-			return err
-		}
-	} else if agentUtils.NeedsPTY() {
+	if agentUtils.NeedsPTY() {
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 

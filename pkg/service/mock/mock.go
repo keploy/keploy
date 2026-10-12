@@ -19,7 +19,8 @@ import (
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
-	ids *ids.Map
+	held *[]func()
+	ids  *ids.Map
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.
@@ -298,7 +299,7 @@ func (m *mockService) propagateExit(appErr models.AppError, phase string) {
 	switch appErr.AppErrorType {
 	case models.ErrAppStopped:
 		// Clean exit (code 0). Success.
-		m.logger.Info("the test command exited 0", zap.String("phase", phase), m.show())
+		m.note(func() { m.logger.Info("the test command exited 0", zap.String("phase", phase), m.show()) })
 	case models.ErrCtxCanceled, "":
 		// User interrupt or nothing to report — leave ErrCode untouched.
 	case models.ErrUnExpected, models.ErrCommandError:
@@ -307,9 +308,13 @@ func (m *mockService) propagateExit(appErr models.AppError, phase string) {
 			code = 1
 		}
 		utils.ErrCode = code
-		m.logger.Info(fmt.Sprintf("the test command exited %d; keploy exits %d", code, code), zap.String("phase", phase), m.show())
+		m.note(func() {
+			m.logger.Info(fmt.Sprintf("the test command exited %d; keploy exits %d", code, code), zap.String("phase", phase), m.show())
+		})
 	default:
 		utils.ErrCode = 1
-		m.logger.Info("the test command did not finish: "+string(appErr.AppErrorType), zap.String("phase", phase), m.show())
+		m.note(func() {
+			m.logger.Info("the test command did not finish: "+string(appErr.AppErrorType), zap.String("phase", phase), m.show())
+		})
 	}
 }

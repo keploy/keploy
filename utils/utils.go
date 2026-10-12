@@ -1973,7 +1973,7 @@ func QuoteArgs(args []string) string {
 		switch {
 		case strings.IndexFunc(a, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) >= 0:
 			out[i] = cQuote(a)
-		case a == "" || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^"):
+		case a == "" || strings.HasPrefix(a, "=") || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^"):
 			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
 	}
@@ -1993,10 +1993,12 @@ func cQuote(a string) string {
 			b.WriteString("\\t")
 		case r == '\r':
 			b.WriteString("\\r")
-		case r < 0x20 || r == 0x7f:
+		case r < 0x80 && unicode.IsControl(r):
 			fmt.Fprintf(&b, "\\x%02x", r)
 		case r == '\u2028' || r == '\u2029' || unicode.IsControl(r):
-			fmt.Fprintf(&b, "\\u%04x", r)
+			for _, c := range []byte(string(r)) {
+				fmt.Fprintf(&b, "\\x%02x", c)
+			}
 		default:
 			b.WriteRune(r)
 		}
