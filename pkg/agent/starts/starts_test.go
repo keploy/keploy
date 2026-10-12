@@ -743,3 +743,28 @@ func TestOtherCasesRankByHowFarTheyAre(t *testing.T) {
 		}
 	}
 }
+
+func TestWithSeveralCasesInFlightTheEarliestIsTheAnchor(t *testing.T) {
+	var owned []models.Owned
+	var cases []models.Case
+	for i := 1; i <= 6; i++ {
+		n := fmt.Sprintf("m%d", i)
+		owned = append(owned, models.Owned{Name: n})
+		cases = append(cases, models.Case{Name: "test-" + n, Method: "GET", URL: "/" + n, Mocks: []string{n}})
+	}
+	_, r := oneTest(map[string]models.SetTable{"e2e": {Tests: map[string][]models.Owned{"T": owned}, Cases: map[string][]models.Case{"T": cases}}})
+	r.Exchange(0, "GET", "/m1")()
+	r.Exchange(0, "GET", "/m2")()
+	r.Exchange(0, "GET", "/m3")()
+	four := r.Exchange(0, "GET", "/m4")
+	five := r.Exchange(0, "GET", "/m5")
+	defer four()
+	defer five()
+	rank, _, _ := r.View(101, at(20))
+	want := map[string]int{"m4": 1, "m5": 1, "m3": nearRank, "m6": nearRank, "m2": pastRank}
+	for n, g := range want {
+		if rank[n] != g {
+			t.Fatalf("ranks %v, want %v", rank, want)
+		}
+	}
+}

@@ -715,9 +715,10 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 		add(next, false)
 	}
 	at := f.last - 1
-	if len(f.open) == 1 {
+	if len(f.open) > 0 {
+		at = len(f.used)
 		for i := range f.open {
-			at = i
+			at = min(at, i)
 		}
 	}
 	prev, next := -1, -1
