@@ -240,6 +240,14 @@ type SetTable struct {
 	Tests  map[string][]Owned  `json:"tests,omitempty"`
 	Runner []string            `json:"runner,omitempty"`
 	Start  time.Time           `json:"start,omitzero"`
+	Cases  map[string][]Case   `json:"cases,omitempty"`
+}
+
+type Case struct {
+	Name   string   `json:"name"`
+	Method string   `json:"method"`
+	URL    string   `json:"url"`
+	Mocks  []string `json:"mocks,omitempty"`
 }
 
 type Owned struct {

@@ -19,6 +19,7 @@ import (
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
@@ -546,6 +547,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	endCase := func() {}
+	defer func() { endCase() }()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
@@ -671,6 +674,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// One that cannot be captured opens none: nothing would decide it.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
+		if pm.mockMode {
+			endCase = starts.Default.Exchange(req.Method, req.URL.String())
 		}
 
 		// Request modifications for sync/sampling modes.
@@ -917,6 +923,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// stream still being sent (a no-op for one that yielded at its
 		// headers already).
 		win.Yield(respTimestamp)
+		endCase()
 
 		// Final memory pressure check before capture evaluation.
 		if !pressureCloseMode && isIngressRecordingPaused() {
@@ -1324,6 +1331,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	endCase := func() {}
+	defer func() { endCase() }()
 
 	for {
 		if isIngressRecordingPaused() {
@@ -1433,6 +1442,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// none: nothing would decide it, and a tunnel can last for hours.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
+		if pm.mockMode {
+			endCase = starts.Default.Exchange(req.Method, req.URL.String())
 		}
 
 		// MSG_PEEK before reusing a pooled upstream conn.
@@ -1745,6 +1757,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// stamp before time.Now() here, so they fall inside the per-test
 		// window and match correctly at replay.
 		respTimestamp := time.Now()
+		endCase()
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse

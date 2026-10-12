@@ -2,6 +2,7 @@ package starts
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -41,6 +42,8 @@ type frame struct {
 	opened time.Time
 	counts map[string]int
 	seq    uint64 // order of the Begin that opened it, unique per registry
+	used   []bool
+	open   map[int]int
 }
 
 type worker struct {
@@ -71,6 +74,7 @@ type Registry struct {
 	root     string
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
+	inCase   map[string]map[string]struct{}
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
@@ -94,6 +98,7 @@ func (r *Registry) Reset() {
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
+	r.inCase = nil
 	r.marked = false
 }
 
@@ -457,7 +462,18 @@ func (r *Registry) SetTable(root string, sets map[string]models.SetTable) {
 	r.root = root
 	r.sets = sets
 	r.universe = map[string]struct{}{}
-	for _, st := range sets {
+	r.inCase = map[string]map[string]struct{}{}
+	for set, st := range sets {
+		for _, cases := range st.Cases {
+			for _, c := range cases {
+				for _, n := range c.Mocks {
+					if r.inCase[set] == nil {
+						r.inCase[set] = map[string]struct{}{}
+					}
+					r.inCase[set][n] = struct{}{}
+				}
+			}
+		}
 		for _, names := range st.Boots {
 			for _, n := range names {
 				r.universe[n] = struct{}{}
@@ -556,13 +572,6 @@ func (r *Registry) bind(s *Start) {
 	}
 }
 
-func (r *Registry) currentTest(w *worker) string {
-	if f := r.currentFrame(w); f != nil {
-		return f.place
-	}
-	return ""
-}
-
 // currentFrame is the test frame a call from w's process tree runs in: w's own
 // open test, or — for a worker with none (an app started once for the suite)
 // — the one test open on any worker, when exactly one is. nil otherwise.
@@ -603,9 +612,17 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	if !ok {
 		return nil, nil, false
 	}
-	test := r.currentTest(w)
+	f := r.currentFrame(w)
+	test := ""
+	if f != nil {
+		test = f.place
+	}
+	allow := r.caseView(set, f, test)
 	rank := map[string]int{}
 	put := func(name string, g int) {
+		if _, ok := allow[name]; allow != nil && !ok {
+			return
+		}
 		if old, ok := rank[name]; !ok || g < old {
 			rank[name] = g
 		}
@@ -622,6 +639,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 				put(o.Name, 4)
 			}
 		}
+		allow = nil
 		for _, n := range st.Boots[s.Bound] {
 			put(n, 2)
 		}
@@ -633,8 +651,110 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	for _, o := range st.Tests[test] {
 		put(o.Name, 1)
 	}
+	allow = nil
 	for _, n := range st.Runner {
 		put(n, 2)
 	}
 	return rank, r.universe, true
 }
+
+func (r *Registry) caseView(set string, f *frame, test string) map[string]struct{} {
+	st := r.sets[set]
+	if len(st.Cases) == 0 {
+		return nil
+	}
+	allow := map[string]struct{}{}
+	if f != nil && len(f.open) > 0 {
+		cases := st.Cases[test]
+		for i := range f.open {
+			if i >= 0 && i < len(cases) {
+				for _, n := range cases[i].Mocks {
+					allow[n] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, o := range st.Tests[test] {
+		if _, ok := r.inCase[set][o.Name]; !ok {
+			allow[o.Name] = struct{}{}
+		}
+	}
+	return allow
+}
+
+func (r *Registry) Exchange(method, rawURL string) func() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var w *worker
+	for _, o := range r.workers {
+		if len(o.frames) > 1 {
+			if w != nil {
+				return func() {}
+			}
+			w = o
+		}
+	}
+	if w == nil {
+		return func() {}
+	}
+	f := w.frames[len(w.frames)-1]
+	cases := r.sets[r.setOf(w.dir)].Cases[f.place]
+	if len(cases) == 0 {
+		return func() {}
+	}
+	if f.used == nil {
+		f.used = make([]bool, len(cases))
+		f.open = map[int]int{}
+	}
+	i := pickCase(cases, f.used, method, rawURL)
+	if i >= 0 {
+		f.used[i] = true
+	}
+	f.open[i]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if f.open[i]--; f.open[i] <= 0 {
+				delete(f.open, i)
+			}
+		})
+	}
+}
+
+func pickCase(cases []models.Case, used []bool, method, rawURL string) int {
+	for _, key := range []func(string, string) string{exactKey, pathKey} {
+		want := key(method, rawURL)
+		for i, c := range cases {
+			if !used[i] && key(c.Method, c.URL) == want {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func exactKey(method, rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return strings.ToUpper(method) + " " + rawURL
+	}
+	return strings.ToUpper(method) + " " + u.Path + "?" + u.Query().Encode()
+}
+
+func pathKey(method, rawURL string) string {
+	path := rawURL
+	if u, err := url.Parse(rawURL); err == nil {
+		path = u.Path
+	}
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		if idPart.MatchString(p) {
+			parts[i] = "{id}"
+		}
+	}
+	return strings.ToUpper(method) + " " + strings.Join(parts, "/")
+}
+
+var idPart = regexp.MustCompile(`^([0-9]+|[0-9a-fA-F]{12,}|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$`)

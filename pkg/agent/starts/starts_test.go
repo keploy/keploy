@@ -364,3 +364,71 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
 	}
 }
+
+func TestACallSeesOnlyTheMocksOfTheCaseInFlight(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "/tmp/e2e.test")
+	r.Begin(100, "/repo/e2e", "/repo/e2e", true, at(1))
+	f.spawn(101, 100, at(2), "/tmp/shop")
+	r.SetTable("/repo", map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "fx"}}, "U": {{Name: "u1"}}},
+		Cases: map[string][]models.Case{"T": {
+			{Name: "test-1", Method: "GET", URL: "http://localhost:8080/a", Mocks: []string{"m1"}},
+			{Name: "test-2", Method: "GET", URL: "http://localhost:8080/a", Mocks: []string{"m2"}},
+			{Name: "test-3", Method: "POST", URL: "http://localhost:8080/b/42", Mocks: []string{"m3"}},
+		}},
+	}})
+	r.Begin(100, "T", "/repo/e2e", false, at(10))
+	seen := func() []string {
+		rank, _, ok := r.View(101, at(20))
+		if !ok {
+			t.Fatal("no view")
+		}
+		var out []string
+		for n := range rank {
+			out = append(out, n)
+		}
+		slices.Sort(out)
+		return out
+	}
+	check := func(what string, want ...string) {
+		t.Helper()
+		if got := seen(); !slices.Equal(got, want) {
+			t.Fatalf("%s: sees %v, want %v", what, got, want)
+		}
+	}
+	check("between cases", "fx")
+	end := r.Exchange("GET", "/a")
+	check("first GET /a", "fx", "m1")
+	end()
+	end()
+	check("after the first case", "fx")
+	end = r.Exchange("GET", "/a")
+	check("second GET /a", "fx", "m2")
+	end()
+	end = r.Exchange("POST", "/b/43")
+	check("POST /b by its path", "fx", "m3")
+	end()
+	end = r.Exchange("GET", "/c")
+	check("a request no case recorded", "fx")
+	end()
+}
+
+func TestWithoutCasesTheWholeTestIsServed(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "/tmp/e2e.test")
+	r.Begin(100, "/repo/e2e", "/repo/e2e", true, at(1))
+	f.spawn(101, 100, at(2), "/tmp/shop")
+	r.SetTable("/repo", map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "m1"}, {Name: "fx"}}},
+	}})
+	r.Begin(100, "T", "/repo/e2e", false, at(10))
+	end := r.Exchange("GET", "/a")
+	defer end()
+	rank, _, _ := r.View(101, at(20))
+	if len(rank) != 2 {
+		t.Fatalf("sees %v, want both mocks of the test", rank)
+	}
+}

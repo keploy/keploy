@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -233,7 +234,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
+	m.pushScopeTable(ctx, name, requests && pkg.IsStrictMockWindow(m.config.Test.StrictMockWindow))
 	gate := m.pushScopeGate(ctx, name, digest)
 
 	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
@@ -686,11 +687,11 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
+func (m *mockService) pushScopeTable(ctx context.Context, name string, cases bool) {
 	if m.mappingDB == nil {
 		return
 	}
-	if m.pushSetTable(ctx, name) {
+	if m.pushSetTable(ctx, name, cases) {
 		return
 	}
 	pusher, ok := m.instrumentation.(ScopePusher)
@@ -871,7 +872,7 @@ func gateReport(g requestedGate, windows []models.ScopeWindow) (note string, ung
 	return "", 0
 }
 
-func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
+func (m *mockService) pushSetTable(ctx context.Context, name string, cases bool) bool {
 	reader, ok := m.mappingDB.(MappingReader)
 	if !ok {
 		return false
@@ -886,6 +887,11 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 	}
 	root := gitTop()
 	sets := setTable(mapping, root)
+	if cases && m.testDB != nil {
+		if tcs, err := m.testDB.GetTestCases(ctx, name); err == nil {
+			addCases(sets, mapping, root, tcs)
+		}
+	}
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
 		m.logger.Warn("could not send the agent each set's mocks and recorded start; using the per-test mocks instead", zap.Error(err))
 		return false
@@ -934,6 +940,43 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 	}
 	return sets
+}
+
+func addCases(sets map[string]models.SetTable, mapping *models.Mapping, root string, tcs []*models.TestCase) {
+	byName := make(map[string]*models.TestCase, len(tcs))
+	for _, tc := range tcs {
+		if tc != nil && tc.Kind == models.HTTP {
+			byName[tc.Name] = tc
+		}
+	}
+	for _, mt := range mapping.TestCases {
+		var recorded []*models.TestCase
+		for _, n := range mt.Cases {
+			if tc, ok := byName[n]; ok {
+				recorded = append(recorded, tc)
+			}
+		}
+		k := setName(mt.Dir, root)
+		st, ok := sets[k]
+		if len(recorded) == 0 || !ok {
+			continue
+		}
+		sort.SliceStable(recorded, func(i, j int) bool { return recorded[i].HTTPReq.Timestamp.Before(recorded[j].HTTPReq.Timestamp) })
+		cases := make([]models.Case, 0, len(recorded))
+		has := false
+		for _, tc := range recorded {
+			cases = append(cases, models.Case{Name: tc.Name, Method: string(tc.HTTPReq.Method), URL: tc.HTTPReq.URL, Mocks: mt.CaseMocks[tc.Name]})
+			has = has || len(mt.CaseMocks[tc.Name]) > 0
+		}
+		if !has && len(mt.Mocks) > 0 {
+			continue
+		}
+		if st.Cases == nil {
+			st.Cases = map[string][]models.Case{}
+		}
+		st.Cases[mt.ID] = cases
+		sets[k] = st
+	}
 }
 
 func ranSets(windows []models.ScopeWindow) []string {
