@@ -92,3 +92,23 @@ func TestCanonicalizeKeepingRepeatedOrder(t *testing.T) {
 		t.Fatalf("today's form must still sort every sibling: %q", got)
 	}
 }
+
+// A protoscope body that differs only in a repeated field's order fails under
+// the switch with that said where the user reads a failure: the result's
+// assessment (persisted in the report, rendered in JUnit) carries the reason
+// and the proto-files way out for a map, graded as a reordered JSON array is.
+// A value change is graded as before.
+func TestMatch_ProvenSwitchSaysAProtoscopeReorderIsOne(t *testing.T) {
+	const recorded = "1: {\"ord_A\"}\n1: {\"ord_B\"}"
+	tc, answer := protoscopeCase(recorded)
+	t.Setenv(provenswitch.Env, "1")
+	_, res := Match(tc, answer("1: {\"ord_B\"}\n1: {\"ord_A\"}"), map[string]map[string][]string{}, true, zap.NewNop(), false)
+	a := res.FailureInfo.Assessment
+	if a == nil || len(a.Reasons) != 1 || !strings.Contains(a.Reasons[0], "--proto-file") || res.FailureInfo.Risk != models.Medium || len(res.FailureInfo.Category) != 1 || res.FailureInfo.Category[0] != models.SchemaUnchanged {
+		t.Fatalf("assessment %+v, risk %s, categories %v; want the reorder reason with the proto-files hint, MEDIUM, SCHEMA_UNCHANGED", a, res.FailureInfo.Risk, res.FailureInfo.Category)
+	}
+	_, res = Match(tc, answer("1: {\"ord_A\"}\n1: {\"ord_C\"}"), map[string]map[string][]string{}, true, zap.NewNop(), false)
+	if res.FailureInfo.Assessment != nil || res.FailureInfo.Risk != models.High || len(res.FailureInfo.Category) != 1 || res.FailureInfo.Category[0] != models.SchemaBroken {
+		t.Fatalf("a value change: assessment %+v, risk %s, categories %v; want HIGH SCHEMA_BROKEN as before", res.FailureInfo.Assessment, res.FailureInfo.Risk, res.FailureInfo.Category)
+	}
+}

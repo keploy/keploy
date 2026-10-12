@@ -231,6 +231,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	expectedDecodedData := ""
 	actualDecodedData := ""
 	var jsonComparisonResult matcher.JSONComparisonResult
+	reorderedOnly := false
 
 	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
 		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
@@ -241,6 +242,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			expectedDecodedData = cmp.expected
 			actualDecodedData = cmp.actual
 			jsonComparisonResult = cmp.json
+			reorderedOnly = cmp.reorderedOnly
 		}
 	}
 	if decodedDataNormal && compareCount > 0 {
@@ -392,6 +394,19 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				currentRisk = models.High
 				currentCategories = append(currentCategories, models.InternalFailure)
 			}
+		} else if reorderedOnly {
+			// Only a repeated field's order differs (protoscope, under the
+			// proven switch): the schema and the values are the recorded
+			// ones, as a reordered JSON array is graded. The reason, with
+			// the proto-files way out for a map, is persisted with the
+			// result, so the report and JUnit say it, not only the console.
+			currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+			currentCategories = append(currentCategories, models.SchemaUnchanged)
+			bodyAssessment = &models.FailureAssessment{
+				Category: []models.FailureCategory{models.SchemaUnchanged},
+				Risk:     models.Medium,
+				Reasons:  []string{reorderedRepeatedMessage},
+			}
 		} else {
 			// non-JSON payload mismatch → Broken
 			currentRisk = models.High
@@ -448,6 +463,9 @@ type msgComparison struct {
 	expected      string
 	actual        string
 	json          matcher.JSONComparisonResult
+	// reorderedOnly: the decoded data differs only in the order of a
+	// repeated field's elements (protoscope, under the proven switch).
+	reorderedOnly bool
 }
 
 // isAllDigits reports whether s is a non-empty run of ASCII digits, i.e. a
@@ -618,6 +636,7 @@ func compareGrpcMessage(
 		expected:      expectedDecodedData,
 		actual:        actualDecodedData,
 		json:          jsonComparisonResult,
+		reorderedOnly: decodedMessage == reorderedRepeatedMessage,
 	}
 }
 
