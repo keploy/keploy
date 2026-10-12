@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,17 +150,34 @@ func (a *AgentClient) sudoRoute(elevates, cached bool) (bool, bool, error) {
 	if !a.mock || a.conf.Debug {
 		return false, false, nil
 	}
-	again := utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...))
-	if exe, err := os.Executable(); err == nil {
-		again = utils.QuoteArgs(append([]string{"sudo", "-E", "env", "PATH=" + os.Getenv("PATH"), exe}, os.Args[1:]...))
-	}
 	if _, err := exec.LookPath("sudo"); err != nil {
 		return false, false, fmt.Errorf("keploy's agent needs root on Linux and sudo is not installed; run keploy as root: %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
 	}
-	if exec.Command("sudo", "-n", "true").Run() != nil {
-		return false, false, fmt.Errorf("keploy's agent needs root on Linux and sudo asks for a password, which keploy cannot answer without a terminal; run: %s", again)
+	return false, false, nil
+}
+
+func (a *AgentClient) sayLog() {
+	a.failed = true
+	a.logger.Error("agent log: "+a.agentLog, log.Show)
+	raw, err := os.ReadFile(a.agentLog)
+	if err != nil {
+		return
 	}
-	return false, true, nil
+	for _, l := range strings.Split(string(raw), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if strings.HasPrefix(l, "sudo:") || strings.HasPrefix(l, "sudo-rs:") {
+			again := utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...))
+			if exe, err := os.Executable(); err == nil {
+				again = utils.QuoteArgs(append([]string{"sudo", "-E", "env", "PATH=" + os.Getenv("PATH"), exe}, os.Args[1:]...))
+			}
+			a.logger.Error(l, log.Show)
+			a.logger.Info("NEXT  run with sudo:  "+again, log.Show)
+		}
+		return
+	}
 }
 
 func cmpOr(a, b string) string {
@@ -200,8 +218,7 @@ func (a *AgentClient) sayAgentLog() {
 	if a.agentLog == "" || a.failed || a.dropped {
 		return
 	}
-	a.failed = true
-	a.logger.Error("agent log: "+a.agentLog, log.Show)
+	a.sayLog()
 }
 
 func (a *AgentClient) endAgentLog(stopped bool) {
@@ -216,8 +233,7 @@ func (a *AgentClient) endAgentLog(stopped bool) {
 	}
 	_ = a.agentFile.Close()
 	if !stopped && !a.failed && !a.dropped {
-		a.failed = true
-		a.logger.Error("agent log: "+a.agentLog, log.Show)
+		a.sayLog()
 	}
 	if a.failed || a.dropped || a.named || !stopped {
 		return

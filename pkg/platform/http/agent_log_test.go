@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type syncBuf struct {
@@ -139,9 +140,9 @@ func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 	}
 }
 
-func TestWithoutATerminalASudoThatWantsAPasswordNamesTheUsersCommand(t *testing.T) {
+func TestWithoutATerminalTheAgentStartsAsOnMainAndSudosOwnWordsAreQuoted(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -149,18 +150,35 @@ func TestWithoutATerminalASudoThatWantsAPasswordNamesTheUsersCommand(t *testing.
 	t.Cleanup(func() { needsPTY, os.Args = prevPTY, prevArgs })
 	needsPTY = func() bool { return false }
 	os.Args = []string{"keploy", "mock", "record", "-c", "go test ./..."}
+	if pty, cached, err := (&AgentClient{mock: true, conf: &config.Config{}}).sudoRoute(true, false); pty || cached || err != nil {
+		t.Fatalf("a sudo that starts without a password is refused: %v %v %v", pty, cached, err)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &AgentClient{mock: true, conf: &config.Config{}}
-	_, _, err = a.sudoRoute(true, false)
-	want := "run: sudo -E env " + utils.QuoteArgs([]string{"PATH=" + os.Getenv("PATH"), exe}) + " mock record -c 'go test ./...'"
-	if err == nil || !strings.HasSuffix(err.Error(), want) || strings.Contains(err.Error(), "agent --") {
-		t.Fatalf("err = %v\nwant suffix %s", err, want)
-	}
-	if pty, cached, err := (&AgentClient{conf: &config.Config{}}).sudoRoute(true, false); pty || cached || err != nil {
-		t.Fatalf("outside a mock run: %v %v %v", pty, cached, err)
+	for _, tc := range []struct{ log, fact string }{
+		{"\n  sudo-rs: interactive authentication is required\nmore\n", "sudo-rs: interactive authentication is required"},
+		{"sudo: a terminal is required to read the password\n", "sudo: a terminal is required to read the password"},
+		{"keploy: listening\nsudo: later\n", ""},
+	} {
+		path := filepath.Join(t.TempDir(), "agent.log")
+		if err := os.WriteFile(path, []byte(tc.log), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		core, logs := observer.New(zap.InfoLevel)
+		(&AgentClient{logger: zap.New(core), agentLog: path, conf: &config.Config{}}).sayAgentLog()
+		var got []string
+		for _, e := range logs.All() {
+			got = append(got, e.Message)
+		}
+		want := []string{"agent log: " + path}
+		if tc.fact != "" {
+			want = append(want, tc.fact, "NEXT  run with sudo:  sudo -E env "+utils.QuoteArgs([]string{"PATH=" + os.Getenv("PATH"), exe})+" mock record -c 'go test ./...'")
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("got  %q\nwant %q", got, want)
+		}
 	}
 }
 
