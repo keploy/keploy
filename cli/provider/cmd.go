@@ -1237,7 +1237,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if mockRun && !c.cfg.Debug && !log.Quieted() {
 		logger, err := log.Quiet()
-		if err == nil {
+		if err == nil && log.Quieted() {
 			*c.logger = *logger
 		}
 	}
