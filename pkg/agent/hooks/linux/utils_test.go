@@ -129,35 +129,6 @@ func TestTracepointFailure(t *testing.T) {
 	}
 }
 
-// tracefsMounted must agree with the mount table about the places the
-// tracepoint API is looked up: a tracefs mounted anywhere, or a debugfs with a
-// tracing directory (cilium/ebpf's internal/tracefs, from v0.22.0). Whichever
-// way this machine is set up, the two answers have to match.
-func TestTracefsMountedAgreesWithTheMountTable(t *testing.T) {
-	mounts, err := os.ReadFile("/proc/self/mounts")
-	if err != nil {
-		t.Skipf("no mount table: %v", err)
-	}
-	want := false
-	for _, line := range strings.Split(string(mounts), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 3 {
-			continue
-		}
-		switch f[2] {
-		case "tracefs":
-			want = true
-		case "debugfs":
-			if st, err := os.Stat(filepath.Join(f[1], "tracing")); err == nil && st.IsDir() {
-				want = true
-			}
-		}
-	}
-	if got := tracefsMounted(); got != want {
-		t.Fatalf("tracefsMounted() = %v, the mount table says %v", got, want)
-	}
-}
-
 // What cilium/ebpf takes for tracefs in a mountinfo table: a tracefs mounted
 // whole at any path (a container's bind mount at /host/... included), not a
 // mount of one of its directories; a debugfs only where it has a tracing
@@ -180,11 +151,14 @@ func TestTracefsInMountinfo(t *testing.T) {
 		{"the canonical tracefs", root + "35 22 0:12 / /sys/kernel/tracing rw,nosuid shared:15 - tracefs tracefs rw\n", true, true},
 		{"tracefs bind-mounted elsewhere", root + "40 22 0:12 / /host/sys/kernel/tracing rw - tracefs tracefs rw\n", true, true},
 		{"one directory of a tracefs", root + "41 22 0:12 /instances/foo /mnt/t rw - tracefs tracefs rw\n", false, true},
+		{"one directory of a debugfs, with tracing", root + "37 22 0:7 /sub " + withTracing + " rw - debugfs debugfs rw\n", false, true},
 		{"debugfs with tracing", root + "36 22 0:7 / " + withTracing + " rw shared:16 - debugfs debugfs rw\n", true, true},
 		{"debugfs with tracing, at a path with a space", root + "36 22 0:7 / " + strings.ReplaceAll(withSpace, " ", `\040`) + " rw - debugfs debugfs rw\n", true, true},
 		{"debugfs without tracing", root + "36 22 0:7 / " + without + " rw - debugfs debugfs rw\n", false, true},
 		{"neither", root, false, true},
-		{"a line the parser refuses", root + "35 22 0:12 / /sys/kernel/tracing rw tracefs\n", false, false},
+		{"a line without the dash", root + "35 22 0:12 / /sys/kernel/tracing rw tracefs\n", false, false},
+		{"too few fields before the dash", root + "35 22 / /sys/kernel/tracing - tracefs tracefs rw\n", false, false},
+		{"nothing after the dash", root + "35 22 0:12 / /sys/kernel/tracing rw - \n", false, false},
 	} {
 		if found, ok := tracefsInMountinfo(c.table); found != c.found || ok != c.ok {
 			t.Errorf("%s: found %v, ok %v; want %v, %v", c.name, found, ok, c.found, c.ok)

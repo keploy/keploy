@@ -14,6 +14,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -228,9 +229,10 @@ func TestKernelBTFWithALayoutSectionLoads(t *testing.T) {
 	}
 }
 
-// This kernel's BTF loads, every type of it, with the parser load() uses: on a
-// kernel whose BTF format cilium/ebpf does not know, here is where it shows,
-// without root. Skipped on a kernel without BTF in sysfs.
+// This kernel's BTF loads, every type of it, with the parser load() uses,
+// without root: a kernel whose BTF header or encoding cilium/ebpf refuses
+// fails here, on whatever machine runs it. (A misread field that still
+// decodes would not.) Skipped on a kernel without BTF in sysfs.
 func TestThisKernelsBTFLoads(t *testing.T) {
 	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
 		t.Skipf("this kernel has no /sys/kernel/btf/vmlinux: %v", err)
@@ -251,10 +253,13 @@ func TestThisKernelsBTFLoads(t *testing.T) {
 	}
 }
 
-// The agent's objects load on this kernel as load() loads them: the call that
-// failed where cilium/ebpf could not read the kernel's BTF, since each
-// object's CO-RE relocations are applied against it. Nothing is attached.
-// Needs root.
+// The agent's objects load on this kernel as load() loads them (hookSpec,
+// hookLoadOptions): the call that failed where cilium/ebpf could not read the
+// kernel's BTF, since each object's CO-RE relocations are applied against it.
+// Then tracefsMounted must agree with cilium/ebpf's own tracefs lookup:
+// attaching to an event no kernel has fails with "neither debugfs nor tracefs
+// are mounted" exactly where that lookup finds no tracefs. Nothing is left
+// attached. Needs root.
 func TestTheHooksLoadOnThisKernel(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("loading the agent's eBPF objects needs root")
@@ -267,15 +272,27 @@ func TestTheHooksLoadOnThisKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 	var objs bpfObjects
-	if err := spec.LoadAndAssign(&objs, nil); err != nil {
+	if err := spec.LoadAndAssign(&objs, hookLoadOptions()); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			t.Fatalf("the verifier refused the hooks on this kernel (%s): %v\n%s", kernelRelease(), err, strings.Join(ve.Log, "\n"))
 		}
 		t.Fatalf("the hooks do not load on this kernel (%s): %v", kernelRelease(), err)
 	}
-	if err := objs.Close(); err != nil {
-		t.Fatalf("close the hooks: %v", err)
+	defer func() {
+		if err := objs.Close(); err != nil {
+			t.Errorf("close the hooks: %v", err)
+		}
+	}()
+
+	l, err := link.Tracepoint("syscalls", "keploy_no_such_event", objs.SyscallProbeEntrySocket, nil)
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("a tracepoint attached to an event that does not exist")
+	}
+	missing := strings.Contains(err.Error(), "neither debugfs nor tracefs are mounted")
+	if mounted := tracefsMounted(); mounted == missing {
+		t.Fatalf("tracefsMounted() = %v, and cilium/ebpf's own lookup says: %v", mounted, err)
 	}
 }
 

@@ -68,7 +68,11 @@ func tracepointFailure(err error, tracefsMounted bool) error {
 // container's bind mount of it at another path counts, else a whole debugfs
 // with a tracing directory, else the canonical paths, by filesystem type. That
 // lookup reports a missing mount only as a plain string, so this is how that
-// cause is told apart from every other reason an attach can fail.
+// cause is told apart from every other reason an attach can fail. cilium/ebpf
+// reads mountinfo once per process, at its first BPF call, and keeps the path
+// it finds; this reads it when asked, so the two differ only where the mounts
+// changed in between. TestTheHooksLoadOnThisKernel holds the two to the same
+// answer.
 func tracefsMounted() bool {
 	if table, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
 		if found, ok := tracefsInMountinfo(string(table)); ok && found {

@@ -186,6 +186,17 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
+// hookLoadOptions are the options load() loads hookSpec() with: a verifier
+// log of every instruction and branch, from a 1 MiB buffer.
+func hookLoadOptions() *ebpf.CollectionOptions {
+	return &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
+			LogSizeStart: 1 * 1024 * 1024,
+		},
+	}
+}
+
 // hookSpec is the collection load() loads into the kernel: the compiled
 // objects, with k_sockops's program and attach types set.
 func hookSpec() (*ebpf.CollectionSpec, error) {
@@ -220,12 +231,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
-	bpfopts := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
-			LogSizeStart: 1 * 1024 * 1024,
-		},
-	}
+	bpfopts := hookLoadOptions()
 
 	spec, err := hookSpec()
 	if err != nil {
