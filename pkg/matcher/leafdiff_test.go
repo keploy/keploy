@@ -168,3 +168,12 @@ func FuzzJSONLeafDiffsAgreesWithTheMatcher(f *testing.F) {
 		}
 	})
 }
+
+func TestJSONLeafDiffsShowsAMissingFieldThatCrossesTheCap(t *testing.T) {
+	wrap := func(s string) string { return strings.Repeat(`{"a":`, 62) + s + strings.Repeat("}", 62) }
+	deep := `{"x":{"y":{"z":{"v":1}}}}`
+	rows, _ := JSONLeafDiffs(wrap(`{"k":1,"gone":`+deep+`}`), wrap(`{"k":1,"new":`+deep+`}`), nil, false, "", 0, 0)
+	if len(rows) != 2 || rows[0].Expected != deep || rows[1].Actual != deep {
+		t.Fatalf("rows %+v", rows)
+	}
+}

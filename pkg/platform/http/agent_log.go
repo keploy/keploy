@@ -180,13 +180,6 @@ func (a *AgentClient) sayLog() {
 	}
 }
 
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
 func (a *AgentClient) watchStart() {
 	if a.agentLog == "" {
 		return

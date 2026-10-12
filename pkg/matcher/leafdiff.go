@@ -49,6 +49,8 @@ func (w *leafWalk) add(path string, kind models.MockFieldDiffKind, e, a any, inE
 		return
 	}
 	d := models.MockFieldDiff{Path: joinPath(w.prefix, path), Kind: kind}
+	e, _ = unshallow(e)
+	a, _ = unshallow(a)
 	if inE {
 		d.Expected = clip(jsonText(e), w.maxVal)
 	}
