@@ -366,6 +366,11 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	}
 }
 
+func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
+	_, end := r.Pair(port, method, rawURL)
+	return end
+}
+
 func caseTable() map[string]models.SetTable {
 	return map[string]models.SetTable{"e2e": {
 		Tests: map[string][]models.Owned{"T": {{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "fx"}}, "U": {{Name: "u1"}}},

@@ -702,18 +702,6 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 	if f.last > 0 {
 		add(f.last-1, true)
 	}
-	if len(f.open) == 0 {
-		next := -1
-		if f.last > 0 && f.last <= len(f.used) {
-			if k := slices.Index(f.used[f.last:], false); k >= 0 {
-				next = f.last + k
-			}
-		}
-		if next < 0 {
-			next = slices.Index(f.used, false)
-		}
-		add(next, false)
-	}
 	at := f.last - 1
 	if len(f.open) > 0 {
 		at = len(f.used)
@@ -728,6 +716,13 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 		}
 		if !u && i > at && next < 0 {
 			next = i
+		}
+	}
+	if len(f.open) == 0 {
+		if next < 0 {
+			add(slices.Index(f.used, false), false)
+		} else {
+			add(next, false)
 		}
 	}
 	return func(name string) (int, bool) {
@@ -754,11 +749,6 @@ const (
 	laterRank = 6
 	pastRank  = 7
 )
-
-func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
-	_, end := r.Pair(port, method, rawURL)
-	return end
-}
 
 func (r *Registry) Pair(port uint16, method, rawURL string) (string, func()) {
 	r.mu.Lock()
