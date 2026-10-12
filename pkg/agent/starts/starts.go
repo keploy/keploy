@@ -756,14 +756,19 @@ const (
 )
 
 func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
+	_, end := r.Pair(port, method, rawURL)
+	return end
+}
+
+func (r *Registry) Pair(port uint16, method, rawURL string) (string, func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sets == nil {
-		return func() {}
+		return "", func() {}
 	}
 	f, set, placed := r.exchangeFrame(port)
 	if f == nil && placed {
-		return func() {}
+		return "", func() {}
 	}
 	if f == nil {
 		open := false
@@ -771,7 +776,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 			open = open || (len(o.frames) > 1 && r.alive(o.pid, o.born))
 		}
 		if !open {
-			return func() {}
+			return "", func() {}
 		}
 		r.blind++
 		for _, o := range r.workers {
@@ -781,7 +786,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 		}
 		gen := r.gen
 		var once sync.Once
-		return func() {
+		return "", func() {
 			once.Do(func() {
 				r.mu.Lock()
 				defer r.mu.Unlock()
@@ -793,7 +798,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	}
 	cases := r.sets[set].Cases[f.place]
 	if len(cases) == 0 {
-		return func() {}
+		return "", func() {}
 	}
 	if f.used == nil || len(f.used) != len(cases) {
 		f.used = make([]bool, len(cases))
@@ -805,8 +810,12 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 		f.last = 0
 	}
 	f.open[i]++
+	name := ""
+	if i >= 0 {
+		name = cases[i].Name
+	}
 	var once sync.Once
-	return func() {
+	return name, func() {
 		once.Do(func() {
 			r.mu.Lock()
 			defer r.mu.Unlock()

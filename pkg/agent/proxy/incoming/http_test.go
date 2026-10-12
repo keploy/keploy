@@ -1162,11 +1162,11 @@ func TestMockModeEndsEachExchangeItStarts(t *testing.T) {
 			var calls []string
 			ends := 0
 			prev := exchange
-			exchange = func(port uint16, method, rawURL string) func() {
+			exchange = func(port uint16, method, rawURL string) (string, func()) {
 				mu.Lock()
 				defer mu.Unlock()
 				calls = append(calls, fmt.Sprintf("%d %s %s", port, method, rawURL))
-				return func() {
+				return "test-1", func() {
 					mu.Lock()
 					defer mu.Unlock()
 					ends++
@@ -1202,9 +1202,9 @@ func TestOutsideMockModeNoExchangeIsStarted(t *testing.T) {
 		models.IncomingOptions, bool, bool, uint16) {
 	})
 	prev := exchange
-	exchange = func(uint16, string, string) func() {
+	exchange = func(uint16, string, string) (string, func()) {
 		t.Error("an exchange was started outside mock mode")
-		return func() {}
+		return "", func() {}
 	}
 	t.Cleanup(func() { exchange = prev })
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}

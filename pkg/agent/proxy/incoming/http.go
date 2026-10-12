@@ -676,7 +676,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
 		}
 		if pm.mockMode {
-			endCase = exchange(appPort, req.Method, req.URL.String())
+			var name string
+			name, endCase = exchange(appPort, req.Method, req.URL.String())
+			if name != "" {
+				logger.Debug("serving this request's calls from its recorded test case first", zap.String("testcase", name), zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			}
 		}
 
 		// Request modifications for sync/sampling modes.
@@ -1160,7 +1164,7 @@ func isStaleConnError(err error) bool {
 	return false
 }
 
-var exchange = starts.Default.Exchange
+var exchange = starts.Default.Pair
 
 func writeBadGateway(c net.Conn) {
 	_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
@@ -1446,7 +1450,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
 		}
 		if pm.mockMode {
-			endCase = exchange(appPort, req.Method, req.URL.String())
+			var name string
+			name, endCase = exchange(appPort, req.Method, req.URL.String())
+			if name != "" {
+				logger.Debug("serving this request's calls from its recorded test case first", zap.String("testcase", name), zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			}
 		}
 
 		// MSG_PEEK before reusing a pooled upstream conn.

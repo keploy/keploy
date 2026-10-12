@@ -768,3 +768,14 @@ func TestWithSeveralCasesInFlightTheEarliestIsTheAnchor(t *testing.T) {
 		}
 	}
 }
+
+func TestPairNamesTheCaseARequestIsPairedWith(t *testing.T) {
+	_, r := oneTest(caseTable())
+	for _, want := range []string{"test-1", "test-2", ""} {
+		name, end := r.Pair(0, "GET", "/a")
+		end()
+		if name != want {
+			t.Fatalf("paired with %q, want %q", name, want)
+		}
+	}
+}
