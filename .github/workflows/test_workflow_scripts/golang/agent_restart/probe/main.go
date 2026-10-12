@@ -17,6 +17,14 @@
 // not a proof: the proxy's connection to the dependency can get the same
 // port number as this one by chance. The recorded mock is the proof.
 //
+// probe -keepalive HOST:PORT is a pooled client: one connection, reused call
+// after call, and a new one only when it fails; it prints "ka C N proxied",
+// "ka C N direct" or "ka C N error ..." for call N on connection C.
+//
+// No call has a deadline of its own: a call that never ends shows as the
+// probe printing nothing more, which is what the e2e's waits watch, and a
+// slow call is not a failed one.
+//
 // Every call is made from the process's main thread. Locked to it in init, so
 // main runs there (runtime.LockOSThread), the calls come from the thread the
 // process started with, older than any agent restarted after the process
@@ -99,17 +107,53 @@ func record(agent string) {
 
 // call makes call n to addr and says how it got there.
 func call(addr string, n int) (string, error) {
-	c, err := net.DialTimeout("tcp4", addr, 5*time.Second)
+	c, err := net.Dial("tcp4", addr)
 	if err != nil {
 		return "", err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	return exchange(c, bufio.NewReader(c), fmt.Sprintf("/call/%d", n), true)
+}
+
+// keepalive is a pooled client: it calls addr again and again over one
+// connection, and opens another only when the one it has fails. It prints a
+// line per call: "ka C N proxied|direct", C counting its connections from 1,
+// or "ka C N error ..." when the call failed, after which it reconnects.
+func keepalive(addr string) {
+	for conn := 1; ; conn++ {
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			fmt.Printf("ka %d 0 error %v\n", conn, err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		br := bufio.NewReader(c)
+		for n := 1; ; n++ {
+			how, err := exchange(c, br, fmt.Sprintf("/ka/%d/%d", conn, n), false)
+			if err != nil {
+				fmt.Printf("ka %d %d error %v\n", conn, n, err)
+				break
+			}
+			fmt.Printf("ka %d %d %s\n", conn, n, how)
+			// Paces the calls; nothing waits on it.
+			time.Sleep(100 * time.Millisecond)
+		}
+		_ = c.Close()
+	}
+}
+
+// exchange sends one GET for path on c, reads its answer through br, and
+// says how the call got to the dependency.
+func exchange(c net.Conn, br *bufio.Reader, path string, closeAfter bool) (string, error) {
 	local := strconv.Itoa(c.LocalAddr().(*net.TCPAddr).Port)
-	if _, err := fmt.Fprintf(c, "GET /call/%d HTTP/1.1\r\nHost: dependency\r\nConnection: close\r\n\r\n", n); err != nil {
+	connection := ""
+	if closeAfter {
+		connection = "Connection: close\r\n"
+	}
+	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: dependency\r\n%s\r\n", path, connection); err != nil {
 		return "", err
 	}
-	res, err := http.ReadResponse(bufio.NewReader(c), nil)
+	res, err := http.ReadResponse(br, nil)
 	if err != nil {
 		return "", err
 	}
@@ -130,7 +174,7 @@ func call(addr string, n int) (string, error) {
 
 func main() {
 	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: probe -serve PORT | probe -record AGENT_URL | probe -call HOST:PORT")
+		fmt.Fprintln(os.Stderr, "usage: probe -serve PORT | probe -record AGENT_URL | probe -call HOST:PORT | probe -keepalive HOST:PORT")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -138,6 +182,8 @@ func main() {
 		serve(os.Args[2])
 	case "-record":
 		record(os.Args[2])
+	case "-keepalive":
+		keepalive(os.Args[2])
 	case "-call":
 		for n := 1; ; n++ {
 			how, err := call(os.Args[2], n)
@@ -150,7 +196,7 @@ func main() {
 			time.Sleep(100 * time.Millisecond)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "usage: probe -serve PORT | probe -record AGENT_URL | probe -call HOST:PORT")
+		fmt.Fprintln(os.Stderr, "usage: probe -serve PORT | probe -record AGENT_URL | probe -call HOST:PORT | probe -keepalive HOST:PORT")
 		os.Exit(2)
 	}
 }

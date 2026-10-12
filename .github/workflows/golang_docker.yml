@@ -110,10 +110,16 @@ jobs:
   # agent container is restarted twice and every call the application starts
   # while an agent records must be recorded. Each agent used to
   # stamp its own load time as the recording's start, which excluded the
-  # still-running application after a restart. Only the PR's image: the
-  # published one is what this guards against.
+  # still-running application after a restart. Before the recording starts on
+  # a restarted agent, the application's calls must be passed through, and a
+  # pooled connection opened then must be reset when it starts and its
+  # reconnection recorded. Only the PR's image: the published one is what this
+  # guards against.
   agent_restart_docker:
-    timeout-minutes: 20
+    # Passes in well under a minute. A run in which nothing is recorded waits
+    # out the script's no-progress guard (HANG_GUARD, 300s) on each recorder
+    # before it can say so.
+    timeout-minutes: 30
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     name: agent-restart (image_build)
