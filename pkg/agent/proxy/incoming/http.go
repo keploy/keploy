@@ -530,10 +530,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Dial Upstream
 	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 	if err != nil {
-		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
-			zap.String("final_app_addr", finalAppAddr),
-			zap.Error(err),
-		)
+		pm.logAppDialFailure(logger, "Failed to connect to upstream application. Verify the application is listening on the resolved address.",
+			err, zap.String("final_app_addr", finalAppAddr))
 		return
 	}
 	defer func() {
@@ -1384,8 +1382,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Stale upstream pool entry detected before upgrade; redialing",
 					zap.String("upstream", upstreamAddr))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1448,8 +1446,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if pm.mockMode {
 					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
 				} else {
-					logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
-						zap.String("upstream", upstreamAddr), zap.Error(err))
+					pm.logAppDialFailure(logger, "Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
+						err, zap.String("upstream", upstreamAddr))
 				}
 				pm.appGone(clientConn)
 				if req.Body != nil {
@@ -1576,8 +1574,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Idempotent request write failed; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1647,8 +1645,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Empty response from upstream; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}

@@ -312,7 +312,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
 	if actual != nil {
-		m.drainTrailingMocks(actual.done, time.Now(), func() (uint64, bool) { return uint64(actual.seen.Load()), false })
+		m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+			func() uint64 { return uint64(actual.seen.Load()) })
 	}
 	stopWatch()
 	actual.wait(mockDrainStall)

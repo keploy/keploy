@@ -1,10 +1,16 @@
 package routes
 
-import "sync"
+import (
+	"net/http"
+	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // recording_clients.go counts the frame streams (test cases, mocks, mappings)
-// a recording's client holds open on the agent, so a stop signal can wait for
-// the client to finish with them (WaitForRecordingClients).
+// a recording's client holds open on the agent and drains after its stop
+// (holdForDrain), so a stop signal can wait for the client to finish with them
+// (WaitForRecordingClients).
 //
 // A recording's client (the CLI) owns the agent's lifetime: when it stops it
 // drains the agent's streams until the agent has handed over what it captured
@@ -23,6 +29,18 @@ var recordingClients struct {
 func init() {
 	recordingClients.gone = make(chan struct{})
 	close(recordingClients.gone)
+}
+
+// holdForDrain notes the frame stream r opened, when its client drains it
+// after the stop, closes it before it stops the agent, and is the only thing
+// that stops the agent (models.DrainsAfterStopHeader), and returns the func
+// that notes it closed. Any other stream (an agent docker compose or kubelet
+// stops) is not held for: the agent stops on a signal as it always has.
+func holdForDrain(r *http.Request) (detach func()) {
+	if r.Header.Get(models.DrainsAfterStopHeader) != "true" {
+		return func() {}
+	}
+	return attachRecordingClient()
 }
 
 // attachRecordingClient notes a frame stream a recording's client holds open,

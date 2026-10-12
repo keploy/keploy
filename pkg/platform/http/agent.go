@@ -69,6 +69,12 @@ type AgentClient struct {
 	agentPTY    *agentUtils.PTYHandle // Track the PTY handle for interactive commands
 	mu          sync.Mutex
 	agentCancel context.CancelFunc // Function to cancel the agent context
+
+	// startedAgent: this client started the agent it talks to (natively, or
+	// in a container it runs), so nothing but this client stops it. Not
+	// under docker compose (the project starts it), nor for an agent another
+	// process started (a k8s sidecar).
+	startedAgent atomic.Bool
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
@@ -113,6 +119,20 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	}
 }
 
+// markDrainsAfterStop says, on a frame stream's request, that its client
+// drains the stream after its stop and closes it before it stops the agent
+// (models.WithDrainsAfterStop): the agent holds a stop signal for it. Only
+// when this client started the agent: otherwise something else stops it
+// (docker compose stops it with the project, which the client waits on;
+// kubelet stops a sidecar with its pod), and an agent that held for the
+// client would only be killed at that stop's timeout. Every request that
+// opens the stream carries it, a reconnection too.
+func (a *AgentClient) markDrainsAfterStop(ctx context.Context, req *http.Request) {
+	if models.DrainsAfterStop(ctx) && a.startedAgent.Load() {
+		req.Header.Set(models.DrainsAfterStopHeader, "true")
+	}
+}
+
 func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 
 	a.logger.Debug("Connecting to incoming test cases stream...")
@@ -133,6 +153,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
+	a.markDrainsAfterStop(ctx, req)
 
 	// Registered before it connects; it outlives a restarted agent (see
 	// agentSession).
@@ -386,6 +407,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
+	a.markDrainsAfterStop(ctx, req)
 
 	// Registered before it connects; it outlives a restarted agent (see
 	// agentSession).
@@ -496,6 +518,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
+	a.markDrainsAfterStop(ctx, req)
 
 	// Registered before it connects; it outlives a restarted agent (see
 	// agentSession).
@@ -1513,6 +1536,7 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 			return nil, err
 		}
 	}
+	a.startedAgent.Store(true)
 
 	// Monitor agent process and cancel client context if agent stops using errgroup
 	grp.Go(func() error {

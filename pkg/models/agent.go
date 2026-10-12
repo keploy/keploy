@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -459,4 +460,33 @@ type AgentBacklog struct {
 	Progress uint64
 	// WaitingOn says what is pending, when the agent can tell.
 	WaitingOn string
+}
+
+// DrainsAfterStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it after a recording's stop and closes it
+// before it stops the agent, and is the only thing that stops the agent: it
+// started it (natively, or in a container it runs). `keploy record` and
+// `keploy mock record` send it then. A stop signal the agent gets meanwhile
+// (a `pkill -INT keploy`, or a stop of its container, that reaches it too)
+// waits for such streams (utils.SetSignalHold). An agent something else
+// stops (docker compose, with the project the client waits on; kubelet, with
+// a sidecar's pod) gets no header, and stops on the signal as it always has:
+// held for the client, it would only be killed at that stop's timeout.
+const DrainsAfterStopHeader = "Keploy-Drains-After-Stop"
+
+type drainsAfterStopKey struct{}
+
+// WithDrainsAfterStop marks the agent frame streams opened on ctx as ones
+// their client drains after the stop and closes before it stops the agent.
+// The agent client sends DrainsAfterStopHeader for them when it started the
+// agent itself. On the agent, the graceful-shutdown ctx carries it while such
+// a client holds a stream: that client stops the app it started first.
+func WithDrainsAfterStop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, drainsAfterStopKey{}, true)
+}
+
+// DrainsAfterStop reports whether ctx was marked with WithDrainsAfterStop.
+func DrainsAfterStop(ctx context.Context) bool {
+	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
+	return v
 }

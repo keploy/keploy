@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // BacklogBefore asks the agent's /record/pending, with the time in Unix
@@ -70,5 +72,74 @@ func TestAgentClient_BacklogBefore(t *testing.T) {
 	got, err := a.BacklogBefore(context.Background(), before)
 	if err == nil || got.Verdict != models.BacklogCannotTell {
 		t.Fatalf("a look the agent did not answer: (%+v, %v), want cannot tell with its error", got, err)
+	}
+}
+
+// The frame streams a recording opens on a context marked
+// models.WithDrainsAfterStop carry DrainsAfterStopHeader, so the agent holds a
+// stop signal for them; others (keploy mock's) do not.
+func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
+	seen := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsAfterStopHeader)
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.startedAgent.Store(true) // this client started the agent
+	open := func(ctx context.Context) []string {
+		grp, gctx := errgroup.WithContext(ctx)
+		ctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		_, _ = a.GetIncoming(ctx, models.IncomingOptions{})
+		_, _ = a.GetOutgoing(ctx, models.OutgoingOptions{})
+		if ch, err := a.GetMappings(ctx, models.IncomingOptions{}); err == nil {
+			for range ch {
+			}
+		}
+		var got []string
+		for len(seen) > 0 {
+			got = append(got, <-seen)
+		}
+		return got
+	}
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=true") {
+			t.Errorf("a recording's stream went without the header: %s", g)
+		}
+	}
+	plain := open(context.Background())
+	if len(plain) == 0 {
+		t.Fatal("no stream reached the agent")
+	}
+	for _, g := range plain {
+		if !strings.HasSuffix(g, "=") {
+			t.Errorf("a stream not marked to drain carried the header: %s", g)
+		}
+	}
+
+	// An agent something else started (docker compose, a k8s sidecar) is
+	// stopped by that, not by this client: asked to hold for the client, it
+	// would wait out that stop's timeout and be killed.
+	a.startedAgent.Store(false)
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=") {
+			t.Errorf("a stream to an agent this client did not start carried the header: %s", g)
+		}
+	}
+	a.startedAgent.Store(true)
+
+	// A stream that reconnects to a restarted agent asks it to hold for it
+	// again; one not marked does not.
+	reopen := func(ctx context.Context) string {
+		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+			t.Fatal("the agent answered 404, yet the stream reopened")
+		}
+		return <-seen
+	}
+	if g := reopen(models.WithDrainsAfterStop(context.Background())); g != "/incoming=true" {
+		t.Errorf("a recording's stream reconnected without the header: %s", g)
+	}
+	if g := reopen(context.Background()); g != "/incoming=" {
+		t.Errorf("a stream not marked to drain reconnected with the header: %s", g)
 	}
 }

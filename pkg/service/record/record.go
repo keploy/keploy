@@ -180,6 +180,13 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		o.afterStop(item)
 		return false, false
 	}
+	// mayBeHeld reports whether a frame handed on after the stop may be what
+	// the agent said it held from before it: one captured before the stop, or
+	// undated. Counted in r.heldFrames (agentEndedDrain).
+	mayBeHeld := func(item T) bool {
+		at := o.capturedAt(item)
+		return at.IsZero() || !at.After(stoppedAt)
+	}
 	hand := func(item T, progress bool) bool {
 		draining := !stoppedAt.IsZero()
 		var left time.Duration
@@ -197,6 +204,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			r.frameProgress.Add(1)
 			if draining {
 				sinceStop++
+				if mayBeHeld(item) {
+					r.heldFrames.Add(1)
+				}
 			}
 			onHanded()
 			handed = true
@@ -272,6 +282,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 					select {
 					case out <- item:
 						r.frameProgress.Add(1)
+						if mayBeHeld(item) {
+							r.heldFrames.Add(1)
+						}
 						onHanded()
 					case <-abandoned:
 						o.dropped(item)
@@ -285,8 +298,22 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			return
 		case item, ok := <-stream:
 			if !ok {
-				if !stoppedAt.IsZero() {
-					r.agentEndedDrain(o.kind, &looks)
+				// The stream's end and the stop can both be ready when this
+				// select runs, and it takes either: whether the stop had come
+				// is the context's to say, or the recording's (its stop
+				// begins before this drain does), not the order select took
+				// them in. An end the stop had come before is the agent going
+				// away while the drain still needed it.
+				if ctx.Err() != nil || r.stopping.Load() {
+					// A second interrupt that reached the agent too ends its
+					// stream as it gives the drain up: that is the user's
+					// stop, and said as one, whichever this select saw first.
+					select {
+					case <-utils.InterruptedAgain():
+						giveUp()
+					default:
+						r.agentEndedDrain(o.kind, &looks)
+					}
 				}
 				return
 			}
@@ -514,6 +541,16 @@ type Recorder struct {
 	// agent still held from before the stop: the recording is incomplete,
 	// and ends as failed.
 	captureLost atomic.Bool
+	// heldFrames counts the test cases and mocks the frame drains handed on
+	// after the stop that may have been captured before it: what the agent's
+	// answer to a look (holdForBacklog) is about. Mappings, which it does not
+	// cover, are not counted. Whether one came since the look that said the
+	// agent held something decides if a loss is certain (agentEndedDrain).
+	heldFrames atomic.Uint64
+	// stopping is set once the recording's stop has begun (Start's teardown).
+	// The frame drains start later, once the app is stopped (natively); a
+	// stream the agent ends in between is one it ended after the stop.
+	stopping atomic.Bool
 	// unsupportedBacklogOnce says once that the agent cannot tell what it
 	// still holds.
 	unsupportedBacklogOnce sync.Once
@@ -543,31 +580,38 @@ type backlogLooks struct {
 	utils.BacklogLooks
 	// toldUnanswered: the drain has said that the agent does not answer.
 	toldUnanswered bool
-	// last is the agent's answer at the drain's last look, and looked says
-	// there was one.
-	last   models.BacklogVerdict
-	looked bool
+	// heldFrames is Recorder.heldFrames at the latest look the agent was not
+	// gone for (utils.BacklogLooks.Said).
+	heldFrames uint64
 }
 
 // agentEndedDrain reports a frame stream the agent ended on its own after the
 // stop, before its drain was done with it: the agent went away (it was
 // killed, or crashed) before it said it held nothing more from before the
-// stop, and what it still held is lost. Said at WARN; when the agent's last
-// answer was that it still held something, or it did not answer, the loss is
-// all but certain, and the recording fails (captureLost).
+// stop, and what it still held is lost. The recording fails (captureLost),
+// said at ERROR, when the agent itself gave a sign it held something: at the
+// latest look it was not already gone for, it said so, or did not answer
+// (Held). The loss is said to be certain only when it said so and nothing it
+// may have held came since. Otherwise it is said at WARN: frames from before
+// the stop still coming after it would not tell an agent's backlog from this
+// CLI's own lag in taking what the agent had already sent.
 func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
-	held := looks.looked && (looks.last == models.BacklogPending || looks.last == models.BacklogCannotTell)
-	if held {
-		r.captureLost.Store(true)
-		r.logger.Error("the keploy agent ended its stream while it still held what it captured before the stop: that is lost",
+	if !looks.Held() {
+		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more from before the stop: what it still held, if anything, is lost",
 			zap.String("frames", kind),
-			zap.Stringer("agent_said", looks.last),
-			zap.String("next_step", "the agent was stopped or crashed before the recording's stop had saved what it held; the recording ends as failed. Do not stop the agent separately from the recording; re-record"))
+			zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured"))
 		return
 	}
-	r.logger.Warn("the keploy agent ended its stream before it said it held nothing more from before the stop: what it still held, if anything, is lost",
+	r.captureLost.Store(true)
+	said, _ := looks.Said()
+	msg := "the keploy agent ended its stream before it had handed over all it captured before the stop: some of that may be lost"
+	if said == models.BacklogPending && r.heldFrames.Load() == looks.heldFrames {
+		msg = "the keploy agent ended its stream while it still held what it captured before the stop: that is lost"
+	}
+	r.logger.Error(msg,
 		zap.String("frames", kind),
-		zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured"))
+		zap.Stringer("agent_said", said),
+		zap.String("next_step", "the agent was stopped or crashed before the recording's stop had saved what it held; the recording ends as failed. Do not stop the agent separately from the recording; re-record"))
 }
 
 // holdForBacklog decides, for a drain whose stream has gone quiet after the
@@ -599,9 +643,17 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 	if looks.Stall == 0 {
 		looks.Stall = drainStallLooks
 	}
+	heldBefore := looks.heldFrames
+	looks.heldFrames = r.heldFrames.Load()
 	b, err := br.BacklogBefore(context.Background(), stoppedAt)
-	looks.last, looks.looked = b.Verdict, true
-	wait, gaveUp := looks.Look(b, r.frameProgress.Load())
+	r.logger.Debug("looked at what the keploy agent still holds from before the stop",
+		zap.String("frames", kind), zap.Stringer("agent_says", b.Verdict), zap.Uint64("progress", b.Progress), zap.Error(err))
+	wait, gaveUp := looks.Look(b, err, r.frameProgress.Load())
+	if looks.LastGone() {
+		// The agent could not be reached: it is going away. This look says
+		// nothing of what it held; the one before it does (agentEndedDrain).
+		looks.heldFrames = heldBefore
+	}
 	switch {
 	case gaveUp:
 		r.captureLost.Store(true)
@@ -1011,6 +1063,11 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 func (r *Recorder) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// A recorder can be started again: this recording has not begun to stop,
+	// nor lost anything yet.
+	r.stopping.Store(false)
+	r.captureLost.Store(false)
+	r.heldFrames.Store(0)
 
 	sessionStart := time.Now()
 
@@ -1217,6 +1274,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 			}
 		}
 
+		// From here a frame stream the agent ends is one it ended after the
+		// stop, though its drain starts only once the app is stopped
+		// (forwardUntilDrained).
+		r.stopping.Store(true)
 		r.logger.Info("Stopping Keploy recording...")
 
 		// Notify the agent that we are shutting down gracefully
@@ -1496,9 +1557,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 		// said once more here, where the run ends, and the run fails.
 		incomplete := r.captureLost.Load()
 		if incomplete {
-			r.logger.Error("the recording is incomplete: the keploy agent still held captures from before the stop when Keploy stopped waiting for them",
+			r.logger.Error("the recording may be incomplete: Keploy could not confirm it saved all the keploy agent captured before the stop",
 				zap.String("testSetID", newTestSetID),
-				zap.String("next_step", "the error above names what it was waiting on; re-record this test set"))
+				zap.String("next_step", "the error above says why (the agent made no progress, or went away before it said it had handed everything over); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
 		if recordingStarted || stopReason != "" {
@@ -2227,6 +2288,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
+	// This recording drains the agent's streams after its stop and closes
+	// them before it stops the agent: an agent the client started holds a
+	// stop signal it gets meanwhile for them (models.DrainsAfterStopHeader).
+	ctx = models.WithDrainsAfterStop(ctx)
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -2646,6 +2711,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				return nil
 			case m, ok := <-ch:
 				if !ok {
+					// Not ended here (mapCtx): the agent ended it. After the
+					// stop that is the agent going away before this drain was
+					// through, and the mappings it still held are lost.
+					if mapCtx.Err() == nil && (ctx.Err() != nil || r.stopping.Load()) {
+						r.logger.Warn("the keploy agent ended its mapping stream before the stop had saved its mappings: those it still held, if any, are lost",
+							zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured. A test left without its mapping replays with no mocks"))
+					}
 					return nil
 				}
 				if appRunsOn && ctx.Err() != nil {

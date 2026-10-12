@@ -103,8 +103,12 @@ send_request() {
 # back to timestamp-based mock filtering (useMappingBased=false), the per-test
 # dependency assertion is never armed, and every dependency assertion below
 # would be asserting a run in which nothing was even attempted.
+# --debug: which test a mock is mapped to is decided in the agent's mock
+# manager (diag/ResolveRange, diag/FlushOwnedWindows), and said only at DEBUG.
+# A recording that leaves a test without its mapping (step 9's THIN-recording
+# error) is otherwise left with nothing to tell why. It adds under 200 lines.
 send_request &
-"$RECORD_BIN" record -c "./http-pokeapi" --sync --generateGithubActions=false 2>&1 | tee record_logs.txt
+"$RECORD_BIN" record -c "./http-pokeapi" --sync --debug --generateGithubActions=false 2>&1 | tee record_logs.txt
 if grep "WARNING: DATA RACE" record_logs.txt; then
     echo "::error::Race condition detected in recording"
     cat record_logs.txt

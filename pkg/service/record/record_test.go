@@ -2372,7 +2372,7 @@ func TestStart_ABacklogTheAgentNeverHandsOverFailsTheRun(t *testing.T) {
 	if status != "incomplete" {
 		t.Fatalf("session status %q, want incomplete", status)
 	}
-	if logs.FilterMessageSnippet("the recording is incomplete").Len() == 0 {
+	if logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("the recording may be incomplete").Len() == 0 {
 		t.Fatalf("the run did not say it was incomplete at ERROR: %v", logs.All())
 	}
 }
