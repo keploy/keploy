@@ -557,3 +557,56 @@ func TestPickCaseKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestATestWhoseRequestsNeverPairIsServedWhole(t *testing.T) {
+	_, r := oneTest(caseTable())
+	r.Exchange(0, "GET", "/zzz")()
+	sees(t, r, 101, "after a request no case recorded", "fx", "m1", "m2", "m3")
+}
+
+func TestAnEndedCaseStaysServedWhileTheNextIsInFlight(t *testing.T) {
+	_, r := oneTest(caseTable())
+	first := r.Exchange(0, "GET", "/a")
+	third := r.Exchange(0, "POST", "/b/1")
+	first()
+	sees(t, r, 101, "the first case ended, the third in flight", "fx", "m1", "m3")
+	third()
+}
+
+func TestBetweenCasesTheNextCaseAfterTheLastIsServed(t *testing.T) {
+	_, r := oneTest(caseTable())
+	r.Exchange(0, "GET", "/a")()
+	r.Exchange(0, "GET", "/a")()
+	r.Exchange(0, "POST", "/b/1")()
+	sees(t, r, 101, "after every case", "fx", "m3")
+	_, r = oneTest(caseTable())
+	r.Exchange(0, "POST", "/b/1")()
+	sees(t, r, 101, "after the third case, the first not served", "fx", "m1", "m3")
+}
+
+func TestAnAppWhoseRunnerIsBetweenTestsIsNotNarrowedByAnotherPackagesTest(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "/tmp/a.test")
+	r.Begin(100, "/repo/a", "/repo/a", true, at(1))
+	f.spawn(101, 100, at(2), "/tmp/shop")
+	f.spawn(200, 1, at(0), "/tmp/b.test")
+	r.Begin(200, "/repo/b", "/repo/b", true, at(1))
+	f.spawn(201, 200, at(2), "/tmp/shop")
+	r.SetTable("/repo", map[string]models.SetTable{
+		"a": {Tests: map[string][]models.Owned{"T": {{Name: "a1"}, {Name: "a2"}}},
+			Cases: map[string][]models.Case{"T": {{Name: "test-1", Method: "GET", URL: "/x", Mocks: []string{"a1"}}}}},
+		"b": {Tests: map[string][]models.Owned{"T": {{Name: "b1"}, {Name: "b2"}, {Name: "b3"}}},
+			Cases: map[string][]models.Case{"T": {
+				{Name: "test-1", Method: "GET", URL: "/x", Mocks: []string{"b1"}},
+				{Name: "test-2", Method: "GET", URL: "/y", Mocks: []string{"b2"}},
+				{Name: "test-3", Method: "GET", URL: "/z", Mocks: []string{"b3"}},
+			}}},
+	})
+	r.Ready(201, 9090, at(3))
+	r.Begin(200, "T", "/repo/b", false, at(10))
+	end := r.Exchange(9090, "GET", "/z")
+	defer end()
+	sees(t, r, 201, "b's third case", "b3")
+	sees(t, r, 101, "a's app between a's tests", "a1", "a2")
+}

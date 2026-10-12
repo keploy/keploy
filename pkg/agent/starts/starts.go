@@ -630,7 +630,10 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	if f != nil {
 		test = f.place
 	}
-	allow := r.caseView(set, f, test)
+	var allow func(string) bool
+	if f != nil && len(w.frames) > 1 && f == w.frames[len(w.frames)-1] {
+		allow = r.caseView(set, f, test)
+	}
 	rank := map[string]int{}
 	put := func(name string, g int) {
 		if allow != nil && !allow(name) {
@@ -673,7 +676,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 
 func (r *Registry) caseView(set string, f *frame, test string) func(string) bool {
 	cases := r.sets[set].Cases[test]
-	if len(cases) == 0 || f == nil || f.used == nil || r.blind > 0 || f.open[-1] > 0 {
+	if len(cases) == 0 || f == nil || !slices.Contains(f.used, true) || r.blind > 0 || f.open[-1] > 0 {
 		return nil
 	}
 	free := r.free[set][test]
@@ -683,12 +686,21 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) bool
 			mine = append(mine, cases[i].Mocks...)
 		}
 	}
+	if f.last > 0 && f.last <= len(cases) {
+		mine = append(mine, cases[f.last-1].Mocks...)
+	}
 	if len(f.open) == 0 {
-		if f.last > 0 && f.last <= len(cases) {
-			mine = append(mine, cases[f.last-1].Mocks...)
+		next := -1
+		if f.last > 0 && f.last <= len(f.used) {
+			if k := slices.Index(f.used[f.last:], false); k >= 0 {
+				next = f.last + k
+			}
 		}
-		if i := slices.Index(f.used, false); i >= 0 && i < len(cases) {
-			mine = append(mine, cases[i].Mocks...)
+		if next < 0 {
+			next = slices.Index(f.used, false)
+		}
+		if next >= 0 && next < len(cases) {
+			mine = append(mine, cases[next].Mocks...)
 		}
 	}
 	return func(name string) bool {
@@ -707,7 +719,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	if f == nil {
 		open := false
 		for _, o := range r.workers {
-			open = open || len(o.frames) > 1
+			open = open || (len(o.frames) > 1 && r.alive(o.pid, o.born))
 		}
 		if !open {
 			return func() {}
