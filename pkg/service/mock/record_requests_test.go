@@ -216,8 +216,24 @@ func TestStartupMocks(t *testing.T) {
 		{name: "mock-3", ts: at(150)},
 		{name: "mock-4", ts: at(250)},
 	}
-	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}, startupMocks(windows, mocks))
-	require.Len(t, startupMocks(nil, mocks), 5)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}, startupMocks(windows, mocks, nil))
+	require.Len(t, startupMocks(nil, mocks, nil), 5)
+
+	// Under the proven wire each pool mock carries the key of the claim it
+	// was made under (design v14 §5.2); one made before any claim has none.
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(200)}}
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "users"}}, startupMocks(windows, mocks, claims))
+}
+
+func TestClaimKeyAt(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	claims := []models.ScopeWindow{{Claim: "a", Start: at(0)}, {Claim: "b", Start: at(10)}}
+	require.Equal(t, "", claimKeyAt(claims, at(-1)))
+	require.Equal(t, "a", claimKeyAt(claims, at(0)), "a call at the claim's own instant is its")
+	require.Equal(t, "a", claimKeyAt(claims, at(9)))
+	require.Equal(t, "b", claimKeyAt(claims, at(10)))
+	require.Equal(t, "b", claimKeyAt(claims, at(1000)), "until the next claim")
+	require.Equal(t, "", claimKeyAt(nil, at(5)))
 }
 
 func stepsMarks() []models.ScopeWindow {

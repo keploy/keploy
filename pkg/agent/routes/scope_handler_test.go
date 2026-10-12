@@ -390,3 +390,53 @@ func TestScopeWindowsWithTheSwitchOffReadAnyOtherFinalPlainly(t *testing.T) {
 		t.Fatalf("status %d, reads %v, want one plain read", rec.Code, svc.reads)
 	}
 }
+
+// poolSvc takes the per-test table and the pool slices.
+type poolSvc struct {
+	agent.Service
+	table map[string][]string
+	pool  map[string][]string
+}
+
+func (s *poolSvc) SetScopeTable(_ context.Context, t map[string][]string) error {
+	s.table = t
+	return nil
+}
+
+func (s *poolSvc) SetScopePool(_ context.Context, p map[string][]string) error {
+	s.pool = p
+	return nil
+}
+
+// tableOnlySvc takes the per-test table and no pool slices.
+type tableOnlySvc struct{ agent.Service }
+
+func (tableOnlySvc) SetScopeTable(context.Context, map[string][]string) error { return nil }
+
+// Under the switch the scope table carries each key's pool slice; an agent
+// that cannot serve them says so, since the CLI judges on them. With the
+// switch off the slices are not read.
+func TestScopeTableCarriesThePoolSlices(t *testing.T) {
+	body := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"],"-":["mock-2"]}}`
+	post := func(a *Agent) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc := &poolSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(svc.table["o::TestA"], []string{"mock-3"}) || !slices.Equal(svc.pool["o"], []string{"mock-1"}) || !slices.Equal(svc.pool["-"], []string{"mock-2"}) {
+		t.Fatalf("table %v, pool %v", svc.table, svc.pool)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: tableOnlySvc{}}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent without pool slices answered %d", rec.Code)
+	}
+	t.Setenv(provenswitch.Env, "")
+	svc = &poolSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
+		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)
+	}
+}

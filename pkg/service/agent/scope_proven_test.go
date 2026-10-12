@@ -857,3 +857,83 @@ func TestAnUnreadReadKeepsTheChargedMisses(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread)
 	require.Len(t, all, 2, "the charged miss and the partial read")
 }
+
+// filteredNames is the per-test pool the proxy was last given.
+func (p *wireProxy) filteredNames() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, m := range p.filtered {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
+// Between tests the agent serves the pool slice of the current claim's key
+// (design v14 §5.2, U21): before any claim the keyless slice, after a claim
+// its key's, during a test the test's own mocks, and after it the key's
+// slice again. Another key's pool mock never answers.
+func TestBetweenTestsTheCurrentKeysPoolSliceIsServed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, p := wireAgent(models.MODE_TEST)
+	storeMocks(a,
+		httpMock("mock-1", "GET", "http://h/orders-setup"),
+		httpMock("mock-2", "GET", "http://h/before-any-claim"),
+		httpMock("mock-3", "GET", "http://h/test-a"),
+		httpMock("mock-4", "GET", "http://h/users-setup"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-3"}}
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2"}, "users": {"mock-4"}}))
+	require.Equal(t, []string{"mock-2"}, p.filteredNames(), "before any claim: the keyless slice")
+	claimSelf(t, a)
+	require.Equal(t, []string{"mock-1"}, p.filteredNames(), "after the claim: its key's slice")
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	require.Equal(t, []string{"mock-3"}, p.filteredNames(), "during the test: its own mocks")
+	p.served["mock-3"] = 1
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, []string{"mock-1"}, p.filteredNames(), "after the test: the key's slice again")
+}
+
+// Without the slices (a CLI that sent none) the whole pool stays armed
+// between tests, as before them.
+func TestWithoutPoolSlicesTheWholePoolIsServed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, p := wireAgent(models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"), httpMock("mock-3", "GET", "http://h/test-a"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-3"}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.served["mock-3"] = 1
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.ElementsMatch(t, []string{"mock-1", "mock-3"}, p.filteredNames())
+}
+
+// Each claim is in the run's windows, in order, so a record tags each pool
+// mock with the key it was made under; a re-claim by the claimer with the
+// same key adds none.
+func TestTheClaimsAreInTheWindows(t *testing.T) {
+	a, _ := wireAgent(models.MODE_RECORD)
+	claimSelf(t, a)
+	claimSelf(t, a)
+	ws, err := a.GetScopeWindows(context.Background())
+	require.NoError(t, err)
+	var claims []string
+	for _, w := range ws {
+		if w.Claim != "" {
+			claims = append(claims, w.Claim)
+			require.False(t, w.Start.IsZero())
+		}
+	}
+	require.Equal(t, []string{"o"}, claims)
+	require.NoError(t, a.resetSession(context.Background()))
+	ws, err = a.GetScopeWindows(context.Background())
+	require.NoError(t, err)
+	for _, w := range ws {
+		require.Empty(t, w.Claim, "the claims belong to the session that made them")
+	}
+}

@@ -3237,6 +3237,44 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.
+// PushProvenTable hands the agent, under the proven switch, the per-test
+// table and each key's pool slice (models.ScopeTableReq.Pool) in one
+// request. Every answer but 200 is an error: a replay judged per test must
+// not run on an agent that serves its tests and pool otherwise.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string) (retErr error) {
+	if pool == nil {
+		pool = map[string][]string{}
+	}
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			t, p := maps.Clone(table), maps.Clone(pool)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-table request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push scope table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {

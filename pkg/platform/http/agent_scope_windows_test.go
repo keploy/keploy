@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,5 +50,40 @@ func TestAgentClient_GetScopeWindowsIsTheFinalRead(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	if _, err := a.GetScopeWindows(ctx); err == nil {
 		t.Fatal("switch on, an agent without the read: want an error")
+	}
+}
+
+// PushProvenTable sends the per-test table and the pool slices in one
+// request, an empty pool as {}, and any answer but 200 is an error.
+func TestAgentClient_PushProvenTable(t *testing.T) {
+	var bodies []string
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
+			http.NotFound(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx := context.Background()
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`, `{"mappings":{"o::TestA":[]},"pool":{}}`}
+	if len(bodies) != 2 || bodies[0] != want[0] || bodies[1] != want[1] {
+		t.Fatalf("posted %q, want %q", bodies, want)
+	}
+	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
+		status = s
+		if err := a.PushProvenTable(ctx, nil, nil); err == nil {
+			t.Fatalf("status %d: want an error", s)
+		}
 	}
 }

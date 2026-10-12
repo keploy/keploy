@@ -166,6 +166,14 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 			a.ClearWorkerScope(uint32(pid))
 			return nil
 		}
+		if pid == 0 && provenswitch.On() {
+			// Between tests the proven wire serves the current key's pool
+			// slice, once the CLI sent the slices.
+			if params, ok := a.poolParams(); ok {
+				a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name), zap.Int("mocks", len(params.MockMapping)))
+				return a.UpdateMockParams(ctx, params)
+			}
+		}
 		a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
 		return a.UpdateMockParams(ctx, models.MockFilterParams{
 			AfterTime:  models.BaseTime,
@@ -209,10 +217,13 @@ func (a *Agent) FinalScopeWindows(ctx context.Context) ([]models.ScopeWindow, er
 }
 
 func (a *Agent) scopeWindowsNow() []models.ScopeWindow {
+	// Read before scopeMu: provenMu is never held while taking it.
+	claims := a.claimWindows()
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
-	out := make([]models.ScopeWindow, len(a.scopeWindows))
+	out := make([]models.ScopeWindow, len(a.scopeWindows), len(a.scopeWindows)+len(claims))
 	copy(out, a.scopeWindows)
+	out = append(out, claims...)
 	for _, s := range starts.Default.List() {
 		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
 	}

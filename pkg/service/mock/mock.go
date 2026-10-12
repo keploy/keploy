@@ -42,6 +42,11 @@ type mockService struct {
 	// command: recorded in the replay receipt it leaked a temp path, and
 	// `keploy mock status` handed it back to agents as the command to run.
 	userCommand string
+	// claims are, under the proven switch, the run's claims (windows with
+	// Claim set), which readWindows takes out of the windows it returns: a
+	// record tags each pool mock with the key of the claim it was made
+	// under (claimKeyAt).
+	claims []models.ScopeWindow
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

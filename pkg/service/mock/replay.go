@@ -742,12 +742,20 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) error {
 	if m.mappingDB == nil {
 		return refuse("this keploy reads no per-test mappings")
 	}
+	var pool map[string][]string
 	if proven {
-		if reader, ok := m.mappingDB.(MappingReader); ok {
-			if mp, err := reader.GetMapping(ctx, name); err == nil && mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
-				return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
-			}
+		reader, ok := m.mappingDB.(MappingReader)
+		if !ok {
+			return refuse("this keploy cannot read the calls the set recorded outside its tests")
 		}
+		mp, err := reader.GetMapping(ctx, name)
+		if err != nil {
+			return refuse("its mappings cannot be read: " + err.Error())
+		}
+		if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
+			return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
+		}
+		pool = poolSlices(mp)
 	} else if m.pushSetTable(ctx, name) {
 		return nil
 	}
@@ -775,15 +783,45 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) error {
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table); err != nil {
-		if proven {
+	if proven {
+		// With each key's pool slice: between tests the agent serves only
+		// the calls recorded under the claim's key (design v14 §5.2, U21).
+		pp, ok := m.instrumentation.(ProvenTablePusher)
+		if !ok {
+			return refuse("this keploy's agent takes no pool slice per key")
+		}
+		if err := pp.PushProvenTable(ctx, table, pool); err != nil {
 			return refuse("its agent refused the per-test table: " + err.Error())
 		}
+		m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+		return nil
+	}
+	if err := pusher.PushScopeTable(ctx, table); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return nil
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
 	return nil
+}
+
+// poolSlices is each key's pool slice of a recording: its start-up mocks by
+// the key they were recorded under, models.PoolKeyNone for none.
+func poolSlices(mp *models.Mapping) map[string][]string {
+	pool := map[string][]string{}
+	if mp == nil {
+		return pool
+	}
+	for _, e := range mp.Startup {
+		if e.Name == "" {
+			continue
+		}
+		key := e.Key
+		if key == "" {
+			key = models.PoolKeyNone
+		}
+		pool[key] = append(pool[key], e.Name)
+	}
+	return pool
 }
 
 // replayWindows are the per-test windows of this replay. Under docker compose

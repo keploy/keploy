@@ -566,7 +566,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
+				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded, m.claims), suites)
 			}
 		}
 	}
@@ -650,7 +650,34 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
 		defer cancel()
 	}
-	return reader.GetScopeWindows(ctx)
+	all, err := reader.GetScopeWindows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	windows := all[:0:0]
+	m.claims = nil
+	for _, w := range all {
+		if w.Claim != "" {
+			m.claims = append(m.claims, w)
+			continue
+		}
+		windows = append(windows, w)
+	}
+	return windows, nil
+}
+
+// claimKeyAt is the key of the claim a call made at at belongs to: the
+// latest claim made at or before it (claims are in the order they were
+// made); "" before the first, which is models.PoolKeyNone's.
+func claimKeyAt(claims []models.ScopeWindow, at time.Time) string {
+	key := ""
+	for _, c := range claims {
+		if c.Start.After(at) {
+			break
+		}
+		key = c.Claim
+	}
+	return key
 }
 
 // existsOnly is saveSet for a build whose judging keeps the set's backup: it
@@ -917,11 +944,13 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 	return flow
 }
 
-func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
+func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
 	var out []models.MockEntry
 	for _, mk := range mocks {
 		if mk.boot || containing(windows, mk.ts) == "" {
-			out = append(out, models.MockEntry{Name: mk.name})
+			// Under the proven wire, the pool slice of the key it was made
+			// under (design v14 §5.2); claims are none without it.
+			out = append(out, models.MockEntry{Name: mk.name, Key: claimKeyAt(claims, mk.ts)})
 		}
 	}
 	return out

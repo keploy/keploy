@@ -240,7 +240,18 @@ type ScopeWindow struct {
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
+	// Claim, under the proven wire, makes this no test's window but a claim:
+	// from Start on, the run's test process is the one that claimed it with
+	// this key (POST /agent/instance), until the next claim. A call made
+	// while no test is open belongs to the pool slice of that key (design
+	// v14 §5.2).
+	Claim string `json:"claim,omitempty"`
 }
+
+// PoolKeyNone is the pool slice of calls made before any test process
+// claimed the run, and the slice a pool mock recorded without a key serves
+// (design v14 U21).
+const PoolKeyNone = "-"
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
@@ -249,6 +260,10 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 	Root     string              `json:"root,omitempty"`
 	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// Pool is, under the proven switch, each key's pool slice: the names of
+	// the mocks recorded while no test was open, by the key of the claim
+	// then (PoolKeyNone for none, and for a mock recorded without a key).
+	Pool map[string][]string `json:"pool,omitempty"`
 }
 
 type SetTable struct {

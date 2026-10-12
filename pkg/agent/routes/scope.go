@@ -238,8 +238,26 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Pool != nil && provenswitch.On() {
+		// Each key's pool slice (design v14 §5.2). An agent that cannot
+		// serve them says so: a CLI that sent them judges on them.
+		s, ok := a.svc.(scopePoolSetter)
+		if !ok {
+			http.Error(w, "this keploy agent cannot serve a pool slice per key", http.StatusNotImplemented)
+			return
+		}
+		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// scopePoolSetter installs each key's pool slice (proven wire).
+type scopePoolSetter interface {
+	SetScopePool(ctx context.Context, pool map[string][]string) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run

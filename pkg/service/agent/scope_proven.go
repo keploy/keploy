@@ -64,6 +64,14 @@ type provenWire struct {
 	charged []models.UnmatchedCall
 	// claim is the live claim; zero when none.
 	claim claimant
+	// claims is every claim of the session, in order: from each one's time
+	// on, until the next, a call made while no test is open belongs to the
+	// pool slice of its key (design v14 §5.2). Record reads them with the
+	// windows to tag each pool mock with its key.
+	claims []models.ScopeWindow
+	// pool is, in a replay, each key's pool slice (the CLI's scope table,
+	// models.ScopeTableReq.Pool); nil until the CLI sent one.
+	pool map[string][]string
 	// closed: the run's windows were read at its end; nothing more is
 	// claimed or begun until the next session resets the wire.
 	closed bool
@@ -243,9 +251,80 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	}
 	a.provenMu.Lock()
 	a.proven.claim = me
+	if prev != me || a.proven.key != key {
+		now := time.Now()
+		a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: key, Start: now, End: now})
+	}
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
+	if a.replaying() {
+		// Calls made from now while no test is open are this key's.
+		if err := a.applyPool(ctx); err != nil {
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				"keploy could not arm the recorded calls of "+key+" made outside its tests: "+err.Error(), "check the agent's log")
+		}
+	}
 	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: models.InstanceRun}, nil
+}
+
+// SetScopePool installs each key's pool slice for a replay (design v14 §5.2,
+// U21), and arms the current key's while no test is open.
+func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) error {
+	cp := make(map[string][]string, len(pool))
+	for k, names := range pool {
+		cp[k] = append([]string{}, names...)
+	}
+	a.provenMu.Lock()
+	a.proven.pool = cp
+	a.provenMu.Unlock()
+	return a.applyPool(ctx)
+}
+
+// poolParams is the served pool while no test is open: the pool slice of the
+// current claim's key, else, before any claim, PoolKeyNone's; a pool mock
+// recorded without a key is in PoolKeyNone's. Beside it the reusable tier
+// is served as always. ok is false until the CLI sent the slices, which
+// leaves the whole pool armed, as before them.
+func (a *Agent) poolParams() (models.MockFilterParams, bool) {
+	a.provenMu.Lock()
+	pool, key := a.proven.pool, a.proven.key
+	a.provenMu.Unlock()
+	if pool == nil {
+		return models.MockFilterParams{}, false
+	}
+	if key == "" {
+		key = models.PoolKeyNone
+	}
+	return models.MockFilterParams{
+		MockMapping:     append([]string{}, pool[key]...),
+		ExactMapping:    true,
+		UseMappingBased: true,
+		AfterTime:       models.BaseTime,
+		BeforeTime:      time.Now(),
+	}, true
+}
+
+// applyPool arms the current key's pool slice (poolParams), unless a test is
+// open: its end arms it.
+func (a *Agent) applyPool(ctx context.Context) error {
+	a.provenMu.Lock()
+	open := a.proven.open
+	a.provenMu.Unlock()
+	if open != "" {
+		return nil
+	}
+	params, ok := a.poolParams()
+	if !ok {
+		return nil
+	}
+	return a.UpdateMockParams(ctx, params)
+}
+
+// claimWindows is the session's claims, as windows (models.ScopeWindow.Claim).
+func (a *Agent) claimWindows() []models.ScopeWindow {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return append([]models.ScopeWindow(nil), a.proven.claims...)
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
