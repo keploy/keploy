@@ -156,3 +156,21 @@ func TestNoQuietWithoutALogFile(t *testing.T) {
 		t.Fatalf("a run with no log file went quiet: %q", read(t, console))
 	}
 }
+
+func TestQuietWritesTheRunFileItWasGiven(t *testing.T) {
+	_, file := quietFiles(t)
+	other, err := os.Create(filepath.Join(t.TempDir(), "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	SetRunFile(other)
+	logger, err := Quiet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("this run's line")
+	if strings.Contains(read(t, file), "this run's line") || !strings.Contains(read(t, other), "this run's line") {
+		t.Fatal("the line did not go to the run file")
+	}
+}

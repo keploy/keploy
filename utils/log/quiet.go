@@ -28,6 +28,8 @@ func Quiet() (*zap.Logger, error) {
 
 func Quieted() bool { return quiet.Load() }
 
+func SetRunFile(f *os.File) { runFile.Store(f) }
+
 func Facts(logger *zap.Logger) *zap.Logger {
 	ensureLogCfg()
 	shown := newRedactingCore(factCore{Core: newFactConsole(LogCfg.Level), min: zapcore.InvalidLevel})
