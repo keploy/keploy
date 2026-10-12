@@ -371,6 +371,9 @@ func (r *Registry) Scope(pid uint32) string {
 		return ""
 	}
 	if f := r.currentFrame(w); f != nil {
+		if c := r.caseOf(w, f); c >= 0 {
+			return fmt.Sprintf("t%d/c%d", f.seq, c)
+		}
 		return fmt.Sprintf("t%d", f.seq)
 	}
 	return fmt.Sprintf("w%d", w.pid)
@@ -733,6 +736,21 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 }
 
 const laterRank = 5
+
+func (r *Registry) caseOf(w *worker, f *frame) int {
+	if len(w.frames) < 2 || f != w.frames[len(w.frames)-1] || f.lost || r.blind > 0 || f.open[-1] > 0 || !slices.Contains(f.used, true) {
+		return -1
+	}
+	switch len(f.open) {
+	case 0:
+		return f.last - 1
+	case 1:
+		for i := range f.open {
+			return i
+		}
+	}
+	return -1
+}
 
 func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	r.mu.Lock()

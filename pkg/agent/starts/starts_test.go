@@ -709,3 +709,23 @@ func TestCasesNotYetServedStayServableAfterTheCaseInFlight(t *testing.T) {
 		t.Fatalf("the first poll can fall back to %v, want the later poll's mocks", got)
 	}
 }
+
+func TestEachCaseCountsItsOwnRepeatedCalls(t *testing.T) {
+	_, r := oneTest(caseTable())
+	test := r.Scope(101)
+	end := r.Exchange(0, "GET", "/a")
+	first := r.Scope(101)
+	end()
+	if got := r.Scope(101); got != first {
+		t.Fatalf("after the first case its calls count in %q, want %q", got, first)
+	}
+	end = r.Exchange(0, "GET", "/a")
+	second := r.Scope(101)
+	other := r.Exchange(0, "POST", "/b/1")
+	both := r.Scope(101)
+	other()
+	end()
+	if test == first || first == second || both != test {
+		t.Fatalf("scopes: test %q, first case %q, second %q, two in flight %q", test, first, second, both)
+	}
+}
