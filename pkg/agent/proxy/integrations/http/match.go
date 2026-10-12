@@ -303,8 +303,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // credentials pick out some of the recordings (credentialPreferred), only those
 // are cursored, under a key of their own; otherwise the whole group is, as before.
 //
-// Tests: the recordings made inside the running test's window are served before
-// the set-wide cursor is consulted (see the test-scope note in the body).
+// Tests: a recording made inside the running test's window, at or past the
+// set-wide cursor, is served before any other (see the test-scope note in the
+// body).
 func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool, live http.Header) (*models.Mock, func()) {
 	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return bestMatch, nil
@@ -359,13 +360,20 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 		key += "\x00caller:" + caller
 	}
 	n := len(group)
+	idx := cs.MockCursorIndex(key, n)
+	if idx < 0 || idx >= n {
+		return bestMatch, nil
+	}
 	// Test scope: these session mocks are reusable across the whole set, but a
 	// recording made inside the running test's window (CurrentTestWindow, the
 	// recorded [request, response] of the test being replayed) is that test's
-	// own. Serve those first, in record order under a per-test key, so a test
+	// own. Serve the first of those at or past the set-wide cursor, so a test
 	// that was skipped or failed before making its calls cannot shift its
-	// recordings onto the next test. The set-wide cursor moves past what was
-	// served and stays the fallback for a test with no recording of its own.
+	// recordings onto the next test, and a recording already served to an
+	// earlier test whose window overlaps this one is not served again; with
+	// none left, saturate on the test's last. Serving moves the set-wide cursor
+	// past it, and that cursor stays the fallback for a test with no recording
+	// of its own.
 	if start, end := mockDb.CurrentTestWindow(); !start.IsZero() && !end.IsZero() {
 		var own []int // positions in group of the running test's recordings
 		for i, m := range group {
@@ -375,21 +383,15 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 			}
 		}
 		if len(own) > 0 {
-			testKey := fmt.Sprintf("%s\x00test:%d-%d", key, start.UnixNano(), end.UnixNano())
-			idx := cs.MockCursorIndex(testKey, len(own))
-			if idx < 0 || idx >= len(own) {
-				return bestMatch, nil
+			at := own[len(own)-1]
+			for _, i := range own {
+				if i >= idx {
+					at = i
+					break
+				}
 			}
-			at, ownN := own[idx], len(own)
-			return group[at], func() {
-				cs.AdvanceMockCursor(testKey, idx, ownN)
-				cs.AdvanceMockCursor(key, at, n)
-			}
+			idx = at
 		}
-	}
-	idx := cs.MockCursorIndex(key, n)
-	if idx < 0 || idx >= n {
-		return bestMatch, nil
 	}
 	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
 }

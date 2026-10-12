@@ -251,3 +251,43 @@ func TestMatch_CursorTestScopeThenSetWideFallback(t *testing.T) {
 	db.start, db.end = base.Add(5*time.Second), base.Add(6*time.Second)
 	serve("test3 call 1", "between-tests")
 }
+
+// TestMatch_CursorOverlappingTestWindowsDoNotReServe: tests whose recorded
+// windows overlap (concurrent incoming requests) share the recordings made in
+// the overlap. T1 [0s,10s] and T2 [5s,15s] each made the same HEAD, recorded at
+// 6s and 8s, so both recordings are in both windows. T1 is served the 6s one;
+// T2 must then get the 8s one, not the 6s one again, as it would on the
+// set-wide cursor alone: a test's own recordings are taken from where the
+// set-wide cursor stands.
+func TestMatch_CursorOverlappingTestWindowsDoNotReServe(t *testing.T) {
+	h := newHTTP()
+	ctx := context.Background()
+	base := time.Unix(1_700_000_000, 0)
+
+	db := &windowedMemDb{
+		mockMemDb: &mockMemDb{
+			mocks: []*models.Mock{
+				headMock("head-6s", base.Add(6*time.Second)),
+				headMock("head-8s", base.Add(8*time.Second)),
+			},
+			updateUnFilteredReturn: true,
+		},
+	}
+	for _, step := range []struct {
+		test       string
+		start, end time.Duration
+		want       string
+	}{
+		{"T1", 0, 10 * time.Second, "head-6s"},
+		{"T2", 5 * time.Second, 15 * time.Second, "head-8s"},
+	} {
+		db.start, db.end = base.Add(step.start), base.Add(step.end)
+		ok, stub, _, err := h.match(ctx, headReq(), db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || !ok || stub == nil {
+			t.Fatalf("%s: ok=%v stub=%v err=%v", step.test, ok, stub, err)
+		}
+		if stub.Name != step.want {
+			t.Fatalf("%s [%v, %v] served %q, want %q — a recording the set-wide cursor has passed must not be served again", step.test, step.start, step.end, stub.Name, step.want)
+		}
+	}
+}
