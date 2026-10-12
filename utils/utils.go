@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"text/template"
 	"time"
+	"unicode"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -1969,9 +1970,37 @@ func QuoteArgs(args []string) string {
 	out := make([]string, len(args))
 	for i, a := range args {
 		out[i] = a
-		if a == "" || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^") {
+		switch {
+		case strings.IndexFunc(a, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) >= 0:
+			out[i] = cQuote(a)
+		case a == "" || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^"):
 			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+func cQuote(a string) string {
+	var b strings.Builder
+	b.WriteString("$'")
+	for _, r := range a {
+		switch {
+		case r == '\\' || r == '\'':
+			b.WriteString("\\" + string(r))
+		case r == '\n':
+			b.WriteString("\\n")
+		case r == '\t':
+			b.WriteString("\\t")
+		case r == '\r':
+			b.WriteString("\\r")
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, "\\x%02x", r)
+		case r == '\u2028' || r == '\u2029' || unicode.IsControl(r):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString("'")
+	return b.String()
 }

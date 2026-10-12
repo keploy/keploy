@@ -398,3 +398,18 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
 }
+
+func TestQuoteArgsKeepsACommandOnOneLine(t *testing.T) {
+	for in, want := range map[string]string{
+		"go test ./...":   "'go test ./...'",
+		"a^b":             "'a^b'",
+		"go test\n-run A": `$'go test\n-run A'`,
+		"it's\r\v":        `$'it\'s\r\x0b'`,
+		"x\u2028y":        `$'x\u2028y'`,
+		"plain":           "plain",
+	} {
+		if got := QuoteArgs([]string{in}); got != want {
+			t.Errorf("QuoteArgs(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
