@@ -43,6 +43,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1580,6 +1581,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.RecordRequests {
 		args = append(args, "--record-requests")
 	}
+	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
+	// the agent, so it travels as a flag.
+	args = append(args, provenswitch.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native
@@ -2008,7 +2012,19 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	case ready = <-agentReadyCh:
 	}
 	if ready {
-		return nil
+		// Within the same readiness budget as the health check: an agent that
+		// answered it once and then stops answering is not ready either.
+		err := a.checkAgentSwitch(agentCtx)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() == nil && agentCtx.Err() == nil {
+			a.stopAgent()
+			return err
+		}
+		// The caller's context ended, or the budget ran out mid-read: not a
+		// switch that was read, so it is handled below exactly as an agent
+		// that never became ready.
 	}
 	if ctx.Err() != nil {
 		// The caller's Ctrl+C -- or a goroutine in the caller's errgroup
@@ -2037,6 +2053,46 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// Sentinel so the caller can retry a fresh bring-up on this specific,
 	// nondeterministic stall without retrying deterministic failures.
 	return fmt.Errorf("%w", pkg.ErrAgentNotReady)
+}
+
+// checkAgentSwitch refuses an agent whose proven switch is not this keploy's
+// (provenswitch.CheckAgent), naming both sides: its parsers and this CLI's
+// verdicts would run different paths. It runs once the agent has answered its
+// health check, so its own read of /health is to an agent that is up. With the
+// switch off here a failed read changes nothing, as before the switch existed;
+// with it on, an agent whose switch cannot be read is not run against. A
+// refusal wraps provenswitch.ErrAgentSwitch; the caller reports it.
+func (a *AgentClient) checkAgentSwitch(ctx context.Context) error {
+	reported, err := a.readAgentSwitch(ctx)
+	if err != nil {
+		if !provenswitch.On() {
+			a.logger.Debug("could not read the agent's proven switch; it is off here, so nothing depends on it", zap.Error(err))
+			return nil
+		}
+		return fmt.Errorf("%w: the switch is on in this keploy (%s) and the agent's could not be read: %w", provenswitch.ErrAgentSwitch, provenswitch.Env, err)
+	}
+	return provenswitch.CheckAgent(reported)
+}
+
+// readAgentSwitch reads the agent's report of its proven switch from /health:
+// the provenswitch.HealthHeader value, "" when a healthy agent sends none. A
+// transport failure or a status other than 200 is an error: the header of
+// such an answer says nothing about the agent.
+func (a *AgentClient) readAgentSwitch(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build the agent health request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("the agent's health check answered %d", res.StatusCode)
+	}
+	return res.Header.Get(provenswitch.HealthHeader), nil
 }
 
 // perfEventParanoidPath is the kernel knob docker mode relaxes for its agent's
@@ -2786,6 +2842,27 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
 
 	for {
+		// The agent's proven switch must be this keploy's before the agent is
+		// told to release the app; a definite disagreement ends the wait.
+		// Until the agent answers its health check there is nothing to read,
+		// and the wait goes on as it always has.
+		if reported, err := a.readAgentSwitch(ctx); err == nil {
+			if err := provenswitch.CheckAgent(reported); err != nil {
+				return err
+			}
+		} else {
+			a.logger.Debug("agent health not readable yet, retrying...", zap.Error(err))
+			select {
+			case <-ctx.Done():
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return fmt.Errorf("timeout waiting for agent to become ready")
+				}
+				return ctx.Err()
+			case <-ticker.C:
+			}
+			continue
+		}
+
 		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 		if err != nil {
 			return err
