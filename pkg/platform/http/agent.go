@@ -98,6 +98,8 @@ type AgentClient struct {
 	logMu     sync.Mutex
 	failed    bool
 	dropped   bool
+	named     bool
+	slow      *time.Timer
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -328,6 +330,10 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 		if err := decoder.Decode(&testCase); err != nil {
 			if utils.IsShutdownError(err) {
 				// End of the stream or connection closed during shutdown
+				break
+			}
+			if a.mock {
+				utils.LogError(a.logger, err, "could not read a recorded request from keploy's agent")
 				break
 			}
 			utils.LogError(a.logger, err, "failed to decode test case from stream")
@@ -1685,10 +1691,14 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
-	if elevates && agentUtils.NeedsPTY() && !sudoCached {
-		if a.mock && !term.IsTerminal(int(os.Stdin.Fd())) {
-			return fmt.Errorf("keploy needs root on Linux and sudo asks for a password; run it with sudo: sudo -E %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
+	if elevates && !sudoCached && a.mock && !a.conf.Debug {
+		if err := askSudo(ctx, a.logger, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
+			return err
 		}
+		sudoCached = true
+	}
+
+	if elevates && agentUtils.NeedsPTY() && !sudoCached {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited)
 	}
 
@@ -1704,6 +1714,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		utils.LogError(a.logger, err, "failed to start keploy agent")
+		a.endAgentLog(false)
 		return err
 	}
 
@@ -2311,7 +2322,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		if err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts); err != nil {
+		err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts)
+		a.agentReady()
+		if err != nil {
 			return err
 		}
 	}
@@ -2578,15 +2591,16 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
-	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
-	if agentUtils.NeedsPTY() {
+	if a.mock && !a.conf.Debug && strings.Contains(cmd.String(), "sudo ") {
+		if err := askSudo(ctx, logger, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
+			return err
+		}
+	} else if agentUtils.NeedsPTY() {
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
 	cmd.Stdout, cmd.Stderr = a.agentOutput()
-	if a.agentLog != "" {
-		logger.Info("starting keploy's agent container; docker's output, including any image download, goes to "+a.agentLog, log.Show)
-	}
+	a.watchStart()
 
 	err = cmd.Run()
 	a.endAgentLog(ctx.Err() != nil)

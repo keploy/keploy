@@ -404,7 +404,7 @@ func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []Flo
 		if next == "" {
 			next = "record this call with --on-miss record, or re-record the set"
 		}
-		m.logger.Warn(missLine(test, k.protocol, k.call, k.dest, n[k], miss.FieldDiffs), append(fields, zap.String("next_step", next), m.own())...)
+		m.logger.Warn(missLine(test, k.protocol, k.call, k.dest, n[k], miss.FieldDiffs), append(fields, zap.String("hint", next), m.own())...)
 	}
 }
 

@@ -1969,7 +1969,7 @@ func QuoteArgs(args []string) string {
 	out := make([]string, len(args))
 	for i, a := range args {
 		out[i] = a
-		if a == "" || strings.ContainsAny(a, " \t\n\"'$`\\|&;<>()*?[]{}~#!") {
+		if a == "" || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^") {
 			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
 	}

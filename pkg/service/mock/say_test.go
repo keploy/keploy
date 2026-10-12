@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -79,6 +80,15 @@ func TestMissLineSaysWhichSideHasAField(t *testing.T) {
 	})
 	if !strings.Contains(got, "; this call has no body.x, the nearest recorded call has it; the nearest recorded call has no body.y, this call has it; ") || strings.Contains(got, `""`) {
 		t.Fatalf("got %s", got)
+	}
+}
+
+func TestAgainReplacesAFlagTheUserAlreadyPassed(t *testing.T) {
+	prev := os.Args
+	t.Cleanup(func() { os.Args = prev })
+	os.Args = []string{"/bin/keploy", "--debug", "mock", "replay", "--on-miss", "fail", "--on-miss=passthrough", "-c", "go test", "--", "x"}
+	if got, want := Again("--on-miss", "record"), "keploy --debug mock replay -c 'go test' --on-miss record -- x"; got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
 

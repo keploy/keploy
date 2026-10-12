@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,11 +13,15 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
-const maxFactLine = 64 << 10
+const (
+	maxFactLine    = 64 << 10
+	slowAgentStart = 20 * time.Second
+)
 
 var (
 	factLine  = []byte("keploy: ")
@@ -56,7 +61,7 @@ func (t *agentTail) run(path string, every time.Duration) {
 		case err == nil:
 			t.line(line)
 			line = line[:0]
-		case errors.Is(err, bufio.ErrBufferFull):
+		case errors.Is(err, bufio.ErrBufferFull) || len(line) >= maxFactLine:
 			if len(line) >= maxFactLine {
 				t.long(line)
 				line = line[:0]
@@ -81,6 +86,11 @@ func (t *agentTail) line(l []byte) {
 		t.skip = false
 		return
 	}
+	if len(l) > maxFactLine {
+		t.long(l)
+		t.skip = false
+		return
+	}
 	if bytes.HasPrefix(l, factLine) {
 		_, _ = t.term.Write(l)
 	}
@@ -96,6 +106,9 @@ func (t *agentTail) long(l []byte) {
 	t.skip = true
 	if bytes.HasPrefix(l, factLine) {
 		_, _ = t.term.Write(append(l[:maxFactLine:maxFactLine], "...\n"...))
+	}
+	if warnLevel.Match(sgr.ReplaceAll(l[:min(len(l), 4096)], nil)) {
+		t.warns++
 	}
 }
 
@@ -123,6 +136,41 @@ func (a *AgentClient) agentOutput() (io.Writer, io.Writer) {
 	return f, f
 }
 
+func askSudo(ctx context.Context, logger *zap.Logger, tty bool) error {
+	if !tty {
+		return fmt.Errorf("keploy needs root on Linux and sudo asks for a password; run it with sudo: sudo -E %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
+	}
+	if err := utils.CacheSudoCredentials(ctx, logger); err != nil {
+		return fmt.Errorf("sudo did not give keploy root: %w", err)
+	}
+	return nil
+}
+
+func (a *AgentClient) watchStart() {
+	if a.agentLog == "" {
+		return
+	}
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	a.slow = time.AfterFunc(slowAgentStart, func() {
+		a.logMu.Lock()
+		defer a.logMu.Unlock()
+		if a.dropped {
+			return
+		}
+		a.named = true
+		a.logger.Info(fmt.Sprintf("keploy's agent container has not started after %s; docker's output, including any image download, is in %s", slowAgentStart, a.agentLog), log.Show)
+	})
+}
+
+func (a *AgentClient) agentReady() {
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	if a.slow != nil {
+		a.slow.Stop()
+	}
+}
+
 func (a *AgentClient) sayAgentLog() {
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
@@ -140,18 +188,25 @@ func (a *AgentClient) endAgentLog(stopped bool) {
 	warns := a.tail.end()
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
-	if a.failed || a.dropped || !stopped {
+	if a.slow != nil {
+		a.slow.Stop()
+	}
+	_ = a.agentFile.Close()
+	if !stopped && !a.failed && !a.dropped {
+		a.failed = true
+		a.logger.Error("agent log: "+a.agentLog, log.Show)
+	}
+	if a.failed || a.dropped || a.named || !stopped {
 		return
 	}
 	if warns > 0 {
-		what := fmt.Sprintf("%d warnings", warns)
+		what := fmt.Sprintf("%d warnings or errors", warns)
 		if warns == 1 {
-			what = "1 warning"
+			what = "1 warning or error"
 		}
 		a.logger.Info("keploy's agent logged "+what+"; its log: "+a.agentLog, log.Show)
 		return
 	}
 	a.dropped = true
-	_ = a.agentFile.Close()
 	_ = os.Remove(a.agentFile.Name())
 }

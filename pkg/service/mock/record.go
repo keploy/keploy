@@ -62,6 +62,7 @@ func (m *mockService) record(ctx context.Context) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	var stopReason string
+	var last func()
 	defer func() {
 		m.notifyShutdown()
 		// Cancel the errgroup ctx so the agent-monitor / app-runner goroutines
@@ -70,6 +71,9 @@ func (m *mockService) record(ctx context.Context) error {
 		cancel()
 		if err := utils.DrainErrGroup(m.logger, "mock-record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-record goroutines")
+		}
+		if last != nil {
+			last()
 		}
 	}()
 
@@ -369,7 +373,7 @@ func (m *mockService) record(ctx context.Context) error {
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
 	if len(starts) == 0 && len(windows) > 0 {
-		m.logger.Info("no AppStart(pid, port) call was seen; calls made outside the tests are saved as the test process's start-up. To keep the app's start-up apart, call AppStart(pid, port) after starting it", log.Show)
+		m.logger.Info("no AppStart(pid, port) call was seen; calls made outside the tests are saved with the test process's own start. To record the app's start on its own, call AppStart(pid, port) after starting it", log.Show)
 	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
@@ -441,17 +445,16 @@ func (m *mockService) record(ctx context.Context) error {
 	}
 
 	sum := Summary{Tests: len(windows), Calls: mockCount, Requests: len(capture.list()), Kept: keep}
-	if keep {
-		m.logger.Info(fmt.Sprintf("recorded %s: %s, %s", plural(sum.Tests, "test"), plural(sum.Calls, "outgoing call"), plural(sum.Requests, "incoming request")), zap.String("mock-set", name), m.show())
-	}
-	m.summarize(sum)
 	if keep && mockCount == 0 {
-		m.logger.Warn("no outgoing calls were recorded (" + were(sum.Requests, "incoming request") + ")")
+		m.logger.Warn("no outgoing calls were recorded ("+were(sum.Requests, "incoming request")+")", m.own())
 	}
-
-	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
-	//     fails when the tests fail.
-	m.propagateExit(appErr, "record")
+	last = func() {
+		if keep {
+			m.logger.Info(fmt.Sprintf("recorded %s: %s, %s", plural(sum.Tests, "test"), plural(sum.Calls, "outgoing call"), plural(sum.Requests, "incoming request")), zap.String("mock-set", name), m.show())
+		}
+		m.summarize(sum)
+		m.propagateExit(appErr, "record")
+	}
 	return nil
 }
 
@@ -597,7 +600,7 @@ func (m *mockService) upsertBoots(ctx context.Context, name string, boots []mode
 		return
 	}
 	if err := mapper.UpsertBoots(ctx, name, boots); err != nil {
-		m.logger.Warn("could not save the app start-ups", zap.Error(err))
+		m.logger.Warn("could not save the recorded app starts", zap.Error(err))
 	}
 }
 

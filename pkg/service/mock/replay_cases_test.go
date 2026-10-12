@@ -470,7 +470,7 @@ func TestReportMissesCarriesTheMatchersDiagnosis(t *testing.T) {
 	require.Equal(t, "exhausted", f["match_phase"])
 	require.EqualValues(t, 3, f["candidates"])
 	require.Equal(t, "mock-7", f["closest"])
-	require.Equal(t, "re-record with keploy mock record", f["next_step"])
+	require.Equal(t, "re-record with keploy mock record", f["hint"])
 }
 
 // missReader is the agent an interrupted replay asks for its misses.

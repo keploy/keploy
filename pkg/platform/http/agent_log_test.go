@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,7 +87,7 @@ func TestTheAgentLogStaysUnlessACleanStopLeftNoWarnings(t *testing.T) {
 		kept    bool
 	}{
 		{name: "asked to stop, nothing to see", stopped: true},
-		{name: "exited without being asked", kept: true},
+		{name: "exited without being asked", kept: true, failed: false},
 		{name: "it warned", stopped: true, warn: true, kept: true},
 		{name: "a failure was reported", stopped: true, failed: true, kept: true},
 	} {
@@ -125,7 +126,7 @@ func TestAgentWritesToTheConsoleOutsideMockRuns(t *testing.T) {
 
 func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 	a := agentWithLog(t)
-	if filepath.Base(a.agentLog) != "keploy-agent-"+strconv.Itoa(os.Getpid())+".log" {
+	if !strings.HasPrefix(filepath.Base(a.agentLog), "keploy-agent-"+strconv.Itoa(os.Getpid())+"-") {
 		t.Fatalf("agent log %s is not named for this run", a.agentLog)
 	}
 	other := filepath.Join(filepath.Dir(a.agentLog), "keploy-agent-1.log")
@@ -135,5 +136,38 @@ func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 	a.endAgentLog(true)
 	if _, err := os.Stat(other); err != nil {
 		t.Fatal("another run's agent log was removed")
+	}
+}
+
+func TestAMockRunWithoutATerminalDoesNotWaitForASudoPassword(t *testing.T) {
+	err := askSudo(context.Background(), zap.NewNop(), false)
+	if err == nil || !strings.Contains(err.Error(), "run it with sudo: sudo -E keploy ") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAFactLineWrittenInPiecesIsStillCapped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var term syncBuf
+	tail := tailAgentLog(path, &term, time.Millisecond)
+	_, _ = f.WriteString("keploy: ")
+	for range 4 {
+		_, _ = f.WriteString(strings.Repeat("y", maxFactLine/2))
+		time.Sleep(3 * time.Millisecond)
+	}
+	_, _ = f.WriteString("\n" + "x\tERROR\t" + strings.Repeat("z", maxFactLine+5) + "\nkeploy: next\n")
+	time.Sleep(5 * time.Millisecond)
+	warns := tail.end()
+	got := term.String()
+	if len(got) > maxFactLine+20 || !strings.HasSuffix(got, "...\nkeploy: next\n") {
+		t.Fatalf("terminal got %d bytes ending %q", len(got), got[max(0, len(got)-30):])
+	}
+	if warns != 1 {
+		t.Fatalf("warnings = %d, want 1", warns)
 	}
 }

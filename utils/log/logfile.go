@@ -1,6 +1,7 @@
 package log
 
 import (
+	"crypto/rand"
 	"errors"
 	"io"
 	"os"
@@ -22,7 +23,7 @@ import (
 const LogFileName = "keploy-logs.txt"
 
 func agentLogName() string {
-	return "keploy-agent-" + strconv.Itoa(os.Getpid()) + ".log"
+	return "keploy-agent-" + strconv.Itoa(os.Getpid()) + "-" + rand.Text()[:6] + ".log"
 }
 
 // logFileMode is what a new log file is created with: its owner writes it,

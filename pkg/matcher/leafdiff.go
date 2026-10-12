@@ -14,14 +14,15 @@ import (
 
 var arrayIndex = regexp.MustCompile(`\[\d+\]`)
 
-func JSONLeafDiffs(expJSON, actJSON string, noise map[string][]string, prefix string, maxVal int) []models.MockFieldDiff {
+func JSONLeafDiffs(expJSON, actJSON string, noise map[string][]string, prefix string, maxVal, limit int) ([]models.MockFieldDiff, int) {
 	var exp, act any
 	if decode(expJSON, &exp) != nil || decode(actJSON, &act) != nil {
-		return nil
+		return nil, 0
 	}
+	ni := buildNoiseIndex(noise, nil)
 	e, a := map[string]string{}, map[string]string{}
-	leaves(exp, "", e)
-	leaves(act, "", a)
+	leaves(exp, "", ni, e)
+	leaves(act, "", ni, a)
 	paths := map[string]bool{}
 	for p := range e {
 		paths[p] = true
@@ -31,29 +32,38 @@ func JSONLeafDiffs(expJSON, actJSON string, noise map[string][]string, prefix st
 	}
 	sorted := make([]string, 0, len(paths))
 	for p := range paths {
-		if !noisy(p, noise) {
+		if e[p] != a[p] {
 			sorted = append(sorted, p)
 		}
 	}
 	sort.Strings(sorted)
 	var out []models.MockFieldDiff
 	for _, p := range sorted {
+		if limit > 0 && len(out) == limit {
+			break
+		}
 		ev, inE := e[p]
 		av, inA := a[p]
-		d := models.MockFieldDiff{Path: prefix + p, Expected: clip(ev, maxVal), Actual: clip(av, maxVal)}
+		d := models.MockFieldDiff{Path: joinPath(prefix, p), Expected: clip(ev, maxVal), Actual: clip(av, maxVal), Kind: models.DiffKindValueChanged}
 		switch {
 		case !inA:
 			d.Kind = models.DiffKindMissingInLive
 		case !inE:
 			d.Kind = models.DiffKindMissingInMock
-		case ev == av:
-			continue
-		default:
-			d.Kind = models.DiffKindValueChanged
 		}
 		out = append(out, d)
 	}
-	return out
+	return out, len(sorted)
+}
+
+func joinPath(prefix, p string) string {
+	switch {
+	case p == "":
+		return strings.TrimSuffix(prefix, ".")
+	case strings.HasPrefix(p, "["):
+		return strings.TrimSuffix(prefix, ".") + p
+	}
+	return prefix + p
 }
 
 func decode(s string, v *any) error {
@@ -62,7 +72,20 @@ func decode(s string, v *any) error {
 	return dec.Decode(v)
 }
 
-func leaves(v any, path string, out map[string]string) {
+func leaves(v any, path string, ni noiseIndex, out map[string]string) {
+	regs, noisy, typeStrict := ni.matchKind(strings.ToLower(arrayIndex.ReplaceAllString(path, "[]")))
+	if noisy && !typeStrict {
+		if len(regs) == 0 {
+			return
+		}
+		s, ok := jsonScalarToString(v)
+		if n, isNum := v.(json.Number); isNum {
+			s, ok = n.String(), true
+		}
+		if ok && anyRegexpMatchStr(s, regs) {
+			return
+		}
+	}
 	switch t := v.(type) {
 	case map[string]any:
 		if len(t) == 0 {
@@ -73,14 +96,14 @@ func leaves(v any, path string, out map[string]string) {
 			if path != "" {
 				p = path + "." + k
 			}
-			leaves(c, p, out)
+			leaves(c, p, ni, out)
 		}
 	case []any:
 		if len(t) == 0 {
 			out[path] = "[]"
 		}
 		for i, c := range t {
-			leaves(c, path+"["+strconv.Itoa(i)+"]", out)
+			leaves(c, path+"["+strconv.Itoa(i)+"]", ni, out)
 		}
 	default:
 		var b bytes.Buffer
@@ -90,17 +113,6 @@ func leaves(v any, path string, out map[string]string) {
 			out[path] = strings.TrimSuffix(b.String(), "\n")
 		}
 	}
-}
-
-func noisy(path string, noise map[string][]string) bool {
-	plain := arrayIndex.ReplaceAllString(path, "")
-	for k := range noise {
-		k = strings.ReplaceAll(k, "[]", "")
-		if plain == k || strings.HasPrefix(plain, k+".") {
-			return true
-		}
-	}
-	return false
 }
 
 func clip(s string, max int) string {

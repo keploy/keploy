@@ -885,7 +885,7 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 	root := gitTop()
 	sets := setTable(mapping, root)
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
-		m.logger.Warn("could not tell the agent which calls belong to which app start-up", zap.Error(err))
+		m.logger.Warn("could not tell the agent which calls belong to which app start", zap.Error(err))
 		return false
 	}
 	m.logger.Info("app starts kept apart", zap.Int("sets", len(sets)), zap.String("mock-set", name))
