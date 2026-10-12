@@ -1126,14 +1126,15 @@ func TestResolveTestOutcome_DefaultsAreBackwardCompatible(t *testing.T) {
 }
 
 // A diverged mock set normally suppresses the response diff as "re-record
-// noise". Under --assert-dependencies the same test is about to be marked
-// FAILED, so suppressing its diff hands the user a red test with nothing to
-// look at.
+// noise". Under --assert-dependencies or --strict-failure the same test is
+// about to be marked FAILED, so suppressing its diff hands the user a red test
+// with nothing to look at.
 func TestShouldEmitFailureLogs(t *testing.T) {
 	tests := []struct {
 		name               string
 		mockSetMismatch    bool
 		assertDependencies bool
+		strictFailure      bool
 		want               bool
 	}{
 		{name: "no divergence: diffs as always", want: true},
@@ -1143,10 +1144,21 @@ func TestShouldEmitFailureLogs(t *testing.T) {
 			name:            "divergence, knob on: the test is going red, so show the diff",
 			mockSetMismatch: true, assertDependencies: true, want: true,
 		},
+		{
+			name:            "divergence, strict failure on: the test is going red, so show the diff",
+			mockSetMismatch: true, strictFailure: true, want: true,
+		},
+		{
+			name:               "divergence, both failure knobs on: show the diff",
+			mockSetMismatch:    true,
+			assertDependencies: true,
+			strictFailure:      true,
+			want:               true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies))
+			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies, tt.strictFailure))
 		})
 	}
 }
