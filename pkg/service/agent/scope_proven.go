@@ -655,12 +655,13 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // destination, how far the matcher got, the closest recorded mock's name,
 // the matcher's next step, when it happened, and the call's shape: for HTTP
 // the method and the path's shape, for SQL the statement with its literals
-// written "?". Never a value the app sent (a query's literals, a path's IDs,
-// a body). The next step is the matcher's own advice, which names fields and
-// commands, not values.
+// written "?" (sqlShape). Never a value the app sent (a query's literals or
+// bound parameters, a path's IDs, a body). The next step is the matcher's
+// own advice, which names commands and the fields that differed; a field
+// path is kept as its shape too, since a map's keys can be values.
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: m.NextSteps, At: m.At}
+		ClosestMock: m.ClosestMock, NextSteps: shapeFieldPaths(m.NextSteps, m.FieldDiffs), At: m.At}
 	switch {
 	case isHTTP(m.Protocol):
 		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
@@ -672,6 +673,34 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	return out
 }
 
+// shapeFieldPaths writes each differing field's path in text as its shape
+// (fieldShape).
+func shapeFieldPaths(text string, diffs []models.MockFieldDiff) string {
+	for _, d := range diffs {
+		if d.Path != "" {
+			text = strings.ReplaceAll(text, d.Path, fieldShape(d.Path))
+		}
+	}
+	return text
+}
+
+// fieldShape is a field path with every segment that may be a value (an ID,
+// an email, a long token: pathShape's rule) written "{}".
+func fieldShape(p string) string {
+	segs := strings.Split(p, ".")
+	for i, s := range segs {
+		name, index, _ := strings.Cut(s, "[")
+		if allDigits.MatchString(name) || (len(name) >= 8 && hasDigit.MatchString(name)) || strings.ContainsAny(name, "@:/ ") {
+			name = "{}"
+		}
+		if index != "" {
+			name += "[]"
+		}
+		segs[i] = name
+	}
+	return strings.Join(segs, ".")
+}
+
 // isSQL reports whether a miss's protocol speaks SQL, whose summary is the
 // statement keploy saw.
 func isSQL(protocol string) bool {
@@ -679,35 +708,99 @@ func isSQL(protocol string) bool {
 	return strings.Contains(p, "sql") || strings.Contains(p, "postgres")
 }
 
-var (
-	sqlQuoted  = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"`)
-	sqlNumber  = regexp.MustCompile(`\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\b`)
-	sqlSpace   = regexp.MustCompile(`\s+`)
-	maxSQLText = 160
-)
+// maxSQLText bounds a statement's shape.
+const maxSQLText = 160
 
 // sqlShape is a SQL statement with every quoted string and number written
-// "?", so no value the app sent is kept; an unterminated quote drops the
-// rest. A quoted identifier (Postgres "table") goes too: a shape that hides
-// one name is better than one that keeps a value.
+// "?". It fails closed: what it cannot read for certain is withheld, the rest
+// of the statement written "…": a literal holding a backslash (MySQL reads
+// \' as a quote by default, so where the literal ends depends on the
+// server's sql_mode), one never closed, a dollar quote ($tag$), and a
+// comment. MySQL's bound parameters (" params=[...]", which the replayer adds
+// to a prepared statement's summary) are dropped whole. A quoted identifier
+// (Postgres "table") is written "?" too: hiding a name beats keeping a value.
 func sqlShape(q string) string {
-	q = sqlQuoted.ReplaceAllString(q, "?")
-	if i := strings.IndexAny(q, `'"`); i >= 0 {
+	if i := strings.Index(q, " params=["); i >= 0 {
 		q = q[:i]
-		if !strings.HasSuffix(q, "?") {
-			q += "?"
+	}
+	var b strings.Builder
+	withheld := false
+scan:
+	for i := 0; i < len(q); {
+		c := q[i]
+		switch {
+		case c == '\'' || c == '"':
+			b.WriteString("?")
+			end, ok := closeQuote(q, i)
+			if !ok {
+				withheld = true
+				break scan
+			}
+			i = end
+		case c == '$' && i+1 < len(q) && isDigitByte(q[i+1]):
+			// A placeholder ($1): kept.
+			j := i + 1
+			for j < len(q) && isDigitByte(q[j]) {
+				j++
+			}
+			b.WriteString(q[i:j])
+			i = j
+		case c == '$', c == '#', strings.HasPrefix(q[i:], "--"), strings.HasPrefix(q[i:], "/*"):
+			// A dollar quote or a comment: withheld.
+			withheld = true
+			break scan
+		case isDigitByte(c) && (i == 0 || !isIdentByte(q[i-1])):
+			j := i
+			for j < len(q) && (isIdentByte(q[j]) || q[j] == '.') {
+				j++
+			}
+			b.WriteString("?")
+			i = j
+		default:
+			b.WriteByte(c)
+			i++
 		}
 	}
-	q = sqlNumber.ReplaceAllString(q, "?")
-	q = strings.TrimSpace(sqlSpace.ReplaceAllString(q, " "))
-	if len(q) > maxSQLText {
+	out := strings.TrimSpace(sqlSpace.ReplaceAllString(b.String(), " "))
+	if withheld {
+		out += " …"
+	}
+	if len(out) > maxSQLText {
 		i := maxSQLText
-		for i > 0 && !utf8.RuneStart(q[i]) {
+		for i > 0 && !utf8.RuneStart(out[i]) {
 			i--
 		}
-		q = q[:i] + "…"
+		out = out[:i] + "…"
 	}
-	return q
+	return out
+}
+
+// closeQuote is the index past the quote that closes the literal opening at
+// q[i] (a doubled quote inside it is one quote), and false for a literal with
+// a backslash in it, or one never closed.
+func closeQuote(q string, i int) (int, bool) {
+	quote := q[i]
+	for j := i + 1; j < len(q); j++ {
+		switch q[j] {
+		case '\\':
+			return 0, false
+		case quote:
+			if j+1 < len(q) && q[j+1] == quote {
+				j++
+				continue
+			}
+			return j + 1, true
+		}
+	}
+	return 0, false
+}
+
+var sqlSpace = regexp.MustCompile(`\s+`)
+
+func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
+
+func isIdentByte(c byte) bool {
+	return c == '_' || isDigitByte(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,

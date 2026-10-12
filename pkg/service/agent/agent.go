@@ -723,9 +723,11 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	errs, err := a.Proxy.GetMockErrors(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		// A read that failed is answered without its list over HTTP: the
-		// misses the wire charged stay for the read that succeeds.
+		// misses the wire charged stay for the read that succeeds. A read
+		// that could not vouch for every miss is answered with what it read,
+		// the charged misses included.
 		return errs, err
 	}
 	// The misses the proven wire charged to a test at its end were drained

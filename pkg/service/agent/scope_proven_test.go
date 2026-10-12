@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -623,8 +624,32 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Empty(t, m.ClosestMockReq)
 	require.Empty(t, m.ReceivedReq)
 
-	require.Equal(t, "SELECT ?", sqlShape("SELECT 'it''s"))
-	require.Equal(t, "INSERT INTO t VALUES (?, ?, ?)", sqlShape("INSERT INTO t VALUES (0x1F, 3.5e2, 'x')"))
+	require.Equal(t, "SELECT ? …", sqlShape("SELECT 'it''s"), "a literal never closed withholds the rest")
+	require.Equal(t, "INSERT INTO t VALUES (?, ?, ?, ?)", sqlShape("INSERT INTO t VALUES (0x1F, 3.5e2, 'x', 'it''s')"))
+	for in, want := range map[string]string{
+		// MySQL's bound parameters are values the app sent.
+		"COM_STMT_EXECUTE SELECT id FROM users WHERE email = ? AND pw = ? params=[alice@example.com, s3cr3t]": "COM_STMT_EXECUTE SELECT id FROM users WHERE email = ? AND pw = ?",
+		// Where a literal with a backslash ends depends on sql_mode.
+		`UPDATE users SET bio = 'it\'s my secret diary' WHERE id = 7`:        "UPDATE users SET bio = ? …",
+		`SELECT 1 WHERE a = 'x\' OR pw = ' AND token = 'abc' AND ssn = 'zz'`: "SELECT ? WHERE a = ? …",
+		"SELECT $tag$secret$tag$":                  "SELECT …",
+		"SELECT 1 -- secret":                       "SELECT ? …",
+		"SELECT 1 /* secret */":                    "SELECT ? …",
+		"SELECT 1 # secret":                        "SELECT ? …",
+		"SELECT * FROM t WHERE id = $1 AND n = $2": "SELECT * FROM t WHERE id = $1 AND n = $2",
+		"SELECT col1, t2.c3 FROM t2 WHERE x = 42":  "SELECT col1, t2.c3 FROM t2 WHERE x = ?",
+	} {
+		require.Equal(t, want, sqlShape(in), in)
+		for _, secret := range []string{"alice", "s3cr3t", "secret", "abc", "zz", "diary"} {
+			require.NotContains(t, sqlShape(in), secret, in)
+		}
+	}
+	// The matcher's next step names the fields that differed; a map's keys
+	// can be values, so a path keeps its shape.
+	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
+		NextSteps:  "Only values drifted (body.users.alice@example.com.score, body.items[3].sku_7c01d2e9). Re-record.",
+		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "body.items[3].sku_7c01d2e9"}}})
+	require.Equal(t, "Only values drifted (body.users.{}.com.score, body.items[].{}). Re-record.", drift.NextSteps)
 	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "PostgresV2", ActualSummary: "SELECT 1"})
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
@@ -810,4 +835,25 @@ func (p *partialProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 	m, err := p.misses, p.err
 	p.misses = nil
 	return m, err
+}
+
+// A read that could not vouch for every miss (ErrUnmatchedCallsUnread) is
+// answered with what it read, the misses already charged to tests included:
+// the run's last read may be one, and nothing reads after it.
+func TestAnUnreadReadKeepsTheChargedMisses(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
+	a.Proxy = p
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /late"}}
+	p.err = fmt.Errorf("%w: the drain stopped", models.ErrUnmatchedCallsUnread)
+	all, err := a.GetMockErrors(ctx)
+	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread)
+	require.Len(t, all, 2, "the charged miss and the partial read")
 }
