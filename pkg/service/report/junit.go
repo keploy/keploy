@@ -242,6 +242,11 @@ func buildFailure(t models.TestResult) *junitFailure {
 	// did not make, by mock.
 	if provenswitch.On() {
 		parts = append(parts, provenEvidenceLines(t.FailureInfo)...)
+		// Why a gRPC body that differs only in order failed, and the way
+		// out for a map field (configure proto files).
+		if t.Kind == models.GRPC_EXPORT && t.FailureInfo.Assessment != nil {
+			parts = append(parts, t.FailureInfo.Assessment.Reasons...)
+		}
 	}
 
 	msg := "test assertion failed"

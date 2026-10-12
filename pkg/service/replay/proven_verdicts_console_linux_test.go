@@ -118,7 +118,7 @@ func provenGRPCResp() models.GrpcResp {
 // A test the switch fails on its own (a miss) is compared as written: the
 // additive-schema auto-pass, which passes an answer that only gained fields,
 // does not run for it, so its rows say the answer differed and nothing says it
-// passed. With nothing against it the auto-pass runs, as before (the control).
+// passed. With strict comparison under the switch (O-SF) it runs for no test.
 func TestRunTestSet_NoAdditiveAutoPassForATestFailedOnItsOwn(t *testing.T) {
 	for _, miss := range []bool{false, true} {
 		name := "nothing against it"
@@ -145,8 +145,11 @@ func TestRunTestSet_NoAdditiveAutoPassForATestFailedOnItsOwn(t *testing.T) {
 			autoPassed := len(logs.FilterMessageSnippet("Passing testcase by default").All()) > 0
 			r := h.result(t, "test-1")
 			bodyNormal := len(r.Result.BodyResult) > 0 && r.Result.BodyResult[0].Normal
-			if autoPassed != !miss || bodyNormal != !miss {
-				t.Fatalf("auto-passed %v, body row normal %v; want both %v", autoPassed, bodyNormal, !miss)
+			// Under the switch O-SF turns the additive auto-pass off for every
+			// test (additiveAutoPassOff), so neither row is auto-passed: an
+			// answer that only gained a field fails like any other difference.
+			if autoPassed || bodyNormal {
+				t.Fatalf("auto-passed %v, body row normal %v; want neither under the switch", autoPassed, bodyNormal)
 			}
 		})
 	}

@@ -933,6 +933,33 @@ for phase in off on; do
 done
 echo "✓ KEPLOY_PROVEN=1: a test that no longer makes a recorded call fails, with the call named, and nothing else does"
 
+# 13. STRICT FAILURE UNDER THE PROVEN SWITCH (KEPLOY_PROVEN=1, the proven
+#     model's staging gate). Step 9's run, unchanged except for the switch: no
+#     --assert-dependencies and no --strict-failure. Step 11a/11b proved that
+#     baseline demotes every test to OBSOLETE and exits 0. Under the switch
+#     strict failure is on for everyone, so a test whose response differs is
+#     FAILED whatever its mocks did, and the run is red: the switch is the only
+#     difference, so it is the only reason.
+rm -rf ./keploy/reports
+KEPLOY_STRICT_MOCK_WINDOW=1 KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false 2>&1 | tee proven_strict_logs.txt
+proven_strict_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" proven_strict_logs.txt; then
+    echo "::error::Race condition detected in the proven-switch run"
+    exit 1
+fi
+"$REPLAY_BIN" report --format json > ndjson_proven_strict.txt 2> ndjson_proven_strict_err.txt
+if ! jq -es 'length > 0 and all(.status == "FAILED")' ndjson_proven_strict.txt > /dev/null; then
+    echo "::error::under KEPLOY_PROVEN=1 a test whose response differs while its mock set diverged must be FAILED (strict failure is always on), not demoted to OBSOLETE as step 9's identical run without the switch demoted it."
+    jq -s 'map({test_case_id, status})' ndjson_proven_strict.txt
+    exit 1
+fi
+if [ "$proven_strict_rc" -eq 0 ]; then
+    echo "::error::under KEPLOY_PROVEN=1 the run exited 0 with every test FAILED; step 9's identical run without the switch exited $strict_rc"
+    tail -40 proven_strict_logs.txt
+    exit 1
+fi
+echo "✓ KEPLOY_PROVEN=1 vetoed the OBSOLETE demotion: every test FAILED and the run exited $proven_strict_rc (step 9 without the switch: OBSOLETE, exit $strict_rc)"
+
 echo "mock-mismatch e2e passed:"
 echo "  - the forced HTTP /api/v2/ unmatched call was reported;"
 echo "  - with the tier as an ordinary recording leaves it, every dependency is"
@@ -946,4 +973,6 @@ echo "    exit code 0 -> non-zero, which no knob-independent label can fake;"
 echo "  - under KEPLOY_PROVEN=1 a test owns every data-plane mock its mapping"
 echo "    lists: the unmutated recording replays green, and a test fails when it"
 echo "    does not make a call it recorded or a call got no recorded answer."
+echo "  - under KEPLOY_PROVEN=1 strict failure is on for everyone: the same run"
+echo "    FAILED its tests instead of demoting them to OBSOLETE, and went red."
 exit 0

@@ -92,6 +92,10 @@ wait_for_http() {
 
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
+    # "no-autopass": the run is known not to auto-pass an additive change (the
+    # proven switch is on), so the expectations are those of a binary without
+    # the auto-pass whatever REPLAY_BIN is.
+    local mode="${1:-}"
 
     # Detect whether the replay binary supports SCHEMA_ADDED auto-pass by
     # checking if the binary is a local build or by probing the test report
@@ -100,8 +104,10 @@ check_report_for_risk_profiles() {
     # failures when schema-addition auto-pass is active, 12 otherwise. We
     # check the actual report to decide rather than hard-coding.
     local replay_supports_schema_addition_autopass=false
-    case "${REPLAY_BIN:-}" in
-        */build/keploy)
+    case "${mode}:${REPLAY_BIN:-}" in
+        no-autopass:*)
+            ;;
+        *:*/build/keploy)
             replay_supports_schema_addition_autopass="true"
             ;;
         *)
@@ -425,6 +431,25 @@ $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee te
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
+
+# The proven switch (KEPLOY_PROVEN=1, the proven model's staging gate) asserts
+# every response field: /users-low-risk, whose response only GAINED a field and
+# which the run above auto-passes, must fail with its LOW risk and SCHEMA_ADDED
+# category, and every other verdict stays as it was. Only a replay binary built
+# from this tree has the switch. Its reports are removed afterwards, so the
+# normalize steps below read the default run exactly as before.
+case "${REPLAY_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy)
+        section "Run Keploy Tests under the proven switch (no additive auto-pass)"
+        KEPLOY_PROVEN=1 $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee test_proven.log || true
+        check_for_errors "test_proven.log"
+        check_report_for_risk_profiles no-autopass
+        proven_run_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+        rm -rf "$proven_run_dir"
+        echo "✅ Under KEPLOY_PROVEN=1 the additive change fails like any other difference."
+        endsec
+        ;;
+esac
 
 section "Attempt Safe Normalization (Expected to Warn)"
 echo "Running normalize without force flag. Expecting warnings for high-risk failures..."
