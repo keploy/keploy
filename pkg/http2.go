@@ -5,13 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +17,6 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -617,36 +614,10 @@ func dialTCPWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, author
 	}
 }
 
+// SimulateGRPC sends tc's gRPC request to the app and returns its answer.
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, cfg SimulationConfig) (*models.GrpcResp, error) {
-	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
-		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
-		if err == nil {
-			tc.HTTPReq.URL = decoded
-		}
-	}
-	// Render any template values in the test case before simulation
-	templateData := buildTemplateDataSnapshot()
-	if len(templateData) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
-			return nil, err
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
-	}
-
+	// tc arrives as it is to be sent: a replay renders its placeholders
+	// (pkg/templates) on a copy before handing it here.
 	grpcReq := tc.GrpcReq
 
 	logger.Info("starting test for", zap.String("test case", models.HighlightString(tc.Name)), zap.String("test set", models.HighlightString(testSetID)))

@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"errors"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -181,9 +179,10 @@ func TestMatch_InvalidJSONBody_321(t *testing.T) {
 	assert.Equal(t, models.Plain, res.BodyResult[0].Type)
 }
 
-// TestMatch_JsonMarshalErrorInDiff_987 simulates a failure in json.Marshal when generating
-// diffs for a failed test case to ensure the error is handled gracefully.
-func TestMatch_JsonMarshalErrorInDiff_987(t *testing.T) {
+// TestMatch_ABodyDifferenceFailsWithItsResult_987: the failure branch only
+// explains a verdict, so a body difference fails with the result that says
+// what differs, never with a nil result the report cannot show.
+func TestMatch_ABodyDifferenceFailsWithItsResult_987(t *testing.T) {
 	logger := zap.NewNop()
 	tc := &models.TestCase{
 		Name: "test-marshal-error",
@@ -196,20 +195,10 @@ func TestMatch_JsonMarshalErrorInDiff_987(t *testing.T) {
 		StatusCode: 200,
 		Body:       `{"id": 1, "value": "actual"}`,
 	}
-	noiseConfig := map[string]map[string][]string{}
-
-	originalJSONMarshal := jsonMarshal234
-	jsonMarshal234 = func(v interface{}) ([]byte, error) {
-		// This mock will fail the first time json.Marshal is called within the diffing logic.
-		return nil, errors.New("mock marshal error")
-	}
-	defer func() { jsonMarshal234 = originalJSONMarshal }()
-
-	pass, res := Match(tc, actualResponse, noiseConfig, false, false, logger, true)
-
-	// The function returns (false, nil) on this specific error path
+	pass, res := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
 	assert.False(t, pass)
-	assert.Nil(t, res)
+	require.NotNil(t, res)
+	assert.False(t, res.BodyResult[0].Normal)
 }
 
 // TestMatch_BodyNoiseWildcard_789 tests the scenario where a global noise configuration
@@ -744,4 +733,44 @@ func TestAssertionMatch_StatusCodeClass_ActualNon2xxFailsAgainst2xx_3843(t *test
 	// Assert
 	assert.False(t, pass, "Should fail because the actual status code 500 is not in the 2xx class")
 	require.NotNil(t, result)
+}
+
+// THE ASSERTIONS PREDICATE is the one Match judges by and the one keploy test
+// and keploy templatize refuse an untied array use by: a test case whose
+// assertions hold anything but its noise is judged by AssertionMatch alone,
+// and unless json_equal is among them no whole body is read. An empty noise
+// assertion alone is such an assertion too: AssertionMatch passes it
+// whatever the answer holds.
+func TestAssertionsUntieBody(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		assertions map[models.AssertionType]interface{}
+		replace    bool
+		untie      string
+	}{
+		{"none", nil, false, ""},
+		{"a noise assertion alone", map[models.AssertionType]interface{}{models.NoiseAssertion: map[string]interface{}{"body.id": []string{}}}, false, ""},
+		{"an empty noise assertion alone", map[models.AssertionType]interface{}{models.NoiseAssertion: nil}, true, "noise (empty)"},
+		{"status_code", map[models.AssertionType]interface{}{models.StatusCode: 200}, true, "status_code"},
+		{"status_code beside noise", map[models.AssertionType]interface{}{models.StatusCode: 200, models.NoiseAssertion: map[string]interface{}{}}, true, "status_code"},
+		{"header_exists and json_contains", map[models.AssertionType]interface{}{models.JsonContains: map[string]interface{}{}, models.HeaderExists: []interface{}{"X"}}, true, "header_exists, json_contains"},
+		{"json_equal", map[models.AssertionType]interface{}{models.JsonEqual: true}, true, ""},
+		{"json_equal beside status_code", map[models.AssertionType]interface{}{models.JsonEqual: true, models.StatusCode: 200}, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Assertions: c.assertions}
+			assert.Equal(t, c.replace, AssertionsReplaceComparison(tc))
+			assert.Equal(t, c.untie, AssertionsUntieBody(tc))
+		})
+	}
+
+	// Match judges by the same predicate: a status_code assertion passes an
+	// answer whose body differs, and without it the body is compared.
+	tc := &models.TestCase{Name: "t", HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"id":"a"}`}}
+	answer := &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"id":"b"}`}
+	pass, _ := Match(tc, answer, nil, true, false, zap.NewNop(), false)
+	assert.False(t, pass, "the comparison reads the body")
+	tc.Assertions = map[models.AssertionType]interface{}{models.StatusCode: 200}
+	pass, _ = Match(tc, answer, nil, true, false, zap.NewNop(), false)
+	assert.True(t, pass, "the assertions judge alone")
 }

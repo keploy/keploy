@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,7 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
-	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -884,6 +885,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
+		// The refused test cases --must-pass keeps are said once per set.
+		keptRefused := false
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
 
 			// clearing testcase from map is required for 2 reasons:
@@ -1042,7 +1045,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
+			// A test case refused when its set loaded was never sent, so
+			// there is nothing to remove it for: it is kept, and said.
+			failedTcIDs, refusedTcIDs := mustPassDeletions(tcResults)
+			if len(refusedTcIDs) > 0 && !keptRefused {
+				keptRefused = true
+				r.logger.Warn("--must-pass keeps the test cases refused when their test set loaded: they were never sent, so they are not removed, and the set fails until they are mended",
+					zap.String("testSet", testSet), zap.Strings("testCaseIDs", refusedTcIDs),
+					zap.String("next_step", "do what each one's refusal in its report says (edit its placeholder, or put a half-written set back), then run keploy test again"))
+			}
 			if len(failedTcIDs) == 0 {
+				if len(refusedTcIDs) > 0 {
+					// Only refusals fail, and no rerun can change one.
+					break
+				}
 				// if no testcase failed in this attempt move to next attempt
 				continue
 			}
@@ -1435,6 +1451,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
+	// A set a killed keploy templatize left half-written is refused, never
+	// read as written; a set whose files cannot be read is an error, as one
+	// whose test cases cannot be read is.
+	if refused, err := r.refuseInterruptedSet(runTestSetCtx, testRunID, testSetID, testCases, startTime); refused || err != nil {
+		return models.TestSetStatusFailed, err
+	}
 
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
 	if r.runDomainSet != nil {
@@ -1516,6 +1538,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if conf == nil {
 		conf = &models.TestSet{}
 	}
+
+	// The set's template state for this run: each key at its config.yaml
+	// value (rule 5 of pkg/templates). The run's own values live here and
+	// nowhere else; config.yaml is never written back.
+	tmplRun := templates.NewRun(r.logger, conf.Template, conf.Secret)
+	// Placeholders a test case cannot run with are refused now, before any
+	// is sent, and each such test case fails with the reason.
+	tmplCheck := tmplRun.Check(testCases, templates.CheckOptions{
+		IgnoreOrdering: r.config.Test.IgnoreOrdering,
+		Streaming:      pkg.IsHTTPStreamingTestCase,
+	})
+	r.refuseUntiedArrayUses(testSetID, &tmplCheck, testCases)
+	refusedTests := tmplCheck.Refused
+	r.logTemplateCheck(testSetID, tmplCheck, testCases)
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
@@ -2056,11 +2092,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var captureOpened bool
 	// var to store the error in the loop
 	var loopErr error
-	utils.TemplatizedValues = conf.Template
-	utils.SecretValues = conf.Secret
-
 	// Add secret files to .gitignore if they exist
-	if len(utils.SecretValues) > 0 {
+	if len(conf.Secret) > 0 {
 		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
 		if err != nil {
 			r.logger.Debug("Failed to add secret files to .gitignore", zap.Error(err))
@@ -2257,6 +2290,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testsToRun := activeTestCases
+	// Each pass's template values: a RetryPassing cycle that skips a test
+	// case still gives later ones the value a whole pass gives them.
+	tmplPass := newPassValues(tmplRun, activeTestCases)
 	// Mocks the agent reports consumed outside their own window (a late server
 	// push, a carry-over publish) are kept and mapped by their own window, not
 	// by the running test; see carryOverAttribution.
@@ -2300,6 +2336,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if replay > 0 {
 			totalConsumedMocks = r.rewindConsumedForRetryCycle(totalConsumedMocks, baselineConsumedMocks, allConsumedAcrossCycles)
 		}
+		// Every pass over the set starts each template key at its recorded
+		// value, so a cycle's producers capture again from their own answers;
+		// a producer the cycle skips gives its last capture at its place.
+		tmplPass.start()
 		var nextTestsToRun []*models.TestCase
 		var currentFailures int
 		var currentObsolete int
@@ -2318,6 +2358,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// accident of nesting.
 	testLoop:
 		for idx, testCase := range testsToRun {
+			tmplPass.reach(testCase)
 
 			// check if its the last test case running
 			if idx == len(testsToRun)-1 && r.isLastTestSet && len(streamingTests) == 0 {
@@ -2389,10 +2430,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// A placeholder refused when the set loaded: the test case fails
+			// with the reason, unsent.
+			if why := refusedTests[testCase.Name]; len(why) > 0 {
+				currentFailures++
+				testSetStatus = models.TestSetStatusFailed
+				if loopErr = r.failRefusedTest(runTestSetCtx, testRunID, testSetID, testCase, why); loopErr != nil {
+					break
+				}
+				continue
+			}
+
 			var testStatus models.TestStatus
 			var testResult *models.Result
 			var testPass bool
 			var loopErr error
+			var captured []models.TemplateCapture
+			var templateFailures []models.TemplateFailure
 
 			reqTime, respTime := testWindowOf(testCase)
 
@@ -2424,7 +2478,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			started := time.Now().UTC()
 
-			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
+			// What is sent: the request with this run's template values, on a
+			// copy. testCase stays as written.
+			sent := toSend(tmplRun, testCase)
+			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
 
 			// A "connection reset by peer" / unexpected EOF while exchanging
 			// the request is, under loaded CI replaying a DOCKER app, dominated
@@ -2452,7 +2509,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// affects keploy-side reporting, never the agent's own serving
 			// state — see retryResetOnce).
 			if loopErr != nil && pkg.IsTransportConnReset(loopErr) {
-				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, testCase, testSetID, loopErr)
+				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, &sent, testSetID, loopErr)
 				if retried {
 					resp, loopErr = retryResp, nil
 				} else {
@@ -2474,7 +2531,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteNoAnswer(testCase.Name, loopErr)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
-				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr)
+				testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, loopErr)
 				// Finalize the capture window even on this early exit, so a miss
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
@@ -2651,7 +2708,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error("invalid response type for HTTP test case")
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("invalid response type for HTTP test case"))
+					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for HTTP test case"))
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -2660,7 +2717,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					continue
 				}
-				testPass, testResult = r.compareHTTPRespForReplay(testCase, httpResp, testSetID, emitFailureLogs)
+				// The answer's captures first, then the rest of the expected
+				// response at the run's values; then compare as written. A
+				// variable place the answer does not satisfy fails the test
+				// case whatever the comparison says.
+				resolved := r.resolveExpected(tmplRun, &tmplCheck, &sent, httpResp, testSetID)
+				tmplPass.captured(testCase, resolved.captures)
+				captured = reportCaptures(resolved.captures)
+				templateFailures = reportFailures(resolved.failures)
+				if len(templateFailures) > 0 {
+					// The test case has failed on its own: the additive-schema
+					// auto-pass (compareHTTPRespForReplay) never passes it, and
+					// its comparison rows stay as compared.
+					testPass, testResult = r.compareHTTPResp(resolved.expected, httpResp, testSetID, emitFailureLogs, resolved.opts...)
+				} else {
+					testPass, testResult = r.compareHTTPRespForReplay(resolved.expected, httpResp, testSetID, emitFailureLogs, resolved.opts...)
+				}
+				if len(templateFailures) > 0 {
+					testPass = false
+					markTemplateFailures(testResult)
+				}
 
 			case models.GRPC_EXPORT:
 				grpcResp, ok := resp.(*models.GrpcResp)
@@ -2668,7 +2744,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error("invalid response type for gRPC test case")
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("invalid response type for gRPC test case"))
+					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for gRPC test case"))
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -2679,10 +2755,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 
 				respCopy := *grpcResp
+				// The expected response with the run's template values, on a
+				// copy: gRPC responses never capture.
+				grpcExpected := noAnswerView(tmplRun, &sent)
 
 				if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 					// get the :path header from the request
-					method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
+					method, ok := grpcExpected.GrpcReq.Headers.PseudoHeaders[":path"]
 					if !ok {
 						utils.LogError(r.logger, nil, "failed to get :path header from the request, cannot convert grpc response to json")
 						goto compareResp
@@ -2704,16 +2783,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 					// convert both actual and expected using the same path (protoscope-text -> wire -> json)
 					actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-					testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+					testJSON, testOK := utils.ProtoTextToJSON(md, files, grpcExpected.GrpcResp.Body.DecodedData, r.logger)
 
 					if actOK && testOK {
 						respCopy.Body.DecodedData = string(actJSON)
-						testCase.GrpcResp.Body.DecodedData = string(testJSON)
+						grpcExpected.GrpcResp.Body.DecodedData = string(testJSON)
 					}
 				}
 
 			compareResp:
-				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
+				// Each use place is asserted on its own, against the answer
+				// as it came, whatever the comparison and its noise say. It
+				// is read first, so a test case it fails never prints the
+				// comparison's pass line.
+				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
+				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0)
+				if len(templateFailures) > 0 {
+					testPass = false
+					markTemplateFailures(testResult)
+				}
 			}
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
@@ -2760,6 +2848,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
 			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			// A template failure is never demoted to OBSOLETE.
+			outcome = keepTemplateFailure(outcome, len(templateFailures) > 0)
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
 				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
@@ -2839,19 +2929,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Started:    started.Unix(),
 						Completed:  time.Now().UTC().Unix(),
 						TestCaseID: testCase.Name,
+						// The request as it was sent: each placeholder at
+						// the value it carried.
 						Req: models.HTTPReq{
-							Method:     testCase.HTTPReq.Method,
-							ProtoMajor: testCase.HTTPReq.ProtoMajor,
-							ProtoMinor: testCase.HTTPReq.ProtoMinor,
-							URL:        testCase.HTTPReq.URL,
-							URLParams:  testCase.HTTPReq.URLParams,
-							Header:     testCase.HTTPReq.Header,
-							Body:       testCase.HTTPReq.Body,
-							Binary:     testCase.HTTPReq.Binary,
-							Form:       testCase.HTTPReq.Form,
-							Timestamp:  testCase.HTTPReq.Timestamp,
+							Method:     sent.HTTPReq.Method,
+							ProtoMajor: sent.HTTPReq.ProtoMajor,
+							ProtoMinor: sent.HTTPReq.ProtoMinor,
+							URL:        sent.HTTPReq.URL,
+							URLParams:  sent.HTTPReq.URLParams,
+							Header:     sent.HTTPReq.Header,
+							Body:       sent.HTTPReq.Body,
+							Binary:     sent.HTTPReq.Binary,
+							Form:       sent.HTTPReq.Form,
+							Timestamp:  sent.HTTPReq.Timestamp,
 
-							HeaderLineLengths: testCase.HTTPReq.HeaderLineLengths,
+							HeaderLineLengths: sent.HTTPReq.HeaderLineLengths,
 						},
 						Res:          *httpResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -2859,6 +2951,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Noise:        testCase.Noise,
 						Result:       *testResult,
 						TimeTaken:    time.Since(started).String(),
+						Captured:     captured,
+
+						TemplateFailures: templateFailures,
 					}
 				case models.GRPC_EXPORT:
 					grpcResp := resp.(*models.GrpcResp)
@@ -2870,13 +2965,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Started:      started.Unix(),
 						Completed:    time.Now().UTC().Unix(),
 						TestCaseID:   testCase.Name,
-						GrpcReq:      testCase.GrpcReq,
+						GrpcReq:      sent.GrpcReq,
 						GrpcRes:      *grpcResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
 						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 						Noise:        testCase.Noise,
 						Result:       *testResult,
 						TimeTaken:    time.Since(started).String(),
+
+						TemplateFailures: templateFailures,
 					}
 				}
 
@@ -3112,6 +3209,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				time.Sleep(time.Second)
 			}
 		}
+		tmplPass.finish()
 		// Every test this cycle meant to run must have produced a verdict. Short
 		// of that, the loop broke out early — a failed result insert, an abort
 		// signal, or the agent refusing the per-test filter params because it
@@ -3222,6 +3320,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
+			// A placeholder refused when the set loaded (a streamed response
+			// never captures): the test case fails with the reason, unsent.
+			if why := refusedTests[tc.Name]; len(why) > 0 {
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				if loopErr = r.failRefusedTest(runTestSetCtx, testRunID, testSetID, tc, why); loopErr != nil {
+					break
+				}
+				continue
+			}
 
 			// Mock Window: Calculate the effective mock filter window for streaming
 			// using the request timestamp to the response timestamp plus a timeout buffer.
@@ -3258,7 +3366,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// CompareHTTPStream below, so in-stream mock consumption can
 			// continue after this call returns.
 			started := time.Now().UTC()
-			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
+			// Sent with this run's template values, on a copy; what it is
+			// expected to stream, likewise (a streamed response never
+			// captures).
+			sent := toSend(tmplRun, tc)
+			resp, simErr := r.hookImpl.SimulateRequest(runTestSetCtx, &sent, testSetID)
+			expectedStream := streamView(tmplRun, &sent)
+			// What the stream delivered, kept only when a recorded frame
+			// holds a use (streamTemplateFailures).
+			var received *bytes.Buffer
 
 			// Mirror the non-streaming reset-resend: a docker userland-proxy reset on
 			// a freshly-accepted host-port conn under CI load never reached the app
@@ -3267,7 +3383,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// streaming tc; on the unsafe refusal path we fold its drained mocks into
 			// totalConsumedMocks identically to the non-streaming loop.
 			if simErr != nil && pkg.IsTransportConnReset(simErr) {
-				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, tc, testSetID, simErr)
+				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, &sent, testSetID, simErr)
 				if retried {
 					resp, simErr = retryResp, nil
 				} else {
@@ -3289,7 +3405,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				noteNoAnswer(tc.Name, simErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
-				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr)
+				testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, simErr)
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -3350,7 +3466,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
 
-					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					// When a recorded frame holds a use, the bytes the
+					// comparison reads are kept too: each use is asserted
+					// against the frame received at its position, whatever
+					// the comparison's noise says.
+					var streamReader io.Reader = streamResp.Reader
+					if tmplRun.StreamHasUses(sent.HTTPResp) {
+						received = &bytes.Buffer{}
+						streamReader = io.TeeReader(streamResp.Reader, received)
+					}
+					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(expectedStream.HTTPResp, streamReader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
 					}
@@ -3367,7 +3492,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						noteNoAnswer(tc.Name, streamErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
-						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr)
+						testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, streamErr)
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
@@ -3394,7 +3519,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					} else {
 						bodyForMatcher := capturedBody
 						if streamMatched {
-							bodyForMatcher = tc.HTTPResp.Body
+							bodyForMatcher = expectedStream.HTTPResp.Body
 						}
 
 						httpResp = &models.HTTPResp{
@@ -3409,7 +3534,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Error(errMsg)
 					failure++
 					testSetStatus = models.TestSetStatusFailed
-					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, errors.New(errMsg))
+					testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New(errMsg))
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -3450,14 +3575,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
+			// Each use place is asserted on its own: the headers', and each
+			// frame's against the frame received at its position, whatever
+			// the stream comparison and its noise say. It is read first, so
+			// a test case it fails never prints the comparison's pass line.
+			var streamReceived string
+			// Whether streamReceived is all the answer delivered: a whole
+			// answer is, and so is a stream every recorded frame of which
+			// matched. A stream that stopped matching was read no further
+			// (the test case fails on that), so its later frames are not
+			// asserted.
+			var streamComplete bool
+			switch {
+			case received != nil:
+				streamReceived, streamComplete = received.String(), !hadStreamingMismatch
+			case ok:
+				// The app answered whole, not as a stream: its body is what
+				// was delivered, frame by frame.
+				streamReceived, streamComplete = httpResp.Body, true
+			}
+			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
+			var streamOpts []httpMatcher.MatchOption
+			if len(streamTemplateFailures) > 0 {
+				streamOpts = append(streamOpts, httpMatcher.WithoutPassLine())
+			}
+			testPass, testResult := r.compareHTTPResp(expectedStream, httpResp, testSetID, emitFailureLogs, streamOpts...)
 			if testResult == nil {
 				// Matcher returned no result (e.g. an internal compare path returning
 				// (false, nil)). Handle it HERE, before the hadStreamingMismatch block
 				// below dereferences testResult.BodyResult. Finalize the window + persist
 				// a failed result so the miss surfaces and can't carry forward.
 				utils.LogError(r.logger, nil, "streaming test result is nil")
-				failedResult := r.CreateFailedTestResult(tc, testSetID, started, errors.New("internal error: streaming comparison returned no result"))
+				failedResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New("internal error: streaming comparison returned no result"))
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
@@ -3465,6 +3614,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					utils.LogError(r.logger, insErr, "failed to insert failed streaming test case result for nil result")
 				}
 				continue
+			}
+			if len(streamTemplateFailures) > 0 {
+				testPass = false
+				markTemplateFailures(testResult)
 			}
 			// Override testPass if streaming comparison failed
 			// (HTTP matcher skips body comparison for non-JSON bodies by default)
@@ -3511,6 +3664,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
+				} else if len(streamTemplateFailures) > 0 {
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.String("reason", vetoTemplateFailure),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
 						zap.String("testcase", tc.Name),
@@ -3537,7 +3698,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.config.Test.StrictFailure {
+			} else if mockSetMismatch && !r.config.Test.StrictFailure && len(streamTemplateFailures) == 0 {
+				// A template failure is never demoted to OBSOLETE.
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
@@ -3555,19 +3717,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Started:    started.Unix(),
 					Completed:  time.Now().UTC().Unix(),
 					TestCaseID: tc.Name,
+					// The request as it was sent.
 					Req: models.HTTPReq{
-						Method:     tc.HTTPReq.Method,
-						ProtoMajor: tc.HTTPReq.ProtoMajor,
-						ProtoMinor: tc.HTTPReq.ProtoMinor,
-						URL:        tc.HTTPReq.URL,
-						URLParams:  tc.HTTPReq.URLParams,
-						Header:     tc.HTTPReq.Header,
-						Body:       tc.HTTPReq.Body,
-						Binary:     tc.HTTPReq.Binary,
-						Form:       tc.HTTPReq.Form,
-						Timestamp:  tc.HTTPReq.Timestamp,
+						Method:     sent.HTTPReq.Method,
+						ProtoMajor: sent.HTTPReq.ProtoMajor,
+						ProtoMinor: sent.HTTPReq.ProtoMinor,
+						URL:        sent.HTTPReq.URL,
+						URLParams:  sent.HTTPReq.URLParams,
+						Header:     sent.HTTPReq.Header,
+						Body:       sent.HTTPReq.Body,
+						Binary:     sent.HTTPReq.Binary,
+						Form:       sent.HTTPReq.Form,
+						Timestamp:  sent.HTTPReq.Timestamp,
 
-						HeaderLineLengths: tc.HTTPReq.HeaderLineLengths,
+						HeaderLineLengths: sent.HTTPReq.HeaderLineLengths,
 					},
 					Res:          *httpResp,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -3575,6 +3738,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Noise:        tc.Noise,
 					Result:       *testResult,
 					TimeTaken:    time.Since(started).String(),
+
+					TemplateFailures: streamTemplateFailures,
 				}
 
 				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
@@ -4151,19 +4316,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 
-	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
-		utils.RemoveDoubleQuotes(utils.TemplatizedValues) // Write the templatized values to the yaml.
-		if len(utils.TemplatizedValues) > 0 {
-			// Through the helper, NOT a struct literal. Write replaces
-			// the whole document, so a literal deletes every field it
-			// forgets — this one erased `metadata:` and `appCommand:`
-			// both, and the loss was invisible because a test-set
-			// without either is the ordinary case.
-			err = testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, utils.TemplatizedValues)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
-			}
-		}
+	// keploy test never writes config.yaml's template. It holds the values
+	// as RECORDED: every run starts from them, and a capture takes the run's
+	// own value from the app's answer as the run goes. A run's values belong
+	// to that run; written back, the next run would start from a value the
+	// recording never held. --update-template is kept, doing nothing, so a
+	// keploy.yml or a CI line that sets it does not break.
+	if r.config.Test.UpdateTemplate && len(conf.Template) > 0 {
+		r.logger.Warn("--update-template no longer writes this run's template values into config.yaml: config.yaml keeps the recorded values, and {{capture ...}} placeholders take each run's values from the app's answers as the run goes",
+			zap.String("testset", testSetID),
+			zap.String("next_step", "remove --update-template (or test.updateTemplate) from your command or keploy.yml"))
 	}
 
 	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
@@ -4654,33 +4816,40 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+	return r.compareHTTPResp(tc, actualResponse, testSetID, emitFailureLogs)
+}
+
+// compareHTTPResp is CompareHTTPResp with the matcher's options added.
+func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
+	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, opts...)
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 
 	return pass, result
 }
 
-func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
+	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, r.autoHeaderNoiseOpt())
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
 		if pass {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
@@ -4695,7 +4864,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		}
 	}
 
-	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, r.autoHeaderNoiseOpt())
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs, opts...)
 	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
@@ -4963,12 +5132,23 @@ func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[str
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+	return r.compareGRPCResp(tc, actualResp, testSetID, emitFailureLogs, false)
+}
+
+// compareGRPCResp is CompareGRPCResp for a test case that may already have
+// failed on its own (failedElsewhere: a template variable's place): a
+// comparison that matches then prints no pass line for it.
+func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs, failedElsewhere bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)
+	var opts []grpcMatcher.MatchOption
+	if failedElsewhere {
+		opts = append(opts, grpcMatcher.WithoutPassLine())
+	}
+	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs, opts...)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -5168,27 +5348,6 @@ func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) m
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
 	return r.testSetConf.Read(ctx, testSet)
-}
-
-// UpdateTestSetTemplate writes the updated template values to the
-// test-set's config, preserving EVERY other field. It used to name the
-// fields it kept — pre/post scripts, secret, metadata — and silently
-// dropped appCommand, which is the failure mode that carrying fields by
-// hand always has.
-func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
-	if len(template) == 0 { // nothing to persist
-		return nil
-	}
-	// THE THIRD templatizing write, through the same helper as the other
-	// two. It carried PreScript, PostScript, Secret and Metadata forward
-	// by hand and silently dropped AppCommand — the field-by-field
-	// carry-forward failing in exactly the way that made the helper
-	// necessary. (Secret was pointless to copy: Db.Write strips it.)
-	if err := testset.WriteTemplatedConfig(ctx, r.testSetConf, testSetID, template); err != nil {
-		utils.LogError(r.logger, err, "failed to write updated template map", zap.String("testSetID", testSetID))
-		return err
-	}
-	return nil
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {

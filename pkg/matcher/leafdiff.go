@@ -59,7 +59,7 @@ func (w *leafWalk) add(path string, kind models.MockFieldDiffKind, e, a any, inE
 }
 
 func (w *leafWalk) walk(key, path string, e, a any, ancestor bool) {
-	if res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.ni, w.global, w.ordering, ancestor); err == nil && res.matches {
+	if res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.ni, w.global, w.ordering, ancestor, nil); err == nil && res.matches {
 		return
 	}
 	switch em := e.(type) {

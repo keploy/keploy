@@ -51,6 +51,11 @@ type HTTPReq struct {
 	// a recording without a repeated header is unchanged.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
 
+	// URLRendered marks a URL a replay rendered from its test set's
+	// templates (pkg/templates): each value in it is escaped for its place,
+	// so it is sent as it stands. Never stored.
+	URLRendered bool `json:"-" yaml:"-" bson:"-"`
+
 	// NOTE: schema-noise (req_body_noise) is NOT stored here. It lives on the
 	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
 	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
