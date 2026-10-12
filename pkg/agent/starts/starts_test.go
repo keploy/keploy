@@ -710,22 +710,13 @@ func TestCasesNotYetServedStayServableAfterTheCaseInFlight(t *testing.T) {
 	}
 }
 
-func TestEachCaseCountsItsOwnRepeatedCalls(t *testing.T) {
+func TestServedCasesStayServableLast(t *testing.T) {
 	_, r := oneTest(caseTable())
-	test := r.Scope(101)
+	r.Exchange(0, "GET", "/a")()
 	end := r.Exchange(0, "GET", "/a")
-	first := r.Scope(101)
-	end()
-	if got := r.Scope(101); got != first {
-		t.Fatalf("after the first case its calls count in %q, want %q", got, first)
-	}
-	end = r.Exchange(0, "GET", "/a")
-	second := r.Scope(101)
-	other := r.Exchange(0, "POST", "/b/1")
-	both := r.Scope(101)
-	other()
-	end()
-	if test == first || first == second || both != test {
-		t.Fatalf("scopes: test %q, first case %q, second %q, two in flight %q", test, first, second, both)
+	defer end()
+	rank, _, _ := r.View(101, at(20))
+	if rank["m2"] != 1 || rank["m3"] != laterRank || rank["m1"] != pastRank {
+		t.Fatalf("ranks %v: want the case in flight first, the case not yet served next, the served case last", rank)
 	}
 }
