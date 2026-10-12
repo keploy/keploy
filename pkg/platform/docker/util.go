@@ -720,8 +720,6 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	return containerName, networkName, nil
 }
 
-// mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`
-// record/replay run, so the containerised agent skips ingress/bind relocation.
 // provenSuffix carries the proven model's staging switch into the agent
 // container, which is not given KEPLOY_PROVEN: " --proven" when the switch is
 // on, "" otherwise, so the alias is byte-identical to before with it off.
@@ -733,6 +731,8 @@ func provenSuffix() string {
 	return " " + strings.Join(args, " ")
 }
 
+// mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`
+// record/replay run, so the containerised agent skips ingress/bind relocation.
 func mockModeSuffix(opts models.SetupOptions) string {
 	if !opts.MockMode {
 		return ""

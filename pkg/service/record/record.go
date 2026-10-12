@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1689,6 +1690,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 		r.logger.Debug("Making keploy-agent ready for docker compose...")
 
 		err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			// The agent and this keploy are on different proven paths:
+			// recording against it would capture under the wrong rules.
+			stopReason = "keploy's agent does not have this keploy's proven switch"
+			return err
+		}
 		if err != nil {
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}

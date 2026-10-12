@@ -156,6 +156,13 @@ func newAgentCmdForTest(t *testing.T, cfg *config.Config) (*cobra.Command, *zap.
 	if err := c.AddFlags(cmd); err != nil {
 		t.Fatalf("AddFlags: %v", err)
 	}
+	// ValidateFlags for the agent pins the proven switch, and a pin lasts for
+	// the rest of the process: keep the real one out of every agent test, so
+	// none decides On() for the tests after it. A test that wants to see the
+	// pin swaps in its own seam after this.
+	prev := pinProvenSwitch
+	pinProvenSwitch = func(bool) {}
+	t.Cleanup(func() { pinProvenSwitch = prev })
 	return cmd, logger
 }
 

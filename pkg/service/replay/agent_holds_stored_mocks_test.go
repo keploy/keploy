@@ -77,6 +77,8 @@ type rearmInstr struct {
 	storeMocksCalls   int
 	updateParamsCalls int
 	readyCalls        int
+	// readyErr is what MakeAgentReadyForDockerCompose answers.
+	readyErr error
 }
 
 func (f *rearmInstr) GetMockStats(ctx context.Context) (models.MockStats, error) {
@@ -162,7 +164,7 @@ func (f *rearmInstr) MakeAgentReadyForDockerCompose(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readyCalls++
-	return nil
+	return f.readyErr
 }
 
 // counts returns stats / MockOutgoing / StoreMocks / UpdateMockParams / ready

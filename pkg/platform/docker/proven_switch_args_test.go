@@ -48,17 +48,44 @@ func TestGetAlias_LinuxCarriesTheProvenSwitch(t *testing.T) {
 }
 
 // getAlias rebuilds the alias in each of its five platform arms, and only the
-// linux one runs here; every arm must carry the switch the same way.
+// linux one runs here; every arm must carry the switch the same way. The call
+// must be part of an assignment to `alias` in the arm's own statements (not in
+// a nested arm, not a stray `_ = provenSuffix()`), so that it is in what the
+// arm returns.
 func TestGetAlias_EveryPlatformBranchCarriesTheProvenSwitch(t *testing.T) {
 	forEachAliasReturningBranch(t, func(t *testing.T, pos token.Position, list []ast.Stmt) {
 		t.Helper()
 		for _, stmt := range list {
-			if stmtCallsFunc(stmt, "provenSuffix") {
+			if stmtAssignsAliasCalling(stmt, "provenSuffix") {
 				return
 			}
 		}
-		t.Errorf("%s: this getAlias platform branch returns an alias without calling provenSuffix; on that platform an agent started by a CLI with KEPLOY_PROVEN=1 would run the old paths", pos)
+		t.Errorf("%s: this getAlias platform branch returns an alias that does not take provenSuffix(); on that platform an agent started by a CLI with KEPLOY_PROVEN=1 would run the old paths", pos)
 	})
+}
+
+// stmtAssignsAliasCalling reports whether stmt assigns to `alias` (= or +=)
+// from an expression that calls the named function.
+func stmtAssignsAliasCalling(stmt ast.Stmt, name string) bool {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 {
+		return false
+	}
+	if ident, ok := assign.Lhs[0].(*ast.Ident); !ok || ident.Name != "alias" {
+		return false
+	}
+	found := false
+	for _, rhs := range assign.Rhs {
+		ast.Inspect(rhs, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == name {
+					found = true
+				}
+			}
+			return true
+		})
+	}
+	return found
 }
 
 // The compose agent service is the third launcher.

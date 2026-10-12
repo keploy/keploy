@@ -16,11 +16,18 @@
 // The agent is a separate process, and it does not inherit the variable: the
 // native agent is started through sudo, which drops the caller's environment,
 // and the agent container gets only the variables keploy passes it. So every
-// launcher appends AgentArgs to the agent's argv, and the agent's --proven flag
-// calls Enable. Parsers run inside the agent, so they see the switch too.
+// launcher appends AgentArgs to the agent's argv, and the agent pins its switch
+// from its --proven flag, on or off (Pin): an agent's own environment never
+// decides, so an agent cannot run the new paths while the CLI that started it
+// runs the old ones, or the reverse. The agent reports what it pinned on its
+// health check (HealthHeader, State), and the CLI refuses, at the agent's
+// bring-up, an agent whose state is not its own (CheckAgent). Parsers run
+// inside the agent, so they see the pinned switch too.
 package provenswitch
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -34,29 +41,81 @@ const (
 	// AgentFlag is the hidden `keploy agent` flag that carries the switch from
 	// the CLI to the agent it starts (see AgentArgs).
 	AgentFlag = "proven"
+	// HealthHeader is the /agent/health response header in which an agent says
+	// whether its switch is on (State). An agent that does not send it predates
+	// the switch.
+	HealthHeader = "X-Keploy-Proven"
 )
 
-// enabled is set by Enable: the agent's --proven flag.
-var enabled atomic.Bool
+// ErrAgentSwitch marks an agent this keploy must not run against: its proven
+// switch is not this keploy's, or, with the switch on here, cannot be read.
+// The bring-up of a native or docker-run agent fails with it, and record,
+// replay and the runner stop on it (errors.Is) when the docker compose
+// readiness step returns it. A compose agent that compose starts again
+// mid-run is started from the same generated file, with the same flag.
+var ErrAgentSwitch = errors.New("keploy's agent does not have this keploy's proven switch")
 
-// On reports whether the proven model's rows are on in this process: the
-// process was started with KEPLOY_PROVEN set to a true value ("1", "true", as
-// strconv.ParseBool reads it), or it is an agent started with --proven.
-//
-// The variable is read on every call rather than once, so the answer is the
-// process's environment as it is now. That costs a map lookup under a read
-// lock, and it lets a test set the switch with t.Setenv.
+// The pinned states. unpinned (the zero value) means On reads the variable.
+const (
+	unpinned int32 = iota
+	pinnedOff
+	pinnedOn
+)
+
+var pinned atomic.Int32
+
+// On reports whether the proven model's rows are on in this process. A process
+// whose switch was pinned (an agent, from its --proven flag) answers with what
+// was pinned. Any other process reads KEPLOY_PROVEN, on every call, so the
+// answer is its environment as it is now (and a test can set the switch with
+// t.Setenv): on for a value strconv.ParseBool reads as true ("1", "true", …),
+// off otherwise. A value it does not read at all is off here; keploy's own
+// commands refuse it before they start (Validate).
 func On() bool {
-	if enabled.Load() {
+	switch pinned.Load() {
+	case pinnedOn:
 		return true
+	case pinnedOff:
+		return false
 	}
-	return envOn(os.Getenv(Env))
+	on, err := parse(os.Getenv(Env))
+	return err == nil && on
 }
 
-// Enable turns the switch on for the rest of this process. The agent calls it
-// when it is started with --proven; nothing turns it off again.
-func Enable() {
-	enabled.Store(true)
+// Pin fixes this process's switch for the rest of its life, on or off, and
+// stops it reading KEPLOY_PROVEN. The agent pins from its --proven flag, so the
+// CLI that started it is the only thing that decides.
+func Pin(on bool) {
+	if on {
+		pinned.Store(pinnedOn)
+		return
+	}
+	pinned.Store(pinnedOff)
+}
+
+// IgnoredEnv is, for a pinned process, a KEPLOY_PROVEN in its environment
+// that says something other than what was pinned (a value that is set and does
+// not read as the pinned state, unreadable values included), and whether there
+// is one. The agent warns about it: its environment never decides its switch.
+func IgnoredEnv() (string, bool) {
+	p := pinned.Load()
+	v := os.Getenv(Env)
+	if p == unpinned || strings.TrimSpace(v) == "" {
+		return "", false
+	}
+	on, err := parse(v)
+	if err == nil && on == (p == pinnedOn) {
+		return "", false
+	}
+	return v, true
+}
+
+// State is On as a health-check value: "on" or "off".
+func State() string {
+	if On() {
+		return "on"
+	}
+	return "off"
 }
 
 // AgentArgs is what a launcher appends to the argv of the agent it starts: the
@@ -70,9 +129,42 @@ func AgentArgs() []string {
 	return []string{"--" + AgentFlag}
 }
 
-// envOn reads a value of KEPLOY_PROVEN. Anything strconv.ParseBool does not
-// read as true, the empty string included, leaves the switch off.
-func envOn(v string) bool {
-	on, err := strconv.ParseBool(strings.TrimSpace(v))
-	return err == nil && on
+// Validate refuses a KEPLOY_PROVEN that is set to something strconv.ParseBool
+// does not read ("yes", "on", a typo): such a value would otherwise mean "off"
+// without a word, and run a staging lane on the old paths. Unset or empty is
+// fine. The CLI calls it before any command runs.
+func Validate() error {
+	if _, err := parse(os.Getenv(Env)); err != nil {
+		return fmt.Errorf("%s=%q is not a value keploy reads: set it to 1 to turn the proven model's staging switch on, or unset it", Env, os.Getenv(Env))
+	}
+	return nil
+}
+
+// CheckAgent compares an agent's health-check report of its switch (the
+// HealthHeader value; "" when the agent sent none) with this process's, and
+// says why they cannot run together when they differ: the agent's parsers and
+// this keploy's verdicts would be on different paths. An agent that sends no
+// report predates the switch, which is only a problem when the switch is on.
+// The error wraps ErrAgentSwitch and names both sides.
+func CheckAgent(reported string) error {
+	local := State()
+	switch {
+	case reported == "" && local == "off":
+		return nil
+	case reported == "":
+		return fmt.Errorf("%w: the switch is on in this keploy (%s) and its agent reports none, so the agent predates it; run the agent of this keploy version", ErrAgentSwitch, Env)
+	case reported == local:
+		return nil
+	}
+	return fmt.Errorf("%w: the switch is %s in this keploy (%s) and %s in its agent. An agent takes it only from the --%s flag of the keploy that starts it; an agent started by anything else (k8s-proxy does not pass the flag yet) or by another keploy version has its own",
+		ErrAgentSwitch, local, Env, reported, AgentFlag)
+}
+
+// parse reads a value of KEPLOY_PROVEN. The empty string is off and no error.
+func parse(v string) (bool, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false, nil
+	}
+	return strconv.ParseBool(v)
 }

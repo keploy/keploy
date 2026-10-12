@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -9,20 +11,20 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
-// runAgentFlags parses an agent argv the way `keploy agent` does and reports
-// whether --proven turned the switch on. The seam is swapped for the test, so
-// the real switch stays off for the rest of this test binary.
-func runAgentFlags(t *testing.T, args ...string) bool {
+// runAgentFlags parses an agent argv the way `keploy agent` does and returns
+// what the agent pinned its switch to, and whether it pinned at all. The seam is
+// swapped for the test (after newAgentCmdForTest, which swaps in a no-op), so
+// the real switch stays unpinned for the rest of this test binary.
+func runAgentFlags(t *testing.T, args ...string) (on, called bool) {
 	t.Helper()
 	viper.Reset()
 	t.Cleanup(viper.Reset)
-	enabled := false
-	prev := enableProvenSwitch
-	enableProvenSwitch = func() { enabled = true }
-	t.Cleanup(func() { enableProvenSwitch = prev })
-
 	cfg := config.New()
 	cmd, logger := newAgentCmdForTest(t, cfg)
+	prev := pinProvenSwitch
+	pinProvenSwitch = func(v bool) { on, called = v, true }
+	t.Cleanup(func() { pinProvenSwitch = prev })
+
 	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatalf("the agent refused %q: %v", args, err)
 	}
@@ -33,23 +35,45 @@ func runAgentFlags(t *testing.T, args ...string) bool {
 	if err := c.ValidateFlags(context.Background(), cmd); err != nil {
 		t.Fatalf("ValidateFlags: %v", err)
 	}
-	return enabled
+	return on, called
 }
 
 // The agent must accept the flag every launcher now appends when the switch is
-// on (provenswitch.AgentArgs), and turn the switch on from it: the agent never
+// on (provenswitch.AgentArgs), and pin its switch on from it: the agent never
 // sees KEPLOY_PROVEN itself.
-func TestAgentProvenFlagTurnsTheSwitchOn(t *testing.T) {
-	if !runAgentFlags(t, "--"+provenswitch.AgentFlag) {
-		t.Fatal("`keploy agent --proven` did not turn the proven switch on: the agent would run the old paths while the CLI runs the new ones")
+func TestAgentProvenFlagPinsTheSwitchOn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	on, called := runAgentFlags(t, "--"+provenswitch.AgentFlag)
+	if !called || !on {
+		t.Fatalf("`keploy agent --proven` pinned=%v on=%v: the agent would run the old paths while the CLI runs the new ones", called, on)
 	}
 }
 
-// Without the flag the agent leaves the switch alone: today's agent argv must
-// mean today's behaviour.
-func TestAgentWithoutProvenFlagLeavesTheSwitchOff(t *testing.T) {
-	if runAgentFlags(t) {
-		t.Fatal("`keploy agent` without --proven turned the proven switch on")
+// Without the flag the agent pins its switch OFF, even with KEPLOY_PROVEN=1 in
+// its own environment (an agent some other launcher started, such as
+// k8s-proxy's): only the CLI that starts the agent decides.
+func TestAgentWithoutProvenFlagPinsTheSwitchOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	on, called := runAgentFlags(t)
+	if !called || on {
+		t.Fatalf("`keploy agent` without --proven, KEPLOY_PROVEN=1 in its environment: pinned=%v on=%v; want pinned off", called, on)
+	}
+}
+
+// The agent's own environment does not decide, so an unreadable value there
+// does not stop the agent either: its switch comes from the flag.
+func TestAgentIgnoresAnUnreadableProvenValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "yes")
+	if on, called := runAgentFlags(t, "--"+provenswitch.AgentFlag); !called || !on {
+		t.Fatalf("pinned=%v on=%v; the agent's switch comes from its flag", called, on)
+	}
+}
+
+// The seam must default to the real pin: pointing it at anything else would
+// leave every agent following nothing.
+func TestPinProvenSwitchDefaultsToProvenswitchPin(t *testing.T) {
+	if reflect.ValueOf(pinProvenSwitch).Pointer() != reflect.ValueOf(provenswitch.Pin).Pointer() {
+		t.Fatal("pinProvenSwitch is not provenswitch.Pin: the agent's --proven flag decides nothing")
 	}
 }
 
@@ -64,5 +88,25 @@ func TestAgentProvenFlagIsHidden(t *testing.T) {
 	}
 	if !f.Hidden {
 		t.Fatalf("--%s is shown in `keploy agent --help`; it is the launcher's, not the user's", provenswitch.AgentFlag)
+	}
+}
+
+// A KEPLOY_PROVEN keploy cannot read is refused before a command runs, rather
+// than meaning "off" without a word.
+func TestValidateFlagsRefusesAnUnreadableProvenValue(t *testing.T) {
+	for _, value := range []string{"yes", "on", "ture"} {
+		t.Setenv(provenswitch.Env, value)
+		cfg := config.New()
+		c, cmd := reportCmd(t, cfg)
+		err := c.ValidateFlags(context.Background(), cmd)
+		if err == nil || !strings.Contains(err.Error(), provenswitch.Env) {
+			t.Fatalf("%s=%q: ValidateFlags = %v; a staging run with a typo would run the old paths", provenswitch.Env, value, err)
+		}
+	}
+	t.Setenv(provenswitch.Env, "1")
+	cfg := config.New()
+	c, cmd := reportCmd(t, cfg)
+	if err := c.ValidateFlags(context.Background(), cmd); err != nil && strings.Contains(err.Error(), provenswitch.Env) {
+		t.Fatalf("KEPLOY_PROVEN=1 was refused: %v", err)
 	}
 }

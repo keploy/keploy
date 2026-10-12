@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -248,6 +249,10 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// Tells the client that /storemocks takes a zstd-compressed stream
 	// (RFC 7694). An agent without this header gets the stream uncompressed.
 	w.Header().Set("Accept-Encoding", models.MockStreamEncodingZstd)
+	// Whether this agent's proven switch is on, as it pinned it from its
+	// --proven flag; the CLI refuses an agent whose switch is not its own
+	// (provenswitch.CheckAgent).
+	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }

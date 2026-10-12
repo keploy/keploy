@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	keployPkg "go.keploy.io/server/v3/pkg"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -489,6 +491,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	}
 
 	if err := r.instrumentation.MakeAgentReadyForDockerCompose(gCtx); err != nil {
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			return nil, err
+		}
 		r.logger.Debug("failed to mark agent ready", zap.Error(err))
 	}
 

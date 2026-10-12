@@ -162,10 +162,11 @@ type CmdConfigurator struct {
 	cfg    *config.Config
 }
 
-// enableProvenSwitch is what the agent's --proven flag calls. A variable only
-// so a test can see the call without turning the switch on for the rest of
-// its process: provenswitch.Enable cannot be undone.
-var enableProvenSwitch = provenswitch.Enable
+// pinProvenSwitch is what the agent's --proven flag decides: the agent's
+// switch, pinned on or off from the flag (provenswitch.Pin). A variable only so
+// a test can see the call without pinning the switch for the rest of its
+// process, since a pin cannot be undone; a test pins this default.
+var pinProvenSwitch = provenswitch.Pin
 
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
@@ -374,7 +375,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// Internal orchestrator→agent flag: the proven model's staging switch.
 		// The CLI reads KEPLOY_PROVEN, but the agent does not inherit it (sudo
 		// drops the environment, the agent container is not given it), so the
-		// launchers pass it as this flag (provenswitch.AgentArgs).
+		// launchers pass it as this flag (provenswitch.AgentArgs), and the agent
+		// pins its switch from it, on or off. It is read with
+		// cmd.Flags().GetBool only: viper's KEPLOY_ env mapping would make
+		// viper.GetBool("proven") answer from the agent's own KEPLOY_PROVEN,
+		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
@@ -1172,6 +1177,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		logger, err := log.RedirectToStderr()
 		if err == nil {
 			*c.logger = *logger
+		}
+	}
+
+	// A KEPLOY_PROVEN keploy cannot read would otherwise mean "off" without a
+	// word, and run a staging lane on the old paths. Checked after the logger
+	// moved to stderr for machine-readable output, so the refusal never lands
+	// in a document. Not for the agent: its switch comes from its --proven flag
+	// alone, and its own environment is ignored (see the agent arm below).
+	if cmd.Name() != "agent" {
+		if err := provenswitch.Validate(); err != nil {
+			utils.LogError(c.logger, err, "refusing to start")
+			return err
 		}
 	}
 
@@ -2051,9 +2068,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		if proven {
-			enableProvenSwitch()
+		// On or off, from the flag alone: the agent's own environment never
+		// decides, so it cannot disagree with the CLI that started it.
+		pinProvenSwitch(proven)
+		if provenswitch.On() {
 			c.logger.Debug("the proven model's staging switch is on in this agent (KEPLOY_PROVEN=1, passed as --proven)")
+		}
+		if v, ignored := provenswitch.IgnoredEnv(); ignored {
+			c.logger.Warn("KEPLOY_PROVEN in the agent's own environment is ignored: an agent takes the proven switch only from the --proven flag of the keploy that starts it",
+				zap.String("value", v), zap.Bool("proven", provenswitch.On()))
 		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
