@@ -821,6 +821,17 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 		if lk == "cache-control" || lk == "pragma" {
 			return true
 		}
+		// Content-Type has its own rule in SchemaMatch: it is compared only
+		// when both sides send one, so a side that omits it is not a
+		// mismatch. Required here as a key, a recording that sent it could
+		// only ever be matched by a request that does too, which undid that
+		// rule. Measured on an enterprise-ui replay: the app sends GET
+		// /cluster/getApps with Content-Type: application/json (53 of 54
+		// recorded) or without it (1), and a second bodyless GET without it
+		// found no candidate in a pool of 805.
+		if lk == "content-type" {
+			return true
+		}
 		// Ignore headers that are in noise configuration
 		if headerNoise != nil {
 			if _, exists := headerNoise[lk]; exists {
