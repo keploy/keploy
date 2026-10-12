@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1870,6 +1871,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			// The agent and this keploy are on different proven paths: no
+			// verdict of this set could be trusted.
+			return models.TestSetStatusInternalErr, err
+		}
 		if err != nil {
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
@@ -4778,7 +4784,11 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
 	// does not stop the run (the compose healthchecks only gate app startup).
+	// A proven-switch refusal does stop it, as it does there.
 	if err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx); err != nil {
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and the new one cannot be run against: %w", err)
+		}
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 	}
 
