@@ -106,6 +106,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if provenswitch.On() && len(m.config.Mock.RunOnly) > 0 {
 		return errors.New("--run-only is not used with KEPLOY_PROVEN: select the tests with your own test command; keploy skips only the tests verdicts.yaml quarantines")
 	}
+	if provenswitch.On() && m.config.Mock.Strict {
+		return errors.New("--strict is not used with KEPLOY_PROVEN: keploy's verdict fails a run on every call the recording did not answer, charged to a test or not")
+	}
 	if err := m.refuseProvenDocker("replay"); err != nil {
 		return err
 	}
@@ -436,7 +439,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// already failed the run (a crashed runner keeps its own, more useful
 	// reason). Like a reported miss, it is the suite's contract, not keploy's own
 	// failure, so it sets the exit code but is not returned as a keployFailure.
-	if policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
+	// Under the proven switch the verdict's first rule (no test ran) takes
+	// its place: a test recorded with no call serves nothing, and passes.
+	if !provenswitch.On() && policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByNothingVerified
 		m.logger.Error("replay verified nothing: the test command served none of the recorded calls",

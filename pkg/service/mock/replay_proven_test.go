@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -331,4 +332,49 @@ func TestASetOfTestsWithoutCallsIsJudgedUnderTheSwitch(t *testing.T) {
 	require.NoError(t, err)
 	runs, _ := instr.counts()
 	require.Equal(t, 1, runs)
+}
+
+// The nothing-verified gate (a replay that served no recorded call fails)
+// is the switch-off rule; under the switch the verdict's first rule (no test
+// ran) takes its place, since a test recorded with no call serves nothing
+// and passes.
+func TestNothingVerifiedIsTheSwitchOffRule(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			if on {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestPure\n      dir: o\n"), 0o644))
+			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			require.NoError(t, New(zap.NewNop(), instr, loadedMockDB{n: 1}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+			want := 1
+			if on {
+				want = 0
+			}
+			require.Equal(t, want, utils.ErrCode)
+		})
+	}
+}
+
+// --strict's miss check is the verdict's second rule under the switch.
+func TestStrictIsRefusedUnderTheSwitch(t *testing.T) {
+	provenOn(t)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test ./...")
+	cfg.Path = t.TempDir()
+	cfg.Mock.OnMiss = "fail"
+	cfg.Mock.Strict = true
+	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "--strict is not used with KEPLOY_PROVEN")
 }

@@ -410,7 +410,7 @@ func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
 	require.Len(t, w.Evidence.Misses, 2)
 	require.Empty(t, w.Evidence.Misses[0].ReceivedReq, "evidence keeps summaries only")
 	require.Equal(t, "POST /audit/{}", w.Evidence.Misses[0].ActualSummary, "an HTTP miss keeps its method and path shape")
-	require.Empty(t, w.Evidence.Misses[1].ActualSummary, "a query's literals never reach the evidence")
+	require.Equal(t, "SELECT * FROM users WHERE token=?", w.Evidence.Misses[1].ActualSummary, "a query's literals never reach the evidence: it keeps the statement's shape")
 
 	all, err := a.GetMockErrors(ctx)
 	require.NoError(t, err)
@@ -605,6 +605,30 @@ func TestASessionStartEndsWithItsCaller(t *testing.T) {
 	go func() { done <- a.resetSession(ctx) }()
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
+}
+
+// Evidence keeps a miss's shape and the matcher's advice, never a value:
+// an HTTP path's IDs and query, a SQL statement's literals.
+func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
+	m := sanitizedMiss(models.UnmatchedCall{
+		Protocol: "MySQL", Destination: "db:3306", MatchPhase: "body_mismatch",
+		ActualSummary: "COM_QUERY SELECT * FROM users WHERE email = 'a@b.c' AND id = 42 AND t = \"x\"",
+		ClosestMock:   "mock-7", NextSteps: "Re-record mocks if the SQL query has changed.",
+		Diff: "actual: secret", ClosestMockReq: "secret", ReceivedReq: "secret",
+	})
+	require.Equal(t, "COM_QUERY SELECT * FROM users WHERE email = ? AND id = ? AND t = ?", m.ActualSummary)
+	require.Equal(t, "mock-7", m.ClosestMock)
+	require.Equal(t, "Re-record mocks if the SQL query has changed.", m.NextSteps)
+	require.Empty(t, m.Diff)
+	require.Empty(t, m.ClosestMockReq)
+	require.Empty(t, m.ReceivedReq)
+
+	require.Equal(t, "SELECT ?", sqlShape("SELECT 'it''s"))
+	require.Equal(t, "INSERT INTO t VALUES (?, ?, ?)", sqlShape("INSERT INTO t VALUES (0x1F, 3.5e2, 'x')"))
+	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "PostgresV2", ActualSummary: "SELECT 1"})
+	require.Equal(t, "SELECT ?", pg.ActualSummary)
+	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
+	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
 }
 
 func TestPathShapeDropsValues(t *testing.T) {

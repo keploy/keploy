@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -651,17 +652,62 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 }
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
-// destination, how far the matcher got, when it happened, and, for HTTP, the
-// method and the path's shape; never a value the app sent (a query's
-// literals, a path's IDs, a body).
+// destination, how far the matcher got, the closest recorded mock's name,
+// the matcher's next step, when it happened, and the call's shape: for HTTP
+// the method and the path's shape, for SQL the statement with its literals
+// written "?". Never a value the app sent (a query's literals, a path's IDs,
+// a body). The next step is the matcher's own advice, which names fields and
+// commands, not values.
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase, At: m.At}
-	if isHTTP(m.Protocol) {
+	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
+		ClosestMock: m.ClosestMock, NextSteps: m.NextSteps, At: m.At}
+	switch {
+	case isHTTP(m.Protocol):
 		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
 			out.ActualSummary = method + " " + pathShape(path)
 		}
+	case isSQL(m.Protocol):
+		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
 	return out
+}
+
+// isSQL reports whether a miss's protocol speaks SQL, whose summary is the
+// statement keploy saw.
+func isSQL(protocol string) bool {
+	p := strings.ToLower(protocol)
+	return strings.Contains(p, "sql") || strings.Contains(p, "postgres")
+}
+
+var (
+	sqlQuoted  = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"`)
+	sqlNumber  = regexp.MustCompile(`\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)\b`)
+	sqlSpace   = regexp.MustCompile(`\s+`)
+	maxSQLText = 160
+)
+
+// sqlShape is a SQL statement with every quoted string and number written
+// "?", so no value the app sent is kept; an unterminated quote drops the
+// rest. A quoted identifier (Postgres "table") goes too: a shape that hides
+// one name is better than one that keeps a value.
+func sqlShape(q string) string {
+	q = sqlQuoted.ReplaceAllString(q, "?")
+	if i := strings.IndexAny(q, `'"`); i >= 0 {
+		q = q[:i]
+		if !strings.HasSuffix(q, "?") {
+			q += "?"
+		}
+	}
+	q = sqlNumber.ReplaceAllString(q, "?")
+	q = strings.TrimSpace(sqlSpace.ReplaceAllString(q, " "))
+	if len(q) > maxSQLText {
+		i := maxSQLText
+		for i > 0 && !utf8.RuneStart(q[i]) {
+			i--
+		}
+		q = q[:i] + "…"
+	}
+	return q
 }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
