@@ -383,8 +383,23 @@ func seen(t *testing.T, r *Registry, pid uint32) []string {
 		t.Fatal("no view")
 	}
 	var out []string
-	for n := range rank {
-		out = append(out, n)
+	for n, g := range rank {
+		if g < Later {
+			out = append(out, n)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func later(t *testing.T, r *Registry, pid uint32) []string {
+	t.Helper()
+	rank, _, _ := r.View(pid, at(20))
+	var out []string
+	for n, g := range rank {
+		if g == Later {
+			out = append(out, n)
+		}
 	}
 	slices.Sort(out)
 	return out
@@ -675,4 +690,22 @@ func TestAnExtraPollDoesNotTakeALaterCaseByItsPath(t *testing.T) {
 	end = r.Exchange(0, "GET", "/jobs/2")
 	defer end()
 	sees(t, r, 101, "GET /jobs/2", "j2")
+}
+
+func TestCasesNotYetServedStayServableAfterTheCaseInFlight(t *testing.T) {
+	_, r := oneTest(map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "mpost"}, {Name: "p1"}, {Name: "p2"}, {Name: "mpay"}}},
+		Cases: map[string][]models.Case{"T": {
+			{Name: "test-1", Method: "POST", URL: "/jobs", Mocks: []string{"mpost"}},
+			{Name: "test-2", Method: "GET", URL: "/jobs/1", Mocks: []string{"p1"}},
+			{Name: "test-3", Method: "GET", URL: "/jobs/1", Mocks: []string{"p2", "mpay"}},
+		}},
+	}})
+	r.Exchange(0, "POST", "/jobs")()
+	end := r.Exchange(0, "GET", "/jobs/1")
+	defer end()
+	sees(t, r, 101, "the first poll, first choice", "p1")
+	if got := later(t, r, 101); !slices.Equal(got, []string{"mpay", "p2"}) {
+		t.Fatalf("the first poll can fall back to %v, want the later poll's mocks", got)
+	}
 }

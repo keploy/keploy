@@ -627,14 +627,18 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	if f != nil {
 		test = f.place
 	}
-	var allow func(string) bool
+	var allow func(string) (int, bool)
 	if f != nil && len(w.frames) > 1 && f == w.frames[len(w.frames)-1] {
 		allow = r.caseView(set, f, test)
 	}
 	rank := map[string]int{}
 	put := func(name string, g int) {
-		if allow != nil && !allow(name) {
-			return
+		if allow != nil {
+			later, keep := allow(name)
+			if !keep {
+				return
+			}
+			g = max(g, later)
 		}
 		if old, ok := rank[name]; !ok || g < old {
 			rank[name] = g
@@ -671,7 +675,7 @@ func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]st
 	return rank, r.universe, true
 }
 
-func (r *Registry) caseView(set string, f *frame, test string) func(string) bool {
+func (r *Registry) caseView(set string, f *frame, test string) func(string) (int, bool) {
 	cases := r.sets[set].Cases[test]
 	b := r.books[set][test]
 	if len(cases) == 0 || b == nil || f == nil || f.lost || !slices.Contains(f.used, true) || r.blind > 0 || f.open[-1] > 0 {
@@ -710,18 +714,25 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) bool
 		}
 		add(next, false)
 	}
-	return func(name string) bool {
+	return func(name string) (int, bool) {
 		if _, in := b.free[name]; in {
-			return true
+			return 0, true
 		}
+		later := false
 		for _, i := range b.owners[name] {
 			if ok[i] {
-				return true
+				return 0, true
 			}
+			later = later || (i < len(f.used) && !f.used[i])
 		}
-		return false
+		if later {
+			return Later, true
+		}
+		return 0, false
 	}
 }
+
+const Later = 5
 
 func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	r.mu.Lock()
