@@ -751,8 +751,10 @@ type PendingResponse struct {
 // capture has not got past that time, or a test case it holds for its verdict
 // ended before it. The stop drains the agent's streams until it may not, and
 // not only until they fall quiet: a parser can be behind the traffic, and
-// quiet, for longer than any fixed grace. 501 when the agent cannot tell (its
-// capture has no watermark); the stop then goes by quiet alone.
+// quiet, for longer than any fixed grace, and a server can finish a response
+// after the test command has exited. A capture with no watermark (the proxy's)
+// tells of the exchanges its parsers have open (syncMock.OpenExchange). 501
+// when the agent cannot tell; the stop then goes by quiet alone.
 func (a *Agent) HandlePending(w http.ResponseWriter, r *http.Request) {
 	ns, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 	if err != nil {

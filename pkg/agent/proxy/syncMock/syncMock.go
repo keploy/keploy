@@ -466,6 +466,9 @@ type SyncMockManager struct {
 	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
 	// stream holds for its verdict (NoteHeld); 0 when none.
 	heldOldest atomic.Int64
+	// exchanges are the exchanges its parsers have open (OpenExchange), which
+	// a capture with no watermark answers PendingBefore from.
+	exchanges Exchanges
 	// onDrop is told of each mock the outChan capacity path drops (OnDrop).
 	onDrop atomic.Pointer[func(*models.Mock)]
 	// sending holds the request time of each mock taken out of the buffer

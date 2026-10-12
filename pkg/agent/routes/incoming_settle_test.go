@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -230,18 +231,35 @@ type backlogWatermark struct {
 func (w *backlogWatermark) PendingBefore(time.Time) bool { return w.pending.Load() }
 
 // A recording's stop asks the agent whether it may still hand over something
-// captured before it; an agent whose capture cannot tell says so (501), and
-// the stop goes by quiet alone.
+// captured before it. A capture with no watermark (the proxy's) tells of the
+// exchanges its parsers have open, for syncmgr.OpenExchangeWait.
 func TestHandlePending(t *testing.T) {
 	a := &Agent{logger: zap.NewNop()}
-	ask := func() (int, string) {
+	askAt := func(before time.Time) (int, string) {
 		rr := httptest.NewRecorder()
-		a.HandlePending(rr, httptest.NewRequest(http.MethodGet, "/agent/record/pending?before=1000", nil))
+		a.HandlePending(rr, httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/agent/record/pending?before=%d", before.UnixNano()), nil))
 		return rr.Code, strings.TrimSpace(rr.Body.String())
 	}
+	ask := func() (int, string) { return askAt(time.Unix(0, 1000)) }
 	syncmgr.Get().SetWatermark(nil)
-	if code, _ := ask(); code != http.StatusNotImplemented {
-		t.Fatalf("without a watermark: %d, want 501", code)
+	stop := time.Now()
+	if code, body := askAt(stop); code != http.StatusOK || body != `{"pending":false}` {
+		t.Fatalf("no watermark, no exchange open: %d %s", code, body)
+	}
+	done := syncmgr.Get().OpenExchange(stop.Add(-time.Second))
+	if code, body := askAt(stop); code != http.StatusOK || body != `{"pending":true}` {
+		t.Fatalf("no watermark, an exchange open from before: %d %s", code, body)
+	}
+	if _, body := askAt(stop.Add(-2 * time.Second)); body != `{"pending":false}` {
+		t.Fatalf("an exchange open from after: %s", body)
+	}
+	if _, body := askAt(stop.Add(-syncmgr.OpenExchangeWait)); body != `{"pending":false}` {
+		t.Fatalf("an exchange open past the wait: %s", body)
+	}
+	done()
+	if _, body := askAt(stop); body != `{"pending":false}` {
+		t.Fatalf("the exchange ended: %s", body)
 	}
 	w := &backlogWatermark{}
 	syncmgr.Get().SetWatermark(w)

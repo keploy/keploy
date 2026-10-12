@@ -580,6 +580,21 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 	return s.manager().OpenOrphanWindow(start)
 }
 
+// OpenExchange says this connection's parser has an exchange open: its
+// request captured at start, its response not yet recorded. It returns the
+// func that says the exchange has ended, its mock emitted or known not to be;
+// the func may be called more than once. It goes to the session's manager,
+// whose PendingBefore a recording's stop asks. The stop waits, for at most
+// syncMock.OpenExchangeWait, for an exchange its test command started: a
+// server can finish a response after the command has exited, and what it
+// finishes is recorded only while the recording runs. Nil-safe.
+func (s *Session) OpenExchange(start time.Time) func() {
+	if s == nil {
+		return func() {}
+	}
+	return s.manager().OpenExchange(start)
+}
+
 // EmitMock sends m to the mocks channel. If the session's active mock
 // is marked incomplete, EmitMock returns nil without sending (the mock
 // is left out and the incomplete flag is cleared, matching the "partial

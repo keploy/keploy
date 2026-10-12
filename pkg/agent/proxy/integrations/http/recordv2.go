@@ -58,6 +58,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		return errors.New("recordV2: nil supervisor session")
 	}
 	defer sess.EndExchanges()
+	// closeExchange ends the exchange this loop has open (OpenExchange), on
+	// every way out of it.
+	closeExchange := func() {}
+	defer func() { closeExchange() }()
 	logger := sess.Logger
 	if logger == nil {
 		logger = h.Logger
@@ -93,6 +97,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		reqTs := firstChunk.ReadAt
+		// Open until its mock is emitted, or known not to be: a recording's
+		// stop waits for it (Session.OpenExchange), as the server may finish
+		// the response after the test command has exited.
+		closeExchange = sess.OpenExchange(reqTs)
 		finalReq := append([]byte(nil), firstChunk.Bytes...)
 
 		// Complete the request: read more chunks until headers + body
@@ -221,6 +229,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// set during it must not leave out the next exchange's mock.
 			sess.MarkMockComplete()
 		}
+		closeExchange()
 	}
 }
 

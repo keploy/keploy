@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 )
@@ -474,4 +475,75 @@ func TestRecordV2_ObserveOnly_NoBodyResponseReadInPartIsRecordedAsAWholeOne(t *t
 	if (wholeErr == nil) != (readErr == nil) || len(whole) != len(read) {
 		t.Errorf("whole: %d mock(s), err %v; read in part: %d mock(s), err %v; want the same outcome", len(whole), wholeErr, len(read), readErr)
 	}
+}
+
+// An exchange is open from its request until its mock is emitted, so a
+// recording's stop waits for a response the server finishes after the test
+// command has exited (Session.OpenExchange). It was not: the last test of an
+// enterprise-ui lane lost its event stream, which the server ended 2.4 s after
+// the run, when the mock set had been saved.
+func TestRecordV2_ExchangeOpenUntilItsMockIsEmitted(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
+	ex := syncMock.New(zaptest.NewLogger(t))
+	sess.Mgr = ex
+	at := time.Now()
+	sendReq(versionRequest, at, at)
+	stop := at.Add(time.Millisecond) // the test command exits, the response is not in
+
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(context.Background(), sess) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !exchangeOpenBefore(ex, stop) {
+		if time.Now().After(deadline) {
+			t.Fatal("the exchange awaiting its response is not open")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	sendResp([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"), at.Add(2*time.Millisecond), at.Add(2*time.Millisecond))
+	closeReq()
+	closeResp()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recordV2: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s")
+	}
+	if len(mocks) != 1 {
+		t.Fatalf("%d mocks, want 1", len(mocks))
+	}
+	if exchangeOpenBefore(ex, stop) {
+		t.Fatal("the exchange is still open after its mock was emitted")
+	}
+}
+
+// An exchange the stream ends in without a response is closed too: nothing is
+// left for a stop to wait for.
+func TestRecordV2_ExchangeClosedWhenStreamEnds(t *testing.T) {
+	t.Parallel()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, _, closeResp, _ := newTestSession(t)
+	ex := syncMock.New(zaptest.NewLogger(t))
+	sess.Mgr = ex
+	at := time.Now()
+	sendReq(versionRequest, at, at)
+	closeReq()
+	closeResp()
+	if err := h.recordV2(context.Background(), sess); err != nil {
+		t.Fatalf("recordV2: %v", err)
+	}
+	if stop := at.Add(time.Millisecond); exchangeOpenBefore(ex, stop) {
+		t.Fatal("an exchange the stream ended in is still open")
+	}
+}
+
+// exchangeOpenBefore is whether m tells a stop at `stop` of an exchange still
+// open from before it.
+func exchangeOpenBefore(m *syncMock.SyncMockManager, stop time.Time) bool {
+	pending, _ := m.PendingBefore(stop)
+	return pending
 }

@@ -2745,9 +2745,9 @@ func (a *AgentClient) openTestErrorCapture(ctx context.Context, carry bool) erro
 
 // PendingBefore asks the agent whether it may still hand over a test case or a
 // mock captured before `before` (GET /agent/record/pending). known is false when
-// it cannot tell: an agent that predates the route, or a capture without a
-// watermark (proxy mode). A recording's stop then goes by its streams' quiet
-// alone.
+// it cannot tell: an agent that predates the route, or, before it told of its
+// open exchanges, a capture without a watermark (proxy mode). A recording's
+// stop then goes by its streams' quiet alone.
 func (a *AgentClient) PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error) {
 	if a.conf.Agent.AgentURI == "" {
 		return false, false, nil

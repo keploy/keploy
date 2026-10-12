@@ -289,16 +289,18 @@ func (m *SyncMockManager) NoteHeld(oldest time.Time) {
 }
 
 // PendingBefore reports whether this recording may still hand over a test case
-// or a mock captured before `before`, and whether that can be told at all (a
-// capture with a Backlog watermark): a test case held for its verdict, or a
-// capture reader or parser that has not got past it.
+// or a mock captured before `before`, and whether that can be told at all: a
+// test case held for its verdict, or a capture reader or parser that has not
+// got past it (a capture with a Backlog watermark). A capture with none, the
+// proxy's, tells of the exchanges its parsers have open (OpenExchange), for
+// OpenExchangeWait past `before`.
 func (m *SyncMockManager) PendingBefore(before time.Time) (pending, known bool) {
 	if m == nil {
 		return false, false
 	}
 	b, ok := m.Watermark().(Backlog)
 	if !ok {
-		return false, false
+		return m.exchanges.OpenBefore(before, time.Now()), true
 	}
 	if h := m.heldOldest.Load(); h != 0 && h <= before.UnixNano() {
 		return true, true
