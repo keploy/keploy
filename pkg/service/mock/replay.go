@@ -989,7 +989,7 @@ func bodySum(req models.HTTPReq) string {
 		body = req.BodyRef.Path
 	}
 	for _, f := range req.Form {
-		body += "\x00" + f.Key + "\x00" + strings.Join(f.Values, "\x00") + "\x00" + strings.Join(f.FileNames, "\x00")
+		body += "\x00" + f.Key + "\x00" + strings.Join(f.Values, "\x00") + "\x00" + strings.Join(f.FileNames, "\x00") + "\x00" + strings.Join(f.Paths, "\x00")
 	}
 	if body == "" {
 		return ""

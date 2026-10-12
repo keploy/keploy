@@ -52,6 +52,7 @@ type book struct {
 	free   map[string]struct{}
 	owners map[string][]int
 	key    []string
+	path   []string
 	group  map[string][]int
 }
 
@@ -766,7 +767,7 @@ func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 		f.used = make([]bool, len(cases))
 		f.open = map[int]int{}
 	}
-	i := pickCase(cases, f.used, method, rawURL)
+	i := pickCase(r.books[set][f.place], f.used, method, rawURL)
 	if i >= 0 {
 		f.used[i] = true
 		f.last = 0
@@ -826,9 +827,10 @@ func (r *Registry) alive(pid uint32, born time.Time) bool {
 }
 
 func bookOf(cases []models.Case, owned []models.Owned) *book {
-	b := &book{free: map[string]struct{}{}, owners: map[string][]int{}, key: make([]string, len(cases)), group: map[string][]int{}}
+	b := &book{free: map[string]struct{}{}, owners: map[string][]int{}, key: make([]string, len(cases)), path: make([]string, len(cases)), group: map[string][]int{}}
 	for i, c := range cases {
 		b.key[i] = exactKey(c.Method, c.URL)
+		b.path[i] = pathKey(c.Method, c.URL)
 		b.group[b.key[i]] = append(b.group[b.key[i]], i)
 		for _, n := range c.Mocks {
 			b.owners[n] = append(b.owners[n], i)
@@ -842,13 +844,27 @@ func bookOf(cases []models.Case, owned []models.Owned) *book {
 	return b
 }
 
-func pickCase(cases []models.Case, used []bool, method, rawURL string) int {
-	for _, key := range []func(string, string) string{exactKey, pathKey} {
-		want := key(method, rawURL)
-		for i, c := range cases {
-			if !used[i] && key(c.Method, c.URL) == want {
+func pickCase(b *book, used []bool, method, rawURL string) int {
+	if b == nil {
+		return -1
+	}
+	for _, pass := range []struct {
+		keys []string
+		key  func(string, string) string
+	}{{b.key, exactKey}, {b.path, pathKey}} {
+		want := pass.key(method, rawURL)
+		seen := false
+		for i, k := range pass.keys {
+			if k != want || i >= len(used) {
+				continue
+			}
+			if !used[i] {
 				return i
 			}
+			seen = true
+		}
+		if seen {
+			return -1
 		}
 	}
 	return -1

@@ -552,7 +552,7 @@ func TestPickCaseKeys(t *testing.T) {
 		{"GET", "/q?y=2&x=1", 2},
 		{"POST", "/q?x=1&y=2", -1},
 	} {
-		if got := pickCase(cases, make([]bool, len(cases)), c.method, c.url); got != c.want {
+		if got := pickCase(bookOf(cases, nil), make([]bool, len(cases)), c.method, c.url); got != c.want {
 			t.Errorf("%s %s pairs with %d, want %d", c.method, c.url, got, c.want)
 		}
 	}
@@ -655,4 +655,24 @@ func TestATestOpenDuringAPlacelessRequestIsServedWholeAfterIt(t *testing.T) {
 	end := r.Exchange(0, "GET", "/a")
 	defer end()
 	sees(t, r, 101, "the next GET /a, once the other package is gone", "fx", "m1", "m2", "m3")
+}
+
+func TestAnExtraPollDoesNotTakeALaterCaseByItsPath(t *testing.T) {
+	_, r := oneTest(map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "j1"}, {Name: "j1b"}, {Name: "j2"}, {Name: "j3"}}},
+		Cases: map[string][]models.Case{"T": {
+			{Name: "test-1", Method: "GET", URL: "/jobs/1", Mocks: []string{"j1"}},
+			{Name: "test-2", Method: "GET", URL: "/jobs/1", Mocks: []string{"j1b"}},
+			{Name: "test-3", Method: "GET", URL: "/jobs/2", Mocks: []string{"j2"}},
+			{Name: "test-4", Method: "GET", URL: "/jobs/3", Mocks: []string{"j3"}},
+		}},
+	}})
+	r.Exchange(0, "GET", "/jobs/1")()
+	r.Exchange(0, "GET", "/jobs/1")()
+	end := r.Exchange(0, "GET", "/jobs/1")
+	sees(t, r, 101, "a third poll of /jobs/1", "j1", "j1b", "j2", "j3")
+	end()
+	end = r.Exchange(0, "GET", "/jobs/2")
+	defer end()
+	sees(t, r, 101, "GET /jobs/2", "j2")
 }
