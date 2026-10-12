@@ -779,3 +779,21 @@ func TestPairNamesTheCaseARequestIsPairedWith(t *testing.T) {
 		}
 	}
 }
+
+func TestARequestToASecondAppOfTheTestTakesNoCaseOfItsOwn(t *testing.T) {
+	f, r := oneTest(caseTable())
+	r.Ready(101, 8080, at(3))
+	f.spawn(102, 100, at(4), "/tmp/pricing")
+	r.Ready(102, 9000, at(5))
+	name, end := r.Pair(9000, "GET", "/status/1")
+	sees(t, r, 101, "the shop while the pricing app answers a call no case recorded", "fx", "m1", "m2", "m3")
+	end()
+	if name != "" {
+		t.Fatalf("paired with %q", name)
+	}
+	name, end = r.Pair(8080, "GET", "/a")
+	defer end()
+	if name != "test-1" {
+		t.Fatalf("the shop's first request paired with %q, want test-1", name)
+	}
+}
