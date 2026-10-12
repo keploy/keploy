@@ -14,7 +14,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
-	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -256,10 +255,7 @@ func TestThisKernelsBTFLoads(t *testing.T) {
 // The agent's objects load on this kernel as load() loads them (hookSpec,
 // hookLoadOptions): the call that failed where cilium/ebpf could not read the
 // kernel's BTF, since each object's CO-RE relocations are applied against it.
-// Then tracefsMounted must agree with cilium/ebpf's own tracefs lookup:
-// attaching to an event no kernel has fails with "neither debugfs nor tracefs
-// are mounted" exactly where that lookup finds no tracefs. Nothing is left
-// attached. Needs root.
+// Nothing is attached. Needs root.
 func TestTheHooksLoadOnThisKernel(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("loading the agent's eBPF objects needs root")
@@ -279,20 +275,8 @@ func TestTheHooksLoadOnThisKernel(t *testing.T) {
 		}
 		t.Fatalf("the hooks do not load on this kernel (%s): %v", kernelRelease(), err)
 	}
-	defer func() {
-		if err := objs.Close(); err != nil {
-			t.Errorf("close the hooks: %v", err)
-		}
-	}()
-
-	l, err := link.Tracepoint("syscalls", "keploy_no_such_event", objs.SyscallProbeEntrySocket, nil)
-	if err == nil {
-		_ = l.Close()
-		t.Fatal("a tracepoint attached to an event that does not exist")
-	}
-	missing := strings.Contains(err.Error(), "neither debugfs nor tracefs are mounted")
-	if mounted := tracefsMounted(); mounted == missing {
-		t.Fatalf("tracefsMounted() = %v, and cilium/ebpf's own lookup says: %v", mounted, err)
+	if err := objs.Close(); err != nil {
+		t.Fatalf("close the hooks: %v", err)
 	}
 }
 

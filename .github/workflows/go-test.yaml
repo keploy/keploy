@@ -125,17 +125,20 @@ jobs:
 
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
-      # objects against this kernel's BTF, as the agent does, and holds
-      # tracefsMounted to cilium/ebpf's own tracefs lookup. Built as the runner
-      # user, run as root, and the PASS lines grepped, so a test that skips or
-      # vanishes fails the step.
+      # objects against this kernel's BTF, as the agent does, and
+      # TestTracefsMountedAgreesWithCiliumInEveryLayout holds tracefsMounted to
+      # cilium/ebpf's own tracefs lookup in five mount layouts, each built in a
+      # mount namespace of its own. Built as the runner user, run as root, and
+      # each PASS line grepped, so a test or layout that skips or vanishes
+      # fails the step.
       - name: Hooks tests as root
         shell: bash
         run: |
           go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
           cd pkg/agent/hooks/linux
-          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run 'TestTheHooksLoadOnThisKernel|TestThisKernelsBTFLoads|TestKernelBTFWithALayoutSectionLoads|TestTracefsInMountinfo' | tee /tmp/hooks-linux.out
-          for t in TestTheHooksLoadOnThisKernel TestThisKernelsBTFLoads TestKernelBTFWithALayoutSectionLoads TestTracefsInMountinfo; do
+          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout)$' | tee /tmp/hooks-linux.out
+          for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout \
+            TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
             grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
           done
 
