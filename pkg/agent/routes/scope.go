@@ -80,6 +80,14 @@ type scopeGate interface {
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
+
+// scopeClock installs and answers each scope's recorded start
+// (models.ScopeAck.ClockBase).
+type scopeClock interface {
+	SetScopeClock(bases map[string]string)
+	ScopeClockBase(name string) string
+}
+
 type scopeTableSetter interface {
 	SetScopeTable(ctx context.Context, table map[string][]string, strict bool) error
 }
@@ -133,6 +141,11 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		// "status" is kept so a runner written against the original contract is
 		// unaffected; scoped/mocks/reason say whether the call did anything.
 		ack.Status = "ok"
+		// At record the window's own start is already set; at replay it is
+		// the start this scope's mocks were recorded under.
+		if c, ok := a.svc.(scopeClock); ok && ack.ClockBase == "" {
+			ack.ClockBase = c.ScopeClockBase(req.Name)
+		}
 		render.Status(r, http.StatusOK)
 		render.JSON(w, r, ack)
 		return
@@ -222,6 +235,9 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		if err := s.SetScopeTable(r.Context(), req.Mappings, req.Strict); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if c, ok := a.svc.(scopeClock); ok {
+			c.SetScopeClock(req.ClockBases)
 		}
 	}
 	render.Status(r, http.StatusOK)

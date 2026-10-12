@@ -107,7 +107,9 @@ type ComposeAgentFailureReader interface {
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopePusher interface {
-	PushScopeTable(ctx context.Context, table map[string][]string, strict bool) error
+	// clock is, per scope, the start its mocks were recorded under
+	// (models.ScopeClockBases); nil when the recording carries none.
+	PushScopeTable(ctx context.Context, table map[string][]string, strict bool, clock map[string]string) error
 }
 
 // ScopeGatePusher is an optional Instrumentation extension: Replay uses it to

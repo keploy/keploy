@@ -137,3 +137,51 @@ func TestHandleScopeBeginForwardsAttempt(t *testing.T) {
 		t.Fatalf("attempt: got %d, want 2 -- the handler dropped the retry field", svc.gotAttempt)
 	}
 }
+
+// clockScopeSvc answers begin with no clock of its own (as a replay does) and
+// holds the recorded starts the scope table installed.
+type clockScopeSvc struct {
+	stubScopeSvc
+	clock     map[string]string
+	gotTable  map[string][]string
+	gotStrict bool
+}
+
+func (s *clockScopeSvc) SetScopeClock(bases map[string]string) { s.clock = bases }
+func (s *clockScopeSvc) ScopeClockBase(name string) string     { return s.clock[name] }
+func (s *clockScopeSvc) SetScopeTable(_ context.Context, table map[string][]string, strict bool) error {
+	s.gotTable, s.gotStrict = table, strict
+	return nil
+}
+
+func TestHandleScopeTableInstallsTheRecordedClock(t *testing.T) {
+	svc := &clockScopeSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	body := `{"mappings":{"t1":["mock-1"]},"clockBases":{"t1":"2026-10-12T13:00:00.123Z"}}`
+	rr := httptest.NewRecorder()
+	a.HandleScopeTable(rr, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if svc.gotTable["t1"][0] != "mock-1" {
+		t.Fatalf("table not installed: %v", svc.gotTable)
+	}
+	if svc.clock["t1"] != "2026-10-12T13:00:00.123Z" {
+		t.Fatalf("clock bases not installed: %v", svc.clock)
+	}
+}
+
+func TestHandleScopeBeginAnswersTheRecordedClockAtReplay(t *testing.T) {
+	svc := &clockScopeSvc{clock: map[string]string{"alpha": "2026-10-12T13:00:00.123Z"}}
+	svc.ack = models.ScopeAck{Scoped: true, Reason: models.ScopeReasonPoolRestricted}
+	_, got := postScopeBegin(t, svc, `{"name":"alpha"}`)
+	if got["clock_base"] != "2026-10-12T13:00:00.123Z" {
+		t.Fatalf("clock_base: got %v, want the start alpha's mocks were recorded under", got["clock_base"])
+	}
+
+	svc.ack = models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened, ClockBase: "2026-10-12T14:00:00.000Z"}
+	_, got = postScopeBegin(t, svc, `{"name":"alpha"}`)
+	if got["clock_base"] != "2026-10-12T14:00:00.000Z" {
+		t.Fatalf("a begin that sets its own clock (record) must keep it, got %v", got["clock_base"])
+	}
+}

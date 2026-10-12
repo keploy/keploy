@@ -278,15 +278,21 @@ func (a *Agent) BeginScopeAck(ctx context.Context, name string, pid, attempt int
 	a.scopeMu.Lock()
 	_, alreadyOpen := a.workerOpen[scopeKey{pid: uint32(pid), name: name}]
 	a.scopeMu.Unlock()
-	a.openWindow(name, pid, at)
+	start := boundaryTime(at)
+	a.openWindow(name, pid, start)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid), zap.Bool("already_open", alreadyOpen), zap.Int("attempt", attempt))
 	// attempt is echoed but changes nothing at record: recording has no served
 	// pool to un-consume, and a retried test simply opens a second window under
 	// the same name, which correlateScopes already handles.
+	//
+	// ClockBase is this window's start, the same instant the window's captures
+	// are stamped with (models.ScopeStartMetadataKey), so a replay hands the
+	// harness back exactly this value.
+	clock := models.FormatScopeStart(start)
 	if alreadyOpen {
-		return models.ScopeAck{Reason: models.ScopeReasonRecordAlreadyOpen, Attempt: attempt}, nil
+		return models.ScopeAck{Reason: models.ScopeReasonRecordAlreadyOpen, Attempt: attempt, ClockBase: clock}, nil
 	}
-	return models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened, Attempt: attempt}, nil
+	return models.ScopeAck{Reason: models.ScopeReasonRecordWindowOpened, Attempt: attempt, ClockBase: clock}, nil
 }
 
 // BeginScopeAt is BeginScopeAck for a runner that sends no attempt and does not
@@ -439,15 +445,22 @@ func (a *Agent) stageSpecSetup(ctx context.Context, spec, why string) error {
 // stamps ReqTimestampMock). "" is the unowned namespace and keeps the legacy
 // mock-N naming, so every un-scoped recording is unaffected.
 func (a *Agent) resolveOwner(pid uint32, ts time.Time) string {
+	owner, _ := a.resolveOwnerWindow(pid, ts)
+	return owner
+}
+
+// resolveOwnerWindow is resolveOwner with the start of the window it chose, so
+// a capture can carry its scope's clock (models.ScopeStartMetadataKey).
+func (a *Agent) resolveOwnerWindow(pid uint32, ts time.Time) (string, time.Time) {
 	if ts.IsZero() {
-		return ""
+		return "", time.Time{}
 	}
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
 
 	// sameWorkerOnly restricts the scan to windows this worker opened. Scope
 	// names are non-empty (BeginScope rejects ""), so "" is a safe sentinel.
-	scan := func(sameWorkerOnly bool) string {
+	scan := func(sameWorkerOnly bool) (string, time.Time) {
 		best := ""
 		var bestStart time.Time
 		for _, w := range a.scopeWindows {
@@ -472,32 +485,25 @@ func (a *Agent) resolveOwner(pid uint32, ts time.Time) string {
 				best, bestStart = k.name, start
 			}
 		}
-		return best
+		return best, bestStart
 	}
 
+	// A match that is only the spec's own `__suite__` window is not a decision:
+	// that window spans the whole spec, so it contains every gap between tests.
+	// The same worker's test window wins; the suite is the fallback.
 	var owner string
+	var start time.Time
 	if pid != 0 {
-		// Same rule as below: a `__suite__` hit is not a decision, because that
-		// window spans the whole spec and therefore contains every inter-test
-		// gap. Keep it as the fallback and let the grace try first.
-		if o := scan(true); o != "" && !strings.HasPrefix(o, "__suite__:") {
-			return o
+		if o, st := scan(true); o != "" && !strings.HasPrefix(o, "__suite__:") {
+			return o, st
 		} else if o != "" {
-			owner = o
+			owner, start = o, st
 		}
 	}
 	if owner == "" {
-		owner = scan(false)
+		owner, start = scan(false)
 	}
-	// A match that is only the spec's own `__suite__` window is NOT a decision:
-	// that window spans the whole spec, so it contains every gap between tests.
-	// Fall through to the trailing grace first and let a test that just closed
-	// claim its own late capture; the suite stays the fallback below.
-	if owner != "" && !strings.HasPrefix(owner, "__suite__:") {
-		return owner
-	}
-
-	return owner
+	return owner, start
 }
 
 // resetConsumedForScope un-consumes exactly the mocks that belong to `name`, so
@@ -749,4 +755,20 @@ func (a *Agent) ScopeRun(name string) (bool, string) {
 		n = n[:i]
 	}
 	return false, a.gateReason
+}
+
+// SetScopeClock installs, per scope, the start its mocks were recorded under
+// (models.ScopeTableReq.ClockBases), answered at begin as ScopeAck.ClockBase.
+// nil clears it: a recording made before the stamp hands the harness nothing.
+func (a *Agent) SetScopeClock(bases map[string]string) {
+	a.scopeMu.Lock()
+	a.scopeClock = bases
+	a.scopeMu.Unlock()
+}
+
+// ScopeClockBase is the recorded start of scope name at replay, or "".
+func (a *Agent) ScopeClockBase(name string) string {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.scopeClock[name]
 }

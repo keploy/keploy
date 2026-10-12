@@ -252,7 +252,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
+	m.pushScopeTable(ctx, name, filtered, unfiltered)
 	gate := m.pushScopeGate(ctx, name, digest)
 
 	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
@@ -705,7 +705,7 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
+func (m *mockService) pushScopeTable(ctx context.Context, name string, pools ...[]*models.Mock) {
 	if m.mappingDB == nil {
 		return
 	}
@@ -728,7 +728,10 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 		}
 		table[testName] = names
 	}
-	if err := pusher.PushScopeTable(ctx, table, m.config.Mock.StrictScope); err != nil {
+	// Each scope's recorded start, so the harness pins a test's clock where it
+	// was at record (models.ScopeStartMetadataKey).
+	clock := models.ScopeClockBases(table, pools...)
+	if err := pusher.PushScopeTable(ctx, table, m.config.Mock.StrictScope, clock); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return
 	}

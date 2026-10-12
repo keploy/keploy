@@ -143,6 +143,7 @@ type Agent struct {
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
 	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
+	scopeClock   map[string]string   // replay: scope name -> recorded start (models.ScopeClockBases)
 	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -593,7 +594,11 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 					return
 				}
 				if mk != nil {
-					mk.Owner = a.resolveOwner(mk.SourcePID, mk.Spec.ReqTimestampMock)
+					owner, start := a.resolveOwnerWindow(mk.SourcePID, mk.Spec.ReqTimestampMock)
+					mk.Owner = owner
+					// The owning scope's start, which its begin handed the
+					// harness as ClockBase; a replay hands it back from here.
+					models.StampScopeStart(mk, models.FormatScopeStart(start))
 				}
 				select {
 				case <-ctx.Done():

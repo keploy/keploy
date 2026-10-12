@@ -288,6 +288,12 @@ type ScopeAck struct {
 	// consumed nothing yet — e.g. the previous attempt failed before its first
 	// outgoing call.
 	RestoredMocks int `json:"restored_mocks,omitempty"`
+	// ClockBase is the time this scope's clock starts at, FormatScopeStart: at
+	// record the scope's own window start, at replay the start its mocks were
+	// recorded under (ScopeTableReq.ClockBases). A harness that pins its clock
+	// pins each scope here, so a test reads the real time it ran at record, and
+	// the same time at replay. Empty when the agent has none for the scope.
+	ClockBase string `json:"clock_base,omitempty"`
 }
 
 // Reason values for ScopeAck. Stable tokens — test runners branch on them.
@@ -322,8 +328,11 @@ const (
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
-	Root     string              `json:"root,omitempty"`
-	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// ClockBases is, per scope, the start its own mocks were recorded under
+	// (ScopeClockBases); the agent answers it as ScopeAck.ClockBase at begin.
+	ClockBases map[string]string   `json:"clockBases,omitempty"`
+	Root       string              `json:"root,omitempty"`
+	Sets       map[string]SetTable `json:"sets,omitempty"`
 	// Strict makes a test with no recording serve NOTHING but the mocks no test
 	// owns, instead of leaving the whole pool armed. Opt-in: integration testing
 	// deliberately lets one test's recording answer another's request, and that
