@@ -879,7 +879,7 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 		return false
 	}
 	mapping, err := reader.GetMapping(ctx, name)
-	if err != nil || mapping == nil || len(mapping.Boots) == 0 {
+	if err != nil || mapping == nil || len(mapping.Boots) == 0 && len(mapping.Suites) == 0 {
 		return false
 	}
 	root := gitTop()
