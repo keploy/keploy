@@ -107,7 +107,7 @@ func newInstr(t *testing.T, lifetime agentLifetime, runBlocks bool, runResult mo
 		f.mu.Unlock()
 		if !f.agentUp() {
 			// In reality nothing is listening at all and the probe gets a
-			// connection refusal; both are "not healthy" to isAgentHealthy,
+			// connection refusal; both are "not healthy" to agentHealthAnswer,
 			// and a served 503 avoids racing a listener open and closed.
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
