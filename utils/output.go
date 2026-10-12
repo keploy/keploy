@@ -7,6 +7,12 @@ import (
 	"os"
 )
 
+// RunnerOut, when set, also receives the stdout of the next runner
+// ExecuteCommand starts (see teeRunnerOut). `keploy mock replay` sets it just
+// before the call that starts the runner and waits for it to exit, and clears
+// it after; nothing else reads it.
+var RunnerOut io.Writer
+
 type JSONWriter struct {
 	enabled bool
 	out     io.Writer

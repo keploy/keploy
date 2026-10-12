@@ -179,9 +179,9 @@ func TestRepeatedScope(t *testing.T) {
 	}{
 		{"one run each", flowMarks(), true, ""},
 		{"a test began twice over a recording that existed", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond)), true,
-			"Recording stopped: TestA ran 2 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=2), then run keploy mock record again.\nNothing was changed: your previous recording is kept."},
+			"TestA ran 2 times in orders/e2e; each test in a folder needs its own name. Rename one of them (or drop -count=2). Nothing was changed: your previous recording is kept."},
 		{"a test began three times in a new set", append(sequentialMarks(), mark("orders/e2e.TestA", 30*time.Millisecond, 40*time.Millisecond), mark("orders/e2e.TestA", 50*time.Millisecond, 60*time.Millisecond)), false,
-			"Recording stopped: TestA ran 3 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=3), then run keploy mock record again.\nNothing was saved."},
+			"TestA ran 3 times in orders/e2e; each test in a folder needs its own name. Rename one of them (or drop -count=3). Nothing was saved."},
 		{"the same subtest name under two tests is fine", []models.ScopeWindow{mark("p.TestA", 0, 1), mark("p.TestA/one", 0, 1), mark("p.TestB", 2, 3), mark("p.TestB/one", 2, 3)}, true, ""},
 		{"the same name in two packages is fine", []models.ScopeWindow{mark("a.TestX", 0, 1), mark("b.TestX", 2, 3)}, true, ""},
 	} {

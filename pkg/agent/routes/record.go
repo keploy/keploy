@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -646,7 +647,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				}
 				// Read once: the warning and the summary say the same.
 				leftOutInFlight := leftOut.LeftOut()
-				if leftOutInFlight > 0 {
+				if leftOutInFlight > 0 && mismatch.MockMode() {
+					a.logger.Warn(fmt.Sprintf("%d incoming requests were still open when their calls had to be dropped; they are not in the recording", leftOutInFlight), log.Show)
+				} else if leftOutInFlight > 0 {
 					// Never captured, so never counted above: each stayed in
 					// flight while the mocks the agent held for the requests
 					// in flight passed their budget, or memory pressure let

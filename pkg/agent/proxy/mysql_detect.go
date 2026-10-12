@@ -58,6 +58,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -65,8 +66,10 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -610,7 +613,10 @@ func (p *Proxy) probeMysql(
 			// Bookkeeping only — this must not grant the fast path, or one
 			// inference would route every later connection on this port to the
 			// MySQL replayer without re-checking that the client is silent.
-			if p.mysqlPorts.LearnInferred(dstAddr) {
+			learned := p.mysqlPorts.LearnInferred(dstAddr)
+			if learned && mismatch.MockMode() {
+				logger.Warn(fmt.Sprintf("serving recorded MySQL calls to %s, a port the recording did not use (recorded ports: %v); to pin it, set mysqlPorts in keploy.yml", dstAddr, derived), log.Show)
+			} else if learned {
 				logger.Warn("serving MySQL mocks on a port the recording never saw: the replayed application connects to a different endpoint than it did at record time. Set mysqlPorts in keploy.yml to pin the mapping, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here.",
 					zap.Uint32("port", port),
 					zap.String("dstAddr", dstAddr),

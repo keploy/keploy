@@ -46,6 +46,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -89,6 +90,16 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+
+	mock      bool
+	agentLog  string
+	agentFile *os.File
+	tail      *agentTail
+	logMu     sync.Mutex
+	failed    bool
+	dropped   bool
+	named     bool
+	slow      *time.Timer
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -321,6 +332,10 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 				// End of the stream or connection closed during shutdown
 				break
 			}
+			if a.mock {
+				utils.LogError(a.logger, err, "could not read a recorded request from keploy's agent")
+				break
+			}
 			utils.LogError(a.logger, err, "failed to decode test case from stream")
 			break
 		}
@@ -477,6 +492,10 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		case mockChan <- &mock:
 			// Send the decoded mock to the channel
 		case <-time.After(mockHandoffGrace):
+			if a.mock {
+				utils.LogError(a.logger, nil, fmt.Sprintf("one %s call (%s) was not saved: keploy did not take it from its agent within %s", mock.Kind, mock.Name, mockHandoffGrace))
+				return true
+			}
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
@@ -526,7 +545,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		if closeErr := res.Body.Close(); closeErr != nil {
 			utils.LogError(a.logger, closeErr, "failed to close response body for getmappings")
 		}
-		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings",
+		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings", log.Hide,
 			zap.String("consequence", "replay falls back to timestamp-based mock filtering for this recording"),
 			zap.String("remedy", "upgrade the agent image to one built from keploy #3715 or later"))
 		noMappings := make(chan models.TestMockMapping)
@@ -1439,7 +1458,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
+			utils.LogError(a.logger, appErr.Err, "error while running the app", log.Hide)
 		}
 		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
@@ -1675,7 +1694,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
-	if elevates && agentUtils.NeedsPTY() && !sudoCached {
+	pty, sudoCached, err := a.sudoRoute(elevates, sudoCached)
+	if err != nil {
+		return err
+	}
+	if pty {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited)
 	}
 
@@ -1683,8 +1706,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := agentUtils.NewAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
@@ -1692,6 +1714,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		utils.LogError(a.logger, err, "failed to start keploy agent")
+		a.endAgentLog(false)
 		return err
 	}
 
@@ -1707,8 +1730,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// when it sees that cancellation.
 		exited <- err
 		// If ctx wasn't cancelled, bubble up unexpected exits
+		a.endAgentLog(ctx.Err() != nil)
 		if err != nil && ctx.Err() == nil {
-			a.logger.Error("agent process exited with error", zap.Error(err))
+			a.logger.Error("agent process exited with error", zap.Error(err), log.Hide)
 			return err
 		}
 		a.mu.Lock()
@@ -1902,6 +1926,9 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 		// Agent context cancelled or agent stopped
 		if errors.Is(agentCtx.Err(), context.Canceled) {
 			a.logger.Info("Agent was stopped intentionally")
+		} else if a.mock {
+			a.logger.Error("keploy's agent exited before the run ended; this run's results are incomplete")
+			a.sayAgentLog()
 		} else {
 			a.logger.Error("Agent stopped unexpectedly, client operations may be affected", zap.String("next_step", "check agent logs for panic/oom, ensure required capabilities/permissions, or rerun with --debug and verify the agent binary is compatible with the CLI"))
 		}
@@ -1933,13 +1960,19 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 		}
 	}
 	if cause == nil {
+		a.sayAgentLog()
 		if exitErr == nil {
 			return errors.New("the keploy agent exited before it became ready")
 		}
 		return fmt.Errorf("the keploy agent exited before it became ready: %w", exitErr)
 	}
 	utils.SetExitCodeOnce(utils.ExitCodeFor(cause))
-	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", agentStartRemedy(cause, isDockerCmd, runtime.GOOS)))
+	remedy := agentStartRemedy(cause, isDockerCmd, runtime.GOOS)
+	if a.agentLog != "" {
+		remedy = strings.ReplaceAll(strings.ReplaceAll(remedy, "The agent's log above", "The agent's log"), "the agent's log above", "the agent's log")
+	}
+	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", remedy))
+	a.sayAgentLog()
 	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
 }
 
@@ -2134,7 +2167,11 @@ func (a *AgentClient) checkDockerModePrivileges(opts models.SetupOptions) error 
 		return a.dockerModeRefused(err, perfEventParanoidRemedy)
 	}
 	if err != nil {
-		a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		if a.mock {
+			a.logger.Error("could not set /proc/sys/kernel/perf_event_paranoid", zap.Error(err))
+		} else {
+			a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		}
 	}
 	return err
 }
@@ -2208,6 +2245,7 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	a.mock = opts.MockMode
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -2336,7 +2374,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		if err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts); err != nil {
+		err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts)
+		a.agentReady()
+		if err != nil {
 			return err
 		}
 	}
@@ -2368,6 +2408,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if !isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
 		certPEM, caErr := a.fetchAgentCA(ctx)
 		if caErr != nil {
+			if a.mock {
+				utils.LogError(a.logger, caErr, "keploy's agent did not hand over its TLS certificate")
+				a.sayAgentLog()
+				return caErr
+			}
 			utils.LogError(a.logger, caErr, "failed to fetch the agent's CA certificate; the app would not trust keploy's MITM leaves",
 				zap.String("next_step", "ensure the agent started cleanly (check the agent log for a SetupCA error) and retry"))
 			return caErr
@@ -2598,15 +2643,16 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
-	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
-	if agentUtils.NeedsPTY() {
+	if agentUtils.NeedsPTY() && (!a.mock || a.conf.Debug || strings.Contains(cmd.String(), "sudo ")) {
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = a.agentOutput()
+	a.watchStart()
 
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	a.endAgentLog(ctx.Err() != nil)
+	if err != nil {
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Keploy agent in docker stopped gracefully.")

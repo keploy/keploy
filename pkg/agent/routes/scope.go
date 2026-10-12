@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -311,7 +313,11 @@ func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
 		placed = starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
 	}
 	if !placed {
-		a.logger.Warn("the app could not be placed under a test process; mark the suite or test before starting the app, and start the app as a child process, or its calls are treated as a dependency's", zap.Int("pid", req.Pid))
+		if mismatch.MockMode() {
+			a.logger.Warn(fmt.Sprintf("app process %d started outside any test or suite mark; its outgoing calls are recorded as the test process's own. Start it after the suite mark, as a child of the test process", req.Pid), zap.Int("pid", req.Pid), log.Show)
+		} else {
+			a.logger.Warn("the app could not be placed under a test process; mark the suite or test before starting the app, and start the app as a child process, or its calls are treated as a dependency's", zap.Int("pid", req.Pid))
+		}
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})

@@ -6,8 +6,10 @@ import (
 	"time"
 
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -300,6 +302,10 @@ func (a *Agent) noteEndOfGated(name string, pid int) {
 	}
 	a.scopeMu.Unlock()
 	if warn {
+		if mismatch.MockMode() {
+			a.logger.Warn("--run-only: "+name+" ran although this replay told it to skip; it is reported as not run", zap.String("test", name), log.Show)
+			return
+		}
 		a.logger.Warn("the test runner's harness ended a test it was told to skip; it is recorded as not run, and what it did is not counted",
 			zap.String("test", name),
 			zap.String("next_step", `make the harness skip a test whose /agent/scope/begin answer says "action":"skip"`))
@@ -315,6 +321,10 @@ func (a *Agent) NoteUngatable(name string) {
 	a.gateWarned = true
 	a.scopeMu.Unlock()
 	if warned {
+		return
+	}
+	if mismatch.MockMode() {
+		a.logger.Warn("--run-only was ignored, so all tests ran: the test command's keploy helper cannot skip a test", zap.String("test", name), log.Show)
 		return
 	}
 	a.logger.Warn("this replay runs only some tests, but the test runner's harness cannot skip one, so every test runs",

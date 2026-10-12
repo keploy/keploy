@@ -327,6 +327,7 @@ func New() (*zap.Logger, *os.File, error) {
 	}
 
 	LogCfg = defaultLogCfg()
+	runFile.Store(logFile)
 
 	// Build the core with our custom encoder
 	sink := primarySyncer()
@@ -375,10 +376,11 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	if level == zap.DebugLevel {
 		LogCfg.DisableStacktrace = false
 		LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+		quiet.Store(false)
 	}
 
 	// Use our custom encoder when building
-	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
+	core := primaryCore(LogCfg, LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -397,7 +399,7 @@ func RedirectToStderr() (*zap.Logger, error) {
 	// (ChangeLogLevel / AddMode / ChangeColorEncoding) inherits stderr
 	// instead of resetting the logger back onto stdout.
 	setPrimarySink(os.Stderr)
-	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
+	core := primaryCore(LogCfg, LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -412,7 +414,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
 	}
 
-	core := consoleCore(cfg, primarySyncer(), cfg.Level)
+	core := primaryCore(cfg, cfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
@@ -432,7 +434,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	// would mean the post-encode RedactEncoded pass never runs in
 	// --disable-ansi mode and non-string zap fields (Any/Binary/Reflect)
 	// would leak from that path.
-	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
+	core := primaryCore(LogCfg, LogCfg.Level)
 	return reattachDebugFileSink(zap.New(newRedactingCore(core))), nil
 }
 

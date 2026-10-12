@@ -8,8 +8,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/utils"
 )
+
+func IsMockRun(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Parent() != nil && cmd.Parent().Name() == "mock" && (cmd.Name() == "record" || cmd.Name() == "replay")
+}
 
 func (c *CmdConfigurator) noCommandError() error {
 	return errors.New("missing required -c flag or appCmd in config file")
