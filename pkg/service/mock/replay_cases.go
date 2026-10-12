@@ -21,6 +21,7 @@ type CaseOutcome struct {
 	Flow    string
 	Case    *models.TestCase
 	Actual  *models.HTTPResp // nil when the runner did not make this request
+	Sent    time.Time
 	Passed  bool
 	Result  *models.Result
 	Skipped bool
@@ -198,6 +199,7 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 					used[j] = true
 					resp := a.HTTPResp
 					outs[i].Actual = &resp
+					outs[i].Sent = caseTime(a)
 					outs[i].Passed, outs[i].Result = compare(rc, &resp)
 					break
 				}

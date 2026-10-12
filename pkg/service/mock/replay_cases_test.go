@@ -60,6 +60,8 @@ func TestPairCasesMatchesByCallWithinTheTestAndReportsTheUnseen(t *testing.T) {
 	require.Equal(t, "post-orders-1", out[0].Case.Name)
 	require.True(t, out[0].Passed)
 	require.Equal(t, `{"id":"b"}`, out[0].Actual.Body, "the actual answer is kept next to the recorded one")
+	require.Equal(t, runnerT0.Add(10*time.Millisecond), out[0].Sent)
+	require.Equal(t, runnerT0.Add(20*time.Millisecond), out[1].Sent)
 	require.Equal(t, "get-orders-by-id-1", out[1].Case.Name)
 	require.True(t, out[1].Passed, "ids in the path do not stop a request from being recognised")
 	require.Equal(t, "get-orders-1", out[2].Case.Name)
@@ -69,6 +71,7 @@ func TestPairCasesMatchesByCallWithinTheTestAndReportsTheUnseen(t *testing.T) {
 	unseen := pairCases(replayWindows, recorded, nil, compare)
 	require.Len(t, unseen, 3)
 	require.Nil(t, unseen[0].Actual)
+	require.True(t, unseen[0].Sent.IsZero())
 	require.False(t, unseen[0].Passed)
 }
 
