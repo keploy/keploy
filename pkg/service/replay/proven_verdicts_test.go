@@ -843,3 +843,361 @@ func TestRunTestSet_AStreamedWrongAnswerIsNeverObsoleteUnderTheSwitch(t *testing
 		})
 	}
 }
+
+// clearEvidence is a hook that wipes the evidence against a test and passes it.
+func clearEvidence(name string, misses, unconsumed bool) func([]models.TestResult) {
+	return func(results []models.TestResult) {
+		for i := range results {
+			if results[i].TestCaseID != name {
+				continue
+			}
+			if misses {
+				results[i].FailureInfo.UnmatchedCalls = nil
+			}
+			if unconsumed {
+				results[i].FailureInfo.UnconsumedMocks = nil
+			}
+			results[i].FailureInfo.Category = nil
+			results[i].Status = models.TestStatusPassed
+		}
+	}
+}
+
+// A hook cannot sidestep the evidence floor: not by relabelling a test with
+// evidence against it to a status that is no verdict, and not by clearing the
+// evidence and passing it. The floor reads the evidence as the loop wrote it,
+// before the hook ran; the test stays FAILED, its set fails, and what the hook
+// cleared is put back, so the report says why.
+func TestRunTestSet_AHookCannotClearOrSidestepTheEvidence(t *testing.T) {
+	httpMiss := func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST payments/v1/charges"}}, nil
+	}
+	for _, tc := range []struct {
+		name       string
+		unconsumed bool // the evidence is an unconsumed test mock, not a miss
+		hook       func([]models.TestResult)
+	}{
+		{"a miss, relabelled PENDING", false, setStatus("test-2", models.TestStatusPending)},
+		{"a miss, cleared and passed", false, clearEvidence("test-2", true, false)},
+		{"an unconsumed test mock, relabelled PENDING", true, setStatus("test-2", models.TestStatusPending)},
+		{"an unconsumed test mock, cleared and passed", true, clearEvidence("test-2", false, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			if tc.unconsumed {
+				// test-2 owns mock-2, which nothing consumes; test-1 owns none.
+				h.mocks.filtered = append(h.mocks.filtered, sessionTierHTTP("mock-2"))
+				h.mappings.onDisk = map[string][]models.MockEntry{"test-2": {{Name: "mock-2", Kind: string(models.HTTP)}}}
+			} else {
+				h.instr.mockErrorsFor = missesByTest(nil, httpMiss)
+			}
+			h.replayer.hookImpl = verdictHooks{set: tc.hook}
+			status := h.run(t)
+			got := resultOf(t, h, "test-2")
+			if got.Status != models.TestStatusFailed || status != models.TestSetStatusFailed {
+				t.Fatalf("test-2 %s, set %s; want FAILED, FAILED", got.Status, status)
+			}
+			if tc.unconsumed {
+				if len(got.FailureInfo.UnconsumedMocks) != 1 || !hasCategory(got, models.DependencyMissing) {
+					t.Fatalf("unconsumed %+v, categories %v; the evidence and its category must be put back", got.FailureInfo.UnconsumedMocks, got.FailureInfo.Category)
+				}
+				return
+			}
+			if len(got.FailureInfo.UnmatchedCalls) != 1 || !hasCategory(got, models.CallUnmatched) {
+				t.Fatalf("unmatched calls %+v, categories %v; the evidence and its category must be put back", got.FailureInfo.UnmatchedCalls, got.FailureInfo.Category)
+			}
+		})
+	}
+}
+
+// A status that is no verdict counts as failed: a hook that leaves a test
+// PENDING, with nothing against it, does not pass its set.
+func TestRunTestSet_AStatusThatIsNoVerdictFailsTheSet(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.hookImpl = verdictHooks{set: setStatus("test-1", models.TestStatusPending)}
+	if status := h.run(t); status != models.TestSetStatusFailed || h.report.report.Failure != 1 || h.report.report.Success != 1 {
+		t.Fatalf("set %s (passed %d, failed %d); want FAILED (1, 1): PENDING vouches for nothing", status, h.report.report.Success, h.report.report.Failure)
+	}
+}
+
+func TestVerdictCountsCountsAStatusThatIsNoVerdictAsFailed(t *testing.T) {
+	p, f, o, i := verdictCounts([]models.TestResult{
+		{TestCaseID: "a", Status: models.TestStatusPending},
+		{TestCaseID: "b", Status: models.TestStatus("MADE_UP")},
+		{TestCaseID: "c", Status: models.TestStatusPassed},
+		{TestCaseID: "c", Status: models.TestStatusRunning}, // the worst row of c
+	})
+	if p != 0 || f != 3 || o != 0 || i != 0 {
+		t.Fatalf("passed %d failed %d obsolete %d ignored %d; want 3 failed", p, f, o, i)
+	}
+}
+
+// A hook cannot make a test vanish from the tally: not by filtering its row
+// out in place, by renaming it, or by overwriting it with another test's.
+// The test is put back, FAILED, with the evidence against it, and the set
+// fails; a row the hook made up under a new name is FAILED too.
+func TestRunTestSet_AHookCannotRemoveATestWithEvidence(t *testing.T) {
+	httpMiss := func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST payments/v1/charges"}}, nil
+	}
+	for _, tc := range []struct {
+		name string
+		hook func([]models.TestResult)
+	}{
+		{"filtered out in place", func(results []models.TestResult) {
+			out := results[:0]
+			for _, r := range results {
+				if r.TestCaseID != "test-2" {
+					out = append(out, r)
+				}
+			}
+			_ = out // the caller's slice keeps its length: its tail is a duplicate
+		}},
+		{"renamed, cleared and passed", func(results []models.TestResult) {
+			for i := range results {
+				if results[i].TestCaseID == "test-2" {
+					results[i].TestCaseID = "test-x"
+					results[i].FailureInfo = models.FailureInfo{}
+					results[i].Status = models.TestStatusPassed
+				}
+			}
+		}},
+		{"overwritten with another test's row", func(results []models.TestResult) {
+			var one models.TestResult
+			for _, r := range results {
+				if r.TestCaseID == "test-1" {
+					one = r
+				}
+			}
+			for i := range results {
+				if results[i].TestCaseID == "test-2" {
+					results[i] = one
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 3, 0)
+			h.instr.mockErrorsFor = missesByTest(nil, httpMiss)
+			h.replayer.hookImpl = verdictHooks{set: tc.hook}
+			if status := h.run(t); status != models.TestSetStatusFailed || h.report.report.Failure < 1 {
+				t.Fatalf("set %s with %d failed; a test the hook removed must still fail its set", status, h.report.report.Failure)
+			}
+			got := resultOf(t, h, "test-2")
+			if got.Status != models.TestStatusFailed || len(got.FailureInfo.UnmatchedCalls) != 1 || !hasCategory(got, models.CallUnmatched) {
+				t.Fatalf("test-2 %s with %+v, categories %v; want it back, FAILED, with its miss", got.Status, got.FailureInfo.UnmatchedCalls, got.FailureInfo.Category)
+			}
+			for _, r := range h.report.report.Tests {
+				if r.TestCaseID == "test-x" && r.Status != models.TestStatusFailed {
+					t.Fatalf("a row the hook made up is %s; want FAILED", r.Status)
+				}
+			}
+		})
+	}
+}
+
+// Quarantine stays allowed, but the evidence a hook cleared, and its
+// category, are put back on the quarantined test.
+func TestRunTestSet_AQuarantinedTestKeepsItsEvidence(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.instr.mockErrorsFor = missesByTest(nil, func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /quotes"}}, nil
+	})
+	h.replayer.hookImpl = verdictHooks{set: func(results []models.TestResult) {
+		clearEvidence("test-2", true, true)(results)
+		setStatus("test-2", models.TestStatusIgnored)(results)
+	}}
+	h.run(t)
+	got := resultOf(t, h, "test-2")
+	if got.Status != models.TestStatusIgnored || len(got.FailureInfo.UnmatchedCalls) != 1 || !hasCategory(got, models.CallUnmatched) {
+		t.Fatalf("test-2 %s with %+v, categories %v; want IGNORED with its miss and UNMATCHED_CALL put back", got.Status, got.FailureInfo.UnmatchedCalls, got.FailureInfo.Category)
+	}
+}
+
+// A clean duplicate row of a test (an earlier cycle's) is left alone, and
+// evidence is not copied onto it; a row that kept its DNS lookups gets only
+// the data-plane misses back, once.
+func TestHoldEvidenceFloorTouchesOnlyRowsWithEvidence(t *testing.T) {
+	setSwitch(t, true)
+	results := []models.TestResult{
+		{TestCaseID: "t", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "h1"}}}},
+		{TestCaseID: "t", Status: models.TestStatusPassed},
+	}
+	out, held := holdEvidenceFloor(results, snapshotEvidence(results))
+	if len(held) != 0 || out[1].Status != models.TestStatusPassed || len(out[1].FailureInfo.UnmatchedCalls) != 0 {
+		t.Fatalf("held %v, clean row %+v; a hook that did nothing must hold nothing and leave the clean row as it was", held, out[1])
+	}
+
+	dns := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "d1"}
+	results = []models.TestResult{{TestCaseID: "u", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{dns, {Protocol: "HTTP", ActualSummary: "h1"}}}}}
+	before := snapshotEvidence(results)
+	results[0].FailureInfo.UnmatchedCalls = []models.UnmatchedCall{dns} // the hook kept only the lookup
+	results[0].Status = models.TestStatusPassed
+	out, _ = holdEvidenceFloor(results, before)
+	if got := out[0].FailureInfo.UnmatchedCalls; len(got) != 2 || got[0].ActualSummary != "d1" || got[1].ActualSummary != "h1" || out[0].Status != models.TestStatusFailed {
+		t.Fatalf("calls %+v, status %s; want the lookup once and the data-plane miss back, FAILED", got, out[0].Status)
+	}
+}
+
+// dupHooks makes test-2 pass its first run and fail its second (a retry
+// cycle's) on a simulate error with a miss, so the set has two rows of
+// test-2: the retry's FAILED one with the miss, and the first cycle's clean
+// PASSED one. set is the BeforeTestResult hook.
+type dupHooks struct {
+	prHooks
+	calls *atomic.Int32
+	armed *atomic.Bool
+	set   func([]models.TestResult)
+}
+
+func (h dupHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, s string) (interface{}, error) {
+	if tc.Name == "test-2" && h.calls.Add(1) == 2 {
+		h.armed.Store(true)
+		return nil, errors.New("connection reset by peer")
+	}
+	return h.prHooks.SimulateRequest(ctx, tc, s)
+}
+
+func (h dupHooks) BeforeTestResult(_ context.Context, _, _ string, results []models.TestResult) error {
+	if h.set != nil {
+		h.set(results)
+	}
+	return nil
+}
+
+func runWithDuplicateRows(t *testing.T, set func([]models.TestResult)) (*prRun, models.TestSetStatus) {
+	t.Helper()
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.RetryPassing = true
+	armed := &atomic.Bool{}
+	h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+		if armed.CompareAndSwap(true, false) {
+			return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST payments/v1/charges"}}, nil
+		}
+		return nil, nil
+	}
+	// test-1's wrong answer fails the first cycle, so a retry cycle runs.
+	h.replayer.hookImpl = dupHooks{prHooks: prHooks{wrongBody: map[string]bool{"test-1": true}}, calls: &atomic.Int32{}, armed: armed, set: set}
+	return h, h.run(t)
+}
+
+// A test with evidence counts FAILED unless all of it is quarantined, decided
+// over all its rows: quarantining the row with the miss while a clean
+// duplicate row stays PASSED does not count the test passed. A hook that does
+// nothing leaves the clean duplicate as it was, and is not blamed.
+func TestRunTestSet_ATestWithEvidenceIsDecidedOverAllItsRows(t *testing.T) {
+	t.Run("the hook quarantines the failed rows only", func(t *testing.T) {
+		h, status := runWithDuplicateRows(t, func(results []models.TestResult) {
+			for i := range results {
+				if results[i].Status == models.TestStatusFailed {
+					results[i].Status = models.TestStatusIgnored
+				}
+			}
+		})
+		if status != models.TestSetStatusFailed || h.report.report.Success != 0 {
+			t.Fatalf("set %s with %d passed; a test with a miss, partly quarantined, must count FAILED", status, h.report.report.Success)
+		}
+	})
+	t.Run("the hook does nothing", func(t *testing.T) {
+		h, status := runWithDuplicateRows(t, nil)
+		if status != models.TestSetStatusFailed {
+			t.Fatalf("set %s; want FAILED", status)
+		}
+		var clean int
+		for _, r := range h.report.report.Tests {
+			if r.TestCaseID == "test-2" && r.Status == models.TestStatusPassed && len(r.FailureInfo.UnmatchedCalls) == 0 {
+				clean++
+			}
+		}
+		if clean != 1 {
+			t.Fatalf("test-2's clean duplicate row was changed (rows %+v); a hook that did nothing must leave it", h.report.report.Tests)
+		}
+	})
+}
+
+// The same, as a hook could shape it: it clears and passes the row with the
+// evidence, quarantines the clean duplicate and moves it first. The test counts
+// FAILED, the evidence is back on the row that carries the verdict, and the
+// floor says it held the test.
+func TestHoldEvidenceFloorDecidesATestOverAllItsRows(t *testing.T) {
+	setSwitch(t, true)
+	results := []models.TestResult{
+		{TestCaseID: "t", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{
+			UnmatchedCalls: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "h1"}},
+			Category:       []models.FailureCategory{models.CallUnmatched}}},
+		{TestCaseID: "t", Status: models.TestStatusPassed},
+	}
+	before := snapshotEvidence(results)
+	a, b := results[0], results[1]
+	a.FailureInfo, a.Status = models.FailureInfo{}, models.TestStatusPassed
+	b.Status = models.TestStatusIgnored
+	results[0], results[1] = b, a
+	results, held := holdEvidenceFloor(results, before)
+	if _, f, _, _ := verdictCounts(results); f != 1 || len(held) != 1 {
+		t.Fatalf("failed %d, held %v; want the test FAILED and held", f, held)
+	}
+	if results[1].Status != models.TestStatusFailed || len(results[1].FailureInfo.UnmatchedCalls) != 1 || !hasCategory(results[1], models.CallUnmatched) {
+		t.Fatalf("verdict row %+v; want FAILED with the miss and its category", results[1])
+	}
+}
+
+// A test a hook removed comes back as it was quarantined when all of it was
+// quarantined before the hook (config-ignored), and FAILED otherwise; a test
+// put back is written to the report store, which the run's failed-test list
+// is read from.
+func TestRunTestSet_ARemovedTestIsPutBackAsItWas(t *testing.T) {
+	drop := func(name string) func([]models.TestResult) {
+		return func(results []models.TestResult) {
+			out := results[:0]
+			for _, r := range results {
+				if r.TestCaseID != name {
+					out = append(out, r)
+				}
+			}
+			_ = out
+		}
+	}
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
+	h.replayer.hookImpl = verdictHooks{set: drop("test-2")}
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("set %s; a quarantined test the hook dropped comes back quarantined, and the set passes", status)
+	}
+	if got := resultOf(t, h, "test-2"); got.Status != models.TestStatusIgnored {
+		t.Fatalf("test-2 %s; want IGNORED, as it was", got.Status)
+	}
+
+	h = newPartialRunHarness(t, 3, 0)
+	h.replayer.reportDB = sharedRowsDB{h.report}
+	h.instr.mockErrorsFor = missesByTest(nil, func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /quotes"}}, nil
+	})
+	h.replayer.hookImpl = verdictHooks{set: drop("test-2")}
+	h.run(t)
+	stored := 0
+	for _, r := range h.report.results {
+		if r.TestCaseID == "test-2" && r.Status == models.TestStatusFailed {
+			stored++
+		}
+	}
+	if stored == 0 {
+		t.Fatal("the test put back was not written to the report store")
+	}
+}
+
+// sharedRowsDB is prReportDB read the way the YAML report store (reportdb)
+// reads: its own rows, not a copy, so what a hook does to them in place is
+// what the store holds.
+type sharedRowsDB struct{ *prReportDB }
+
+func (s sharedRowsDB) GetTestCaseResults(context.Context, string, string) ([]models.TestResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.results, nil
+}
