@@ -2,6 +2,8 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -496,4 +500,150 @@ func TestRecordRequestsNeedNoAppPort(t *testing.T) {
 	opts, read := instr.setup()
 	require.True(t, opts.RecordRequests, "the tests' calls to the app are found at connect time, so no port is needed")
 	require.True(t, read)
+}
+
+// Under the proven switch a record leaves what each test did against real
+// infra, kept or not: a runner that failed makes the record restore the set
+// (here, remove a fresh one), and the per-test results are written after
+// that restore, so they survive it. With the switch off nothing is written.
+// A record whose command failed leaves its per-test results, and under the
+// switch keeps its recording: judging commits it test by test, keeping the
+// previous recording of the test that failed. With the switch off nothing is
+// kept, as before.
+func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			passed, failed := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
+			passed.Outcome, failed.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomeFailed
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
+				windows: []models.ScopeWindow{passed, failed}}
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			_ = svc.Record(context.Background())
+			set := (&mockService{config: cfg}).setName()
+			got, err := ReadRecordTestsReceipt(dir, set)
+			require.NoError(t, err)
+			if !proven {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got, "the per-test results were not left for judging")
+			require.Equal(t, []TestReceipt{
+				{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+				{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+			}, got.Tests)
+			_, err = os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+			require.NoError(t, err, "under the switch the recording is kept for judging to commit test by test")
+		})
+	}
+}
+
+// Under the switch a record that cannot read what each test did keeps
+// nothing, and fails saying so; with it off the record keeps its mocks with
+// no per-test windows, as before the switch existed.
+func TestARecordThatCannotReadItsTestsKeepsNothing(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+			instr.windowsErr = errors.New("connection reset by peer")
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			err := svc.Record(context.Background())
+			set := (&mockService{config: cfg}).setName()
+			_, statErr := os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+			if !proven {
+				require.NoError(t, err)
+				require.NoError(t, statErr, "the switch off: the mocks are kept")
+				return
+			}
+			require.ErrorContains(t, err, "keploy could not read what each test did from its agent, so nothing was kept")
+			require.True(t, os.IsNotExist(statErr), "a record that could not read its tests kept a recording")
+		})
+	}
+}
+
+// Under the switch a record whose tests made no call keeps them, as tests
+// with no mocks: judging needs their (empty) recordings. With the switch off
+// the existing set is left unchanged, as before.
+func TestARecordOfTestsWithoutCallsKeepsThemUnderTheSwitch(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			w := mark("orders::TestPure", 0, 10*time.Millisecond)
+			w.Outcome, w.Dir = models.ScopeOutcomePassed, "orders"
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+				windows: []models.ScopeWindow{w}}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			require.NoError(t, svc.Record(context.Background()))
+			set := (&mockService{config: cfg}).setName()
+			raw, err := os.ReadFile(filepath.Join(dir, set, "mappings.yaml"))
+			if !proven {
+				require.True(t, os.IsNotExist(err), "the switch off: a record without calls keeps nothing")
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, string(raw), "orders::TestPure")
+		})
+	}
+}
+
+// judgedBuild stands for a build that judges what the record keeps.
+func judgedBuild(t *testing.T) {
+	t.Helper()
+	JudgeRecords()
+	t.Cleanup(func() { recordsJudged.Store(false) })
+}
+
+// Under the switch, in a build no judge runs in, a failed record keeps
+// nothing, as before the switch: no one would commit it test by test, and
+// the previous recording must not be lost.
+func TestAFailedRecordNoOneJudgesKeepsNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	failed := mark("orders::TestB", 0, 10*time.Millisecond)
+	failed.Outcome = models.ScopeOutcomeFailed
+	instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
+		windows: []models.ScopeWindow{failed}}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	_ = svc.Record(context.Background())
+	set := (&mockService{config: cfg}).setName()
+	_, err := os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+	require.True(t, os.IsNotExist(err), "a record no one judges kept a failed run's recording")
+	require.NoDirExists(t, filepath.Join(dir, set), "the fresh set's folder came back")
 }

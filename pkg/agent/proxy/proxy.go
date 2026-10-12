@@ -3997,6 +3997,16 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.GetConsumedMocks(), nil
 }
 
+// ServedCounts forwards how many times each mock answered a request this
+// session (the mock manager's ServedCounts); nil when no manager.
+func (p *Proxy) ServedCounts() map[string]uint64 {
+	m := p.getMockManager()
+	if m == nil {
+		return nil
+	}
+	return m.ServedCounts()
+}
+
 // GetPersistentConsumed forwards the mock manager's never-drained per-name
 // consumption map (implements coreAgent.ConsumedStateReader; see
 // models.MockFilterParams.AgentOwnsConsumed). Returns nil when no manager.

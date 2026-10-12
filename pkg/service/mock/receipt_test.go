@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -66,6 +67,11 @@ type replayCase struct {
 	// keployFails: the run fails on keploy's side, and Replay returns that
 	// failure as its own error rather than only an exit code.
 	keployFails bool
+	// windowsErr: reading what each test did from the agent fails.
+	windowsErr error
+	// mapped: the set has per-test mappings (keploy mock record wrote them),
+	// which the proven switch requires.
+	mapped bool
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -80,6 +86,11 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	}
 	if err := os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	var mapDB MappingDB
+	if c.mapped {
+		writeMapping(t, keployDir)
+		mapDB = mapdb.New(zap.NewNop(), keployDir, "")
 	}
 	if c.covReport != "" && (c.staleCov || c.prevRun) {
 		p := filepath.Join(repo, "coverage.out")
@@ -99,6 +110,7 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	base := newInstr(t, agentUpFromSetup, false, exit)
 	base.mockErrors = c.mockErrs
 	base.mockErrorsErr = c.mockErrErr
+	base.windowsErr = c.windowsErr
 	if !c.noneServed {
 		base.consumedMocks = []models.MockState{{Name: "mock-0"}}
 	}
@@ -121,7 +133,7 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	svc := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, cfg)
+	svc := New(zap.New(core), instr, stubMockDB{}, mapDB, nil, nil, cfg)
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -926,4 +938,45 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 	got, err = ReadTestsReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.Nil(t, got, "a replay that named no tests leaves no stale per-test file behind")
+}
+
+// A record leaves what each top-level test did against real infra, kept or
+// not, for judging the recording; a run that named no test leaves none.
+func TestRecordTestsReceipt(t *testing.T) {
+	keployDir := t.TempDir()
+	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	windows := []models.ScopeWindow{
+		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestA/case", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "suite", Suite: true},
+		{Name: "app", App: true},
+	}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, windows)
+	got, err := ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "t2-go", got.Set)
+	require.Equal(t, []TestReceipt{
+		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+	}, got.Tests)
+	ignore, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
+	require.NoError(t, err)
+	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
+
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, nil)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, got, "a record that named no test removes the stale file")
+}
+
+// writeMapping writes keploy/set/mappings.yaml: one test, which made the
+// set's one call.
+func writeMapping(t *testing.T, keployDir string) {
+	t.Helper()
+	body := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n"
+	if err := os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

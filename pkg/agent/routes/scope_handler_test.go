@@ -321,3 +321,57 @@ func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
 		t.Fatalf("anchored without a suite start: %v", h.got)
 	}
 }
+
+// windowsSvc answers each window read with the read it was.
+type windowsSvc struct {
+	agent.Service
+	reads []string
+}
+
+func (s *windowsSvc) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	s.reads = append(s.reads, "plain")
+	return []models.ScopeWindow{{Name: "plain"}}, nil
+}
+
+func (s *windowsSvc) FinalScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	s.reads = append(s.reads, "final")
+	return []models.ScopeWindow{{Name: "final"}}, nil
+}
+
+// The CLI's last read (?final=1) is the final one, which fails a test still
+// open; a plain read is not; any other value is refused, since a client that
+// meant the last read would otherwise get a plain one and leave an open test
+// out of the verdict.
+func TestScopeWindowsFinalReadIsTheRunsLast(t *testing.T) {
+	svc := &windowsSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	for _, tc := range []struct {
+		query, read string
+		status      int
+	}{
+		{"", "plain", http.StatusOK},
+		{"?final=1", "final", http.StatusOK},
+		{"?final=true", "", http.StatusBadRequest},
+		{"?final=0", "", http.StatusBadRequest},
+	} {
+		svc.reads = nil
+		rec := httptest.NewRecorder()
+		a.HandleScopeWindows(rec, httptest.NewRequest(http.MethodGet, "/agent/scope/windows"+tc.query, nil))
+		if rec.Code != tc.status {
+			t.Fatalf("%q: status %d, want %d (%s)", tc.query, rec.Code, tc.status, rec.Body.String())
+		}
+		if tc.read == "" {
+			if len(svc.reads) != 0 {
+				t.Fatalf("%q: read %v, want none", tc.query, svc.reads)
+			}
+			continue
+		}
+		var got []models.ScopeWindow
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%q: %v", tc.query, err)
+		}
+		if !slices.Equal(svc.reads, []string{tc.read}) || len(got) != 1 || got[0].Name != tc.read {
+			t.Fatalf("%q: reads %v, answered %+v, want the %s read", tc.query, svc.reads, got, tc.read)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -73,6 +74,19 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		a.scopeMu.Unlock()
+		if pid == 0 && len(names) == 0 && provenswitch.On() {
+			// The proven wire serves a test exactly its recording: one
+			// recorded with no call, or with none at all, is served only
+			// the reusable tier, so any call of its own is a miss.
+			a.logger.Debug("scope begin: a test with no recorded call is served the reusable tier only", zap.String("test", name), zap.Bool("mapped", ok))
+			return a.UpdateMockParams(ctx, models.MockFilterParams{
+				MockMapping:     []string{},
+				ExactMapping:    true,
+				UseMappingBased: true,
+				AfterTime:       models.BaseTime,
+				BeforeTime:      time.Now(),
+			})
+		}
 		if !ok || len(names) == 0 {
 			// No per-test mapping for this test — leave the whole pool armed.
 			return nil
@@ -118,7 +132,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	if ok {
 		delete(a.workerOpen, k)
 		meta := a.scopeMeta[k]
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -143,7 +157,8 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		a.scopeMu.Lock()
 		_, scoped := a.scopeTable[name]
 		a.scopeMu.Unlock()
-		if !scoped {
+		// The proven wire narrowed even a test without a mapping entry.
+		if !scoped && !(pid == 0 && provenswitch.On()) {
 			return nil
 		}
 		if pid > 0 {
@@ -176,9 +191,24 @@ func boundaryTime(at time.Time) time.Time {
 	return at
 }
 
-// GetScopeWindows returns the per-test windows collected this record session,
-// consumed by the CLI to build mappings.yaml.
-func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error) {
+// GetScopeWindows returns the per-test windows collected so far this
+// session. A read at the run's end is FinalScopeWindows.
+func (a *Agent) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	return a.scopeWindowsNow(), nil
+}
+
+// FinalScopeWindows is the run's last read of its windows, once its command
+// has exited: under the proven wire a test still open is failed and closed
+// (so its window is among these), and the wire is closed, as nothing begun
+// now would be read.
+func (a *Agent) FinalScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	if err := a.reapOpenTest(ctx); err != nil {
+		return nil, err
+	}
+	return a.scopeWindowsNow(), nil
+}
+
+func (a *Agent) scopeWindowsNow() []models.ScopeWindow {
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
 	out := make([]models.ScopeWindow, len(a.scopeWindows))
@@ -186,7 +216,7 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 	for _, s := range starts.Default.List() {
 		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
 	}
-	return out, nil
+	return out
 }
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI
@@ -230,9 +260,10 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 }
 
 type scopeMeta struct {
-	dir     string
-	suite   bool
-	outcome string
+	dir      string
+	suite    bool
+	outcome  string
+	evidence *models.ScopeEvidence
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

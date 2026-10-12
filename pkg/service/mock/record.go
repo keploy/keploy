@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -38,6 +39,35 @@ const mockDrainStall = 5 * time.Second
 // per recording.
 const mockDrainQuiet = 500 * time.Millisecond
 
+// recordsJudged is set by a build that judges what keploy mock record keeps
+// (JudgeRecords).
+var recordsJudged atomic.Bool
+
+// JudgeRecords says this build judges what keploy mock record keeps, test by
+// test (keploy enterprise's judging): under the proven switch a record then
+// keeps its recording whenever it read what each test did, even when the
+// command failed, for the judging to commit. Without it a failed record
+// keeps nothing, as before the switch, so the previous recording is never
+// lost to a record no one judges.
+//
+// A build that calls it takes over the set's backup: under the switch Record
+// then makes no .<set>.previous copy of its own and never puts the set back,
+// so the caller must back the whole set up before Record (verdicts.yaml
+// included) and restore it on any failure, or a failed record loses the
+// previous recording.
+func JudgeRecords() { recordsJudged.Store(true) }
+
+// replaysJudged is set by a build that judges a replay (JudgeReplays).
+var replaysJudged atomic.Bool
+
+// JudgeReplays says this build sets a replay's exit code from keploy's
+// verdict on each test (keploy enterprise's judging). Under the proven switch
+// a replay in a build without it is refused: its exit code would be only the
+// test command's, and a test keploy fails after it has ended (one left open
+// when the command exited) or a call made outside every test that got no
+// recorded answer does not fail the command.
+func JudgeReplays() { replaysJudged.Store(true) }
+
 // Record runs the wrapped test command and captures every outgoing dependency
 // call into the configured named mock set. It writes ONLY mocks (no incoming
 // test cases), overwrites the set in place so a re-record produces a clean
@@ -46,6 +76,10 @@ const mockDrainQuiet = 500 * time.Millisecond
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
 	requests := m.requests()
+	started := time.Now()
+	if err := m.refuseProvenDocker("record"); err != nil {
+		return err
+	}
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -149,7 +183,28 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	restore, existed, err := m.saveSet(name)
+	// Under the proven switch the record leaves what each test did against
+	// real infra (design v14 §7.4's R0) for judging, whether or not the
+	// recording is kept. Registered before the restore below, so it runs
+	// after it: a restore puts the previous set back, or removes a fresh one.
+	var recordTests []models.ScopeWindow
+	recordJudged := false
+	defer func() {
+		// Only a build that judges the record reads these results; written
+		// otherwise, they would recreate a fresh set's folder a failed
+		// record's restore just removed.
+		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
+			writeRecordTestsReceipt(m.logger, m.config.Path, name, started.UTC().Truncate(time.Second), recordTests)
+		}
+	}()
+	saveSet := m.saveSet
+	if provenswitch.On() && recordsJudged.Load() {
+		// The judging build backs the whole set up itself, list carried, and
+		// puts it back when the record is not judged: a second backup here
+		// would restore the folder without its list.
+		saveSet = m.existsOnly
+	}
+	restore, existed, err := saveSet(name)
 	if err != nil {
 		// No restorable copy of the set — refuse before deleting its mappings
 		// or cases below, so a failed backup can never destroy the recording.
@@ -416,7 +471,23 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	var windows []models.ScopeWindow
-	if m.mappingDB != nil {
+	if provenswitch.On() {
+		// What each test did is the record's judging input: a record that
+		// cannot read it keeps nothing and says so. The read waits on the
+		// run's own context, not a clock: the user's interrupt, or the agent
+		// process exiting, ends it.
+		var werr error
+		if windows, werr = m.readWindows(ctx); werr != nil {
+			m.propagateExit(appErr, "record")
+			stopReason = "keploy could not read what each test did from its agent, so nothing was kept"
+			if parent.Err() != nil {
+				stopReason = "the recording was stopped before keploy read what each test did, so nothing was kept"
+			}
+			utils.LogError(m.logger, werr, stopReason, zap.String("mock-set", name),
+				zap.String("next_step", "check the agent's log, then record again"))
+			return fmt.Errorf("%s: %w", stopReason, werr)
+		}
+	} else if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
 	if len(windows) > 0 {
@@ -432,8 +503,20 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error(err.Error())
 		return err
 	}
+	recordTests, recordJudged = windows, true
 	keep = runnerPassed(appErr)
-	if keep && mockCount == 0 && len(capture.list()) == 0 {
+	judged := provenswitch.On() && recordsJudged.Load() && len(windows) > 0
+	if judged {
+		// Under the proven switch, in a build that judges what the record
+		// keeps, what each test recorded is kept whether or not the command
+		// passed, and whether or not it made a call: judging commits it test
+		// by test (design v14 §7.5), keeping the previous recording of a
+		// test that failed or did not run, and recording a test that made no
+		// call as one with no mocks. Otherwise the record is kept or not as
+		// before.
+		keep = true
+	}
+	if keep && mockCount == 0 && len(capture.list()) == 0 && !judged {
 		keep = false
 		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("mock-set", name),
@@ -496,7 +579,12 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if !runnerPassed(appErr) {
-		m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+		if keep {
+			// Under the proven switch: judging commits it test by test.
+			m.logger.Warn("tests failed; the recording is kept for judging, which keeps each failed test's previous recording, and is not published", zap.String("mock-set", name))
+		} else {
+			m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+		}
 	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
@@ -536,18 +624,46 @@ func runnerPassed(appErr models.AppError) bool {
 
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
-	reader, ok := m.instrumentation.(ScopeReader)
-	if !ok {
-		return nil
-	}
-	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-	defer cancel()
-	windows, err := reader.GetScopeWindows(scopeCtx)
+	windows, err := m.readWindows(ctx)
 	if err != nil {
 		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
 		return nil
 	}
 	return windows
+}
+
+// readWindows reads the run's per-test windows from the agent. Under the
+// proven switch they are what each test did, which judging and keploy's
+// verdict rest on: the read has no deadline (the agent closes a test whose
+// process went away before it answers; its answer, or the connection's
+// close, ends the wait), and a failed read is an error, never "no tests".
+func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	reader, ok := m.instrumentation.(ScopeReader)
+	if !ok {
+		if provenswitch.On() {
+			return nil, errors.New("this keploy cannot read what each test did from its agent")
+		}
+		return nil, nil
+	}
+	if !provenswitch.On() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
+		defer cancel()
+	}
+	return reader.GetScopeWindows(ctx)
+}
+
+// existsOnly is saveSet for a build whose judging keeps the set's backup: it
+// only says whether the set exists, and restores nothing.
+func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
+	if m.config.Path == "" {
+		return func(bool) {}, true, nil
+	}
+	_, err := os.Stat(filepath.Join(m.config.Path, name))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, true, err
+	}
+	return func(bool) {}, err == nil, nil
 }
 
 // saveSet backs the named set up to a sibling .<name>.previous directory so a

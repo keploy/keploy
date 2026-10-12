@@ -283,6 +283,19 @@ func TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner(t *testing.T) {
 		"a mock-mode runner gets no credential, so every scope call it makes is a 401")
 }
 
+// A keploy started from a test of another keploy run inherits that run's
+// claim marker; its own test processes must still claim, so a mock-mode
+// command never sees it.
+func TestExportMockScopeEnv_DropsAnInheritedClaimMarker(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_AGENT", "")
+	t.Setenv(token.MockAgentTokenEnv, "")
+	t.Setenv("KEPLOY_MOCK_SESSION", "")
+	t.Setenv(models.TestPIDEnv, "4242")
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
+	_, set := os.LookupEnv(models.TestPIDEnv)
+	require.False(t, set, "the enclosing run's claim marker reached this run's command")
+}
+
 func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
 	// The docker alias names the token without a value, but an assignment that
 	// did reach a logged command line must not survive into it. Debug logs are

@@ -105,6 +105,14 @@ func (a *Agent) writeStopOutcome(ctx context.Context, path string) error {
 // models.MockOutcome. Both reads drain, exactly as the CLI's own end-of-run
 // reads do: this is the last time they are made.
 func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
+	// The windows say which test ran when, and with what verdict; the CLI
+	// cannot ask a stopped agent for them. Read first: closing a test whose
+	// process went away charges its misses, which the miss read below must
+	// then see.
+	windows, err := a.FinalScopeWindows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read what each test of this replay did: %w", err)
+	}
 	consumed, err := a.GetConsumedMocks(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
@@ -118,9 +126,6 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
-	// The windows say which test ran when, and with what verdict; the CLI
-	// cannot ask a stopped agent for them.
-	windows, _ := a.GetScopeWindows(ctx)
 	body, err := json.Marshal(models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread})
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the replay outcome: %w", err)

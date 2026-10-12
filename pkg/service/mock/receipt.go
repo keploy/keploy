@@ -80,6 +80,11 @@ type Receipt struct {
 	Loaded   int `yaml:"loaded" json:"loaded"`
 	Consumed int `yaml:"consumed" json:"consumed"`
 	Missed   int `yaml:"missed" json:"missed"`
+	// MissedData counts, under the proven switch only, the misses other than
+	// DNS lookups, which are protocol-phase (the proxy answers an unrecorded
+	// name itself): what the proven model's verdict fails on. -1 when the
+	// misses were not read; absent with the switch off.
+	MissedData *int `yaml:"missedData,omitempty" json:"missedData,omitempty"`
 	// Bypass lists the destinations configured to skip keploy (bypassRules,
 	// --pass-through-ports): calls to them reach the real service.
 	Bypass []string `yaml:"bypass,omitempty" json:"bypass,omitempty"`
@@ -177,6 +182,9 @@ type TestReceipt struct {
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
+	// Evidence is, under the proven wire, what failed the test at its end:
+	// its misses and the recorded calls of its mapping it never made.
+	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner
@@ -229,20 +237,63 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	path := filepath.Join(dir, TestsReceiptFile)
+	writeTestsFile(logger, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n", "this replay", r)
+}
+
+// RecordTestsReceiptFile holds what each test did in the last record of a set:
+// its verdict against real infra, which judging the recording reads (design
+// v14 §7.4, the R0 round). Local and git-ignored like the replay's.
+const RecordTestsReceiptFile = "last-record-tests.yaml"
+
+// writeRecordTestsReceipt writes RecordTestsReceiptFile: the verdict each
+// top-level test of the record reported as it ended, whether or not the
+// recording was kept. It makes the set's directory when the record kept
+// nothing, since a test that failed against real infra is judged too.
+func writeRecordTestsReceipt(logger *zap.Logger, keployDir, set string, at time.Time, windows []models.ScopeWindow) {
+	r := TestsReceipt{Set: set, At: at}
+	for _, w := range windows {
+		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
+			continue
+		}
+		r.Tests = append(r.Tests, TestReceipt{Name: w.Name, Outcome: w.Outcome})
+	}
+	dir := filepath.Join(keployDir, set)
+	if len(r.Tests) > 0 {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			logger.Warn("could not write what each test did in this record", zap.String("dir", dir), zap.Error(err))
+			return
+		}
+	} else if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
+	writeTestsFile(logger, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n", "this record", r)
+	if err := utils.AddToGitIgnore(logger, keployDir, "/*/"+RecordTestsReceiptFile); err != nil {
+		logger.Debug("failed to git-ignore the record's per-test results", zap.Error(err))
+	}
+}
+
+// ReadRecordTestsReceipt reads keploy/<set>/last-record-tests.yaml; (nil, nil)
+// when there is none.
+func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
+	return readTestsFile(keployDir, set, RecordTestsReceiptFile, "a record's")
+}
+
+// writeTestsFile writes a per-test results file into dir, or removes a stale
+// one when the run named no tests: it would describe an earlier run.
+func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsReceipt) {
+	path := filepath.Join(dir, file)
 	if len(r.Tests) == 0 {
 		_ = os.Remove(path)
 		return
 	}
 	body, err := yaml.Marshal(r)
 	if err == nil {
-		head := []byte("# Written by `keploy mock replay`: what each test did in the last replay of this set.\n")
 		// The receipt's temporary prefix covers this file's too.
-		err = writeLocalFile(logger, dir, TestsReceiptFile, receiptTempPrefix+"tests-", append(head, body...))
+		err = writeLocalFile(logger, dir, file, receiptTempPrefix+"tests-", append([]byte(head), body...))
 	}
 	if err != nil {
 		_ = os.Remove(path)
-		logger.Warn("could not write what each test did in this replay", zap.String("dir", dir), zap.Error(err),
+		logger.Warn("could not write what each test did in "+run, zap.String("dir", dir), zap.Error(err),
 			zap.String("next_step", "check that "+dir+" is writable by the user running keploy"))
 	}
 }
@@ -253,21 +304,25 @@ const TestsReceiptBytes = 64 << 20
 // ReadTestsReceipt reads keploy/<set>/last-replay-tests.yaml; (nil, nil) when
 // there is none. Read through safeyaml for the reasons ReadReceipt is.
 func ReadTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
-	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, TestsReceiptFile), TestsReceiptBytes)
+	return readTestsFile(keployDir, set, TestsReceiptFile, "a replay's")
+}
+
+func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
+	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, file), TestsReceiptBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, TestsReceiptFile), safeyaml.StripPath(err))
+		return nil, fmt.Errorf("%s: %w", filepath.Join(set, file), safeyaml.StripPath(err))
 	}
 	var r TestsReceipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, TestsReceiptFile), err)
+		return nil, fmt.Errorf("%s: %w", filepath.Join(set, file), err)
 	}
 	// An empty or foreign document unmarshals into a zero TestsReceipt with
 	// no error, as for the receipt.
 	if r.Set == "" {
-		return nil, fmt.Errorf("%s is not a replay's per-test results", filepath.Join(set, TestsReceiptFile))
+		return nil, fmt.Errorf("%s is not %s per-test results", filepath.Join(set, file), whose)
 	}
 	return &r, nil
 }

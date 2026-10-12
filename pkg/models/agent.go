@@ -135,6 +135,11 @@ type ScopeReq struct {
 	// that cannot skip would run the test anyway, against a pool the gate never
 	// narrowed for it.
 	CanSkip bool `json:"canSkip,omitempty"`
+	// File and Project qualify the test's ID under the proven wire (TestID):
+	// the test file a harness names, and its project (a Jest displayName).
+	// A Go test sends neither; its instance's key is the path.
+	File    string `json:"file,omitempty"`
+	Project string `json:"project,omitempty"`
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
@@ -179,6 +184,8 @@ func NormalizeScopeOutcome(s string) string {
 // {"status":"ok"}, as before, so a harness that predates gating — or decodes
 // the answer as strings — is unaffected, and a missing action means "run".
 type ScopeBeginResp struct {
+	// V is ScopeProtocolVersion under the proven wire, absent otherwise.
+	V      int    `json:"v,omitempty"`
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
@@ -197,6 +204,11 @@ const ScopeActionSkip = "skip"
 type ScopeGateReq struct {
 	Run    []string `json:"run"`
 	Reason string   `json:"reason,omitempty"`
+	// Skip is the proven model's gate (design v14 §6.1): the tests keploy
+	// skips, by ID, each with the reason its harness skips it with. It is a
+	// deny list: every test it does not name runs. Read under the proven
+	// switch, where it replaces Run.
+	Skip map[string]string `json:"skip,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -225,6 +237,9 @@ type ScopeWindow struct {
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// Evidence is, under the proven wire, what keploy saw that failed the
+	// test at its end in a replay; nil when nothing did.
+	Evidence *ScopeEvidence `json:"evidence,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
@@ -303,6 +318,11 @@ type MockStreamHeader struct {
 
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
+	// ExactMapping makes MockMapping the test's whole recording even when
+	// it is empty: a test recorded with no call is served no per-test mock,
+	// only the reusable tier. Without it an empty mapping means "none
+	// supplied", which leaves the whole pool armed.
+	ExactMapping bool `json:"exactMapping,omitempty"`
 	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
 	// in the set being staged, which the replayer knows because it loads test
 	// cases sorted by request timestamp. The agent seeds the manager's

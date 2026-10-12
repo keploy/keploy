@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -138,6 +139,20 @@ const agentEpilogueTimeout = 10 * time.Second
 // Without a bound, an agent that dies between the two calls stalls the run for
 // five and a half minutes.
 const composeReleaseTimeout = 30 * time.Second
+
+// refuseProvenDocker refuses a docker command (docker compose, docker run,
+// docker start) under the proven switch, before anything starts. Inside a
+// container keploy cannot tell which process runs the tests (a test
+// process's claim is refused), and under compose the agent stops with the
+// project, before a record can read what each test did: a run that could
+// only end unjudged is refused up front instead.
+func (m *mockService) refuseProvenDocker(verb string) error {
+	if !provenswitch.On() || !utils.IsDockerCmd(utils.CmdType(m.config.CommandType)) {
+		return nil
+	}
+	return fmt.Errorf("keploy mock %[1]s with %[2]s runs the test command natively in this release: inside a container keploy cannot tell which process runs the tests, or read what each of them did. "+
+		"Run the test command itself through keploy (keploy mock %[1]s -c \"go test -p 1 -json ./...\"), or unset %[2]s", verb, provenswitch.Env)
+}
 
 // isDockerCompose reports whether the wrapped command is a compose project.
 // Compose inverts the usual startup order — see startComposeApp.
