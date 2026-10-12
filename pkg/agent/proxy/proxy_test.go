@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -731,5 +733,69 @@ func TestHandleConnectionClosesTheTunnelWhenTheAppLeavesBeforeUsingIt(t *testing
 	}
 	if src.closes.Load() == 0 {
 		t.Fatal("handleConnection returned without closing the application's connection")
+	}
+}
+
+// A client that dialled an IP literal sends no SNI and checks the MITM leaf
+// against an IP SAN, as client-go does reaching the Kubernetes API at
+// https://10.96.0.1 (dsmon F7). On replay that has to hold whether or not the
+// proxy offers h2 to the destination: the h2 hint used to be put on a context
+// rebuilt from the connection's, which dropped the destination IP, so a
+// destination with PreferH2 or a recorded Http2 mock got a leaf with no IP SAN.
+func TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay(t *testing.T) {
+	const ip = "10.96.0.1"
+	for _, tc := range []struct {
+		name     string
+		preferH2 bool
+		mocks    []*models.Mock
+		wantALPN string
+	}{
+		{name: "the destination is http/1.1", wantALPN: "http/1.1"},
+		{name: "PreferH2 is set", preferH2: true, wantALPN: "h2"},
+		{name: "the destination has a recorded Http2 mock", mocks: []*models.Mock{h2MockForTest("k8s-api", ip+":443")}, wantALPN: "h2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: ipv4Dest(t, ip+":443")}, mysqlPorts: newMysqlPortRegistry()}
+			p.setSession(&agent.Session{
+				Mode:            models.MODE_TEST,
+				OutgoingOptions: models.OutgoingOptions{Mocking: true, PreferH2: tc.preferH2, DisableMysqlAutoDetect: true},
+			})
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetUnFilteredMocks(tc.mocks)
+			p.mockManager = mm
+
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			client := tls.Client(app, &tls.Config{
+				ServerName: ip, // an IP literal: crypto/tls sends no SNI for it
+				NextProtos: []string{"h2", "http/1.1"},
+				// The run's CA is minted by the handshake itself, so the leaf
+				// is verified in VerifyConnection, the way a client trusting
+				// that CA would verify it.
+				InsecureSkipVerify: true,
+				VerifyConnection: func(cs tls.ConnectionState) error {
+					roots := x509.NewCertPool()
+					if !roots.AppendCertsFromPEM(pTls.ActiveCACertPEM()) {
+						return errors.New("no MITM CA for this run")
+					}
+					leaf := cs.PeerCertificates[0]
+					if _, err := leaf.Verify(x509.VerifyOptions{DNSName: ip, Roots: roots}); err != nil {
+						return fmt.Errorf("leaf CN %q, IP SANs %v: %w", leaf.Subject.CommonName, leaf.IPAddresses, err)
+					}
+					return nil
+				},
+			})
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake with %s: %v", ip, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			awaitEvent(t, done, "handleConnection returning after the client left")
+		})
 	}
 }

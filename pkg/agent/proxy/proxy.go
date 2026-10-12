@@ -2829,7 +2829,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
 			}
 			if preferH2 {
-				hsCtx = pTls.WithPreferH2(ctx)
+				// On hsCtx, not ctx: the destination IP set above must
+				// survive the hint.
+				hsCtx = pTls.WithPreferH2(hsCtx)
 				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
 					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
 			}
