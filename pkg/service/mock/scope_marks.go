@@ -45,6 +45,12 @@ func repeatedScope(windows []models.ScopeWindow, existed bool) error {
 		if parentOf(windows, w.Name) != "" {
 			continue
 		}
+		// A spec's setup scope opens once per runner project that includes the
+		// spec and again after a worker restart; its windows are pooled, not
+		// matched one-to-one, so a repeat is not two tests sharing a name.
+		if models.IsSpecSetupScope(w.Name) {
+			continue
+		}
 		if runs[w.Name] == 0 {
 			order = append(order, w.Name)
 		}

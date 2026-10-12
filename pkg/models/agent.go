@@ -199,6 +199,19 @@ type ScopeBeginResp struct {
 // ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
 const ScopeActionSkip = "skip"
 
+// SpecSetupScopePrefix starts the name of a spec's setup scope: the window a
+// browser harness opens around one spec file's beforeAll / afterAll hooks and
+// the gaps between its tests, named "__suite__:<spec file>". Unlike a test it
+// may legitimately open more than once in a run -- once for every runner
+// project that includes the spec, and again when the runner replaces a worker
+// partway through the spec -- and every opening feeds the same setup pool.
+const SpecSetupScopePrefix = "__suite__:"
+
+// IsSpecSetupScope reports whether name is a spec setup scope.
+func IsSpecSetupScope(name string) bool {
+	return len(name) > len(SpecSetupScopePrefix) && strings.HasPrefix(name, SpecSetupScopePrefix)
+}
+
 // ScopeGateReq is the body of POST /agent/replay/gate: the replay CLI names the
 // only tests that should run this replay (for instance, the ones a previous
 // replay proved pass with every dependency mocked). Any other test — other

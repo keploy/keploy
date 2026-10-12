@@ -234,6 +234,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// nothing" exit, the receipt and the metered count.
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 	loaded := len(filtered) + len(unfiltered)
+	// The command runs on the recording's start, as it did when recorded
+	// (models.RecordStartEnv); a recording made before the stamp sets none.
+	exportRecordStart(m.logger, models.RecordStartOf(filtered, unfiltered))
 	// The recording this run replays, for the receipt: read after Pull, so in
 	// enterprise it is the registry's copy that was actually served.
 	digest := MocksDigest(m.config.Path, name)

@@ -184,6 +184,9 @@ func TestRepeatedScope(t *testing.T) {
 			"Recording stopped: TestA ran 3 times in orders/e2e.\nEach test in a folder needs its own name. Rename one of them (or drop -count=3), then run keploy mock record again.\nNothing was saved."},
 		{"the same subtest name under two tests is fine", []models.ScopeWindow{mark("p.TestA", 0, 1), mark("p.TestA/one", 0, 1), mark("p.TestB", 2, 3), mark("p.TestB/one", 2, 3)}, true, ""},
 		{"the same name in two packages is fine", []models.ScopeWindow{mark("a.TestX", 0, 1), mark("b.TestX", 2, 3)}, true, ""},
+		{"a spec setup scope opened by two projects is fine", []models.ScopeWindow{mark("__suite__:specs/a.spec.ts", 0, 5), mark("specs/a.spec.ts > t1", 1, 2), mark("__suite__:specs/a.spec.ts", 6, 9), mark("specs/a.spec.ts > t2", 7, 8)}, false, ""},
+		{"a repeated test is still refused beside a repeated spec setup scope", []models.ScopeWindow{mark("__suite__:specs/a.spec.ts", 0, 5), mark("__suite__:specs/a.spec.ts", 6, 9), mark("specs/a.spec.ts > t1", 1, 2), mark("specs/a.spec.ts > t1", 7, 8)}, false,
+			"Recording stopped: ts > t1 ran 2 times in specs/a.spec.\nEach test in a folder needs its own name. Rename one of them (or drop -count=2), then run keploy mock record again.\nNothing was saved."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := repeatedScope(tc.windows, tc.existed)

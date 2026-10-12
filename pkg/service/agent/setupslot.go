@@ -83,7 +83,7 @@ func (sp *specPool) slotAt(ts time.Time) int {
 }
 
 func isSuiteScope(name string) bool {
-	return len(name) > len("__suite__:") && name[:len("__suite__:")] == "__suite__:"
+	return models.IsSpecSetupScope(name)
 }
 
 // cachedSpecPool returns a spec's plan if one was built, without building it.

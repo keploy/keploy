@@ -48,6 +48,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
+	// The recording's start: handed to the test command and stamped on every
+	// mock, so a replay hands the command back the same value
+	// (models.RecordStartEnv).
+	recordStart := time.Now().UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
+	exportRecordStart(m.logger, recordStart)
 
 	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
 	// errgroup below cancels the context it derives whenever any goroutine in
@@ -205,6 +210,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// only by persist, which runs on the one consumer goroutine.
 	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
 	persist := func(mk *models.Mock) {
+		models.StampRecordStart(mk, recordStart)
 		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
 			m.logger.Debug("BeforeMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
