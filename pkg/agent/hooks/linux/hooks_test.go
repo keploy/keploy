@@ -3,10 +3,13 @@
 package linux
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"sync"
 	"testing"
 
+	"github.com/cilium/ebpf/btf"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
@@ -163,5 +166,68 @@ func TestGetProxyInfo_NonDocker_CfgPortOverrideStillForcesV6(t *testing.T) {
 	}
 	if info.Port != cfg.Port {
 		t.Errorf("Port = %d, want %d", info.Port, cfg.Port)
+	}
+}
+
+// Linux 7.1 added two fields to the BTF header, layout_off and layout_len, for
+// a section that gives the size of each kind of type (include/uapi/linux/btf.h),
+// and a kernel built with pahole 1.31 or later fills them in: Fedora 44's 7.2
+// kernels do. cilium/ebpf before v0.22.0 refused such a header ("parsing .BTF
+// header: header contains non-zero trailer"), and with it the kernel's whole
+// BTF, so load() could not apply the objects' CO-RE relocations and the agent
+// refused to start on those kernels. load() reads /sys/kernel/btf/vmlinux with
+// the parser this test calls. The blob is laid out as such a kernel's is: types,
+// then the layout section, then the strings.
+func TestKernelBTFWithALayoutSectionLoads(t *testing.T) {
+	le := binary.LittleEndian
+	var types bytes.Buffer
+	// One type, BTF_KIND_INT (1) named "int": 32 bits, signed.
+	for _, v := range []uint32{1, 1 << 24, 4, 1<<24 | 32} {
+		_ = binary.Write(&types, le, v)
+	}
+	// struct btf_layout {info_sz, elem_sz u8; flags u16} for kinds 0 to 19,
+	// as libbpf writes it (tools/lib/bpf/btf.c, layouts[]).
+	var layout bytes.Buffer
+	for _, sz := range [][2]uint8{
+		{0, 0}, {4, 0}, {0, 0}, {12, 0}, {0, 12}, {0, 12}, {0, 8}, {0, 0}, {0, 0}, {0, 0},
+		{0, 0}, {0, 0}, {0, 0}, {0, 8}, {4, 0}, {0, 12}, {0, 0}, {4, 0}, {0, 0}, {0, 12},
+	} {
+		_ = binary.Write(&layout, le, struct {
+			InfoSz, ElemSz uint8
+			Flags          uint16
+		}{sz[0], sz[1], 0})
+	}
+	strs := []byte("\x00int\x00")
+	header := struct {
+		Magic                            uint16
+		Version, Flags                   uint8
+		HdrLen                           uint32
+		TypeOff, TypeLen, StrOff, StrLen uint32
+		LayoutOff, LayoutLen             uint32
+	}{
+		Magic: 0xeB9F, Version: 1, HdrLen: 32,
+		TypeOff: 0, TypeLen: uint32(types.Len()),
+		LayoutOff: uint32(types.Len()), LayoutLen: uint32(layout.Len()),
+		StrOff: uint32(types.Len() + layout.Len()), StrLen: uint32(len(strs)),
+	}
+	var blob bytes.Buffer
+	_ = binary.Write(&blob, le, header)
+	if blob.Len() != 32 {
+		t.Fatalf("the header is %d bytes, want 32", blob.Len())
+	}
+	blob.Write(types.Bytes())
+	blob.Write(layout.Bytes())
+	blob.Write(strs)
+
+	spec, err := btf.LoadSpecFromReader(bytes.NewReader(blob.Bytes()))
+	if err != nil {
+		t.Fatalf("the BTF of a kernel with a layout section does not load: %v", err)
+	}
+	var i *btf.Int
+	if err := spec.TypeByName("int", &i); err != nil {
+		t.Fatalf("the loaded BTF has no int: %v", err)
+	}
+	if i.Size != 4 || i.Encoding != btf.Signed {
+		t.Fatalf("int is %d bytes, encoding %v, want 4 and signed", i.Size, i.Encoding)
 	}
 }
