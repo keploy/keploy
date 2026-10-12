@@ -247,6 +247,7 @@ type Case struct {
 	Name   string   `json:"name"`
 	Method string   `json:"method"`
 	URL    string   `json:"url"`
+	Sum    string   `json:"sum,omitempty"`
 	Mocks  []string `json:"mocks,omitempty"`
 }
 

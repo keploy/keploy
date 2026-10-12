@@ -2,6 +2,8 @@ package mock
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -967,7 +969,7 @@ func addCases(sets map[string]models.SetTable, mapping *models.Mapping, root str
 		cases := make([]models.Case, 0, len(recorded))
 		has := false
 		for _, tc := range recorded {
-			cases = append(cases, models.Case{Name: tc.Name, Method: string(tc.HTTPReq.Method), URL: tc.HTTPReq.URL, Mocks: mt.CaseMocks[tc.Name]})
+			cases = append(cases, models.Case{Name: tc.Name, Method: string(tc.HTTPReq.Method), URL: tc.HTTPReq.URL, Sum: bodySum(tc.HTTPReq), Mocks: mt.CaseMocks[tc.Name]})
 			has = has || len(mt.CaseMocks[tc.Name]) > 0
 		}
 		if !has && len(mt.Mocks) > 0 {
@@ -979,6 +981,18 @@ func addCases(sets map[string]models.SetTable, mapping *models.Mapping, root str
 		st.Cases[mt.ID] = cases
 		sets[k] = st
 	}
+}
+
+func bodySum(req models.HTTPReq) string {
+	body := req.Body
+	if body == "" {
+		body = req.BodyRef.Path
+	}
+	if body == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:8])
 }
 
 func ranSets(windows []models.ScopeWindow) []string {

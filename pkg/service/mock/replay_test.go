@@ -108,3 +108,12 @@ func TestAddCasesSkipsATestWhoseCasesHaveNoMappedMocks(t *testing.T) {
 		t.Fatalf("a test with no mocks at all: cases %+v", got)
 	}
 }
+
+func TestBodySumTellsBodiesApart(t *testing.T) {
+	a := bodySum(models.HTTPReq{Body: `{"sku":"lamp"}`})
+	b := bodySum(models.HTTPReq{Body: `{"sku":"vase"}`})
+	off := bodySum(models.HTTPReq{BodyRef: models.BodyRef{Path: "assets/body-1"}})
+	if a == "" || a == b || off == "" || off == a || bodySum(models.HTTPReq{}) != "" {
+		t.Fatalf("sums %q %q %q", a, b, off)
+	}
+}

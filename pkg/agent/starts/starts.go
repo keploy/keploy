@@ -76,6 +76,7 @@ type Registry struct {
 	sets     map[string]models.SetTable
 	universe map[string]struct{}
 	free     map[string]map[string]map[string]struct{}
+	peers    map[string]map[string][][]string
 	blind    int
 	gen      uint64
 	marked   bool
@@ -102,6 +103,7 @@ func (r *Registry) Reset() {
 	r.sets = nil
 	r.universe = nil
 	r.free = nil
+	r.peers = nil
 	r.blind = 0
 	r.gen++
 	r.marked = false
@@ -468,8 +470,13 @@ func (r *Registry) SetTable(root string, sets map[string]models.SetTable) {
 	r.sets = sets
 	r.universe = map[string]struct{}{}
 	r.free = map[string]map[string]map[string]struct{}{}
+	r.peers = map[string]map[string][][]string{}
 	for set, st := range sets {
 		for test, cases := range st.Cases {
+			if r.peers[set] == nil {
+				r.peers[set] = map[string][][]string{}
+			}
+			r.peers[set][test] = peersOf(cases)
 			in := map[string]struct{}{}
 			for _, c := range cases {
 				for _, n := range c.Mocks {
@@ -681,13 +688,20 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) bool
 	}
 	free := r.free[set][test]
 	var mine []string
-	for i := range f.open {
-		if i < len(cases) {
+	peers := r.peers[set][test]
+	add := func(i int) {
+		if i >= 0 && i < len(cases) {
 			mine = append(mine, cases[i].Mocks...)
 		}
+		if i >= 0 && i < len(peers) {
+			mine = append(mine, peers[i]...)
+		}
 	}
-	if f.last > 0 && f.last <= len(cases) {
-		mine = append(mine, cases[f.last-1].Mocks...)
+	for i := range f.open {
+		add(i)
+	}
+	if f.last > 0 {
+		add(f.last - 1)
 	}
 	if len(f.open) == 0 {
 		next := -1
@@ -779,7 +793,7 @@ func (r *Registry) exchangeFrame(port uint16) (*frame, string) {
 	}
 	if w == nil {
 		for _, o := range r.workers {
-			if len(o.frames) > 1 && r.alive(o.pid, o.born) {
+			if len(o.frames) > 0 && r.alive(o.pid, o.born) {
 				if w != nil {
 					return nil, ""
 				}
@@ -799,6 +813,18 @@ func (r *Registry) alive(pid uint32, born time.Time) bool {
 	}
 	b, ok := r.proc.Birth(pid)
 	return ok && b.Equal(born)
+}
+
+func peersOf(cases []models.Case) [][]string {
+	out := make([][]string, len(cases))
+	for i, c := range cases {
+		for j, d := range cases {
+			if i != j && c.Sum != d.Sum && exactKey(c.Method, c.URL) == exactKey(d.Method, d.URL) {
+				out[i] = append(out[i], d.Mocks...)
+			}
+		}
+	}
+	return out
 }
 
 func pickCase(cases []models.Case, used []bool, method, rawURL string) int {

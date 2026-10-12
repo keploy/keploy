@@ -610,3 +610,37 @@ func TestAnAppWhoseRunnerIsBetweenTestsIsNotNarrowedByAnotherPackagesTest(t *tes
 	sees(t, r, 201, "b's third case", "b3")
 	sees(t, r, 101, "a's app between a's tests", "a1", "a2")
 }
+
+func TestRequestsTheHookCannotTellApartShareTheirMocks(t *testing.T) {
+	_, r := oneTest(map[string]models.SetTable{"e2e": {
+		Tests: map[string][]models.Owned{"T": {{Name: "m0"}, {Name: "m1"}, {Name: "m2"}, {Name: "g1"}, {Name: "g2"}}},
+		Cases: map[string][]models.Case{"T": {
+			{Name: "test-1", Method: "POST", URL: "/orders", Sum: "a", Mocks: []string{"m0"}},
+			{Name: "test-2", Method: "POST", URL: "/orders", Sum: "b", Mocks: []string{"m1"}},
+			{Name: "test-3", Method: "POST", URL: "/orders", Sum: "b", Mocks: []string{"m2"}},
+			{Name: "test-4", Method: "GET", URL: "/a", Mocks: []string{"g1"}},
+			{Name: "test-5", Method: "GET", URL: "/a", Mocks: []string{"g2"}},
+		}},
+	}})
+	end := r.Exchange(0, "POST", "/orders")
+	sees(t, r, 101, "a POST whose body could be any of the three", "m0", "m1", "m2")
+	end()
+	end = r.Exchange(0, "POST", "/orders")
+	sees(t, r, 101, "the second POST, its body the same as the third's", "m0", "m1")
+	end()
+	r.Exchange(0, "POST", "/orders")()
+	end = r.Exchange(0, "GET", "/a")
+	sees(t, r, 101, "the first of two identical GETs", "g1")
+	end()
+}
+
+func TestAPortlessRequestWhileAnotherPackageRunsIsNotPairedWithItsTest(t *testing.T) {
+	f, r := oneTest(caseTable())
+	f.spawn(200, 1, at(0), "/tmp/other.test")
+	r.Begin(200, "/repo/e2e", "/repo/e2e", true, at(1))
+	f.spawn(201, 200, at(2), "/tmp/shop")
+	r.Exchange(0, "GET", "/a")()
+	end := r.Exchange(0, "GET", "/a")
+	defer end()
+	sees(t, r, 101, "the open test, a request it may not own in flight", "fx", "m1", "m2", "m3")
+}
