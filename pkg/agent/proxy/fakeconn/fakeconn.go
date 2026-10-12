@@ -106,7 +106,8 @@ type FakeConn struct {
 	pos int64
 	// discardTo is the discard watermark set by [FakeConn.DiscardBefore]:
 	// every byte below it is swallowed rather than delivered. Monotonic.
-	discardTo int64
+	// Written under mu, and atomic so ReadThrough takes no lock.
+	discardTo atomic.Int64
 	// consumed mirrors pos, for Consumed.
 	consumed atomic.Int64
 	// waits counts the times the reader found nothing to take and blocked
@@ -300,11 +301,11 @@ func (f *FakeConn) deliverLocked(c Chunk, n int) {
 func (f *FakeConn) next() error {
 	for {
 		f.mu.Lock()
-		if n := min(f.discardTo-f.pos, int64(len(f.pending.Bytes))); n > 0 {
+		if n := min(f.discardTo.Load()-f.pos, int64(len(f.pending.Bytes))); n > 0 {
 			f.skipLocked(int(n))
 			f.advanceLocked(int(n))
 		}
-		if f.hasPending && f.pos >= f.discardTo {
+		if f.hasPending && f.pos >= f.discardTo.Load() {
 			f.mu.Unlock()
 			return nil
 		}
@@ -458,7 +459,7 @@ func (f *FakeConn) AtChunkBoundary() bool {
 func (f *FakeConn) SkipThrough(t time.Time) (n int64, last time.Time, err error) {
 	for {
 		f.mu.Lock()
-		if !f.hasPending && f.pos >= f.discardTo {
+		if !f.hasPending && f.pos >= f.discardTo.Load() {
 			// Nothing in hand: the last chunk read, all of it, was captured
 			// at t or after it. (A chunk the skip discards was captured
 			// before t, so this holds or not for the whole of the skip.)
@@ -725,6 +726,15 @@ func (f *FakeConn) SettleStart() {
 // take.
 func (f *FakeConn) Consumed() int64 { return f.consumed.Load() }
 
+// ReadThrough is how far into this stream the reader is done: past what has
+// left the FakeConn (Consumed), and past what is below the discard watermark
+// (DiscardBefore), which it will never be handed though it is swallowed only
+// as the reader next pulls. A reader that stops reading recorded nothing past
+// it. It takes no lock.
+func (f *FakeConn) ReadThrough() int64 {
+	return max(f.consumed.Load(), f.discardTo.Load())
+}
+
 // Waiting reports whether the reader is blocked for the next chunk with
 // nothing buffered for it, and how many times it has blocked so. A reader that
 // reads one message at a time and is blocked so is done with everything it
@@ -786,10 +796,10 @@ func (f *FakeConn) Waiting() (waiting bool, waits uint64) {
 func (f *FakeConn) DiscardBefore(offset int64) int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if offset > f.discardTo {
-		f.discardTo = offset
+	if offset > f.discardTo.Load() {
+		f.discardTo.Store(offset)
 	}
-	if n := f.discardTo - f.pos; n > 0 {
+	if n := f.discardTo.Load() - f.pos; n > 0 {
 		return n
 	}
 	return 0
