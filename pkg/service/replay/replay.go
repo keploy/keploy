@@ -3586,9 +3586,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// written (attachStreamDepResults), from the filtered list the
 			// streamed test's own verdict reads.
 			//
-			// Under the switch a diverged mock set demotes nothing, so the
-			// diff of a failed answer is printed as the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+			// When dependency mismatches remain failures, the response diff is
+			// printed just as it is in the main replay loop.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks(), r.strictFailure())
 
 			if !ok {
 				// Handle streaming response type
@@ -3713,7 +3713,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks(), r.strictFailure())
 				}
 			}
 

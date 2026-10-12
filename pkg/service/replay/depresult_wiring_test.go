@@ -292,6 +292,27 @@ func TestRunTestSetWiring(t *testing.T) {
 	}
 }
 
+// All three response-diff decisions must use the shared predicate: once for
+// ordinary HTTP/gRPC replay and twice around streaming replay's mock drains.
+// Streaming-body mismatches may still force emitFailureLogs=false afterward to
+// avoid printing a second, misleading body diff.
+func TestFailureLogPredicateIsWiredOnEveryReplayPath(t *testing.T) {
+	_, fn := runTestSetSource(t)
+	calls := callArgIdents(fn, "shouldEmitFailureLogs")
+	if len(calls) != 3 {
+		t.Fatalf("expected three shouldEmitFailureLogs calls in RunTestSet, found %d", len(calls))
+	}
+
+	want := []string{"mockSetMismatch", "assertTestMocks", "strictFailure"}
+	for i, idents := range calls {
+		for _, identifier := range want {
+			if !idents[identifier] {
+				t.Fatalf("shouldEmitFailureLogs call %d does not pass %s; got identifiers %v", i+1, identifier, sortedKeys(idents))
+			}
+		}
+	}
+}
+
 // The deferred streaming path must NOT write DepResult with the proven switch
 // off: its expected-mock list is an un-tier-filtered slice built before the
 // run, so reusable/startup mocks would show up as per-test dependencies and go
