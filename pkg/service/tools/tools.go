@@ -843,26 +843,12 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		return nil
 	}
 
-	for _, testSetID := range testSets {
-
-		testSet, err := t.testSetConf.Read(ctx, testSetID)
-		if err == nil && (testSet != nil && testSet.Template != nil) {
-			utils.TemplatizedValues = testSet.Template
-		} else {
-			utils.TemplatizedValues = make(map[string]interface{})
-		}
-
-		if err == nil && (testSet != nil && testSet.Secret != nil) {
-			utils.SecretValues = testSet.Secret
-		} else {
-			utils.SecretValues = make(map[string]interface{})
-		}
-
+	for i, testSetID := range testSets {
 		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(t.logger, err, "failed to get test cases")
-			return err
+			utils.LogError(t.logger, err, "failed to get test cases", zap.String("testSet", testSetID))
+			return t.templatizeStopped(testSetID, testSets[i+1:], err)
 		}
 
 		if len(tcs) == 0 {
@@ -870,11 +856,22 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			continue
 		}
 
-		err = t.ProcessTestCasesV2(ctx, tcs, testSetID)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to process test cases")
-			return err
+		// ProcessTestCasesV2 logs what stopped it, with its next step.
+		if err := t.ProcessTestCasesV2(ctx, tcs, testSetID); err != nil {
+			return t.templatizeStopped(testSetID, testSets[i+1:], err)
 		}
 	}
 	return nil
+}
+
+// templatizeStopped is the error keploy templatize returns when it stops at
+// testSetID, whose own line said why: the test sets after it, not
+// templatized in this run, are named, and the command exits non-zero.
+func (t *Tools) templatizeStopped(testSetID string, rest []string, err error) error {
+	if len(rest) > 0 {
+		t.logger.Warn(fmt.Sprintf("keploy templatize stopped at test set %s, so it did not templatize the test sets after it", testSetID),
+			zap.Strings("notTemplatized", rest),
+			zap.String("next_step", "fix what the error for "+testSetID+" says, then run keploy templatize again: it leaves every set it already wrote as it is"))
+	}
+	return fmt.Errorf("keploy templatize stopped at test set %s: %w", testSetID, err)
 }

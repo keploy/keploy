@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 )
 
 type Service interface {
@@ -40,6 +41,34 @@ type TestDB interface {
 	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string, enableLog bool) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
+}
+
+// TestSetFiles is a TestDB that keeps each test set as files, which keploy
+// templatize needs: it reads a set's files as they are written, and puts
+// every file it changes in place together or none. The OSS store
+// (testdb.TestYaml) is one. It is its own interface, asserted only by
+// templatize, so a TestDB that keeps no files (k8s-proxy's, for keploy
+// normalize) still builds and serves every other tool.
+type TestSetFiles interface {
+	// TestCaseFiles returns the test case files of a test set as they are
+	// stored: every file GetTestCases reads, and no other. It fails when the
+	// set holds what an interrupted ReplaceFiles left.
+	TestCaseFiles(ctx context.Context, testSetID string) ([]yaml.File, error)
+	// TestCaseFile returns the file UpdateTestCase stores testCase in and the
+	// bytes it would hold, without writing it.
+	TestCaseFile(ctx context.Context, testCase *models.TestCase, testSetID string) (yaml.File, error)
+	// ReplaceFiles stores every file of files, or none of them: an error
+	// means the test set is as it was.
+	ReplaceFiles(ctx context.Context, files []yaml.File) error
+}
+
+// ConfigFiles is a TestSetConfig that keeps config.yaml as a file, which
+// keploy templatize needs (TestSetFiles): it is replaced together with the
+// test cases templatize changes. Asserted only by templatize.
+type ConfigFiles interface {
+	// ConfigFile returns the file Write stores testSet in and the bytes it
+	// would hold, without writing it.
+	ConfigFile(ctx context.Context, testSetID string, testSet *models.TestSet) (yaml.File, error)
 }
 
 type ReportDB interface {
