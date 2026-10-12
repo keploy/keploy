@@ -1304,3 +1304,61 @@ func TestFuzzy_AnonymousGraphQL_SameRootFieldStillMatches(t *testing.T) {
 		t.Fatalf("anonymous same-operation match failed: ok=%v mock=%v", ok, m)
 	}
 }
+
+// generateReq is a GenerateAPITests mutation the size of the enterprise-ui
+// one (134 KB: an OpenAPI schema and a Postman collection), carrying token.
+func generateReq(token string) string {
+	schema := strings.Repeat(`{\"path\":\"/jobs\",\"method\":\"post\"},`, 3000)
+	return `{"operationName":"GenerateAPITests","variables":{"schema":"` + schema +
+		`","authType":"BearerToken","token":"` + token + `"},` +
+		`"query":"mutation GenerateAPITests($schema: String) { generateAPITests(schema: $schema) { genJobId } }"}`
+}
+
+// The identity gate applies to a body of any size. It read no identity from a
+// body past 64 KB, so a large mutation was served the nearest member of a pool
+// that holds no recording of it: a different operation, as a 200.
+func TestFuzzy_LargeBody_DifferentOperation_Misses(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("reports", reportsBody)}
+	req := generateReq("eyJ.new.token")
+	if len(req) <= 64<<10 {
+		t.Fatalf("request is %d bytes; the case needs one past 64 KB", len(req))
+	}
+
+	if ok, m := h.PerformFuzzyMatch(pool, []byte(req)); ok {
+		t.Fatalf("served %q for a GenerateAPITests request: a different operation must miss", m.Name)
+	}
+}
+
+// A large mutation whose only change since its recording is a bearer token
+// (minted live by a server the replay does not mock) is served its recording,
+// and at once. It took 77 s: no identity was read from the body, so every
+// GraphQL mock in the pool was a candidate, each ranked by a Levenshtein
+// distance whose cost is the product of the two lengths.
+func TestFuzzy_LargeBody_SameOperation_ServedPromptly(t *testing.T) {
+	h := newHTTP()
+	pool := []*models.Mock{identityMock("generate", generateReq("eyJ.recorded.token"))}
+	for i := 0; i < 50; i++ {
+		pool = append(pool, identityMock(fmt.Sprintf("reports-%d", i), reportsBody))
+	}
+	raw := []byte("POST /query HTTP/1.1\r\nHost: localhost:8083\r\n" +
+		"Content-Type: application/json\r\n\r\n" + generateReq("eyJ.replayed.token"))
+
+	type result struct {
+		ok bool
+		m  *models.Mock
+	}
+	done := make(chan result, 1)
+	go func() {
+		ok, m := h.PerformFuzzyMatch(pool, raw)
+		done <- result{ok, m}
+	}()
+	select {
+	case r := <-done:
+		if !r.ok || r.m.Name != "generate" {
+			t.Fatalf("matched ok=%v mock=%v, want generate", r.ok, r.m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("fuzzy match of one large request ran past 10s")
+	}
+}

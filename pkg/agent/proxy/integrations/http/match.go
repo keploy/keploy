@@ -1464,12 +1464,13 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 // Deliberately textual: a full GraphQL parse on the match path would cost more
 // than it saves, and the root field is the first identifier after the opening
 // brace of the operation. Returns "" when the body is not a GraphQL document,
-// so non-GraphQL traffic is unaffected.
+// so non-GraphQL traffic is unaffected. Any size of body has its root field,
+// as it has its operationName (mismatch.ExtractReqIdentity): decoding the one
+// member it reads builds nothing for the others.
 var gqlRootFieldRe = regexp.MustCompile(`(?s)(?:query|mutation|subscription)\s*(?:\w+)?\s*(?:\([^)]*\))?\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)`)
 
 func gqlRootField(body []byte) string {
-	const maxScan = 64 << 10
-	if len(body) == 0 || len(body) > maxScan {
+	if len(body) == 0 {
 		return ""
 	}
 	var m struct {
@@ -1595,6 +1596,17 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 				zap.String("match_type", "fuzzy_exact"))
 			return true, mock
 		}
+	}
+
+	// One candidate is the answer: with no similarity floor, both measures
+	// below return it whatever its distance, and the Levenshtein one costs the
+	// product of the two lengths -- tens of seconds for one 134 KB GraphQL
+	// mutation whose bearer token had changed since it was recorded.
+	if len(tcsMocks) == 1 {
+		h.Logger.Debug("http mock matched",
+			zap.String("mock", tcsMocks[0].Name),
+			zap.String("match_type", "fuzzy_single_candidate"))
+		return true, tcsMocks[0]
 	}
 
 	// Build mock body strings, stripping noisy values for fair comparison

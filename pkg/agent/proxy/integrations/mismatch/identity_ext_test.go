@@ -1,6 +1,9 @@
 package mismatch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExtractReqIdentity(t *testing.T) {
 	cases := []struct{ name, body, want string }{
@@ -37,5 +40,36 @@ func TestBuilderCarriesReqIdentity(t *testing.T) {
 		Build()
 	if r.ReqIdentity != "operationName=GetAllGenJobs" {
 		t.Fatalf("report lost ReqIdentity: got %q", r.ReqIdentity)
+	}
+}
+
+// A body past 64 KB has its identity too. The HTTP matcher's identity gate asks
+// it, and a 134 KB GenerateAPITests mutation that had none was fuzzy-matched
+// against every GraphQL operation in the pool: 77 s for one request.
+func TestExtractReqIdentity_LargeBody(t *testing.T) {
+	big := strings.Repeat("x", 200<<10)
+	cases := []struct{ name, body, want string }{
+		{"identity before a big value",
+			`{"operationName":"GenerateAPITests","variables":{"schema":"` + big + `"},"query":"mutation GenerateAPITests { generateAPITests }"}`,
+			"operationName=GenerateAPITests"},
+		{"identity after a big value",
+			`{"variables":{"schema":"` + big + `"},"operationName":"GenerateAPITests"}`,
+			"operationName=GenerateAPITests"},
+		{"a nested operationName is not the call's",
+			`{"variables":{"operationName":"Inner","schema":"` + big + `"}}`,
+			""},
+		{"a later duplicate wins, as json.Unmarshal's does",
+			`{"operationName":"First","operationName":"Second"}`,
+			"operationName=Second"},
+		{"a non-string duplicate clears it",
+			`{"operationName":"First","operationName":7}`,
+			""},
+		{"trailing bytes are not JSON", `{"operationName":"X"} junk`, ""},
+		{"cut short", `{"operationName":"X","variables":{"schema":"` + big, ""},
+	}
+	for _, c := range cases {
+		if got := ExtractReqIdentity([]byte(c.body)); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
 	}
 }

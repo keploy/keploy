@@ -21,9 +21,12 @@
 package mismatch
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -594,22 +597,22 @@ var identityKeys = []string{"operationName", "operation", "method", "action", "t
 // out of a JSON request body, so a miss on a multiplexed endpoint says which
 // call it was. Returns "" when the body is not JSON or carries no identity key
 // — an empty field is honest, a guessed one is not.
+//
+// Any size of body has its identity: the HTTP matcher's identity gate and write
+// barrier ask it too, and a body too big to have one was let through to fuzzy
+// matching against every operation in the pool. Only the top-level members are
+// read, with no tree built for the values, so the cost is a scan of the body.
 func ExtractReqIdentity(body []byte) string {
-	const maxScan = 64 << 10 // don't parse an unbounded body on the miss path
-	if len(body) == 0 || len(body) > maxScan {
+	if len(body) == 0 {
 		return ""
 	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(body, &m); err != nil {
+	found, ok := topLevelStrings(body, identityKeys)
+	if !ok {
 		return ""
 	}
 	parts := make([]string, 0, 2)
 	for _, k := range identityKeys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		if sv, ok := v.(string); ok && sv != "" {
+		if sv := found[k]; sv != "" {
 			if len(sv) > 80 {
 				sv = sv[:80] + "..."
 			}
@@ -617,4 +620,44 @@ func ExtractReqIdentity(body []byte) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// topLevelStrings reads the JSON object body and returns the string values of
+// its top-level members named in keys; a member whose value is not a string is
+// left out, and a later duplicate replaces an earlier one, as json.Unmarshal
+// into a map does. ok is false when body is not one JSON object.
+func topLevelStrings(body []byte, keys []string) (map[string]string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	found := map[string]string{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, false
+		}
+		if !slices.Contains(keys, key) {
+			continue
+		}
+		var sv string
+		if json.Unmarshal(raw, &sv) != nil {
+			delete(found, key)
+			continue
+		}
+		found[key] = sv
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, false
+	}
+	// Nothing may follow the object, as json.Unmarshal requires.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	return found, true
 }
