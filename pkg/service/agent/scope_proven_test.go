@@ -608,6 +608,25 @@ func TestASessionStartEndsWithItsCaller(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
+// No secret written as a literal survives sqlShape, whatever surrounds it:
+// every combination of a prefix, a literal form and a suffix is shaped.
+func TestSQLShapeKeepsNoLiteral(t *testing.T) {
+	prefixes := []string{"", "SELECT * FROM `t` WHERE a = ", "UPDATE `x'y` SET b = ", "SELECT `a\"b`, ", "SELECT 1 -- ", "SELECT $q$ ", "INSERT INTO t VALUES (", "SELECT E", "SELECT _utf8mb4", "SELECT X"}
+	literals := []string{"'SeCrEt'", "\"SeCrEt\"", "'Se''CrEt'", "'Se\\'CrEt'", "'SeCrEt", "`SeCrEt`'SeCrEt'", "$t$SeCrEt$t$", "/* SeCrEt */", "'a' 'SeCrEt'"}
+	suffixes := []string{"", ")", " AND c = 'SeCrEt'", " params=[SeCrEt]", " `z`"}
+	for _, p := range prefixes {
+		for _, l := range literals {
+			for _, sfx := range suffixes {
+				q := p + l + sfx
+				got := sqlShape(q)
+				if strings.Contains(strings.ToLower(strings.ReplaceAll(got, "`SeCrEt`", "")), "secret") {
+					t.Errorf("sqlShape(%q) = %q keeps the literal", q, got)
+				}
+			}
+		}
+	}
+}
+
 // Evidence keeps a miss's shape and the matcher's advice, never a value:
 // an HTTP path's IDs and query, a SQL statement's literals.
 func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
@@ -638,6 +657,13 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 		"SELECT 1 # secret":                        "SELECT ? …",
 		"SELECT * FROM t WHERE id = $1 AND n = $2": "SELECT * FROM t WHERE id = $1 AND n = $2",
 		"SELECT col1, t2.c3 FROM t2 WHERE x = 42":  "SELECT col1, t2.c3 FROM t2 WHERE x = ?",
+		// A quote inside a backtick identifier would flip what is a literal.
+		"UPDATE `user's` SET password = 'secret' WHERE id = 7":                "UPDATE …",
+		"SELECT name AS `Customer\"s Name` FROM c WHERE email = 'alice@x.io'": "SELECT name AS …",
+		"SELECT `users`.`email` FROM `users` WHERE `id` = 7":                  "SELECT `users`.`email` FROM `users` WHERE `id` = ?",
+		"SELECT `unclosed FROM t WHERE p = 'secret'":                          "SELECT …",
+		"COM_STMT_EXECUTE SELECT 1 params=[secret]":                           "COM_STMT_EXECUTE SELECT ?",
+		"params=[secret]": "",
 	} {
 		require.Equal(t, want, sqlShape(in), in)
 		for _, secret := range []string{"alice", "s3cr3t", "secret", "abc", "zz", "diary"} {
@@ -649,7 +675,9 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
 		NextSteps:  "Only values drifted (body.users.alice@example.com.score, body.items[3].sku_7c01d2e9). Re-record.",
 		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "body.items[3].sku_7c01d2e9"}}})
-	require.Equal(t, "Only values drifted (body.users.{}.com.score, body.items[].{}). Re-record.", drift.NextSteps)
+	require.Equal(t, "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", drift.NextSteps)
+	fixed := sanitizedMiss(models.UnmatchedCall{Protocol: "MySQL", NextSteps: "Re-record mocks if the SQL query has changed."})
+	require.Equal(t, "Re-record mocks if the SQL query has changed.", fixed.NextSteps, "fixed advice is kept")
 	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "PostgresV2", ActualSummary: "SELECT 1"})
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})

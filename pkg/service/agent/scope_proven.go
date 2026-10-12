@@ -736,11 +736,10 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // the method and the path's shape, for SQL the statement with its literals
 // written "?" (sqlShape). Never a value the app sent (a query's literals or
 // bound parameters, a path's IDs, a body). The next step is the matcher's
-// own advice, which names commands and the fields that differed; a field
-// path is kept as its shape too, since a map's keys can be values.
+// own fixed advice (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: shapeFieldPaths(m.NextSteps, m.FieldDiffs), At: m.At}
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At}
 	switch {
 	case isHTTP(m.Protocol):
 		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
@@ -752,32 +751,20 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	return out
 }
 
-// shapeFieldPaths writes each differing field's path in text as its shape
-// (fieldShape).
-func shapeFieldPaths(text string, diffs []models.MockFieldDiff) string {
-	for _, d := range diffs {
-		if d.Path != "" {
-			text = strings.ReplaceAll(text, d.Path, fieldShape(d.Path))
+// nextStepOf is a miss's next step as evidence keeps it. Every matcher
+// writes fixed advice, but one lists the fields that differed, and a map's
+// keys can be values (an email, a user ID): a next step that names any of
+// the miss's field paths is replaced by fixed advice that counts them.
+func nextStepOf(m models.UnmatchedCall) string {
+	for _, d := range m.FieldDiffs {
+		if d.Path == "" {
+			continue
+		}
+		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
+			return fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
 		}
 	}
-	return text
-}
-
-// fieldShape is a field path with every segment that may be a value (an ID,
-// an email, a long token: pathShape's rule) written "{}".
-func fieldShape(p string) string {
-	segs := strings.Split(p, ".")
-	for i, s := range segs {
-		name, index, _ := strings.Cut(s, "[")
-		if allDigits.MatchString(name) || (len(name) >= 8 && hasDigit.MatchString(name)) || strings.ContainsAny(name, "@:/ ") {
-			name = "{}"
-		}
-		if index != "" {
-			name += "[]"
-		}
-		segs[i] = name
-	}
-	return strings.Join(segs, ".")
+	return m.NextSteps
 }
 
 // isSQL reports whether a miss's protocol speaks SQL, whose summary is the
@@ -795,26 +782,56 @@ const maxSQLText = 160
 // of the statement written "…": a literal holding a backslash (MySQL reads
 // \' as a quote by default, so where the literal ends depends on the
 // server's sql_mode), one never closed, a dollar quote ($tag$), and a
-// comment. MySQL's bound parameters (" params=[...]", which the replayer adds
-// to a prepared statement's summary) are dropped whole. A quoted identifier
+// comment. MySQL's bound parameters ("params=[...]", which the replayer adds
+// to a prepared statement's summary) are dropped whole, and a backtick
+// identifier is kept only when it holds no quote. A quoted identifier
 // (Postgres "table") is written "?" too: hiding a name beats keeping a value.
 func sqlShape(q string) string {
-	if i := strings.Index(q, " params=["); i >= 0 {
+	if i := strings.Index(q, "params=["); i >= 0 {
 		q = q[:i]
 	}
 	var b strings.Builder
 	withheld := false
+	firstLiteral := -1
 scan:
 	for i := 0; i < len(q); {
 		c := q[i]
 		switch {
 		case c == '\'' || c == '"':
-			b.WriteString("?")
+			if firstLiteral < 0 {
+				firstLiteral = b.Len()
+			}
 			end, ok := closeQuote(q, i)
 			if !ok {
+				// A literal never closed leaves no quote of the statement
+				// paired for certain: everything from the first is withheld.
+				if end < 0 {
+					s := b.String()[:firstLiteral]
+					b.Reset()
+					b.WriteString(s)
+				}
+				b.WriteString("?")
 				withheld = true
 				break scan
 			}
+			b.WriteString("?")
+			i = end
+		case c == '`':
+			// A MySQL identifier: kept, as a name. One never closed, or
+			// holding a quote (which a reader would take for a literal's
+			// start), is withheld with the rest; so is a backslash, and
+			// Postgres's operator character.
+			end, ok := closeQuote(q, i)
+			if !ok || strings.ContainsAny(q[i+1:end-1], `'"`) {
+				if !ok && end < 0 && firstLiteral >= 0 {
+					s := b.String()[:firstLiteral]
+					b.Reset()
+					b.WriteString(s)
+				}
+				withheld = true
+				break scan
+			}
+			b.WriteString(q[i:end])
 			i = end
 		case c == '$' && i+1 < len(q) && isDigitByte(q[i+1]):
 			// A placeholder ($1): kept.
@@ -856,7 +873,7 @@ scan:
 
 // closeQuote is the index past the quote that closes the literal opening at
 // q[i] (a doubled quote inside it is one quote), and false for a literal with
-// a backslash in it, or one never closed.
+// a backslash in it (index 0), or one never closed (index -1).
 func closeQuote(q string, i int) (int, bool) {
 	quote := q[i]
 	for j := i + 1; j < len(q); j++ {
@@ -871,7 +888,7 @@ func closeQuote(q string, i int) (int, bool) {
 			return j + 1, true
 		}
 	}
-	return 0, false
+	return -1, false
 }
 
 var sqlSpace = regexp.MustCompile(`\s+`)
