@@ -57,10 +57,13 @@ func (m *mockService) ended(err error) error {
 }
 
 func (m *mockService) note(f func()) {
+	m.heldMu.Lock()
 	if m.held != nil {
 		*m.held = append(*m.held, f)
+		m.heldMu.Unlock()
 		return
 	}
+	m.heldMu.Unlock()
 	f()
 }
 

@@ -19,8 +19,9 @@ import (
 
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
-	held *[]func()
-	ids  *ids.Map
+	held   *[]func()
+	heldMu sync.Mutex
+	ids    *ids.Map
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -69,5 +70,19 @@ func TestJSONLeafDiffsCapsRowsAndNamesTopLevelArrays(t *testing.T) {
 	}
 	if got, _ := JSONLeafDiffs(`1`, `2`, nil, false, "body.", 0, 0); got[0].Path != "body" {
 		t.Fatalf("a scalar body is %q", got[0].Path)
+	}
+}
+
+func TestJSONLeafDiffsStopsAtADepthItCanAfford(t *testing.T) {
+	deep := func(leaf string) string {
+		return strings.Repeat(`{"a":`, 10000) + leaf + strings.Repeat("}", 10000)
+	}
+	start := time.Now()
+	rows, n := JSONLeafDiffs(deep("1"), deep("2"), nil, false, "body.", 0, 50)
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("depth 10000 took %s", took)
+	}
+	if n != 1 || len(rows) != 1 || strings.Count(rows[0].Path, ".a") != maxLeafDepth {
+		t.Fatalf("got %d rows of %d: %+v", len(rows), n, rows)
 	}
 }

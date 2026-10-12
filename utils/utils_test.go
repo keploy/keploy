@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -404,13 +405,28 @@ func TestQuoteArgsKeepsACommandOnOneLine(t *testing.T) {
 		"go test ./...":   "'go test ./...'",
 		"a^b":             "'a^b'",
 		"go test\n-run A": `$'go test\n-run A'`,
-		"it's\r\v":        `$'it\'s\r\x0b'`,
-		"x\u2028y":        `$'x\xe2\x80\xa8y'`,
+		"it's\r\v":        `$'it\'s\r\013'`,
+		"x\u2028y":        `$'x\342\200\250y'`,
 		"=x":              "'=x'",
+		"a\xffb":          `$'a\377b'`,
 		"plain":           "plain",
 	} {
 		if got := QuoteArgs([]string{in}); got != want {
 			t.Errorf("QuoteArgs(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestQuoteArgsRoundTripsInTheShells(t *testing.T) {
+	for _, sh := range []string{"bash", "zsh"} {
+		if _, err := exec.LookPath(sh); err != nil {
+			continue
+		}
+		for _, in := range []string{"go test\n-run A", "it's\r\v", "x\u2028y", "a\xffb", "=x", "plain", "a'b\\c"} {
+			out, err := exec.Command(sh, "-c", "printf %s "+QuoteArgs([]string{in})).Output()
+			if err != nil || string(out) != in {
+				t.Errorf("%s: %q came back as %q (%v)", sh, in, out, err)
+			}
 		}
 	}
 }

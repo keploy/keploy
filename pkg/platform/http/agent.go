@@ -1691,9 +1691,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
-	if elevates && !sudoCached && a.mock && !a.conf.Debug {
-		if err := askSudo(ctx, a.logger, keployBin, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
-			return err
+	mockSudo := elevates && !sudoCached && a.mock && !a.conf.Debug
+	if mockSudo {
+		if _, err := exec.LookPath("sudo"); err != nil {
+			return fmt.Errorf("keploy's agent needs root on Linux and sudo is not installed; run keploy as root: %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
 		}
 		sudoCached = true
 	}
@@ -1708,15 +1709,22 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 
 	cmd.Stdout, cmd.Stderr = a.agentOutput()
 
-	a.mu.Lock()
-	a.agentCmd = cmd // this has been set for proper stopping of the native agent
-	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
+	var waited <-chan error
+	if mockSudo && a.agentLog != "" {
+		var err error
+		cmd, waited, err = startSudo(ctx, a.logger, cmd, func() *exec.Cmd { return agentUtils.NewAgentCommand(keployBin, args, true) }, a.agentLog, term.IsTerminal(int(os.Stdin.Fd())))
+		if err != nil {
+			a.endAgentLog(false)
+			return err
+		}
+	} else if err := agentUtils.StartCommand(cmd); err != nil {
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		a.endAgentLog(false)
 		return err
 	}
+	a.mu.Lock()
+	a.agentCmd = cmd // this has been set for proper stopping of the native agent
+	a.mu.Unlock()
 
 	pid := cmd.Process.Pid
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
@@ -1724,7 +1732,12 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 
-		err := cmd.Wait()
+		var err error
+		if waited != nil {
+			err = <-waited
+		} else {
+			err = cmd.Wait()
+		}
 		// Reported BEFORE the error is returned below: returning it cancels
 		// the group, and the readiness wait must find the exit already here
 		// when it sees that cancellation.
@@ -2591,7 +2604,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
-	if agentUtils.NeedsPTY() {
+	if agentUtils.NeedsPTY() && (!a.mock || a.conf.Debug || strings.Contains(cmd.String(), "sudo ")) {
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 

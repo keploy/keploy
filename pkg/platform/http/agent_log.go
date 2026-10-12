@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -138,25 +139,49 @@ func (a *AgentClient) agentOutput() (io.Writer, io.Writer) {
 	return f, f
 }
 
-var sudoProbe = func(ctx context.Context, bin string) (string, error) {
-	out, err := exec.CommandContext(ctx, "sudo", "-n", "-l", bin).CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+var sudoGrace = 2 * time.Second
+
+func startSudo(ctx context.Context, logger *zap.Logger, cmd *exec.Cmd, again func() *exec.Cmd, logPath string, tty bool) (*exec.Cmd, <-chan error, error) {
+	for try := 0; ; try++ {
+		if err := agentUtils.StartCommand(cmd); err != nil {
+			return nil, nil, err
+		}
+		waited := make(chan error, 1)
+		go func(c *exec.Cmd) { waited <- c.Wait() }(cmd)
+		select {
+		case <-time.After(sudoGrace):
+			return cmd, waited, nil
+		case err := <-waited:
+			said := sudoSaid(logPath)
+			if said == "" {
+				back := make(chan error, 1)
+				back <- err
+				return cmd, back, nil
+			}
+			if !tty || try > 0 {
+				return nil, nil, fmt.Errorf("keploy's agent needs root on Linux, and sudo said: %s; keploy ran: %s", said, utils.QuoteArgs(cmd.Args))
+			}
+			if err := utils.CacheSudoCredentials(ctx, logger); err != nil {
+				return nil, nil, fmt.Errorf("keploy's agent needs root on Linux, and sudo did not accept the password (%w); keploy ran: %s", err, utils.QuoteArgs(cmd.Args))
+			}
+			next := again()
+			next.Stdout, next.Stderr = cmd.Stdout, cmd.Stderr
+			cmd = next
+		}
+	}
 }
 
-func askSudo(ctx context.Context, logger *zap.Logger, bin string, tty bool) error {
-	said, err := sudoProbe(ctx, bin)
-	if err == nil {
-		return nil
+func sudoSaid(logPath string) string {
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
 	}
-	again := utils.QuoteArgs(append([]string{"sudo", "-E", "env", "PATH=" + os.Getenv("PATH"), bin}, os.Args[1:]...))
-	if !tty {
-		first, _, _ := strings.Cut(said, "\n")
-		return fmt.Errorf("keploy's agent needs root on Linux, and sudo -n -l %s refused (%s); run keploy as root: %s", bin, cmpOr(first, err.Error()), again)
+	for _, l := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(l, "sudo: ") && strings.Contains(l, "password is required") {
+			return strings.TrimSpace(l)
+		}
 	}
-	if err := utils.CacheSudoCredentials(ctx, logger); err != nil {
-		return fmt.Errorf("sudo did not give keploy root (%w); run keploy as root: %s", err, again)
-	}
-	return nil
+	return ""
 }
 
 func cmpOr(a, b string) string {

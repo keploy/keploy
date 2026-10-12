@@ -111,7 +111,9 @@ func (m *mockService) replay(ctx context.Context) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	var held []func()
+	m.heldMu.Lock()
 	m.held = &held
+	m.heldMu.Unlock()
 	defer func() {
 		m.notifyShutdown()
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
@@ -119,8 +121,11 @@ func (m *mockService) replay(ctx context.Context) (err error) {
 		if err := utils.DrainErrGroup(m.logger, "mock-replay", errGrp, 30*time.Second); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
 		}
+		m.heldMu.Lock()
 		m.held = nil
-		for _, f := range held {
+		later := held
+		m.heldMu.Unlock()
+		for _, f := range later {
 			f()
 		}
 	}()

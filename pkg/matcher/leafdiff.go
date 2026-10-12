@@ -39,7 +39,7 @@ func JSONLeafDiffs(expJSON, actJSON string, noise map[string][]string, ignoreOrd
 		}
 	}
 	w.ni = buildNoiseIndex(path, nil)
-	w.walk("", "", exp, act, false)
+	w.walk("", "", shallow(exp, 0), shallow(act, 0), false)
 	return w.out, w.total
 }
 
@@ -116,6 +116,32 @@ func (w *leafWalk) walk(key, path string, e, a any, ancestor bool) {
 	w.add(path, models.DiffKindValueChanged, e, a, true, true)
 }
 
+const maxLeafDepth = 64
+
+func shallow(v any, depth int) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if depth >= maxLeafDepth {
+			return "\x00" + jsonText(t)
+		}
+		out := make(map[string]any, len(t))
+		for k, c := range t {
+			out[k] = shallow(c, depth+1)
+		}
+		return out
+	case []any:
+		if depth >= maxLeafDepth {
+			return "\x00" + jsonText(t)
+		}
+		out := make([]any, len(t))
+		for i, c := range t {
+			out[i] = shallow(c, depth+1)
+		}
+		return out
+	}
+	return v
+}
+
 func joinKey(path, k string) string {
 	if path == "" {
 		return k
@@ -143,6 +169,9 @@ func jsonText(v any) string {
 	enc.SetEscapeHTML(false)
 	if f, ok := v.(float64); ok {
 		return formatJSONNumber(f)
+	}
+	if s, ok := v.(string); ok && strings.HasPrefix(s, "\x00") {
+		return s[1:]
 	}
 	if enc.Encode(v) != nil {
 		return ""

@@ -3,8 +3,8 @@ package http
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -140,19 +140,62 @@ func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 	}
 }
 
-func TestAMockRunWithoutATerminalDoesNotWaitForASudoPassword(t *testing.T) {
-	prev := sudoProbe
-	t.Cleanup(func() { sudoProbe = prev })
-	sudoProbe = func(context.Context, string) (string, error) {
-		return "sudo: a password is required", errors.New("exit status 1")
+const fakeSudo = `#!/bin/sh
+case "$1 $2" in
+"-v "*) touch "$STAMP"; exit 0 ;;
+"-n -v") [ -f "$STAMP" ] && exit 0; exit 1 ;;
+esac
+if [ "$1" = "-n" ]; then
+	shift
+	if [ "$MODE" = nopasswd ] || [ -f "$STAMP" ]; then exec "$@"; fi
+	echo "sudo: a password is required" >&2
+	exit 1
+fi
+exec "$@"
+`
+
+func TestASudoThatWantsAPasswordIsAskedOnceOrNamed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(fakeSudo), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	err := askSudo(context.Background(), zap.NewNop(), "/opt/keploy", false)
-	if err == nil || !strings.Contains(err.Error(), "sudo -n -l /opt/keploy refused (sudo: a password is required); run keploy as root: sudo -E env PATH=") {
-		t.Fatalf("err = %v", err)
-	}
-	sudoProbe = func(context.Context, string) (string, error) { return "", nil }
-	if err := askSudo(context.Background(), zap.NewNop(), "/opt/keploy", false); err != nil {
-		t.Fatalf("a sudoers rule for keploy alone is enough: %v", err)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prev := sudoGrace
+	sudoGrace = 300 * time.Millisecond
+	t.Cleanup(func() { sudoGrace = prev })
+	for _, tc := range []struct {
+		name, mode string
+		tty, ok    bool
+	}{
+		{name: "ALL with an unrelated NOPASSWD, on a terminal", mode: "password", tty: true, ok: true},
+		{name: "ALL with an unrelated NOPASSWD, no terminal", mode: "password", ok: false},
+		{name: "NOPASSWD for keploy with its args", mode: "nopasswd", ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MODE", tc.mode)
+			t.Setenv("STAMP", filepath.Join(t.TempDir(), "stamp"))
+			logPath := filepath.Join(t.TempDir(), "agent.log")
+			f, err := os.Create(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			mk := func() *exec.Cmd { return exec.Command("sudo", "-n", "sleep", "5") }
+			cmd := mk()
+			cmd.Stdout, cmd.Stderr = f, f
+			got, waited, err := startSudo(context.Background(), zap.NewNop(), cmd, mk, logPath, tc.tty)
+			if tc.ok {
+				if err != nil || waited == nil {
+					t.Fatalf("start = %v", err)
+				}
+				_ = got.Process.Kill()
+				<-waited
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "sudo said: sudo: a password is required; keploy ran: sudo -n sleep 5") {
+				t.Fatalf("err = %v", err)
+			}
+		})
 	}
 }
 

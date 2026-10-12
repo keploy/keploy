@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -1800,7 +1801,7 @@ func QuoteArgs(args []string) string {
 	for i, a := range args {
 		out[i] = a
 		switch {
-		case strings.IndexFunc(a, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) >= 0:
+		case !utf8.ValidString(a) || strings.IndexFunc(a, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) >= 0:
 			out[i] = cQuote(a)
 		case a == "" || strings.HasPrefix(a, "=") || strings.ContainsAny(a, " \t\r\n\"'$`\\|&;<>()*?[]{}~#!^"):
 			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
@@ -1812,7 +1813,8 @@ func QuoteArgs(args []string) string {
 func cQuote(a string) string {
 	var b strings.Builder
 	b.WriteString("$'")
-	for _, r := range a {
+	for i := 0; i < len(a); {
+		r, size := utf8.DecodeRuneInString(a[i:])
 		switch {
 		case r == '\\' || r == '\'':
 			b.WriteString("\\" + string(r))
@@ -1822,15 +1824,14 @@ func cQuote(a string) string {
 			b.WriteString("\\t")
 		case r == '\r':
 			b.WriteString("\\r")
-		case r < 0x80 && unicode.IsControl(r):
-			fmt.Fprintf(&b, "\\x%02x", r)
-		case r == '\u2028' || r == '\u2029' || unicode.IsControl(r):
-			for _, c := range []byte(string(r)) {
-				fmt.Fprintf(&b, "\\x%02x", c)
+		case r == utf8.RuneError && size == 1, unicode.IsControl(r), r == '\u2028', r == '\u2029':
+			for _, c := range []byte(a[i : i+size]) {
+				fmt.Fprintf(&b, "\\%03o", c)
 			}
 		default:
-			b.WriteRune(r)
+			b.WriteString(a[i : i+size])
 		}
+		i += size
 	}
 	b.WriteString("'")
 	return b.String()
