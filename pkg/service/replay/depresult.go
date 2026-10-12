@@ -287,6 +287,7 @@ func buildDepResults(
 	}
 
 	var out []models.DepResult
+	var missing []models.UnconsumedMock
 	consumedCount := 0
 	// missingOverflow counts the missing dependencies past depMissingRowCap.
 	// They collapse into one models.DepMissingOverflowRow instead of being
@@ -330,6 +331,7 @@ func buildDepResults(
 			consumedCount++
 			continue
 		}
+		missing = append(missing, models.UnconsumedMock{Name: m.Name, Kind: m.Kind})
 
 		if len(out) >= depMissingRowCap {
 			// Past the cap. The dependencies are visited in RECORDED order
@@ -395,7 +397,7 @@ func buildDepResults(
 		out = append(out, models.DepMissingOverflowRow(missingOverflow))
 	}
 
-	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out}
+	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out, Missing: missing}
 }
 
 // depAssertion is the complete per-test dependency verdict buildDepResults
@@ -422,6 +424,10 @@ type depAssertion struct {
 	// Rows carries one presence row per dependency that went missing, plus at
 	// most one models.DepMissingOverflowRow. Nil when nothing went missing.
 	Rows []models.DepResult
+	// Missing names every dependency that went missing, by its mock's name
+	// and kind, in recorded order: Rows caps its rows and names a display
+	// target, not the mock.
+	Missing []models.UnconsumedMock
 }
 
 // depMissingRowCap bounds the number of INDIVIDUAL missing-dependency rows
@@ -721,6 +727,11 @@ func attachDepResults(
 	// run, which omitempty then keeps off the wire entirely.
 	tcResult.Result.DepsChecked = dep.Checked
 	tcResult.Result.DepsConsumed = dep.Consumed
+	// Under the proven switch each unconsumed test mock fails the test, and
+	// its name is the evidence (unconsumed_mock).
+	if provenswitch.On() {
+		tcResult.FailureInfo.UnconsumedMocks = dep.Missing
+	}
 
 	missingNames = models.MissingDepNames(dep.Rows)
 	if len(missingNames) == 0 {
@@ -787,6 +798,11 @@ func recordUnexercised(set map[string]models.TestStatus, name string, status mod
 // verdict, so the log tells the user which knob to look at instead of pointing
 // them at re-recording.
 func vetoFlagName(depAssertFail, strictFailure bool) string {
+	if (depAssertFail || strictFailure) && provenswitch.On() {
+		// Under the switch the veto holds whatever the flags say: it is the
+		// switch that keeps the test FAILED, so the switch is named, alone.
+		return provenswitch.Env + "=1"
+	}
 	switch {
 	case depAssertFail && strictFailure:
 		return "--assert-dependencies, --strict-failure"
@@ -978,15 +994,25 @@ func dependencyAssertionInertMessage(reason string) string {
 // The message is chosen from the reason (dependencyAssertionInertMessage)
 // because the scopes are not the same claim.
 func (r *Replayer) warnDependencyAssertionInert(testSetID string, useMappingBased, isMappingEnabled, consumedFetchFailed, deferredStreaming, noEligibleDeps bool, warned *bool) {
-	if !r.config.Test.AssertDependencies || warned == nil || *warned {
+	if !r.assertTestMocks() || warned == nil || *warned {
 		return
+	}
+	if provenswitch.On() {
+		// Under the proven switch the streaming pass judges its tests on
+		// their test mocks too (unconsumedTestMocks): it is not inert there.
+		deferredStreaming = false
 	}
 	reason := dependencyAssertionInertReason(r.instrument, useMappingBased, isMappingEnabled, consumedFetchFailed, deferredStreaming, noEligibleDeps)
 	if reason == "" {
 		return
 	}
 	*warned = true
-	r.logger.Warn(dependencyAssertionInertMessage(reason),
+	msg := dependencyAssertionInertMessage(reason)
+	if provenswitch.On() {
+		// It is the switch that asks for the assertion, whatever the flags.
+		msg = provenswitch.Env + "=1" + strings.TrimPrefix(msg, "--assert-dependencies")
+	}
+	r.logger.Warn(msg,
 		zap.String("testset", testSetID),
 		zap.String("reason", reason))
 }

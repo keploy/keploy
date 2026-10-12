@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type junitTestSuites struct {
@@ -236,6 +237,13 @@ func buildFailure(t models.TestResult) *junitFailure {
 	// every report produced before it.
 	parts = append(parts, depFailureLines(t.Result.DepResult)...)
 
+	// Under the proven switch the evidence that fails a test on its calls is
+	// named: each call that got no recorded answer, and each recorded call it
+	// did not make, by mock.
+	if provenswitch.On() {
+		parts = append(parts, provenEvidenceLines(t.FailureInfo)...)
+	}
+
 	msg := "test assertion failed"
 	if refusedUnsent(t.TemplateFailures) {
 		// Refused when its set loaded: nothing was sent or asserted.
@@ -347,4 +355,32 @@ func fmtTestTime(timeTaken string) string {
 		return "0.000"
 	}
 	return fmtSeconds(dur)
+}
+
+// provenEvidenceLines are a failed test's calls that got no recorded answer
+// (DNS left out, as the verdict leaves it out) and its unconsumed test mocks,
+// one line each, under the proven switch.
+func provenEvidenceLines(fi models.FailureInfo) []string {
+	var lines []string
+	for _, c := range fi.UnmatchedCalls {
+		if strings.EqualFold(c.Protocol, "DNS") {
+			continue
+		}
+		line := fmt.Sprintf("call with no recorded answer: %s %s", c.Protocol, c.ActualSummary)
+		if c.Destination != "" {
+			line += " (to " + c.Destination + ")"
+		}
+		lines = append(lines, line)
+	}
+	for _, m := range fi.UnconsumedMocks {
+		line := fmt.Sprintf("recorded call not made: mock %s", m.Name)
+		if m.Kind != "" {
+			line += " (" + m.Kind + ")"
+		}
+		if m.ConsumedBy != "" {
+			line += "; " + m.ConsumedBy + " consumed it, and the order the shared mock pool served the two in can decide which test it counts for"
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }

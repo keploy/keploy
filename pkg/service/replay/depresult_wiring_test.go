@@ -11,12 +11,11 @@ import (
 	"testing"
 )
 
-// RunTestSet is ~2000 lines long and no test executes it: standing up its
-// eight collaborator interfaces (TestDB, MockDB, MappingDB, ReportDB,
-// TestSetConfig, Telemetry, Instrumentation, TestHooks) plus the simulate loop
-// is a harness this slice does not justify. The consequence measured by a
-// reviewer is that the DepResult writer could be replaced with a discard and
-// the whole suite stayed green.
+// RunTestSet is ~2000 lines long, and when this file was written no test
+// executed it. The harnesses that do now (partial_run_runtestset_test.go,
+// templates_runtestset_test.go) drive some of its paths, not every wire
+// below: the consequence measured by a reviewer was that the DepResult writer
+// could be replaced with a discard and the whole suite stayed green.
 //
 // The BEHAVIOUR of every extracted seam is table-tested above
 // (resolveTestOutcome, resolveTestStatus, attachDepResults, buildDepResults,
@@ -289,9 +288,12 @@ func TestRunTestSetWiring(t *testing.T) {
 	}
 }
 
-// The deferred streaming path must NOT write DepResult: its expected-mock list
-// is an un-tier-filtered slice built before the run, so reusable/startup mocks
-// would show up as per-test dependencies and go "missing" at random.
+// The deferred streaming path must NOT write DepResult with the proven switch
+// off: its expected-mock list is an un-tier-filtered slice built before the
+// run, so reusable/startup mocks would show up as per-test dependencies and go
+// "missing" at random. Under the switch it writes them through
+// attachStreamDepResults, which filters that list as the main loop does
+// (eligibleExpectedEntries), and only there.
 func TestStreamingPathDoesNotWriteDepResults(t *testing.T) {
 	_, fn := runTestSetSource(t)
 	if calls := callArgIdents(fn, "buildDepResults"); len(calls) != 1 {
@@ -299,6 +301,18 @@ func TestStreamingPathDoesNotWriteDepResults(t *testing.T) {
 	}
 	if calls := callArgIdents(fn, "attachDepResults"); len(calls) != 1 {
 		t.Fatalf("expected exactly one attachDepResults call in RunTestSet, found %d", len(calls))
+	}
+	pos := posOfCall(t, fn, "attachStreamDepResults")
+	under := false
+	for _, n := range ancestorsOf(fn, pos) {
+		if ifStmt, ok := n.(*ast.IfStmt); ok {
+			if call, ok := ifStmt.Cond.(*ast.CallExpr); ok && calleeName(call) == "provenswitch.On" {
+				under = true
+			}
+		}
+	}
+	if !under {
+		t.Fatal("RunTestSet writes a streamed test's dependency rows outside `if provenswitch.On()`: with the switch off the streaming pass must write none")
 	}
 }
 
@@ -808,8 +822,9 @@ func TestStreamingPassWarnsTheAssertionDidNotRun(t *testing.T) {
 	calls := callArgIdents(fn, warner)
 	if len(calls) != 2 {
 		t.Fatalf("RunTestSet calls %s %d time(s), want 2 (the main replay loop and the deferred streaming pass).\n\n"+
-			"WHY THIS MATTERS: the streaming pass runs no dependency assertion at all. Without its own "+
-			"call, --assert-dependencies over a set of SSE/chunked tests is silently inert and exits 0.",
+			"WHY THIS MATTERS: the streaming pass runs no --assert-dependencies assertion (under "+
+			"KEPLOY_PROVEN=1 it judges only its test mocks, proven_verdicts.go). Without its own call, "+
+			"--assert-dependencies over a set of SSE/chunked tests is silently inert and exits 0.",
 			warner, len(calls))
 	}
 

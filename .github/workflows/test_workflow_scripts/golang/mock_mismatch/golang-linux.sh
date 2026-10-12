@@ -848,6 +848,10 @@ echo "✓ KEPLOY_PROVEN=1: every test owned its recorded call, the miss was repo
 #      reads as consumed.
 KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./pristine-run --delay 7 --generateGithubActions=false 2>&1 | tee proven_pristine_logs.txt
 proven_pristine_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" proven_pristine_logs.txt; then
+    echo "::error::Race condition detected in the proven-switch control run"
+    exit 1
+fi
 "$REPLAY_BIN" report --format json --path ./pristine-run > ndjson_proven_pristine.txt 2> ndjson_proven_pristine_err.txt
 if [ "$proven_pristine_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson_proven_pristine.txt > /dev/null; then
     echo "::error::under KEPLOY_PROVEN=1 the unmutated recording must replay green (exit $proven_pristine_rc). A red test here is a false red: a mock its test did consume read as unconsumed, or a protocol-phase/DNS mock was required of a test."
@@ -896,6 +900,10 @@ for phase in off on; do
         "$REPLAY_BIN" test -c "./http-pokeapi" --path ./unconsumed-run --delay 7 --generateGithubActions=false 2>&1 | tee "unconsumed_${phase}_logs.txt"
     fi
     uc_rc=${PIPESTATUS[0]}
+    if grep "WARNING: DATA RACE" "unconsumed_${phase}_logs.txt"; then
+        echo "::error::Race condition detected in the unconsumed-mock run (switch $phase)"
+        exit 1
+    fi
     "$REPLAY_BIN" report --format json --path ./unconsumed-run > "ndjson_unconsumed_${phase}.txt" 2>/dev/null
     if [ "$phase" = off ]; then
         if [ "$uc_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' "ndjson_unconsumed_${phase}.txt" > /dev/null; then
@@ -912,6 +920,14 @@ for phase in off on; do
     fi
     if [ "$uc_rc" -eq 0 ]; then
         echo "::error::under KEPLOY_PROVEN=1 a failed test must make the run exit non-zero"
+        exit 1
+    fi
+    # The evidence names the mock (failure_info.unconsumed_mocks), not only a
+    # display row: what a judge builds unconsumed_mock evidence from.
+    uc_report=$(ls -1t ./unconsumed-run/keploy/reports/test-run-*/test-set-*-report.yaml | head -n 1)
+    if ! OWNER="$owner" yq '.tests[] | select(.test_case_id == strenv(OWNER)) | .failure_info.unconsumed_mocks[].name' "$uc_report" | grep -qx "$lent_mock"; then
+        echo "::error::under KEPLOY_PROVEN=1 $owner's report row must name the recorded call it did not make ($lent_mock) under failure_info.unconsumed_mocks"
+        OWNER="$owner" yq '.tests[] | select(.test_case_id == strenv(OWNER)) | .failure_info' "$uc_report"
         exit 1
     fi
 done

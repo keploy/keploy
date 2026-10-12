@@ -138,6 +138,32 @@ type FailureInfo struct {
 	// test's evidence is unknown, so its test set is not judged. Set only under
 	// the proven switch.
 	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// TestMocksUnread says the mocks this test consumed could not be read
+	// from keploy's agent, so whether it made every call it recorded is
+	// unknown: it has no verdict, and its test set is not judged. Set only
+	// under the proven switch, before any hook reads the result.
+	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
+	// did not consume: the mocks of its recorded mapping its per-test
+	// assertion owns (data-plane mocks; connection failures and
+	// protocol-phase mocks are not owned) that it made no call for, each of
+	// which fails it (a recorded call was not made). In recorded order, every
+	// one: Result.DepResult caps its rows and names a target, not the mock.
+	// Empty with the switch off, and for a test that owned none or whose
+	// consumption was not read (TestMocksUnread).
+	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+}
+
+// UnconsumedMock is a test mock a test did not consume
+// (FailureInfo.UnconsumedMocks).
+type UnconsumedMock struct {
+	Name string `json:"name" yaml:"name"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// ConsumedBy names another test of the set that consumed this mock, when
+	// one did: the call was made, by a sibling, and the order in which the
+	// shared mock pool served the two can decide which test it counts for,
+	// until each test's consumption is exact. Empty when no test consumed it.
+	ConsumedBy string `json:"consumed_by,omitempty" yaml:"consumed_by,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -337,6 +363,10 @@ const (
 	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
 	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
 	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
+	// CallUnmatched: a call the test made got no recorded answer (a miss),
+	// which fails it under KEPLOY_PROVEN=1. The calls are in
+	// FailureInfo.UnmatchedCalls.
+	CallUnmatched FailureCategory = "UNMATCHED_CALL"
 	// TemplateVariable means a template variable place of the expected
 	// response was not satisfied by the answer (a {{capture ...}} that found
 	// no value of its type, or a use that did not hold its key's value), or
