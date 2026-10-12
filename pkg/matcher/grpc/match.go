@@ -231,18 +231,24 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	expectedDecodedData := ""
 	actualDecodedData := ""
 	var jsonComparisonResult matcher.JSONComparisonResult
-	reorderedOnly := false
+	// reorderedOnly: every message that differs differs only in a repeated
+	// field's order, and the stream has as many messages as recorded. One
+	// message with a real change makes the body a real change, whichever
+	// message differed first.
+	reorderedOnly := len(expMsgs) == len(actMsgs)
 
 	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
 		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
 			differences, result, bodyNoise, ignoreOrdering, logger)
+		if !cmp.decodedNormal && !cmp.reorderedOnly {
+			reorderedOnly = false
+		}
 		if !cmp.decodedNormal && decodedDataNormal {
 			// first mismatch wins
 			decodedDataNormal = false
 			expectedDecodedData = cmp.expected
 			actualDecodedData = cmp.actual
 			jsonComparisonResult = cmp.json
-			reorderedOnly = cmp.reorderedOnly
 		}
 	}
 	if decodedDataNormal && compareCount > 0 {

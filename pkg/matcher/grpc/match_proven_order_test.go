@@ -112,3 +112,29 @@ func TestMatch_ProvenSwitchSaysAProtoscopeReorderIsOne(t *testing.T) {
 		t.Fatalf("a value change: assessment %+v, risk %s, categories %v; want HIGH SCHEMA_BROKEN as before", res.FailureInfo.Assessment, res.FailureInfo.Risk, res.FailureInfo.Category)
 	}
 }
+
+// A stream is graded a reorder only if every message that differs is one: a
+// first message only reordered and a second with a changed value is a real
+// change (HIGH, SCHEMA_BROKEN), with no reorder reason.
+func TestMatch_ProvenSwitchGradesAStreamByEveryMessage(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	msgs := func(bodies ...string) []models.GrpcLengthPrefixedMessage {
+		out := make([]models.GrpcLengthPrefixedMessage, 0, len(bodies))
+		for _, b := range bodies {
+			out = append(out, models.GrpcLengthPrefixedMessage{DecodedData: b, MessageLength: 40})
+		}
+		return out
+	}
+	tc, answer := protoscopeCase("")
+	tc.GrpcResp.SetMessages(msgs("1: {\"ord_A\"}\n1: {\"ord_B\"}", "2: 100"))
+	live := answer("")
+	live.SetMessages(msgs("1: {\"ord_B\"}\n1: {\"ord_A\"}", "2: 999"))
+	ok, res := Match(tc, live, map[string]map[string][]string{}, true, zap.NewNop(), false)
+	if ok || res.FailureInfo.Risk != models.High || res.FailureInfo.Assessment != nil {
+		t.Fatalf("matched %v, risk %s, assessment %+v; want a real change: HIGH, no reorder reason", ok, res.FailureInfo.Risk, res.FailureInfo.Assessment)
+	}
+	live.SetMessages(msgs("1: {\"ord_B\"}\n1: {\"ord_A\"}", "2: 100"))
+	if _, res := Match(tc, live, map[string]map[string][]string{}, true, zap.NewNop(), false); res.FailureInfo.Risk != models.Medium || res.FailureInfo.Assessment == nil {
+		t.Fatalf("a stream only reordered: risk %s, assessment %+v; want MEDIUM with the reorder reason", res.FailureInfo.Risk, res.FailureInfo.Assessment)
+	}
+}
