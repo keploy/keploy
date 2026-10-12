@@ -225,6 +225,10 @@ func buildFailure(t models.TestResult) *junitFailure {
 		}
 	}
 
+	// Template variable places the answer did not satisfy: each fails the
+	// test case on its own, also where every comparison row is normal.
+	parts = append(parts, templateFailureLines(t.TemplateFailures)...)
+
 	// Dependency assertions (models.Result.DepResult). Emitted alongside the
 	// body rows so a CI system consuming JUnit sees a vanished outgoing call,
 	// not just a response diff. Additive: DepResult had no writer before
@@ -233,8 +237,12 @@ func buildFailure(t models.TestResult) *junitFailure {
 	parts = append(parts, depFailureLines(t.Result.DepResult)...)
 
 	msg := "test assertion failed"
+	if refusedUnsent(t.TemplateFailures) {
+		// Refused when its set loaded: nothing was sent or asserted.
+		msg = "test case refused when its test set loaded, not sent"
+	}
 	if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
-		msg = fmt.Sprintf("test assertion failed [%s-RISK]", t.FailureInfo.Risk)
+		msg = fmt.Sprintf("%s [%s-RISK]", msg, t.FailureInfo.Risk)
 	}
 
 	return &junitFailure{
@@ -276,6 +284,26 @@ func depNonFailureBody(deps []models.DepResult) string {
 	return strings.Join(lines[:depNoticeTestSampleSize], "\n") +
 		fmt.Sprintf("\n...and %d more dependenc%s not exercised - see the report file or `keploy report --format json`",
 			rest, plural(rest, "y", "ies"))
+}
+
+// templateFailureLines is one line per template variable place a test case
+// failed on.
+func templateFailureLines(fs []models.TemplateFailure) []string {
+	lines := make([]string, 0, len(fs))
+	for _, f := range fs {
+		lines = append(lines, "template variable "+templateFailureLine(f))
+	}
+	return lines
+}
+
+// templateFailureLine is one template failure as the reports say it: where,
+// the placeholder, why. A refusal of a whole test set (one a killed keploy
+// templatize left half-written) names no placeholder.
+func templateFailureLine(f models.TemplateFailure) string {
+	if f.Placeholder == "" {
+		return f.Where + ": " + f.Why
+	}
+	return f.Where + ": " + f.Placeholder + " " + f.Why
 }
 
 // depFailureLines renders the failed dependency assertions of a result as one

@@ -38,6 +38,10 @@ func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	return 0, true
 }
 
+func listening(ip net.IP, port uint32) bool {
+	return len(listenInodes(ip, port)) > 0
+}
+
 func listenInodes(ip net.IP, port uint32) map[string]bool {
 	out := map[string]bool{}
 	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {

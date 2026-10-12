@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	keployPkg "go.keploy.io/server/v3/pkg"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -250,6 +252,8 @@ func (r *Runner) executeAndCompare(ctx context.Context, tc *models.TestCase, ser
 	httpReq.URL = orig.String()
 	tcCopy.HTTPReq = httpReq
 
+	// Sent as written: one test case run alone has no test set's template
+	// values, which belong to a replay of the whole set (pkg/templates).
 	actual, err := keployPkg.SimulateHTTP(ctx, &tcCopy, "", r.logger, keployPkg.SimulationConfig{})
 	if err != nil {
 		return false, models.RespCompare{}, err
@@ -487,6 +491,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	}
 
 	if err := r.instrumentation.MakeAgentReadyForDockerCompose(gCtx); err != nil {
+		if errors.Is(err, provenswitch.ErrAgentSwitch) {
+			return nil, err
+		}
 		r.logger.Debug("failed to mark agent ready", zap.Error(err))
 	}
 

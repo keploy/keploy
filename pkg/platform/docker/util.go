@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -330,7 +331,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -410,7 +411,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -476,7 +477,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -557,7 +558,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -622,7 +623,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -717,6 +718,17 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	}
 
 	return containerName, networkName, nil
+}
+
+// provenSuffix carries the proven model's staging switch into the agent
+// container, which is not given KEPLOY_PROVEN: " --proven" when the switch is
+// on, "" otherwise, so the alias is byte-identical to before with it off.
+func provenSuffix() string {
+	args := provenswitch.AgentArgs()
+	if len(args) == 0 {
+		return ""
+	}
+	return " " + strings.Join(args, " ")
 }
 
 // mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`

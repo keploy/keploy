@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -882,6 +883,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.RecordRequests {
 		command = append(command, "--record-requests")
 	}
+	// The proven model's staging switch: the agent container is not given
+	// KEPLOY_PROVEN, so it travels as a flag.
+	command = append(command, provenswitch.AgentArgs()...)
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}

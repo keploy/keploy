@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,12 +9,20 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -499,5 +508,228 @@ func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
 		t.Fatalf("Mock did not clear the previous test set's consumption: %#v — the replayer treats a "+
 			"successful MockOutgoing as proof that it did, and stops sending its own map, so this "+
 			"silently mis-filters the next test set", got)
+	}
+}
+
+// closeCountingConn is a connection that counts its Close calls, so a test can
+// see whether the code under test closed it, as soon as that code returns.
+type closeCountingConn struct {
+	net.Conn
+	closes atomic.Int32
+}
+
+func (c *closeCountingConn) Close() error {
+	c.closes.Add(1)
+	return c.Conn.Close()
+}
+
+// CloseWrite forwards a half-close, as the TCP connection it wraps would.
+func (c *closeCountingConn) CloseWrite() error { return util.CloseWriteIfPossible(c.Conn) }
+
+// NetConn is the connection beneath, the convention the proxy's own wrappers
+// follow, so what looks for the socket under a connection finds it here too.
+func (c *closeCountingConn) NetConn() net.Conn { return c.Conn }
+
+// acceptedConn returns both ends of a loopback TCP connection: app is the
+// application's end, and proxySide the end the proxy's listener accepted,
+// counting its closes.
+func acceptedConn(t *testing.T) (app *net.TCPConn, proxySide *closeCountingConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close(); _ = s.Close() })
+	return c.(*net.TCPConn), &closeCountingConn{Conn: s}
+}
+
+// fakeDestInfo answers handleConnection's lookup of a connection's original
+// destination the way the connect hooks would.
+type fakeDestInfo struct {
+	dest   *agent.NetworkAddress
+	getErr error
+	delErr error
+}
+
+func (f fakeDestInfo) Get(context.Context, uint16) (*agent.NetworkAddress, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	d := *f.dest // handleConnection may rewrite the port of what it gets
+	return &d, nil
+}
+
+func (f fakeDestInfo) Delete(context.Context, uint16) error { return f.delErr }
+
+// predialedTo dials addr and hands it to p as the connection pre-dialled for
+// the application end of src, the way a held handshake does, so the first
+// dial of addr takes it: a test can then count whether the proxy closed the
+// upstream connection it used.
+func predialedTo(t *testing.T, p *Proxy, src net.Conn, addr string) *closeCountingConn {
+	t.Helper()
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	counted := &closeCountingConn{Conn: c}
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(addr, connseq.NewUpstream(counted)))
+	return counted
+}
+
+// awaitEvent waits for ch to deliver. What it waits for follows from a socket
+// event the code under test causes without waiting on anything, however
+// loaded the host is, so the wait has no budget of its own: it is bounded only
+// so that code that never causes the event fails the test instead of hanging
+// the binary. Each wait may take a quarter of the time left before the test
+// binary's deadline, so one that never ends still leaves time for the waits
+// and the tests after it to report their own results.
+func awaitEvent[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	var expired <-chan time.Time
+	if dl, ok := t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case v := <-ch:
+		return v
+	case <-expired:
+		t.Fatalf("%s never happened", what)
+		panic("unreachable")
+	}
+}
+
+// Every path out of handleConnection closes the application's connection.
+// Those that returned before the cleanup was registered, or that replaced
+// the connection with nil, left the application blocked on its call until
+// its own timeout.
+func TestHandleConnectionClosesTheAppConnectionOnEveryEarlyReturn(t *testing.T) {
+	dest := ipv4Dest(t, "127.0.0.1:8443")
+	session := &agent.Session{
+		Mode: models.MODE_TEST,
+		// Mocking keeps the proxy off the destination; the MySQL probe is
+		// off so nothing waits for the application to stay silent.
+		OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
+	}
+	// A TLS record holding a ClientHello with no body: the MITM handshake
+	// reads it whole and fails on it.
+	brokenClientHello := []byte{0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00}
+
+	for _, tc := range []struct {
+		name    string
+		dest    fakeDestInfo
+		session *agent.Session
+		send    []byte
+		wantErr bool
+	}{
+		{name: "the destination lookup fails", dest: fakeDestInfo{getErr: errors.New("no redirect record")}},
+		{name: "releasing the destination record fails", dest: fakeDestInfo{dest: dest, delErr: errors.New("map delete failed")}, wantErr: true},
+		{name: "the client's TLS handshake fails", dest: fakeDestInfo{dest: dest}, session: session, send: brokenClientHello, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: tc.dest, mysqlPorts: newMysqlPortRegistry()}
+			if tc.session != nil {
+				p.setSession(tc.session)
+			}
+			if len(tc.send) > 0 {
+				if _, err := app.Write(tc.send); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := p.handleConnection(context.Background(), src)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleConnection returned %v, want an error: %v", err, tc.wantErr)
+			}
+			if src.closes.Load() == 0 {
+				t.Fatal("handleConnection returned without closing the application's connection")
+			}
+			if _, err := io.ReadAll(app); err != nil {
+				t.Fatalf("the application's end did not see its connection end cleanly: %v", err)
+			}
+		})
+	}
+}
+
+// A CONNECT tunnel the corporate proxy opened is closed when the application
+// ends its connection before sending anything through it. The proxy's
+// connection used to become dstConn only after the inner bytes were peeked,
+// so returning at that peek left it open and unreferenced.
+func TestHandleConnectionClosesTheTunnelWhenTheAppLeavesBeforeUsingIt(t *testing.T) {
+	corp, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = corp.Close() })
+	go func() {
+		c, err := corp.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		_, _ = io.Copy(io.Discard, c)
+	}()
+
+	app, src := acceptedConn(t)
+	p := &Proxy{
+		logger:     zap.NewNop(),
+		DestInfo:   fakeDestInfo{dest: ipv4Dest(t, corp.Addr().String())},
+		mysqlPorts: newMysqlPortRegistry(),
+	}
+	p.setSession(&agent.Session{
+		Mode:            models.MODE_RECORD,
+		MC:              make(chan *models.Mock, 1),
+		OutgoingOptions: models.OutgoingOptions{DisableMysqlAutoDetect: true},
+	})
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	tunnel := predialedTo(t, p, src, corp.Addr().String())
+
+	req := "CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n"
+	if _, err := app.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	resp, err := http.ReadResponse(bufio.NewReader(app), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("reading the tunnel's 200: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT answered %d, want 200", resp.StatusCode)
+	}
+	// The application leaves without sending a byte through the tunnel.
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := awaitEvent(t, done, "handleConnection returning after the application left"); err != nil {
+		t.Fatalf("handleConnection: %v", err)
+	}
+	if tunnel.closes.Load() == 0 {
+		t.Fatal("handleConnection returned without closing its connection to the corporate proxy")
+	}
+	if src.closes.Load() == 0 {
+		t.Fatal("handleConnection returned without closing the application's connection")
 	}
 }

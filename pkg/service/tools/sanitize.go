@@ -683,6 +683,11 @@ func keyToSecretKey(field string) string {
 	if key == "" {
 		key = "Secret"
 	}
+	// A key is an identifier ({{string .secret.KEY}}): it starts with a
+	// letter, never a digit.
+	if r := []rune(key)[0]; unicode.IsDigit(r) {
+		key = "Secret" + key
+	}
 	return key
 }
 
