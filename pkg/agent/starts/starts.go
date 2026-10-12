@@ -726,13 +726,13 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 			later = later || (i < len(f.used) && !f.used[i])
 		}
 		if later {
-			return Later, true
+			return laterRank, true
 		}
 		return 0, false
 	}
 }
 
-const Later = 5
+const laterRank = 5
 
 func (r *Registry) Exchange(port uint16, method, rawURL string) func() {
 	r.mu.Lock()

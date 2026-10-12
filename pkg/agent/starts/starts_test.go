@@ -384,7 +384,7 @@ func seen(t *testing.T, r *Registry, pid uint32) []string {
 	}
 	var out []string
 	for n, g := range rank {
-		if g < Later {
+		if g < laterRank {
 			out = append(out, n)
 		}
 	}
@@ -397,7 +397,7 @@ func later(t *testing.T, r *Registry, pid uint32) []string {
 	rank, _, _ := r.View(pid, at(20))
 	var out []string
 	for n, g := range rank {
-		if g == Later {
+		if g == laterRank {
 			out = append(out, n)
 		}
 	}
