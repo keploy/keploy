@@ -95,7 +95,12 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 // request (an HTTP server's 408 on a connection that idled out as the client
 // sent it) are the server's own, as are bytes captured after a request the
 // parser read and before the request after it (MySQL's ERR at wait_timeout or
-// shutdown, an idle-close 408). Or it is what is left of an answer its parser
+// shutdown, an idle-close 408), and so are the server bytes a parser returns
+// without reading, with no request after them (pkg/agent/proxy's
+// parserReads leaves out only the requests it never read). That holds as
+// long as a parser that returns in the middle of an exchange reports it;
+// one that returns nil on a cancelled context without doing so leaves that
+// exchange in no span. Or it is what is left of an answer its parser
 // stopped reading and left out, which the parser reported itself as it did
 // (the MySQL recorder, for a response it cannot frame: it skips the rest of
 // that response by capture time before the floor applies, so the floor drops

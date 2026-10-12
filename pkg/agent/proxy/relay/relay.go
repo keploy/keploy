@@ -285,6 +285,16 @@ func (r *Relay) ClientStream() *fakeconn.FakeConn { return r.clientStream }
 // to call before or after Run starts.
 func (r *Relay) DestStream() *fakeconn.FakeConn { return r.destStream }
 
+// Teed is how many bytes of dir's stream the tee has taken for the parser so
+// far: the position just past the last chunk teed to it, in the offsets of
+// fakeconn.FakeConn.Consumed (Config.OnCarried).
+func (r *Relay) Teed(dir fakeconn.Direction) int64 {
+	if dir == fakeconn.FromClient {
+		return r.teeC2D.acceptedBytes()
+	}
+	return r.teeD2C.acceptedBytes()
+}
+
 // Directives returns the parser-writable directive channel. Parsers
 // send [directive.Directive] values here; the relay's directive
 // processor goroutine handles them.
@@ -581,6 +591,17 @@ func (r *Relay) run(ctx context.Context) error {
 	return firstErr
 }
 
+// noteCarried tells the owner of a chunk the connection carried, as the
+// forwarder hands it to the tee t, and whether t took it (Config.OnCarried).
+// It runs on t's forwarder, the one goroutine that pushes into t, so t's
+// accepted bytes are, right after a push it took, the position just past the
+// chunk.
+func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
+	if r.cfg.OnCarried != nil {
+		r.cfg.OnCarried(c.Dir, c.ReadAt, teed, t.acceptedBytes())
+	}
+}
+
 // forward is one forwarder goroutine. src is the read side, dst is
 // the write side, t is the tee to push chunks into, seq is the
 // per-direction sequence counter.
@@ -591,7 +612,8 @@ func (r *Relay) run(ctx context.Context) error {
 //     ReadAt, the number (order) that orders it against the other
 //     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
 //  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
-//  4. Push the Chunk into the tee (non-blocking), with its SeqNo.
+//  4. Push the Chunk into the tee (non-blocking), with its SeqNo, and tell
+//     the owner it was carried (Config.OnCarried).
 //  5. Bump activity.
 //
 // Returns the first read or write error encountered. io.EOF is
@@ -729,6 +751,7 @@ func (r *Relay) forward(
 				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
 					chunk.SeqNo = seq.Add(1)
 					teed := t.push(chunk)
+					r.noteCarried(t, chunk, teed)
 					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
 					}
@@ -803,6 +826,7 @@ func (r *Relay) forward(
 				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
 				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
+				r.noteCarried(t, chunk, teed)
 				if teed && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
 				}
@@ -860,6 +884,7 @@ func (r *Relay) forward(
 				r.cfg.beforeTee(dir)
 			}
 			teed := t.push(chunk)
+			r.noteCarried(t, chunk, teed)
 			// On a successful client→dest tee, signal the supervisor
 			// that a request chunk is in flight and awaiting a mock
 			// emission. This is the "pending work" signal the hang
