@@ -881,16 +881,16 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 		return false
 	}
 	mapping, err := reader.GetMapping(ctx, name)
-	if err != nil || mapping == nil || len(mapping.Boots) == 0 && len(mapping.Suites) == 0 {
+	if err != nil || mapping == nil || (len(mapping.Boots) == 0 && len(mapping.Suites) == 0) {
 		return false
 	}
 	root := gitTop()
 	sets := setTable(mapping, root)
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
-		m.logger.Warn("could not install the app start table; app starts are not kept apart in this run", zap.Error(err))
+		m.logger.Warn("could not send the agent each set's mocks and recorded start; using the per-test mocks instead", zap.Error(err))
 		return false
 	}
-	m.logger.Info("app starts kept apart", zap.Int("sets", len(sets)), zap.String("mock-set", name))
+	m.logger.Info("sent the agent each set's mocks and recorded start", zap.Int("sets", len(sets)), zap.String("mock-set", name))
 	return true
 }
 
