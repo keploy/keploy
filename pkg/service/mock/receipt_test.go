@@ -279,6 +279,9 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 	if logs.FilterMessageSnippet("did not prove the tests run with the dependencies off").Len() != 1 {
 		t.Fatal("a replay that proved nothing claimed to, or said nothing at all")
 	}
+	if logs.FilterMessageSnippet("--on-miss passthrough lets a call the recording does not have reach the real dependency").Len() != 1 {
+		t.Fatal("a passthrough replay did not say calls can reach the real dependency")
+	}
 	if logs.FilterMessageSnippet("ran with every dependency answered from the recording").Len() != 0 {
 		t.Fatal("a passthrough replay claimed every dependency came from the recording")
 	}

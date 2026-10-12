@@ -4577,9 +4577,9 @@ func (p *Proxy) logSelfCalls() {
 		processes++
 		return true
 	})
-	p.logger.Info("self-calls passed through to the run's own listeners; the real handler answered them, not a mock",
+	p.logger.Info(fmt.Sprintf("%d self-calls passed through to the run's own listeners; the real handler answered them, not a mock", n),
 		zap.Int64("calls", n), zap.Int("processes", processes),
-		zap.String("reason", models.ReasonLoopbackOutsideRun))
+		zap.String("reason", models.ReasonLoopbackOutsideRun), log.Show)
 }
 
 func (p *Proxy) closeDependencyConns() {
@@ -4651,7 +4651,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
 			zap.String("reason", models.ReasonLoopbackOutsideRun),
-			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
+			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"), log.Show)
 	} else {
 		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),

@@ -458,6 +458,9 @@ func (m *mockService) replay(ctx context.Context) (err error) {
 	} else {
 		m.logger.Info("this replay did not prove the tests run with the dependencies off",
 			zap.String("mock-set", name), zap.String("reason", isolationNote))
+		if runnerExit == 0 && (policy != models.MissFail || len(bypass) > 0) {
+			m.logger.Info(isolationNote, zap.String("mock-set", name), log.Show)
+		}
 	}
 
 	//     Leave the verdict where the editor, an agent and a status command
