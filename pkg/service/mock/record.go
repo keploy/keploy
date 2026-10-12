@@ -520,7 +520,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		keep = false
 		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("mock-set", name),
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", nothingCapturedNext()))
 		m.propagateExit(appErr, "record")
 		return nil
 	}
@@ -595,7 +595,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", nothingCapturedNext()))
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
@@ -1117,4 +1117,15 @@ func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks
 		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", zap.Error(err))
 	}
 	return wait, false
+}
+
+// nothingCapturedNext is what to do about a record that captured no call.
+// Under the proven switch a test's calls are captured once its harness
+// reports it to keploy, so the integration is named; with the switch off the
+// advice is as it was.
+func nothingCapturedNext() string {
+	if provenswitch.On() {
+		return "confirm the tests call an external dependency (HTTP, MySQL, ...) and report themselves to keploy: in Go, make `defer keploytest.T(t)()` each test's first line (github.com/keploy/go-sdk/v3/keploytest)"
+	}
+	return "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"
 }

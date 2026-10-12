@@ -378,3 +378,13 @@ func TestStrictIsRefusedUnderTheSwitch(t *testing.T) {
 	err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(context.Background())
 	require.ErrorContains(t, err, "--strict is not used with KEPLOY_PROVEN")
 }
+
+// A record that captured no call names keploy's Go integration under the
+// switch, and keeps its advice with the switch off.
+func TestNothingCapturedNext(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	require.Contains(t, nothingCapturedNext(), "defer keploytest.T(t)()")
+	require.NotContains(t, nothingCapturedNext(), "docker")
+	t.Setenv(provenswitch.Env, "")
+	require.Equal(t, "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command", nothingCapturedNext())
+}
