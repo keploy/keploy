@@ -222,3 +222,15 @@ func TestAFactLineWrittenInPiecesIsStillCapped(t *testing.T) {
 		t.Fatalf("warnings = %d, want 1", warns)
 	}
 }
+
+func TestTheAgentsOwnErrorsAreQuotedWhenItStops(t *testing.T) {
+	raw := "🐰 Keploy(agent): 2026-10-12T09:13:40Z\t\x1b[31mERROR\x1b[0m\tfailed to load eBPF\t{\"error\": \"keploy does not have the kernel privileges it needs: missing required capabilities\"}\n" +
+		"🐰 Keploy(agent): 2026-10-12T09:13:40Z\tINFO\tstarting\n" +
+		"🐰 Keploy(agent): 2026-10-12T09:13:41Z\tERROR\tneither debugfs nor tracefs are mounted\n" +
+		"🐰 Keploy(agent): 2026-10-12T09:13:41Z\tERROR\tneither debugfs nor tracefs are mounted\n"
+	got := agentErrors(raw, 3)
+	want := []string{"failed to load eBPF: keploy does not have the kernel privileges it needs: missing required capabilities", "neither debugfs nor tracefs are mounted"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q", got)
+	}
+}

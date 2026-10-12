@@ -116,7 +116,7 @@ DP=$(start_dep); sleep 1
 echo "== 1. record two endpoints under two scopes =="
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p --disable-tele 2>&1 | tee rec.log
 grep -q "RECORD_OK" rec.log || { echo "FAIL: record driver did not complete"; FAIL=1; }
-MOCKS=$(sed 's/\x1b\[[0-9;]*m//g' rec.log | grep -oE '"mocks": *[0-9]+' | grep -oE '[0-9]+' | tail -1)
+MOCKS=$(sed 's/\x1b\[[0-9;]*m//g' rec.log | grep -oE '^keploy: recorded [0-9]+ tests?: [0-9]+ outgoing calls?' | grep -oE '[0-9]+ outgoing' | grep -oE '[0-9]+' | tail -1)
 [ "${MOCKS:-0}" = "2" ] || { echo "FAIL: expected 2 recorded mocks, got ${MOCKS:-0}"; FAIL=1; }
 kill "$DP" 2>/dev/null; sleep 1
 

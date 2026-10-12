@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -163,6 +165,9 @@ func (a *AgentClient) sayLog() {
 	if err != nil {
 		return
 	}
+	for _, l := range agentErrors(string(raw), 3) {
+		a.logger.Error("keploy's agent: "+l, log.Show)
+	}
 	for _, l := range strings.Split(string(raw), "\n") {
 		l = strings.TrimSpace(l)
 		if l == "" {
@@ -178,6 +183,35 @@ func (a *AgentClient) sayLog() {
 		}
 		return
 	}
+}
+
+func agentErrors(raw string, n int) []string {
+	var out []string
+	for _, l := range strings.Split(sgr.ReplaceAllString(raw, ""), "\n") {
+		parts := strings.Split(strings.TrimSpace(l), "\t")
+		for i := 0; i+1 < len(parts); i++ {
+			if parts[i] != "ERROR" && parts[i] != "FATAL" {
+				continue
+			}
+			msg := strings.TrimSpace(parts[i+1])
+			if i+2 < len(parts) {
+				var f map[string]any
+				if json.Unmarshal([]byte(parts[i+2]), &f) == nil {
+					if e, ok := f["error"].(string); ok && e != "" {
+						msg += ": " + e
+					}
+				}
+			}
+			if msg != "" && !slices.Contains(out, msg) {
+				out = append(out, msg)
+			}
+			break
+		}
+		if len(out) == n {
+			break
+		}
+	}
+	return out
 }
 
 func (a *AgentClient) watchStart() {
