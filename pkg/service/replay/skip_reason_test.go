@@ -1,10 +1,13 @@
 package replay
 
 import (
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func skipReasonsFor(set string, reasons map[string]string) map[string]map[string]string {
@@ -119,5 +122,78 @@ func TestRunTestSet_IgnoredTestCarriesItsReason(t *testing.T) {
 				t.Fatal("no row for the ignored test")
 			}
 		})
+	}
+}
+
+// A test skipped for a reason is said as it is skipped (at Debug: the run's
+// summary is where it is listed), once, with its reason, and listed in the
+// run's summary, under the switch. With it off nothing is
+// said and the summary lists nothing.
+func TestRunTestSet_AQuarantinedTestIsSaidAndSummarised(t *testing.T) {
+	reason := models.SkipReasonText("flaky", "replay_only", "failed the replay after record\nwith no keploy evidence")
+	for _, on := range []bool{false, true} {
+		name := "switch off"
+		if on {
+			name = "switch on"
+		}
+		t.Run(name, func(t *testing.T) {
+			if on {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
+			h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{"test-2": reason})
+			core, logs := observer.New(zap.DebugLevel)
+			h.replayer.logger = zap.New(core)
+
+			h.run(t)
+			h.run(t) // a flaky-check attempt runs the set again: still said once
+			said := logs.FilterMessageSnippet("skipping a quarantined test").All()
+			summary := h.replayer.quarantinedSummary()
+			if !on {
+				if len(said) != 0 || summary != "" {
+					t.Fatalf("switch off: said %d times, summary %q; want nothing", len(said), summary)
+				}
+				return
+			}
+			if len(said) != 1 || said[0].ContextMap()["testcase"] != "test-2" || said[0].ContextMap()["reason"] != reason {
+				t.Fatalf("said %+v; want once, for test-2, with its reason", said)
+			}
+			if want := "test-set-0/test-2: flaky/replay_only: failed the replay after record with no keploy evidence\n"; !strings.Contains(summary, want) || !strings.Contains(summary, ": 1\n") {
+				t.Fatalf("summary %q; want it to list test-2 on one line", summary)
+			}
+		})
+	}
+}
+
+// The run's printed summary carries the list, with and without ANSI.
+func TestPrintSummaryListsTheQuarantinedTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, noANSI := range []bool{false, true} {
+		h := newPartialRunHarness(t, 1, 0)
+		h.replayer.config.DisableANSI = noANSI
+		h.replayer.totalTests = 1
+		h.replayer.completeTestReport["test-set-0"] = TestReportVerdict{total: 1, ignored: 1, status: true}
+		h.replayer.noteQuarantined("test-set-0", "test-1", "manual: waits on PAY-12")
+		out := captureStdout(t, func() { h.replayer.printSummary(t.Context(), false) })
+		if !strings.Contains(out, "test-set-0/test-1: manual: waits on PAY-12") {
+			t.Fatalf("DisableANSI=%v: the summary does not list the quarantined test:\n%s", noANSI, out)
+		}
+	}
+}
+
+// An IGNORED result is of the test's own kind under the switch, and HTTP with
+// it off, as before.
+func TestIgnoredKind(t *testing.T) {
+	grpcCase := &models.TestCase{Kind: models.GRPC_EXPORT}
+	t.Setenv(provenswitch.Env, "")
+	if got := ignoredKind(grpcCase); got != models.HTTP {
+		t.Fatalf("switch off: %s, want HTTP as before", got)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	if got := ignoredKind(grpcCase); got != models.GRPC_EXPORT {
+		t.Fatalf("switch on: %s, want the test's own kind", got)
 	}
 }

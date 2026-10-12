@@ -140,6 +140,11 @@ case "${REPLAY_BIN:-}" in
             echo "::error::Race condition detected in the ignored-set replay"
             exit 1
         fi
+        if grep "ERROR" test_logs_ignored.txt; then
+            echo "::error::Error found in the ignored-set replay"
+            cat test_logs_ignored.txt
+            exit 1
+        fi
         if grep -q "failed to get testcase results" test_logs_ignored.txt; then
             echo "::error::the ignored set left the run without results to read; each skipped test should be an IGNORED row"
             cat test_logs_ignored.txt
@@ -160,7 +165,7 @@ case "${REPLAY_BIN:-}" in
         fi
         "$REPLAY_BIN" report --format junit > junit_ignored.xml 2> junit_ignored_err.txt
         junit_skipped=$(grep -c '<skipped' junit_ignored.xml || true)
-        if [ "$junit_skipped" -lt "$recorded" ]; then
+        if [ "$junit_skipped" -ne "$recorded" ]; then
             echo "::error::keploy report --format junit has $junit_skipped <skipped> cases; want one for each of the $recorded skipped tests"
             cat junit_ignored.xml
             exit 1

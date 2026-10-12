@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -155,7 +156,7 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
 		// A test keploy skipped for a reason says why, right under its status.
 		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
-			fmt.Fprintf(r.out, "  %s\n", quarantinedSkipMessage(t.SkipReason))
+			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
 		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
@@ -284,6 +285,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
+	}
+	// Tests keploy quarantined, with their reasons. Only a run under the
+	// proven switch writes a reason (TestResult.SkipReason), so a report
+	// without one prints exactly what it printed before.
+	quarantined := quarantinedTests(reports)
+	if len(quarantined) > 0 {
+		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
 	}
 
 	// Dependencies that the recording says a test exercises but that the test
@@ -421,12 +429,45 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		}
 	}
 
+	if len(quarantined) > 0 {
+		fmt.Fprintln(r.out, "\nQUARANTINED TEST CASES:")
+		for _, q := range quarantined {
+			fmt.Fprintf(r.out, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
+		}
+	}
+
 	fmt.Fprintln(r.out, "<=========================================>")
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in printSummary: %w", err)
 	}
 	return nil
+}
+
+// quarantinedTest is a test keploy skipped for a reason.
+type quarantinedTest struct{ set, test, reason string }
+
+// quarantinedTests are the IGNORED tests of the reports that carry a skip
+// reason, by test set and then in report order.
+func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
+	names := make([]string, 0, len(reports))
+	for name := range reports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []quarantinedTest
+	for _, name := range names {
+		rep := reports[name]
+		if rep == nil {
+			continue
+		}
+		for _, t := range rep.Tests {
+			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
+			}
+		}
+	}
+	return out
 }
 
 func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
@@ -694,11 +735,20 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 // processLegacySummary generates a summary report for legacy format
 func (r *Report) processLegacySummary(tests []models.TestResult) error {
-	total, pass, fail, obsolete := len(tests), 0, 0, 0
+	total, pass, fail, obsolete, ignored := len(tests), 0, 0, 0, 0
 	var failedCases []string
 
 	for _, t := range tests {
 		switch t.Status {
+		case models.TestStatusIgnored:
+			// Under the proven switch a skipped test is counted as skipped:
+			// it did not pass. With the switch off it is counted as passed,
+			// as before.
+			if provenswitch.On() {
+				ignored++
+				continue
+			}
+			pass++
 		case models.TestStatusFailed:
 			fail++
 			label := t.TestCaseID
@@ -714,7 +764,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 	}
 
 	totalTime := estimateDuration(tests)
-	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, totalTime, failedCases)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, ignored, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)
