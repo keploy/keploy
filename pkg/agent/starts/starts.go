@@ -714,27 +714,44 @@ func (r *Registry) caseView(set string, f *frame, test string) func(string) (int
 		}
 		add(next, false)
 	}
+	at := f.last - 1
+	if len(f.open) == 1 {
+		for i := range f.open {
+			at = i
+		}
+	}
+	prev, next := -1, -1
+	for i, u := range f.used {
+		if u && i < at {
+			prev = i
+		}
+		if !u && i > at && next < 0 {
+			next = i
+		}
+	}
 	return func(name string) (int, bool) {
 		if _, in := b.free[name]; in {
 			return 0, true
 		}
-		later := false
+		g := pastRank
 		for _, i := range b.owners[name] {
-			if ok[i] {
+			switch {
+			case ok[i]:
 				return 0, true
+			case i == prev || i == next:
+				g = min(g, nearRank)
+			case i < len(f.used) && !f.used[i]:
+				g = min(g, laterRank)
 			}
-			later = later || (i < len(f.used) && !f.used[i])
 		}
-		if later {
-			return laterRank, true
-		}
-		return pastRank, true
+		return g, true
 	}
 }
 
 const (
-	laterRank = 5
-	pastRank  = 6
+	nearRank  = 5
+	laterRank = 6
+	pastRank  = 7
 )
 
 func (r *Registry) Exchange(port uint16, method, rawURL string) func() {

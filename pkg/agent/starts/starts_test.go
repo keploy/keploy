@@ -1,6 +1,7 @@
 package starts
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -384,7 +385,7 @@ func seen(t *testing.T, r *Registry, pid uint32) []string {
 	}
 	var out []string
 	for n, g := range rank {
-		if g < laterRank {
+		if g < nearRank {
 			out = append(out, n)
 		}
 	}
@@ -397,7 +398,7 @@ func later(t *testing.T, r *Registry, pid uint32) []string {
 	rank, _, _ := r.View(pid, at(20))
 	var out []string
 	for n, g := range rank {
-		if g == laterRank {
+		if g == nearRank {
 			out = append(out, n)
 		}
 	}
@@ -705,8 +706,8 @@ func TestCasesNotYetServedStayServableAfterTheCaseInFlight(t *testing.T) {
 	end := r.Exchange(0, "GET", "/jobs/1")
 	defer end()
 	sees(t, r, 101, "the first poll, first choice", "p1")
-	if got := later(t, r, 101); !slices.Equal(got, []string{"mpay", "p2"}) {
-		t.Fatalf("the first poll can fall back to %v, want the later poll's mocks", got)
+	if got := later(t, r, 101); !slices.Equal(got, []string{"mpay", "mpost", "p2"}) {
+		t.Fatalf("the first poll can fall back to %v, want the cases on either side of it", got)
 	}
 }
 
@@ -716,7 +717,29 @@ func TestServedCasesStayServableLast(t *testing.T) {
 	end := r.Exchange(0, "GET", "/a")
 	defer end()
 	rank, _, _ := r.View(101, at(20))
-	if rank["m2"] != 1 || rank["m3"] != laterRank || rank["m1"] != pastRank {
+	if rank["m2"] != 1 || rank["m3"] != nearRank || rank["m1"] != nearRank {
 		t.Fatalf("ranks %v: want the case in flight first, the case not yet served next, the served case last", rank)
+	}
+}
+
+func TestOtherCasesRankByHowFarTheyAre(t *testing.T) {
+	var owned []models.Owned
+	var cases []models.Case
+	for i := 1; i <= 5; i++ {
+		n := fmt.Sprintf("m%d", i)
+		owned = append(owned, models.Owned{Name: n})
+		cases = append(cases, models.Case{Name: "test-" + n, Method: "GET", URL: "/" + n, Mocks: []string{n}})
+	}
+	_, r := oneTest(map[string]models.SetTable{"e2e": {Tests: map[string][]models.Owned{"T": owned}, Cases: map[string][]models.Case{"T": cases}}})
+	r.Exchange(0, "GET", "/m1")()
+	r.Exchange(0, "GET", "/m2")()
+	end := r.Exchange(0, "GET", "/m3")
+	defer end()
+	rank, _, _ := r.View(101, at(20))
+	want := map[string]int{"m3": 1, "m2": nearRank, "m4": nearRank, "m5": laterRank, "m1": pastRank}
+	for n, g := range want {
+		if rank[n] != g {
+			t.Fatalf("ranks %v, want %v", rank, want)
+		}
 	}
 }
