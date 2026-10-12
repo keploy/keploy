@@ -207,6 +207,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 					zap.Int("candidates", len(schemaMatched)))
 			}
 		}
+		// A CORS preflight is answered for the request it announces: keep the
+		// recordings of that same preflight (preflight.go).
+		schemaMatched = preflightCandidates(input, schemaMatched)
 		// KPTIMING stage 4b/4c: schema filter (method, URL, content-type,
 		// header keys, query params) over the whole pool.
 		kpSchemaMs := time.Since(kpIterStart).Milliseconds() - kpPoolMs
