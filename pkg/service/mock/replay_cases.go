@@ -507,7 +507,14 @@ func missLine(test, protocol, call, dest string, times int, diffs []models.MockF
 		if i == 2 {
 			break
 		}
-		line += fmt.Sprintf("; nearest recorded call has %s %q, this call %q", d.Path, d.Expected, d.Actual)
+		switch d.Kind {
+		case models.DiffKindMissingInLive:
+			line += "; this call has no " + d.Path + ", the nearest recorded call has it"
+		case models.DiffKindMissingInMock:
+			line += "; the nearest recorded call has no " + d.Path + ", this call has it"
+		default:
+			line += fmt.Sprintf("; nearest recorded call has %s %q, this call %q", d.Path, d.Expected, d.Actual)
+		}
 	}
 	return line + "; add it: " + Again("--on-miss", "record")
 }

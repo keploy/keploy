@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -68,6 +69,16 @@ func TestMissLineNamesTheCallAndTheCommand(t *testing.T) {
 	want := `not in the recording: orders.TestPrice called GET /price/vase on 127.0.0.1:9000 (2 times); nearest recorded call has url.path "/price/lamp", this call "/price/vase"; add it: ` + Again("--on-miss", "record")
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestMissLineSaysWhichSideHasAField(t *testing.T) {
+	got := missLine("T", "HTTP", "POST /a", "", 1, []models.MockFieldDiff{
+		{Path: "body.x", Kind: models.DiffKindMissingInLive, Expected: "1"},
+		{Path: "body.y", Kind: models.DiffKindMissingInMock, Actual: "2"},
+	})
+	if !strings.Contains(got, "; this call has no body.x, the nearest recorded call has it; the nearest recorded call has no body.y, this call has it; ") || strings.Contains(got, `""`) {
+		t.Fatalf("got %s", got)
 	}
 }
 

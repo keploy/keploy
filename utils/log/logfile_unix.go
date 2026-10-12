@@ -77,7 +77,13 @@ func openLogFile() (*os.File, string, error) {
 }
 
 func OpenAgentLog() (*os.File, error) {
-	f, err := os.OpenFile(AgentLogName, os.O_CREATE|os.O_WRONLY|oNoFollow|oNonBlock, logFileMode)
+	name := agentLogName()
+	const flags = os.O_CREATE | os.O_WRONLY | oNoFollow | oNonBlock
+	f, err := os.OpenFile(name, flags|os.O_EXCL, logFileMode)
+	created := err == nil
+	if errors.Is(err, os.ErrExist) {
+		f, err = os.OpenFile(name, flags, logFileMode)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -86,10 +92,10 @@ func OpenAgentLog() (*os.File, error) {
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		switch {
 		case !fi.Mode().IsRegular() || !ok || st.Nlink != 1:
-			err = errors.New(AgentLogName + " is not a regular file")
+			err = errors.New(name + " is not a regular file")
 		case !mayKeepLog(st.Uid):
-			err = errors.New(AgentLogName + " belongs to another user")
-		default:
+			err = errors.New(name + " belongs to another user")
+		case !created:
 			err = f.Truncate(0)
 		}
 	}
@@ -97,7 +103,10 @@ func OpenAgentLog() (*os.File, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	if os.Geteuid() == 0 {
+	if perm := fi.Mode().Perm(); perm&^logFileMode != 0 {
+		_ = f.Chmod(perm & logFileMode)
+	}
+	if created && os.Geteuid() == 0 {
 		if uid, gid, ok := logOwnerForRoot(); ok {
 			_ = f.Chown(uid, gid)
 		}

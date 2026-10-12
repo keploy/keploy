@@ -94,8 +94,10 @@ type AgentClient struct {
 	mock      bool
 	agentLog  string
 	agentFile *os.File
-	failed    atomic.Bool
-	sayLog    sync.Once
+	tail      *agentTail
+	logMu     sync.Mutex
+	failed    bool
+	dropped   bool
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -484,6 +486,10 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		case mockChan <- &mock:
 			// Send the decoded mock to the channel
 		case <-time.After(mockHandoffGrace):
+			if a.mock {
+				utils.LogError(a.logger, nil, fmt.Sprintf("one %s call (%s) was not saved: keploy did not take it from its agent within %s", mock.Kind, mock.Name, mockHandoffGrace))
+				return true
+			}
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
@@ -533,7 +539,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		if closeErr := res.Body.Close(); closeErr != nil {
 			utils.LogError(a.logger, closeErr, "failed to close response body for getmappings")
 		}
-		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings",
+		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings", log.Hide,
 			zap.String("consequence", "replay falls back to timestamp-based mock filtering for this recording"),
 			zap.String("remedy", "upgrade the agent image to one built from keploy #3715 or later"))
 		noMappings := make(chan models.TestMockMapping)
@@ -1691,9 +1697,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	cmd := agentUtils.NewAgentCommand(keployBin, args, sudoCached)
 
 	cmd.Stdout, cmd.Stderr = a.agentOutput()
-	if a.agentLog != "" && cmd.WaitDelay == 0 {
-		cmd.WaitDelay = 5 * time.Second
-	}
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
@@ -1716,6 +1719,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// when it sees that cancellation.
 		exited <- err
 		// If ctx wasn't cancelled, bubble up unexpected exits
+		a.endAgentLog(ctx.Err() != nil)
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err), log.Hide)
 			return err
@@ -1724,7 +1728,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.agentCmd = nil
 		a.mu.Unlock()
 		a.logger.Debug("agent process stopped")
-		a.dropAgentLog()
 		return nil
 	})
 
@@ -2101,7 +2104,11 @@ func (a *AgentClient) checkDockerModePrivileges(opts models.SetupOptions) error 
 		return a.dockerModeRefused(err, perfEventParanoidRemedy)
 	}
 	if err != nil {
-		a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		if a.mock {
+			a.logger.Error("could not set /proc/sys/kernel/perf_event_paranoid", zap.Error(err))
+		} else {
+			a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		}
 	}
 	return err
 }
@@ -2577,12 +2584,16 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	cmd.Stdout, cmd.Stderr = a.agentOutput()
+	if a.agentLog != "" {
+		logger.Info("starting keploy's agent container; docker's output, including any image download, goes to "+a.agentLog, log.Show)
+	}
 
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	a.endAgentLog(ctx.Err() != nil)
+	if err != nil {
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Keploy agent in docker stopped gracefully.")
-			a.dropAgentLog()
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")

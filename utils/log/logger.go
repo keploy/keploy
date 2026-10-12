@@ -414,7 +414,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
 	}
 
-	core := consoleCore(cfg, primarySyncer(), cfg.Level)
+	core := primaryCore(cfg, cfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil

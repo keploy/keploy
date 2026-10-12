@@ -409,7 +409,7 @@ func TestGateReport(t *testing.T) {
 
 	// A harness that scopes but sends no verdicts, and cannot skip.
 	note, ungated = gateReport(g, []models.ScopeWindow{w("TestA", ""), w("TestB", ""), w("TestC", ""), w("TestC", "")})
-	require.Contains(t, note, "2 test(s) outside the run list ran")
+	require.Contains(t, note, "2 tests outside the run list ran")
 	require.Equal(t, 2, ungated)
 }
 

@@ -22,7 +22,7 @@ var (
 
 func Quiet() (*zap.Logger, error) {
 	ensureLogCfg()
-	quiet.Store(true)
+	quiet.Store(runFile.Load() != nil)
 	return reattachDebugFileSink(zap.New(newRedactingCore(primaryCore(LogCfg, LogCfg.Level)))), nil
 }
 
@@ -82,13 +82,21 @@ func (c factCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		return nil
 	}
 	ent.Message = factPrefix + ent.Message
+	next := ""
 	for _, f := range fields {
-		if f.Type == zapcore.ErrorType && f.Key == "error" {
+		switch {
+		case f.Type == zapcore.ErrorType && f.Key == "error":
 			if err, ok := f.Interface.(error); ok && err != nil {
 				ent.Message += ": " + err.Error()
 			}
+		case f.Type == zapcore.StringType && f.Key == "next_step":
+			next = f.String
 		}
 	}
+	if err := c.Core.Write(ent, nil); err != nil || next == "" {
+		return err
+	}
+	ent.Message = factPrefix + "next step: " + next
 	return c.Core.Write(ent, nil)
 }
 

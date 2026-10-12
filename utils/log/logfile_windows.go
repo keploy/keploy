@@ -30,8 +30,9 @@ func openLogFile() (*os.File, string, error) {
 }
 
 func OpenAgentLog() (*os.File, error) {
-	if fi, err := os.Lstat(AgentLogName); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New(AgentLogName + " is a symbolic link")
+	name := agentLogName()
+	if fi, err := os.Lstat(name); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New(name + " is a symbolic link")
 	}
-	return os.OpenFile(AgentLogName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, logFileMode)
+	return os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, logFileMode)
 }

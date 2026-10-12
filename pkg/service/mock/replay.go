@@ -30,7 +30,7 @@ import (
 // non-zero when any recorded mock was missed. It returns an error for a
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
-func (m *mockService) Replay(ctx context.Context) (err error) {
+func (m *mockService) replay(ctx context.Context) (err error) {
 	m.ids = nil
 	name := m.setName()
 	requests := m.requests()
@@ -509,11 +509,11 @@ func (m *mockService) readCoverage(dir string, before report.Before, isolated bo
 	if rel, err := filepath.Rel(dir, path); err == nil && !strings.HasPrefix(rel, "..") {
 		s.Source = rel
 	}
-	label := "test coverage of this replay (not offline: isolation was not proven)"
+	label := "coverage of this replay"
 	if isolated {
-		label = "offline coverage: code your tests exercised with every dependency replayed"
+		label = "coverage with every outgoing call answered from the recording"
 	}
-	m.logger.Info(label,
+	m.logger.Info(fmt.Sprintf("%s: %s%% (%d of %d %s); report: %s", label, report.Floor1(s.Percent()), s.Covered, s.Total, s.Unit, s.Source),
 		zap.String("coverage", report.Floor1(s.Percent())+"%"),
 		zap.String("covered", fmt.Sprintf("%d of %d %s", s.Covered, s.Total, s.Unit)),
 		zap.String("report", s.Source), log.Show)
@@ -538,14 +538,14 @@ func (m *mockService) enforceMinCoverage(cov *report.Summary, note string) bool 
 			next = "the tests run in a container, so the report is written inside it: mount its directory into the working directory and name the report with --coverage-report"
 		}
 		utils.ErrCode = 1
-		m.logger.Error("replay failed under --min-coverage: this run left no coverage report to check",
+		m.logger.Error("--min-coverage: this run left no coverage report to check ("+note+")",
 			zap.String("reason", note),
 			zap.String("next_step", next))
 		return true
 	}
 	if cov.Percent() < floor {
 		utils.ErrCode = 1
-		m.logger.Error("replay failed under --min-coverage: the tests cover less of the code than the floor",
+		m.logger.Error(fmt.Sprintf("--min-coverage: the tests cover less of the code than the floor: %s%% (%d of %d %s), under %s%%", report.Floor1(cov.Percent()), cov.Covered, cov.Total, cov.Unit, strconv.FormatFloat(floor, 'f', -1, 64)),
 			zap.String("coverage", report.Floor1(cov.Percent())+"%"),
 			zap.String("covered", fmt.Sprintf("%d of %d %s", cov.Covered, cov.Total, cov.Unit)),
 			zap.String("min-coverage", strconv.FormatFloat(floor, 'f', -1, 64)+"%"),
@@ -864,7 +864,7 @@ func gateReport(g requestedGate, windows []models.ScopeWindow) (note string, ung
 	case len(windows) == 0:
 		return "no test reported to keploy, so the request to run only some tests had no effect", 0
 	case len(outside) > 0:
-		return fmt.Sprintf("%d test(s) outside the run list ran: the test runner's harness cannot skip a test", len(outside)), len(outside)
+		return fmt.Sprintf("%d tests outside the run list ran: the test command's keploy helper cannot skip a test", len(outside)), len(outside)
 	}
 	return "", 0
 }
@@ -1273,7 +1273,7 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			continue
 		}
 		m.servedAnnounced[name] = struct{}{}
-		m.logger.Info("mock served", log.Show,
+		m.logger.Info(fmt.Sprintf("mock served: %s (%s %s, recorded at %s)", name, state.Kind, state.Type, state.ReqTimestampMock), log.Show,
 			zap.String("name", name),
 			zap.String("kind", string(state.Kind)),
 			zap.String("type", state.Type),
@@ -1294,7 +1294,7 @@ const interruptedReadTimeout = 3 * time.Second
 // interrupted because a test hung on a missing mock would show none. Best
 // effort: the reads are bounded, and when they fail it says where to look.
 func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose bool) {
-	const hint = "run the replay again with --debug to see each miss as it happens"
+	hint := "to see each call that was not in the recording: " + Again("--debug")
 	if fromCompose {
 		m.logger.Info("the replay was interrupted before its misses were read; "+hint, log.Show)
 		return

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 )
 
 // LogFileName is the log every keploy run keeps beside the console, in the
@@ -20,7 +21,9 @@ import (
 // only, saying why.
 const LogFileName = "keploy-logs.txt"
 
-const AgentLogName = "keploy-agent.log"
+func agentLogName() string {
+	return "keploy-agent-" + strconv.Itoa(os.Getpid()) + ".log"
+}
 
 // logFileMode is what a new log file is created with: its owner writes it,
 // others may read it. It is never set by path, and an existing log writable by

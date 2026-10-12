@@ -127,3 +127,32 @@ func TestFactsWritesMarkedLinesOnceInTheirOwnFormat(t *testing.T) {
 		t.Fatalf("console = %q", got)
 	}
 }
+
+func TestQuietRendersTheNextStepAndSurvivesAddMode(t *testing.T) {
+	console, _ := quietFiles(t)
+	if _, err := Quiet(); err != nil {
+		t.Fatal(err)
+	}
+	logger, err := AddMode("record")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("hidden")
+	logger.Error("the agent could not start", zap.Error(errors.New("exit 1")), zap.String("next_step", "mount tracefs"))
+	if got, want := read(t, console), "keploy: the agent could not start: exit 1\nkeploy: next step: mount tracefs\n"; got != want {
+		t.Fatalf("console = %q, want %q", got, want)
+	}
+}
+
+func TestNoQuietWithoutALogFile(t *testing.T) {
+	console, _ := quietFiles(t)
+	runFile.Store(nil)
+	logger, err := Quiet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("still on the console")
+	if Quieted() || !strings.Contains(read(t, console), "still on the console") {
+		t.Fatalf("a run with no log file went quiet: %q", read(t, console))
+	}
+}

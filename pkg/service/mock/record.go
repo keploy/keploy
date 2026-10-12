@@ -43,7 +43,7 @@ const mockDrainQuiet = 500 * time.Millisecond
 // test cases), overwrites the set in place so a re-record produces a clean
 // diff, correlates any per-test scopes the runner reported into mappings.yaml,
 // pushes the set to the store, and propagates the runner's exit code.
-func (m *mockService) Record(ctx context.Context) error {
+func (m *mockService) record(ctx context.Context) error {
 	name := m.setName()
 	requests := m.requests()
 	m.logger.Info("recording: "+m.userCommand, zap.String("mock-set", name), log.Show)
@@ -373,7 +373,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
-		m.logger.Error(err.Error(), log.Hide)
+		m.logger.Error(err.Error(), m.own())
 		return err
 	}
 	if err := m.noScopes(windows, windowsErr, appErr, existed); err != nil {
@@ -383,7 +383,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	keep = runnerPassed(appErr)
 	if keep && mockCount == 0 && len(capture.list()) == 0 {
 		keep = false
-		m.logger.Warn(fmt.Sprintf("nothing was recorded: keploy saw no outgoing call and no incoming request from the test command (tests marked: %d, AppStart calls: %d); the existing recording is unchanged", len(windows), len(starts)),
+		m.logger.Warn(fmt.Sprintf("nothing was recorded: keploy saw no outgoing call and no incoming request from the test command (tests marked: %d, AppStart calls: %d); the existing recording is unchanged; to see what keploy intercepted: %s", len(windows), len(starts), Again("--debug")),
 			zap.String("mock-set", name), m.own())
 		m.summarize(Summary{Tests: len(windows)})
 		m.propagateExit(appErr, "record")

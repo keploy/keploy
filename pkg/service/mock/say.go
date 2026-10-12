@@ -1,9 +1,11 @@
 package mock
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -35,6 +37,22 @@ func agentErr(what string, err error) error {
 		return err
 	}
 	return AgentErr{What: what, Err: err}
+}
+
+type Ended struct{ Err error }
+
+func (e Ended) Error() string { return e.Err.Error() }
+func (e Ended) Unwrap() error { return e.Err }
+
+func (m *mockService) Record(ctx context.Context) error { return m.ended(m.record(ctx)) }
+
+func (m *mockService) Replay(ctx context.Context) error { return m.ended(m.replay(ctx)) }
+
+func (m *mockService) ended(err error) error {
+	if err != nil && m.ends() {
+		return Ended{Err: err}
+	}
+	return err
 }
 
 func (m *mockService) ends() bool {
@@ -70,7 +88,12 @@ func plural(n int, word string) string {
 }
 
 func Again(extra ...string) string {
-	return utils.QuoteArgs(append(append([]string{"keploy"}, os.Args[1:]...), extra...))
+	args, rest := os.Args[1:], []string(nil)
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, rest = args[:i], args[i:]
+	}
+	out := append(append([]string{"keploy"}, args...), extra...)
+	return utils.QuoteArgs(append(out, rest...))
 }
 
 func were(n int, word string) string {

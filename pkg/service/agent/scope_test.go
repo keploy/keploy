@@ -205,9 +205,9 @@ func TestEndOfAGatedTestWarnsOnce(t *testing.T) {
 	a.NoteScopeGated("t2", 3, time.Time{})
 	require.NoError(t, a.EndScope(ctx, "t1", 3))
 	require.NoError(t, a.EndScope(ctx, "t2", 3))
-	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").Len())
+	require.Equal(t, 1, logs.FilterMessageSnippet("told it to skip").Len())
 
 	require.NoError(t, a.BeginScope(ctx, "t3", 3))
 	require.NoError(t, a.EndScope(ctx, "t3", 3))
-	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").Len(), "an ordinary test's end is not a gated one")
+	require.Equal(t, 1, logs.FilterMessageSnippet("told it to skip").Len(), "an ordinary test's end is not a gated one")
 }
