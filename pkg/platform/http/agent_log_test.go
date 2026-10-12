@@ -2,9 +2,7 @@ package http
 
 import (
 	"bytes"
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -140,62 +139,43 @@ func TestTwoRunsInOneFolderKeepTheirOwnAgentLogs(t *testing.T) {
 	}
 }
 
-const fakeSudo = `#!/bin/sh
-case "$1 $2" in
-"-v "*) touch "$STAMP"; exit 0 ;;
-"-n -v") [ -f "$STAMP" ] && exit 0; exit 1 ;;
-esac
-if [ "$1" = "-n" ]; then
-	shift
-	if [ "$MODE" = nopasswd ] || [ -f "$STAMP" ]; then exec "$@"; fi
-	echo "sudo: a password is required" >&2
-	exit 1
-fi
-exec "$@"
-`
-
-func TestASudoThatWantsAPasswordIsAskedOnceOrNamed(t *testing.T) {
+func TestWithoutATerminalASudoThatWantsAPasswordNamesTheUsersCommand(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(fakeSudo), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	prev := sudoGrace
-	sudoGrace = 300 * time.Millisecond
-	t.Cleanup(func() { sudoGrace = prev })
-	for _, tc := range []struct {
-		name, mode string
-		tty, ok    bool
-	}{
-		{name: "ALL with an unrelated NOPASSWD, on a terminal", mode: "password", tty: true, ok: true},
-		{name: "ALL with an unrelated NOPASSWD, no terminal", mode: "password", ok: false},
-		{name: "NOPASSWD for keploy with its args", mode: "nopasswd", ok: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("MODE", tc.mode)
-			t.Setenv("STAMP", filepath.Join(t.TempDir(), "stamp"))
-			logPath := filepath.Join(t.TempDir(), "agent.log")
-			f, err := os.Create(logPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer f.Close()
-			mk := func() *exec.Cmd { return exec.Command("sudo", "-n", "sleep", "5") }
-			cmd := mk()
-			cmd.Stdout, cmd.Stderr = f, f
-			got, waited, err := startSudo(context.Background(), zap.NewNop(), cmd, mk, logPath, tc.tty)
-			if tc.ok {
-				if err != nil || waited == nil {
-					t.Fatalf("start = %v", err)
-				}
-				_ = got.Process.Kill()
-				<-waited
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), "sudo said: sudo: a password is required; keploy ran: sudo -n sleep 5") {
-				t.Fatalf("err = %v", err)
-			}
-		})
+	prevPTY, prevArgs := needsPTY, os.Args
+	t.Cleanup(func() { needsPTY, os.Args = prevPTY, prevArgs })
+	needsPTY = func() bool { return false }
+	os.Args = []string{"keploy", "mock", "record", "-c", "go test ./..."}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &AgentClient{mock: true, conf: &config.Config{}}
+	_, _, err = a.sudoRoute(true, false)
+	want := "run: sudo -E env " + utils.QuoteArgs([]string{"PATH=" + os.Getenv("PATH"), exe}) + " mock record -c 'go test ./...'"
+	if err == nil || !strings.HasSuffix(err.Error(), want) || strings.Contains(err.Error(), "agent --") {
+		t.Fatalf("err = %v\nwant suffix %s", err, want)
+	}
+	if pty, cached, err := (&AgentClient{conf: &config.Config{}}).sudoRoute(true, false); pty || cached || err != nil {
+		t.Fatalf("outside a mock run: %v %v %v", pty, cached, err)
+	}
+}
+
+func TestASudoThatCanPromptTakesTheTerminalPath(t *testing.T) {
+	prev := needsPTY
+	t.Cleanup(func() { needsPTY = prev })
+	needsPTY = func() bool { return true }
+	for _, mock := range []bool{true, false} {
+		pty, cached, err := (&AgentClient{mock: mock, conf: &config.Config{}}).sudoRoute(true, false)
+		if !pty || cached || err != nil {
+			t.Fatalf("mock=%v: %v %v %v", mock, pty, cached, err)
+		}
+	}
+	if pty, cached, _ := (&AgentClient{mock: true, conf: &config.Config{}}).sudoRoute(true, true); pty || !cached {
+		t.Fatal("cached credentials need no terminal")
 	}
 }
 

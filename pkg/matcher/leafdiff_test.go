@@ -1,7 +1,9 @@
 package matcher
 
 import (
+	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -85,4 +87,84 @@ func TestJSONLeafDiffsStopsAtADepthItCanAfford(t *testing.T) {
 	if n != 1 || len(rows) != 1 || strings.Count(rows[0].Path, ".a") != maxLeafDepth {
 		t.Fatalf("got %d rows of %d: %+v", len(rows), n, rows)
 	}
+}
+
+func TestJSONLeafDiffsAgreesWithTheMatcherBelowTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		exp, act string
+		noise    map[string][]string
+		ordering bool
+	}{
+		{`{"id":1,"x":1}`, `{"id":2,"x":1}`, map[string][]string{"id": {}}, false},
+		{`{"at":"2025","x":1}`, `{"at":"2026","x":1}`, map[string][]string{"at": {"^20"}}, false},
+		{`{"at":"2025"}`, `{"at":"abc"}`, map[string][]string{"at": {"^20"}}, false},
+		{`{"l":[1,2,3]}`, `{"l":[3,2,1]}`, nil, true},
+		{`{"l":[1,2,3]}`, `{"l":[3,2,4]}`, nil, true},
+		{`{"l":[{"p":1},{"p":2}]}`, `{"l":[{"p":2},{"p":1}]}`, nil, true},
+		{`{"v":null}`, `{"v":"2026"}`, map[string][]string{"v": {"^20"}}, false},
+		{`{"v":null}`, `{"v":"abc"}`, map[string][]string{"v": {"^20"}}, false},
+		{`{"v":null}`, `{"v":"2026"}`, map[string][]string{"@.v": {"^20"}}, false},
+		{`{"m":{"ts":1,"k":1}}`, `{"m":{"ts":2,"k":1}}`, map[string][]string{"@.m.ts": {}}, false},
+		{`{"m":{"ts":1,"k":1}}`, `{"m":{"ts":2,"k":2}}`, map[string][]string{"@.m.ts": {}}, false},
+		{`{"n":1}`, `{"n":1}`, nil, false},
+	} {
+		for _, depth := range []int{0, 3, maxLeafDepth - 1, maxLeafDepth, maxLeafDepth + 6} {
+			nest := func(s string) string { return strings.Repeat(`{"a":`, depth) + s + strings.Repeat("}", depth) }
+			noise := map[string][]string{}
+			for k, v := range tc.noise {
+				if rest, ok := strings.CutPrefix(k, "@."); ok {
+					k = strings.Repeat("a.", depth) + rest
+				}
+				noise[k] = v
+			}
+			exp, act := nest(tc.exp), nest(tc.act)
+			e, a := exp, act
+			v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := JSONDiffWithNoiseControl(v, noise, tc.ordering, zap.NewNop())
+			matched := err == nil && res.matches
+			rows, _ := JSONLeafDiffs(exp, act, noise, tc.ordering, "b.", 0, 0)
+			if matched != (len(rows) == 0) {
+				t.Errorf("depth %d %s -> %s noise %v ordering %v: matcher matched=%v, rows %+v", depth, tc.exp, tc.act, tc.noise, tc.ordering, matched, rows)
+			}
+		}
+	}
+}
+
+func FuzzJSONLeafDiffsAgreesWithTheMatcher(f *testing.F) {
+	f.Add(`{"a":{"id":1,"l":[1,2]}}`, `{"a":{"id":2,"l":[2,1]}}`, "id", "", true, 70)
+	f.Add(`{"v":null}`, `{"v":"2026"}`, "v", "^20", false, 66)
+	f.Fuzz(func(t *testing.T, exp, act, key, pattern string, ordering bool, depth int) {
+		if depth < 0 || depth > 200 {
+			return
+		}
+		exp = strings.Repeat(`{"a":`, depth) + exp + strings.Repeat("}", depth)
+		act = strings.Repeat(`{"a":`, depth) + act + strings.Repeat("}", depth)
+		if !json.Valid([]byte(exp)) || !json.Valid([]byte(act)) {
+			return
+		}
+		noise := map[string][]string{}
+		if key != "" && !strings.Contains(key, ".") {
+			noise[key] = []string{}
+			if pattern != "" {
+				if _, err := regexp.Compile(pattern); err != nil {
+					return
+				}
+				noise[key] = []string{pattern}
+			}
+		}
+		e, a := exp, act
+		v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+		if err != nil || !v.IsIdentical() {
+			return
+		}
+		res, err := JSONDiffWithNoiseControl(v, noise, ordering, zap.NewNop())
+		matched := err == nil && res.matches
+		rows, _ := JSONLeafDiffs(exp, act, noise, ordering, "b.", 0, 0)
+		if matched != (len(rows) == 0) {
+			t.Fatalf("matcher matched=%v, rows %+v", matched, rows)
+		}
+	})
 }

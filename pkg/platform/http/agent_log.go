@@ -3,7 +3,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -139,49 +137,29 @@ func (a *AgentClient) agentOutput() (io.Writer, io.Writer) {
 	return f, f
 }
 
-var sudoGrace = 2 * time.Second
+var needsPTY = agentUtils.NeedsPTY
 
-func startSudo(ctx context.Context, logger *zap.Logger, cmd *exec.Cmd, again func() *exec.Cmd, logPath string, tty bool) (*exec.Cmd, <-chan error, error) {
-	for try := 0; ; try++ {
-		if err := agentUtils.StartCommand(cmd); err != nil {
-			return nil, nil, err
-		}
-		waited := make(chan error, 1)
-		go func(c *exec.Cmd) { waited <- c.Wait() }(cmd)
-		select {
-		case <-time.After(sudoGrace):
-			return cmd, waited, nil
-		case err := <-waited:
-			said := sudoSaid(logPath)
-			if said == "" {
-				back := make(chan error, 1)
-				back <- err
-				return cmd, back, nil
-			}
-			if !tty || try > 0 {
-				return nil, nil, fmt.Errorf("keploy's agent needs root on Linux, and sudo said: %s; keploy ran: %s", said, utils.QuoteArgs(cmd.Args))
-			}
-			if err := utils.CacheSudoCredentials(ctx, logger); err != nil {
-				return nil, nil, fmt.Errorf("keploy's agent needs root on Linux, and sudo did not accept the password (%w); keploy ran: %s", err, utils.QuoteArgs(cmd.Args))
-			}
-			next := again()
-			next.Stdout, next.Stderr = cmd.Stdout, cmd.Stderr
-			cmd = next
-		}
+func (a *AgentClient) sudoRoute(elevates, cached bool) (bool, bool, error) {
+	if !elevates || cached {
+		return false, cached, nil
 	}
-}
-
-func sudoSaid(logPath string) string {
-	raw, err := os.ReadFile(logPath)
-	if err != nil {
-		return ""
+	if needsPTY() {
+		return true, false, nil
 	}
-	for _, l := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(l, "sudo: ") && strings.Contains(l, "password is required") {
-			return strings.TrimSpace(l)
-		}
+	if !a.mock || a.conf.Debug {
+		return false, false, nil
 	}
-	return ""
+	again := utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...))
+	if exe, err := os.Executable(); err == nil {
+		again = utils.QuoteArgs(append([]string{"sudo", "-E", "env", "PATH=" + os.Getenv("PATH"), exe}, os.Args[1:]...))
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return false, false, fmt.Errorf("keploy's agent needs root on Linux and sudo is not installed; run keploy as root: %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
+	}
+	if exec.Command("sudo", "-n", "true").Run() != nil {
+		return false, false, fmt.Errorf("keploy's agent needs root on Linux and sudo asks for a password, which keploy cannot answer without a terminal; run: %s", again)
+	}
+	return false, true, nil
 }
 
 func cmpOr(a, b string) string {

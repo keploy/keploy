@@ -48,7 +48,6 @@ import (
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/term"
 )
 
 const (
@@ -1691,15 +1690,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
-	mockSudo := elevates && !sudoCached && a.mock && !a.conf.Debug
-	if mockSudo {
-		if _, err := exec.LookPath("sudo"); err != nil {
-			return fmt.Errorf("keploy's agent needs root on Linux and sudo is not installed; run keploy as root: %s", utils.QuoteArgs(append([]string{"keploy"}, os.Args[1:]...)))
-		}
-		sudoCached = true
+	pty, sudoCached, err := a.sudoRoute(elevates, sudoCached)
+	if err != nil {
+		return err
 	}
-
-	if elevates && agentUtils.NeedsPTY() && !sudoCached {
+	if pty {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited)
 	}
 
@@ -1709,22 +1704,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 
 	cmd.Stdout, cmd.Stderr = a.agentOutput()
 
-	var waited <-chan error
-	if mockSudo && a.agentLog != "" {
-		var err error
-		cmd, waited, err = startSudo(ctx, a.logger, cmd, func() *exec.Cmd { return agentUtils.NewAgentCommand(keployBin, args, true) }, a.agentLog, term.IsTerminal(int(os.Stdin.Fd())))
-		if err != nil {
-			a.endAgentLog(false)
-			return err
-		}
-	} else if err := agentUtils.StartCommand(cmd); err != nil {
+	a.mu.Lock()
+	a.agentCmd = cmd // this has been set for proper stopping of the native agent
+	a.mu.Unlock()
+	// Start (OS-specific tweaks happen inside utils.StartCommand)
+	if err := agentUtils.StartCommand(cmd); err != nil {
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		a.endAgentLog(false)
 		return err
 	}
-	a.mu.Lock()
-	a.agentCmd = cmd // this has been set for proper stopping of the native agent
-	a.mu.Unlock()
 
 	pid := cmd.Process.Pid
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
@@ -1732,12 +1720,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 
-		var err error
-		if waited != nil {
-			err = <-waited
-		} else {
-			err = cmd.Wait()
-		}
+		err := cmd.Wait()
 		// Reported BEFORE the error is returned below: returning it cancels
 		// the group, and the readiness wait must find the exit already here
 		// when it sees that cancellation.

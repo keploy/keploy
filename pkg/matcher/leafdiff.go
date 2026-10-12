@@ -59,7 +59,18 @@ func (w *leafWalk) add(path string, kind models.MockFieldDiffKind, e, a any, inE
 }
 
 func (w *leafWalk) walk(key, path string, e, a any, ancestor bool) {
-	if res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.ni, w.global, w.ordering, ancestor, nil); err == nil && res.matches {
+	if w.matches(key, e, a, ancestor) {
+		return
+	}
+	_, ce := e.(capped)
+	_, ca := a.(capped)
+	if ce || ca {
+		ue, ue2 := unshallow(e)
+		ua, ua2 := unshallow(a)
+		if (ue2 || ua2) && w.matches(key, ue, ua, ancestor) {
+			return
+		}
+		w.add(path, models.DiffKindValueChanged, ue, ua, true, true)
 		return
 	}
 	switch em := e.(type) {
@@ -113,16 +124,26 @@ func (w *leafWalk) walk(key, path string, e, a any, ancestor bool) {
 		}
 		return
 	}
-	w.add(path, models.DiffKindValueChanged, e, a, true, true)
+	ue, ue2 := unshallow(e)
+	ua, ua2 := unshallow(a)
+	if (ue2 || ua2) && w.matches(key, ue, ua, ancestor) {
+		return
+	}
+	w.add(path, models.DiffKindValueChanged, ue, ua, true, true)
 }
 
-const maxLeafDepth = 64
+func (w *leafWalk) matches(key string, e, a any, ancestor bool) bool {
+	res, err := matchJSONWithNoiseHandlingIndexed(key, e, a, w.ni, w.global, w.ordering, ancestor, nil)
+	return err == nil && res.matches
+}
+
+type capped struct{ v any }
 
 func shallow(v any, depth int) any {
 	switch t := v.(type) {
 	case map[string]any:
 		if depth >= maxLeafDepth {
-			return "\x00" + jsonText(t)
+			return capped{t}
 		}
 		out := make(map[string]any, len(t))
 		for k, c := range t {
@@ -131,7 +152,7 @@ func shallow(v any, depth int) any {
 		return out
 	case []any:
 		if depth >= maxLeafDepth {
-			return "\x00" + jsonText(t)
+			return capped{t}
 		}
 		out := make([]any, len(t))
 		for i, c := range t {
@@ -141,6 +162,45 @@ func shallow(v any, depth int) any {
 	}
 	return v
 }
+
+func unshallow(v any) (any, bool) {
+	switch t := v.(type) {
+	case capped:
+		return t.v, true
+	case map[string]any:
+		var out map[string]any
+		for k, c := range t {
+			if u, ok := unshallow(c); ok {
+				if out == nil {
+					out = make(map[string]any, len(t))
+					for k2, c2 := range t {
+						out[k2] = c2
+					}
+				}
+				out[k] = u
+			}
+		}
+		if out != nil {
+			return out, true
+		}
+	case []any:
+		var out []any
+		for i, c := range t {
+			if u, ok := unshallow(c); ok {
+				if out == nil {
+					out = append([]any(nil), t...)
+				}
+				out[i] = u
+			}
+		}
+		if out != nil {
+			return out, true
+		}
+	}
+	return v, false
+}
+
+const maxLeafDepth = 64
 
 func joinKey(path, k string) string {
 	if path == "" {
@@ -169,9 +229,6 @@ func jsonText(v any) string {
 	enc.SetEscapeHTML(false)
 	if f, ok := v.(float64); ok {
 		return formatJSONNumber(f)
-	}
-	if s, ok := v.(string); ok && strings.HasPrefix(s, "\x00") {
-		return s[1:]
 	}
 	if enc.Encode(v) != nil {
 		return ""
