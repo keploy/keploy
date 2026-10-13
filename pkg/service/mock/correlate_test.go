@@ -126,3 +126,25 @@ func names(entries []models.MockEntry) []string {
 	}
 	return out
 }
+
+func TestOutsideTestsNamesEveryRequestNoTestHolds(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "TestA", Start: ts(10), End: ts(20)},
+		{Name: "TestB", Start: ts(30), End: ts(40)},
+	}
+	cases := []capturedMock{
+		{name: "get-healthz-1", ts: ts(5)},
+		{name: "post-orders-1", ts: ts(12)},
+		{name: "get-orders-1", ts: ts(25)},
+		{name: "get-orders-2", ts: ts(35)},
+		{name: "delete-all-1", ts: ts(50)},
+	}
+	byCase := correlateCases(windows, nil, cases, nil)
+	n, loose := outsideTests(windows, cases, byCase)
+	require.Equal(t, 2, n)
+	require.Equal(t, []string{
+		"get-healthz-1 (set-up, before the first test)",
+		"get-orders-1 (between two tests)",
+		"delete-all-1 (tear-down, after the last test)",
+	}, loose)
+}

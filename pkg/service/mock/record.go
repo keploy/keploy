@@ -360,6 +360,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	var windows []models.ScopeWindow
 	var windowsErr error
+	var loose []string
+	inTests := -1
 	if m.mappingDB != nil {
 		windows, windowsErr = m.agentWindows(persistCtx)
 	}
@@ -407,6 +409,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			plan := classify(windows, starts, owners, recorded)
 			byTest := plan.tests
 			byCase := correlateCases(windows, plan.perTest, capture.list(), stepWindows(windows))
+			inTests, loose = outsideTests(windows, capture.list(), byCase)
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -448,6 +451,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 	if capture != nil {
 		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+		if len(loose) > 0 {
+			m.logger.Info(fmt.Sprintf("%d requests captured; %d belong to tests; %d made outside every test %s not part of any test: %s",
+				len(capture.list()), inTests, len(loose), plural(len(loose), "is", "are"), strings.Join(loose, ", ")),
+				zap.String("mock-set", name),
+				zap.String("next_step", "a request made outside every test is not replayed or compared; the calls it made to dependencies are kept with the start-up and served at replay"))
+		}
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
@@ -844,4 +853,55 @@ func (m *mockService) agentPendingBefore(before time.Time) bool {
 		m.logger.Debug("could not ask the agent what it has yet to hand over; going by the stream's quiet", zap.Error(err))
 	}
 	return known && pending
+}
+
+// outsideTests counts the captured requests that belong to a test, and names
+// each one that belongs to none, with when it was made: a request the test
+// process made before its first test, after its last or between two (a
+// readiness probe in TestMain, say) is kept in the recording but is no test's.
+func outsideTests(windows []models.ScopeWindow, cases []capturedMock, byCase map[string]models.MappedTestCase) (int, []string) {
+	held := map[string]bool{}
+	for _, tc := range byCase {
+		for _, c := range tc.Cases {
+			held[c] = true
+		}
+	}
+	var loose []string
+	n := 0
+	for _, c := range cases {
+		if held[c.name] {
+			n++
+			continue
+		}
+		loose = append(loose, c.name+" ("+whenOutside(windows, c.ts)+")")
+	}
+	return n, loose
+}
+
+func whenOutside(windows []models.ScopeWindow, at time.Time) string {
+	before, after := false, false
+	for _, w := range windows {
+		if w.Start.After(at) {
+			before = true
+		}
+		if w.End.Before(at) {
+			after = true
+		}
+	}
+	switch {
+	case before && after:
+		return "between two tests"
+	case before:
+		return "set-up, before the first test"
+	case after:
+		return "tear-down, after the last test"
+	}
+	return "while a test ran, outside its scope"
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
