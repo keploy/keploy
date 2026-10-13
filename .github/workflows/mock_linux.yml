@@ -26,7 +26,9 @@ name: Mock Mode Regression (Linux)
 # Another records an app that mints ids and cookies, templatizes the set and
 # asserts it replays with each run's values, that a wrong id in an answer
 # fails, and that keploy normalize keeps the placeholders; once recorded by
-# this build and once by the released keploy.
+# this build and once by the released keploy. Another follows a test variable
+# (an id an app mints) through its dependency calls under the proven switch,
+# and asserts a read-back of another id fails with the variable as evidence.
 on:
   workflow_call:
     inputs:
@@ -196,6 +198,23 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"
 
+      # keploy record / keploy test with KEPLOY_PROVEN=1 for a test variable
+      # followed through dependency calls: an app mints an order id, sends it
+      # to an HTTP dependency and reads the order back twice by it. With the
+      # variables the learn step writes on the mocks (the script writes them,
+      # as it would), the set must pass: the id is bound where the app first
+      # sends it, asserted at each read-back, answered in record order and
+      # named in every answer. A read-back of another id, of the recorded id,
+      # one made before the create, and an id sent as a number must each fail
+      # with the variable as evidence; with the switch off the block must
+      # change no verdict.
+      - name: Run variables record/test e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
+
       # The same, recorded by the released keploy and templatized and tested by
       # this build: what an upgrading user has. The recording format did not
       # change.
@@ -210,3 +229,13 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"
+
+      # The variables e2e on a recording the released keploy made: the block is
+      # written on mocks an older keploy recorded, as the learn step will do
+      # for a user who upgrades.
+      - name: Run variables e2e (record latest, test build)
+        env:
+          RECORD_BIN: ${{ steps.latest.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"

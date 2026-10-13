@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -66,6 +67,10 @@ type matchDiag struct {
 	// already finished with, attached to a struct only ever built on the
 	// no-match return.
 	pool []*models.Mock
+	// variable is the evidence of a mock that fits the call but whose
+	// variables do not hold (proven switch; see variables.go): the miss is
+	// reported as that, whatever else the cascade found.
+	variable *varProblem
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -136,6 +141,61 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
+		// Under the proven switch a mock that declares variable places is
+		// served by the variable pass alone (variables.go): no later pass
+		// sees it, so it is never served on a call whose variables do not
+		// hold. With the switch off nothing here runs.
+		comparedPool := unfilteredMocks
+		var vp *varProblem
+		if provenswitch.On() {
+			withVars, rest := splitVariableMocks(unfilteredMocks)
+			if len(withVars) > 0 {
+				table := variableTable(mockDb)
+				hits, problem, err := h.variablePass(ctx, input, withVars, table, headerNoise, userBodyNoise, urlNoise)
+				if err != nil {
+					return false, nil, nil, err
+				}
+				if len(hits) > 0 {
+					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if problem != nil {
+						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
+					}
+					if commitCursor != nil {
+						commitCursor()
+					}
+					return true, served, nil, nil
+				}
+				vp = problem
+				unfilteredMocks = rest
+				if vp != nil {
+					// A recording fit this call but its variables did not
+					// hold: only an exact recording of this very call may
+					// still answer it, never a lenient pass.
+					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, urlNoise, statefulMocks)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if ok {
+						return true, served, nil, nil
+					}
+					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
+				}
+				if len(unfilteredMocks) == 0 {
+					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
+				}
+			}
+		}
+
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
@@ -159,7 +219,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		if len(schemaMatched) == 0 {
-			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
+			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
 		}
 
 		h.Logger.Debug("http mock schema match results",
@@ -197,7 +257,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// field, capture the live value, and render it into the served response —
 		// run BEFORE the lenient key-schema / fuzzy passes so a correlated mock is
 		// not served stale or rejected by strict noise.
-		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation); okC {
+		// Under the proven switch an echo is a variable of its call, followed
+		// by the variable pass; shape-detected correlations are not honoured.
+		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation && !provenswitch.On()); okC {
 			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
 			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
 			if err != nil {
@@ -235,7 +297,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				if beforeStrict > 0 {
 					phase = models.MatchPhaseStrict
 				}
-				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched, pool: unfilteredMocks}, nil
+				return false, nil, &matchDiag{phase: phase, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
 			}
 
 			if len(bodyMatched) == 1 {
@@ -270,7 +332,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			return true, served, nil, nil
 		}
-		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
+		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
 	}
 }
 
@@ -1641,6 +1703,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		mocks = append(mocks, perTestMocks...)
 		mocks = append(mocks, sessionMocks...)
 		httpMocks = FilterHTTPMocks(mocks)
+	}
+
+	if diag != nil && diag.variable != nil {
+		return variableMismatchReport(request, liveBody, dest, actualKey, diag, httpMocks)
 	}
 
 	phase := models.MatchPhaseExhausted

@@ -61,6 +61,11 @@ type NetworkTrafficDoc struct {
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
 	Start        string              `json:"start,omitempty" yaml:"start,omitempty"`
+
+	// Variables, when present, names the places of the call that hold a test
+	// variable's value (models.MockVariables): a kind-agnostic top-level block,
+	// like noise, kept off the per-kind spec.
+	Variables models.MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under

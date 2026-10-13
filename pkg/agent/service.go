@@ -179,6 +179,15 @@ type StatefulCursorResetter interface {
 	ResetStatefulCursors()
 }
 
+// VariableResetter is the optional extension implemented by proxies whose mock
+// manager keeps the test variables a replay binds (package variables). Under
+// the proven switch the agent calls it when a scope begins: on the staging call
+// of a test-set, and at the begin of each test of keploy mock replay. A proxy
+// that lacks it follows no variables, so it has none to forget.
+type VariableResetter interface {
+	ResetVariables()
+}
+
 // CarryOverPlanner is the optional extension implemented by proxies with a
 // carry-over tier (models.RegisterCarryOver). For the window that starts at
 // start it names the recorded-time range of registered per-test mocks the agent

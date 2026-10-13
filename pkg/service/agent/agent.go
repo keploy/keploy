@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -172,6 +173,9 @@ type Agent struct {
 	// noteEndOfGated said so this session.
 	gatedScopes    map[scopeKey]struct{}
 	gatedEndWarned bool
+	// replay, under the proven switch: the root test whose scope holds the
+	// test variables bound so far (beginVariableScope).
+	varRoot string
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while
@@ -872,6 +876,10 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+	if provenswitch.On() {
+		storage.filtered = a.refuseUnfollowable(storage.filtered)
+		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered)
+	}
 
 	// Derive Lifetime once per mock before they enter the runtime pool.
 	// Idempotent: DeriveLifetime short-circuits when the Lifetime
@@ -999,6 +1007,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mock := &m
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(mock)
+		if provenswitch.On() && !a.followable(mock) {
+			continue
+		}
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
 		}
@@ -1037,6 +1048,42 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		zap.Int("filtered", len(storage.filtered)),
 		zap.Int("unfiltered", len(storage.unfiltered)))
 	return nil
+}
+
+// followable reports whether this keploy can follow the variables a mock
+// declares (models.MockVariables): those of a plain HTTP call. A mock whose
+// variables it cannot follow is never served, under the proven switch: served
+// as recorded, it would answer a call whose variable does not hold. It is
+// named in an error, and the call it was recorded for misses.
+func (a *Agent) followable(m *models.Mock) bool {
+	if m == nil || len(m.Spec.Variables) == 0 {
+		return true
+	}
+	why := ""
+	switch {
+	case m.Kind != models.HTTP:
+		why = "keploy follows variables on HTTP calls only"
+	case m.IsAsync():
+		why = "keploy does not follow variables on an async HTTP call"
+	default:
+		return true
+	}
+	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
+		zap.String("mock", m.Name), zap.String("kind", string(m.Kind)), zap.String("why", why),
+		zap.String("next_step", "re-record the test with this keploy, or remove the variables block of "+m.Name+" to replay the call as recorded"))
+	return false
+}
+
+// refuseUnfollowable drops the mocks whose variables this keploy cannot follow
+// (followable).
+func (a *Agent) refuseUnfollowable(mocks []*models.Mock) []*models.Mock {
+	out := mocks[:0]
+	for _, m := range mocks {
+		if a.followable(m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -1253,6 +1300,16 @@ func dedupByName(a, b []*models.Mock) []*models.Mock {
 	add(a)
 	add(b)
 	return out
+}
+
+// ResetVariables forgets every test variable the replay has bound: a test
+// begins. Under the proven switch the agent's route calls it for every mock
+// filter a keploy test sends (one per test case, before the test case is
+// sent), and BeginScopeAt as a root test of keploy mock replay begins.
+func (a *Agent) ResetVariables() {
+	if resetter, ok := a.Proxy.(coreAgent.VariableResetter); ok {
+		resetter.ResetVariables()
+	}
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager

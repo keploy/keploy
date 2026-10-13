@@ -83,6 +83,9 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			return fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
 		}
 		a.openWindow(name, pid, at)
+		if provenswitch.On() {
+			a.beginVariableScope(name)
+		}
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -138,6 +141,39 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 	a.openWindow(name, pid, at)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// beginVariableScope starts the scope of the test variables keploy mock
+// replay binds as a test begins (proven switch). A root test and its subtests
+// share one scope, since a subtest runs inside its parent (TestOrder binds,
+// TestOrder/read uses): a root test begins with none bound, and a subtest
+// keeps what its root bound. One test is open at a time in an agent under the
+// switch, so the agent keeps one table.
+func (a *Agent) beginVariableScope(id string) {
+	root, sub := rootTest(id)
+	a.scopeMu.Lock()
+	fresh := !sub || root != a.varRoot
+	a.varRoot = root
+	a.scopeMu.Unlock()
+	if fresh {
+		a.ResetVariables()
+	}
+}
+
+// rootTest is the root test of a test's ID ([<project>::]<path>::<name>, the
+// name after the ID's last "::"), and whether the test is a subtest: a name
+// holding "/" is a subtest of the test its first part names (Go's TestX/case).
+func rootTest(id string) (string, bool) {
+	name := id
+	if i := strings.LastIndex(id, "::"); i >= 0 {
+		name = id[i+2:]
+	}
+	prefix := id[:len(id)-len(name)]
+	j := strings.IndexByte(name, '/')
+	if j < 0 {
+		return id, false
+	}
+	return prefix + name[:j], true
 }
 
 // openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
