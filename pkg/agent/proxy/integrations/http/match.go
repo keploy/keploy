@@ -1757,20 +1757,23 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
 	}
+	// The call the field diffs are computed from: under the proven switch a
+	// closest mock with variables is diffed with its recorded values at their
+	// places, so a variable's place is never named as the difference. The
+	// report still renders the call as it was received.
+	diffReq, diffBody := request, liveBody
 	if provenswitch.On() {
-		// A closest mock with variables is diffed with its recorded values
-		// at their places: a variable's place is never the difference.
-		request, liveBody = asRecordedForDiff(request, liveBody, closestMock)
+		diffReq, diffBody = asRecordedForDiff(request, liveBody, closestMock)
 	}
 
 	mockReq := closestMock.Spec.HTTPReq
 	var fieldDiffs []models.MockFieldDiff
 
 	// method / path pseudo-fields
-	if string(mockReq.Method) != request.Method {
+	if string(mockReq.Method) != diffReq.Method {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "method", Kind: models.DiffKindValueChanged,
-			Expected: string(mockReq.Method), Actual: request.Method,
+			Expected: string(mockReq.Method), Actual: diffReq.Method,
 		})
 	}
 	mockPath := mockReq.URL
@@ -1779,10 +1782,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		mockPath = parsed.Path
 		mockQuery = parsed.Query()
 	}
-	if mockPath != request.URL.Path {
+	if mockPath != diffReq.URL.Path {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "path", Kind: models.DiffKindValueChanged,
-			Expected: mockPath, Actual: request.URL.Path,
+			Expected: mockPath, Actual: diffReq.URL.Path,
 		})
 	}
 
@@ -1796,14 +1799,14 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	} else {
 		recordedQuery = mockQuery
 	}
-	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, request.URL.Query())...)
-	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, request.Header, headerNoise)...)
+	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, diffReq.URL.Query())...)
+	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
 	// matcher itself ignores (learned req_body_noise + user body noise).
-	if len(liveBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(liveBody) {
+	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
 		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
-		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(liveBody), ignore)...)
+		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they

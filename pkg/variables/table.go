@@ -26,6 +26,17 @@ type Binding struct {
 type Table struct {
 	mu   sync.Mutex
 	vals map[string]Binding
+	// gen counts the scopes the table has begun (Reset): a call checked in
+	// one scope never binds in the next (BindAll).
+	gen uint64
+}
+
+// Gen is the scope the table is in now: what a call that is about to bind
+// was checked against.
+func (t *Table) Gen() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.gen
 }
 
 // Lookup returns the binding of name in force, if any.
@@ -51,29 +62,34 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 	return b, true
 }
 
-// BindAll binds bs together, all or none, under one lock: each name holds one
-// value (a name already bound must be bound to the same value), and two
-// variables recorded with two values do not share a live value. It returns
-// the first binding that does not hold and the binding it collides with; ok
-// is true when every binding of bs is in force afterwards.
-func (t *Table) BindAll(bs []Binding) (bad, with Binding, ok bool) {
+// BindAll binds bs together, all or none, under one lock, for a call checked
+// in scope gen (Gen): each name holds one value (a name already bound must be
+// bound to the same value), and two variables recorded with two values do not
+// share a live value. It returns the first binding that does not hold and the
+// binding it collides with; stale is true when a new scope began since gen
+// (nothing is bound); ok is true when every binding of bs is in force
+// afterwards.
+func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if gen != t.gen {
+		return Binding{}, Binding{}, true, false
+	}
 	for i, b := range bs {
 		if have, bound := t.vals[b.Name]; bound && have.Value != b.Value {
-			return b, have, false
+			return b, have, false, false
 		}
 		for _, other := range t.vals {
 			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
-				return b, other, false
+				return b, other, false, false
 			}
 		}
 		for _, other := range bs[:i] {
 			if other.Name == b.Name && other.Value != b.Value {
-				return b, other, false
+				return b, other, false, false
 			}
 			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
-				return b, other, false
+				return b, other, false, false
 			}
 		}
 	}
@@ -85,13 +101,14 @@ func (t *Table) BindAll(bs []Binding) (bad, with Binding, ok bool) {
 			t.vals[b.Name] = b
 		}
 	}
-	return Binding{}, Binding{}, true
+	return Binding{}, Binding{}, false, true
 }
 
 // Reset forgets every binding: a new scope begins.
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.vals = nil
+	t.gen++
 	t.mu.Unlock()
 }
 

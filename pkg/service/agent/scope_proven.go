@@ -789,21 +789,22 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
 	if m.MatchPhase == models.MatchPhaseVariable {
-		// A test variable did not hold. Where it did not hold is the
-		// recording's own structure (the place the learn step declared),
-		// never a value the app sent: it is kept, the values are not.
-		var places []string
+		// A test variable did not hold, or the closest mock's variables could
+		// not be followed. The part of the call it is in is kept: a URL path
+		// segment by its position, a header or query parameter by its name.
+		// A body place is kept as "body" alone, since a JSON key can be a
+		// value the app sent (a map keyed by an email). No value is kept.
 		for _, d := range m.FieldDiffs {
-			if d.Kind == models.DiffKindVariable && d.Path != "" {
-				out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: d.Path, Kind: d.Kind})
-				places = append(places, d.Path)
+			if d.Path == "" {
+				continue
 			}
+			path := d.Path
+			if strings.HasPrefix(path, "body.") || strings.HasPrefix(path, "body[") {
+				path = "body"
+			}
+			out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: path, Kind: d.Kind})
 		}
-		at := ""
-		if len(places) > 0 {
-			at = " at " + strings.Join(places, ", ")
-		}
-		out.NextSteps = "a test variable did not hold" + at + " in " + m.ClosestMock + ": the call sent another value than the one the test bound, or used it before the call that binds it; fix the application, or re-record the test with 'keploy mock record' if that is intended"
+		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
 	}
 	return out
 }

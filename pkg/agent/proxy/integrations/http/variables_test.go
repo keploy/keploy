@@ -20,9 +20,10 @@ import (
 // variable table.
 type varDb struct {
 	mockMemDb
-	perTest []*models.Mock
-	session []*models.Mock
-	table   variables.Table
+	perTest  []*models.Mock
+	session  []*models.Mock
+	table    variables.Table
+	consumed map[string]bool
 }
 
 func (d *varDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
@@ -35,13 +36,22 @@ func (d *varDb) DeleteFilteredMock(m models.Mock) bool {
 	for i, x := range d.perTest {
 		if x.Name == m.Name {
 			d.perTest = append(d.perTest[:i:i], d.perTest[i+1:]...)
+			if d.consumed == nil {
+				d.consumed = map[string]bool{}
+			}
+			d.consumed[m.Name] = true
 			return true
 		}
 	}
 	return false
 }
-func (d *varDb) UpdateUnFilteredMock(_, _ *models.Mock) bool { return true }
-func (d *varDb) Variables() *variables.Table                 { return &d.table }
+
+// UpdateUnFilteredMock keeps a reusable mock; a per-test mock another call
+// consumed already is gone (the update fails, as the manager's does).
+func (d *varDb) UpdateUnFilteredMock(old, _ *models.Mock) bool {
+	return !(old.TestModeInfo.Lifetime == models.LifetimePerTest && d.consumed[old.Name])
+}
+func (d *varDb) Variables() *variables.Table { return &d.table }
 
 var recordedAt = time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 
@@ -771,5 +781,161 @@ func TestVariables_TheClosestMockDiffLeavesTheVariablesOut(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the diff does not name the field that differs: %+v", rep.FieldDiffs)
+	}
+}
+
+// Two connections that sent creates of one shape at once, each checked before
+// either bound, are each answered: the second's bind collides, it is checked
+// again, and the next recording binds its variable.
+func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	first := reusable(at(varMock("mock-1", "POST", "http://store/orders", `{"id":"a-rec"}`, 201, `{}`,
+		models.MockVariables{"first": bindV("a-rec", "body.id")}), 1))
+	second := reusable(at(varMock("mock-2", "POST", "http://store/orders", `{"id":"b-rec"}`, 201, `{}`,
+		models.MockVariables{"second": bindV("b-rec", "body.id")}), 2))
+	db := &varDb{session: []*models.Mock{first, second}}
+	ctx := context.Background()
+	x, y := liveReq("POST", "/orders", `{"id":"x"}`), liveReq("POST", "/orders", `{"id":"y"}`)
+	pool, _ := splitVariableMocks([]*models.Mock{first, second})
+	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, nil, nil, nil)
+	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, nil, nil, nil)
+	hx, _ := h.pickHit(hitsX, db, true)
+	hy, _ := h.pickHit(hitsY, db, true)
+	if hx.mock != first || hy.mock != first {
+		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
+	}
+	if _, p, retry, err := h.serveVariables(ctx, hx, db, &db.table); err != nil || p != nil || retry {
+		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
+	}
+	if _, p, retry, err := h.serveVariables(ctx, hy, db, &db.table); err != nil || p != nil || !retry {
+		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
+	}
+	ok, stub, diag := matchVar(t, h, db, y)
+	if !ok || stub.Name != "mock-2" {
+		t.Fatalf("y checked again: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	if b, _ := db.table.Lookup("second"); b.Value != "y" {
+		t.Fatalf("second bound as %+v", b)
+	}
+}
+
+// A call checked in one test binds nothing in the next: a straggler of the
+// previous test is checked again against the new one.
+func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	ctx := context.Background()
+	pool, _ := splitVariableMocks(db.perTest)
+	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, nil, nil, nil)
+	if len(hits) == 0 {
+		t.Fatal("the straggler should fit")
+	}
+	db.table.Reset() // the next test begins
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
+	}
+	if got := db.table.Snapshot(); len(got) != 0 {
+		t.Fatalf("a straggler bound %+v in the next test", got)
+	}
+	if len(db.perTest) != 2 {
+		t.Fatal("a straggler consumed a mock of the next test")
+	}
+}
+
+// A call that sent the bound value but whose mock another connection took
+// first is checked again; with no recording left it is a miss.
+func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	ctx := context.Background()
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"l1","item":"pen"}`)); !ok {
+		t.Fatal("the create should match")
+	}
+	pool, _ := splitVariableMocks(db.perTest)
+	read := liveReq("GET", "/orders/l1", "")
+	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, nil, nil, nil)
+	if ok, _, _ := matchVar(t, h, db, read); !ok {
+		t.Fatal("the read-back should match")
+	}
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
+	}
+	if ok, _, _ := matchVar(t, h, db, read); ok {
+		t.Fatal("a second read-back was answered by a recording consumed already")
+	}
+}
+
+// The evidence says what kind of difference it is: a value of another type is
+// a type change against the recording, a use before the binding call and a
+// value another variable holds are no field difference (the diff says it).
+func TestVariables_TheEvidenceSaysWhatDiffers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"123","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV("123", "body.id")}), 1)
+	db := &varDb{perTest: []*models.Mock{m}}
+	_, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":456,"item":"pen"}`))
+	rep := h.buildHTTPMismatchReport(makeReq("POST", "/orders"), []byte(`{"id":456,"item":"pen"}`), db, nil, nil, nil, diag)
+	if len(rep.FieldDiffs) != 1 || rep.FieldDiffs[0].Kind != models.DiffKindTypeChanged || rep.FieldDiffs[0].Expected != `"123"` {
+		t.Fatalf("a type change: %+v", rep.FieldDiffs)
+	}
+	db = &varDb{perTest: createAndReadBack("r")}
+	_, _, diag = matchVar(t, h, db, liveReq("GET", "/orders/l1", ""))
+	rep = h.buildHTTPMismatchReport(makeReq("GET", "/orders/l1"), nil, db, nil, nil, nil, diag)
+	if len(rep.FieldDiffs) != 0 || !strings.Contains(rep.Diff, "before the call that binds it") {
+		t.Fatalf("a use before the binding call: %+v %q", rep.FieldDiffs, rep.Diff)
+	}
+}
+
+// The report renders the call as it was received; only its field diffs leave
+// a variable's place out, and only for a call to the mock's route.
+func TestVariables_TheReportRendersTheCallAsReceived(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)
+	db := &varDb{perTest: []*models.Mock{m}}
+	body := `{"id":"l1","item":"book"}`
+	_, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", body))
+	req := makeReq("POST", "/orders")
+	req.Header = http.Header{"Content-Type": []string{"application/json"}}
+	rep := h.buildHTTPMismatchReport(req, []byte(body), db, nil, nil, nil, diag)
+	if !strings.Contains(rep.ReceivedReq, "l1") || strings.Contains(rep.ReceivedReq, "r1") {
+		t.Fatalf("the received call is rendered as %q", rep.ReceivedReq)
+	}
+	r2 := httpRequest("GET", "/orderz/l1")
+	read := at(varMock("mock-2", "GET", "http://store/orders/r1", "", 200, `{}`, models.MockVariables{"id": useV("r1", []string{"url.path[1]"})}), 2)
+	got, _ := asRecordedForDiff(r2, nil, read)
+	if got.URL.Path != "/orderz/l1" {
+		t.Fatalf("a call to another route had a variable put back: %s", got.URL.Path)
+	}
+}
+
+func httpRequest(method, path string) *http.Request {
+	r := makeReq(method, path)
+	r.Header = http.Header{}
+	return r
+}
+
+// With the switch off the miss report of a call against a mock with
+// variables is main's: its field diffs name every place that differs.
+func TestVariables_SwitchOffTheReportIsAsOnMain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)
+	db := &varDb{perTest: []*models.Mock{m}}
+	req := makeReq("POST", "/orders")
+	req.Header = http.Header{"Content-Type": []string{"application/json"}}
+	rep := h.buildHTTPMismatchReport(req, []byte(`{"id":"l1","item":"book"}`), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}})
+	paths := map[string]bool{}
+	for _, d := range rep.FieldDiffs {
+		paths[d.Path] = true
+	}
+	if !paths["body.id"] || !paths["body.item"] {
+		t.Fatalf("switch off: field diffs %+v", rep.FieldDiffs)
 	}
 }

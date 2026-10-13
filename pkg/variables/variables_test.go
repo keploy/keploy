@@ -192,7 +192,7 @@ func TestAnswerEditAndApplyEdits(t *testing.T) {
 // as two values never share a live value, and a refused batch leaves nothing.
 func TestTable_BindAll(t *testing.T) {
 	var tb Table
-	if _, _, ok := tb.BindAll([]Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "b", Value: "2", Recorded: "r2"}}); !ok {
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "b", Value: "2", Recorded: "r2"}}); !ok {
 		t.Fatal("two fresh variables should bind")
 	}
 	for name, batch := range map[string][]Binding{
@@ -201,7 +201,7 @@ func TestTable_BindAll(t *testing.T) {
 		"two values of one name in a call": {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "c", Value: "4", Recorded: "r3"}},
 		"one value of two names in a call": {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "e", Value: "3", Recorded: "r5"}},
 	} {
-		if bad, with, ok := tb.BindAll(batch); ok {
+		if bad, with, _, ok := tb.BindAll(tb.Gen(), batch); ok {
 			t.Fatalf("%s: bound", name)
 		} else if bad.Name == "" || with.Name == "" {
 			t.Fatalf("%s: no evidence (%+v, %+v)", name, bad, with)
@@ -210,8 +210,17 @@ func TestTable_BindAll(t *testing.T) {
 			t.Fatalf("%s: a refused batch left c bound", name)
 		}
 	}
-	if _, _, ok := tb.BindAll([]Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "f", Value: "1", Recorded: "r1"}}); !ok {
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "f", Value: "1", Recorded: "r1"}}); !ok {
 		t.Fatal("a bound name at its value, and a name recorded with the same value, should bind")
+	}
+	// A call checked before a new scope began binds nothing in it.
+	gen := tb.Gen()
+	tb.Reset()
+	if _, _, stale, ok := tb.BindAll(gen, []Binding{{Name: "g", Value: "7", Recorded: "r7"}}); ok || !stale {
+		t.Fatalf("a call of the previous scope bound: ok=%v stale=%v", ok, stale)
+	}
+	if _, bound := tb.Lookup("g"); bound {
+		t.Fatal("a stale call left g bound")
 	}
 }
 
@@ -224,7 +233,7 @@ func TestTable_ConcurrentBindAllKeepsValuesApart(t *testing.T) {
 			wg.Add(1)
 			go func(name string) {
 				defer wg.Done()
-				if _, _, ok := tb.BindAll([]Binding{{Name: name, Value: "U", Recorded: "rec-" + name}}); ok {
+				if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: name, Value: "U", Recorded: "rec-" + name}}); ok {
 					took <- name
 				}
 			}(name)

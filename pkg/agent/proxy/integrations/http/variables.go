@@ -327,9 +327,17 @@ func (v reqView) asReq(input *req) *req {
 // varProblem is why a mock that fits a call did not answer it. It is the
 // miss's evidence.
 type varProblem struct {
-	mock     string
-	name     string
-	place    string
+	mock  string
+	name  string
+	place string
+	// kind is the field diff the problem is: DiffKindVariable when the place
+	// held another value than the test's variable (expected: the variable's
+	// value, actual: the call's), DiffKindTypeChanged when it held a value of
+	// another JSON type (expected: the recording's, actual: the call's); ""
+	// when the problem is no difference of values (a declaration, a use
+	// before the binding call, an empty value, another variable's value): its
+	// why says what it is.
+	kind     models.MockFieldDiffKind
 	expected string
 	actual   string
 	why      string
@@ -349,6 +357,8 @@ type varHit struct {
 	// only.
 	binds []variables.Binding
 	local map[string]variables.Binding
+	// gen is the table's scope the call was checked in (variables.Table.Gen).
+	gen uint64
 }
 
 // variablePass returns the mocks of pool (in its order) that the live call
@@ -356,6 +366,10 @@ type varHit struct {
 // fits but whose variables do not hold, if any.
 func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
 	live := liveView(input)
+	var gen uint64
+	if table != nil {
+		gen = table.Gen()
+	}
 	var hits []*varHit
 	var first *varProblem
 	for _, m := range pool {
@@ -365,6 +379,7 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 		hit, problem := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
 		switch {
 		case hit != nil:
+			hit.gen = gen
 			hits = append(hits, hit)
 		case problem != nil && first == nil:
 			first = problem
@@ -426,7 +441,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
 				typeChange = &varProblem{
-					mock: m.Name, name: d.name, place: vp.raw, expected: r.raw, actual: l.raw,
+					mock: m.Name, name: d.name, place: vp.raw, kind: models.DiffKindTypeChanged, expected: r.raw, actual: l.raw,
 					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
 					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
 				}
@@ -536,7 +551,7 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 			verb = "sent, at a place that binds it,"
 		}
 		return &varProblem{
-			mock: mock, name: d.name, place: vp.raw, expected: want, actual: l.value,
+			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
 			why:  fmt.Sprintf("variable %s is %q in this test (taken at %s %s), and this call %s %q at %s", d.name, want, boundMock, boundPlace, verb, l.value, vp.raw),
 			next: fmt.Sprintf("the application sent another value at %s than the one it made in this test: if that is intended, re-record the test; otherwise fix the application", vp.raw),
 		}
@@ -627,11 +642,13 @@ func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMo
 
 // serveVariables answers the call with a hit: loads its response, renders its
 // answers, commits its binds and consumes it. The binds are committed all or
-// none, under one lock, before the mock is consumed: a variable another
-// connection bound meanwhile to another value, or a value another variable
-// took meanwhile, makes the call a miss with nothing consumed. retry is true
-// when another connection took the mock first (the binds stay: they are what
-// the app sent at its binding places).
+// none, under one lock, before the mock is consumed, and only in the scope the
+// call was checked in. retry is true when the call must be checked again: a
+// test began since (a straggler of the previous test binds nothing in this
+// one), another connection bound one of its variables or took one of its
+// values meanwhile (the next check sees that, and either another recording
+// answers the call or the call is a miss with that evidence), or another
+// connection took the mock first. Nothing is consumed before the binds hold.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb, table *variables.Table) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
@@ -641,15 +658,8 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 	if problem != nil {
 		return nil, problem, false, nil
 	}
-	if bad, with, ok := table.BindAll(hit.binds); !ok {
-		why := fmt.Sprintf("variable %s was bound to %q at %s %s while this call, which binds it to %q at %s, was being answered", bad.Name, with.Value, with.Mock, with.Place, bad.Value, bad.Place)
-		if with.Name != bad.Name {
-			why = fmt.Sprintf("this call binds variable %s at %s to %q, which variable %s took meanwhile (at %s %s); they were two values when the test was recorded", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place)
-		}
-		return nil, &varProblem{
-			mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: with.Value, actual: bad.Value,
-			why: why, next: "two calls of the test bound its variables at once in a way the recording did not: fix the application, or re-record the test if that is intended",
-		}, false, nil
+	if _, _, _, ok := table.BindAll(hit.gen, hit.binds); !ok {
+		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
 		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
@@ -772,8 +782,8 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock) *models.MockMismatchReport {
 	p := diag.variable
 	var diffs []models.MockFieldDiff
-	if p.place != "" {
-		diffs = append(diffs, models.MockFieldDiff{Path: p.place, Kind: models.DiffKindVariable, Expected: p.expected, Actual: p.actual})
+	if p.place != "" && p.kind != "" {
+		diffs = append(diffs, models.MockFieldDiff{Path: p.place, Kind: p.kind, Expected: p.expected, Actual: p.actual})
 	}
 	pool := diag.pool
 	if pool == nil {
@@ -834,11 +844,13 @@ func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, m
 }
 
 // asRecordedForDiff is the live call to diff against m, a mock with variables
-// that it did not fit: m's recorded values put back at its variables' places.
-// Those places are not where the call differs (a variable takes a new value on
-// every run), so the diff and its hint name only what does differ, and never
-// suggest noise for a variable's place. A call without such a mock, or one
-// whose variables cannot be read, is diffed as it is.
+// that it did not fit: m's recorded values put back at its variables' places,
+// when the call is to m's route and holds a value of the recorded JSON type
+// there. Those places are not where the call differs (a variable takes a new
+// value on every run), so the field diffs and their hint name only what does
+// differ, and never suggest noise for a variable's place. It is used for the
+// field diffs only: the report renders the call as it was received. A call
+// to another route, or one whose variables cannot be read, is diffed as it is.
 func asRecordedForDiff(request *http.Request, liveBody []byte, m *models.Mock) (*http.Request, []byte) {
 	if !hasVariables(m) || m.Spec.HTTPReq == nil || request == nil || request.URL == nil {
 		return request, liveBody
@@ -850,10 +862,14 @@ func asRecordedForDiff(request *http.Request, liveBody []byte, m *models.Mock) (
 	}
 	in := &req{method: request.Method, url: request.URL, header: request.Header, body: liveBody}
 	live := liveView(in)
+	if !sameRoute(live, rec, m) {
+		return request, liveBody
+	}
 	for _, d := range decls {
 		for _, vp := range d.requestPlaces() {
 			r, okRec := rec.read(vp.place)
-			if _, okLive := live.read(vp.place); !okRec || !okLive {
+			l, okLive := live.read(vp.place)
+			if !okRec || !okLive || l.body != r.body || l.kind != r.kind {
 				continue
 			}
 			if v, ok := live.putBack(vp.place, r); ok {

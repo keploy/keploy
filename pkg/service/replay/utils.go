@@ -1971,8 +1971,6 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 			exp = "(not recorded)"
 		case models.DiffKindTypeChanged:
 			exp, rec = "type "+d.Expected, "type "+d.Actual
-		case models.DiffKindVariable:
-			exp = "variable: " + d.Expected
 		}
 		table.Append([]string{d.Path, exp, rec})
 	}
