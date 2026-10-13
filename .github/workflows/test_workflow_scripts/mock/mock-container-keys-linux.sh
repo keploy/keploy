@@ -148,13 +148,22 @@ def _post(p,b):
     if TOKEN: h["Authorization"]="Bearer "+TOKEN
     r=urllib.request.Request(AGENT+p,data=json.dumps(b).encode(),headers=h,method="POST")
     return json.loads(urllib.request.urlopen(r).read() or b"{}")
+# Under the proven switch the agent serves scope protocol v1: the test
+# process claims the run before its first test, and each test names its file.
+# Without the switch there is no claim to make (/agent/instance is a 404).
+@pytest.fixture(autouse=True, scope="session")
+def keploy_claim():
+    if os.environ.get("KEPLOY_PROVEN")=="1":
+        _post("/agent/instance",{"key":".","dir":os.getcwd()})
+    yield
 @pytest.fixture(autouse=True)
-def keploy_scope(request):
-    resp=_post("/agent/scope/begin",{"name":request.node.name,"canSkip":True})
+def keploy_scope(request, keploy_claim):
+    test={"name":request.node.name,"file":request.node.path.name}
+    resp=_post("/agent/scope/begin",dict(test,canSkip=True))
     if resp and resp.get("action")=="skip":
         pytest.skip(resp.get("reason") or "keploy: not run this replay")
     yield
-    _post("/agent/scope/end",{"name":request.node.name,"outcome":"passed"})
+    _post("/agent/scope/end",dict(test,outcome="passed"))
 PY
 
 cat > test_containers.py <<'PY'

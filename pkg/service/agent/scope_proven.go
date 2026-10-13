@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -466,6 +467,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Lock()
 	a.proven.open, a.proven.atBegin = id, counts
 	a.provenMu.Unlock()
+	// The test's own containers are numbered from here, after the run's
+	// (containerkey); closeOpen goes back to the run's numbering however the
+	// test closes.
+	containerkey.Default.BeginTest()
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
@@ -516,10 +521,16 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, atBegin map[string]uint64, why string) (*models.ScopeEvidence, error) {
 	defer func() {
 		a.provenMu.Lock()
-		if a.proven.open == id {
+		closed := a.proven.open == id
+		if closed {
 			a.proven.open, a.proven.atBegin = "", nil
 		}
 		a.provenMu.Unlock()
+		if closed {
+			// Connections from here on are numbered by the run again
+			// (containerkey).
+			containerkey.Default.EndTest()
+		}
 	}()
 	return a.endTest(ctx, id, outcome, at, atBegin, why)
 }
