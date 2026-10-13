@@ -3086,10 +3086,6 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 // order; subsequent calls for the same name update the stored state in-place
 // without changing its position. This preserves true network call order in
 // GetConsumedMocks.
-// reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
-// request (nil when none was detected). Used to carry schema-detected noise out
-// on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
-// alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
 // SetServedObserver makes f told of every mock a parser is served, from now
 // on (nil: none).
 func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
@@ -3106,6 +3102,10 @@ func (m *MockManager) observeServed(mock *models.Mock) {
 	}
 }
 
+// reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
+// request (nil when none was detected). Used to carry schema-detected noise out
+// on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
+// alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
 func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 	return spec.ReqBodyNoise
 }
