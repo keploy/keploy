@@ -226,3 +226,84 @@ func TestProcStartTime(t *testing.T) {
 		require.Empty(t, procStartTime(2), "a kernel thread")
 	}
 }
+
+// Under the proven switch the single-worker wire opens and closes each test
+// (ProvenBegin, ProvenEnd), with no pid: its begin moves the run's clock to
+// the test's recorded begin, and its end moves it back. A test still open
+// when the run's windows are read (its process exited, or outlived the test
+// command) is failed with the clock moved back. A wire begin that cannot move
+// the clock, or whose pool cannot narrow once it moved, opens nothing, leaves
+// the clock where it was, and records the test failed.
+func TestTheWireMovesTheClockPerTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &clockHooks{}
+	useHooks(t, h)
+	a, _ := wireAgent(models.MODE_TEST)
+	storeMocks(a)
+	ctx := context.Background()
+	h.file = "/tmp/kclk1/t"
+	resp, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, os.Getpid())
+	require.Nil(t, serr)
+	require.Equal(t, "/tmp/kclk1/t", resp.TimeFile, "the claim names the clock record the run's processes read")
+	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": b}))
+
+	_, serr = a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Equal(t, []string{models.ScopeOutcomePassed}, outcomesOf(t, a, "o::TestA"))
+
+	h.err = errors.New("disk full")
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.NotNil(t, serr, "a test that cannot run on its recording's clock is refused")
+	h.err = nil
+	require.Zero(t, a.clockHeld)
+
+	a.clientMocks.Delete(uint64(0)) // its pool cannot narrow, after its clock moved
+	_, serr = a.ProvenBegin(ctx, begin("TestD"))
+	require.NotNil(t, serr, "a test whose pool cannot narrow is refused, with the clock moved back")
+	storeMocks(a)
+	require.Zero(t, a.clockHeld)
+	require.Zero(t, a.clockMoved)
+
+	_, serr = a.ProvenBegin(ctx, begin("TestC"))
+	require.Nil(t, serr)
+	require.NoError(t, a.reapOpenTest(ctx))
+	require.Equal(t, []string{models.ScopeOutcomeFailed}, outcomesOf(t, a, "o::TestB"), "a test refused its recording's clock is recorded failed")
+	require.Equal(t, []string{models.ScopeOutcomeFailed}, outcomesOf(t, a, "o::TestD"))
+	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestC").Outcome)
+	require.Zero(t, a.clockHeld)
+	require.Zero(t, a.clockMoved)
+	require.Equal(t, []string{
+		"begin o::TestA 2026-10-06T09:01:00Z", "end o::TestA",
+		"begin o::TestB 0001-01-01T00:00:00Z",
+		"begin o::TestD 0001-01-01T00:00:00Z", "end o::TestD",
+		"begin o::TestC 0001-01-01T00:00:00Z", "end o::TestC",
+	}, h.moves)
+}
+
+// A begin of the previous session that lands after a new session released
+// the clock, and before it reset the wire, takes the clock; the reset gives
+// it back, under the wire, or every begin of the new session would be
+// refused while that forgotten test held it.
+func TestASessionResetGivesBackAClockTakenAfterTheRelease(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &clockHooks{}
+	useHooks(t, h)
+	a, _ := wireAgent(models.MODE_TEST)
+	storeMocks(a)
+	ctx := context.Background()
+	claimSelf(t, a)
+	require.NoError(t, a.releaseTestClock(ctx))
+	_, serr := a.ProvenBegin(ctx, begin("TestOld"))
+	require.Nil(t, serr)
+	require.NoError(t, a.resetSession(ctx))
+	require.Zero(t, a.clockHeld)
+	require.Zero(t, a.clockMoved)
+	require.Equal(t, []string{"begin o::TestOld 0001-01-01T00:00:00Z", "end o::TestOld"}, h.moves)
+
+	claimSelf(t, a)
+	_, serr = a.ProvenBegin(ctx, begin("TestNew"))
+	require.Nil(t, serr, "the new session's test begins")
+}
