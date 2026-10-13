@@ -3234,9 +3234,6 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	return nil
 }
 
-// PushScopeTable hands the agent the replay-time per-test name→mock-names table
-// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
-// served pool per test. A missing endpoint (older agent) is a no-op.
 // PushProvenTable hands the agent, under the proven switch, the per-test
 // table and each key's pool slice (models.ScopeTableReq.Pool) in one
 // request. Every answer but 200 is an error: a replay judged per test must
@@ -3275,6 +3272,9 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[strin
 	return nil
 }
 
+// PushScopeTable hands the agent the replay-time per-test name→mock-names table
+// (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
+// served pool per test. A missing endpoint (older agent) is a no-op.
 func (a *AgentClient) PushScopeTable(ctx context.Context, table map[string][]string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {

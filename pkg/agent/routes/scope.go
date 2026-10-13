@@ -238,7 +238,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Pool != nil && provenswitch.On() {
+	if provenswitch.On() && req.Sets == nil {
+		// Under the switch a table without pool slices serves no pool mock
+		// between tests: an older CLI's push fails closed.
+		if req.Pool == nil {
+			req.Pool = map[string][]string{}
+		}
 		// Each key's pool slice (design v14 §5.2). An agent that cannot
 		// serve them says so: a CLI that sent them judges on them.
 		s, ok := a.svc.(scopePoolSetter)

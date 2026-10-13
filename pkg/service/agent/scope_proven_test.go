@@ -965,3 +965,29 @@ func TestTheClaimsAreInTheWindows(t *testing.T) {
 		require.Empty(t, w.Claim, "the claims belong to the session that made them")
 	}
 }
+
+// Digits inside a kept backtick span are written "?", in case the span was
+// misread (a Postgres operator, a multi-byte character set's trail byte).
+func TestSQLShapeMasksDigitsInNames(t *testing.T) {
+	require.Equal(t, "SELECT a `~ ? AND b ~` c", sqlShape("SELECT a `~ 999 AND b ~` c"))
+	require.Equal(t, "SELECT `t?` FROM x", sqlShape("SELECT `t1` FROM x"))
+}
+
+// An empty pool (a recording with no start-up mock) is a pool: between
+// tests no pool mock answers, and no test's own mock.
+func TestAnEmptyPoolServesNoPoolMock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, p := wireAgent(models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/test-a"), httpMock("mock-2", "GET", "http://h/test-b"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	require.Empty(t, p.filteredNames(), "before any claim")
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.served["mock-1"] = 1
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, p.filteredNames(), "between tests no test's mock answers")
+}

@@ -434,6 +434,13 @@ func TestScopeTableCarriesThePoolSlices(t *testing.T) {
 	if rec := post(&Agent{logger: zap.NewNop(), svc: tableOnlySvc{}}); rec.Code != http.StatusNotImplemented {
 		t.Fatalf("an agent without pool slices answered %d", rec.Code)
 	}
+	// A table without slices serves no pool mock between tests.
+	svc = &poolSvc{}
+	rec := httptest.NewRecorder()
+	(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(`{"mappings":{"o::TestA":["mock-3"]}}`)))
+	if rec.Code != http.StatusOK || svc.pool == nil || len(svc.pool) != 0 {
+		t.Fatalf("a table without slices: status %d, pool %v, want an empty pool", rec.Code, svc.pool)
+	}
 	t.Setenv(provenswitch.Env, "")
 	svc = &poolSvc{}
 	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {

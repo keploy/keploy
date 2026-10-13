@@ -268,13 +268,18 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
-	//    mapping) — same call RunTestSet makes before the first test.
-	if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
-		AfterTime:  models.BaseTime,
-		BeforeTime: time.Now(),
-	}); err != nil {
-		utils.LogError(m.logger, err, "failed to arm the mock pool")
-		return err
+	//    mapping) — same call RunTestSet makes before the first test. Under
+	//    the proven switch the table push (step 5) already armed the pool
+	//    slice of calls made before any claim; arming the whole pool would
+	//    let any test's mock answer them.
+	if !provenswitch.On() {
+		if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
+			AfterTime:  models.BaseTime,
+			BeforeTime: time.Now(),
+		}); err != nil {
+			utils.LogError(m.logger, err, "failed to arm the mock pool")
+			return err
+		}
 	}
 
 	// 7. Release the compose app now that the mock pool is armed. This is the

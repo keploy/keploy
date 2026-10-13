@@ -263,7 +263,9 @@ type ScopeTableReq struct {
 	// Pool is, under the proven switch, each key's pool slice: the names of
 	// the mocks recorded while no test was open, by the key of the claim
 	// then (PoolKeyNone for none, and for a mock recorded without a key).
-	Pool map[string][]string `json:"pool,omitempty"`
+	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
+	// between tests"; only a nil one is left out (with the switch off).
+	Pool map[string][]string `json:"pool,omitzero"`
 }
 
 type SetTable struct {

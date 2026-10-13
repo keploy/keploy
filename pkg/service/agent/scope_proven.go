@@ -270,6 +270,10 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 // SetScopePool installs each key's pool slice for a replay (design v14 §5.2,
 // U21), and arms the current key's while no test is open.
 func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
 	cp := make(map[string][]string, len(pool))
 	for k, names := range pool {
 		cp[k] = append([]string{}, names...)
@@ -831,7 +835,10 @@ scan:
 				withheld = true
 				break scan
 			}
-			b.WriteString(q[i:end])
+			// A name keeps its letters; a run of digits in it is written
+			// "?", in case the span was misread (a Postgres operator, a
+			// multi-byte character set's trail byte).
+			b.WriteString(digitRuns.ReplaceAllString(q[i:end], "?"))
 			i = end
 		case c == '$' && i+1 < len(q) && isDigitByte(q[i+1]):
 			// A placeholder ($1): kept.
@@ -891,7 +898,10 @@ func closeQuote(q string, i int) (int, bool) {
 	return -1, false
 }
 
-var sqlSpace = regexp.MustCompile(`\s+`)
+var (
+	sqlSpace  = regexp.MustCompile(`\s+`)
+	digitRuns = regexp.MustCompile(`[0-9]+`)
+)
 
 func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
 
