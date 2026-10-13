@@ -9,6 +9,7 @@ import (
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -116,6 +117,26 @@ func (a *Agent) BeginScopeAck(ctx context.Context, name string, pid, attempt int
 			}
 		}
 		a.scopeMu.Unlock()
+		if pid == 0 && len(names) == 0 && provenswitch.On() {
+			// The proven wire serves a test exactly its recording: one
+			// recorded with no call, or with none at all, is served only
+			// the reusable tier, so any call of its own is a miss.
+			a.logger.Debug("scope begin: a test with no recorded call is served the reusable tier only", zap.String("test", name), zap.Bool("mapped", ok))
+			if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+				MockMapping:     []string{},
+				ExactMapping:    true,
+				UseMappingBased: true,
+				AfterTime:       models.BaseTime,
+				BeforeTime:      time.Now(),
+			}); err != nil {
+				return models.ScopeAck{}, err
+			}
+			reason := models.ScopeReasonEmptyMapping
+			if !ok {
+				reason = models.ScopeReasonUnmappedScope
+			}
+			return models.ScopeAck{Scoped: true, Reason: reason, Attempt: attempt}, nil
+		}
 		// SPEC-SHARED REQUESTS (specpool.go): requests whose every copy in the
 		// spec carries the same response are reachable from every scope of the
 		// spec and not consumed, so a poll, refetch or extra page load cannot
@@ -325,7 +346,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) {
 	if ok {
 		delete(a.workerOpen, k)
 		meta := a.scopeMeta[k]
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -345,13 +366,22 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		a.scopeMu.Lock()
 		_, scoped := a.scopeTable[name]
 		a.scopeMu.Unlock()
-		if !scoped {
+		// The proven wire narrowed even a test without a mapping entry.
+		if !scoped && !(pid == 0 && provenswitch.On()) {
 			return nil
 		}
 		if pid > 0 {
 			a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
 			a.ClearWorkerScope(uint32(pid))
 			return nil
+		}
+		if pid == 0 && provenswitch.On() {
+			// Between tests the proven wire serves the current key's pool
+			// slice, once the CLI sent the slices.
+			if params, ok := a.poolParams(); ok {
+				a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name), zap.Int("mocks", len(params.MockMapping)))
+				return a.UpdateMockParams(ctx, params)
+			}
 		}
 		// A suite ends only when the runner moves to another spec or tears the
 		// worker down, and the next scope begin replaces the pool either way.
@@ -533,17 +563,35 @@ func (a *Agent) resetConsumedForScope(ctx context.Context, name string, names []
 	return restored, true
 }
 
-// GetScopeWindows returns the per-test windows collected this record session,
-// consumed by the CLI to build mappings.yaml.
-func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error) {
+// GetScopeWindows returns the per-test windows collected so far this
+// session. A read at the run's end is FinalScopeWindows.
+func (a *Agent) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	return a.scopeWindowsNow(), nil
+}
+
+// FinalScopeWindows is the run's last read of its windows, once its command
+// has exited: under the proven wire a test still open is failed and closed
+// (so its window is among these), and the wire is closed, as nothing begun
+// now would be read.
+func (a *Agent) FinalScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	if err := a.reapOpenTest(ctx); err != nil {
+		return nil, err
+	}
+	return a.scopeWindowsNow(), nil
+}
+
+func (a *Agent) scopeWindowsNow() []models.ScopeWindow {
+	// Read before scopeMu: provenMu is never held while taking it.
+	claims := a.claimWindows()
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
-	out := make([]models.ScopeWindow, len(a.scopeWindows))
+	out := make([]models.ScopeWindow, len(a.scopeWindows), len(a.scopeWindows)+len(claims))
 	copy(out, a.scopeWindows)
+	out = append(out, claims...)
 	for _, s := range starts.Default.List() {
 		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
 	}
-	return out, nil
+	return out
 }
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI
@@ -623,9 +671,10 @@ func suiteScopeOf(testName string) string {
 }
 
 type scopeMeta struct {
-	dir     string
-	suite   bool
-	outcome string
+	dir      string
+	suite    bool
+	outcome  string
+	evidence *models.ScopeEvidence
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -388,11 +389,22 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n%sConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), corsHdrs, noMockBody)
+				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
+				missErr := models.NewMockMismatchError(baseErr, report)
+				// Under the proven switch a miss fails the test that made it,
+				// so it is queued for that test before the app sees the 502:
+				// a test that ends right after reading the 502 has its miss,
+				// and the next test is never charged with it. Reported here,
+				// it is not returned again.
+				reported := provenswitch.On() && models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
-				errCh <- models.NewMockMismatchError(baseErr, report)
+				if reported {
+					errCh <- nil
+					return
+				}
+				errCh <- missErr
 				return
 			}
 

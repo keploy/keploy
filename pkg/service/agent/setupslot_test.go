@@ -37,12 +37,12 @@ func laterSet(p *fakeScopeProxy) map[string]bool {
 func TestPlaceSetupSlotsCopiesByRecordedTestOrder(t *testing.T) {
 	const q = `{"operationName":"Q","query":"query Q { q }"}`
 	mocks := []*models.Mock{
-		httpMock("s-before", "POST", "/query", q, 200, "a", 5),
-		httpMock("t1-a", "POST", "/query", q, 200, "b", 10),
-		httpMock("t1-b", "POST", "/query", q, 200, "c", 12),
-		httpMock("s-gap1", "POST", "/query", q, 200, "d", 20),
-		httpMock("t2-a", "POST", "/query", q, 200, "e", 30),
-		httpMock("s-after2", "POST", "/query", q, 200, "f", 40),
+		specHTTPMock("s-before", "POST", "/query", q, 200, "a", 5),
+		specHTTPMock("t1-a", "POST", "/query", q, 200, "b", 10),
+		specHTTPMock("t1-b", "POST", "/query", q, 200, "c", 12),
+		specHTTPMock("s-gap1", "POST", "/query", q, 200, "d", 20),
+		specHTTPMock("t2-a", "POST", "/query", q, 200, "e", 30),
+		specHTTPMock("s-after2", "POST", "/query", q, 200, "f", 40),
 	}
 	owner := map[string]string{
 		"s-before": "__suite__:x.spec.ts", "s-gap1": "__suite__:x.spec.ts", "s-after2": "__suite__:x.spec.ts",
@@ -64,12 +64,12 @@ func TestSetupPoolHoldsLaterHooksCopiesUntilTheirTurn(t *testing.T) {
 	const list = `{"operationName":"Suites","query":"query Suites { suites { id } }"}`
 	const other = `{"operationName":"Other","query":"query Other { o }"}`
 	mocks := []*models.Mock{
-		httpMock("hook1-list", "POST", "/query", list, 200, "six suites", 5),
-		httpMock("t1-own", "POST", "/query", other, 200, "t1", 10),
-		httpMock("t2-own", "POST", "/query", other, 200, "t2", 20),
-		httpMock("hook2-list", "POST", "/query", list, 200, "six suites, reordered", 25),
-		httpMock("t3-own", "POST", "/query", other, 200, "t3", 30),
-		httpMock("hook3-list", "POST", "/query", list, 200, "two suites", 35),
+		specHTTPMock("hook1-list", "POST", "/query", list, 200, "six suites", 5),
+		specHTTPMock("t1-own", "POST", "/query", other, 200, "t1", 10),
+		specHTTPMock("t2-own", "POST", "/query", other, 200, "t2", 20),
+		specHTTPMock("hook2-list", "POST", "/query", list, 200, "six suites, reordered", 25),
+		specHTTPMock("t3-own", "POST", "/query", other, 200, "t3", 30),
+		specHTTPMock("hook3-list", "POST", "/query", list, 200, "two suites", 35),
 	}
 	a, p := replayAgentWithMocks(t, mocks, map[string][]string{
 		"__suite__:f.spec.ts": {"hook1-list", "hook2-list", "hook3-list"},
@@ -108,11 +108,11 @@ func TestSuiteReopenedMidSpecKeepsThePosition(t *testing.T) {
 	ctx := context.Background()
 	const list = `{"operationName":"Suites","query":"query Suites { suites { id } }"}`
 	mocks := []*models.Mock{
-		httpMock("hook1-list", "POST", "/query", list, 200, "a", 5),
-		httpMock("t1-own", "GET", "/x", "", 200, "t1", 10),
-		httpMock("hook2-list", "POST", "/query", list, 200, "b", 15),
-		httpMock("t2-own", "GET", "/y", "", 200, "t2", 20),
-		httpMock("hook3-list", "POST", "/query", list, 200, "c", 25),
+		specHTTPMock("hook1-list", "POST", "/query", list, 200, "a", 5),
+		specHTTPMock("t1-own", "GET", "/x", "", 200, "t1", 10),
+		specHTTPMock("hook2-list", "POST", "/query", list, 200, "b", 15),
+		specHTTPMock("t2-own", "GET", "/y", "", 200, "t2", 20),
+		specHTTPMock("hook3-list", "POST", "/query", list, 200, "c", 25),
 	}
 	a, p := replayAgentWithMocks(t, mocks, map[string][]string{
 		"__suite__:f.spec.ts": {"hook1-list", "hook2-list", "hook3-list"},

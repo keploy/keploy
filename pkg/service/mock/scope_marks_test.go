@@ -72,6 +72,9 @@ func (r *runnerInstr) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 func (r *runnerInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.windowsErr != nil {
+		return nil, r.windowsErr
+	}
 	return append([]models.ScopeWindow(nil), r.windows...), nil
 }
 

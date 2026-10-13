@@ -8,7 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-func httpMock(name, method, url, body string, status int, respBody string, at int) *models.Mock {
+func specHTTPMock(name, method, url, body string, status int, respBody string, at int) *models.Mock {
 	return &models.Mock{
 		Name: name,
 		Kind: models.HTTP,
@@ -33,23 +33,23 @@ func TestBuildSpecPool(t *testing.T) {
 	const validate = `{"operationName":"ValidateSchema","query":"mutation ValidateSchema { validateSchema }"}`
 	mocks := []*models.Mock{
 		// identical across the spec → shared, one representative (the earliest)
-		httpMock("suite-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 3),
-		httpMock("t1-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 1),
-		httpMock("t2-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 5),
+		specHTTPMock("suite-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 3),
+		specHTTPMock("t1-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 1),
+		specHTTPMock("t2-1", "POST", "/query", myApps, 200, `{"apps":[1]}`, 5),
 		// changes within the spec → not shared
-		httpMock("t1-2", "POST", "/query", branches, 200, `{"branches":[]}`, 2),
-		httpMock("t1-3", "POST", "/query", branches, 200, `{"branches":["feat"]}`, 4),
+		specHTTPMock("t1-2", "POST", "/query", branches, 200, `{"branches":[]}`, 2),
+		specHTTPMock("t1-3", "POST", "/query", branches, 200, `{"branches":["feat"]}`, 4),
 		// a single write → never shared
-		httpMock("t1-4", "POST", "/query", create, 200, `{"id":"b1"}`, 6),
+		specHTTPMock("t1-4", "POST", "/query", create, 200, `{"id":"b1"}`, 6),
 		// a write repeated with the same response → shared
-		httpMock("t2-2", "POST", "/query", validate, 200, `{"valid":true}`, 7),
-		httpMock("t2-3", "POST", "/query", validate, 200, `{"valid":true}`, 8),
+		specHTTPMock("t2-2", "POST", "/query", validate, 200, `{"valid":true}`, 7),
+		specHTTPMock("t2-3", "POST", "/query", validate, 200, `{"valid":true}`, 8),
 		// REST heartbeat POST, same response every time → shared
-		httpMock("s-2", "POST", "/auth/session/activity", "", 404, "", 9),
-		httpMock("t1-5", "POST", "/auth/session/activity", "", 404, "", 10),
+		specHTTPMock("s-2", "POST", "/auth/session/activity", "", 404, "", 9),
+		specHTTPMock("t1-5", "POST", "/auth/session/activity", "", 404, "", 10),
 		// same path, different status → not shared
-		httpMock("s-3", "GET", "/cluster/list", "", 200, `[]`, 11),
-		httpMock("t2-4", "GET", "/cluster/list", "", 403, ``, 12),
+		specHTTPMock("s-3", "GET", "/cluster/list", "", 200, `[]`, 11),
+		specHTTPMock("t2-4", "GET", "/cluster/list", "", 403, ``, 12),
 		// non-HTTP is ignored
 		{Name: "dns-1", Kind: models.DNS},
 	}
@@ -87,7 +87,7 @@ func TestIsWriteRequest(t *testing.T) {
 		{"DELETE", ``, true},
 	}
 	for _, c := range cases {
-		m := httpMock("x", c.method, "/p", c.body, 200, "", 0)
+		m := specHTTPMock("x", c.method, "/p", c.body, 200, "", 0)
 		if got := isWriteRequest(m); got != c.want {
 			t.Errorf("%s %q: got %v want %v", c.method, c.body, got, c.want)
 		}
@@ -111,15 +111,15 @@ func TestSpecOfScope(t *testing.T) {
 // Origin for a request with Origin, so keeping only one copy starves the other
 // caller.
 func TestBuildSpecPoolKeepsServerAndBrowserCallsApart(t *testing.T) {
-	helper := httpMock("h-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 1)
+	helper := specHTTPMock("h-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 1)
 	helper.Spec.HTTPReq.Header = map[string]string{"Host": "localhost:8083", "Accept": "*/*", "Cookie": "a=1", "User-Agent": "node", "Connection": "keep-alive"}
 	helper.Spec.HTTPResp.Header = map[string]string{"Set-Cookie": "jwt=x"}
 
-	browser := httpMock("b-3", "GET", "/auth/check", "", 200, `{"user":"u"}`, 2)
+	browser := specHTTPMock("b-3", "GET", "/auth/check", "", 200, `{"user":"u"}`, 2)
 	browser.Spec.HTTPReq.Header = map[string]string{"Host": "localhost:8083", "Accept": "*/*", "Cookie": "a=1; _ga=2", "User-Agent": "Chrome", "Connection": "keep-alive", "Origin": "http://localhost:3000", "Referer": "http://localhost:3000/"}
 	browser.Spec.HTTPResp.Header = map[string]string{"Access-Control-Allow-Origin": "http://localhost:3000"}
 
-	browser2 := httpMock("b-7", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
+	browser2 := specHTTPMock("b-7", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
 	browser2.Spec.HTTPReq.Header = browser.Spec.HTTPReq.Header
 	browser2.Spec.HTTPResp.Header = browser.Spec.HTTPResp.Header
 
@@ -142,11 +142,11 @@ func TestBuildSpecPoolKeepsServerAndBrowserCallsApart(t *testing.T) {
 // never-consumed 401 then answered every signed-in call. They are one request
 // with two answers, consumed in order.
 func TestBuildSpecPoolHeaderSubsetIsOneRequest(t *testing.T) {
-	out := httpMock("o-0", "GET", "/auth/check", "", 401, `{"error":"unauthorized"}`, 1)
+	out := specHTTPMock("o-0", "GET", "/auth/check", "", 401, `{"error":"unauthorized"}`, 1)
 	out.Spec.HTTPReq.Header = map[string]string{"Host": "localhost:8083", "Origin": "http://localhost:3000", "Accept": "*/*"}
-	out2 := httpMock("o-1", "GET", "/auth/check", "", 401, `{"error":"unauthorized"}`, 2)
+	out2 := specHTTPMock("o-1", "GET", "/auth/check", "", 401, `{"error":"unauthorized"}`, 2)
 	out2.Spec.HTTPReq.Header = out.Spec.HTTPReq.Header
-	in := httpMock("i-3", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
+	in := specHTTPMock("i-3", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
 	in.Spec.HTTPReq.Header = map[string]string{"Host": "localhost:8083", "Origin": "http://localhost:3000", "Accept": "*/*", "Cookie": "jwt=x"}
 
 	sp, _ := buildSpecPool([]*models.Mock{out, out2, in})
@@ -160,10 +160,10 @@ func TestBuildSpecPoolHeaderSubsetIsOneRequest(t *testing.T) {
 // because a caller may read the session cookie out of the response.
 func TestBuildSpecPoolSetCookieDoesNotSplitAndIsKept(t *testing.T) {
 	hdr := map[string]string{"Host": "localhost:8083", "Origin": "http://localhost:3000"}
-	a := httpMock("a-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 1)
-	b := httpMock("b-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 2)
+	a := specHTTPMock("a-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 1)
+	b := specHTTPMock("b-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 2)
 	b.Spec.HTTPResp.Header = map[string]string{"Set-Cookie": "jwt=x"}
-	c := httpMock("c-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
+	c := specHTTPMock("c-0", "GET", "/auth/check", "", 200, `{"user":"u"}`, 3)
 	for _, m := range []*models.Mock{a, b, c} {
 		m.Spec.HTTPReq.Header = hdr
 	}
@@ -185,7 +185,7 @@ func TestIsGraphQLMutation(t *testing.T) {
 		`{"url":"http://x"}`: false,
 		``:                   false,
 	} {
-		if got := isGraphQLMutation(httpMock("x", "POST", "/query", body, 200, "", 0)); got != want {
+		if got := isGraphQLMutation(specHTTPMock("x", "POST", "/query", body, 200, "", 0)); got != want {
 			t.Errorf("%.40q: got %v want %v", body, got, want)
 		}
 	}

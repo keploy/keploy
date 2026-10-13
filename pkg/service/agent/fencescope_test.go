@@ -13,11 +13,11 @@ import (
 func TestMarkFenceScope(t *testing.T) {
 	const mutation = `{"query":"mutation($id: String!) { requestBranchReview(branchId: $id) }"}`
 	const query = `{"operationName":"GetBranches","query":"query GetBranches { branches { id } }"}`
-	ownWrite := httpMock("own-w", "POST", "/query", mutation, 200, "", 1)
-	ownRead := httpMock("own-r", "POST", "/query", query, 200, "", 2)
-	ownShared := httpMock("own-shared-w", "POST", "/query", mutation, 200, "", 3)
+	ownWrite := specHTTPMock("own-w", "POST", "/query", mutation, 200, "", 1)
+	ownRead := specHTTPMock("own-r", "POST", "/query", query, 200, "", 2)
+	ownShared := specHTTPMock("own-shared-w", "POST", "/query", mutation, 200, "", 3)
 	ownShared.TestModeInfo.SharedInSpec = true
-	suiteWrite := httpMock("suite-w", "POST", "/query", mutation, 200, "", 4)
+	suiteWrite := specHTTPMock("suite-w", "POST", "/query", mutation, 200, "", 4)
 	all := []*models.Mock{ownWrite, ownRead, ownShared, suiteWrite}
 
 	a := &Agent{logger: zap.NewNop()}
@@ -54,10 +54,10 @@ func TestMarkFenceScope(t *testing.T) {
 // later hook; one captured before (setup the test depends on) does not.
 func TestMarkFenceScopeTagsLaterSuiteCopies(t *testing.T) {
 	const query = `{"operationName":"GetSuites","query":"query GetSuites { suites { id } }"}`
-	own := httpMock("own", "POST", "/query", query, 200, "", 10)
-	setup := httpMock("suite-setup", "POST", "/query", query, 200, "", 5)
-	later := httpMock("suite-later", "POST", "/query", query, 200, "", 20)
-	shared := httpMock("shared-later", "POST", "/query", query, 200, "", 30)
+	own := specHTTPMock("own", "POST", "/query", query, 200, "", 10)
+	setup := specHTTPMock("suite-setup", "POST", "/query", query, 200, "", 5)
+	later := specHTTPMock("suite-later", "POST", "/query", query, 200, "", 20)
+	shared := specHTTPMock("shared-later", "POST", "/query", query, 200, "", 30)
 	shared.TestModeInfo.SharedInSpec = true
 
 	a := &Agent{logger: zap.NewNop()}

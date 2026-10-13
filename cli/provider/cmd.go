@@ -508,7 +508,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		// defaulting this true would flip existing suites red on upgrade.
 		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
 		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
-		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
+		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of the test cases that pass from what they consumed (a test case that does not pass keeps its recorded mapping)")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
 		// bugs that need a long-lived TCP connection (asyncpg, JDBC pool,

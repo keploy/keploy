@@ -1208,7 +1208,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			} else {
 				r.logger.Info("Some testsets failed due to mock differences.",
 					zap.String("test_sets", testSets),
-					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record', or refresh mappings with --update-test-mapping."))
+					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'. A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."))
 			}
 
 			r.mockMismatchFailures.PrintFailuresTable()
@@ -2297,6 +2297,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// consumedUnread names the tests that own test mocks and whose consumed
 	// mocks could not be read (proven switch): see testMocksUnknown.
 	var consumedUnread []string
+	// consumptionUnread names every test, in any cycle and with the switch on or
+	// off, for which a read of what it consumed failed: what it consumed is not
+	// known, so the mapping write leaves its entry as it is (passingTests).
+	var consumptionUnread []string
+	// obsoleteShaped names every test whose answer did not match while a
+	// recorded mock of its mapping went unconsumed: the shape of a wrong-mock
+	// serve, whatever verdict the flags or a hook give it. The mapping write
+	// leaves its entry as it is (passingTests).
+	var obsoleteShaped []string
+	// leftRecordedUnconsumed names every test that left a recorded mock of its
+	// mapping unconsumed, whatever its answer. One whose row also reports a
+	// call no mock answered keeps its entry as it is too (passedMissShaped).
+	var leftRecordedUnconsumed []string
 	// The lookup of mock name -> summary, protocol and target from the mock
 	// registry (once per test set). `target` is added for the DepResult writer:
 	// neither models.MockEntry (the mapping side) nor models.MockState (the
@@ -2617,6 +2630,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				instrumentConsumedFetchErr = err
 				if err != nil {
+					consumptionUnread = appendOnce(consumptionUnread, testCase.Name)
 					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 						testSetStatus = resolvedStatus
 						exitLoop = true
@@ -2951,6 +2965,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
 			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure())
+			if mockSetMismatch {
+				leftRecordedUnconsumed = appendOnce(leftRecordedUnconsumed, testCase.Name)
+				if !testPass {
+					obsoleteShaped = appendOnce(obsoleteShaped, testCase.Name)
+				}
+			}
 			// A template failure is never demoted to OBSOLETE.
 			outcome = keepTemplateFailure(outcome, len(templateFailures) > 0)
 			// Under the proven switch a call of this test that got no recorded
@@ -2999,7 +3019,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
 			case mismatchLogObsolete:
-				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case, or, if its mapping is stale, remap it with --disable-mapping --update-test-mapping (which serves it its recorded window); --update-test-mapping alone keeps its recorded mapping, as it updates only a passing test's",
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
 					zap.Strings("expectedMocks", filteredExpectedNames),
@@ -3743,6 +3763,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			streamArmed := r.instrument && useMappingBased && isMappingEnabled
 			streamTestMocksUnread := false
 			streamOwned, streamUnconsumed := unconsumedTestMocks(streamArmed, expectedTestMockMappings[tc.Name], consumedMocks, mockKindByName, reusableMockNames)
+			if streamConsumedErr != nil {
+				consumptionUnread = appendOnce(consumptionUnread, tc.Name)
+			}
 			if testMocksUnknown(streamArmed, streamOwned, streamConsumedErr) {
 				// Not judged rather than failed on a partial read.
 				consumedUnread = appendOnce(consumedUnread, tc.Name)
@@ -3901,6 +3924,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			//  Record: Update counters and persist result.
+			//
+			// The OBSOLETE shape for the mapping write: a wrong answer with a
+			// recorded mock of its mapping left unconsumed (what mockSetMismatch
+			// is in the main loop) or a mock outside it consumed (what it is
+			// here).
+			streamLeftRecorded := streamArmed && streamConsumedErr == nil &&
+				leftRecordedMockUnconsumed(expectedTestMockMappings[tc.Name], consumedMocks, mockKindByName, reusableMockNames)
+			if streamLeftRecorded {
+				leftRecordedUnconsumed = appendOnce(leftRecordedUnconsumed, tc.Name)
+			}
+			if !testPass && (mockSetMismatch || streamLeftRecorded) {
+				obsoleteShaped = appendOnce(obsoleteShaped, tc.Name)
+			}
 			var testStatus models.TestStatus
 			if testPass {
 				testStatus = models.TestStatusPassed
@@ -4405,8 +4441,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// Test-mode mapping write semantics:
 	//
-	//   UpdateTestMapping=true  → always write/merge mappings.yaml
-	//                             (operator-driven update).
+	//   UpdateTestMapping=true  → write/merge mappings.yaml
+	//                             (operator-driven update), with
+	//                             the entries of the passing tests
+	//                             only; a new file only when it
+	//                             would map a test (see below).
 	//   UpdateTestMapping=false → create-if-not-present: write only
 	//                             when mappings.yaml is absent for
 	//                             this test-set AND we have at least
@@ -4423,7 +4462,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// create-if-not-present default closes that gap without changing
 	// behaviour for existing users who already have a mappings.yaml
 	// they don't want overwritten — they can keep flag=false and the
-	// existing file is preserved. To force a refresh, flag=true.
+	// existing file is preserved. To refresh the passing tests'
+	// entries, flag=true.
 	//
 	// Independence from DisableMapping: the two flags express
 	// orthogonal concerns. DisableMapping picks the replay-time mock
@@ -4432,7 +4472,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// the write on the filter strategy.
 	//
 	// The non-emptiness guard on the create-if-not-present branch
-	// matters because actualTestMockMappings is populated by
+	// matters because mappingDoc is built from actualTestMockMappings,
+	// which is populated by
 	// upsertActualTestMockMapping calls that depend on consumedMocks,
 	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
 	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
@@ -4441,31 +4482,80 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// mappings.yaml and every subsequent run would skip the create
 	// branch (file exists), leaving autoreplay permanently without
 	// the mappings the feature relies on. UpdateTestMapping=true
-	// still writes an empty file when explicitly requested — that
-	// matches the operator intent of "force a refresh".
+	// still writes an empty file when explicitly requested and some
+	// test passed — that matches the operator intent of "force a
+	// refresh"; it creates none from a run where no test passed.
+	// Kept as it was: the run passed tests, and found none of them
+	// consumed a mock, which is what the empty file says. It maps no
+	// test, so each is served its recorded window as with no file,
+	// and every later flag run merges into it; only a later default
+	// run's create is skipped, as for any file that exists.
 	//
-	// No write may leave a loaded test out of the file for good, as no default
-	// run adds to a file that exists. A run that did not score every loaded
-	// test writes nothing: no create, no StoreMappings merge, no backfill. A run
-	// where a test got no answer, was refused or lost its result has no entry
-	// for that test, so by default it must not create the file, but may backfill
-	// one that exists. --update-test-mapping writes it either way: mapdb.Insert
-	// replaces only this run's entries, so the next such run adds the missing
-	// test (MergeStartupMockNames keeps an unmapped test on the time window).
+	// No write may leave a loaded test out of the file for good because the
+	// run lost it, as no default run adds to a file that exists. A run that did
+	// not score every loaded test writes nothing: no create, no StoreMappings
+	// merge, no backfill. A run where a test got no answer, was refused or lost
+	// its result has no entry for that test, so by default it must not create
+	// the file, but may backfill one that exists. --update-test-mapping writes
+	// it either way: mapdb.Insert replaces only this run's entries, so the next
+	// such run adds the missing test (MergeStartupMockNames keeps an unmapped
+	// test on the time window).
+	//
+	// Only a passing test's entry is written (see mapping_verdicts.go),
+	// decided on the verdicts as the report holds them, after the
+	// BeforeTestResult hook. The document holds no entry for any other test, so
+	// it keeps the one it has or, with none, stays on its recorded window. A
+	// new file therefore lacks a test that did not pass, and keeps lacking it
+	// under the default flag; that is not the loss the rule above guards
+	// against. It is what the test is owed: the mocks of its recorded window.
+	// Holding the create instead would leave every test of a set with one
+	// failure with no mapping at all, where a set recorded without a
+	// mappings.yaml gets one from its first replay (enterprise's auto-replay,
+	// for one).
+	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
+	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
+	if len(passing) == 0 {
+		// The boot traffic belongs to no test, and a run where no test passed
+		// vouches for it no more than for the tests: the section on disk stays.
+		mappingDoc.Startup = nil
+	}
 	mappingExists := sync.OnceValues(func() (bool, error) { return r.mappingDB.Exists(ctx, testSetID) })
 	holdMappings := ""
+	// holdQuietly: a hold that is the expected outcome, logged at Debug.
+	holdQuietly := false
+	// Whether the run had anything to write at all, before the verdicts took
+	// their part: what the holds below are about.
 	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
 		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
-	if wouldWrite && !allTestsGotAVerdict {
+	switch {
+	case !wouldWrite:
+	case !allTestsGotAVerdict:
 		holdMappings = "not every loaded test got a verdict"
-	} else if wouldWrite && !r.config.Test.UpdateTestMapping &&
-		(len(noAnswerTests) > 0 || internalErr || !resultsComplete || appUnreachable) {
+	case !r.config.Test.UpdateTestMapping && (len(noAnswerTests) > 0 || internalErr || !resultsComplete || appUnreachable):
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
 		}
+	case len(mappingDoc.TestCases) == 0 && (len(keptRecorded) > 0 || len(passing) == 0 || !r.config.Test.UpdateTestMapping):
+		// A new file would map no test, and, existing, would stop every later
+		// default run from creating the one that does. Into a file that exists
+		// the run goes on: the startup backfill, or the flag's write, which
+		// leaves every entry on disk as it is (with nothing to write, it does
+		// not touch the file). (A flag run where tests passed and none consumed
+		// anything writes as it always has.)
+		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
+			switch {
+			case len(keptRecorded) > 0:
+				holdMappings = "no test that consumed a mock counts as passing, so a new file would map no test; a later run in which one passes creates it"
+			case len(passing) == 0:
+				holdMappings = "no test passed, so a new file would map no test; a later run in which a test that consumes a mock passes creates it"
+			default:
+				holdMappings = "no test consumed a mock, so a new file would map no test"
+				holdQuietly = true
+			}
+		}
 	}
 	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""
-	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && len(actualTestMockMappings.TestCases) > 0 {
+	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && len(mappingDoc.TestCases) > 0 {
 		exists, existsErr := mappingExists()
 		if existsErr != nil {
 			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
@@ -4477,19 +4567,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// See backfillStartupSection: writes a STARTUP-ONLY document so the
-	// operator's per-test mappings are never rewritten by a subset run.
+	// operator's per-test mappings are never rewritten by a subset run. Only
+	// into a file that exists: one it created would map no test (the hold
+	// above names that case).
 	if holdMappings != "" {
 		// Into a file that exists, the default flag would only have backfilled
 		// the startup section, so a subset run on a mapped set stays quiet.
 		logHold := r.logger.Warn
-		if !r.config.Test.UpdateTestMapping {
+		if holdQuietly {
+			logHold = r.logger.Debug
+		} else if !r.config.Test.UpdateTestMapping {
 			if exists, existsErr := mappingExists(); existsErr == nil && exists {
 				logHold = r.logger.Debug
 			}
 		}
-		logHold("not writing mappings.yaml", zap.String("testSetID", testSetID), zap.String("reason", holdMappings))
-	} else if !shouldWriteMappings {
-		r.backfillStartupSection(ctx, testSetID, actualTestMockMappings)
+		fields := []zap.Field{zap.String("testSetID", testSetID), zap.String("reason", holdMappings)}
+		if n := len(keptRecorded); n > 0 && len(mappingDoc.TestCases) == 0 {
+			fields = append(fields, zap.Int("count", n), zap.Strings("testsNotCountedAsPassing", keptRecorded[:min(n, 20)]))
+		}
+		logHold("not writing mappings.yaml", fields...)
+	} else if !shouldWriteMappings && r.mappingDB != nil && len(mappingDoc.Startup) > 0 {
+		if exists, existsErr := mappingExists(); existsErr == nil && exists {
+			r.backfillStartupSection(ctx, testSetID, mappingDoc)
+		}
 	}
 
 	if shouldWriteMappings {
@@ -4503,14 +4603,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				onDiskStartup, err = r.mappingDB.GetStartup(ctx, testSetID)
 			}
 			if err == nil {
-				keepConnFailureMappings(actualTestMockMappings, onDisk, onDiskStartup, mockKindByName)
+				keepConnFailureMappings(mappingDoc, onDisk, onDiskStartup, mockKindByName)
 			} else {
 				r.logger.Debug("could not read the mapping file to keep its connection-failure entries", zap.String("testSetID", testSetID), zap.Error(err))
 			}
 		}
-		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
+		logKept := func() {
+			if n := len(keptRecorded); n > 0 {
+				// Named, capped as the unanswered tests are: an auto-replay that
+				// failed tests must say their mappings were left as recorded.
+				r.logger.Info("left the mapping of the tests not counted as passing as recorded (their entry, or none: their recorded window): only a passing test's consumption updates mappings.yaml",
+					zap.String("testSetID", testSetID),
+					zap.Int("count", n),
+					zap.Strings("tests", keptRecorded[:min(n, 20)]))
+			}
+		}
+		// A document with no entry and no startup section has nothing to put
+		// into a file that exists: it is left as it is, not rewritten. (Into
+		// none, a flag run where tests passed and none consumed anything
+		// writes an empty file, as it always has.)
+		nothingToWrite := false
+		if len(mappingDoc.TestCases) == 0 && len(mappingDoc.Startup) == 0 {
+			if exists, existsErr := mappingExists(); existsErr == nil && exists {
+				nothingToWrite = true
+			}
+		}
+		if nothingToWrite {
+			logKept()
+			r.logger.Debug("mappings.yaml left as it is: this run has no passing test's entry and no startup section to write",
+				zap.String("testSetID", testSetID))
+		} else if err := r.StoreMappings(ctx, mappingDoc); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
+			logKept()
 			// startupMocks is reported at INFO, not DEBUG, on purpose: it is the
 			// only signal that the startup section was actually captured. Every
 			// other trace of it (mapdb.GetStartup, determineMockingStrategy) is
@@ -4520,8 +4645,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// feature is unobservable from a green pipeline.
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.TestCases)),
-				zap.Int("startupMocks", len(actualTestMockMappings.Startup)))
+				zap.Int("numTests", len(mappingDoc.TestCases)),
+				zap.Int("startupMocks", len(mappingDoc.Startup)))
 		}
 	}
 
@@ -6704,15 +6829,16 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 // happened to consume. A short-circuited or partly-failed run writes a
 // strict subset as authoritative, and the next mapping-based run fails that
 // test with no_mocks. That is exactly the contract the create-if-not-present
-// gate exists to protect ("once a file exists, leave it alone; to force a
-// refresh, pass --update-test-mapping").
+// gate exists to protect ("once a file exists, leave it alone; to refresh the
+// passing tests' entries, pass --update-test-mapping").
 //
 // With TestCases empty, Insert's seed-from-existing loop carries every
 // on-disk entry through untouched and only the section is added.
 //
 // Fires at most once per test set (gated on the section being genuinely
 // absent), so it cannot churn the file. A read failure costs the section,
-// not the run.
+// not the run. RunTestSet calls it only for a file that exists: a file it
+// created would map no test and block the create that does.
 //
 // Extracted from RunTestSet so the gate is unit-testable: it is the exact
 // decision that made the whole feature unreachable in the default flow, and the

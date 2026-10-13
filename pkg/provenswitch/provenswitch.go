@@ -100,6 +100,13 @@ func Pin(on bool) {
 	pinned.Store(pinnedOff)
 }
 
+// Unpin undoes Pin, so the process reads KEPLOY_PROVEN again. keploy itself
+// never calls it: it is for a test that runs the agent's flag handling (which
+// pins) in a process whose later tests set the switch with t.Setenv.
+func Unpin() {
+	pinned.Store(unpinned)
+}
+
 // IgnoredEnv is, for a pinned process, a KEPLOY_PROVEN in its environment
 // that says something other than what was pinned (a value that is set and does
 // not read as the pinned state, unreadable values included), and whether there

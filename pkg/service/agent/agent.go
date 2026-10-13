@@ -179,6 +179,16 @@ type Agent struct {
 	// (setupslot.go). fenceSetup is empty while a test is staged.
 	fenceSetup string
 	specPos    map[string]int
+
+	// provenMu guards proven, the single-worker integration wire's state
+	// (scope_proven.go), served under the proven switch. Never held while
+	// taking scopeMu.
+	provenMu sync.Mutex
+	proven   provenWire
+	// wire is held across every operation of the wire (a claim, a begin,
+	// an end, the final reap) so they never interleave; taken before
+	// provenMu.
+	wire wireLock
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -567,7 +577,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 
 	starts.Default.Reset()
 	ids.Default.Reset()
-	a.resetScopeState()
+	if err := a.resetSession(ctx); err != nil {
+		return nil, err
+	}
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -653,7 +665,9 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	httpparser.ResetCaptured()
 	starts.Default.Reset()
 	ids.Default.Reset()
-	a.resetScopeState()
+	if err := a.resetSession(ctx); err != nil {
+		return err
+	}
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -778,7 +792,20 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
-	return a.Proxy.GetMockErrors(ctx)
+	errs, err := a.Proxy.GetMockErrors(ctx)
+	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
+		// A read that failed is answered without its list over HTTP: the
+		// misses the wire charged stay for the read that succeeds. A read
+		// that could not vouch for every miss is answered with what it read,
+		// the charged misses included.
+		return errs, err
+	}
+	// The misses the proven wire charged to a test at its end were drained
+	// from the proxy then; they are still the run's misses.
+	if charged := a.takeChargedMisses(); len(charged) > 0 {
+		errs = append(charged, errs...)
+	}
+	return errs, err
 }
 
 // BeginTestErrorCapture opens a per-test mock-error capture window so the
@@ -1193,7 +1220,8 @@ const (
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
-	case params.UseMappingBased && len(params.MockMapping) > 0:
+	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
+		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
 	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
@@ -1441,7 +1469,11 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// MockManager.SetMocksWithWindow enforce strict semantics.
 
 	// Apply filtering based on parameters
-	if params.UseMappingBased && len(params.MockMapping) > 0 {
+	if params.UseMappingBased && params.ExactMapping {
+		// The proven wire (scope_proven.go): exactly the scope's own mocks.
+		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+	} else if params.UseMappingBased && len(params.MockMapping) > 0 {
 		filteredMocks = pkg.FilterTcsMocksMappingWithShared(ctx, a.logger, originalFiltered, params.MockMapping, params.MockMappingUniverse)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
