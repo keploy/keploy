@@ -3167,10 +3167,17 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flag
 // GetScopeWindows fetches the per-test scope windows the wrapped runner reported
 // during a `keploy mock record` session (via /agent/scope/*), so the CLI can
 // correlate captured mocks into mappings.yaml. A missing endpoint (older agent)
-// returns an empty slice, degrading to suite-level recording.
+// returns nil, degrading to suite-level recording; under the proven switch it
+// is an error. Under the switch the read is the run's last (?final=1), which
+// closes the run: call it only once the test command has exited.
 func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
-	// Every read the CLI makes is the run's last, once its command exited.
-	url := fmt.Sprintf("%s/scope/windows?final=1", a.conf.Agent.AgentURI)
+	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	if provenswitch.On() {
+		// Every read the CLI makes is the run's last, once its command
+		// exited: the agent fails a test still open. With the switch off
+		// the read is the one keploy made before the switch.
+		url += "?final=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
