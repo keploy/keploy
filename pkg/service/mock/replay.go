@@ -705,13 +705,20 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
+//
+// A recording pulled from the registry also carries its sets (Boots, Suites),
+// and their table goes first: it gives each set its recorded start. It does not
+// scope a test's mocks — the starts registry follows test-runner processes, and
+// a browser suite's traffic comes from a browser and a server that are none —
+// so the per-test table still follows. Returning after the set table left every
+// test of a pulled browser suite on the whole pool of every set pulled
+// (enterprise-ui pipeline 11689: "reason=no_mapping_table scoped=false" on each
+// test, a non-admin served an admin's /auth/check from another lane's set).
 func (m *mockService) pushScopeTable(ctx context.Context, name string, pools ...[]*models.Mock) {
 	if m.mappingDB == nil {
 		return
 	}
-	if m.pushSetTable(ctx, name) {
-		return
-	}
+	m.pushSetTable(ctx, name)
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
 		return
