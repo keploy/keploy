@@ -17,8 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-//TODO: rename this file.
-
 // Get Used by proxy
 func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
