@@ -88,7 +88,7 @@ func StartCommand(cmd *exec.Cmd) error {
 const gracefulStopTimeout = StopSignalWait
 
 // forceKillTimeout bounds the post-SIGKILL wait for the group to disappear.
-const forceKillTimeout = 3 * time.Second
+const forceKillTimeout = StopKillWait
 
 // groupGone reports whether no process remains in process group pgid. kill(-pgid, 0)
 // returns ESRCH once every member has exited and been reaped (keploy's app-watch

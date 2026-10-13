@@ -313,6 +313,20 @@ func TestTestCaseHold_EarliestStarts(t *testing.T) {
 	empty.EarliestStarts(func(string, string, time.Time) { t.Fatal("an empty hold reported a start") })
 }
 
+// A gRPC test case held behind an HTTP one has no HTTP end: the hold's oldest
+// end is still the HTTP one's, or a stop asking the agent would hear nothing
+// is held while that test case waits for its verdict.
+func TestTestCaseHold_OldestIsNotHiddenByATestCaseWithNoHTTPEnd(t *testing.T) {
+	end := time.Unix(1000, 0)
+	h := NewTestCaseHold(&fakeWatermark{}, time.Hour, 1<<20) // nothing settles
+	h.Add(heldTC("http", end), "", "")
+	h.Add(&models.TestCase{Name: "grpc", Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: end.Add(time.Second)}, GrpcResp: models.GrpcResp{Timestamp: end.Add(2 * time.Second)}}, "", "")
+	if got := h.Oldest(); !got.Equal(end) {
+		t.Fatalf("Oldest = %v, want the HTTP test case's end %v", got, end)
+	}
+}
+
 // backlogWatermark is a Backlog watermark whose answers the test sets.
 type backlogWatermark struct {
 	settled, pending atomic.Bool
@@ -414,6 +428,19 @@ func TestBacklogBefore(t *testing.T) {
 		t.Fatalf("%+v: a built test case still pending, or no progress counted", st)
 	}
 
+	// Once a stop has asked, a test case built from after the time it asked
+	// about is no progress on its backlog: steady traffic after the stop
+	// must not keep a stop waiting on a backlog that does not move.
+	before = m.BacklogBefore(stop).Progress
+	m.BuildingTestCase(stop.Add(time.Second))()
+	if st := m.BacklogBefore(stop); st.Progress != before {
+		t.Fatalf("progress moved from %d to %d for a test case from after the stop", before, st.Progress)
+	}
+	m.BuildingTestCase(stop.Add(-time.Second))()
+	if st := m.BacklogBefore(stop); st.Progress == before {
+		t.Fatal("no progress counted for a test case from before the stop")
+	}
+
 	// A queue of built test cases the stream has not taken.
 	var queued atomic.Int64
 	stopWatch := m.WatchTestCaseQueue(func() int { return int(queued.Load()) })
@@ -441,5 +468,145 @@ func TestBacklogBefore(t *testing.T) {
 	// PendingBefore is BacklogBefore's verdict.
 	if pending, known := m.PendingBefore(stop); pending || !known {
 		t.Fatalf("PendingBefore (%v, %v), want (false, true)", pending, known)
+	}
+}
+
+// A mock a parser that ran behind its traffic hands over after its test's
+// window resolved waits in the manager's buffer for the next flush, a ticker a
+// starved agent runs late. Until that flush has handed it on, a stop that asks
+// must hear it is pending: told "clear", it ends the mock stream and the mock
+// is lost, with the recording reported complete.
+func TestBacklogBefore_AMockTheNextFlushHandsOnIsPending(t *testing.T) {
+	m := New(nil)
+	out := make(chan *models.Mock, 16)
+	m.SetOutputChannel(out)
+	defer m.AddWatermark(&backlogWatermark{})() // every parser caught up
+	m.SetFirstRequestSignaled()
+
+	start := time.Now().Add(-2 * time.Second)
+	end := start.Add(100 * time.Millisecond)
+	m.ResolveRange(start, end, "test-1", true, true)
+	// Per-test (a kind no fallback makes reusable): test-1's window owns it.
+	m.AddMock(&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "mocks"},
+		ReqTimestampMock: start.Add(10 * time.Millisecond),
+		ResTimestampMock: start.Add(20 * time.Millisecond),
+	}})
+	if len(out) != 0 {
+		t.Fatal("setup: the late mock was sent at once, not buffered for the flush")
+	}
+
+	stop := time.Now()
+	if st := m.BacklogBefore(stop); !st.Pending || st.WaitingOn == "" {
+		t.Fatalf("%+v: a mock from before the stop that the next flush hands on is not pending", st)
+	}
+	if st := m.BacklogBefore(start); st.Pending {
+		t.Fatalf("%+v: pending for a time before the buffered mock was requested", st)
+	}
+	m.FlushOwnedWindows()
+	if len(out) != 1 {
+		t.Fatalf("setup: the flush handed on %d mocks, want the late one", len(out))
+	}
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: still pending once the flush handed the mock on", st)
+	}
+}
+
+// A buffered mock that no window can take yet stays in the buffer for a
+// request that may still claim it, and a flush leaves it there: it is not
+// pending, or a stop would wait on it until it gave up and failed a recording
+// that had lost nothing.
+func TestBacklogBefore_AMockNoWindowCanTakeIsNotPending(t *testing.T) {
+	m := New(nil)
+	out := make(chan *models.Mock, 16)
+	m.SetOutputChannel(out)
+	defer m.AddWatermark(&backlogWatermark{})()
+	m.SetFirstRequestSignaled()
+	m.mu.Lock()
+	m.resolvedTestCount = models.StartupMockTestCaseWindow // past the startup window
+	m.mu.Unlock()
+
+	at := time.Now().Add(-time.Second)
+	// Per-test: a kind no fallback makes reusable, tagged as a test's mock.
+	m.AddMock(&models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "mocks"},
+		ReqTimestampMock: at,
+		ResTimestampMock: at,
+	}})
+	stop := time.Now()
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: a mock no window can take is pending", st)
+	}
+	m.FlushOwnedWindows()
+	m.mu.Lock()
+	buffered := len(m.buffer)
+	m.mu.Unlock()
+	if buffered != 1 || len(out) != 0 {
+		t.Fatalf("setup: the flush moved a mock no window can take (buffered %d, sent %d)", buffered, len(out))
+	}
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: a mock no window can take is pending after the flush", st)
+	}
+}
+
+// A mock on its way to the stream (its send can wait on a full output
+// channel), or owed back to its test at the next flush, is still the agent's:
+// pending until it has been handed on.
+func TestBacklogBefore_AMockBeingSentOrOwedIsPending(t *testing.T) {
+	m := New(nil)
+	defer m.AddWatermark(&backlogWatermark{})()
+	stop := time.Now()
+	mk := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: stop.Add(-time.Second)}}
+
+	m.noteSending(mk)
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatalf("%+v: a mock from before the stop whose send is under way is not pending", st)
+	}
+	if st := m.BacklogBefore(stop.Add(-2 * time.Second)); st.Pending {
+		t.Fatalf("%+v: pending for a time before the mock being sent was requested", st)
+	}
+	m.sent(mk)
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: still pending once the send finished", st)
+	}
+
+	m.mu.Lock()
+	m.owed = append(m.owed, owedMock{mock: mk})
+	m.mu.Unlock()
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatalf("%+v: a mock from before the stop owed back to its test is not pending", st)
+	}
+	m.mu.Lock()
+	m.owed = nil
+	m.mu.Unlock()
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: still pending once nothing is owed", st)
+	}
+}
+
+// A session or connection mock in the buffer (an untagged HTTP mock is one)
+// goes at the next flush whatever window it falls in: pending until then.
+func TestBacklogBefore_AReusableMockInTheBufferIsPendingUntilTheFlush(t *testing.T) {
+	m := New(nil)
+	out := make(chan *models.Mock, 16)
+	m.SetOutputChannel(out)
+	defer m.AddWatermark(&backlogWatermark{})()
+	m.SetFirstRequestSignaled()
+	m.mu.Lock()
+	m.resolvedTestCount = models.StartupMockTestCaseWindow // past the startup window
+	m.mu.Unlock()
+
+	at := time.Now().Add(-time.Second)
+	m.AddMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at}})
+	stop := time.Now()
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatalf("%+v: a reusable mock from before the stop that the next flush hands on is not pending", st)
+	}
+	m.FlushOwnedWindows()
+	if len(out) != 1 {
+		t.Fatalf("setup: the flush handed on %d mocks, want the reusable one", len(out))
+	}
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatalf("%+v: still pending once the flush handed the mock on", st)
 	}
 }

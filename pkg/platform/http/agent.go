@@ -1788,14 +1788,15 @@ func (a *AgentClient) StartedAgent() bool { return a.startedAgent.Load() }
 // agentStoppingGrace bounds how long the CLI waits for an agent that is
 // already going away (agentGoingAway) to exit before it signals it: it only
 // catches an agent that hangs on its way out. The stop request before it
-// (agentStopRequestTimeout), it, and the signal's own wait before a kill
-// (agentUtils.StopSignalWait) stay within the 30 s the recorders' teardown
-// waits on the goroutine that stops the agent (DrainErrGroup: "record-setup",
-// "mock-record"), so such an agent is stopped before that wait gives up on
-// it: killed, when it was started on its own (agentUtils.StopCommand); one
-// started on a terminal for sudo's password has its terminal closed and is
-// sent SIGTERM, never killed (agentUtils.StopPTYCommand).
-var agentStoppingGrace = 15 * time.Second
+// (agentStopRequestTimeout), it, and the signal's own waits, before the kill
+// and after it (agentUtils.StopCommandWait), stay within the 30 s the
+// recorders' teardown waits on the goroutine that stops the agent
+// (DrainErrGroup: "record-setup", "mock-record"), so such an agent is stopped
+// before that wait gives up on it: killed, when it was started on its own
+// (agentUtils.StopCommand); one started on a terminal for sudo's password has
+// its terminal closed and is sent SIGTERM, never killed
+// (agentUtils.StopPTYCommand).
+var agentStoppingGrace = 13 * time.Second
 
 // agentStopRequestTimeout bounds the stop request itself (requestAgentStop),
 // which comes before the grace.

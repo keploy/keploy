@@ -50,5 +50,13 @@ func GenerateRandomContainerName(logger *zap.Logger, prefix string) string {
 
 // StopSignalWait is the longest StopCommand waits for the process it signalled
 // to exit before it kills it (on Unix; on Windows it does not wait). A caller
-// that must have the process gone within a bound counts it in.
+// that must have the process gone within a bound counts StopCommandWait in.
 const StopSignalWait = 8 * time.Second
+
+// StopKillWait is the longest StopCommand waits, after it kills a process that
+// outlived StopSignalWait, for it to be gone (on Unix).
+const StopKillWait = 3 * time.Second
+
+// StopCommandWait is the longest StopCommand takes: the wait for the signalled
+// process, and the one after the kill.
+const StopCommandWait = StopSignalWait + StopKillWait

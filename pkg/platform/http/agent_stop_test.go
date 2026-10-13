@@ -94,13 +94,14 @@ func TestStopAgentProcessSignalsOnlyAnAgentThatWillNotGo(t *testing.T) {
 }
 
 // The stop request, the grace for an agent on its way out, and the signal's
-// wait before a kill end before the recorders' teardown stops waiting on the
-// goroutine that stops the agent (30 s): otherwise an agent that hangs as it
-// goes is killed only after that wait gave up, if at all.
+// waits, before the kill and after it, end before the recorders' teardown
+// stops waiting on the goroutine that stops the agent (30 s): otherwise an
+// agent that hangs as it goes is killed only after that wait gave up, and the
+// teardown says a goroutine ignored its cancellation.
 func TestAgentStoppingGraceEndsBeforeTheTeardownWait(t *testing.T) {
-	if total := agentStopRequestTimeout + agentStoppingGrace + agentUtils.StopSignalWait; total >= 30*time.Second {
-		t.Fatalf("the stop request (%v), the grace (%v) and the signal's wait (%v) take %v, not under the teardown's 30 s wait",
-			agentStopRequestTimeout, agentStoppingGrace, agentUtils.StopSignalWait, total)
+	if total := agentStopRequestTimeout + agentStoppingGrace + agentUtils.StopCommandWait; total >= 30*time.Second {
+		t.Fatalf("the stop request (%v), the grace (%v) and the signal's waits (%v) take %v, not under the teardown's 30 s wait",
+			agentStopRequestTimeout, agentStoppingGrace, agentUtils.StopCommandWait, total)
 	}
 }
 
