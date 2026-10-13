@@ -157,6 +157,14 @@ func (a *Agent) resetSession(ctx context.Context) error {
 		return fmt.Errorf("start the session: %w", err)
 	}
 	defer a.wire.unlock()
+	// The clock again, under the wire: a begin of the previous session that
+	// came after the caller's release (MockOutgoing, GetOutgoing) took it,
+	// and the reset below forgets that test, so nothing would end it. A
+	// failure here comes after the caller's own resets (the proxy's captured
+	// mocks, the app starts, the IDs), unlike the caller's release.
+	if err := a.releaseTestClock(ctx); err != nil {
+		return fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
+	}
 	a.resetScopeState()
 	a.provenMu.Lock()
 	a.proven = provenWire{}
@@ -267,7 +275,9 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				"keploy could not arm the recorded calls of "+key+" made outside its tests: "+err.Error(), "check the agent's log")
 		}
 	}
-	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: models.InstanceRun}, nil
+	// The clock record the run's processes read: the integration exports it
+	// as KEPLOY_TIME_FILE to what it starts ("" when the run is not frozen).
+	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: models.InstanceRun, TimeFile: TimeFile()}, nil
 }
 
 // SetScopePool installs each key's pool slice for a replay (design v14 §5.2,

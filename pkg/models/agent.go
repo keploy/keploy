@@ -271,6 +271,15 @@ type ScopeTableReq struct {
 	Pool map[string][]string `json:"pool,omitzero"`
 }
 
+// TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
+// CLI sends: when each test of the replayed recording began
+// (MappedTestCase.At), by test name. Under the proven switch the agent moves
+// the clock of the run's processes to a test's begin while the test is open,
+// and back to the run's start time after it (design v14 §3.4).
+type TestBeginsReq struct {
+	Begins map[string]time.Time `json:"begins"`
+}
+
 type SetTable struct {
 	Boots  map[string][]string `json:"boots,omitempty"`
 	Tests  map[string][]Owned  `json:"tests,omitempty"`

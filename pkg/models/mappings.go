@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -119,6 +120,11 @@ type MappedTestCase struct {
 	CaseSteps map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty" bson:"case_steps,omitempty"`
 	Dir       string              `json:"dir,omitempty" yaml:"dir,omitempty" bson:"dir,omitempty"`
 	Starts    int                 `json:"starts,omitempty" yaml:"starts,omitempty" bson:"starts,omitempty"`
+	// At is when the test began in its recording: the clock its replay runs
+	// on while it is open (design v14 §3.4). Written and read only under the
+	// proven switch; zero in recordings made before keploy kept it, and in
+	// those made without the switch.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -129,6 +135,15 @@ type persistedTestFormat struct {
 	CaseSteps   map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty"`
 	Dir         string              `json:"dir,omitempty" yaml:"dir,omitempty"`
 	Starts      int                 `json:"starts,omitempty" yaml:"starts,omitempty"`
+}
+
+// writtenTestFormat is how a test entry is written: the persisted format and
+// the test's recorded begin, last and omitted when zero, so an entry without
+// one is written as it was before keploy kept it. The begin stays out of
+// persistedTestFormat, which also picks the shape an entry is read in.
+type writtenTestFormat struct {
+	persistedTestFormat `yaml:",inline"`
+	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -143,11 +158,45 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return tc.persistedFormat(), nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(tc.persistedFormat())
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At})
+}
+
+// errRecordedBegin is a test entry whose at: is not a time.
+const errRecordedBegin = "a test's recorded begin (at) is not a time: %w"
+
+// recordedBeginYAML is a test entry's at: under the proven switch. One that is
+// not a time is an error, never a reason to read the entry in another shape and
+// lose its mocks. With the switch off the entry reads as it did before keploy
+// kept the begin: at: is not read.
+func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
+	if !provenswitch.On() || !nodeHasField(node, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `yaml:"at"`
+	}
+	if err := node.Decode(&at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
+}
+
+// recordedBeginJSON is recordedBeginYAML for a JSON entry.
+func recordedBeginJSON(data []byte) (time.Time, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(data, &at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -169,6 +218,20 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 //	      - name: mock-1
 //	        kind: Redis
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
+	at, err := recordedBeginYAML(node)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalYAMLEntry(node); err != nil {
+		return err
+	}
+	tc.At = at
+	return nil
+}
+
+// unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
+// format's other fields, in whichever shape the entry has.
+func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	perr := node.Decode(&persisted)
@@ -213,6 +276,19 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
+	at, err := recordedBeginJSON(data)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalJSONEntry(data); err != nil {
+		return err
+	}
+	tc.At = at
+	return nil
+}
+
+// unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
+func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
 	var persisted persistedTestFormat
 	perr := json.Unmarshal(data, &persisted)
 	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {

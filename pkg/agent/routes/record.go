@@ -107,6 +107,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// What an integration refused, for the run's verdict to name
 		// (scope_proven.go). The plain 404 with the switch off.
 		r.HandleFunc("/refusal", a.HandleRefusal)
+		// Any method: with the proven switch off the handler answers the
+		// 404 this path had before it existed.
+		r.HandleFunc("/replay/clock", a.HandleTestBegins)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

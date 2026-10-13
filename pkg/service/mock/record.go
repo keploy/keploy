@@ -576,6 +576,9 @@ func (m *mockService) Record(ctx context.Context) error {
 				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
+			if provenswitch.On() {
+				stampBegins(byCase, windows)
+			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
@@ -949,6 +952,23 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 		}
 	}
 	return byTest
+}
+
+// stampBegins keeps, for each test, when it began in this recording: its
+// replay moves the clock of the run's processes to that instant while the
+// test is open (design v14 §3.4). A name with more than one window (a
+// subtest run twice) keeps its earliest begin.
+func stampBegins(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if w.Start.IsZero() {
+			continue
+		}
+		tc := byCase[w.Name]
+		if tc.At.IsZero() || w.Start.Before(tc.At) {
+			tc.At = w.Start
+		}
+		byCase[w.Name] = tc
+	}
 }
 
 func flowOf(windows []models.ScopeWindow, test string) string {

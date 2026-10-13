@@ -46,7 +46,9 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self,*a): pass
 socketserver.TCPServer.allow_reuse_address=True
-with socketserver.TCPServer(("127.0.0.1",PORT),H) as s: s.serve_forever()
+with socketserver.TCPServer(("127.0.0.1",PORT),H) as s:
+    print("ready", flush=True)
+    s.serve_forever()
 PY
 
 cat > conftest.py <<'PY'
@@ -65,11 +67,19 @@ def _post(p,b):
             headers=h,method="POST")
         return json.loads(urllib.request.urlopen(r,timeout=3).read() or b"{}")
     except Exception: return None
+# Under the proven switch the agent serves the single-worker wire (scope
+# protocol v1): the test process claims the run before its first test, and
+# each test names its file. Without the switch /agent/instance is a 404 and
+# the file is not read.
+@pytest.fixture(autouse=True, scope="session")
+def keploy_claim():
+    _post("/agent/instance",{"key":".","dir":os.getcwd()})
+    yield
 # canSkip: this harness skips a test the replay says not to run. (Test-only:
 # KEPLOY_E2E_NO_SKIP plays a harness that predates skipping.)
 @pytest.fixture(autouse=True)
-def keploy_scope(request):
-    begin={"name":request.node.name}
+def keploy_scope(request, keploy_claim):
+    begin={"name":request.node.name,"file":request.node.path.name}
     if not os.environ.get("KEPLOY_E2E_NO_SKIP"): begin["canSkip"]=True
     resp=_post("/agent/scope/begin",begin)
     if resp and resp.get("action")=="skip":
@@ -88,7 +98,7 @@ def pytest_runtest_makereport(item, call):
     worst=getattr(item,"_keploy_worst",None)
     if worst is None or _RANK[o]>_RANK[worst]: item._keploy_worst=o
     if rep.when=="teardown":
-        _post("/agent/scope/end",{"name":item.name,"outcome":item._keploy_worst})
+        _post("/agent/scope/end",{"name":item.name,"file":item.path.name,"outcome":item._keploy_worst})
 PY
 
 # outcome_of NAME: the verdict the last replay gives a test (per-test file).
@@ -339,6 +349,45 @@ SAID=$(grep -c "INFO.*self-call passed through to the run's own listener" self.l
 [ "$SAID" -eq 1 ] || { echo "FAIL: 5 self-calls were said at INFO $SAID times, want once"; FAIL=1; }
 grep -qE "self-calls passed through to the run's own listeners.*\"calls\": 5" self.log ||
   { echo "FAIL: the run's 5 self-calls were not counted when it ended"; FAIL=1; }
+
+echo "== 6. under the proven switch, a record keeps when each test began =="
+# The agent moves the run's clock to each test's recorded begin while the test
+# is open (design v14 §3.4); a build that freezes the clock does the moving.
+# Under the switch a replay needs a build that judges each test (keploy
+# enterprise), so here the begins are checked on disk; the enterprise UM lane
+# (mock-local-loop-e2e) replays them on a frozen clock.
+grep -qE '^\s+at: ' keploy/e2e/mappings.yaml && { echo "FAIL: a record without the proven switch wrote test begins"; FAIL=1; }
+DEP_PID=$(start_dep)
+# Ready when it says it listens (depserver.py prints after binding).
+until grep -qx ready dep.log 2>/dev/null; do
+  kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the dependency exited before it listened"; FAIL=1; break; }
+  sleep 0.1
+done
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-proven --disable-tele 2>&1 | tee rec-proven.log
+stop_dep "$DEP_PID"
+python3 - <<'PY' || FAIL=1
+import datetime, re, sys
+t = open("keploy/e2e-proven/mappings.yaml").read()
+begins = {}
+for block in re.split(r"\n(?=\s*- id: )", t):
+    m = re.search(r"- id: (\S+)", block)
+    a = re.search(r"\n\s+at: (\S+)", block)
+    if m and a:
+        begins[m.group(1)] = datetime.datetime.fromisoformat(a.group(1).replace("Z", "+00:00"))
+print("recorded begins:", begins)
+want = ["test_api.py::test_users", "test_api.py::test_items", "test_api.py::test_health"]
+if set(begins) != set(want):
+    sys.exit(f"FAIL: want a recorded begin for each of {sorted(want)}, got {sorted(begins)}")
+order = [n for n, _ in sorted(begins.items(), key=lambda kv: kv[1])]
+if order != want:
+    sys.exit(f"FAIL: the begins are not in the order the tests ran: {order}")
+PY
+# The begins change nothing without the switch: the recording replays as
+# before, and nothing is sent.
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-proven --disable-tele 2>&1 | tee rep-proven-off.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] && grep -q "3 passed" rep-proven-off.log || { echo "FAIL: without the switch the recording with begins should replay as before (exit 0, 3 passed), got $RC"; FAIL=1; }
+grep -q 'sent the agent when each test began' rep-proven-off.log && { echo "FAIL: a replay without the proven switch sent the agent the tests' begins"; FAIL=1; }
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi
 exit "$FAIL"

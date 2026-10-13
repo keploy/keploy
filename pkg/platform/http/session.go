@@ -75,6 +75,7 @@ const (
 	stepScopeTable   = "scope-table"
 	stepSetTable     = "set-table"
 	stepScopeGate    = "scope-gate"
+	stepTestBegins   = "test-begins"
 	stepAgentReady   = "agent-ready"
 )
 

@@ -3279,6 +3279,42 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[strin
 	return nil
 }
 
+// PushTestBegins hands the agent when each test of the replayed recording
+// began, so it moves the run's clock per test (models.TestBeginsReq). They
+// are given again to a restarted agent, like the scope table. An agent that
+// cannot take them is an error: the tests would run on another clock than
+// their recording's.
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := maps.Clone(begins)
+			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded) })
+		}
+	}()
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send the agent the tests' recorded begins: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent did not take the tests' recorded begins: status %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
 // PushScopeTable hands the agent the replay-time per-test name→mock-names table
 // (from mappings.yaml) so the runner's /agent/scope/begin calls can restrict the
 // served pool per test. A missing endpoint (older agent) is a no-op.

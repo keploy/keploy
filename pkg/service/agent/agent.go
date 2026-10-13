@@ -133,6 +133,24 @@ type Agent struct {
 	// behavior instead of being silently ignored.
 	incomingMu sync.Mutex
 
+	// clockMu serialises the moves of the run's frozen clock (beginTestClock,
+	// endTestClock, releaseTestClock) with their state, so a begin and an end
+	// that cross never land out of order. clockHeld is the open test (its
+	// worker and name) that holds the clock; clockMoved is the test whose
+	// move is in force, the zero key when the clock is at the start time.
+	// They part when a test's end cannot move the clock back: the test no
+	// longer holds it, so the next test can begin, but the clock is still off
+	// the start time until a move back succeeds. clockMu is never held while
+	// scopeMu is taken.
+	clockMu    sync.Mutex
+	clockHeld  scopeKey
+	clockMoved scopeKey
+	// clockHeldStart is the holder's worker's start time (procStartTime),
+	// "" when the agent cannot see that process: a begin from another worker
+	// while the holder's has exited (or its pid is another process's now)
+	// knows the holder's end will never come.
+	clockHeldStart string
+
 	// scope state backs the /agent/scope/* and /agent/mock/stats API that a
 	// user's test runner (pytest / go test / jest / glue-code) calls to mark
 	// per-test boundaries. In record mode it collects the agent-clock window for
@@ -142,8 +160,9 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
-	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
+	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
+	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
+	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -163,6 +182,10 @@ type Agent struct {
 	// an end, the final reap) so they never interleave; taken before
 	// provenMu.
 	wire wireLock
+
+	// replay, under the proven switch: the start time of the process that
+	// opened each window in workerOpen (procStartTime), where it is known.
+	openProc map[scopeKey]string
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -536,17 +559,25 @@ const (
 // are lazily re-created by openWindow/NoteScope, so nil is the correct zero.
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
-	a.workerOpen = nil
+	a.workerOpen, a.openProc = nil, nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
 	// A gate belongs to the replay that installed it; the CLI installs this
 	// session's after the reset.
 	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
 	a.gatedScopes, a.gatedEndWarned = nil, false
+	// The tests' recorded begins belong to the replay that installed them;
+	// the clock's holder is given back by releaseTestClock, before this.
+	a.testBegins = nil
 	a.scopeMu.Unlock()
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+	// First, so a clock that cannot move back fails the session before
+	// anything of the previous one is reset (MockOutgoing).
+	if err := a.releaseTestClock(ctx); err != nil {
+		return nil, fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
+	}
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	starts.Default.Reset()
@@ -588,6 +619,13 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	}
 	a.logger.Debug("MockOutgoing function called", zap.Any("options", redactedOpts))
 
+	// A test the previous session left holding the run's clock (its end never
+	// came, or could not move it back) gives it back before the new session
+	// starts; a clock that cannot move back fails the session, which would
+	// otherwise start on it, before anything of the previous one is reset.
+	if err := a.releaseTestClock(ctx); err != nil {
+		return fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
+	}
 	// A new mock-serving session begins here (called once per replay). Clear the
 	// on-miss capture buffer so a reused / long-lived agent process (compose,
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
