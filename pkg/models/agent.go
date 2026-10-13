@@ -428,8 +428,11 @@ const (
 	// BacklogPending: the agent may still hand over something captured
 	// before the stop.
 	BacklogPending
-	// BacklogClear: the agent will hand over nothing more captured before
-	// the stop.
+	// BacklogClear: the agent holds nothing more captured before the stop:
+	// its capture, parsers and test-case queue are through it. What it has
+	// already handed on and the client has not received yet (in its mock
+	// manager's channel, the stream's encoder, the socket) is not counted:
+	// clear is not delivered.
 	BacklogClear
 	// BacklogUnsupported: the agent cannot tell, and never will (it predates
 	// the route, or its capture has no watermark). The stop goes by its

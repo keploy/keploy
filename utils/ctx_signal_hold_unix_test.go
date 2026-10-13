@@ -3,9 +3,11 @@
 package utils
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +17,13 @@ import (
 // stop signal waits on a hold (SetSignalHold) that the test releases by
 // creating "release" in the directory, or a second signal cuts short.
 const signalHoldHelperDir = "KEPLOY_TEST_SIGNAL_HOLD_HELPER"
+
+// signalHoldLinger, set, keeps the helper running after its root context is
+// cancelled until a later signal reaches it.
+const signalHoldLinger = "KEPLOY_TEST_SIGNAL_HOLD_LINGER"
+
+// signalHoldNone, set, runs the helper with no hold, as the CLI runs.
+const signalHoldNone = "KEPLOY_TEST_SIGNAL_HOLD_NONE"
 
 func TestSignalHoldHelper(t *testing.T) {
 	dir := os.Getenv(signalHoldHelperDir)
@@ -27,7 +36,7 @@ func TestSignalHoldHelper(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	SetSignalHold(func(stopNow <-chan struct{}) {
+	hold := func(stopNow <-chan struct{}) {
 		mark("holding")
 		for {
 			if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
@@ -41,11 +50,21 @@ func TestSignalHoldHelper(t *testing.T) {
 			case <-time.After(5 * time.Millisecond):
 			}
 		}
-	})
+	}
+	if os.Getenv(signalHoldNone) == "" {
+		SetSignalHold(hold)
+	}
 	ctx := NewCtx()
 	mark("ready")
 	<-ctx.Done()
 	mark("cancelled")
+	if os.Getenv(signalHoldLinger) != "" {
+		// Still stopping when a later signal comes (the agent's client
+		// stopping it once it has closed its streams).
+		<-InterruptedAgain()
+		mark("again")
+		os.Exit(0)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "stopped-now")); err == nil {
 		select {
 		case <-InterruptedAgain():
@@ -58,11 +77,20 @@ func TestSignalHoldHelper(t *testing.T) {
 
 // signalHoldRun starts the helper and returns it, with a func that waits for a
 // mark (failing after a generous bound: it only ends a broken run).
-func signalHoldRun(t *testing.T) (*exec.Cmd, string, func(string), chan error) {
+func signalHoldRun(t *testing.T, env ...string) (*exec.Cmd, string, func(string), chan error) {
+	cmd, dir, waitFor, exited, _ := signalHoldRunOut(t, env...)
+	return cmd, dir, waitFor, exited
+}
+
+// signalHoldRunOut is signalHoldRun, and also returns what the helper writes
+// to its stdout (where NewCtx says what a signal does), whole once it exited.
+func signalHoldRunOut(t *testing.T, env ...string) (*exec.Cmd, string, func(string), chan error, *bytes.Buffer) {
 	t.Helper()
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalHoldHelper$")
-	cmd.Env = append(os.Environ(), signalHoldHelperDir+"="+dir)
+	cmd.Env = append(append(os.Environ(), signalHoldHelperDir+"="+dir), env...)
+	out := &bytes.Buffer{}
+	cmd.Stdout = out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +110,7 @@ func signalHoldRun(t *testing.T) (*exec.Cmd, string, func(string), chan error) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	return cmd, dir, waitFor, exited
+	return cmd, dir, waitFor, exited, out
 }
 
 func marked(dir, name string) bool {
@@ -128,5 +156,59 @@ func TestNewCtx_ASecondSignalCutsTheHoldShort(t *testing.T) {
 	}
 	if marked(dir, "released") {
 		t.Fatal("the hold was released, not cut short")
+	}
+}
+
+// A signal after the hold finished (the agent's recording client closed its
+// streams, and then stopped the agent) cuts nothing short: it is not said to
+// lose what was being saved. One that cuts the hold short still is.
+func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
+	cmd, dir, waitFor, exited, out := signalHoldRunOut(t, signalHoldLinger+"=1")
+	waitFor("ready")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("holding")
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("cancelled")
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	waitFor("again")
+	if err := <-exited; err != nil {
+		t.Fatalf("the run ended with %v", err)
+	}
+	said := out.String()
+	if !strings.Contains(said, "Signal received again") || strings.Contains(said, "not saved") {
+		t.Fatalf("a signal after the hold finished was said to lose what was being saved:\n%s", said)
+	}
+
+	cmd, _, waitFor, exited, out = signalHoldRunOut(t)
+	waitFor("ready")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("holding")
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	waitFor("cancelled")
+	if err := <-exited; err != nil {
+		t.Fatalf("the run ended with %v", err)
+	}
+	if !strings.Contains(out.String(), "not saved") {
+		t.Fatalf("a signal that cut the hold short was not said to lose what was being saved:\n%s", out.String())
+	}
+}
+
+// With no hold (the CLI), a second signal stops the process with what it was
+// still saving, its stop's drain, cut short, and says so: only a hold that
+// finished leaves nothing to lose.
+func TestNewCtx_ASecondSignalWithNoHoldSaysWhatIsLost(t *testing.T) {
+	cmd, _, waitFor, exited, out := signalHoldRunOut(t, signalHoldNone+"=1", signalHoldLinger+"=1")
+	waitFor("ready")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("cancelled")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("again")
+	if err := <-exited; err != nil {
+		t.Fatalf("the run ended with %v", err)
+	}
+	if !strings.Contains(out.String(), "not saved") {
+		t.Fatalf("a second signal with no hold was not said to lose what was being saved:\n%s", out.String())
 	}
 }

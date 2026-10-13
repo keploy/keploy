@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
 
 // drainInstrumentation is a wrapped runner that emits its last mock AFTER Run
@@ -751,5 +753,181 @@ func TestDrainTrailingMocks_MocksStillComingBeforeAnyAnswerAreAWarning(t *testin
 	lost, logs, code := gatedDrain(t, refusedErr(), &frames, func() { frames.Add(1) }, true)
 	if lost || code != 0 || logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its mock stream before it said").Len() != 1 {
 		t.Fatalf("want one WARN and the run not failed: lost=%v exit code %d: %v", lost, code, logs.All())
+	}
+}
+
+// lifetimeInstr is an agent whose lifetime is the context its Setup got, as a
+// native agent's is: the user presses Ctrl+C while the runner runs, and the
+// drain then asks the agent what it still holds.
+type lifetimeInstr struct {
+	trickleInstrumentation
+	setupCtx  context.Context
+	interrupt func()
+	aliveAtLook,
+	looked atomic.Bool
+}
+
+func (l *lifetimeInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	l.setupCtx = ctx
+	return nil
+}
+
+func (l *lifetimeInstr) Run(context.Context, models.RunOptions) models.AppError {
+	l.interrupt() // Ctrl+C
+	// A live agent keeps its stream open until the client ends it.
+	captureCtx := l.captureCtx
+	go func() {
+		<-captureCtx.Done()
+		close(l.out)
+	}()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+func (l *lifetimeInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	if !l.looked.Swap(true) {
+		l.aliveAtLook.Store(l.setupCtx.Err() == nil)
+	}
+	return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+}
+
+// A Ctrl+C stops the runner, not the agent: the agent lives until the drain has
+// asked it what it still holds, and the teardown stops it after. Stopped as the
+// interrupt landed, it was gone before the drain, and what it held was lost.
+func TestRecord_ACtrlCLeavesTheAgentRunningUntilTheDrainIsDone(t *testing.T) {
+	parent, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	inst := &lifetimeInstr{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, 1)}, interrupt: interrupt}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "lifetime-test"
+	if err := New(zap.NewNop(), inst, &recordingMockDB{}, nil, FileStore{}, nil, cfg).Record(parent); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if !inst.looked.Load() {
+		t.Fatal("the drain never asked the agent")
+	}
+	if !inst.aliveAtLook.Load() {
+		t.Fatal("the agent was stopped by the Ctrl+C, before the drain asked it what it still held")
+	}
+	if inst.setupCtx.Err() == nil {
+		t.Fatal("the agent was never stopped")
+	}
+}
+
+// ownedGone is goneInstrumentation for an agent this client started
+// (AgentClient.StartedAgent): it holds its stream open for this drain.
+type ownedGone struct{ *goneInstrumentation }
+
+func (ownedGone) StartedAgent() bool { return true }
+
+// An agent this client started ends its stream during the drain, before the
+// drain asked it anything: it went away before the run could be confirmed
+// complete. The run fails, and the existing set is kept.
+func TestRecord_AnAgentThisClientStartedGoneBeforeTheDrainAsksFailsTheRun(t *testing.T) {
+	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
+	utils.ErrCode = 0
+	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	cfg := &config.Config{}
+	cfg.Mock.Name = "owned-gone-test"
+	db := &recordingMockDB{}
+	err := New(zap.New(core), ownedGone{inst}, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	inst.wg.Wait()
+	if err == nil || utils.ErrCode != utils.ExitKeployError || logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("before it confirmed it had handed over").Len() != 1 {
+		t.Fatalf("want the run failed at ERROR (error %v, exit code %d): %v", err, utils.ErrCode, logs.All())
+	}
+	if db.promoted.Load() {
+		t.Fatal("a run that could not be confirmed complete was promoted over the existing set")
+	}
+}
+
+// interruptedSetup is an agent whose setup the user's Ctrl+C interrupts as it
+// finishes: Setup returns only once the interrupt has stopped the agent (its
+// context, the agent's lifetime, is done).
+type interruptedSetup struct {
+	trickleInstrumentation
+	interrupt func()
+	captured  atomic.Bool
+}
+
+func (i *interruptedSetup) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	i.interrupt()
+	<-ctx.Done()
+	return nil
+}
+
+func (i *interruptedSetup) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
+	i.captured.Store(true)
+	return i.trickleInstrumentation.GetOutgoing(ctx, o)
+}
+
+// The user's interrupt that stopped the agent as its setup finished ends the
+// run as an interrupted setup: no error, and nothing captured with an agent
+// that is stopping (utils.SetupGate). Keploy's own failure there is not one
+// (TestARecordingKeployFailedIsNotAnInterrupt).
+func TestRecord_AnInterruptThatStoppedTheSetupEndsTheRun(t *testing.T) {
+	parent, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	inst := &interruptedSetup{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, 1)}, interrupt: interrupt}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "interrupted-setup"
+	if err := New(zap.NewNop(), inst, &recordingMockDB{}, nil, FileStore{}, nil, cfg).Record(parent); err != nil {
+		t.Fatalf("an interrupted setup ended with %v, want nil", err)
+	}
+	if inst.captured.Load() {
+		t.Fatal("the run went on to capture with an agent the interrupt had stopped")
+	}
+}
+
+// errAgentExited is an agent process's exit, as its wait goroutine hands it to
+// keploy's errgroup.
+var errAgentExited = errors.New("keploy agent exited: signal: killed")
+
+// diedAgent is an agent this client started that dies under the test command:
+// its process's exit fails keploy's errgroup, as the native agent's wait
+// goroutine does, and then its mock stream ends, before the drain asks it
+// anything.
+type diedAgent struct {
+	ownedGone
+	exited chan struct{}
+}
+
+func (d diedAgent) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("fixture: no errgroup in the setup's context")
+	}
+	grp.Go(func() error {
+		<-d.exited
+		return errAgentExited
+	})
+	return nil
+}
+
+func (d diedAgent) Run(ctx context.Context, o models.RunOptions) models.AppError {
+	close(d.exited)
+	<-ctx.Done() // keploy's errgroup has failed with the agent's exit
+	return d.goneInstrumentation.Run(ctx, o)
+}
+
+// A run whose agent died under it, not stopped by the user, fails with why:
+// the agent's exit, as a run that did not finish says it, on top of the mocks
+// it could not confirm. The set is not promoted.
+func TestRecord_AnAgentThatDiedUnderTheRunFailsWithItsExit(t *testing.T) {
+	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
+	utils.ErrCode = 0
+	inst := diedAgent{
+		ownedGone: ownedGone{&goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}},
+		exited:    make(chan struct{}),
+	}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "died-test"
+	db := &recordingMockDB{}
+	err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	inst.wg.Wait()
+	if !errors.Is(err, errAgentExited) {
+		t.Fatalf("the run failed with %v, want the agent's exit (%v) in it", err, errAgentExited)
+	}
+	if db.promoted.Load() {
+		t.Fatal("a run whose agent died under it was promoted over the existing set")
 	}
 }

@@ -2460,3 +2460,66 @@ func TestStart_TheAgentOutlivesTheInterruptUntilTheDrainsAreDone(t *testing.T) {
 		t.Fatal("the agent was not stopped once the drains were done")
 	}
 }
+
+// interruptedSetupInstr's Setup is interrupted as it finishes: the user's
+// Ctrl+C lands, and the setup returns only once the interrupt has stopped the
+// agent it brought up (its context, the agent's lifetime, is done).
+type interruptedSetupInstr struct {
+	*fakeInstr
+	interrupt context.CancelFunc
+	captured  atomic.Bool
+}
+
+func (i *interruptedSetupInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	i.interrupt()
+	<-ctx.Done()
+	return nil
+}
+
+func (i *interruptedSetupInstr) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
+	i.captured.Store(true)
+	return i.fakeInstr.GetOutgoing(ctx, o)
+}
+
+func (i *interruptedSetupInstr) GetIncoming(ctx context.Context, o models.IncomingOptions) (<-chan *models.TestCase, error) {
+	i.captured.Store(true)
+	return i.fakeInstr.GetIncoming(ctx, o)
+}
+
+// An interrupt that stopped the agent as its setup finished ends the run as an
+// interrupted setup: no recording goes on with an agent that is stopping
+// (utils.SetupGate).
+func TestStart_AnInterruptThatStoppedTheSetupEndsTheRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst := &interruptedSetupInstr{fakeInstr: &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}, interrupt: cancel}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: inst,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("an interrupted setup ended with %v, want nil", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Start did not return after its setup was interrupted")
+	}
+	if inst.captured.Load() {
+		t.Fatal("the recording went on to capture with an agent the interrupt had stopped")
+	}
+}

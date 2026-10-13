@@ -1136,3 +1136,92 @@ func TestDrain_ConsumerLagIsNotAnAgentBacklog(t *testing.T) {
 		t.Fatalf("handed on %d of 16; captureLost=%v: a lagging consumer failed a complete recording: %v", n, r.captureLost.Load(), logs.All())
 	}
 }
+
+// ownedAgent is an agent this client started (AgentClient.StartedAgent): it
+// holds its streams open until this client's drain is done.
+type ownedAgent struct{ *backlogAgent }
+
+func (ownedAgent) StartedAgent() bool { return true }
+
+// An agent this client started ends its stream after the stop, before the
+// drain ever asked it anything: it went away before the recording could be
+// confirmed complete. The recording fails, at ERROR; one docker compose or
+// kubelet stops says so at WARN.
+func TestDrain_AnAgentThisClientStartedGoneBeforeAnyLookFailsTheRecording(t *testing.T) {
+	for _, owned := range []bool{true, false} {
+		f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+		agent := &backlogAgent{fakeInstr: f, answer: func() (models.AgentBacklog, error) {
+			return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+		}}
+		var inst Instrumentation = agent
+		if owned {
+			inst = ownedAgent{agent}
+		}
+		core, logs := observer.New(zapcore.WarnLevel)
+		r := &Recorder{logger: zap.New(core), instrumentation: inst, config: &config.Config{}, frameQuiet: time.Hour}
+		g, gctx := errgroup.WithContext(context.Background())
+		ctx, cancel := context.WithCancel(gctx)
+		ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+		frames, err := r.GetTestAndMockChans(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for range frames.Incoming {
+			}
+		}()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range frames.Outgoing {
+			}
+		}()
+		cancel()          // the stop
+		close(f.outgoing) // the agent goes away before the drain asks it
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the mock drain did not end with its stream")
+		}
+		mocks := logs.FilterField(zap.String("frames", "mocks"))
+		errs := mocks.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("before it confirmed it had handed over").Len()
+		warns := mocks.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its stream before it said").Len()
+		if owned && (errs != 1 || !r.captureLost.Load()) {
+			t.Fatalf("an agent this client started, gone before the drain asked, did not fail the recording: %v", logs.All())
+		}
+		if !owned && (warns != 1 || r.captureLost.Load()) {
+			t.Fatalf("an agent this client did not start, gone before the drain asked, was not one WARN: %v", logs.All())
+		}
+		frames.Abandon()
+	}
+}
+
+// The stop's outer drains give up on a goroutine that makes no progress for
+// their stall bound (utils.DrainErrGroupProgress). A frame drain that keeps
+// waiting on an agent working through its backlog hands nothing over while it
+// waits, so each look at which it decides to keep waiting is progress: without
+// it, the outer bound cut a wait the drain chose, and the agent's backlog with it.
+func TestHoldForBacklog_AWaitingLookIsProgressForTheOuterDrains(t *testing.T) {
+	f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+	agent := &backlogAgent{fakeInstr: f}
+	agent.answer = func() (models.AgentBacklog, error) {
+		return models.AgentBacklog{Verdict: models.BacklogPending, Progress: uint64(agent.asked.Load())}, nil
+	}
+	r := &Recorder{logger: zap.NewNop(), instrumentation: agent, config: &config.Config{}}
+	var looks backlogLooks
+	stop := time.Now()
+	for i := 1; i <= 3; i++ {
+		before := r.drainProgress()
+		if !r.holdForBacklog(stop, &looks, "mocks") {
+			t.Fatalf("look %d: the drain stopped waiting on an agent whose backlog moves", i)
+		}
+		if r.drainProgress() <= before {
+			t.Fatalf("look %d: a look that keeps waiting was no progress for the outer drains", i)
+		}
+	}
+	agent.answer = func() (models.AgentBacklog, error) { return models.AgentBacklog{Verdict: models.BacklogClear}, nil }
+	before := r.drainProgress()
+	if r.holdForBacklog(stop, &looks, "mocks") || r.drainProgress() != before {
+		t.Fatal("a look that ends the wait was counted as progress, or did not end it")
+	}
+}

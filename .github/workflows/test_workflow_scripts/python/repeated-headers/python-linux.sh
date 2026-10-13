@@ -162,6 +162,18 @@ KEPLOY_CFG
         tail -200 "record_logs_${format}.txt"
         return 1
     fi
+    # The stop signals the agent too (pkill matches it), and it holds that
+    # signal until the recording's client has taken all it captured. The
+    # client then stops it: an agent already on its way out is waited for,
+    # not signalled again, unless it is still running past a grace (a busy
+    # runner's slow teardown can be), and then it has nothing left unsaved.
+    # So no stop may say that what it was still saving is not saved: it said
+    # so at the end of every recording, which had lost nothing.
+    if grep -q 'what Keploy was still saving is not saved' "record_logs_${format}.txt"; then
+        echo "::error::a clean stop said that what Keploy was still saving is not saved ($format)"
+        grep -n 'Signal received\|agent stop\|has not exited' "record_logs_${format}.txt"
+        return 1
+    fi
     if [ "$mode" = lag ]; then
         # The lag was really induced: the agent says so at WARN when it is.
         if ! grep -q 'KEPLOY_DEBUG_PARSER_LAG is set' "record_logs_${format}.txt"; then

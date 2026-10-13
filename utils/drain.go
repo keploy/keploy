@@ -130,8 +130,9 @@ type BacklogLooks struct {
 // time (a timeout) is an agent that may be starved, and may still hold
 // something.
 //
-//   - clear: the agent will hand over nothing more from before the stop.
-//     The wait ends.
+//   - clear: the agent holds nothing more from before the stop. The wait
+//     ends. What it already handed on and this client has not received yet
+//     is not counted (models.BacklogClear: clear is not delivered).
 //   - unsupported: the agent can never tell. The wait ends; the stop goes by
 //     its streams' quiet alone.
 //   - pending, or cannot tell (no answer came): the stop keeps waiting. An

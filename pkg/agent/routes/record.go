@@ -346,6 +346,11 @@ func (f *flushOnWrite) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// testCaseHoldTick is how often HandleIncoming looks at the test cases it holds
+// for their verdict again (syncmgr.TestCaseHoldTick). A variable so a test can
+// tell what the stream does at once from what its tick does.
+var testCaseHoldTick = syncmgr.TestCaseHoldTick
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -594,7 +599,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// past the cap, the spans before it are the ones joined (Spans).
 		hold.EarliestStarts(func(_, _ string, start time.Time) { syncmgr.Get().CheckedBefore(start) })
 		if hold.Len() > 0 && holdTick == nil {
-			holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+			holdTick = time.NewTicker(testCaseHoldTick)
 		} else if hold.Len() == 0 && holdTick != nil {
 			holdTick.Stop()
 			holdTick = nil
@@ -622,7 +627,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				// still has goes as its verdicts settle, or its bound ends.
 				for hold != nil && hold.Len() > 0 {
 					if holdTick == nil {
-						holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+						holdTick = time.NewTicker(testCaseHoldTick)
 					}
 					select {
 					case <-r.Context().Done():

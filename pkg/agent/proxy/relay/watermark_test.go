@@ -211,3 +211,62 @@ func TestWatermark_ReaderLagHoldsTheParserBehind(t *testing.T) {
 		t.Fatalf("the chunk reached the parser %v after it was read, want at least %v", d, lag)
 	}
 }
+
+// A response chunk from before mid that the drain has taken off the queue
+// (delivered) but the parser has not consumed, while the parser has already
+// taken a later client chunk: only the delivered list sees the response, and
+// without it the watermark says the parser is past mid.
+func TestWatermark_ADeliveredChunkOnTheOtherDirectionHoldsIt(t *testing.T) {
+	h := newHarness(t, Config{})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	h.writeDest([]byte("resp"))
+	h.readClient(4)
+	mid := time.Now()
+	time.Sleep(2 * time.Millisecond) // the next chunk is stamped after mid
+	h.writeClient([]byte("next"))
+	h.readDest(4)
+	// The drain hands the response to the parser's stream at once (it is
+	// delivered, not queued); the parser reads only the client direction.
+	awaitState(t, "the response to leave the tee's queue", func() bool {
+		h.r.teeD2C.mu.Lock()
+		defer h.r.teeD2C.mu.Unlock()
+		return len(h.r.teeD2C.q) == 0
+	})
+	c := readChunk(t, h.r.ClientStream())
+	if !c.ReadAt.After(mid) {
+		t.Fatalf("setup: client chunk stamped %v, not after %v", c.ReadAt, mid)
+	}
+	if !w.PendingBefore(mid) {
+		t.Fatal("PendingBefore(mid) = false with a response from before mid delivered but never consumed")
+	}
+	if w.Settled("", "", mid.Add(-time.Second), mid) {
+		t.Fatal("Settled = true for a window whose response the parser never consumed")
+	}
+}
+
+// A parser that took a request from before mid and now waits on the client
+// while the response, from after mid, waits for it on the other direction has
+// not consumed everything the connection carried: it may still be building
+// the exchange it took before mid, so it is not done with mid.
+func TestWatermark_AParserWaitingWithTheOtherDirectionUnreadIsNotDone(t *testing.T) {
+	h := newHarness(t, Config{})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	h.writeClient([]byte("req"))
+	h.readDest(3)
+	readChunk(t, h.r.ClientStream())
+	mid := time.Now()
+	time.Sleep(2 * time.Millisecond) // the response is stamped after mid
+	h.writeDest([]byte("resp"))
+	h.readClient(4)
+	awaitState(t, "the response to reach the parser's stream", func() bool {
+		return h.r.teeD2C.acceptedBytes() == 4
+	})
+	blockInRead(t, h.r.ClientStream())
+	if !w.PendingBefore(mid) {
+		t.Fatal("PendingBefore(mid) = false while the parser waits on the client with the response to the request it took before mid unread")
+	}
+}

@@ -243,6 +243,9 @@ func NewCtx() context.Context {
 
 		// What the process still does for someone else (SetSignalHold)
 		// finishes before the cancel; a second signal cuts it short.
+		// holdDone says it finished: nothing the process held for someone
+		// else is lost to a signal after it.
+		holdDone := false
 		if h := signalHold.Load(); h != nil {
 			stopNow := make(chan struct{})
 			held := make(chan struct{})
@@ -252,6 +255,7 @@ func NewCtx() context.Context {
 			}()
 			select {
 			case <-held:
+				holdDone = true
 			case sig2 := <-sigs:
 				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
 				MarkInterruptedAgain()
@@ -286,7 +290,14 @@ func NewCtx() context.Context {
 		// stayed registered and unread, so Ctrl+C did nothing and only
 		// SIGKILL, which skips all cleanup, could end the process.
 		for sig2 := range sigs {
-			fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			if holdDone {
+				// An agent whose recording client finished with it (the
+				// hold returned): a signal now, often the client's own stop
+				// of it, cuts nothing short.
+				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
+			} else {
+				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			}
 			MarkInterruptedAgain()
 		}
 	}()
