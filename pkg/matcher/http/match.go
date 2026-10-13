@@ -79,6 +79,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	for _, opt := range opts {
 		opt(&mo)
 	}
+	// Under the proven switch response arrays are compared in order.
+	ignoreOrdering = matcherUtils.ResponseIgnoreOrdering(ignoreOrdering)
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult

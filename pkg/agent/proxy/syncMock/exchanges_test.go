@@ -41,12 +41,13 @@ func TestExchanges_ZeroStartIsNow(t *testing.T) {
 	}
 }
 
-// A capture with no watermark (the proxy's) tells of its open exchanges.
+// A capture with no watermark cannot tell what it has yet to hand over, except
+// an exchange it has open from before the stop, which is pending.
 func TestPendingBefore_NoWatermarkTellsOpenExchanges(t *testing.T) {
 	m := &SyncMockManager{}
 	stop := time.Now()
-	if pending, known := m.PendingBefore(stop); !known || pending {
-		t.Fatalf("nothing open: pending=%v known=%v, want false true", pending, known)
+	if pending, known := m.PendingBefore(stop); known || pending {
+		t.Fatalf("nothing open: pending=%v known=%v, want false false (cannot tell)", pending, known)
 	}
 	done := m.OpenExchange(stop.Add(-time.Second))
 	defer done()

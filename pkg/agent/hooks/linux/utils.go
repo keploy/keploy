@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/cilium/ebpf"
@@ -61,12 +62,25 @@ func tracepointFailure(err error, tracefsMounted bool) error {
 	return fmt.Errorf("%w: %w", utils.ErrEnvironmentUnsupported, err)
 }
 
-// tracefsMounted reports whether tracefs can be reached where the tracepoint
-// API is looked up: the paths, and filesystem types, cilium/ebpf's own lookup
-// accepts (internal/tracefs getTracefsPath). That lookup reports a missing
-// mount only as a plain string, so this is how that cause is told apart from
-// every other reason an attach can fail.
+// tracefsMounted reports whether tracefs can be reached where cilium/ebpf
+// looks for it to attach a tracepoint (internal/tracefs getTracefsPath, from
+// v0.22.0): a tracefs mounted whole anywhere in /proc/self/mountinfo, so a
+// container's bind mount of it at another path counts, else a whole debugfs
+// with a tracing directory, else the canonical paths, by filesystem type. That
+// lookup reports a missing mount only as a plain string, so this is how that
+// cause is told apart from every other reason an attach can fail. cilium/ebpf
+// reads mountinfo once per process, at its first BPF call (its BPF token
+// lookup), and works out the tracefs path, with the debugfs and canonical-path
+// checks, once, at its first tracefs use; this reads all of it when asked, so
+// the two differ only where the mounts changed in between.
+// TestTracefsMountedAgreesWithCiliumInEveryLayout holds the two to the same
+// answer in each way tracefs can be mounted.
 func tracefsMounted() bool {
+	if table, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
+		if found, ok := tracefsInMountinfo(string(table)); ok && found {
+			return true
+		}
+	}
 	for _, m := range []struct {
 		path  string
 		magic int64
@@ -81,4 +95,42 @@ func tracefsMounted() bool {
 		}
 	}
 	return false
+}
+
+// mountinfoUnescape undoes show_mountinfo's escapes of ' ', '\t', '\n' and
+// '\\', as cilium/ebpf's internal/mountinfo does.
+var mountinfoUnescape = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+
+// tracefsInMountinfo reports whether a mountinfo table (proc(5)) has a place
+// cilium/ebpf takes for tracefs: a tracefs mount whose root is "/", or a
+// debugfs one whose mount point has a tracing directory. ok is false where
+// cilium/ebpf's parser refuses the table (a line without " - ", or with too
+// few fields), which then falls back to the canonical paths.
+func tracefsInMountinfo(table string) (found, ok bool) {
+	var debugfs []string
+	for _, line := range strings.Split(table, "\n") {
+		if line == "" {
+			continue
+		}
+		before, after, cut := strings.Cut(line, " - ")
+		first, second := strings.Fields(before), strings.Fields(after)
+		if !cut || len(second) == 0 || len(first) < 6 {
+			return false, false
+		}
+		if mountinfoUnescape.Replace(first[3]) != "/" {
+			continue
+		}
+		switch second[0] {
+		case "tracefs":
+			found = true
+		case "debugfs":
+			debugfs = append(debugfs, mountinfoUnescape.Replace(first[4]))
+		}
+	}
+	for _, m := range debugfs {
+		if st, err := os.Stat(filepath.Join(m, "tracing")); err == nil && st.IsDir() {
+			found = true
+		}
+	}
+	return found, true
 }

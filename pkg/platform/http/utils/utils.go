@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -46,3 +47,8 @@ func GenerateRandomContainerName(logger *zap.Logger, prefix string) string {
 	uuidSuffix := hex.EncodeToString(randomBytes)
 	return prefix + uuidSuffix
 }
+
+// StopSignalWait is the longest StopCommand waits for the process it signalled
+// to exit before it kills it (on Unix; on Windows it does not wait). A caller
+// that must have the process gone within a bound counts it in.
+const StopSignalWait = 8 * time.Second

@@ -2416,6 +2416,35 @@ func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
 	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")
 }
 
+// A health check's headers are the agent's only when it answered 200: an
+// answer other than 200 (a proxy's 503, an agent still starting) says nothing
+// about the agent, whatever headers it carries, and is no answer at all, as
+// none is when nothing listens. Each check here has a definite answer, so none
+// has a deadline.
+func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
+	answer := func(status int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Keploy-Proven", "off")
+			w.WriteHeader(status)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL + "/agent"
+	}
+
+	header := agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusOK))
+	require.NotNil(t, header, "a 200 is a healthy answer")
+	require.Equal(t, "off", header.Get("X-Keploy-Proven"), "the headers returned are not the answer's")
+
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
+		"the headers of a 503 were taken for the agent's")
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close()
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
+		"an address nothing answers on gave headers")
+}
+
 // Each health check waits twice as long as the last one that ran out of time,
 // up to a ceiling; a check that failed fast (nothing listening yet) or got an
 // answer leaves the wait as it was, so a local agent keeps its quick check.

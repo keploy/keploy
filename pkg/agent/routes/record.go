@@ -346,7 +346,15 @@ func (f *flushOnWrite) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// testCaseHoldTick is how often HandleIncoming looks at the test cases it holds
+// for their verdict again (syncmgr.TestCaseHoldTick). A variable so a test can
+// tell what the stream does at once from what its tick does.
+var testCaseHoldTick = syncmgr.TestCaseHoldTick
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+	// A recording's client that drains this stream after its stop holds it
+	// open until it has: a stop signal waits for that (holdForDrain).
+	defer holdForDrain(r)()
 	a.logger.Debug("Received request to handle incoming test cases")
 
 	// Flush headers to ensure the client gets the response immediately
@@ -388,6 +396,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("%s: %v", stopReason, err), http.StatusInternalServerError)
 		return // Important: return after handling the error
 	}
+	// Test cases built and not yet taken here wait in tc: a stop's drain
+	// waits for them (syncMock BacklogBefore).
+	defer syncmgr.Get().WatchTestCaseQueue(func() int { return len(tc) })()
 
 	// Kept requests the mock manager leaves out this session because their
 	// window was given up while they were in flight (syncMock.Window.Keep),
@@ -588,7 +599,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// past the cap, the spans before it are the ones joined (Spans).
 		hold.EarliestStarts(func(_, _ string, start time.Time) { syncmgr.Get().CheckedBefore(start) })
 		if hold.Len() > 0 && holdTick == nil {
-			holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+			holdTick = time.NewTicker(testCaseHoldTick)
 		} else if hold.Len() == 0 && holdTick != nil {
 			holdTick.Stop()
 			holdTick = nil
@@ -616,7 +627,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				// still has goes as its verdicts settle, or its bound ends.
 				for hold != nil && hold.Len() > 0 {
 					if holdTick == nil {
-						holdTick = time.NewTicker(syncmgr.TestCaseHoldTick)
+						holdTick = time.NewTicker(testCaseHoldTick)
 					}
 					select {
 					case <-r.Context().Done():
@@ -723,9 +734,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// waits for the tick, which looks at them all.
 			wasEmpty := hold.Len() == 0
 			hold.Add(t, "", "")
-			if wasEmpty && !release() {
-				return
+			if wasEmpty {
+				if !release() {
+					return
+				}
+				continue
 			}
+			// Held from here: a stop's drain must know before the tick.
+			syncmgr.Get().NoteHeld(hold.Oldest())
 		}
 	}
 }
@@ -744,33 +760,45 @@ type PendingResponse struct {
 	// Pending: the agent may still hand over a test case or a mock captured
 	// before the time asked about.
 	Pending bool `json:"pending"`
+	// Progress is a count that moves whenever the capture gets further (a
+	// parser consumes bytes or returns, a test case is built): a stop that
+	// waits on a pending backlog tells one being worked through from one
+	// that is not moving. Absent from an agent that predates it.
+	Progress uint64 `json:"progress"`
+	// WaitingOn says what is pending, when it can be told.
+	WaitingOn string `json:"waitingOn,omitempty"`
 }
 
 // HandlePending tells a recording's stop whether the agent may still hand over
 // a test case or a mock captured before ?before= (Unix nanoseconds): its
-// capture has not got past that time, or a test case it holds for its verdict
-// ended before it. The stop drains the agent's streams until it may not, and
-// not only until they fall quiet: a parser can be behind the traffic, and
-// quiet, for longer than any fixed grace, and a server can finish a response
-// after the test command has exited. A capture with no watermark (the proxy's)
-// tells of the exchanges its parsers have open (syncMock.OpenExchange). 501
-// when the agent cannot tell; the stop then goes by quiet alone.
+// capture has not got past that time, or a test case it holds for its verdict,
+// builds, or has queued ended before it. The stop drains the agent's streams
+// until it may not, and not only until they fall quiet: a parser can be
+// behind the traffic, and quiet, for longer than any fixed grace. It also says
+// how far the capture has got (Progress), so the stop can tell a backlog being
+// worked through from one that is not moving. An HTTP exchange still open from
+// before that time (its response still being sent) is pending too
+// (syncMock.OpenExchange). 501 when the agent cannot tell
+// (its capture has no watermark); the stop then goes by quiet alone.
 func (a *Agent) HandlePending(w http.ResponseWriter, r *http.Request) {
 	ns, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 	if err != nil {
 		http.Error(w, "before must be a Unix time in nanoseconds", http.StatusBadRequest)
 		return
 	}
-	pending, known := syncmgr.Get().PendingBefore(time.Unix(0, ns))
-	if !known {
+	st := syncmgr.Get().BacklogBefore(time.Unix(0, ns))
+	if !st.Known {
 		http.Error(w, "this agent's capture cannot tell what it has yet to hand over", http.StatusNotImplemented)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: pending})
+	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: st.Pending, Progress: st.Progress, WaitingOn: st.WaitingOn})
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
+	// A recording's client that drains this stream after its stop holds it
+	// open until it has: a stop signal waits for that (holdForDrain).
+	defer holdForDrain(r)()
 
 	a.logger.Debug("Received request to handle outgoing mocks")
 
@@ -864,6 +892,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
+	// A recording's client that drains this stream after its stop holds it
+	// open until it has: a stop signal waits for that (holdForDrain).
+	defer holdForDrain(r)()
 	a.logger.Debug("Received request to handle mappings stream")
 	w.Header().Set("Content-Type", "application/json")
 	flusher, ok := w.(http.Flusher)
@@ -1020,7 +1051,16 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 	a.logger.Debug("Received graceful shutdown notification")
 
-	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
+	// A recording client that holds a frame stream it drains after the stop
+	// stops the app it started before it stops the agent: what the ingress
+	// finds refusing from here is that app gone on purpose (incoming
+	// stopping.go). Any other client's app (docker compose, a k8s sidecar's)
+	// goes on running through the stop.
+	ctx := r.Context()
+	if RecordingClients() > 0 {
+		ctx = models.WithDrainsAfterStop(ctx)
+	}
+	if err := a.svc.SetGracefulShutdown(ctx); err != nil {
 		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
 		http.Error(w, fmt.Sprintf("failed to set graceful shutdown: %v", err), http.StatusInternalServerError)
 		return

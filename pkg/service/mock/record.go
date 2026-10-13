@@ -27,7 +27,8 @@ import (
 const mockDrainStall = 5 * time.Second
 
 // mockDrainQuiet is how long the outgoing stream must stay silent before the
-// drain concludes the agent has handed over everything.
+// drain asks the agent whether it still holds anything from before the run
+// ended (drainTrailingMocks).
 //
 // The window it covers is small but real: the agent finishes parsing the last
 // dependency response, emits the mock, and it travels agent -> gob stream ->
@@ -67,13 +68,26 @@ func (m *mockService) Record(ctx context.Context) error {
 	// reaches disk (same rationale as pkg/service/record's persistCtx).
 	persistCtx := context.WithoutCancel(ctx)
 
+	// The agent's lifetime (setupCtx). A Ctrl+C while it is still being set
+	// up cancels the setup at once. Once it is up, it records until the drain
+	// below has taken what it captured before the run ended, and the teardown
+	// stops it then. Cancelled as the interrupt landed, it was stopped (its
+	// stop request) before the drain, which then lost what it still held, and
+	// the short set replaced the one it was recorded to update.
+	// The interrupt and the agent being up are decided together
+	// (utils.SetupGate).
+	setupCtx, setupCancel := context.WithCancel(context.WithoutCancel(ctx))
+	setupGate := utils.NewSetupGate(ctx, setupCancel)
+
 	var stopReason string
 	defer func() {
 		m.notifyShutdown()
 		// Cancel the errgroup ctx so the agent-monitor / app-runner goroutines
 		// (bound to this ctx by Setup/Run) observe cancellation and unwind,
-		// otherwise the drain below waits its full 30s budget every run.
+		// otherwise the drain below waits its full 30s budget every run; and
+		// the agent's lifetime, now that the drain is done.
 		cancel()
+		setupCancel()
 		if err := utils.DrainErrGroup(m.logger, "mock-record", errGrp, 30*time.Second); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-record goroutines")
 		}
@@ -81,7 +95,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 1. Instrument: start the agent, hooks and proxy in mock mode (no ingress
 	//    port relocation — the runner is not a server).
-	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
+	if err := m.instrumentation.Setup(setupCtx, m.config.Command, models.SetupOptions{
 		Container:        m.config.ContainerName,
 		FromContainer:    m.config.FromContainer,
 		CommandType:      m.config.CommandType,
@@ -102,6 +116,21 @@ func (m *mockService) Record(ctx context.Context) error {
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
+	if !setupGate.Up() {
+		// The run's context ended first, as the setup finished, and stopped
+		// the agent: an interrupted setup when the user stopped it (parent),
+		// keploy's own failure (the errgroup's) otherwise, which must not
+		// pass for one.
+		if parent.Err() != nil {
+			return nil
+		}
+		stopReason = "failed setting up the environment"
+		cause := context.Cause(ctx)
+		utils.LogError(m.logger, cause, stopReason)
+		return fmt.Errorf("%s: %w", stopReason, cause)
+	}
+	// The agent is up: from here a Ctrl+C no longer stops it; the teardown
+	// does, once the drain is done.
 
 	// 2. Docker compose inverts this function's normal order: arming the
 	//    capture (step 4) needs a live agent, but under compose the agent is a
@@ -171,6 +200,18 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 4. Arm the record proxy and stream captured mocks.
 	captureCtx, stopCapture := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopCapture()
+	// Natively the drain below runs, and the capture's streams close, before
+	// the agent is stopped: the agent holds a stop signal it gets meanwhile
+	// (a `pkill keploy`, or a stop of its container, reaches it too) until
+	// they have, or it ended the streams the drain still needed
+	// (models.DrainsAfterStopHeader). Not under compose:
+	// the streams close only once `docker compose up` has exited, which waits
+	// on the agent, a service in the project; held for them, it would be
+	// killed only at compose's stop timeout.
+	agentHolds := composeAppExit == nil
+	if agentHolds {
+		captureCtx = models.WithDrainsAfterStop(captureCtx)
+	}
 	outgoing, err := m.instrumentation.GetOutgoing(captureCtx, models.OutgoingOptions{
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
@@ -317,9 +358,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	// be a race. This returns as soon as the agent stops sending.
 	drainStart := time.Now()
 	drainFrom.Store(drainStart.UnixNano())
-	m.drainTrailingMocks(consumerDone, drainStart, func() (uint64, bool) {
+	lost := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
 		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
-	})
+	}, func() uint64 { return uint64(heldSeen.Load()) })
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
 		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
@@ -327,6 +368,26 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Duration("stalledFor", mockDrainStall))
 	}
 	capture.wait(mockDrainStall)
+
+	// The agent still held mocks when the drain ended (said above, at ERROR):
+	// what was captured is not the whole run, and promoted it would replace
+	// the set it was recorded to update with one that is short of mocks.
+	if lost {
+		stopReason = "the recording may be incomplete: Keploy could not confirm it saved all the mocks the keploy agent captured"
+		err := errors.New(stopReason)
+		if parent.Err() == nil {
+			// Not the user: the agent died under the test command, which is
+			// why it ended its stream early. Say why, as a run that did not
+			// finish does.
+			if cause := m.runFailure(ctx); cause != nil {
+				err = fmt.Errorf("%s: %w", stopReason, cause)
+			}
+		}
+		m.logger.Error(stopReason+"; the mocks it recorded were not saved over the existing set",
+			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Error(err),
+			zap.String("next_step", "re-record the mock set"))
+		return err
+	}
 
 	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
 		if mockCount == 0 && len(capture.list()) == 0 {
@@ -350,11 +411,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// errgroup; under compose the agent is a service in the project, its death
 	// stops the project -- test command included, whose exit is then compose's
 	// stop and not its verdict -- and only the agent's container says so.
-	cause := m.composeAgentFailure()
-	if cause == nil && ctx.Err() != nil {
-		cause = context.Cause(ctx)
-	}
-	if cause != nil {
+	if cause := m.runFailure(ctx); cause != nil {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
 		}
@@ -778,63 +835,176 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 
 // drainTrailingMocks blocks until the agent has evidently finished handing over
 // mocks: no new arrival of one requested before the drain began
-// (mocksSeen counts those) for mockDrainQuiet, or the stream ended by itself.
+// (mocksSeen counts those) for mockDrainQuiet and the agent says it holds
+// nothing more (clear), or the stream ended by itself. Clear is not
+// delivered: a mock the agent had handed on and this client had not received
+// yet when the stream is ended is lost unseen (models.BacklogClear); the
+// quiet before the drain asks has almost always let it through.
 // It is bounded by progress, not by a deadline: an agent still handing over a
 // backlog is waited for however long that takes, and so is one the user
 // interrupted (Ctrl+C stops the recording, not the handing over of what was
 // already captured). Calls something left running keeps making do not hold
 // it. It must be called BEFORE the capture context is cancelled - see the
 // call site.
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, held func() (progress uint64, busy bool)) {
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64) (lost bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 
 	last, _ := held()
+	looks := utils.BacklogLooks{Stall: mockDrainStallLooks}
+	// lookedAt is arrived()'s count at the drain's latest look the agent was
+	// not gone for (utils.BacklogLooks.Said).
+	lookedAt := arrived()
 	for {
 		select {
 		case <-consumerDone:
-			// The agent closed the stream on its own; nothing left to wait for.
-			return
+			// The agent closed the stream on its own. One that holds it for
+			// this drain (agentHolds) closes it only as it goes away: it was
+			// stopped, or crashed, before the drain was through. Otherwise
+			// (compose: the agent goes with the project) nothing is left to
+			// wait for.
+			if agentHolds {
+				// A second interrupt that reached the agent too ends its
+				// stream as it gives the drain up: the user's stop.
+				select {
+				case <-utils.InterruptedAgain():
+					m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
+						zap.String("next_step", "mocks the agent still held were not saved"))
+				default:
+					return m.agentEndedDrain(&looks, arrived() == lookedAt)
+				}
+			}
+			return false
 		case <-utils.InterruptedAgain():
 			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
 				zap.String("next_step", "mocks the agent still held were not saved"))
-			return
+			return false
 		case <-quiet.C:
 			// Quiet means the stream brought nothing held while the consumer
 			// was free to take it: a consumer still persisting one is not
 			// quiet, however long the write takes.
-			if now, busy := held(); now != last || busy {
+			now, busy := held()
+			if now != last || busy {
 				last = now
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
 			// Quiet is not proof: an agent whose capture can tell says whether
-			// it may still hand over a mock from before the runner exited.
-			if m.agentPendingBefore(from) {
+			// it may still hand over a mock from before the runner exited,
+			// and one that does not answer may still hold one
+			// (holdForBacklog).
+			lookedBefore := lookedAt
+			lookedAt = arrived()
+			wait, gaveUp := m.holdForBacklog(from, &looks, now)
+			if looks.LastGone() {
+				// A look the agent was gone for says nothing of what it
+				// held: what came since counts from the one before.
+				lookedAt = lookedBefore
+			}
+			if wait {
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
-			return
+			return gaveUp
 		}
 	}
 }
 
-// pendingReader is an agent client that can ask the agent whether it may still
-// hand over something captured before a time (AgentClient.PendingBefore).
-type pendingReader interface {
-	PendingBefore(ctx context.Context, before time.Time) (pending, known bool, err error)
+// runFailure is why a run the user did not stop ended: the agent's container
+// says so under compose; natively its death fails the run's own errgroup
+// (ctx). nil: nothing failed.
+func (m *mockService) runFailure(ctx context.Context) error {
+	if cause := m.composeAgentFailure(); cause != nil {
+		return cause
+	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	return nil
 }
 
-// agentPendingBefore reports whether the agent says it may still hand over a
-// mock captured before `before`. False when it cannot tell.
-func (m *mockService) agentPendingBefore(before time.Time) bool {
-	pr, ok := m.instrumentation.(pendingReader)
-	if !ok {
+// agentEndedDrain reports the agent ending its mock stream while the drain
+// still needed it (drainTrailingMocks): what it still held is lost. The run
+// fails (lost), said at ERROR, and the set it recorded is not saved over the
+// existing one, when the agent itself gave a sign it held something (at the
+// latest look it was not already gone for, it said so, or did not answer:
+// Held), or when this client started the agent (startedAgent): such an agent
+// holds its stream open until this drain is done, so one that ends it first
+// went away before the run could be confirmed complete. The loss is said to be
+// certain only when it said it held something and no mock from before the
+// runner exited came since (noneSince). Otherwise it is said at WARN.
+func (m *mockService) agentEndedDrain(looks *utils.BacklogLooks, noneSince bool) (lost bool) {
+	if !looks.Held() && !startedAgent(m.instrumentation) {
+		m.logger.Warn("the keploy agent ended its mock stream before it said it held nothing more from before the run ended: mocks it still held, if any, are lost",
+			zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured"))
 		return false
 	}
-	pending, known, err := pr.PendingBefore(context.Background(), before)
-	if err != nil {
-		m.logger.Debug("could not ask the agent what it has yet to hand over; going by the stream's quiet", zap.Error(err))
+	said, answered := looks.Said()
+	msg := "the keploy agent ended its mock stream before it confirmed it had handed over all the mocks it captured before the run ended: some may be lost"
+	if answered && said == models.BacklogPending && noneSince {
+		msg = "the keploy agent ended its mock stream while it still held mocks it captured before the run ended: those are lost"
 	}
-	return known && pending
+	var fields []zap.Field
+	if answered {
+		fields = append(fields, zap.Stringer("agent_said", said))
+	}
+	m.logger.Error(msg, append(fields,
+		zap.String("next_step", "the agent was stopped or crashed before the recording had saved what it held; the run ends as failed and the existing mock set is kept. Do not stop the agent separately from the recording; re-record"))...)
+	utils.SetExitCodeOnce(utils.ExitKeployError)
+	return true
+}
+
+// startedAgent reports whether the agent client started the agent it talks to
+// (AgentClient.StartedAgent): only this client stops such an agent.
+func startedAgent(inst any) bool {
+	s, ok := inst.(interface{ StartedAgent() bool })
+	return ok && s.StartedAgent()
+}
+
+// backlogReader is an agent client that can ask the agent whether it may still
+// hand over something captured before a time (AgentClient.BacklogBefore).
+type backlogReader interface {
+	BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error)
+}
+
+// mockDrainStallLooks is how many looks in a row the drain makes at a backlog
+// the agent says is pending, or does not answer about, with nothing handed
+// over and no progress in the agent's capture between them, before it stops
+// waiting and reports what is lost. A count, not a time: each look comes once
+// the stream has been quiet for mockDrainQuiet, so the drain waits at least
+// that times this on a backlog that does not move, well past the agent's own
+// hang bound (a parser that holds work and makes no progress is retired,
+// which is progress here).
+const mockDrainStallLooks = 180
+
+// holdForBacklog decides, for the trailing drain once the stream has gone
+// quiet, whether it goes on waiting for what the agent still holds from
+// before the runner exited (true) or ends (false), by the agent's answer
+// (utils.BacklogLooks.Look): clear or unsupported end it; pending, or no
+// answer at all, keep it going, never read as "nothing pending". frames is
+// the drain's own progress so far. A wait that sees no progress for
+// mockDrainStallLooks looks ends with an error that says what the agent still
+// held, and the run fails (a Keploy-side exit code, never over the runner's
+// own).
+func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks, frames uint64) (wait, gaveUp bool) {
+	br, ok := m.instrumentation.(backlogReader)
+	if !ok {
+		return false, false
+	}
+	b, err := br.BacklogBefore(context.Background(), before)
+	wait, gaveUp = looks.Look(b, err, frames)
+	if gaveUp {
+		m.logger.Error("stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
+			zap.Stringer("agent_says", b.Verdict),
+			zap.String("waiting_on", b.WaitingOn),
+			zap.Int("looks_without_progress", looks.Stalled()),
+			zap.NamedError("last_look_error", err),
+			zap.String("next_step", "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more"))
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return false, true
+	}
+	if wait && b.Verdict == models.BacklogCannotTell && looks.Stalled() == 1 {
+		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", zap.Error(err))
+	}
+	return wait, false
 }

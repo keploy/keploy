@@ -260,6 +260,20 @@ type tee struct {
 	// at random between delivering and discarding an already-recorded
 	// chunk.
 	shutdown chan struct{}
+
+	// progress is how far this direction's capture has got, for the
+	// capture watermark (watermark.go).
+	progress teeProgress
+
+	// consumed is how many bytes of this direction's stream have left the
+	// FakeConn its parser reads (fakeconn.FakeConn.Consumed). Set by [New]
+	// before the drain starts.
+	consumed func() int64
+
+	// readerLag, when positive, delays each chunk's delivery to the parser
+	// until this long after it was read ([Config.ReaderLag]). Read-only
+	// after construction.
+	readerLag time.Duration
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
@@ -575,7 +589,15 @@ func (t *tee) drain() {
 			// not pin its high-water-mark allocation for its whole life.
 			t.q = nil
 		}
+		// Off the queue and not yet consumed by the parser: the watermark
+		// follows it from here (teeProgress.delivered), under the same
+		// lock, so no look finds it in neither place.
+		t.noteDeliveringLocked(c)
 		t.mu.Unlock()
+
+		if t.readerLag > 0 && !t.lagDelivery(c) {
+			return
+		}
 
 		// Fast path: deliver without blocking whenever out has room. This
 		// is the overwhelmingly common case, and doing it first means the
@@ -830,6 +852,8 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 	// first would only add an O(n) pass under the same mutex push contends on.
 	t.q = nil
 	t.qBytes = 0
+	// Nothing will consume what was delivered either: its parser is gone.
+	t.progress.delivered = nil
 	// Mark the tee dead. drain is about to return, so from here on NOTHING
 	// will deliver a queued chunk — a push that kept succeeding would append
 	// to a queue with no consumer and report success for a chunk that is

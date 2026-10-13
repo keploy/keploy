@@ -2636,7 +2636,10 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+// AgentHealthTicker checks the agent's health endpoint every checkInterval
+// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// returns when ctx ends too, and closes agentReadyCh either way, so a receive
+// that gets false means ctx ended first.
 //
 // Each check waits agentHealthFirstWait for its answer to begin with, and twice
 // as long after a check that ran out of time (nextAgentHealthWait), so an agent
@@ -2646,17 +2649,46 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-// and signals on the provided channel when the agent becomes available or unavailable.
-// It respects the context timeout and returns when the context is cancelled.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+	defer close(agentReadyCh)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+		select {
+		case agentReadyCh <- true:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// AgentHealthTickerWithAnswer is AgentHealthTicker that sends, in place of
+// true, the headers of the answer that found the agent healthy (never nil),
+// so the caller reads what that same answer said, with no second request that
+// an agent which has since stopped answering, or a budget that has since run
+// out, could fail. A receive that gets nil means ctx ended first.
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+	defer close(answers)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+		select {
+		case answers <- header:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// agentHealthTicker is the loop of the two above: it checks the agent's health
+// every checkInterval until an answer finds it healthy, hands that answer's
+// headers to ready, which reports whether it delivered them (false when ctx
+// ended first), and returns; or it returns when ctx ends.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
-	defer close(agentReadyCh)
 
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
-	agentStarted := false
 
 	for {
 		select {
@@ -2664,72 +2696,70 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 			return
 		case <-ticker.C:
 			checkCtx, cancel := context.WithTimeout(ctx, wait)
-			isHealthy := isAgentHealthy(checkCtx, logger, client, agentURI)
-			timedOut := !isHealthy && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
 			if next := nextAgentHealthWait(wait, timedOut); next != wait {
 				logger.Debug("agent health check ran out of time; the next one waits longer",
 					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 				wait = next
 			}
-
-			if isHealthy && !agentStarted {
-				// Agent became healthy
-				agentStarted = true
-				select {
-				case agentReadyCh <- true:
-					// Only now, and off this goroutine. The check is a
-					// diagnostic: every caller races this send against a
-					// readiness deadline, and spending any of that budget on
-					// it could fail the user's run with "did not become ready"
-					// against an agent that had just answered its health
-					// check. Detached from ctx for the same reason it runs at
-					// all — the caller cancels this context as soon as it has
-					// its answer, which would cancel the check before it could
-					// report anything.
-					go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
-					return
-				case <-ctx.Done():
-					return
-				}
-			} else if !isHealthy && agentStarted {
-				// Agent became unhealthy
-				agentStarted = false
-				select {
-				case agentReadyCh <- false:
-				case <-ctx.Done():
-					return
-				}
+			if header == nil {
+				continue
 			}
+			if ready(header) {
+				// Only now, and off this goroutine. The check is a
+				// diagnostic: every caller races this signal against a
+				// readiness deadline, and spending any of that budget on it
+				// could fail the user's run with "did not become ready"
+				// against an agent that had just answered its health check.
+				// Detached from ctx for the same reason it runs at all --
+				// the caller cancels this context as soon as it has its
+				// answer, which would cancel the check before it could
+				// report anything.
+				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+			}
+			return
 		}
 	}
 }
 
-// isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) bool {
+// agentHealthAnswer checks whether the agent is running and healthy by calling
+// its /agent/health endpoint, and returns the headers of a healthy (200)
+// answer, never nil, or nil when there was none: no answer, or an answer
+// other than 200, whose headers say nothing about the agent.
+func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
 	logger.Debug("Checking agent health", zap.String("url", healthURL))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		logger.Debug("Failed to create health check request", zap.Error(err))
-		return false
+		return nil
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Debug("Failed to read agent health response body", zap.Error(err))
-		return false
+		return nil
 	}
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	if resp.Header == nil {
+		// A RoundTripper other than net/http's may leave it nil; healthy is
+		// never nil.
+		return http.Header{}
+	}
+	return resp.Header
 }
 
 // TestSetMocksReader is an optional extension of the mock store a replay, the

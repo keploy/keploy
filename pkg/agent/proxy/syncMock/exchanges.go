@@ -13,6 +13,9 @@ import (
 // open longer, such as a stream that never ends, is not waited for.
 const OpenExchangeWait = 10 * time.Second
 
+// openExchangeWaiting is what a stop is told it waits on for an open exchange.
+const openExchangeWaiting = "an HTTP exchange still open (its response is still being sent)"
+
 // Exchanges keeps the exchanges parsers have open: a request captured whose
 // response is not yet recorded. The zero value is ready to use. A recording's stop waits for those its test
 // command started (PendingBefore): a server can finish a response after the
