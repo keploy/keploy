@@ -298,6 +298,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	} else {
 		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 		if err != nil {
+			// Its perf_event_open(2) is the one call here that
+			// kernel.perf_event_paranoid gates, and every program above
+			// loaded with the same capabilities: say what refused it, not
+			// only "permission denied".
+			err = diagnosePerfEventRefusal(err)
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 			return tracepointFailure(err, tracefsMounted())
 		}
