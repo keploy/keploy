@@ -259,11 +259,12 @@ func TestRecordIncoming_ACallFromBeforeTheStopIsPendingUntilItIsCaptured(t *test
 }
 
 // Every chunk the parser is handed is released exactly once, whatever becomes
-// of it: handed to the emitter once all of it is taken, or as the parser
-// returns when it took only part of it, or released at once when the parser
-// gave up before taking it. A chunk released early would let a stop end
-// before the call it completes is captured; one never released would hold
-// every stop until it gave up, failing a recording that lost nothing.
+// of it: through the emitter when its frames completed any (it releases it
+// once it has decided what they completed), and at once when they completed
+// none, or the parser never took it. A chunk released before the emitter
+// decided its calls would let a stop end before they are captured; one never
+// released would hold every stop until it gave up, failing a recording that
+// had lost nothing.
 func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 	req, _ := pingCall(t)
 	split := len(http2.ClientPreface) + 20 // inside the request's HEADERS frame
@@ -298,21 +299,22 @@ func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 		return got
 	}
 
-	t.Run("a frame split across chunks waits for its end", func(t *testing.T) {
+	t.Run("a chunk that completes no frame is released at once", func(t *testing.T) {
 		got := run(t, [][]byte{req[:split], req[split:]})
-		assert.Equal(t, []int{0, 1}, got.toEmitter)
-		assert.Empty(t, got.direct)
-	})
-	t.Run("a stream that ends mid-frame hands its part-taken chunk on", func(t *testing.T) {
-		got := run(t, [][]byte{req[:split]})
-		assert.Equal(t, []int{0}, got.toEmitter)
-		assert.Empty(t, got.direct)
+		assert.Equal(t, []int{1}, got.toEmitter, "the chunk that completes the frames")
+		assert.Equal(t, []int{0}, got.direct, "the chunk that ends mid-frame")
 	})
 	t.Run("chunks left when the parser gives up are released", func(t *testing.T) {
 		bad := []byte{0, 0, 0, 0x0, 0, 0, 0, 0, 0} // a DATA frame on stream 0: a protocol error
 		got := run(t, [][]byte{req, bad, req})
-		assert.Equal(t, []int{0, 1}, got.toEmitter, "the good chunk, and the one it stopped in")
-		assert.Equal(t, []int{2}, got.direct, "the chunk it never took")
+		assert.Equal(t, []int{0}, got.toEmitter, "the good chunk")
+		assert.Equal(t, []int{1, 2}, got.direct, "the one it stopped in, which completed no frame, and the one it never took")
+	})
+	t.Run("a chunk it stops in after some of its frames goes to the emitter", func(t *testing.T) {
+		bad := []byte{0, 0, 0, 0x0, 0, 0, 0, 0, 0}
+		got := run(t, [][]byte{append(append([]byte{}, req...), bad...)})
+		assert.Equal(t, []int{0}, got.toEmitter)
+		assert.Empty(t, got.direct)
 	})
 	t.Run("an empty chunk is released", func(t *testing.T) {
 		got := run(t, [][]byte{{}, req})
@@ -331,7 +333,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 	split := len(http2.ClientPreface) + 20 // inside the request's HEADERS frame
 	for name, tc := range map[string]struct {
 		chunks []frameChunk
-		want   int // chunks handed to the emitter before ch closes
+		want   int32 // chunks let go before ch closes
 	}{
 		"a frame it cannot read": {
 			chunks: []frameChunk{{data: req}, {data: []byte{0, 0, 0, 0x0, 0, 0, 0, 0, 0}}}, // DATA on stream 0
@@ -344,8 +346,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ch := make(chan frameChunk) // open: the connection lives on
-			handed := make(chan int, 8)
-			var direct atomic.Int32
+			var released atomic.Int32
 			parserDone := make(chan struct{})
 			go func() {
 				defer close(parserDone)
@@ -353,33 +354,65 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 					for _, d := range done {
 						d()
 					}
-					handed <- len(done)
 				})
 			}()
 			for i := range tc.chunks {
 				c := tc.chunks[i]
 				if !c.teeEnded {
-					c.timestamp, c.built = time.Now(), func() {}
+					c.timestamp, c.built = time.Now(), func() { released.Add(1) }
 				}
 				ch <- c
 			}
-			got := 0
-			for got < tc.want {
-				select {
-				case n := <-handed:
-					got += n
-				case <-time.After(30 * time.Second):
-					t.Fatalf("%d of %d chunks let go while the connection is open", got, tc.want)
+			deadline := time.Now().Add(30 * time.Second) // bounds only a parser that never lets go
+			for released.Load() < tc.want {
+				if time.Now().After(deadline) {
+					t.Fatalf("%d of %d chunks let go while the connection is open", released.Load(), tc.want)
 				}
+				time.Sleep(time.Millisecond)
 			}
 			// What comes after is let go as it comes.
-			ch <- frameChunk{data: req, timestamp: time.Now(), built: func() { direct.Add(1) }}
+			ch <- frameChunk{data: req, timestamp: time.Now(), built: func() { released.Add(1) }}
 			close(ch)
 			<-parserDone
-			assert.Equal(t, int32(1), direct.Load(), "a chunk the parser never takes is released by it")
-			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want+1, released.Load())
 		})
 	}
+}
+
+// A client that stops reading in the middle of a response: the forwarder
+// waits in its write of the next chunk, which is never noted, and the chunk
+// before it ends mid-frame. That one is let go once its frames are handled:
+// the frame it ends in is stamped by the chunk that completes it, after its
+// write, so nothing it holds can be from before the stop. Held, it would keep
+// the stop waiting on a client that never reads again.
+func TestRecordIncoming_AClientThatStopsReadingMidFrameHoldsNoStop(t *testing.T) {
+	g := startGRPCIngress(t)
+	req, _ := pingCall(t)
+	go func() { _, _ = g.cliApp.Write(req) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+	require.NoError(t, err)
+	g.waitFor(t, "the request chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 1 && !st.Pending })
+
+	// The response: its headers, then a DATA frame the first chunk cuts.
+	head := headersFrameBytes(t, 1, []hpack.HeaderField{
+		{Name: ":status", Value: "200"},
+		{Name: "content-type", Value: "application/grpc"},
+	}, false)
+	data := dataFrameBytes(t, 1, false, grpcPayloadBytes(make([]byte, 64)))
+	first := append(append([]byte{}, head...), data[:20]...)
+	second := data[20:]
+
+	// The client reads the first chunk, then stops reading.
+	go func() { _, _ = g.appApp.Write(first) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(first)))
+	require.NoError(t, err)
+	// The forwarder has read the second chunk once this returns, and waits
+	// in its write to the client, which never reads it.
+	wrote := make(chan struct{})
+	go func() { _, _ = g.appApp.Write(second); close(wrote) }()
+	<-wrote
+
+	g.waitFor(t, "clear while the client does not read", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 2 })
 }
 
 // The tee that memory pressure stops tells the parser so: the rest of the
