@@ -279,8 +279,8 @@ func TestExpected_SetCookieCapturesCookieByCookie(t *testing.T) {
 	r := newRun(t, map[string]interface{}{"csrf": "C0rec", "sid": "S0rec"})
 	res := r.Expected(exp, models.HTTPResp{Header: map[string]string{"Date": ansDate, "Set-Cookie": "csrftoken=C1; Path=/; Expires=x,sessionid=S1; Max-Age=1209600; Path=/; HttpOnly,theme=dark; Path=/"}}, ExpectOptions{})
 	require.Len(t, res.Captures, 2)
-	assert.Equal(t, Capture{Key: "csrf", Value: "C1", Where: "header Set-Cookie.csrftoken"}, res.Captures[0])
-	assert.Equal(t, Capture{Key: "sid", Value: "S1", Where: "header Set-Cookie.sessionid"}, res.Captures[1])
+	assert.Equal(t, Capture{Key: "csrf", Value: "C1", Where: "header Set-Cookie.csrftoken", Type: TypeString}, res.Captures[0])
+	assert.Equal(t, Capture{Key: "sid", Value: "S1", Where: "header Set-Cookie.sessionid", Type: TypeString}, res.Captures[1])
 	assert.Contains(t, res.Resp.Header["Set-Cookie"], "Expires=Fri, 23 Oct 2026 10:00:00 GMT", "an Expires that does not read is compared as recorded")
 }
 
@@ -1139,4 +1139,20 @@ func TestExpected_ASecretInACookiesNameIsTheNameTheRecordingHeld(t *testing.T) {
 			assert.NotContains(t, got.Failures[0].Where+" "+got.Failures[0].Why, c.secret, "a failure prints the secret")
 		})
 	}
+}
+
+// A capture carries its placeholder's type, wherever it stands: a number is
+// one value whatever its spelling, a string is its text.
+func TestExpected_ACaptureCarriesItsPlaceholdersType(t *testing.T) {
+	r := newRun(t, map[string]interface{}{"n": 1, "id": "u_rec", "price": 1.5})
+	res := r.Expected(models.HTTPResp{
+		Body:   `{"n":"{{capture int .n}}","id":"{{capture string .id}}"}`,
+		Header: map[string]string{"X-Price": "{{capture float .price}}"},
+	}, models.HTTPResp{Body: `{"n":7,"id":"u_live"}`, Header: map[string]string{"X-Price": "1.50"}}, ExpectOptions{})
+	require.Empty(t, res.Failures)
+	got := map[string]string{}
+	for _, c := range res.Captures {
+		got[c.Key] = c.Type
+	}
+	assert.Equal(t, map[string]string{"n": TypeInt, "id": TypeString, "price": TypeFloat}, got)
 }

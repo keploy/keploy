@@ -203,6 +203,13 @@ func consumedUnreadReason(tests []string) string {
 		len(tests), firstNames(tests, 10))
 }
 
+// variablesUnjudgedReason is why a test set is not judged when keploy could not
+// check what some tests captured against what their dependency calls carried.
+func variablesUnjudgedReason(tests []string, why string) string {
+	return fmt.Sprintf("not judged: keploy could not check what %d test(s) captured against what their dependency calls carried (%s): %s",
+		len(tests), firstNames(tests, 10), why)
+}
+
 // firstNames joins up to n names, and says how many more there are.
 func firstNames(names []string, n int) string {
 	if len(names) <= n {

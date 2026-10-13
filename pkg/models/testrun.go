@@ -99,6 +99,12 @@ type TestResult struct {
 	// failure without --strict-failure); the report still names the places.
 	// Absent when there is none.
 	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Variables are the test variables bound while the test case ran (proven
+	// switch): the values its request sent, and each value a dependency call
+	// carried where the learn step found it first, with where it was taken.
+	// A later call that sent another value failed the test case as a miss.
+	// Absent when none was bound.
+	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or
@@ -148,6 +154,11 @@ type FailureInfo struct {
 	// unknown: it has no verdict, and its test set is not judged. Set only
 	// under the proven switch, before any hook reads the result.
 	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// VariablesUnchecked says why what this test captured could not be
+	// checked against what its dependency calls carried (a keploy-side
+	// fault): it has no verdict, and its test set is not judged. Set only
+	// under the proven switch.
+	VariablesUnchecked string `json:"variables_unchecked,omitempty" yaml:"variables_unchecked,omitempty"`
 	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
 	// did not consume: the mocks of its recorded mapping its per-test
 	// assertion owns (data-plane mocks; connection failures and

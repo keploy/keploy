@@ -1309,6 +1309,33 @@ func (a *Agent) ResetVariables() {
 	}
 }
 
+// StartTestVariables begins a test's variables: it forgets what the previous
+// test bound and binds the values the test's own request gave, under one lock.
+func (a *Agent) StartTestVariables(given []models.VariableBinding) error {
+	binder, ok := a.Proxy.(coreAgent.VariableBinder)
+	if !ok {
+		if len(given) == 0 {
+			a.ResetVariables()
+			return nil
+		}
+		return errors.New("this keploy agent's proxy keeps no test variables")
+	}
+	if !binder.StartVariables(given) && len(given) > 0 {
+		return errors.New("this keploy agent holds no mocks to bind the test's variables to")
+	}
+	return nil
+}
+
+// TestVariables returns the test variables the current test has bound, and
+// false when this agent's proxy keeps none.
+func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
+	binder, ok := a.Proxy.(coreAgent.VariableBinder)
+	if !ok {
+		return nil, false
+	}
+	return binder.BoundVariables()
+}
+
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 

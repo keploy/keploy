@@ -290,8 +290,12 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 	}
 }
-func (f *prInstr) GetErrorChannel() <-chan error                                    { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error)    { return f.errs() }
+func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
+func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
+
+// TestVariables answers as an agent that bound no test variable does: the
+// stand-in agent serves no mock with variables.
+func (f *prInstr) TestVariables(context.Context) ([]models.VariableBinding, error)  { return nil, nil }
 func (f *prInstr) BeforeSimulate(context.Context, *time.Time, string, string) error { return nil }
 func (f *prInstr) AfterSimulate(context.Context, string, string) error              { return nil }
 func (f *prInstr) BeforeTestRun(context.Context, string) error                      { return nil }

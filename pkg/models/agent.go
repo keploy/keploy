@@ -392,6 +392,13 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+
+	// Variables are the test variables the test's own request carries (its
+	// test case's template values), under the proven switch: a mock filter
+	// starts a test, and the agent binds these as the test begins, so a
+	// dependency call that uses one is asserted to send that value. Empty for
+	// every other caller.
+	Variables []VariableBinding `json:"variables,omitempty"`
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent

@@ -379,7 +379,9 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 		case hit != nil:
 			hit.gen = gen
 			hits = append(hits, hit)
-		case problem != nil && first == nil:
+		case problem != nil && (first == nil || (first.kind == "" && problem.kind != "")):
+			// A value that differs is better evidence than a declaration
+			// keploy cannot follow or a variable not yet bound.
 			first = problem
 		}
 	}
@@ -480,6 +482,12 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		}
 		if bound, ok := table.Lookup(d.name); ok {
 			if !variables.SameValue(bound.Recorded, d.recorded, false) {
+				if bound.Given {
+					// A template key holds one recorded value for the whole
+					// set: a call that names it with another is no call of
+					// another test, but a declaration keploy cannot follow.
+					return refuse(fmt.Sprintf("it names variable %s after the template key the test case's request sends, but records it as %q where config.yaml records %q: the learn step and the templates disagree", d.name, d.recorded, bound.Recorded))
+				}
 				// Recorded with another value than the one the test bound: a
 				// call of another test (reusable mocks are seen by every
 				// test), not this one.
@@ -518,7 +526,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded {
+			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded {
 				return nil, &varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),

@@ -4602,3 +4602,29 @@ func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error)
 	}
 	return pairs, nil
 }
+
+// TestVariables returns the test variables the agent bound in the current test
+// (GET /agent/variables; proven switch).
+func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBinding, error) {
+	if a.conf.Agent.AgentURI == "" {
+		return nil, errors.New("keploy has no agent to read the test's variables from")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/variables", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get test variables", res, rawBody)
+	}
+	var out models.TestVariablesResp
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Variables, nil
+}

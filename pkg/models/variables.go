@@ -14,6 +14,25 @@ package models
 //	        recorded: o3fa9c21b7d4e
 //	        bind: body.id
 //	        answer: [body.id]
+//
+// Names are per test (a test case in keploy test, a test in keploy mock
+// replay) and may repeat across tests. One namespace holds a test's mock
+// variables and its test case's template keys (config.yaml `template:`), so:
+//
+//   - A variable that carries a template key's value is named after that key:
+//     the same value when recorded and in each run the learn step watched,
+//     not merely an equal recorded value (two counters both at 1 when
+//     recorded are two values). A template key's name is reserved in every
+//     test of the set: no other variable takes it. Its recorded value is the
+//     key's config.yaml value; a dependency call that binds it is checked
+//     against what the test case captures under the key, and a call that
+//     names it with another recorded value is refused. Replay cannot tell,
+//     from values, a misnamed variable from another value recorded equal: a
+//     capture is checked only against a variable of its key's name.
+//   - A value that first appears in the test case's own request (a template
+//     key the request sends) is bound by the test case: the mocks name it with
+//     use places only, no bind. keploy test sends those values for HTTP test
+//     cases; a gRPC test case's request binds none.
 type MockVariables map[string]MockVariable
 
 // MockVariable is where one variable is in one call. A place is written in
@@ -50,4 +69,28 @@ func (v MockVariables) Clone() MockVariables {
 		out[name] = mv
 	}
 	return out
+}
+
+// TestVariablesResp is the answer of GET /agent/variables.
+type TestVariablesResp struct {
+	Variables []VariableBinding `json:"variables"`
+}
+
+// VariableBinding is the value a test variable has in a test, and where it
+// was taken: a dependency call the test made (Mock is the mock's name), or
+// the test case itself (Mock is "test case <name>"). keploy test sends the
+// agent the values its test case's request carries, and reads back what the
+// test bound, for its report.
+type VariableBinding struct {
+	Name string `json:"name" yaml:"name"`
+	// Value is the live value.
+	Value string `json:"value" yaml:"value"`
+	// Recorded is the value the recording held where it was taken.
+	Recorded string `json:"recorded" yaml:"recorded"`
+	Mock     string `json:"mock" yaml:"mock"`
+	Place    string `json:"place" yaml:"place"`
+	// Given marks a value the test case's request gave (its template
+	// value), not one the application made: it binds the variable for the
+	// calls that use it, and is never another variable's value.
+	Given bool `json:"given,omitempty" yaml:"given,omitempty"`
 }

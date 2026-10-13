@@ -1073,3 +1073,51 @@ func TestVariables_AMissCheckedAcrossABeginIsCheckedAgain(t *testing.T) {
 		t.Fatalf("the evidence is not the check against the new test: %+v", diag)
 	}
 }
+
+// A value the test case's request gave is no variable's value the app made:
+// an app whose counter mints the same number for an order is not taken for
+// one that sent the user's value where the order's goes.
+func TestVariables_AGivenValueIsNoOtherVariables(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	create := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"5"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV("5", "body.id")}), 1)
+	db := &varDb{perTest: []*models.Mock{create}}
+	db.table.Start([]variables.Binding{{Name: "userId", Value: "1", Recorded: "1", Mock: "test case test-2", Place: "request"}})
+	if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"1"}`)); !ok {
+		t.Fatalf("an order id equal to the user id the request gave was refused: %+v", diag)
+	}
+}
+
+// A call that names a template key's variable with another recorded value than
+// the key's is refused with evidence: a key holds one recorded value for the
+// set, so it is no other test's call.
+func TestVariables_AGivenKeyRecordedWithAnotherValueIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	read := at(varMock("mock-1", "GET", "http://store/users/u_rec_9999", "", 200, `{}`,
+		models.MockVariables{"id": useV("u_rec_9999", []string{"url.path[1]"})}), 1)
+	db := &varDb{perTest: []*models.Mock{read}}
+	db.table.Start([]variables.Binding{{Name: "id", Value: "u_live", Recorded: "u_rec_0001", Mock: "test case test-2", Place: "request"}})
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/users/u_live", ""))
+	wantProblem(t, ok, diag, "the learn step and the templates disagree")
+}
+
+// Evidence of a value that differs wins over a declaration keploy cannot
+// follow: a reusable mock of another test that names a template key with its
+// own recorded value does not hide this test's wrong id.
+func TestVariables_AValueThatDiffersIsTheEvidence(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	other := reusable(at(varMock("mock-b", "GET", "http://store/users/o_123", "", 200, `{}`,
+		models.MockVariables{"id": useV("o_123", []string{"url.path[1]"})}), 1))
+	mine := reusable(at(varMock("mock-a", "GET", "http://store/users/u_rec", "", 200, `{}`,
+		models.MockVariables{"id": useV("u_rec", []string{"url.path[1]"})}), 2))
+	db := &varDb{session: []*models.Mock{other, mine}}
+	db.table.Start([]variables.Binding{{Name: "id", Value: "u_live", Recorded: "u_rec", Mock: "test case test-a", Place: "request"}})
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/users/u_wrong", ""))
+	p := wantProblem(t, ok, diag, "this call sent")
+	if p.mock != "mock-a" || p.expected != "u_live" || p.actual != "u_wrong" {
+		t.Fatalf("evidence %+v", p)
+	}
+}
