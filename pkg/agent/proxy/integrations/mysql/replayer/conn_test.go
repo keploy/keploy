@@ -225,10 +225,11 @@ func TestTheRecordedHandshakeIsServed(t *testing.T) {
 	}
 }
 
-// poolDb is a session pool with the mock manager's semantics the handshake
-// relies on: a reused handshake is re-stamped to the back of the pool
-// (UpdateUnFilteredMock), and a deleted one is gone (DeleteUnFilteredMock).
-// Mocks are told apart by name.
+// poolDb is a session pool whose handshakes change place when reused: a
+// reused one is re-stamped to the back of the pool (UpdateUnFilteredMock), as
+// the mock manager does once the first test window is staged (at boot it does
+// not), and a deleted one is gone (DeleteUnFilteredMock). What a login is
+// answered must not depend on either. Mocks are told apart by name.
 type poolDb struct{ fakeMockDb }
 
 func (p *poolDb) UpdateUnFilteredMock(old, updated *models.Mock) bool {
@@ -295,12 +296,15 @@ func TestAnUnservableMockDoesNotShadowAServableHandshake(t *testing.T) {
 	greetingOnly.Spec.MySQLRequests, greetingOnly.Spec.MySQLResponses = nil, greetingOnly.Spec.MySQLResponses[:1]
 	nextFactor := handshakeMock(mysql.Native, []mysql.Response{{PacketBundle: bundle(2, mysql.AuthStatusToString(mysql.AuthNextFactor),
 		&mysql.AuthNextFactorPacket{PacketType: mysql.AuthNextFactor, PluginName: "authentication_fido_client"})}})
-	cutShort := handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess)}) // no OK after it
+	cutShort := handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess)})                  // no OK after it
+	fullAuthCutShort := handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), // no public key, no OK
+		{PacketBundle: bundle(4, mysql.AuthStatusToString(mysql.AuthMoreData), &mysql.AuthMoreDataPacket{StatusTag: mysql.AuthMoreData, Data: "PUBLIC KEY"})}})
 	for name, first := range map[string]*models.Mock{
-		"a greeting that is not the first response":      greetingLater,
-		"a greeting and nothing more":                    greetingOnly,
-		"a verdict replay does not serve":                nextFactor,
-		"an AuthMoreData with nothing recorded after it": cutShort,
+		"a greeting that is not the first response":         greetingLater,
+		"a greeting and nothing more":                       greetingOnly,
+		"a verdict replay does not serve":                   nextFactor,
+		"an AuthMoreData with nothing recorded after it":    cutShort,
+		"a full authentication cut short before its answer": fullAuthCutShort,
 	} {
 		t.Run(name, func(t *testing.T) {
 			first.Name = "mock-unservable"
@@ -311,51 +315,72 @@ func TestAnUnservableMockDoesNotShadowAServableHandshake(t *testing.T) {
 	}
 }
 
-// A login the recording holds a refusal for is refused, as the server refused
-// it: the client reads the recorded ERR, and the replayer ends the connection,
-// as the server ended it. That is no miss: the recording answers the client.
-// Before, the refusal was not served at all, and the client waited,
-// unanswered, for as long as it would.
+// A login the recording holds only a refusal for is refused, as the server
+// refused it: the client reads the recorded ERR, and the replayer ends the
+// connection, as the server ended it. That is no miss: the recording answers
+// the client. Before, the refusal was not served at all, and the client
+// waited, unanswered, for as long as it would.
 //
-// The handshakes are served in recorded order, a refusal once: a login refused
-// and then retried with success, as the recording holds it, is refused, and
-// its retry is served the success, which then serves every later connection.
-// A handshake recorded for the server the client dialled goes ahead of
-// another server's.
-func TestARecordedRefusalIsServedOnceInRecordedOrder(t *testing.T) {
+// The replayer cannot tell the password a client sent, so it never refuses a
+// login the recording holds a success for, from the server the client
+// dialled: a login refused and then retried with success, as the recording
+// holds it, is let in, on every connection. Another server's success does not
+// let in a login this server refused. Nothing here depends on what earlier
+// connections did, so each case opens several.
+func TestARecordedRefusalIsServed(t *testing.T) {
 	named := func(m *models.Mock, name string) *models.Mock { m.Name = name; return m }
-	elsewhere := named(nativeHandshake(), "mock-elsewhere") // another server's success, recorded first
-	elsewhere.Spec.Metadata = map[string]string{"type": "config", "connID": "1", "destAddr": "10.0.0.6:3306"}
+	elsewhere := func(m *models.Mock) *models.Mock { // recorded for another server
+		m.Spec.Metadata = map[string]string{"type": "config", "connID": "1", "destAddr": "10.0.0.6:3306"}
+		return m
+	}
 	switchedLogin := func(c mysqlClient) {
 		c.greetAndAnswer("app", mysql.Native)
 		c.answerSwitch(3)
+	}
+	refused := func() *models.Mock {
+		return named(handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), "mock-refused")
 	}
 	for _, tc := range []struct {
 		name    string
 		session []*models.Mock
 		client  func(c mysqlClient)
-		want    []byte // the verdicts of successive connections
+		want    byte
 	}{{
-		name:    "a refusal of the HandshakeResponse41, then its retry's success",
-		session: []*models.Mock{named(handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), "mock-refused"), named(nativeHandshake(), "mock-ok")},
+		name:    "a refusal of the HandshakeResponse41",
+		session: []*models.Mock{refused()},
 		client:  nativeLogin,
-		want:    []byte{mysql.ERR, mysql.OK, mysql.OK},
+		want:    mysql.ERR,
 	}, {
-		name:    "a refusal of the AuthSwitchResponse, then its retry's success",
+		name:    "a refusal of the AuthSwitchResponse",
+		session: []*models.Mock{named(switchedHandshake(refusal(4)), "mock-refused")},
+		client:  switchedLogin,
+		want:    mysql.ERR,
+	}, {
+		name:    "a refusal, then its retry's success",
+		session: []*models.Mock{refused(), named(nativeHandshake(), "mock-ok")},
+		client:  nativeLogin,
+		want:    mysql.OK,
+	}, {
+		name:    "a refusal after an auth switch, then its retry's success",
 		session: []*models.Mock{named(switchedHandshake(refusal(4)), "mock-refused"), named(switchedHandshake(okAnswer(4)), "mock-ok")},
 		client:  switchedLogin,
-		want:    []byte{mysql.ERR, mysql.OK, mysql.OK},
+		want:    mysql.OK,
 	}, {
-		name:    "this server's refusal, ahead of another server's success recorded first",
-		session: []*models.Mock{elsewhere, named(handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), "mock-refused")},
+		name:    "this server's refusal, and another server's success recorded first",
+		session: []*models.Mock{elsewhere(named(nativeHandshake(), "mock-elsewhere")), refused()},
 		client:  nativeLogin,
-		want:    []byte{mysql.ERR, mysql.OK},
+		want:    mysql.ERR,
+	}, {
+		name:    "another server's refusal, recorded first, and this server's success",
+		session: []*models.Mock{elsewhere(refused()), named(nativeHandshake(), "mock-ok")},
+		client:  nativeLogin,
+		want:    mysql.OK,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &poolDb{fakeMockDb{session: tc.session}}
-			for i, want := range tc.want {
-				if got := login(t, db, tc.client); got != want {
-					t.Fatalf("connection %d read %#x; want the recorded %#x", i+1, got, want)
+			for i := 1; i <= 3; i++ {
+				if got := login(t, db, tc.client); got != tc.want {
+					t.Fatalf("connection %d read %#x; want the recorded %#x", i, got, tc.want)
 				}
 			}
 		})

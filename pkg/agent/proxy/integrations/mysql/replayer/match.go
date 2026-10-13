@@ -463,7 +463,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// dropped the error too, and the test that sent the command passed
 		// with no miss. The pool is empty, for one, when a connection
 		// outlives the mocks its handshake was served from: the pool was
-		// replaced by one holding no MySQL mock.
+		// replaced by one holding no mock at all.
 		if len(pool) == 0 {
 			logger.Debug("the mysql mock pool is empty")
 		}

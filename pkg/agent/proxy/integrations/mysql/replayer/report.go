@@ -43,7 +43,7 @@ const (
 func newConnectionMiss(dst, step, why, phase string, candidates int) error {
 	next := "The application's MySQL handshake differs from the recorded one (user, database, client options or authentication exchange), or the recorded handshake ends before this step. Re-record with '" + mismatch.RecordCommand() + "' if the application's MySQL connection settings changed."
 	if phase == models.MatchPhaseNoMocks {
-		next = "The recording holds no complete MySQL handshake left to answer this connection: it never recorded one, the ones it holds are incomplete, or the only one left was a login refusal, which is served once, as it was recorded. Re-record with '" + mismatch.RecordCommand() + "' if the application's MySQL connections changed."
+		next = "The recording holds no complete MySQL handshake to answer this connection: it never recorded one, or the ones it holds are incomplete. Re-record with '" + mismatch.RecordCommand() + "' if the application's MySQL connections changed."
 	}
 	report := mismatch.NewReport(mismatch.ProtocolMySQL, "connection phase: "+step).
 		WithDestination(dst).
