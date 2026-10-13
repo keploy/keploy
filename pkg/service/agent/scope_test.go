@@ -211,3 +211,29 @@ func TestEndOfAGatedTestWarnsOnce(t *testing.T) {
 	require.NoError(t, a.EndScope(ctx, "t3", 3))
 	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").Len(), "an ordinary test's end is not a gated one")
 }
+
+func TestAReplayReportsATestThatNeverEndedAsFailed(t *testing.T) {
+	ctx := context.Background()
+	a := newReplayAgent()
+	a.NoteScope("e2e/pay", 7, "e2e/pay", true)
+	require.NoError(t, a.BeginScope(ctx, "e2e/pay", 7))
+	a.NoteScope("TestDone", 7, "e2e/pay", false)
+	require.NoError(t, a.BeginScope(ctx, "TestDone", 7))
+	a.NoteScopeOutcome("TestDone", 7, "passed")
+	require.NoError(t, a.EndScope(ctx, "TestDone", 7))
+	a.NoteScope("TestPay", 7, "e2e/pay", false)
+	require.NoError(t, a.BeginScope(ctx, "TestPay", 7))
+
+	ws, _ := a.GetScopeWindows(ctx)
+	require.Len(t, ws, 2)
+	require.Equal(t, "TestDone", ws[0].Name)
+	require.Equal(t, models.ScopeOutcomePassed, ws[0].Outcome)
+	require.Equal(t, "TestPay", ws[1].Name)
+	require.Equal(t, models.ScopeOutcomeFailed, ws[1].Outcome)
+	require.Equal(t, "e2e/pay", ws[1].Dir)
+	require.False(t, ws[1].End.Before(ws[1].Start))
+
+	rec := newRecordAgent()
+	require.NoError(t, rec.BeginScope(ctx, "TestPay", 7))
+	require.Empty(t, windowNames(rec), "a recording keeps only the tests that ended")
+}
