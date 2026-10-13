@@ -127,8 +127,8 @@ type MockManager struct {
 	cursors  map[string]int
 
 	// vars holds the test variables this replay has bound (package
-	// variables): reset once per test-set on the staging call, and at each
-	// test's begin in keploy mock replay. Read only under the proven switch.
+	// variables): reset as each test case of keploy test and each test of
+	// keploy mock replay begins. Read only under the proven switch.
 	vars variables.Table
 
 	// Optimized lookup maps

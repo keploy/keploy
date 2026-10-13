@@ -20,20 +20,24 @@ type resetProxy struct {
 
 func (p *resetProxy) ResetVariables() { p.resets++ }
 
-// Every test begins with no variable bound: the integrations begin only
-// top-level tests, so a Go subtest shares its parent's scope by never beginning
-// one, and a test begun again (go test -count=2) starts afresh.
+// Every test begins with no variable bound, and a test begun again (go test
+// -count=2) starts afresh.
 func TestEveryTestBeginsWithNoVariableBound(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	p := &resetProxy{}
-	a := &Agent{logger: zap.NewNop(), Proxy: p, config: &config.Config{Agent: config.Agent{Mode: models.MODE_TEST}}}
+	a, p := orderAgent(t)
+	a.clientMocks.Store(uint64(0), &ClientMockStorage{})
 	ctx := context.Background()
 	for i, test := range []string{"f_test.go::TestOrder", "f_test.go::TestUser", "f_test.go::TestUser", "g_test.go::TestOrder"} {
-		// The begin goes on to narrow the pool, which this agent has none
-		// to narrow: its error is not what is tested here.
-		_ = a.BeginScopeAt(ctx, test, 0, models.BaseTime)
-		if p.resets != i+1 {
-			t.Fatalf("after %s began the variables were forgotten %d times, want %d", test, p.resets, i+1)
+		if err := a.BeginScopeAt(ctx, test, 0, models.BaseTime); err != nil {
+			t.Fatalf("begin %s: %v", test, err)
+		}
+		resets := 0
+		for _, e := range p.events {
+			if e == "reset" {
+				resets++
+			}
+		}
+		if resets != i+1 {
+			t.Fatalf("after %s began the variables were forgotten %d times, want %d", test, resets, i+1)
 		}
 		_ = a.EndScopeAt(ctx, test, 0, models.BaseTime)
 	}

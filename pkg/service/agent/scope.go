@@ -72,6 +72,7 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		nested := a.nestedInOpenTest(name, pid)
 		took, lost, err := a.beginTestClock(ctx, name, pid)
 		if lost.key.name != "" {
 			a.failLostScope(ctx, lost, at)
@@ -84,14 +85,16 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		}
 		a.openWindow(name, pid, at)
 		// Under the proven switch a test is the scope of the variables
-		// keploy mock replay binds: each test begins with none bound. The
-		// integrations begin only top-level tests (a Go subtest runs inside
-		// its parent's scope, which it shares), and one test is open at a
-		// time in an agent, so the agent keeps one table. The scope begins
-		// once the test's pool is in (as this begin returns), so a call
-		// checked against the previous pool binds nothing in it.
-		if provenswitch.On() {
-			defer a.ResetVariables()
+		// keploy mock replay binds: each test begins with none bound, and a
+		// subtest begun inside its open parent shares the parent's. One test
+		// is open at a time in an agent, so the agent keeps one table. The
+		// scope begins once the test's pool is in, at each return of a begin
+		// that succeeded, so a call checked against the previous pool binds
+		// nothing in it; a begin that fails narrowed nothing and begins none.
+		beginVariables := func() {
+			if provenswitch.On() && !nested {
+				a.ResetVariables()
+			}
 		}
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
@@ -112,12 +115,14 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			}
 		case !ok || len(names) == 0:
 			// No per-test mapping for this test — leave the whole pool armed.
+			beginVariables()
 			return nil
 		case pid > 0:
 			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
 			// PID, so concurrent workers never overwrite one shared filter.
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
+			beginVariables()
 			return nil
 		default:
 			// No worker PID reported — restrict the single global pool (correct for
@@ -142,12 +147,22 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			a.noteScopeFailed(name, pid, at)
 			return errors.Join(err, a.endTestClock(ctx, name, pid))
 		}
+		beginVariables()
 		return nil
 	}
 
 	a.openWindow(name, pid, at)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
+}
+
+// nestedInOpenTest reports whether a begin is a subtest of the test that holds
+// the run's clock, from the same worker (scope_clock.go lets it begin there).
+func (a *Agent) nestedInOpenTest(name string, pid int) bool {
+	a.clockMu.Lock()
+	defer a.clockMu.Unlock()
+	h := a.clockHeld
+	return h.name != "" && h.pid == uint32(pid) && strings.HasPrefix(name, h.name+"/")
 }
 
 // openWindow remembers when a test said it started, in either mode, so a client can read the windows later.

@@ -20,8 +20,8 @@ type Binding struct {
 	Place string
 }
 
-// Table holds the variables one scope has bound: a test set in keploy test,
-// one test in keploy mock replay. A variable is bound once; a later binding of
+// Table holds the variables one scope has bound: one test case in keploy
+// test, one test in keploy mock replay. A variable is bound once; a later binding of
 // the same name does not take (Bind). Safe for concurrent use.
 type Table struct {
 	mu   sync.Mutex

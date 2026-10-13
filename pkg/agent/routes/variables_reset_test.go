@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,10 +19,14 @@ import (
 type paramsSvc struct {
 	agent.Service // nil: any other call panics loudly
 	events        *[]string
+	failFilter    bool
 }
 
 func (s paramsSvc) UpdateMockParams(context.Context, models.MockFilterParams) error {
 	*s.events = append(*s.events, "filter")
+	if s.failFilter {
+		return errors.New("no mocks stored")
+	}
 	return nil
 }
 
@@ -48,5 +53,18 @@ func TestAMockFilterStartsATestsVariables(t *testing.T) {
 				t.Fatalf("status %d, events %v; want 200 and %q", rec.Code, events, tc.want)
 			}
 		})
+	}
+}
+
+// A filter that fails swapped no pool in, and begins no test: the variables
+// stay with the pool they were bound against.
+func TestAFailedMockFilterBeginsNoTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	var events []string
+	a := &Agent{logger: zap.NewNop(), svc: paramsSvc{events: &events, failFilter: true}}
+	rec := httptest.NewRecorder()
+	a.UpdateMockParams(rec, httptest.NewRequest(http.MethodPost, "/agent/updatemockparams", strings.NewReader(`{"filterParams":{}}`)))
+	if rec.Code != http.StatusInternalServerError || strings.Join(events, " ") != "filter" {
+		t.Fatalf("status %d, events %v; want 500 and the filter alone", rec.Code, events)
 	}
 }

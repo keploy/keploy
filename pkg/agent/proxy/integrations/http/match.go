@@ -176,6 +176,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 						continue
 					}
 					if problem != nil {
+						if table.Gen() != varGen {
+							continue // a test began meanwhile: check the call against it
+						}
 						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
 					}
 					if commitCursor != nil {
@@ -198,6 +201,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 					}
 					if ok {
 						return true, served, nil, nil
+					}
+					if table != nil && table.Gen() != varGen {
+						continue // a test began meanwhile: check the call against it
 					}
 					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
 				}
