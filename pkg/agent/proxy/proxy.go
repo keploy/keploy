@@ -1278,6 +1278,47 @@ func (p *Proxy) recordMySQLOutgoing(
 	return nil
 }
 
+// mockMySQLOutgoing serves a replay-mode MySQL connection that arrived
+// through the PROBE branch from the recorded mocks, and reports what the
+// parser returns as a miss.
+//
+// It is a method rather than an inlined block for the reason
+// recordMySQLOutgoing is: inlined, it sat behind an eBPF-resolved
+// destination and a probe, so no test could check that a MySQL miss reaches
+// the test's misses before the client's connection is closed.
+//
+// The order is load-bearing. The parser leaves the client's connection open
+// when it returns, and handleConnection's deferred close shuts it after this
+// returns: a returned miss is queued here (sendMockNotFoundError) before the
+// application sees its connection fail, so a test that ends as soon as its
+// database call fails still has its miss.
+func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, dstAddr string, m integrations.MockMemDb, outgoingOpts models.OutgoingOptions) error {
+	// Same registration hazard as the record path: a probe verdict of IsMySQL
+	// does not imply the parser is registered (the configured-port and
+	// known-port verdicts never check), so an unregistered build nil-panics
+	// here instead of failing cleanly.
+	mysqlMocker := p.Integrations[integrations.MYSQL]
+	if mysqlMocker == nil {
+		// Replay has no upstream to relay to, so a decline cannot be
+		// rescued here the way it is on the record path; fail cleanly
+		// rather than nil-panicking.
+		utils.LogError(p.logger, nil, "no MySQL parser is registered",
+			zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
+		return errors.New("mysql parser not registered")
+	}
+
+	err := mysqlMocker.MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
+		p.sendMockNotFoundError(err)
+		if provenswitch.On() && isMockMiss(err) {
+			return reportedMiss{err}
+		}
+		return err
+	}
+	return nil
+}
+
 // mysqlSessionForRelay builds the minimal RecordSession the decline relay
 // needs when there is no parser to build a full one for.
 func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integrations.RecordSession {
@@ -2587,32 +2628,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
 			return err
 		}
-
-		// Same registration hazard as the record path above: a probe verdict
-		// of IsMySQL does not imply the parser is registered (the
-		// configured-port and known-port verdicts never check), so an
-		// unregistered build nil-panics here instead of failing cleanly.
-		mysqlMocker := p.Integrations[integrations.MYSQL]
-		if mysqlMocker == nil {
-			// Replay has no upstream to relay to, so a decline cannot be
-			// rescued here the way it is on the record path; fail cleanly
-			// rather than nil-panicking.
-			utils.LogError(p.logger, nil, "no MySQL parser is registered",
-				zap.String("next_step", "the MySQL probe matched but integrations.MYSQL is absent from p.Integrations; this is a build/registration bug"))
-			return errors.New("mysql parser not registered")
-		}
-
-		//mock the outgoing message
-		err := mysqlMocker.MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-			p.sendMockNotFoundError(err)
-			if provenswitch.On() && isMockMiss(err) {
-				return reportedMiss{err}
-			}
-			return err
-		}
-		return nil
+		return p.mockMySQLOutgoing(parserCtx, srcConn, dstAddr, m, outgoingOpts)
 	}
 
 	reader := bufio.NewReader(srcConn)

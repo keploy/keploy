@@ -453,9 +453,19 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		tiersRead = true // recordedQuery reads these tiers, not a second snapshot
 		pool = merge(perTestTier, sessionMocks, connectionTier)
+		// An empty pool is no error: it is loaded (non-nil, so never read
+		// again for this command), the scan below finds no candidate, and the
+		// command is answered as it is against a pool holding only mocks it
+		// cannot match: a control statement, a SEND_LONG_DATA, a STMT_RESET or
+		// an unrecorded PREPARE by its synthesized answer, anything else by
+		// the no_mocks miss. It was an error that did not wrap
+		// models.ErrNoMockMatched: the connection was dropped, the proxy
+		// dropped the error too, and the test that sent the command passed
+		// with no miss. The pool is empty, for one, once a full-authentication
+		// handshake has used up the only handshake mock and the test's window
+		// holds no data mock.
 		if len(pool) == 0 {
-			utils.LogError(logger, nil, "no mysql mocks found")
-			return fmt.Errorf("no mysql mocks found")
+			logger.Debug("the mysql mock pool is empty")
 		}
 		return nil
 	}

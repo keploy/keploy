@@ -1,8 +1,13 @@
 package replayer
 
 import (
+	"context"
 	"fmt"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 )
 
 // TestQuerySigCacheIsBounded pins the retention contract on querySigCache.
@@ -107,5 +112,39 @@ func TestQuerySigCacheSkipsUnparseableSQL(t *testing.T) {
 	}
 	if got := querySigCache.Len(); got != 0 {
 		t.Errorf("querySigCache holds %d entries after a parse failure, want 0", got)
+	}
+}
+
+// An empty pool answers a command as a pool holding only mocks the command
+// cannot match does: a query by the no_mocks miss, a control statement by its
+// synthesized OK, a SEND_LONG_DATA by accepting it. Before, an empty pool was
+// an error that did not wrap models.ErrNoMockMatched: the connection was
+// dropped for every command, the proxy dropped the error too, and the test
+// that sent the command passed with no miss. Whether a ROLLBACK was answered
+// then depended on whether an unrelated mock was left in the pool. The pool is
+// empty, for one, once a full-authentication handshake has used up the only
+// handshake mock and the test's window holds no data mock.
+func TestAnEmptyPoolAnswersAsAPoolWithNoMatchingMock(t *testing.T) {
+	sld := mysql.Request{PacketBundle: mysql.PacketBundle{
+		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12}, Type: "COM_STMT_SEND_LONG_DATA"},
+		Message: &mysql.StmtSendLongDataPacket{StatementID: 3},
+	}}
+
+	t.Run("a query is the no_mocks miss", func(t *testing.T) {
+		resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), comQueryReq("SELECT 1"), &fakeMockDb{}, newDecodeCtx(), nil, nil)
+		if err != nil || ok || resp != nil || miss == nil || miss.matchPhase != models.MatchPhaseNoMocks || miss.candidateCount != 0 {
+			t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want the no_mocks miss, and no answer or error", resp, ok, miss, err)
+		}
+	})
+	for name, req := range map[string]mysql.Request{
+		"a control statement is answered": comQueryReq("SET autocommit=0"),
+		"a SEND_LONG_DATA is accepted":    sld,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, &fakeMockDb{}, newDecodeCtx(), nil, nil)
+			if err != nil || !ok || resp == nil || miss != nil {
+				t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want it answered, as a pool with no matching mock answers it", resp, ok, miss, err)
+			}
+		})
 	}
 }

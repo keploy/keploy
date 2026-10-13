@@ -18,8 +18,12 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	mysqlparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
+	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	mysqlmodels "go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -545,4 +549,146 @@ func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
 		t.Error("the parser was invoked with the kill switch tripped")
 	}
 	<-done
+}
+
+// closeHook runs onClose once, the first time the client's connection is
+// closed, before closing it.
+type closeHook struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *closeHook) Close() error {
+	c.once.Do(c.onClose)
+	return c.Conn.Close()
+}
+
+// mysqlReplayMisses serves one MySQL connection through the proxy's replay
+// dispatch from a session pool holding session, with app playing the
+// application, and returns the misses the test it was made in reads. The test
+// reads them the moment the application's connection is closed: the earliest a
+// harness that ends on the failed database call can read them. A miss queued
+// only after that close is therefore missing from what this returns, whatever
+// the scheduler does.
+func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn)) []models.UnmatchedCall {
+	t.Helper()
+	p := startedDrainProxy(t, 16)
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	now := time.Now()
+	mm.SetMocksWithWindow(nil, session, now.Add(-time.Hour), now.Add(time.Hour))
+
+	ctx := context.Background()
+	p.BeginTestErrorCapture() // the test begins
+	appEnd, pipeEnd := net.Pipe()
+	t.Cleanup(func() { _ = appEnd.Close() })
+	var misses []models.UnmatchedCall
+	var readErr error
+	agentEnd := &closeHook{Conn: pipeEnd, onClose: func() {
+		misses, readErr = p.GetMockErrors(ctx) // the test ends: its database call failed
+	}}
+	connCtx := context.WithValue(context.WithValue(ctx, models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = p.mockMySQLOutgoing(connCtx, agentEnd, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+		_ = agentEnd.Close() // handleConnection's deferred close
+	}()
+	app(appEnd)
+	<-closed // the misses were read: onClose has run
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return misses
+}
+
+// eachSwitchState runs test with the proven switch off and on: a MySQL miss is
+// queued before its connection is closed either way.
+func eachSwitchState(t *testing.T, test func(t *testing.T)) {
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			test(t)
+		})
+	}
+}
+
+// requireOneMySQLMiss fails the test unless misses is the one MySQL miss of a
+// connection to 10.0.0.5:3306 that summary names.
+func requireOneMySQLMiss(t *testing.T, misses []models.UnmatchedCall, summary string) {
+	t.Helper()
+	if len(misses) != 1 {
+		t.Fatalf("the test read %d misses when its application's MySQL connection was closed; want its one miss (with none, the test passes although its database call failed): %+v", len(misses), misses)
+	}
+	if m := misses[0]; m.Protocol != "MySQL" || m.ActualSummary != summary || m.Destination != "10.0.0.5:3306" {
+		t.Fatalf("miss %+v; want a MySQL miss of %q at 10.0.0.5:3306", m, summary)
+	}
+}
+
+// A MySQL connection the test set holds no session mock for is closed
+// unanswered, and the test it was made in has that miss by the time the
+// application sees its connection fail. Before, the parser returned nil and
+// the test passed with no miss.
+func TestAMySQLConnectionWithNoMocksIsAMissOfItsTest(t *testing.T) {
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMisses(t, nil, func(app net.Conn) {
+			if got, err := io.ReadAll(app); len(got) != 0 || err != nil {
+				t.Errorf("the application read %q, %v; want its connection closed unanswered", got, err)
+			}
+		})
+		requireOneMySQLMiss(t, misses, "connection phase: new connection")
+	})
+}
+
+// A MySQL handshake no recorded one matches is a miss of the test it was made
+// in, by the time the application sees its connection fail. Before, the
+// parser's error did not wrap models.ErrNoMockMatched, so the proxy dropped
+// it from the test's misses and the test passed.
+func TestAMySQLHandshakeNoMockMatchesIsAMissOfItsTest(t *testing.T) {
+	const caps = uint32(mysqlmodels.CLIENT_PROTOCOL_41 | mysqlmodels.CLIENT_PLUGIN_AUTH | mysqlmodels.CLIENT_SECURE_CONNECTION)
+	hr41 := func(user string) *mysqlmodels.HandshakeResponse41Packet {
+		return &mysqlmodels.HandshakeResponse41Packet{CapabilityFlags: caps, MaxPacketSize: 1 << 24, CharacterSet: 0x21,
+			Username: user, AuthResponse: make([]byte, 20), AuthPluginName: string(mysqlmodels.Native)}
+	}
+	packet := func(seq uint8, typ string, msg interface{}) mysqlmodels.PacketBundle {
+		return mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: seq}, Type: typ}, Message: msg}
+	}
+	handshake := &models.Mock{
+		Kind: models.MySQL,
+		Name: "mock-0",
+		Spec: models.MockSpec{
+			Metadata:      map[string]string{"type": "config", "connID": "0"},
+			MySQLRequests: []mysqlmodels.Request{{PacketBundle: packet(1, mysqlmodels.HandshakeResponse41, hr41("app"))}},
+			MySQLResponses: []mysqlmodels.Response{
+				{PacketBundle: packet(0, mysqlmodels.AuthStatusToString(mysqlmodels.HandshakeV10), &mysqlmodels.HandshakeV10Packet{
+					ProtocolVersion: 0x0a, ServerVersion: "8.0.36", ConnectionID: 7, AuthPluginData: make([]byte, 20),
+					CapabilityFlags: caps, CharacterSet: 0x21, StatusFlags: 2, AuthPluginName: string(mysqlmodels.Native)})},
+				{PacketBundle: packet(2, mysqlmodels.StatusToString(mysqlmodels.OK), &mysqlmodels.OKPacket{Header: mysqlmodels.OK, StatusFlags: 2})},
+			},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMisses(t, []*models.Mock{handshake}, func(app net.Conn) {
+			if _, err := readOneMySQLPacket(app); err != nil {
+				t.Errorf("reading the greeting: %v", err)
+				return
+			}
+			payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), hr41("intruder"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := app.Write(append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 1}, payload...)); err != nil {
+				t.Errorf("sending the HandshakeResponse41: %v", err)
+				return
+			}
+			if got, err := io.ReadAll(app); len(got) != 0 || err != nil {
+				t.Errorf("the application read %q, %v after its handshake; want its connection closed unanswered", got, err)
+			}
+		})
+		requireOneMySQLMiss(t, misses, "connection phase: HandshakeResponse41")
+	})
 }
