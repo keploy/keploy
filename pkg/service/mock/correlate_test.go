@@ -148,3 +148,13 @@ func TestOutsideTestsNamesEveryRequestNoTestHolds(t *testing.T) {
 		"delete-all-1 (tear-down, after the last test)",
 	}, loose)
 }
+
+func TestWhenOutsideSaysARequestMadeDuringATestWasMadeThen(t *testing.T) {
+	windows := []models.ScopeWindow{
+		{Name: "T1", Start: ts(0), End: ts(10)},
+		{Name: "T2", Start: ts(20), End: ts(30)},
+		{Name: "T3", Start: ts(40), End: ts(50)},
+	}
+	require.Equal(t, "while a test ran, outside its scope", whenOutside(windows, ts(25)))
+	require.Equal(t, "between two tests", whenOutside(windows, ts(15)))
+}

@@ -1350,9 +1350,8 @@ func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose b
 	if len(misses) == 0 {
 		return
 	}
-	// The agent returns only tests that ended: the one the signal cut off,
-	// often the one that hung on a missing mock, never sent its end, so a
-	// miss no window holds may be its, not outside every test.
+	// The test the signal cut off, often the one that hung on a missing mock,
+	// never sent its end: the agent returns it as a test that ran until now.
 	windows, _ := m.agentWindows(rctx)
-	m.reportMissesAs(misses, attributeMocks(testWindows(windows), nil, nil, misses), "(not in a finished test)")
+	m.reportMisses(misses, attributeMocks(testWindows(windows), nil, nil, misses))
 }

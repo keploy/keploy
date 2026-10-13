@@ -324,7 +324,7 @@ func (r *Registry) ownerLocked(pid uint32) *worker {
 	if w, ok := r.workers[pid]; ok {
 		return w
 	}
-	if r.proc == nil {
+	if r.proc == nil || len(r.workers) == 0 {
 		return nil
 	}
 	_, w := r.chain(pid)

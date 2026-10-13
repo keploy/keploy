@@ -337,15 +337,10 @@ func (m *mockService) withRunIDs(tc *models.TestCase) *models.TestCase {
 // reportMisses prints each call no mock matched once, with the test it was
 // made in ("(outside any test)" when none) and how many times, and what the
 // matcher said about the first one: how far matching got, the closest mock,
-// and the protocol's own next step. In a `keploy mock` run the agent logs
-// misses at Debug, so this is where they show.
+// and the protocol's own next step. Under the proven switch the agent logs
+// misses at Debug in a `keploy mock` run, so this is where they show.
 func (m *mockService) reportMisses(misses []models.UnmatchedCall, byFlow []FlowMocks) {
-	m.reportMissesAs(misses, byFlow, "(outside any test)")
-}
-
-// reportMissesAs is reportMisses with the label for a miss no test's window
-// holds.
-func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []FlowMocks, unplaced string) {
+	const unplaced = "(outside any test)"
 	type key struct{ test, protocol, call, dest string }
 	var order []key
 	n := map[key]int{}

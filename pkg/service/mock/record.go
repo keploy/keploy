@@ -433,7 +433,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	windows, suites := splitSuites(windows)
 	if len(starts) == 0 && len(windows) > 0 {
 		m.logger.Info("no app start seen: calls made outside the tests are kept as the start-up of their test folder",
-			zap.String("next_step", "if the tests start the app as its own process, send POST $KEPLOY_MOCK_AGENT/agent/app/start {\"port\": <port>, \"pid\": <app pid>} once it is ready, so its start-up is kept apart"))
+			zap.String("next_step", "if the tests start the app as its own process, send POST $KEPLOY_MOCK_AGENT/agent/app/start {\"port\": <port>, \"pid\": <app pid>} (with Authorization: Bearer $KEPLOY_MOCK_AGENT_TOKEN when that is set) once it is ready, so its start-up is kept apart"))
 	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
@@ -512,7 +512,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			m.logger.Info(fmt.Sprintf("%d requests captured; %d belong to tests; %d made outside every test %s not part of any test: %s",
 				len(capture.list()), inTests, len(loose), plural(len(loose), "is", "are"), strings.Join(loose, ", ")),
 				zap.String("mock-set", name),
-				zap.String("next_step", "a request made outside every test is not replayed or compared; the calls it made to dependencies are kept with the start-up and served at replay"))
+				zap.String("next_step", "a request made outside every test is not replayed or compared as a test case"))
 		}
 	}
 	if mockCount == 0 {
@@ -573,7 +573,7 @@ func (m *mockService) noScopes(tests []models.ScopeWindow, readErr error, appErr
 		return refusal{fmt.Sprintf("Recording stopped: keploy could not read which tests ran from its agent (%v).\n%s", readErr, last)}
 	}
 	return refusal{"Recording stopped: your tests ran but none sent a scope mark, so keploy cannot tell which calls belong to which test.\n" +
-		"At the start of every test send POST $KEPLOY_MOCK_AGENT/agent/scope/begin {\"name\": \"<test>\", \"pid\": <test process pid>, \"dir\": \"<folder>\"}, and at its end POST $KEPLOY_MOCK_AGENT/agent/scope/end with the same body, then run keploy mock record again.\n" + last}
+		"At the start of every test send POST $KEPLOY_MOCK_AGENT/agent/scope/begin {\"name\": \"<test>\", \"pid\": <test process pid>, \"dir\": \"<folder>\"}, and at its end POST $KEPLOY_MOCK_AGENT/agent/scope/end with the same body; send Authorization: Bearer $KEPLOY_MOCK_AGENT_TOKEN on both when that variable is set. Then run keploy mock record again.\n" + last}
 }
 
 // noCallsNext is the next step when a recording captured no outgoing call.
@@ -1051,6 +1051,9 @@ func outsideTests(windows []models.ScopeWindow, cases []capturedMock, byCase map
 func whenOutside(windows []models.ScopeWindow, at time.Time) string {
 	before, after := false, false
 	for _, w := range windows {
+		if !at.Before(w.Start) && !at.After(w.End) {
+			return "while a test ran, outside its scope"
+		}
 		if w.Start.After(at) {
 			before = true
 		}
@@ -1066,7 +1069,7 @@ func whenOutside(windows []models.ScopeWindow, at time.Time) string {
 	case after:
 		return "tear-down, after the last test"
 	}
-	return "while a test ran, outside its scope"
+	return "outside every test"
 }
 
 func plural(n int, one, many string) string {
