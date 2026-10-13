@@ -13,7 +13,12 @@ type bootPlan struct {
 	perTest []capturedMock
 }
 
-func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, mocks []capturedMock) bootPlan {
+// classify files each recorded mock under the test that made it, the app
+// start it belongs to, or, for any other call made outside every test, the
+// start-up of the test folder whose process made it (owners: worker PID to
+// folder). A call whose process belongs to no known worker is filed with no
+// folder: the start-up every set is served. It is never placed by time.
+func classify(tests, starts []models.ScopeWindow, owners map[uint32]string, mocks []capturedMock) bootPlan {
 	byRef := make(map[string]int, len(starts))
 	boots := make([]models.BootSpec, 0, len(starts))
 	for _, s := range starts {
@@ -40,12 +45,16 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.ts); test != "" {
+		who := mk.worker
+		if who == 0 {
+			who = mk.pid
+		}
+		if test := testAt(tests, who, mk.ts); test != "" && (!mk.boot || len(starts) > 0) {
 			out.tests[test] = append(out.tests[test], entry)
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		dir := suiteAt(suites, mk.ts)
+		dir := owners[who]
 		j, ok := runner[dir]
 		if !ok {
 			j = len(boots)
@@ -87,16 +96,19 @@ func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
 	return pick[0].Name
 }
 
-func suiteAt(suites []models.SuiteSpan, at time.Time) string {
-	best := ""
-	var start time.Time
-	for _, s := range suites {
-		if at.Before(s.Start) || (!s.End.IsZero() && at.After(s.End)) {
+// workerDirs maps each worker PID that sent a scope mark to the folder its
+// marks named. A PID seen with two folders maps to none.
+func workerDirs(windows []models.ScopeWindow) map[uint32]string {
+	out := map[uint32]string{}
+	for _, w := range windows {
+		if w.App || w.PID == 0 || w.Dir == "" {
 			continue
 		}
-		if best == "" || s.Start.After(start) {
-			best, start = s.Dir, s.Start
+		if d, ok := out[w.PID]; ok && d != w.Dir {
+			out[w.PID] = ""
+			continue
 		}
+		out[w.PID] = w.Dir
 	}
-	return best
+	return out
 }

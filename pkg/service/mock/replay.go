@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -284,6 +285,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
+		m.reportInterruptedMisses(ctx, composeAppExit != nil)
 		// A replay stopped by a signal before it finished did not verify the
 		// suite, so it must not exit 0 (a pass). Exit 128+N for the signal that
 		// stopped it (SIGINT→130, SIGHUP→129, SIGTERM→143); a non-signal cancel
@@ -371,7 +373,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		failedBy = FailedByStrict
 		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
 		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
+			zap.String("next_step", strictNext()))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
@@ -729,7 +731,8 @@ func (m *mockService) replayWindows(ctx context.Context) []models.ScopeWindow {
 		}
 		return outcome.Windows
 	}
-	return m.agentWindows(ctx)
+	windows, _ := m.agentWindows(ctx)
+	return windows
 }
 
 // ScopeGateRequest is what a ScopeGateSource is told about the replay it gates.
@@ -905,12 +908,17 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 		return st
 	}
+	var shared []string
 	for _, b := range mapping.Boots {
-		st := get(b.Dir)
 		names := make([]string, 0, len(b.Mocks))
 		for _, e := range b.Mocks {
 			names = append(names, e.Name)
 		}
+		if b.Dir == "" && b.Key == "" {
+			shared = append(shared, names...)
+			continue
+		}
+		st := get(b.Dir)
 		if b.Key == "" {
 			st.Runner = append(st.Runner, names...)
 		} else {
@@ -926,6 +934,15 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 		st.Tests[tc.ID] = owned
 		sets[setName(tc.Dir, root)] = st
+	}
+	if len(shared) > 0 {
+		if len(sets) == 0 {
+			sets[setName("", root)] = get("")
+		}
+		for k, st := range sets {
+			st.Runner = append(st.Runner, shared...)
+			sets[k] = st
+		}
 	}
 	for _, su := range mapping.Suites {
 		k := setName(su.Dir, root)
@@ -999,6 +1016,20 @@ type ReplayOutcome struct {
 	Mocks  []FlowMocks
 	Starts map[string]int
 	Sets   []string
+	// Tests is each top-level test the replay reached, once, gated ones
+	// included (see ranTests).
+	Tests []RanTest
+}
+
+// RanTest is one top-level test a replay reached: its name, the set (folder)
+// it belongs to, and its verdict as its harness reported it at the end of the
+// test (models.ScopeOutcomePassed, Failed or Skipped; "" when it reported
+// none), or models.ScopeOutcomeGated, with no set, for a test the replay told
+// not to run.
+type RanTest struct {
+	Name   string
+	Set    string
+	Status string
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -1114,21 +1145,19 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			summary = append(summary, zap.NamedError("reason", consumedErr))
 			next = "the keploy-agent container writes what it served and missed as compose stops it; check its logs above for why this one did not, and that its image is the one this keploy version runs"
 		}
+		if missesErr != nil && provenswitch.On() {
+			// Under the proven switch the agent logs each miss at Debug in a
+			// `keploy mock` run, so its logs name them only under --debug.
+			next += "; " + debugHint
+		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
 			append(summary, zap.String("next_step", next))...)
 	}
 
-	for _, miss := range misses {
-		m.logger.Warn("no recorded mock matched an outgoing call",
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", miss.ActualSummary),
-			zap.String("destination", miss.Destination),
-			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
-	}
-
-	// What each test used and missed, and its verdict: for the receipt, and
-	// for the reporter below.
+	// What each test used and missed, and its verdict: for the misses named
+	// below, the receipt, and the reporter.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	m.reportMisses(misses, flows)
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free
@@ -1151,6 +1180,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Mocks:    flows,
 				Starts:   startsByTest(detail.windows, detail.starts),
 				Sets:     ranSets(detail.windows),
+				Tests:    ranTests(detail.windows),
 			})
 		}
 	}
@@ -1278,4 +1308,50 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 			// would otherwise read it as "when this happened".
 			zap.String("recordedReqTimestamp", state.ReqTimestampMock))
 	}
+}
+
+// interruptedReadTimeout bounds the reads an interrupted replay makes to name
+// its misses before it exits.
+const interruptedReadTimeout = 3 * time.Second
+
+// debugHint is where the misses show when the CLI could not name them: under
+// the proven switch the agent logs each miss at Debug in a `keploy mock` run.
+const debugHint = "run the replay again with --debug to see each miss as it happens"
+
+func strictNext() string {
+	next := "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"
+	if provenswitch.On() {
+		next += "; " + debugHint
+	}
+	return next
+}
+
+// reportInterruptedMisses names the misses of a replay a signal stopped. Under
+// the proven switch the agent logs them at Debug in a `keploy mock` run, so
+// without this a replay interrupted because a test hung on a missing mock
+// would show none; with the switch off the agent's own lines already did.
+// Best effort: the reads are bounded, and when they fail it says where to look.
+func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose bool) {
+	if !provenswitch.On() {
+		return
+	}
+	const hint = debugHint
+	if fromCompose {
+		m.logger.Info("the replay was interrupted before its misses were read; " + hint)
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptedReadTimeout)
+	defer cancel()
+	misses, err := m.instrumentation.GetMockErrors(rctx)
+	if err != nil {
+		m.logger.Info("the replay was interrupted and its misses could not be read; "+hint, zap.Error(err))
+		return
+	}
+	if len(misses) == 0 {
+		return
+	}
+	// The test the signal cut off, often the one that hung on a missing mock,
+	// never sent its end: the agent returns it as a test that ran until now.
+	windows, _ := m.agentWindows(rctx)
+	m.reportMisses(misses, attributeMocks(testWindows(windows), nil, nil, misses))
 }

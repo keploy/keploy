@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -183,10 +184,32 @@ func (a *Agent) GetScopeWindows(_ context.Context) ([]models.ScopeWindow, error)
 	defer a.scopeMu.Unlock()
 	out := make([]models.ScopeWindow, len(a.scopeWindows))
 	copy(out, a.scopeWindows)
+	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		out = append(out, a.unendedLocked(time.Now())...)
+	}
 	for _, s := range starts.Default.List() {
 		out = append(out, models.ScopeWindow{Name: s.Key, Start: s.First, End: s.First, Ready: s.Ready, PID: s.Root, Dir: s.Dir, App: true, Port: s.Port, Program: s.Program, Place: s.Place, N: s.N, Ref: s.Ref, Worker: s.Worker})
 	}
 	return out, nil
+}
+
+// unendedLocked is each test of a replay that began and has not ended, as a
+// window up to now with the verdict failed: a test whose binary was killed
+// (a -timeout panic, a crash) never sends its end, and a replay must not
+// leave it out of the tests it reached. Suite scopes are not tests.
+func (a *Agent) unendedLocked(now time.Time) []models.ScopeWindow {
+	keys := make([]scopeKey, 0, len(a.workerOpen))
+	for k := range a.workerOpen {
+		if !a.scopeMeta[k].suite {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return a.workerOpen[keys[i]].Before(a.workerOpen[keys[j]]) })
+	out := make([]models.ScopeWindow, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, models.ScopeWindow{Name: k.name, Start: a.workerOpen[k], End: now, PID: k.pid, Dir: a.scopeMeta[k].dir, Outcome: models.ScopeOutcomeFailed})
+	}
+	return out
 }
 
 // SetScopeTable installs the replay-time per-test name→mock-names table the CLI

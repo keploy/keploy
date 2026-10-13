@@ -364,3 +364,34 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
 	}
 }
+
+func TestStampNamesTheWorkerACallDescendsFrom(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	f.spawn(100, 1, at(0), "/tmp/orders.test")
+	r.Begin(100, "/repo/e2e/orders", "/repo/e2e/orders", true, at(10))
+	f.spawn(101, 100, at(20), "/tmp/sh")
+	f.spawn(102, 101, at(30), "/tmp/shop")
+	f.spawn(300, 1, at(40), "/tmp/other")
+
+	for _, c := range []struct {
+		pid, worker uint32
+	}{
+		{100, 100}, // the test process itself
+		{102, 100}, // a grandchild it started without AppStart
+		{300, 0},   // a process no worker started
+	} {
+		m := &models.Mock{SourcePID: c.pid}
+		r.Stamp(m)
+		if m.Worker != c.worker {
+			t.Fatalf("pid %d: worker %d, want %d", c.pid, m.Worker, c.worker)
+		}
+	}
+	nop := New(nil, 0)
+	nop.Begin(100, "/repo/e2e/orders", "/repo/e2e/orders", true, at(10))
+	m := &models.Mock{SourcePID: 102}
+	nop.Stamp(m)
+	if m.Worker != 0 {
+		t.Fatalf("with no process table only a worker itself is known, got %d", m.Worker)
+	}
+}

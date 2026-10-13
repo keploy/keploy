@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -2180,7 +2181,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					if isShutdownError(err) || isNetworkClosedErr(err) {
 						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
 					} else {
-						if refusedLocally(err) {
+						if errors.As(err, new(reportedMiss)) {
+							p.logger.Debug("failed to handle the client connection: no mock matched its call", zap.Error(err))
+						} else if refusedLocally(err) {
 							p.logger.Debug("failed to handle the client connection: nothing is listening at the local destination yet", zap.Error(err))
 						} else {
 							utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -2548,6 +2551,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
+			if quietMisses() && isMockMiss(err) {
+				return reportedMiss{err}
+			}
 			return err
 		}
 		return nil
@@ -3323,10 +3329,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
-				p.sendMockNotFoundError(err)
-				return err
+				return p.mockFailed(logger, err)
 			}
 		}
 	}
@@ -3430,16 +3434,12 @@ func (p *Proxy) mockGenericOutgoing(
 		// mode-gated), so report rather than relay — which is what the MySQL
 		// replay site does too.
 		err := errors.New("no generic parser is registered to mock this connection")
-		utils.LogError(logger, err, "failed to mock the outgoing message")
-		p.sendMockNotFoundError(err)
-		return err
+		return p.mockFailed(logger, err)
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-		utils.LogError(logger, err, "failed to mock the outgoing message")
 		// Send specific error type to error channel for external monitoring
-		p.sendMockNotFoundError(err)
-		return err
+		return p.mockFailed(logger, err)
 	}
 	return nil
 }
@@ -4492,6 +4492,66 @@ func (p *Proxy) SendError(err error) {
 	}
 }
 
+// reportedMiss marks a mock miss that `keploy mock` already reports under the
+// proven switch: the CLI prints each miss once, named by its test, at the end
+// of the run, and fails the run when it cannot read them, so the connection
+// handler logs it at Debug rather than as an error.
+type reportedMiss struct{ err error }
+
+func (r reportedMiss) Error() string { return r.err.Error() }
+
+func (r reportedMiss) Unwrap() error { return r.err }
+
+// mismatchReporter is an error that carries the report of a call no mock
+// matched.
+type mismatchReporter interface {
+	MismatchReport() *models.MockMismatchReport
+}
+
+// isMockMiss reports whether err is a call no mock matched, the kind the
+// replay counts as missed, rather than a parser or I/O failure.
+func isMockMiss(err error) bool {
+	var reporter mismatchReporter
+	return errors.Is(err, models.ErrNoMockMatched) || (errors.As(err, &reporter) && reporter != nil)
+}
+
+// quietMisses reports whether the agent leaves naming each miss to the CLI: a
+// `keploy mock` run under the proven switch, where a miss list the CLI cannot
+// read fails the run. Anywhere else the agent's own line is the one that
+// always shows, so it stays at Warn.
+func quietMisses() bool {
+	return mismatch.MockMode() && provenswitch.On()
+}
+
+// mockFailed reports a MockOutgoing failure and returns the error the
+// connection handler gets. Where the CLI names each miss (quietMisses), a miss
+// is logged at Debug and returned as reportedMiss; anything else, and every
+// other run, keeps the error log it always had.
+func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
+	quiet := quietMisses() && isMockMiss(err)
+	if quiet {
+		logger.Debug("failed to mock the outgoing message", zap.Error(err))
+	} else {
+		utils.LogError(logger, err, "failed to mock the outgoing message")
+	}
+	p.sendMockNotFoundError(err)
+	if quiet {
+		return reportedMiss{err}
+	}
+	return err
+}
+
+// mismatchLog is how the mock-mismatch line is logged: Warn, so every replay
+// shows each miss as it happens, except where the CLI names each miss once
+// with its test at the end (quietMisses: Debug there, or the miss would be
+// printed twice).
+func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
+	if quietMisses() {
+		return p.logger.Debug
+	}
+	return p.logger.Warn
+}
+
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
 func (p *Proxy) sendMockNotFoundError(err error) {
@@ -4502,9 +4562,6 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	}
 	// Extract diff report from the error chain if available.
 	// Use errors.As to traverse wrapped errors.
-	type mismatchReporter interface {
-		MismatchReport() *models.MockMismatchReport
-	}
 	var reporter mismatchReporter
 	if errors.As(err, &reporter) && reporter != nil {
 		proxyErr.MismatchReport = reporter.MismatchReport()
@@ -4552,9 +4609,9 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		if r.DestinationScope != models.DestinationScopeUnknown {
 			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
 		}
-		p.logger.Warn("mock mismatch: no matching mock for outgoing call", fields...)
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.logger.Warn("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
 	}
 	p.SendError(proxyErr)
 }

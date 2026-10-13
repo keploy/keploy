@@ -26,6 +26,33 @@ func TestSetTableCarriesTheFirstSuiteStart(t *testing.T) {
 	}
 }
 
+func TestSetTableServesAStartupOfNoFolderToEverySet(t *testing.T) {
+	m := &models.Mapping{
+		Boots: []models.BootSpec{
+			{Dir: "e2e/orders", Mocks: []models.MockEntry{{Name: "orders-boot"}}},
+			{Mocks: []models.MockEntry{{Name: "shared-boot"}}},
+		},
+		TestCases: []models.MappedTestCase{
+			{ID: "TestOrders", Dir: "e2e/orders"},
+			{ID: "TestBilling", Dir: "e2e/billing"},
+		},
+	}
+	sets := setTable(m, "")
+	if len(sets) != 2 {
+		t.Fatalf("sets %+v", sets)
+	}
+	if got := sets["e2e/orders"].Runner; len(got) != 2 || got[0] != "orders-boot" || got[1] != "shared-boot" {
+		t.Fatalf("orders runner %v", got)
+	}
+	if got := sets["e2e/billing"].Runner; len(got) != 1 || got[0] != "shared-boot" {
+		t.Fatalf("billing runner %v", got)
+	}
+	only := setTable(&models.Mapping{Boots: []models.BootSpec{{Mocks: []models.MockEntry{{Name: "shared-boot"}}}}}, "")
+	if got := only[""].Runner; len(only) != 1 || len(got) != 1 {
+		t.Fatalf("a recording with only a shared start-up keeps it: %+v", only)
+	}
+}
+
 type setTableDB struct {
 	MappingDB
 	mapping *models.Mapping

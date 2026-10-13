@@ -199,7 +199,7 @@ func TestCorrelateCases(t *testing.T) {
 	require.Empty(t, correlateCases(nil, nil, cases, steps))
 }
 
-func TestStartupMocks(t *testing.T) {
+func TestBootsWithoutAppStart(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	windows := []models.ScopeWindow{
 		{Name: "orders/e2e.TestA", Start: at(0), End: at(100)},
@@ -212,8 +212,10 @@ func TestStartupMocks(t *testing.T) {
 		{name: "mock-3", ts: at(150)},
 		{name: "mock-4", ts: at(250)},
 	}
-	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}, startupMocks(windows, mocks))
-	require.Len(t, startupMocks(nil, mocks), 5)
+	plan := classify(windows, nil, nil, mocks)
+	require.Equal(t, []models.BootSpec{{Mocks: []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}}}, plan.boots)
+	require.Equal(t, map[string][]models.MockEntry{"orders/e2e.TestA": {{Name: "mock-1"}}, "orders/e2e.TestB": {{Name: "mock-3"}}}, plan.tests)
+	require.Len(t, classify(nil, nil, nil, mocks).boots[0].Mocks, 5)
 }
 
 func stepsMarks() []models.ScopeWindow {
@@ -263,8 +265,10 @@ func TestRecordWritesCaseMocksStepsAndStartup(t *testing.T) {
 	require.Empty(t, top.CaseMocks)
 	b := byID["orders/e2e.TestB"]
 	require.Equal(t, map[string][]string{"test-3": {"mock-4"}}, b.CaseMocks)
-	require.Equal(t, []string{"mock-3", "mock-4", "mock-5"}, b.MockNames())
-	require.Equal(t, []string{"mock-0", "mock-3"}, mapping.StartupMockNames())
+	require.Equal(t, []string{"mock-4", "mock-5"}, b.MockNames())
+	require.Empty(t, mapping.StartupMockNames())
+	require.Len(t, mapping.Boots, 1)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-3"}}, mapping.Boots[0].Mocks)
 }
 
 func TestRecordRefusesATestThatRanTwice(t *testing.T) {
@@ -411,7 +415,8 @@ func TestRecordAndReplayPutASetupCallInTheParentTest(t *testing.T) {
 	require.Equal(t, map[string]string{"test-1": ""}, flow.CaseSteps, "the call before the first subtest is the parent's")
 	require.Equal(t, map[string][]string{"test-1": {"mock-1"}}, flow.CaseMocks)
 	require.Equal(t, []string{"mock-1"}, flow.MockNames())
-	require.Equal(t, []string{"mock-0"}, mapping.StartupMockNames(), "a call between two tests' marks belongs to no test")
+	require.Len(t, mapping.Boots, 1)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}}, mapping.Boots[0].Mocks, "a call between two tests' marks belongs to no test")
 
 	recorded := map[string][]*models.TestCase{"e2e/orders.TestFlow": {httpCase("test-1", "POST", "/apps", 201, "{}", setup)}}
 	actual := []*models.TestCase{httpCase("", "POST", "/apps", 201, "{}", setup.Add(time.Millisecond))}
