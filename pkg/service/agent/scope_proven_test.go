@@ -994,3 +994,28 @@ func TestAnEmptyPoolServesNoPoolMock(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, p.filteredNames(), "between tests no test's mock answers")
 }
+
+// A refusal is in the run's windows, once when repeated, and the session
+// keeps a bounded number of them.
+func TestRefusalsAreInTheWindows(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	r := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "a second test process"}
+	a.NoteRefusal(r)
+	a.NoteRefusal(r)
+	a.NoteRefusal(models.RunRefusal{Code: "go_test_parallel", Message: "go test -p 2"})
+	ws, err := a.GetScopeWindows(context.Background())
+	require.NoError(t, err)
+	var got []string
+	for _, w := range ws {
+		if w.Refused != nil {
+			got = append(got, w.Refused.Code)
+		}
+	}
+	require.Equal(t, []string{models.ScopeErrOneTestProcess, "go_test_parallel"}, got)
+	for i := 0; i < 2*maxRefusals; i++ {
+		a.NoteRefusal(models.RunRefusal{Code: "c", Message: fmt.Sprint(i)})
+	}
+	require.Len(t, a.claimWindows(), maxRefusals)
+	require.NoError(t, a.resetSession(context.Background()))
+	require.Empty(t, a.claimWindows(), "the refusals belong to their session")
+}

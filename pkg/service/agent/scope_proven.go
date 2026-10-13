@@ -72,6 +72,9 @@ type provenWire struct {
 	// pool is, in a replay, each key's pool slice (the CLI's scope table,
 	// models.ScopeTableReq.Pool); nil until the CLI sent one.
 	pool map[string][]string
+	// refusals are what the wire refused, and what an integration refused
+	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
+	refusals []models.ScopeWindow
 	// closed: the run's windows were read at its end; nothing more is
 	// claimed or begun until the next session resets the wire.
 	closed bool
@@ -324,11 +327,34 @@ func (a *Agent) applyPool(ctx context.Context) error {
 	return a.UpdateMockParams(ctx, params)
 }
 
-// claimWindows is the session's claims, as windows (models.ScopeWindow.Claim).
+// claimWindows is the session's claims and refusals, as windows
+// (models.ScopeWindow.Claim, .Refused).
 func (a *Agent) claimWindows() []models.ScopeWindow {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	return append([]models.ScopeWindow(nil), a.proven.claims...)
+	out := append([]models.ScopeWindow(nil), a.proven.claims...)
+	return append(out, a.proven.refusals...)
+}
+
+// maxRefusals bounds the refusals a session keeps: past it, a harness that
+// is refused at every test adds nothing new.
+const maxRefusals = 64
+
+// NoteRefusal records a refusal of the run (models.RunRefusal): one the wire
+// answered a claim or a begin with, or one an integration made and told the
+// agent. The CLI's verdict names it. A refusal like the last one is kept
+// once.
+func (a *Agent) NoteRefusal(r models.RunRefusal) {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	if n := len(a.proven.refusals); n > 0 && *a.proven.refusals[n-1].Refused == r {
+		return
+	}
+	if len(a.proven.refusals) >= maxRefusals {
+		return
+	}
+	now := time.Now()
+	a.proven.refusals = append(a.proven.refusals, models.ScopeWindow{Start: now, End: now, Refused: &r})
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,

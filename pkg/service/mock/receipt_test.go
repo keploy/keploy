@@ -952,7 +952,7 @@ func TestRecordTestsReceipt(t *testing.T) {
 		{Name: "suite", Suite: true},
 		{Name: "app", App: true},
 	}
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, windows)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, windows, nil)
 	got, err := ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -965,7 +965,7 @@ func TestRecordTestsReceipt(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
 
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, nil)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, nil, nil)
 	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.Nil(t, got, "a record that named no test removes the stale file")

@@ -79,6 +79,21 @@ type ScopeError struct {
 	Status int `json:"-"`
 }
 
+// RunRefusal is what keploy refused during a run under the proven wire: a
+// test process's claim, a test's begin, or what a test framework's
+// integration refused and told keploy (POST /agent/refusal). The run fails,
+// naming it, with its own reason.
+type RunRefusal struct {
+	Code    string `json:"code" yaml:"code"`
+	Message string `json:"message" yaml:"message"`
+	Remedy  string `json:"remedy,omitempty" yaml:"remedy,omitempty"`
+}
+
+// Refusal is e as a RunRefusal.
+func (e *ScopeError) Refusal() RunRefusal {
+	return RunRefusal{Code: e.Code, Message: e.Message, Remedy: e.Remedy}
+}
+
 func (e *ScopeError) Error() string {
 	if e.Remedy == "" {
 		return e.Message

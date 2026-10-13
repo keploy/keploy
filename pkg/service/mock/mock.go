@@ -47,6 +47,10 @@ type mockService struct {
 	// record tags each pool mock with the key of the claim it was made
 	// under (claimKeyAt).
 	claims []models.ScopeWindow
+	// refusals are, under the proven switch, what the run's wire refused
+	// (windows with Refused set), which readWindows takes out of the
+	// windows it returns: the replay's receipt names them.
+	refusals []models.RunRefusal
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

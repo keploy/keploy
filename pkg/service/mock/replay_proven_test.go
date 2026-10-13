@@ -440,3 +440,31 @@ func TestTheWholePoolIsNotArmedBeforeTheRunUnderTheSwitch(t *testing.T) {
 		})
 	}
 }
+
+// What the wire refused during the run comes with the windows; the replay's
+// receipt carries it for keploy's verdict, and the windows the rest of the
+// replay reads have no refusal in them.
+func TestTheReceiptCarriesTheRunsRefusals(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	refused := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "process 7 is a second test process", Remedy: "run go test -p 1"}
+	instr.windows = []models.ScopeWindow{{Name: "o::TestA", Outcome: models.ScopeOutcomePassed}, {Refused: &refused}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	r, err := ReadReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Equal(t, []models.RunRefusal{refused}, r.Refusals)
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1, "a refusal is no test")
+}

@@ -196,7 +196,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// otherwise, they would recreate a fresh set's folder a failed
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
-			writeRecordTestsReceipt(m.logger, m.config.Path, name, started.UTC().Truncate(time.Second), recordTests)
+			writeRecordTestsReceipt(m.logger, m.config.Path, name, started.UTC().Truncate(time.Second), recordTests, m.refusals)
 		}
 	}()
 	saveSet := m.saveSet
@@ -669,13 +669,16 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 		return nil, err
 	}
 	windows := all[:0:0]
-	m.claims = nil
+	m.claims, m.refusals = nil, nil
 	for _, w := range all {
-		if w.Claim != "" {
+		switch {
+		case w.Refused != nil:
+			m.refusals = append(m.refusals, *w.Refused)
+		case w.Claim != "":
 			m.claims = append(m.claims, w)
-			continue
+		default:
+			windows = append(windows, w)
 		}
-		windows = append(windows, w)
 	}
 	return windows, nil
 }

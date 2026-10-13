@@ -246,6 +246,9 @@ type ScopeWindow struct {
 	// while no test is open belongs to the pool slice of that key (design
 	// v14 §5.2).
 	Claim string `json:"claim,omitempty"`
+	// Refused, under the proven wire, makes this no test's window but a
+	// refusal keploy made at Start (RunRefusal).
+	Refused *RunRefusal `json:"refused,omitempty"`
 }
 
 // PoolKeyNone is the pool slice of calls made before any test process

@@ -71,6 +71,8 @@ type composeInstr struct {
 	// reads failing is the normal case there, not an exotic one.
 	// pool is the pool slices the last proven table push sent.
 	pool map[string][]string
+	// windows is what the agent answers the windows read with.
+	windows []models.ScopeWindow
 
 	consumedMocks []models.MockState
 	consumedErr   error
@@ -202,7 +204,7 @@ func (f *composeInstr) released() bool {
 }
 
 func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
-	return nil, f.windowsErr
+	return f.windows, f.windowsErr
 }
 
 // PushScopeTable takes the per-test table (ScopePusher).

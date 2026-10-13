@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -194,4 +195,36 @@ func TestAnAppStartNeedsANewIntegrationUnderTheWire(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), models.ScopeErrUpgradeIntegration) {
 		t.Fatalf("app start: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// refusingSvc records what it was told was refused.
+type refusingSvc struct {
+	wireSvc
+	refusals []models.RunRefusal
+}
+
+func (s *refusingSvc) NoteRefusal(r models.RunRefusal) { s.refusals = append(s.refusals, r) }
+
+// What the wire refuses is recorded for the run's verdict to name, and an
+// integration can tell the agent what it refused; with the switch off the
+// refusal path is the plain 404.
+func TestRefusalsAreRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &refusingSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	// An httptest request comes from no connection: the agent cannot tell
+	// the caller, and that refusal is recorded like any other.
+	rec := call(t, a.HandleInstance, `{"key":"o"}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	rec = call(t, a.HandleRefusal, `{"code":"go_test_parallel","message":"go test runs up to 8 test binaries at once","remedy":"add -p 1"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"v":1`)
+	require.Len(t, svc.refusals, 2)
+	require.Equal(t, models.ScopeErrNoCaller, svc.refusals[0].Code)
+	require.Equal(t, models.RunRefusal{Code: "go_test_parallel", Message: "go test runs up to 8 test binaries at once", Remedy: "add -p 1"}, svc.refusals[1])
+	require.Equal(t, http.StatusBadRequest, call(t, a.HandleRefusal, `{"code":""}`).Code)
+	t.Setenv(provenswitch.Env, "")
+	off := call(t, a.HandleRefusal, `{"code":"x","message":"y"}`)
+	require.Equal(t, http.StatusNotFound, off.Code)
+	require.Equal(t, "404 page not found\n", off.Body.String())
 }

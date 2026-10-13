@@ -525,6 +525,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		CoverageNote:   covNote,
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
+		Refusals:       m.refusals,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:         name,
