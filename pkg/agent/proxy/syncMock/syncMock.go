@@ -586,7 +586,14 @@ func New(logger *zap.Logger) *SyncMockManager {
 	if logger != nil {
 		m.logger = logger
 	}
+	m.orphans.SetHorizon(m.CapturedTo)
 	return m
+}
+
+func init() {
+	// The package manager's orphan spans extend as far as its capture has
+	// got (CapturedTo), as every manager New makes does.
+	instance.orphans.SetHorizon(instance.CapturedTo)
 }
 
 // DedupQueue returns this manager's dedup queue: its own private one for
@@ -2667,11 +2674,48 @@ func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, i
 	if m == nil {
 		return false, 0
 	}
-	// Still-open spans extend to now, matching WasPressureActiveInWindow's
-	// treatment of an open pressure interval. Without that a connection that
-	// is un-capturable RIGHT NOW would suppress nothing, which is precisely the
-	// window whose test cases must not be shipped mock-less.
+	// Still-open spans extend: one that follows a connection's traffic on the
+	// capture's clock (OpenOrphanSpan) as far as the capture has got
+	// (CapturedTo), and no further than the idle grace past its last chunk;
+	// one opened on the agent's clock (OpenOrphanWindow) to now. Without that
+	// a connection that is un-capturable RIGHT NOW would suppress nothing,
+	// which is precisely the window whose test cases must not be shipped
+	// mock-less; on the agent's clock, a parser behind the traffic widened a
+	// span it stamps by its lag.
 	return m.orphans.Overlaps(start, end)
+}
+
+// OpenOrphanSpan is OpenOrphanWindow on the capture's clock (Spans.OpenAt):
+// the span of what a connection carries after it stopped being recorded,
+// from start, the stamp of the newest chunk it had carried at the stop. The
+// connection's traffic extends it (OpenSpan.Extend), and it ends at the stamp
+// of its last chunk (OpenSpan.Close). grace is UnrecordedIdleGrace. A zero
+// start is ignored (a nil OpenSpan, whose methods do nothing).
+func (m *SyncMockManager) OpenOrphanSpan(start time.Time, grace time.Duration) *OpenSpan {
+	if m == nil {
+		return nil
+	}
+	return m.orphans.OpenAt(start, grace)
+}
+
+// CapturedTo is how far the recording's capture has got: every chunk stamped
+// up to it has been read and noted, as each watermark that can tell says
+// (Horizon); the clock when none can. An open orphan span extends no further.
+func (m *SyncMockManager) CapturedTo() time.Time {
+	var to time.Time
+	for _, w := range m.watermarks() {
+		h, ok := w.(Horizon)
+		if !ok {
+			continue
+		}
+		if t := h.CapturedTo(); !t.IsZero() && (to.IsZero() || t.Before(to)) {
+			to = t
+		}
+	}
+	if to.IsZero() {
+		return time.Now()
+	}
+	return to
 }
 
 // OpenOrphanWindow marks the start of a hole whose end is not yet known and

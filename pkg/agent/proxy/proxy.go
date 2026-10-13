@@ -417,6 +417,19 @@ type Proxy struct {
 	// parserLag is relay.Config.ReaderLag for every recorded connection:
 	// zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
 	parserLag time.Duration
+	// parserGates are the gates of KEPLOY_DEBUG_PARSER_GATE
+	// (debugParserGate): nil unless it is set.
+	parserGates *parserGates
+
+	// parserHangBudget is supervisor.Config.HangBudget for every recorded
+	// connection: how long a parser with work pending may make no progress
+	// before it is retired. Zero (always, outside tests): the supervisor's
+	// default.
+	parserHangBudget time.Duration
+	// relayConfigured, when set (tests only), is told each recorded
+	// connection's relay.Config as recordViaSupervisor builds it, before the
+	// relay is: a test reaches the hooks the dispatcher wires there.
+	relayConfigured func(*relay.Config)
 
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
@@ -1056,6 +1069,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 
 	proxy.capture = relay.NewWatermark()
 	proxy.parserLag = debugParserLag(logger)
+	proxy.parserGates = debugParserGate(logger)
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
@@ -3558,6 +3572,9 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	if p.removeCaptureWatermark != nil {
 		p.removeCaptureWatermark()
 	}
+	// The test hook's watch of its gate directory, if it is set, ends with
+	// the proxy.
+	p.parserGates.close()
 
 	p.CloseErrorChannel()
 	if len(cleanupErrors) > 0 {

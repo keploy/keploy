@@ -11,6 +11,10 @@ GET /login calls the upstream, which answers with two Set-Cookie lines, and
 returns the cookies it received. At replay the upstream is gone and the mock
 answers instead, so the response only matches when the mock serves both
 lines rather than one folded Set-Cookie.
+
+GET /broken calls the upstream, which answers with bytes that are not HTTP,
+and returns 502: keploy's parser stops recording that connection, and the test
+case over it is left out of the recording.
 """
 import http.client
 import json
@@ -52,6 +56,19 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             return self._reply(200, {"cookies": cookies})
+        if self.path == "/broken":
+            # The upstream answers with bytes that are not HTTP: the app says
+            # so, and keploy's parser stops recording that connection.
+            conn = http.client.HTTPConnection("127.0.0.1", UPSTREAM_PORT, timeout=10)
+            try:
+                conn.request("GET", "/broken")
+                conn.getresponse()
+                status = 200
+            except (http.client.HTTPException, OSError):
+                status = 502
+            finally:
+                conn.close()
+            return self._reply(status, {"upstream": "broken"})
         return self._reply(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Upstream for the repeated-headers guard: GET /session answers with two
 Set-Cookie lines. The second carries an Expires date, whose comma makes a
-folded "a,b" Set-Cookie impossible to split back apart."""
+folded "a,b" Set-Cookie impossible to split back apart. GET /broken answers
+with bytes that are not HTTP, which stop keploy's parser on that connection."""
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -12,6 +13,13 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
+        if self.path == "/broken":
+            # Bytes that are not an HTTP response: keploy's HTTP parser
+            # cannot decode them and stops recording the connection there.
+            self.wfile.write(b"NOT-HTTP\r\n\r\n")
+            self.wfile.flush()
+            self.close_connection = True
+            return
         body = b"ok"
         self.send_response(200)
         self.send_header("Set-Cookie", "session=abc123; Path=/; HttpOnly")

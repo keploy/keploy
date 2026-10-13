@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -281,5 +284,66 @@ func TestCaptureWatermark_ATestCaseIsLetGoOnlyOnceWhatTheParserNeverReadIsLeftOu
 	waitUntilT(t, 30*time.Second, "the test case to be let go", func() bool { return wm.Settled("", "", start, end) })
 	if left, _ := mgr.WasMockOrphanedInWindow(start, end); !left {
 		t.Fatal("a test case over a request the parser never read is not left out")
+	}
+}
+
+// KEPLOY_DEBUG_PARSER_GATE numbers the connections the proxy records from 1,
+// and opens the n-th one's gate on the event of a file named n, or "all",
+// being created in its directory: a test orders parsers by events of its
+// choosing. A file there before the gate is asked for opens it at once.
+func TestParserGateOpensTheNthConnectionOnItsFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(debugParserGateEnv, dir)
+	touch := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch("3") // before any gate is asked for
+	p := &Proxy{parserGates: debugParserGate(zap.NewNop())}
+	if p.parserGates == nil || p.parserGates.dir != dir {
+		t.Fatalf("the gates are %+v, want the directory %q", p.parserGates, dir)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := p.parserGate(ctx, zap.NewNop(), nil)
+	second := p.parserGate(ctx, zap.NewNop(), nil)
+	third := p.parserGate(ctx, zap.NewNop(), nil)
+	<-third
+	touch("2")
+	<-second
+	select {
+	case <-first:
+		t.Fatal("the first connection's gate opened on another's file")
+	default:
+	}
+	touch("all")
+	<-first
+	if (&Proxy{}).parserGate(ctx, nil, nil) != nil {
+		t.Fatal("a proxy with no gate directory gated a connection")
+	}
+	p.parserGates.close()
+}
+
+// A gate directory the proxy cannot watch opens no gate, and says so at
+// ERROR: a gate that opened anyway let the parsers through in no order, and a
+// test that ordered them by their gates passed without the order it set up.
+func TestParserGateThatCannotBeWatchedOpensNone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "never-made")
+	t.Setenv(debugParserGateEnv, dir)
+	core, logs := observer.New(zapcore.ErrorLevel)
+	p := &Proxy{parserGates: debugParserGate(zap.New(core))}
+	defer p.parserGates.close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gate := p.parserGate(ctx, zap.NewNop(), nil)
+	select {
+	case <-gate:
+		t.Fatal("a gate opened on a directory that cannot be watched")
+	default:
+	}
+	if n := logs.FilterMessage(cannotWatchGates).Len(); n != 1 {
+		t.Fatalf("%d ERROR lines that the gates cannot be watched, want 1", n)
 	}
 }

@@ -132,7 +132,11 @@ func answered(command byte) bool {
 // (fakeconn.ErrUnnumbered otherwise), and the server stream's floor is set at
 // it. Only the client is read here, so a floor set at a packet passed over is
 // replaced at the next packet before the server's stream is read again, and
-// the one in force is the returned command's.
+// the one in force is the returned command's. A packet passed over begins no
+// exchange: it is more of the one left out, so the exchange NextRequest began
+// at it is ended (Session.EndExchange). Left open, it was the exchange a
+// parser that died in the command after it was said to have stopped in, from
+// that packet on, over however long the client then sat idle.
 //
 // A client that waits for each answer before its next command sends that
 // command on its own, so it starts a chunk of the capture
@@ -146,7 +150,8 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 	var prevSeq byte
 	prevData, passed := false, false
 	for {
-		if _, err := sess.NextRequest(models.MySQL, false); err != nil {
+		found, err := sess.NextRequest(models.MySQL, false)
+		if err != nil {
 			return nil, 0, false, err
 		}
 		atChunk := sess.ClientStream.AtChunkBoundary()
@@ -168,6 +173,7 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 		}
 		if inExchange {
 			prevSeq, prevData, passed = lastSeq, len(buf) > 4, true
+			sess.EndExchange(found.ReadAt)
 			clearPending(sess)
 			continue
 		}
@@ -365,8 +371,8 @@ func clearPending(sess *supervisor.Session) {
 // reached the recorder at reqTs, for err, and returns err. It is reported as
 // every parser reports the exchange it stops on (Session.ReportStoppedOn):
 // counted in the recording's summary (mocks_left_out), said at WARN,
-// rate-limited, and spanned from its command to the stop, under the relay's
-// mark when one is set. What the connection carries from the stop on is left
+// rate-limited, and spanned from its command to the last byte the recorder
+// read, under the relay's mark when one is set. What the connection carries from the stop on is left
 // out apart from it, from the stop's instant (Session.StoppedAt), which opens
 // that span there and then. It is stamped where the stop is decided: by
 // warnFramingLost for lost framing, by this call otherwise, unless a capture

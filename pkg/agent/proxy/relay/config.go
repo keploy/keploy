@@ -156,6 +156,18 @@ type Config struct {
 	// back, so the other direction's later capture is teed first.
 	beforeTee func(fakeconn.Direction)
 
+	// OnCapture, when non-nil, is told the stamp (ReadAt) of every chunk the
+	// relay reads, in either direction, as it is stamped: before its bytes
+	// are written on, and whether the tee queues it, refuses it or a pause
+	// stashes it. It is the connection's traffic on the capture's clock: the
+	// dispatcher follows a connection that stopped being recorded with it
+	// (syncMock.UnrecordedConn). It runs on the forwarder's goroutine, for
+	// every chunk, so it must be cheap and must not block: on a connection
+	// that stopped being recorded, the dispatcher's moves the end of the
+	// connection's open span, under the recording's span lock, for a few
+	// instructions.
+	OnCapture func(at time.Time)
+
 	// ReaderLag, when positive, delivers each captured chunk to its parser
 	// no earlier than this long after the relay read it: the parser then runs
 	// that far behind the traffic, as a starved agent's does, while the
@@ -163,6 +175,13 @@ type Config struct {
 	// capture lag deterministic in end-to-end tests (the proxy sets it from
 	// KEPLOY_DEBUG_PARSER_LAG); zero, the default, adds nothing.
 	ReaderLag time.Duration
+
+	// ReaderGate, when non-nil, delivers nothing to the parser until it is
+	// closed: the parser then gets to its traffic only when the gate opens,
+	// while the application's bytes are forwarded as fast as ever. It exists
+	// to order parsers by events in end-to-end tests (the proxy sets it from
+	// KEPLOY_DEBUG_PARSER_GATE); nil, the default, holds nothing.
+	ReaderGate <-chan struct{}
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.

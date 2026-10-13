@@ -274,6 +274,9 @@ type tee struct {
 	// until this long after it was read ([Config.ReaderLag]). Read-only
 	// after construction.
 	readerLag time.Duration
+	// readerGate, when non-nil, holds every chunk's delivery to the parser
+	// until it is closed ([Config.ReaderGate]).
+	readerGate <-chan struct{}
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
@@ -595,6 +598,9 @@ func (t *tee) drain() {
 		t.noteDeliveringLocked(c)
 		t.mu.Unlock()
 
+		if t.readerGate != nil && !t.gateDelivery(c) {
+			return
+		}
 		if t.readerLag > 0 && !t.lagDelivery(c) {
 			return
 		}

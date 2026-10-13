@@ -195,6 +195,8 @@ type recording struct {
 	cleared        int64
 	clearedAt      []int64
 	clientConsumed int64
+	// readTo is where the recorder had got to on its streams (readTo).
+	readTo time.Time
 	// closedAt is when the streams of a connection left open were closed, at
 	// the deadline (zero when RecordV2 returned before it).
 	closedAt time.Time
@@ -436,6 +438,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	rec.clearedAt = clearedAt
 	clearedMu.Unlock()
 	rec.clientConsumed = h.sess.ClientStream.Consumed()
+	rec.readTo = readTo(h.sess)
 	for {
 		select {
 		case m := <-mocks:
@@ -667,7 +670,8 @@ func TestRecordV2_LargeResultFramesAcrossAnyChunking(t *testing.T) {
 // parser reports the exchange it stops on (Session.ReportStoppedOn), as the
 // HTTP recorder reports a request or response that does not decode: counted
 // in the recording's summary (mocks_left_out), said at WARN with the MySQL
-// kind and why, and spanned from its command to the stop. The stop itself is
+// kind and why, and spanned from its command to the last of it the recorder
+// read. The stop itself is
 // said apart from it, at WARN (warnFramingLost), as the dispatcher says an
 // HTTP parser's retirement. Before, the exchange was only spanned: nothing
 // counted it or said it was left out. The loss here is the client's bytes:
@@ -702,9 +706,10 @@ func TestRecordV2_TheExchangeAFramingLossStopsInIsCounted(t *testing.T) {
 
 // leaveOutInFlight reports the exchange a recording stops in through
 // Session.ReportStoppedOn, the rule every parser's stop follows: from its
-// command to the stop, counted, and under the relay's mark when one is on the
-// flag (the recorder returns, so nothing else takes it), with the recorder's
-// cause and why after it. A stream's end or a recording's stop is no exchange
+// command to the last of it the recorder read (here, with no stream read, the
+// command alone), counted, and under the relay's mark when one is on the flag
+// (the recorder returns, so nothing else takes it), with the recorder's cause
+// and why after it. The stop is stamped as it is reported. A stream's end or a recording's stop is no exchange
 // stopped in: nothing is reported for it, and a mark is left alone.
 //
 // Not parallel: the WARN is limited process-wide, and this test counts it.
@@ -731,9 +736,11 @@ func TestLeaveOutInFlightReportsTheExchangeItStopsInAsEveryParserDoes(t *testing
 	if got := leaveOutInFlight(sess, at, lost); got != lost {
 		t.Fatalf("leaveOutInFlight = %v, want the error it was handed", got)
 	}
-	after := time.Now()
-	if w, ok := spans.last(); spans.count() != 1 || !ok || !w[0].Equal(at) || w[1].Before(before) || w[1].After(after) {
-		t.Fatalf("%d spans, last %v; want one from the command (%v) to the stop", spans.count(), w, at)
+	if w, ok := spans.last(); spans.count() != 1 || !ok || !w[0].Equal(at) || !w[1].Equal(at) {
+		t.Fatalf("%d spans, last %v; want one over the command (%v), which is all of it the recorder read", spans.count(), w, at)
+	}
+	if stop := sess.StoppedAt(); stop.Before(before) {
+		t.Fatalf("the stop is %v, before the report (%v): it was not stamped as the exchange was reported", stop, before)
 	}
 	if n := mgr.MocksLeftOut(); n != 1 {
 		t.Fatalf("counted %d, want the exchange stopped in, once", n)
@@ -1662,9 +1669,25 @@ type buffered struct {
 	leftOut *orphanSpans
 	// handshakeEnd is when the handshake's last packet (the server's OK)
 	// arrived, commandAt when each exchange's command did (zero for one the
-	// capture lost), and lastArrival when the last byte of the connection did.
-	handshakeEnd, lastArrival time.Time
-	commandAt                 []time.Time
+	// capture lost), lastArrival when the last byte of the connection did,
+	// and readTo where the recorder had got to when it returned (readTo).
+	handshakeEnd, lastArrival, readTo time.Time
+	commandAt                         []time.Time
+}
+
+// readTo is the last stamp sess's parser was handed on either stream, read
+// off the wire or written on: where a parser that stops got to, which the
+// exchange it stops in is spanned to (supervisor.Session.ReportStoppedOn).
+func readTo(sess *supervisor.Session) time.Time {
+	var to time.Time
+	for _, fc := range []*fakeconn.FakeConn{sess.ClientStream, sess.DestStream} {
+		for _, t := range []time.Time{fc.LastReadTime(), fc.LastWrittenTime()} {
+			if t.After(to) {
+				to = t
+			}
+		}
+	}
+	return to
 }
 
 // recordBuffered records a connection whose bytes were all buffered before the
@@ -1708,15 +1731,17 @@ func recordBuffered(t *testing.T, xs []exchange) buffered {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	b.err = RecordV2(ctx, h.logger, h.sess)
+	b.readTo = readTo(h.sess)
 	return b
 }
 
 // When the recording stops in an exchange, the window it leaves out runs from
-// that exchange's start to when the recorder gave up, and the supervisor counts
-// what the connection carries from the parser's retirement, which follows. A
-// window that ended at the last chunk the parser read left a gap between the
-// two: the bytes a parser behind its connection had not read yet arrived in it,
-// and a test case recorded there was saved without its mocks.
+// that exchange's start to the last byte the recorder read of it. The bytes a
+// parser behind its connection had not read yet are not that exchange's: the
+// requests among them are left out apart, each over its own span, by the
+// dispatcher (pkg/agent/proxy's parserReads), and what the connection carries
+// from the stop on is counted from there. A window on to the stop instead left
+// out every test case in between, those that never used the connection too.
 //
 // When the bytes the capture lost were client bytes, of the first command after
 // the handshake, the lost command was sent after the handshake ended: the
@@ -1733,7 +1758,7 @@ func recordBuffered(t *testing.T, xs []exchange) buffered {
 // Server bytes lost inside a result stop nothing: that exchange alone is left
 // out, over a window that holds when its command was sent, and the recording
 // goes on (realign).
-func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
+func TestRecordV2_TheWindowLeftOutReachesWhatTheParserRead(t *testing.T) {
 	t.Parallel()
 	requireWindow := func(t *testing.T, b buffered, startBy time.Time, startWhat string) {
 		t.Helper()
@@ -1747,8 +1772,8 @@ func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
 		if w[0].After(startBy) {
 			t.Fatalf("the window left out starts at %v, after %s (%v): the test case of the exchange the recording stopped in is not left out", w[0].Format(time.StampMicro), startWhat, startBy.Format(time.StampMicro))
 		}
-		if w[1].Before(b.lastArrival) {
-			t.Fatalf("the window left out ends at %v, before the last byte the connection had buffered arrived (%v): the test cases recorded in between are in neither this window nor the span counted from the parser's retirement, and are saved without their mocks", w[1].Format(time.StampMicro), b.lastArrival.Format(time.StampMicro))
+		if !w[1].Equal(b.readTo) {
+			t.Fatalf("the window left out ends at %v, want at the last byte the recorder read (%v): short of it, a test case over what it read of the exchange is saved without its mock; past it, one in between that never used the connection is left out", w[1].Format(time.StampMicro), b.readTo.Format(time.StampMicro))
 		}
 	}
 	t.Run("server bytes lost inside a result: the exchange alone", func(t *testing.T) {
@@ -1793,6 +1818,10 @@ func TestRecordV2_TheWindowLeftOutReachesTheParsersRetirement(t *testing.T) {
 		b.lastArrival = sent.Add(time.Second)
 		j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), b.lastArrival)
 		_, b.err = j.run(t)
+		b.readTo = readTo(j.h.sess)
+		if b.readTo.Before(b.lastArrival) {
+			t.Fatalf("the recorder read to %v, before the header it misread as the continuation's (%v)", b.readTo, b.lastArrival)
+		}
 		requireWindow(t, b, sent, "the INSERT it stopped in was sent")
 	})
 }

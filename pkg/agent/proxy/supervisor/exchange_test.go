@@ -46,13 +46,16 @@ type exchangeConn struct {
 	spans        *spanLog
 	mgr          *syncMock.SyncMockManager
 	logs         *observer.ObservedLogs
+	// kind is the kind of the requests request reads: a connection's parser
+	// records one (HTTP unless a test says otherwise).
+	kind models.Kind
 }
 
 func newExchangeConn(t *testing.T, ctx context.Context) *exchangeConn {
 	t.Helper()
 	core, logs := observer.New(zapcore.DebugLevel)
 	c := &exchangeConn{client: make(chan fakeconn.Chunk, 16), dest: make(chan fakeconn.Chunk, 16), spans: &spanLog{},
-		mgr: syncMock.New(nil), logs: logs}
+		mgr: syncMock.New(nil), logs: logs, kind: models.HTTP}
 	c.sess = &Session{
 		ClientStream: fakeconn.New(c.client, nil, nil),
 		DestStream:   fakeconn.New(c.dest, nil, nil),
@@ -82,7 +85,7 @@ func (c *exchangeConn) resp(seq uint32, b string) {
 // chunk.
 func (c *exchangeConn) request(t *testing.T) string {
 	t.Helper()
-	first, err := c.sess.NextRequest(models.HTTP, false)
+	first, err := c.sess.NextRequest(c.kind, false)
 	if err != nil {
 		t.Fatalf("NextRequest: %v", err)
 	}
@@ -347,6 +350,7 @@ func TestNextRequestReturnsTheEndOfTheClientsStream(t *testing.T) {
 func TestNextRequestKeepsTheFloorWhileAnAnswerIsUnread(t *testing.T) {
 	t.Parallel()
 	c := newExchangeConn(t, context.Background())
+	c.kind = models.MySQL
 	c.req(1, "PREPARE")
 	c.resp(2, "PREPARE OK + definitions")
 	c.req(4, "EXECUTE")
@@ -509,5 +513,366 @@ func TestEndExchangesReportsTheAnswerInFlightOfAParserThatDoesNotReadIt(t *testi
 func TestASessionStaysInThe640ByteSizeClass(t *testing.T) {
 	if n := unsafe.Sizeof(Session{}); n > 640 {
 		t.Fatalf("a Session is %d B, past the 640 B size class: each connection's takes 704 B", n)
+	}
+}
+
+// unfinished reports the exchanges the session holds open as a parser that
+// stopped without ending them, and returns how many mocks were left out in
+// all, with the spans recorded.
+func (c *exchangeConn) unfinished(t *testing.T) (int64, [][2]time.Time) {
+	t.Helper()
+	c.sess.StoppedAt()
+	c.sess.ReportUnfinishedExchange("it panicked")
+	return c.mgr.MocksLeftOut(), c.spans.all()
+}
+
+// A parser that reports its own stop (ReportStoppedOn) ends whatever exchange
+// it had begun, whichever request time it gives: the MySQL recorder reports
+// the command it stopped in from the end of the last exchange it read
+// (leaveOutInFlight), older than the command NextRequest began. The supervisor
+// and the dispatcher then have nothing left to report for it; reported again,
+// it was two mocks left out and two WARNs for one exchange.
+func TestAParsersOwnStopIsNotReportedAgain(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(2, "COM_QUERY")
+	c.request(t)
+	c.sess.ReportStoppedOn(models.MySQL, at(1), "mysql framing: x")
+	if left, _ := c.unfinished(t); left != 1 {
+		t.Fatalf("%d mocks left out, want the one the parser reported", left)
+	}
+}
+
+// One exchange held open (a PREPARE the MySQL recorder settles later) while
+// the next begins: ending the held one leaves the next open, as the oldest
+// one, and a parser that stops in it leaves it out. Tracked in one slot that
+// only the first could take, the next ran untracked, and was in no report.
+func TestTheNextExchangeStaysOpenOnceAnOlderOneEnds(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.kind = models.MySQL
+	c.req(2, "PREPARE")
+	c.request(t)
+	c.req(3, "EXECUTE")
+	if _, err := c.sess.NextRequest(models.MySQL, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.sess.ClientStream.ReadChunk(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sess.exchangeAt.Load(); got != at(2).UnixNano() {
+		t.Fatalf("the oldest open exchange is at %v, want the PREPARE's %v: a later request took it", time.Unix(0, got), at(2))
+	}
+	_ = c.sess.EmitMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(2), ResTimestampMock: at(2)}})
+	left, spans := c.unfinished(t)
+	if left != 1 || len(spans) != 1 || !spans[0][0].Equal(at(3)) {
+		t.Fatalf("%d left out, spans %v; want the EXECUTE's exchange, from %v", left, spans, at(3))
+	}
+}
+
+// The span of an unfinished exchange ends at the last byte the parser read of
+// it, not at the stop: a request read, then minutes of an idle connection
+// before the parser stops, is a span over the request, not over the idle
+// minutes.
+func TestAnUnfinishedExchangesSpanEndsAtWhatTheParserRead(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(2, "GET /a")
+	c.request(t)
+	c.sess.CaptureClock = func() time.Time { return at(300) } // the stop, minutes later
+	left, spans := c.unfinished(t)
+	if left != 1 || len(spans) != 1 || !spans[0][0].Equal(at(2)) || !spans[0][1].Equal(at(2)) {
+		t.Fatalf("%d left out, spans %v; want one over [%v, %v]", left, spans, at(2), at(2))
+	}
+}
+
+// A mock the session refuses (its context done, as a memory-cap retirement
+// cancels it before the abort reports) does not end the exchange: the abort
+// reports it. Ended before the refusal, it was in no report.
+func TestAMockRefusedDoesNotEndItsExchange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := newExchangeConn(t, ctx)
+	c.sess.RouteMocksViaSyncMock = true
+	c.req(2, "GET /a")
+	c.request(t)
+	cancel()
+	if err := c.sess.EmitMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at(2), ResTimestampMock: at(2)}}); err == nil {
+		t.Fatal("fixture: the session accepted a mock on a done context")
+	}
+	if left, _ := c.unfinished(t); left != 1 {
+		t.Fatalf("%d left out, want the exchange whose mock was refused", left)
+	}
+}
+
+// The kind of the exchange left unfinished is read by the goroutine that
+// reports it, while the parser's own goroutine goes on with NextRequest: the
+// kind is written once, at the connection's first request, before any
+// exchange's start is published, so the report reads it after that write and
+// no write races it. The reporter keeps reporting until the parser has made
+// all its requests, so every later NextRequest runs against a report.
+func TestAnUnfinishedExchangeIsReportedWithoutARace(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	const requests = 500
+	c.client = make(chan fakeconn.Chunk, requests)
+	c.sess.ClientStream = fakeconn.New(c.client, nil, nil)
+	for i := uint32(2); i < 2+requests; i++ {
+		c.req(i, "GET /a")
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < requests; i++ {
+			if _, err := c.sess.NextRequest(models.HTTP, false); err != nil {
+				return
+			}
+			if _, err := c.sess.ClientStream.ReadChunk(); err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			// A reporter descheduled for the whole run reports it now.
+			c.sess.ReportUnfinishedExchange("over its memory cap")
+			if n := c.mgr.MocksLeftOut(); n != 1 {
+				t.Fatalf("%d exchanges reported, want the one the parser was in, once", n)
+			}
+			return
+		default:
+		}
+		c.sess.ReportUnfinishedExchange("over its memory cap")
+	}
+}
+
+// A connection's parser records one kind of exchange: a request of another
+// kind is refused (a parser bug), and the exchange left unfinished is
+// reported under the kind it began with.
+func TestAConnectionsParserRecordsOneKind(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(2, "GET /a")
+	c.req(3, "COM_QUERY")
+	c.request(t)
+	if _, err := c.sess.NextRequest(models.MySQL, false); !errors.Is(err, errKindChanged) {
+		t.Fatalf("NextRequest of another kind = %v, want it refused (errKindChanged)", err)
+	}
+	c.sess.StoppedAt()
+	c.sess.ReportUnfinishedExchange("it panicked")
+	var kinds []any
+	for _, e := range c.logs.All() {
+		if e.Message == LeftOutWarnMsg || e.Message == LeftOutDebugMsg { // past the WARN's limit, at Debug
+			kinds = append(kinds, e.ContextMap()["kind"])
+		}
+	}
+	if len(kinds) != 1 || kinds[0] != string(models.HTTP) {
+		t.Fatalf("the exchange left unfinished is reported as %v, want once, as the HTTP exchange it began as", kinds)
+	}
+}
+
+// The supervisor or the dispatcher's abort reports the exchange a parser was
+// in (ReportUnfinishedExchange); the parser, still running, then reports its
+// own stop on it (ReportStoppedOn), as a retired parser that wakes does. The
+// exchange is reported once: twice, it was two mocks left out and two WARNs.
+// Nor does an exchange begin after it: the parser is gone.
+func TestAnExchangeReportedUnfinishedIsNotReportedAgainByItsParser(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(2, "GET /a")
+	c.req(3, "GET /b")
+	c.request(t)
+	if left, _ := c.unfinished(t); left != 1 {
+		t.Fatalf("%d left out, want the exchange the parser was in", left)
+	}
+	c.sess.ReportStoppedOn(models.HTTP, at(2), "http decode error: x")
+	if n := c.mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("%d left out once the parser reported its own stop too, want the one exchange, once", n)
+	}
+	c.request(t)
+	c.sess.ReportUnfinishedExchange("again")
+	if n := c.mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("%d left out: an exchange began after the parser was reported gone", n)
+	}
+}
+
+// A mock left out with no request time says not which exchange it was (the
+// floor's report of a connection's start with no capture time comes as the
+// first request's exchange begins): it ends none. It ended the oldest open,
+// and a parser that then died in that exchange left it in no report.
+func TestALeftOutReportWithNoTimeEndsNoExchange(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(2, "GET /a")
+	c.request(t)
+	c.sess.ReportLeftOut(&models.Mock{Kind: models.HTTP}, "no time")
+	left, spans := c.unfinished(t)
+	if left != 2 || len(spans) != 1 || !spans[0][0].Equal(at(2)) {
+		t.Fatalf("%d left out, spans %v: want the report with no time, and the exchange the parser was in from %v", left, spans, at(2))
+	}
+}
+
+// A mock whose request time is earlier than one already emitted on the
+// session is clamped to just after it (invariant I5): one nanosecond later,
+// in the mock's own location, so the recorded time reads as the parser's.
+func TestAnOutOfOrderRequestTimeIsClampedJustAfterTheLast(t *testing.T) {
+	prev := debugMonotonic.Load()
+	debugMonotonic.Store(false)
+	t.Cleanup(func() { debugMonotonic.Store(prev) })
+	loc := time.FixedZone("IST", 5*3600+1800)
+	s := &Session{}
+	first := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at(5).In(loc)}}
+	s.enforceReqMonotonic(first)
+	late := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at(3).In(loc), ResTimestampMock: at(9).In(loc)}}
+	s.enforceReqMonotonic(late)
+	got := late.Spec.ReqTimestampMock
+	if want := at(5).Add(time.Nanosecond); !got.Equal(want) {
+		t.Fatalf("clamped to %v, want one nanosecond after the last request time, %v", got, want)
+	}
+	if got.Location() != loc {
+		t.Fatalf("clamped request time is in %v, want the mock's own location %v", got.Location(), loc)
+	}
+	inOrder := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at(7).In(loc)}}
+	s.enforceReqMonotonic(inOrder)
+	if !inOrder.Spec.ReqTimestampMock.Equal(at(7)) {
+		t.Fatalf("an in-order request time was changed to %v", inOrder.Spec.ReqTimestampMock)
+	}
+}
+
+// Supervisor.Run reports the exchange a parser that returns an error, or
+// panics, was in, as it learns of it, whatever its caller does on a
+// retirement: the parser cannot report it, having stopped.
+func TestTheSupervisorReportsTheExchangeAParserDiedIn(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		c := newExchangeConn(t, context.Background())
+		c.req(2, "GET /a")
+		sv := New(Config{Logger: zap.NewNop()})
+		sv.Run(context.Background(), func(_ context.Context, s *Session) error {
+			if _, err := s.NextRequest(models.HTTP, false); err != nil {
+				return err
+			}
+			if _, err := s.ClientStream.ReadChunk(); err != nil {
+				return err
+			}
+			if panics {
+				panic("a parser bug")
+			}
+			return errors.New("a parser error")
+		}, c.sess)
+		sv.Close()
+		if left := c.mgr.MocksLeftOut(); left != 1 {
+			t.Fatalf("panics=%v: %d mocks left out, want the exchange the parser died in", panics, left)
+		}
+	}
+}
+
+// The mock of a connection's handshake (EmitHandshakeMock: the MySQL
+// recorder's config mock) answers no request NextRequest found, and ends no
+// exchange, whatever its request time: one open stays open.
+func TestAHandshakeMockEndsNoExchange(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.kind = models.MySQL
+	c.req(2, "COM_QUERY")
+	c.request(t)
+	if err := c.sess.EmitHandshakeMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(3), ResTimestampMock: at(3)}}); err != nil {
+		t.Fatal(err)
+	}
+	left, spans := c.unfinished(t)
+	if left != 1 || len(spans) != 1 || !spans[0][0].Equal(at(2)) {
+		t.Fatalf("%d left out, spans %v: want the exchange the parser was in, from %v, still open past the handshake's mock", left, spans, at(2))
+	}
+}
+
+// The floor's report of the server bytes at a connection's start is made
+// apart from the exchanges the parser began: those bytes can be stamped at or
+// after the first request (the two directions are stamped apart), and ended by
+// their times they ended that request's exchange, which a parser that then
+// died in it left in no report.
+func TestTheFloorsReportEndsNoExchange(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.sess.JoinedMidConnection = true
+	c.dest <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: []byte("R0"), ReadAt: at(3)} // captured first, stamped after Q1
+	c.req(2, "Q1")
+	c.resp(4, "R1")
+	if q, r := c.exchange(t); q != "Q1" || r != "R1" {
+		t.Fatalf("paired %q with %q", q, r)
+	}
+	left, spans := c.unfinished(t)
+	if left != 2 || len(spans) != 2 || !spans[1][0].Equal(at(2)) {
+		t.Fatalf("%d left out, spans %v: want R0's, and the exchange the parser was in from %v", left, spans, at(2))
+	}
+}
+
+// A parser that reports its own stop after the supervisor or the abort
+// reported the exchange it was in is not counted again, but what its own
+// request time covers before the start they reported from is still left out:
+// the MySQL recorder reports from the end of the last exchange it recorded,
+// before the command NextRequest found.
+func TestAParsersOwnStopAfterTheReportLeavesOutWhatThatReportDidNot(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(5, "GET /a")
+	c.request(t)
+	if left, _ := c.unfinished(t); left != 1 {
+		t.Fatalf("%d left out, want the exchange the parser was in", left)
+	}
+	c.sess.ReportStoppedOn(models.HTTP, at(3), "http decode error: x")
+	if n := c.mgr.MocksLeftOut(); n != 1 {
+		t.Fatalf("%d left out, want the one exchange, counted once", n)
+	}
+	spans := c.spans.all()
+	if len(spans) != 2 || !spans[1][0].Equal(at(3)) || !spans[1][1].Equal(at(5)) {
+		t.Fatalf("spans %v: want the part before the reported start, [%v %v], left out too", spans, at(3), at(5))
+	}
+}
+
+// A parser that reports its own stop with no request time is spanned from the
+// exchange NextRequest found it in, not counted with no span.
+func TestAParsersOwnStopWithNoTimeIsSpannedFromItsExchange(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(4, "GET /a")
+	c.request(t)
+	c.sess.ReportStoppedOn(models.HTTP, time.Time{}, "http decode error: x")
+	spans := c.spans.all()
+	if c.mgr.MocksLeftOut() != 1 || len(spans) != 1 || !spans[0][0].Equal(at(4)) {
+		t.Fatalf("%d left out, spans %v: want one, from the exchange's request %v", c.mgr.MocksLeftOut(), spans, at(4))
+	}
+}
+
+// The newest exchange begun is the latest NextRequest found, in stream order:
+// with the wall clock stepped back between two requests, ending the first
+// does not leave the slot on a stamp from before the step, which no later
+// request's mock would end.
+func TestTheNewestExchangeIsTheLatestFound(t *testing.T) {
+	c := newExchangeConn(t, context.Background())
+	c.req(10, "GET /a")
+	c.client <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 11, Bytes: []byte("GET /b"), ReadAt: at(2)} // the clock stepped back
+	c.request(t)
+	c.request(t)
+	if got := c.sess.exchangeNewest.Load(); got != at(2).UnixNano() {
+		t.Fatalf("the newest exchange begun is at %v, want the latest found, %v", time.Unix(0, got), at(2))
+	}
+}
+
+// A mock ends the exchange its request time names as the parser emitted it,
+// not as the session clamps it to keep request times in order (I5): with the
+// wall clock stepped back, a held PREPARE's mock, emitted after a later
+// command's, is clamped past every exchange still open, and ended by that
+// time it ended the EXECUTE in flight too, which a parser that then died in it
+// left in no report.
+func TestTheClampedRequestTimeEndsNoNewerExchange(t *testing.T) {
+	prev := debugMonotonic.Load()
+	debugMonotonic.Store(false)
+	t.Cleanup(func() { debugMonotonic.Store(prev) })
+	c := newExchangeConn(t, context.Background())
+	c.kind = models.MySQL
+	c.req(100, "COM_QUERY")
+	c.request(t)
+	_ = c.sess.EmitMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(100), ResTimestampMock: at(100)}})
+	c.client <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 101, Bytes: []byte("PREPARE"), ReadAt: at(50)} // the clock stepped back
+	c.request(t)
+	c.client <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 102, Bytes: []byte("EXECUTE"), ReadAt: at(60)}
+	if _, err := c.sess.NextRequest(models.MySQL, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.sess.ClientStream.ReadChunk(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.sess.EmitMock(&models.Mock{Kind: models.MySQL, Spec: models.MockSpec{ReqTimestampMock: at(50), ResTimestampMock: at(55)}}) // the held PREPARE's
+	left, spans := c.unfinished(t)
+	if left != 1 || len(spans) != 1 || !spans[0][0].Equal(at(60)) {
+		t.Fatalf("%d left out, spans %v: want the EXECUTE's exchange, still open, from %v", left, spans, at(60))
 	}
 }

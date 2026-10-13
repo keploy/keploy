@@ -25,7 +25,7 @@ import (
 //     seconds: a parser behind the traffic can be quiet for longer than that.
 
 // proxyWatermark is proxy mode's syncMock.Watermark, Backlog, Explainer,
-// Progressor and PendingExplainer: its relays' capture watermark, and the
+// Progressor, PendingExplainer and Horizon: its relays' capture watermark, and the
 // recording's manager holding no mock of the test case's window. The manager
 // hands mocks to the CLI's stream, and a mock it drops there is told
 // (WasMockDroppedForTC, OnDrop) before it stops being pending (PendingIn): a
@@ -42,6 +42,7 @@ var (
 	_ syncMock.Explainer        = proxyWatermark{}
 	_ syncMock.Progressor       = proxyWatermark{}
 	_ syncMock.PendingExplainer = proxyWatermark{}
+	_ syncMock.Horizon          = proxyWatermark{}
 )
 
 func (w proxyWatermark) Settled(namespace, pod string, start, end time.Time) bool {

@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -809,5 +810,110 @@ func TestRecordV2_TLSUpgrade_ClientHelloDiscardedFromParserStream(t *testing.T) 
 	h.closeStreams()
 	if err := <-done; err != nil {
 		t.Errorf("RecordV2 returned error: %v", err)
+	}
+}
+
+// The post-TLS handshake begins an exchange at the client's first packet, the
+// HandshakeResponse41, and the config mock it records is dated at the server's
+// greeting, before it: handing the mock over ends that exchange. Left open, a
+// parser that was retired, or died, in the first command of a pooled
+// connection, sent minutes after the handshake, was said to have stopped in an
+// exchange that began at the handshake, and every test case in between, on
+// any connection, was left out. A config mock the session refuses (its
+// context is done) is not recorded: the handshake's exchange stays open, and
+// is the one reported.
+func TestRecordV2_PostTLS_TheHandshakesExchangeEndsWithItsConfigMock(t *testing.T) {
+	t.Parallel()
+	for _, refused := range []bool{false, true} {
+		refused := refused
+		t.Run(map[bool]string{false: "handed over", true: "refused"}[refused], func(t *testing.T) {
+			t.Parallel()
+			h := newV2Harness(t)
+			spans := &orphanSpans{}
+			h.sess.Orphans = spans
+			h.sess.Mgr = syncMock.New(nil)
+			if refused {
+				// Through the manager, whose send checks the context first.
+				stopped, cancel := context.WithCancel(context.Background())
+				cancel()
+				h.sess.Ctx = stopped
+				h.sess.RouteMocksViaSyncMock = true
+			}
+			base := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+			handshakeBuf := cannedHandshakeV10(t)
+			greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+			if err != nil {
+				t.Fatalf("decode handshake v10: %v", err)
+			}
+			hr41 := cannedHandshakeResponse41(t, 2, false)
+			query := cannedCOMQuery(t, 0, "SELECT 1")
+			hr41At := base.Add(5 * time.Millisecond)
+			h.pushClient(hr41, hr41At)
+			h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+			later := base.Add(5 * time.Minute)
+			h.pushClient(query, later) // the pool's first use of it; its answer never comes
+
+			ctx, cancel := context.WithCancel(postTLSCtx(t, handshakeBuf, cannedSSLRequest(t, 1), base, 3306))
+			done := make(chan error, 1)
+			go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+			t.Cleanup(func() { cancel(); h.closeStreams(); <-done })
+			consumedAll(t, h.sess, int64(len(hr41)+len(query)), done)
+
+			start, ok := unfinishedFrom(h.sess, spans)
+			if !ok {
+				t.Fatal("the exchange the recorder is in is not reported")
+			}
+			want := later
+			if refused {
+				want = hr41At
+			}
+			if !start.Equal(want) {
+				t.Fatalf("the exchange the recorder is in starts at %v, want %v", start, want)
+			}
+		})
+	}
+}
+
+// On a TLS connection joined mid-stream, the post-TLS handshake reads the
+// first command (firstCmd) and begins its exchange; the config mock it records
+// first is dated at the server's greeting, or, with no stamp for it, at the
+// client's first read, which is that command's. The config mock is the
+// handshake's and ends no exchange (Session.EmitHandshakeMock): the first
+// command's stays open until its own mock. Ended by the config mock's time, a
+// parser retired, or dead, in that command reported nothing, and the command,
+// read, was in no span either.
+func TestRecordV2_PostTLS_AJoinedConnectionsFirstCommandStaysOpen(t *testing.T) {
+	t.Parallel()
+	for _, unstamped := range []bool{false, true} {
+		unstamped := unstamped
+		t.Run(map[bool]string{false: "greeting stamped", true: "greeting unstamped"}[unstamped], func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			if unstamped {
+				// An entry with no time (a direct fetch, a restored shared
+				// entry): the config mock is dated at the first client read.
+				j.ctx = postTLSCtx(t, j.greeting, cannedSSLRequest(t, 1), time.Time{}, 3306)
+			}
+			spans := &orphanSpans{}
+			j.h.sess.Orphans = spans
+			j.h.sess.Mgr = syncMock.New(nil)
+			cmdAt := time.Date(2026, 10, 2, 12, 5, 0, 0, time.UTC)
+			q := cannedCOMQuery(t, 0, "SELECT 1")
+			j.h.pushClient(q, cmdAt) // its answer never comes
+
+			ctx, cancel := context.WithCancel(j.ctx)
+			done := make(chan error, 1)
+			go func() { done <- RecordV2(ctx, j.h.logger, j.h.sess) }()
+			t.Cleanup(func() { cancel(); j.h.closeStreams(); <-done })
+			waitingOnTheServer(t, j.h.sess, done)
+
+			start, ok := unfinishedFrom(j.h.sess, spans)
+			if !ok {
+				t.Fatal("the first command, in flight, is not reported: the config mock ended its exchange")
+			}
+			if !start.Equal(cmdAt) {
+				t.Fatalf("the exchange the recorder is in starts at %v, want the first command's %v", start, cmdAt)
+			}
+		})
 	}
 }

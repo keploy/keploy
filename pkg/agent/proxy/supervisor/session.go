@@ -206,6 +206,15 @@ type Session struct {
 	// Set it before the parser runs.
 	OnStop func(at time.Time)
 
+	// CaptureClock, when non-nil, is the capture's clock for this
+	// connection: the stamp of the newest chunk it has carried (when the
+	// relay, or the kernel, read it), in either direction, whether its parser
+	// has got to it or not. StoppedAt dates a stop by it. The dispatcher sets
+	// it to its relay's LastCaptured. nil: the stop is dated by the agent's
+	// clock, which is as far past the connection's traffic as its parser is
+	// behind. Set it before the parser runs.
+	CaptureClock func() time.Time
+
 	// RecordingDone is closed once the recording this connection is captured
 	// for stops: the dispatcher sets it to the Done channel of the recording's
 	// context. It is not the parser's lifetime (Ctx), which also ends when
@@ -238,10 +247,28 @@ type Session struct {
 	endedWithConnection [2]atomic.Bool
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
-	endedAtHole      [2]atomic.Pointer[string]
-	hookMu           sync.Mutex
-	lastReqMu        sync.Mutex
-	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
+	endedAtHole [2]atomic.Pointer[string]
+	// hookMu guards OnMockRecorded's chain and lastReqTimestamp: each is
+	// read and written in a few instructions, never with the other held or a
+	// hook running, so one lock serves both and keeps a Session in its size
+	// class (TestASessionStaysInThe640ByteSizeClass).
+	hookMu sync.Mutex
+	// lastReqTimestamp is the most recent ReqTimestampMock emitted on this
+	// session, in Unix nanoseconds (0: none yet).
+	lastReqTimestamp int64
+
+	// exchangeAt is when the oldest exchange the parser has begun and not
+	// ended began, in Unix nanoseconds: the stamp of the first chunk of the
+	// request NextRequest found it at, until the parser ends it (an accepted
+	// EmitMock, ReportLeftOut, MarkMockComplete, EndExchange). 0 while none
+	// is open; once ReportUnfinishedExchange has reported it, the negated
+	// start it reported from (reportedFrom), after which no exchange begins.
+	// exchangeNewest is the latest request NextRequest found (the parser's
+	// goroutine alone writes it): when the oldest ends while a newer one is
+	// open, exchangeAt moves to it. A parser that stops without ending them
+	// leaves them unrecorded (ReportUnfinishedExchange).
+	exchangeAt     atomic.Int64
+	exchangeNewest atomic.Int64
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
 	// it is clear, else why it was set, the first reason since it was last
@@ -390,6 +417,18 @@ func (s *Session) EndedAtHole(dir fakeconn.Direction) (reason string, ok bool) {
 	return *r, true
 }
 
+// reportedFrom says whether exchangeAt's value v is that of an exchange
+// ReportUnfinishedExchange reported (a negated start), and the start it was
+// reported from. The parser is gone (dead, or retired), so no exchange begins
+// after it, and its own report of the exchange (ReportStoppedOn), racing that
+// one, is not made again.
+func reportedFrom(v int64) (time.Time, bool) {
+	if v >= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, -v), true
+}
+
 // MarkMockComplete clears the incomplete-mock flag, and with it the mark that
 // set it. A parser calls it when it ends an exchange it records nothing for (a
 // passthrough request, say), so a mark set during that exchange does not leave
@@ -404,6 +443,139 @@ func (s *Session) MarkMockComplete() {
 		return
 	}
 	s.incomplete.Store(nil)
+	// The parser has ended an exchange it records nothing for.
+	s.endExchange(time.Time{})
+}
+
+// accepted is what follows a mock emitMockCore delivered, whose request
+// reached the parser at req: the parser has ended its exchange (endExchange;
+// none for a zero req), and has no work pending (OnPendingCleared).
+func (s *Session) accepted(req time.Time) {
+	if !req.IsZero() {
+		s.endExchange(req)
+	}
+	if s.OnPendingCleared != nil {
+		s.OnPendingCleared()
+	}
+}
+
+// EndExchange says the parser ended the exchange NextRequest found the
+// request of at at (the ReadAt of the chunk it returned), recorded or left out
+// by a mock whose own request time does not say so, or with no mock at all:
+// the MySQL recorder's post-TLS handshake, whose config mock is dated at the
+// server's greeting, before the client's first packet NextRequest found; a
+// client packet the MySQL recorder passes over, which begins no exchange of
+// its own but is more of one it left out already. It ends every exchange
+// begun at or before at, as a mock of the one begun at at does (endExchange):
+// a parser ends an exchange only once it has ended every one before it.
+// Nil-safe.
+func (s *Session) EndExchange(at time.Time) {
+	if s == nil || at.IsZero() {
+		return
+	}
+	s.endExchange(at)
+}
+
+// endExchange says the parser ended the exchange whose request reached it at
+// req (a zero req: the oldest open one). One older than the oldest open (an
+// exchange it reported apart, whose request NextRequest never found) ends
+// nothing. Ending the oldest, or a newer one, leaves open only those begun
+// after it: the oldest open is then the newest begun, if it is newer
+// (exchangeNewest), or none.
+func (s *Session) endExchange(req time.Time) {
+	for {
+		at := s.exchangeAt.Load()
+		if at <= 0 {
+			return
+		}
+		end := at
+		if !req.IsZero() {
+			if end = req.UnixNano(); end < at {
+				return
+			}
+		}
+		next := s.exchangeNewest.Load()
+		if next <= end {
+			next = 0
+		}
+		if s.exchangeAt.CompareAndSwap(at, next) {
+			return
+		}
+	}
+}
+
+// ReportUnfinishedExchange reports the exchange the parser is in, begun by
+// NextRequest and not ended (EmitMock, ReportLeftOut, MarkMockComplete,
+// EndExchange), as one it stopped on (ReportStoppedOn), for reason: from its
+// request to the last byte the parser read (lastRead). The supervisor calls
+// it for a parser that panicked or returned an error, and the dispatcher's
+// abort for one it retires (hung, over its memory cap), right after each
+// stamps the stop (StoppedAt): such a parser cannot report the exchange it
+// stopped in itself. Read whole or not, that exchange is not recorded, and a
+// test case over it, its request in the test case's window, was saved without
+// its mock; the requests the parser never read are left out apart
+// (pkg/agent/proxy's parserReads). Only the parsers that begin each exchange
+// with NextRequest (HTTP/1, MySQL) say where one begins; nothing is reported
+// for the others. Nothing is reported as the recording itself stops
+// (RecordingStopping): the connection is torn down with it, no loss. Once
+// reported, no exchange begins on the session (reportedFrom), and the
+// parser's own report of the exchange, if it makes one, is not made again.
+// Nil-safe, and a no-op with no exchange unfinished.
+func (s *Session) ReportUnfinishedExchange(reason string) {
+	if s == nil || s.RecordingStopping() {
+		return
+	}
+	var at int64
+	for {
+		if at = s.exchangeAt.Load(); at <= 0 {
+			return
+		}
+		if s.exchangeAt.CompareAndSwap(at, -at) {
+			break
+		}
+	}
+	start := time.Unix(0, at)
+	end := s.lastRead(start)
+	reason = unfinishedExchange + ": " + reason
+	if mark, ok := s.TakeMockIncomplete(); ok {
+		reason = mark + ": " + reason
+	}
+	// exchanges.kind was written once, before the exchange's start was
+	// published (NextRequest).
+	s.reportLeftOut(&models.Mock{
+		Kind: s.exchanges.kind,
+		Spec: models.MockSpec{ReqTimestampMock: start, ResTimestampMock: end},
+	}, reason, false)
+}
+
+// unfinishedExchange is the cause ReportUnfinishedExchange reports an exchange
+// left out for (leftOutCause).
+const unfinishedExchange = "the parser stopped in the middle of this exchange"
+
+// lastRead is where a parser that stops in an exchange that began at start
+// got to: the stamp of the last chunk either stream handed it, read off the
+// wire or written on, whichever is later (a response's end is when its bytes
+// were written on to the client, as a mock's response time is), or start,
+// when that is later. An exchange it stops in runs to there, not to the
+// connection's stop (StoppedAt): what it never read is not the exchange's to
+// cover. The requests are left out apart (pkg/agent/proxy's parserReads), and
+// the rest of the answer is within a test case that overlaps the request. To
+// the stop instead, the exchange's span carried the parser's lag, and an
+// idle connection's stretch of nothing, and left out the test cases in it
+// that never used the connection.
+func (s *Session) lastRead(start time.Time) time.Time {
+	end := start
+	for _, fc := range [2]*fakeconn.FakeConn{s.ClientStream, s.DestStream} {
+		if fc == nil {
+			continue
+		}
+		for _, t := range [2]time.Time{fc.LastReadTime(), fc.LastWrittenTime()} {
+			if t.After(end) {
+				end = t
+			}
+		}
+	}
+	return end
 }
 
 // IsMockIncomplete reports whether the session's active mock has been
@@ -469,6 +641,12 @@ func (s *Session) TakeMockIncomplete() (reason string, ok bool) {
 //
 // A nil m is a no-op that leaves the flag alone, like EmitMock's. Nil-safe.
 func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
+	return s.leaveOutIfIncomplete(m, true)
+}
+
+// leaveOutIfIncomplete is LeaveOutIfIncomplete; ends says whether the mock
+// left out ends the exchange its request time names (reportLeftOut).
+func (s *Session) leaveOutIfIncomplete(m *models.Mock, ends bool) bool {
 	if s == nil || m == nil {
 		return false
 	}
@@ -476,7 +654,7 @@ func (s *Session) LeaveOutIfIncomplete(m *models.Mock) bool {
 	if !ok {
 		return false
 	}
-	s.ReportLeftOut(m, reason)
+	s.reportLeftOut(m, reason, ends)
 	return true
 }
 
@@ -555,11 +733,68 @@ func (s *Session) manager() *syncMock.SyncMockManager {
 }
 
 // OrphanSpans is where a Session's unrecordable spans go instead of its manager
-// (Session.Orphans). *syncMock.Spans is one.
+// (Session.Orphans). *syncMock.Spans is one, and a CaptureOrphanSpans.
 type OrphanSpans interface {
 	Record(start, end time.Time)
 	Open(start time.Time) func()
 }
+
+// CaptureOrphanSpans is an OrphanSpans that can also open a span on the
+// capture's clock (syncMock.Spans.OpenAt): Session.OpenOrphanSpan uses it.
+// *syncMock.Spans is one.
+type CaptureOrphanSpans interface {
+	OrphanSpans
+	OpenAt(start time.Time, grace time.Duration) *syncMock.OpenSpan
+}
+
+var _ CaptureOrphanSpans = (*syncMock.Spans)(nil)
+
+// OpenOrphanSpan is OpenOrphanWindow on the capture's clock: the span of what
+// the connection carries after it stopped being recorded, from start (its
+// stop, StoppedAt), extended to the stamp of each chunk it carries after and
+// ended at the last one (syncMock.UnrecordedConn on the capture's clock). It
+// routes as OpenOrphanWindow does: to Orphans when set (a CaptureOrphanSpans;
+// one that is not opens a span that extends to its horizon, as
+// OpenOrphanWindow's), else to Session.manager. grace is
+// syncMock.UnrecordedIdleGrace.
+func (s *Session) OpenOrphanSpan(start time.Time, grace time.Duration) syncMock.CaptureSpan {
+	if s == nil {
+		return syncMock.NoSpan
+	}
+	if s.Orphans != nil {
+		return OpenCaptureSpan(s.Orphans, start, grace)
+	}
+	return orNoSpan(s.manager().OpenOrphanSpan(start, grace))
+}
+
+// OpenCaptureSpan opens a span from start on the capture's clock on spans
+// (CaptureOrphanSpans.OpenAt), or, on spans that cannot, one that extends to
+// their horizon, as Open's does. Never nil: NoSpan for a zero start.
+func OpenCaptureSpan(spans OrphanSpans, start time.Time, grace time.Duration) syncMock.CaptureSpan {
+	if spans == nil || start.IsZero() {
+		return syncMock.NoSpan
+	}
+	if c, ok := spans.(CaptureOrphanSpans); ok {
+		return orNoSpan(c.OpenAt(start, grace))
+	}
+	return closerSpan(spans.Open(start))
+}
+
+// orNoSpan is o, or NoSpan for a nil one (a zero start opens none).
+func orNoSpan(o *syncMock.OpenSpan) syncMock.CaptureSpan {
+	if o == nil {
+		return syncMock.NoSpan
+	}
+	return o
+}
+
+// closerSpan is a span opened with Open, as a CaptureSpan: the traffic does
+// not extend it (it extends to its spans' horizon), and its closer ends it
+// there.
+type closerSpan func()
+
+func (closerSpan) Extend(time.Time)  {}
+func (c closerSpan) Close(time.Time) { c() }
 
 // OpenOrphanWindow is the open-ended twin of RecordOrphanWindow, for a hole
 // whose end is not yet known. It routes the same way (Orphans when set, else
@@ -625,7 +860,18 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 // matches the defensive shape of RecordSession call sites. A nil m is
 // a programming error and treated as a no-op returning nil.
 func (s *Session) EmitMock(m *models.Mock) error {
-	return s.emitMockCore(m, false)
+	return s.emitMockCore(m, false, true)
+}
+
+// EmitHandshakeMock is EmitMock for the mock of a connection's handshake (the
+// MySQL recorder's config mock), which answers no request NextRequest found:
+// taken or left out, it ends no exchange. A parser that began one for the
+// handshake ends it itself (EndExchange). Ended by the mock's request time
+// instead, it ended whichever exchange that time named: dated at the client's
+// first read on a connection joined mid-stream, the first command's, before
+// the parser had recorded it.
+func (s *Session) EmitHandshakeMock(m *models.Mock) error {
+	return s.emitMockCore(m, false, false)
 }
 
 // EmitMockOnShutdown is the shutdown-time variant of EmitMock used by
@@ -653,14 +899,27 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // propagation, ReqTimestampMock monotonicity, OnMockRecorded hook
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
-	return s.emitMockCore(m, true)
+	return s.emitMockCore(m, true, true)
 }
 
-func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
+// emitMockCore is EmitMock's body; ends says whether the mock ends the
+// exchange its request time names (EmitHandshakeMock's does not).
+func (s *Session) emitMockCore(m *models.Mock, shutdown, ends bool) error {
 	if s == nil || m == nil {
 		return nil
 	}
-	if s.LeaveOutIfIncomplete(m) {
+	// The parser ends this exchange once its mock is accepted (accepted,
+	// below), or left out (reportLeftOut ends it). One refused, as the
+	// context is done, is not ended: a retirement under way reports it
+	// (ReportUnfinishedExchange). Which exchange is the one the mock's
+	// request time names, read here, before the time is clamped
+	// (enforceReqMonotonic) and the mock handed on: once handed on, it is the
+	// consumer's.
+	var req time.Time
+	if ends {
+		req = m.Spec.ReqTimestampMock
+	}
+	if s.leaveOutIfIncomplete(m, ends) {
 		// Left out, and the flag reset, so the next mock in this cycle
 		// gets a fresh chance. Matches invariant I4 in PLAN.md.
 		//
@@ -746,16 +1005,12 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 			}
 		}
 		mgr.AddMock(m)
-		if s.OnPendingCleared != nil {
-			s.OnPendingCleared()
-		}
+		s.accepted(req)
 		return nil
 	}
 
 	if s.Mocks == nil {
-		if s.OnPendingCleared != nil {
-			s.OnPendingCleared()
-		}
+		s.accepted(req)
 		return nil
 	}
 	ctx := s.Ctx
@@ -763,9 +1018,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// A session without a bound ctx can still send; we just
 		// don't gate on cancellation.
 		s.Mocks <- m
-		if s.OnPendingCleared != nil {
-			s.OnPendingCleared()
-		}
+		s.accepted(req)
 		return nil
 	}
 	if shutdown {
@@ -775,9 +1028,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 		// delivery during shutdown should route via SyncMock.
 		select {
 		case s.Mocks <- m:
-			if s.OnPendingCleared != nil {
-				s.OnPendingCleared()
-			}
+			s.accepted(req)
 			return nil
 		default:
 			return nil
@@ -785,9 +1036,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	}
 	select {
 	case s.Mocks <- m:
-		if s.OnPendingCleared != nil {
-			s.OnPendingCleared()
-		}
+		s.accepted(req)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -874,11 +1123,25 @@ func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
 // ends before it. A nil m is reported as a mock with no times: the flag it was
 // left out for has been taken, so it must still be counted. Nil-safe.
 func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
+	s.reportLeftOut(m, reason, true)
+}
+
+// reportLeftOut is ReportLeftOut; ends says whether the mock ends the
+// exchange its request time names: a parser's report of an exchange it
+// leaves out does, and a report made apart from the exchanges the parser
+// began (the floor's of a connection's start, an exchange reported for a
+// parser that stopped in it) does not.
+func (s *Session) reportLeftOut(m *models.Mock, reason string, ends bool) {
 	if s == nil {
 		return
 	}
 	if m == nil {
 		m = &models.Mock{}
+	}
+	// The parser has ended this exchange: left out, by this report. One
+	// with no request time says not which: it ends none.
+	if ends && !m.Spec.ReqTimestampMock.IsZero() {
+		s.endExchange(m.Spec.ReqTimestampMock)
 	}
 	start, end := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
 	spanned := !start.IsZero()
@@ -922,19 +1185,19 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // ReportLeftOut, and its recording goes on). So the count, the span and the
 // WARN do not depend on which parser stopped.
 //
-//   - Its span runs from its request to the stop: the session's stop instant
-//     (StoppedAt), or reqTs when that reads earlier than a chunk's stamp
-//     (ReportLeftOut ends a span no earlier than it starts). Not to the last
-//     byte the parser read of the exchange: a parser runs behind its
-//     connection, and the bytes the connection carried between that one and
-//     the stop are in its capture buffer, unread, and lost with it. The span
-//     of what the connection carries after the stop starts at the same
-//     instant, and is open from it (OnStop): from this call, before it
-//     reports the exchange and before the parser logs its error and
-//     returns, unless the parser's retirement or a capture hole came first
-//     and stamped the stop then. So the two spans meet: no test case
-//     recorded between them is saved without its mocks, and one checked
-//     after the stop overlaps the span after it.
+//   - Its span runs from its request to the last byte the parser read
+//     (lastRead), as an exchange it stops in without reporting it does
+//     (ReportUnfinishedExchange). Not to the stop: the bytes the connection
+//     carried past that one were not this exchange's to cover. The requests
+//     among them, which the parser never read, are left out apart, each over
+//     its own span (pkg/agent/proxy's parserReads), and the rest of this
+//     exchange's answer is within a test case that overlaps its request. To
+//     the stop, the span carried the parser's lag behind its connection, and
+//     left out every test case in it, those that never used the connection
+//     too. The stop is still stamped here (StoppedAt), first, unless the
+//     parser's retirement or a capture hole came first and stamped it then:
+//     the span of what the connection carries after the stop opens there
+//     (OnStop), before the parser logs its error and returns.
 //   - A mark on the incomplete-mock flag is taken with it. The parser returns,
 //     so no later EmitMock takes the mark, and nothing would report it. A mark
 //     is a chunk the relay lost on the connection, the likelier cause of what
@@ -952,23 +1215,61 @@ func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason stri
 	if s == nil {
 		return
 	}
-	stop := s.StoppedAt()
+	// The parser reports its own stop: whatever exchange it had begun and
+	// not ended is this report's, not one for the supervisor or the
+	// dispatcher to report again (ReportUnfinishedExchange), whichever
+	// request time the parser gives it. One they reported first, racing
+	// this, is not counted again; but the parser's request time can be
+	// earlier than the start they reported from (the MySQL recorder reports
+	// from the end of the last exchange it recorded), and that part is
+	// still left out.
+	var begun int64
+	for {
+		at := s.exchangeAt.Load()
+		if from, reported := reportedFrom(at); reported {
+			if !reqTs.IsZero() && reqTs.Before(from) {
+				s.RecordOrphanWindow(reqTs, from)
+			}
+			return
+		}
+		if s.exchangeAt.CompareAndSwap(at, 0) {
+			begun = at
+			break
+		}
+	}
+	s.StoppedAt()
 	if mark, ok := s.TakeMockIncomplete(); ok {
 		reason = mark + ": " + reason
 	}
-	s.ReportLeftOut(&models.Mock{
+	if reqTs.IsZero() && begun > 0 {
+		// The parser gives no time; NextRequest found the exchange's.
+		reqTs = time.Unix(0, begun)
+	}
+	var end time.Time
+	if !reqTs.IsZero() {
+		end = s.lastRead(reqTs)
+	}
+	s.reportLeftOut(&models.Mock{
 		Kind: kind,
-		Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: stop},
-	}, reason)
+		Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: end},
+	}, reason, false)
 }
 
 // StoppedAt is the instant this connection stopped being recorded: the first of
 // the parser's stop on an exchange, its death or retirement, and a capture
-// hole. It is the clock, read once, at the first call, and that same instant
-// at every call after it, from any goroutine; the first call tells OnStop
-// before it returns. Each event calls it as it happens, before it logs
+// hole. It is the capture's clock (CaptureClock: the stamp of the newest chunk
+// the connection had carried), read once, at the first call, and that same
+// instant at every call after it, from any goroutine; the first call tells
+// OnStop before it returns. Every byte the connection had carried by the stop,
+// read by the parser or still buffered behind it and lost with it, is stamped
+// no later, so the span of what it carries after the stop starts after them
+// all; and a parser that is behind its traffic does not widen it by its lag,
+// as the agent's clock does (a stop the agent gets to ten seconds after the
+// traffic was dated ten seconds late, and left out every test case of every
+// healthy connection in between). Without a CaptureClock it is the agent's
+// clock. Each event calls it as it happens, before it logs
 // anything: the parser as it reports the exchange it stops on
-// (ReportStoppedOn, whose span ends at it); the supervisor as it learns that
+// (ReportStoppedOn); the supervisor as it learns that
 // the parser panicked or returned with an error (Supervisor.Run); the
 // dispatcher's abort as it pauses the capture of a parser it retires that is
 // still running, hung or cancelled (before the pause, so every chunk the pause
@@ -983,18 +1284,18 @@ func (s *Session) ReportStoppedOn(kind models.Kind, reqTs time.Time, reason stri
 // hole, and a test case checked before the span opened overlapped none. The
 // traffic in between, more of it the more starved the agent, was in no span:
 // a test case recorded over it was saved without its mocks. A later event gets
-// the earlier instant: an exchange a parser reports after its retirement (one
-// that hung, say) is spanned up to the retirement, and a hole after the
-// parser's stop opens its span at the stop. A nil Session's is the zero time.
+// the earlier instant: a hole after the parser's stop, or a parser's own
+// report after its retirement (one that hung, say), leaves the span after the
+// stop where the first event opened it. A nil Session's is the zero time.
 //
 // What a parser had captured and not yet recorded when it stops was captured
 // before the stop, and is lost with it: the exchange it was in, and every
-// exchange queued behind it in its capture buffer. A parser that reports the
-// exchange (ReportStoppedOn) spans it from its request to the stop, which
-// covers those behind it too. One that stops without reporting it (it
-// panics, hangs, or returns an error without ReportStoppedOn) leaves them in
-// no span and uncounted: a test case over them that ended before the stop, or
-// was checked before it, is saved without its mocks.
+// request queued behind it in its capture buffer. The exchange is reported
+// from its request to the last byte the parser read, by the parser
+// (ReportStoppedOn), or for a parser that panics, returns an error without
+// reporting it, or is retired (ReportUnfinishedExchange); the requests it
+// never read are left out apart, each over its own span (pkg/agent/proxy's
+// parserReads).
 func (s *Session) StoppedAt() time.Time {
 	if s == nil {
 		return time.Time{}
@@ -1002,7 +1303,13 @@ func (s *Session) StoppedAt() time.Time {
 	if n := s.stoppedAt.Load(); n != 0 {
 		return time.Unix(0, n)
 	}
-	now := time.Now().UnixNano()
+	stamp := time.Now()
+	if s.CaptureClock != nil {
+		if t := s.CaptureClock(); !t.IsZero() {
+			stamp = t
+		}
+	}
+	now := stamp.UnixNano()
 	if !s.stoppedAt.CompareAndSwap(0, now) {
 		return time.Unix(0, s.stoppedAt.Load())
 	}
@@ -1184,7 +1491,7 @@ func leftOutNextStep(class string, spanned bool) string {
 // s.lastReqTimestamp + 1ns when a regression is detected, and
 // updates the session's last-seen timestamp. In debug builds we
 // panic instead so regressions surface during testing. Thread-safe:
-// holds lastReqMu while comparing + writing back.
+// holds hookMu while comparing + writing back.
 //
 // Zero-valued ReqTimestampMock values pass through untouched
 // (parsers that haven't populated them, e.g. tests with pre-built
@@ -1194,14 +1501,17 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 	if req.IsZero() {
 		return
 	}
-	s.lastReqMu.Lock()
-	defer s.lastReqMu.Unlock()
-	if s.lastReqTimestamp.IsZero() {
-		s.lastReqTimestamp = req
+	s.hookMu.Lock()
+	defer s.hookMu.Unlock()
+	// Compared on the wall clock alone: invariant I5 is about the request
+	// times recorded, which replay orders by, not about when the agent read
+	// them (a wall clock stepped back is clamped, as replay would see it).
+	if s.lastReqTimestamp == 0 {
+		s.lastReqTimestamp = req.UnixNano()
 		return
 	}
-	if req.Before(s.lastReqTimestamp) {
-		clamped := s.lastReqTimestamp.Add(time.Nanosecond)
+	if req.UnixNano() < s.lastReqTimestamp {
+		clamped := time.Unix(0, s.lastReqTimestamp+1).In(req.Location())
 		if debugMonotonic.Load() {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
@@ -1244,7 +1554,7 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 		}
 		req = clamped
 	}
-	s.lastReqTimestamp = req
+	s.lastReqTimestamp = req.UnixNano()
 }
 
 // debugMonotonic, when true, causes enforceReqMonotonic to panic on

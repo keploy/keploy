@@ -160,6 +160,22 @@ func (w *Watermark) Progress() uint64 {
 	return n
 }
 
+// CapturedTo is how far the capture of every followed connection has got
+// (Relay.CapturedTo): the earliest of them; the clock when it follows none. The
+// recording's open orphan spans extend no further (syncMock.Horizon).
+func (w *Watermark) CapturedTo() time.Time {
+	to := time.Now()
+	if w == nil {
+		return to
+	}
+	for _, c := range w.snapshot() {
+		if t := c.r.CapturedTo(); t.Before(to) {
+			to = t
+		}
+	}
+	return to
+}
+
 // Following is how many connections the watermark follows.
 func (w *Watermark) Following() int {
 	if w == nil {

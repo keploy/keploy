@@ -144,7 +144,17 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	}
 
 	if !handshake.skipConfigMock {
-		emitMockV2(ctx, sess, handshake.req, handshake.resp, "config", handshake.requestOperation, handshake.responseOperation, handshake.reqTimestamp, handshake.resTimestamp)
+		handed := emitMockV2(ctx, sess, handshake.req, handshake.resp, "config", handshake.requestOperation, handshake.responseOperation, handshake.reqTimestamp, handshake.resTimestamp)
+		if handed && handshake.firstCmd == nil {
+			// The post-TLS handshake began an exchange at the client's
+			// first packet (firstCmdAt), which the config mock ends no
+			// exchange for (Session.EmitHandshakeMock): it ends here. Left
+			// open, a parser that died in the first command of a
+			// connection that then sat idle in its pool was said to have
+			// stopped in it from the handshake on. With firstCmd, that
+			// packet was the first command, whose own mock ends it.
+			sess.EndExchange(handshake.firstCmdAt)
+		}
 	}
 
 	// Observe-only pre-TLS handshake was stored for the decrypted stream's
@@ -2333,8 +2343,11 @@ func nextPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Sessio
 // (metadata, kind, spec) and hands it to the supervisor Session via
 // EmitMock so the session's post-record hook chain and incomplete-mock
 // gate run consistently. Timestamps come from chunk ReadAt stamps; the
-// legacy path's time.Now() use is deliberately NOT replicated here.
-func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time) {
+// legacy path's time.Now() use is deliberately NOT replicated here. Reports
+// whether the session took the mock (Session.EmitMock: recorded, or left out
+// and reported): not when it refused it, as the recording or the parser was
+// stopping.
+func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time) bool {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  reqOp,
@@ -2374,10 +2387,16 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		},
 	}
 
-	if err := sess.EmitMock(m); err != nil {
-		if sess.Logger != nil {
-			sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
-		}
+	// The config mock is the handshake's: it answers no command
+	// NextRequest found, and ends no exchange (the post-TLS handshake ends
+	// the one it began itself, RecordV2).
+	emit := sess.EmitMock
+	if mockType == "config" {
+		emit = sess.EmitHandshakeMock
+	}
+	err := emit(m)
+	if err != nil && sess.Logger != nil {
+		sess.Logger.Debug("V2: emit mock failed", zap.Error(err))
 	}
 	// Note: EmitMock auto-clears the incomplete flag when it drops a
 	// partial mock (see supervisor.Session.EmitMock). On the healthy-
@@ -2385,6 +2404,7 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 	// NOT call MarkMockComplete here because the relay may have set
 	// the flag for memory-guard reasons we must respect.
 	_ = ctx
+	return err == nil
 }
 
 // sentinelConn is a zero-behaviour net.Conn used only as a map key in
