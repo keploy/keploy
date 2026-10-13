@@ -178,6 +178,9 @@ func (f *fakeDocker) endStream(err error) {
 // summaryOf is what the list shows of a container.
 func summaryOf(id string, c container.InspectResponse) container.Summary {
 	s := container.Summary{ID: id, Image: c.Config.Image, ImageID: c.Image}
+	if c.ContainerJSONBase != nil && c.Name != "" {
+		s.Names = []string{c.Name}
+	}
 	for p, bs := range c.NetworkSettings.Ports {
 		for _, b := range bs {
 			hp := uint16(0)

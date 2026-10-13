@@ -57,6 +57,18 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-compose-linux.sh"
 
+      # The proven model (KEPLOY_PROVEN=1) in docker mode: the agent's
+      # container has no Docker socket, so the CLI pushes it the list of the
+      # daemon's containers, and a compose dependency reached by its service
+      # name is recorded as container:<image>:<port>#<n>; it replays with the
+      # dependency deleted, and records no keys without the switch.
+      - name: Run mock-mode docker-compose container-keys e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-compose-container-keys-linux.sh"
+
   # A dependency that crashes once after keploy's agent is set up: keploy's
   # compose retry must reuse that agent, or set up again the one compose starts
   # again, or the recording (and the replay) is lost. A job of its own: its

@@ -174,10 +174,10 @@ var pinProvenSwitch = provenswitch.Pin
 // see the call.
 var setDockerHost = containerkey.SetDockerHost
 
-// disableContainerKeys is what a docker-mode agent does at start: it has no
-// Docker socket, so it names no container destination. A variable so a test
-// can see the call.
-var disableContainerKeys = func() { containerkey.Default.Disable() }
+// usePushedContainers is what a docker-mode agent does at start under the
+// proven switch: it has no Docker socket, so it names container destinations
+// from the list its keploy CLI pushes. A variable so a test can see the call.
+var usePushedContainers = containerkey.UsePushed
 
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
@@ -2141,10 +2141,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.IsDocker = isdocker
 		if isdocker && provenswitch.On() {
-			// keploy's agent container has no Docker socket to name
-			// container destinations by (containerkey).
-			disableContainerKeys()
-			c.logger.Info("keploy's agent runs in a container here and cannot read the Docker daemon, so this run names container destinations by their address; HTTP calls to compose services are still matched by the service names the app uses")
+			// keploy's agent container has no Docker socket: it names
+			// container destinations from the list its keploy CLI pushes
+			// (containerkey).
+			usePushedContainers()
 		}
 
 		enableTesting, err := cmd.Flags().GetBool("enable-testing")

@@ -110,6 +110,12 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Any method: with the proven switch off the handler answers the
 		// 404 this path had before it existed.
 		r.HandleFunc("/replay/clock", a.HandleTestBegins)
+		// The keploy CLI's container list, for a docker-mode agent that cannot
+		// read Docker itself (containerkey); only under the proven switch.
+		if provenswitch.On() {
+			r.Get("/containers", a.HandleTakesContainers)
+			r.Post("/containers", a.HandleContainers)
+		}
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

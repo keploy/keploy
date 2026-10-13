@@ -24,7 +24,11 @@
 #      always, so it must be set up again;
 #   4. test (replay) of 3's recording, `up --always-recreate-deps app`, with
 #      the dependency crashing once again: the recreated agent must get the
-#      test set's mocks, their filters and its readiness again.
+#      test set's mocks, their filters and its readiness again;
+#   5. 3 under the proven switch (KEPLOY_PROVEN=1): the recreated agent, which
+#      runs in a container with no Docker socket, must be given keploy's list
+#      of the daemon's containers again before its session is made again, so
+#      the app's calls to the dependency carry its container key.
 #
 # Env: RECORD_BIN and REPLAY_BIN (the keploy binaries under test). The agent
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
@@ -124,7 +128,7 @@ record() {
   cleanup
   sudo rm -rf keploy
   # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-  sudo -E env PATH="$PATH" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
     --record-timer 60s --disable-tele > "$name.log" 2>&1 &
   local pid=$!
   requests "$pid"
@@ -172,6 +176,17 @@ if [ "$FAIL" -ne "$before" ]; then
 else
   echo "ok: replay: $how; $summary"
 fi
+
+# 5. The recreated agent under the proven switch.
+before=$FAIL
+KEPLOY_PROVEN=1 record recreated-proven "docker compose up --always-recreate-deps app"
+setup_again recreated-proven || fail "recreated-proven: the agent compose recreated was not set up again"
+mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+keyed=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c 'containerKey: container:python:3.11-slim:8000#1$')
+if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ]; then
+  fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
+fi
+[ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "compose-dep-retry e2e: FAILED"
