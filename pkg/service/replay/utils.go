@@ -1847,6 +1847,12 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		// full second copy of that sentence, once per missed call, was pure
 		// duplication.
 		fmt.Println("  (closest-mock diff omitted — see hint)")
+	case r.MatchPhase == models.MatchPhaseVariable && r.Diff != "":
+		// A test variable did not hold: the recording is not what the call
+		// should have sent (it holds the recorded value, not this run's), so
+		// a request diff against it would mislead. The diff names the
+		// variable, the value it has in this test and the one the call sent.
+		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
 		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:
@@ -1965,6 +1971,8 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 			exp = "(not recorded)"
 		case models.DiffKindTypeChanged:
 			exp, rec = "type "+d.Expected, "type "+d.Actual
+		case models.DiffKindVariable:
+			exp = "variable: " + d.Expected
 		}
 		table.Append([]string{d.Path, exp, rec})
 	}

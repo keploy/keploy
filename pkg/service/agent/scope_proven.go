@@ -788,6 +788,23 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	case isSQL(m.Protocol):
 		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
+	if m.MatchPhase == models.MatchPhaseVariable {
+		// A test variable did not hold. Where it did not hold is the
+		// recording's own structure (the place the learn step declared),
+		// never a value the app sent: it is kept, the values are not.
+		var places []string
+		for _, d := range m.FieldDiffs {
+			if d.Kind == models.DiffKindVariable && d.Path != "" {
+				out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: d.Path, Kind: d.Kind})
+				places = append(places, d.Path)
+			}
+		}
+		at := ""
+		if len(places) > 0 {
+			at = " at " + strings.Join(places, ", ")
+		}
+		out.NextSteps = "a test variable did not hold" + at + " in " + m.ClosestMock + ": the call sent another value than the one the test bound, or used it before the call that binds it; fix the application, or re-record the test with 'keploy mock record' if that is intended"
+	}
 	return out
 }
 

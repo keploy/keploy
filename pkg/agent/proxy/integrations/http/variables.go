@@ -162,6 +162,9 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		}
 		for _, vp := range d.requestPlaces() {
 			key := vp.place.String()
+			if vp.place.Part == variables.PartHeader {
+				key = strings.ToLower(key) // a header's name is read in any case
+			}
 			if other, dup := seen[key]; dup {
 				return nil, fmt.Sprintf("the request place %s is declared twice (variables %s and %s)", key, other, name)
 			}
@@ -623,8 +626,12 @@ func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMo
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its
-// answers, consumes it, and commits its binds. retry is true when another
-// connection took the mock first.
+// answers, commits its binds and consumes it. The binds are committed all or
+// none, under one lock, before the mock is consumed: a variable another
+// connection bound meanwhile to another value, or a value another variable
+// took meanwhile, makes the call a miss with nothing consumed. retry is true
+// when another connection took the mock first (the binds stay: they are what
+// the app sent at its binding places).
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb, table *variables.Table) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
@@ -634,24 +641,22 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 	if problem != nil {
 		return nil, problem, false, nil
 	}
-	if !h.updateMock(ctx, hit.mock, mockDb, nil) {
-		return nil, nil, true, nil
+	if bad, with, ok := table.BindAll(hit.binds); !ok {
+		why := fmt.Sprintf("variable %s was bound to %q at %s %s while this call, which binds it to %q at %s, was being answered", bad.Name, with.Value, with.Mock, with.Place, bad.Value, bad.Place)
+		if with.Name != bad.Name {
+			why = fmt.Sprintf("this call binds variable %s at %s to %q, which variable %s took meanwhile (at %s %s); they were two values when the test was recorded", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place)
+		}
+		return nil, &varProblem{
+			mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: with.Value, actual: bad.Value,
+			why: why, next: "two calls of the test bound its variables at once in a way the recording did not: fix the application, or re-record the test if that is intended",
+		}, false, nil
 	}
 	for _, b := range hit.binds {
-		have, took := table.Bind(b)
-		if !took && have.Value != b.Value {
-			// Another connection bound the variable to another value between
-			// this call's check and its answer.
-			return nil, &varProblem{
-				mock: hit.mock.Name, name: b.Name, place: b.Place, expected: have.Value, actual: b.Value,
-				why:  fmt.Sprintf("variable %s was bound to %q at %s %s while this call, which binds it to %q, was being answered", b.Name, have.Value, have.Mock, have.Place, b.Value),
-				next: "two calls bound one variable at once: re-record the test",
-			}, false, nil
-		}
-		if took {
-			h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
-				zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
-		}
+		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
+			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+	}
+	if !h.updateMock(ctx, hit.mock, mockDb, nil) {
+		return nil, nil, true, nil
 	}
 	return rendered, nil, false, nil
 }
@@ -826,4 +831,39 @@ func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, m
 		commitCursor()
 	}
 	return served, true, false, nil
+}
+
+// asRecordedForDiff is the live call to diff against m, a mock with variables
+// that it did not fit: m's recorded values put back at its variables' places.
+// Those places are not where the call differs (a variable takes a new value on
+// every run), so the diff and its hint name only what does differ, and never
+// suggest noise for a variable's place. A call without such a mock, or one
+// whose variables cannot be read, is diffed as it is.
+func asRecordedForDiff(request *http.Request, liveBody []byte, m *models.Mock) (*http.Request, []byte) {
+	if !hasVariables(m) || m.Spec.HTTPReq == nil || request == nil || request.URL == nil {
+		return request, liveBody
+	}
+	decls, bad := readDecls(m)
+	rec, ok := recordedView(m.Spec.HTTPReq)
+	if bad != "" || !ok {
+		return request, liveBody
+	}
+	in := &req{method: request.Method, url: request.URL, header: request.Header, body: liveBody}
+	live := liveView(in)
+	for _, d := range decls {
+		for _, vp := range d.requestPlaces() {
+			r, okRec := rec.read(vp.place)
+			if _, okLive := live.read(vp.place); !okRec || !okLive {
+				continue
+			}
+			if v, ok := live.putBack(vp.place, r); ok {
+				live = v
+			}
+		}
+	}
+	as := live.asReq(in)
+	out := request.Clone(request.Context())
+	out.URL = as.url
+	out.Header = live.header
+	return out, []byte(live.body)
 }

@@ -241,6 +241,8 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 			parts = append(parts, fmt.Sprintf("%s: live %q, absent in recording", d.Path, d.Actual))
 		case models.DiffKindTypeChanged:
 			parts = append(parts, fmt.Sprintf("%s: type changed (recorded %s, live %s)", d.Path, d.Expected, d.Actual))
+		case models.DiffKindVariable:
+			parts = append(parts, fmt.Sprintf("%s: the test's variable is %q, the call sent %q", d.Path, d.Expected, d.Actual))
 		default:
 			parts = append(parts, fmt.Sprintf("%s: recorded %q, live %q", d.Path, d.Expected, d.Actual))
 		}

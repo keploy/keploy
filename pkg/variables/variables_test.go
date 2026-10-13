@@ -187,3 +187,52 @@ func TestAnswerEditAndApplyEdits(t *testing.T) {
 		t.Fatal("overlapping edits were applied")
 	}
 }
+
+// BindAll commits all or none: a name keeps its value, two variables recorded
+// as two values never share a live value, and a refused batch leaves nothing.
+func TestTable_BindAll(t *testing.T) {
+	var tb Table
+	if _, _, ok := tb.BindAll([]Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "b", Value: "2", Recorded: "r2"}}); !ok {
+		t.Fatal("two fresh variables should bind")
+	}
+	for name, batch := range map[string][]Binding{
+		"a name to another value":          {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "a", Value: "9", Recorded: "r1"}},
+		"another variable's value":         {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "d", Value: "1", Recorded: "r4"}},
+		"two values of one name in a call": {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "c", Value: "4", Recorded: "r3"}},
+		"one value of two names in a call": {{Name: "c", Value: "3", Recorded: "r3"}, {Name: "e", Value: "3", Recorded: "r5"}},
+	} {
+		if bad, with, ok := tb.BindAll(batch); ok {
+			t.Fatalf("%s: bound", name)
+		} else if bad.Name == "" || with.Name == "" {
+			t.Fatalf("%s: no evidence (%+v, %+v)", name, bad, with)
+		}
+		if _, bound := tb.Lookup("c"); bound {
+			t.Fatalf("%s: a refused batch left c bound", name)
+		}
+	}
+	if _, _, ok := tb.BindAll([]Binding{{Name: "a", Value: "1", Recorded: "r1"}, {Name: "f", Value: "1", Recorded: "r1"}}); !ok {
+		t.Fatal("a bound name at its value, and a name recorded with the same value, should bind")
+	}
+}
+
+func TestTable_ConcurrentBindAllKeepsValuesApart(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		var tb Table
+		var wg sync.WaitGroup
+		took := make(chan string, 2)
+		for _, name := range []string{"userId", "orderId"} {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				if _, _, ok := tb.BindAll([]Binding{{Name: name, Value: "U", Recorded: "rec-" + name}}); ok {
+					took <- name
+				}
+			}(name)
+		}
+		wg.Wait()
+		close(took)
+		if n := len(took); n != 1 {
+			t.Fatalf("round %d: %d variables took one value, want 1", round, n)
+		}
+	}
+}

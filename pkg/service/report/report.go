@@ -1208,9 +1208,15 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 					sb.WriteString(fmt.Sprintf("      %s: live %q, absent in recording\n", d.Path, d.Actual))
 				case models.DiffKindTypeChanged:
 					sb.WriteString(fmt.Sprintf("      %s: type changed (recorded %s, live %s)\n", d.Path, d.Expected, d.Actual))
+				case models.DiffKindVariable:
+					sb.WriteString(fmt.Sprintf("      %s: the test's variable is %q, the call sent %q\n", d.Path, d.Expected, d.Actual))
 				default:
 					sb.WriteString(fmt.Sprintf("      %s: recorded %q, live %q\n", d.Path, d.Expected, d.Actual))
 				}
+			}
+			if uc.MatchPhase == models.MatchPhaseVariable && uc.Diff != "" {
+				// It names the variable and where the test bound it.
+				sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
 			}
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))

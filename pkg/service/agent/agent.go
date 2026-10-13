@@ -173,9 +173,6 @@ type Agent struct {
 	// noteEndOfGated said so this session.
 	gatedScopes    map[scopeKey]struct{}
 	gatedEndWarned bool
-	// replay, under the proven switch: the root test whose scope holds the
-	// test variables bound so far (beginVariableScope).
-	varRoot string
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while
@@ -1305,7 +1302,7 @@ func dedupByName(a, b []*models.Mock) []*models.Mock {
 // ResetVariables forgets every test variable the replay has bound: a test
 // begins. Under the proven switch the agent's route calls it for every mock
 // filter a keploy test sends (one per test case, before the test case is
-// sent), and BeginScopeAt as a root test of keploy mock replay begins.
+// sent), and BeginScopeAt as a test of keploy mock replay begins.
 func (a *Agent) ResetVariables() {
 	if resetter, ok := a.Proxy.(coreAgent.VariableResetter); ok {
 		resetter.ResetVariables()

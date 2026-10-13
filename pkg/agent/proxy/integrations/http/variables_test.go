@@ -636,3 +636,140 @@ func TestVariables_ACorrelationIsNotHonouredUnderTheSwitch(t *testing.T) {
 		t.Fatalf("a correlation was honoured under the switch: %s", stub.Spec.HTTPResp.Body)
 	}
 }
+
+// After a variable did not hold, only an exact recording of the call answers
+// it: a recording of the same route with another body does not.
+func TestVariables_AfterAMismatchOnlyAnExactBodyAnswers(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	create := at(varMock("mock-1", "POST", "http://store/carts", `{"cart":"c-rec"}`, 201, `{}`,
+		models.MockVariables{"cartId": bindV("c-rec", "body.cart")}), 1)
+	add := at(varMock("mock-2", "POST", "http://store/items", `{"cart":"c-rec","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"cartId": useV("c-rec", []string{"body.cart"})}), 2)
+	plain := at(varMock("mock-3", "POST", "http://store/items", `{"cart":"c-zzz","item":"pen"}`, 201, `{"plain":true}`, nil), 3)
+	db := &varDb{perTest: []*models.Mock{create, add, plain}}
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/carts", `{"cart":"c-live"}`)); !ok {
+		t.Fatal("the create should match")
+	}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/items", `{"cart":"c-other","item":"pen"}`))
+	if ok {
+		t.Fatalf("a call whose variable did not hold was answered by %s", stub.Name)
+	}
+	wantProblem(t, ok, diag, "this call sent")
+}
+
+func TestVariables_EveryPlaceOfACallHoldsItsVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for name, vars := range map[string]models.MockVariable{
+		"a bind and a use in one call": {Recorded: "r1", Bind: "body.id", Use: []string{"header.X-Id"}},
+		"an echo and its use":          {Recorded: "r1", Bind: "body.id", Use: []string{"header.X-Id"}, Echo: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHTTP()
+			m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{}`, models.MockVariables{"id": vars}), 1)
+			m.Spec.HTTPReq.Header["X-Id"] = "r1"
+			db := &varDb{perTest: []*models.Mock{m}}
+			r := liveReq("POST", "/orders", `{"id":"l1"}`)
+			r.header.Set("X-Id", "l2")
+			ok, _, diag := matchVar(t, h, db, r)
+			wantProblem(t, ok, diag, "this call sent")
+			r.header.Set("X-Id", "l1")
+			if ok, _, _ := matchVar(t, h, db, r); !ok {
+				t.Fatal("a call holding one value at both places should match")
+			}
+		})
+	}
+}
+
+func TestVariables_AnEchoOfAnEmptyValueIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := reusable(at(varMock("mock-1", "POST", "http://pay/charge", `{"key":"k-rec"}`, 200, `{"key":"k-rec"}`,
+		models.MockVariables{"key": {Recorded: "k-rec", Bind: "body.key", Answer: []string{"body.key"}, Echo: true}}), 1))
+	db := &varDb{session: []*models.Mock{m}}
+	ok, _, diag := matchVar(t, h, db, liveReq("POST", "/charge", `{"key":""}`))
+	wantProblem(t, ok, diag, "an empty value")
+}
+
+func TestVariables_AHeaderAnswerIsServed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id", "header.X-Order")}), 1)
+	m.Spec.HTTPResp.Header["X-Order"] = "r1"
+	db := &varDb{perTest: []*models.Mock{m}}
+	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"l1"}`))
+	if !ok || stub.Spec.HTTPResp.Header["X-Order"] != "l1" || m.Spec.HTTPResp.Header["X-Order"] != "r1" {
+		t.Fatalf("ok=%v served %+v (pooled %+v)", ok, stub, m.Spec.HTTPResp.Header)
+	}
+}
+
+func TestVariables_MoreDeclarationsKeployRefuses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for name, vars := range map[string]models.MockVariables{
+		"an answer at a request place": {"id": bindV("r1", "body.id", "url.path[0]")},
+		"one place twice":              {"a": bindV("r1", "header.X-Id"), "b": useV("r1", []string{"header.x-id"})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHTTP()
+			m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{}`, vars), 1)
+			m.Spec.HTTPReq.Header["X-Id"] = "r1"
+			db := &varDb{perTest: []*models.Mock{m}}
+			r := liveReq("POST", "/orders", `{"id":"r1"}`)
+			r.header.Set("X-Id", "r1")
+			ok, _, diag := matchVar(t, h, db, r)
+			wantProblem(t, ok, diag, "cannot be followed")
+		})
+	}
+}
+
+// The known noise of a call with variables is the user's body noise and the
+// obfuscator's redacted values, as for any other call.
+func TestVariables_UserNoiseAndRedactedValuesAreKnownNoise(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","at":"t1","secret":"REDACTED_1"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)
+	m.Noise = []string{`^REDACTED_\d+$`}
+	db := &varDb{perTest: []*models.Mock{m}}
+	live := liveReq("POST", "/orders", `{"id":"l1","at":"t2","secret":"sk_live_9"}`)
+	ok, _, _, err := h.match(context.Background(), live, db, nil, map[string][]string{"at": {}}, nil, true, false, false, true, true)
+	if err != nil || !ok {
+		t.Fatalf("a drift under the user's noise and a redacted value should fit: ok=%v err=%v", ok, err)
+	}
+	db = &varDb{perTest: []*models.Mock{at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","at":"t1","secret":"REDACTED_1"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)}}
+	if ok, _, _, _ := h.match(context.Background(), live, db, nil, map[string][]string{"at": {}}, nil, true, false, false, true, true); ok {
+		t.Fatal("without the obfuscator's patterns the secret is compared")
+	}
+}
+
+// A call answered by a mock with variables, and diffed against one it did not
+// fit, never names a variable's place as the difference.
+func TestVariables_TheClosestMockDiffLeavesTheVariablesOut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"id": bindV("r1", "body.id")}), 1)
+	db := &varDb{perTest: []*models.Mock{m}}
+	live := liveReq("POST", "/orders", `{"id":"l1","item":"book"}`)
+	ok, _, diag := matchVar(t, h, db, live)
+	if ok {
+		t.Fatal("a create of another item was answered")
+	}
+	req := makeReq("POST", "/orders")
+	req.Header = http.Header{"Content-Type": []string{"application/json"}}
+	rep := h.buildHTTPMismatchReport(req, live.body, db, nil, nil, nil, diag)
+	for _, d := range rep.FieldDiffs {
+		if d.Path == "body.id" {
+			t.Fatalf("the diff names the variable's place: %+v", rep.FieldDiffs)
+		}
+	}
+	found := false
+	for _, d := range rep.FieldDiffs {
+		found = found || d.Path == "body.item"
+	}
+	if !found {
+		t.Fatalf("the diff does not name the field that differs: %+v", rep.FieldDiffs)
+	}
+}

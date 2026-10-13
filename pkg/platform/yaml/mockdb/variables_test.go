@@ -127,7 +127,11 @@ func TestNoVariablesNoKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := yaml.MarshalDoc(yaml.FormatJSON, &yaml.NetworkTrafficDoc{Version: doc.Version, Kind: doc.Kind, Name: doc.Name, Spec: doc.Spec}); strings.Contains(string(b), "variables") {
+	b, err := yaml.MarshalDoc(yaml.FormatJSON, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "variables") {
 		t.Fatalf("json doc wrote the key: %s", b)
 	}
 	if jd.Variables != nil {

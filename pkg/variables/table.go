@@ -51,6 +51,43 @@ func (t *Table) Bind(b Binding) (Binding, bool) {
 	return b, true
 }
 
+// BindAll binds bs together, all or none, under one lock: each name holds one
+// value (a name already bound must be bound to the same value), and two
+// variables recorded with two values do not share a live value. It returns
+// the first binding that does not hold and the binding it collides with; ok
+// is true when every binding of bs is in force afterwards.
+func (t *Table) BindAll(bs []Binding) (bad, with Binding, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, b := range bs {
+		if have, bound := t.vals[b.Name]; bound && have.Value != b.Value {
+			return b, have, false
+		}
+		for _, other := range t.vals {
+			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
+				return b, other, false
+			}
+		}
+		for _, other := range bs[:i] {
+			if other.Name == b.Name && other.Value != b.Value {
+				return b, other, false
+			}
+			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
+				return b, other, false
+			}
+		}
+	}
+	if t.vals == nil {
+		t.vals = make(map[string]Binding, len(bs))
+	}
+	for _, b := range bs {
+		if _, bound := t.vals[b.Name]; !bound {
+			t.vals[b.Name] = b
+		}
+	}
+	return Binding{}, Binding{}, true
+}
+
 // Reset forgets every binding: a new scope begins.
 func (t *Table) Reset() {
 	t.mu.Lock()

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -19,51 +20,22 @@ type resetProxy struct {
 
 func (p *resetProxy) ResetVariables() { p.resets++ }
 
-func TestRootTest(t *testing.T) {
-	for _, c := range []struct {
-		id, root string
-		sub      bool
-	}{
-		{"TestOrder", "TestOrder", false},
-		{"TestOrder/read", "TestOrder", true},
-		{"TestOrder/read/deep", "TestOrder", true},
-		{"pkg/a_test.go::TestOrder/read", "pkg/a_test.go::TestOrder", true},
-		{"proj::pkg/a/b_test.go::TestOrder", "proj::pkg/a/b_test.go::TestOrder", false},
-		{"proj::pkg/a/b_test.go::Test%3A%3Ax/y", "proj::pkg/a/b_test.go::Test%3A%3Ax", true},
-	} {
-		root, sub := rootTest(c.id)
-		if root != c.root || sub != c.sub {
-			t.Fatalf("rootTest(%q) = %q, %v; want %q, %v", c.id, root, sub, c.root, c.sub)
-		}
-	}
-}
-
-// A root test begins with no variable bound; its subtests keep what it bound;
-// the same root test begun again (go test -count=2) starts afresh.
-func TestARootTestAndItsSubtestsShareTheirVariables(t *testing.T) {
+// Every test begins with no variable bound: the integrations begin only
+// top-level tests, so a Go subtest shares its parent's scope by never beginning
+// one, and a test begun again (go test -count=2) starts afresh.
+func TestEveryTestBeginsWithNoVariableBound(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := &resetProxy{}
 	a := &Agent{logger: zap.NewNop(), Proxy: p, config: &config.Config{Agent: config.Agent{Mode: models.MODE_TEST}}}
 	ctx := context.Background()
-	for _, step := range []struct {
-		test   string
-		resets int
-	}{
-		{"f_test.go::TestOrder", 1},
-		{"f_test.go::TestOrder/create", 1},
-		{"f_test.go::TestOrder/read", 1},
-		{"f_test.go::TestUser", 2},
-		{"f_test.go::TestUser", 3},
-		{"f_test.go::TestOrder/read", 4},
-		{"g_test.go::TestOrder/read", 5},
-	} {
+	for i, test := range []string{"f_test.go::TestOrder", "f_test.go::TestUser", "f_test.go::TestUser", "g_test.go::TestOrder"} {
 		// The begin goes on to narrow the pool, which this agent has none
 		// to narrow: its error is not what is tested here.
-		_ = a.BeginScopeAt(ctx, step.test, 0, models.BaseTime)
-		if p.resets != step.resets {
-			t.Fatalf("after %s began the variables were forgotten %d times, want %d", step.test, p.resets, step.resets)
+		_ = a.BeginScopeAt(ctx, test, 0, models.BaseTime)
+		if p.resets != i+1 {
+			t.Fatalf("after %s began the variables were forgotten %d times, want %d", test, p.resets, i+1)
 		}
-		_ = a.EndScopeAt(ctx, step.test, 0, models.BaseTime)
+		_ = a.EndScopeAt(ctx, test, 0, models.BaseTime)
 	}
 }
 
@@ -96,5 +68,34 @@ func TestVariablesKeployCannotFollowAreRefusedAtLoad(t *testing.T) {
 	got := names(a.refuseUnfollowable([]*models.Mock{httpVars, pg, async, plain}))
 	if len(got) != 2 || got[0] != "http" || got[1] != "plain" {
 		t.Fatalf("kept %v, want [http plain]", got)
+	}
+}
+
+// The mock stream, the one path /storemocks takes, leaves out under the switch
+// a mock whose variables keploy cannot follow, and keeps it with the switch
+// off.
+func TestStoreMocksStreamRefusesVariablesKeployCannotFollow(t *testing.T) {
+	vars := models.MockVariables{"id": {Recorded: "1", Bind: "body.id"}}
+	for _, tc := range []struct {
+		proven string
+		want   int
+	}{{"1", 1}, {"0", 2}} {
+		t.Run("KEPLOY_PROVEN="+tc.proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.proven)
+			RegisterHooks(&captureHook{})
+			a := newTestAgent()
+			httpVars := mkMock("http", models.HTTP, time.Time{})
+			httpVars.Spec.Variables = vars
+			pg := mkMock("pg", models.PostgresV2, time.Time{})
+			pg.Spec.Variables = vars
+			header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, nil, []*models.Mock{httpVars, pg}))
+			if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+				t.Fatal(err)
+			}
+			st := loadStorage(t, a)
+			if len(st.unfiltered) != tc.want {
+				t.Fatalf("stored %d mocks, want %d", len(st.unfiltered), tc.want)
+			}
+		})
 	}
 }

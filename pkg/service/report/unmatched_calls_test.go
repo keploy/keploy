@@ -192,3 +192,25 @@ func TestRenderUnmatchedCalls_NoCausesWithoutAnOutOfScopeMiss(t *testing.T) {
 		t.Errorf("shared causes must not appear without an out-of-scope miss:\n%s", sb.String())
 	}
 }
+
+// A call whose test variable did not hold names the variable's value in this
+// test and what the call sent (never "recorded"), and the diff naming the
+// variable and where the test bound it.
+func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
+	test := models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
+		Protocol: "HTTP", ActualSummary: "GET /orders/o9", ClosestMock: "mock-2", MatchPhase: models.MatchPhaseVariable,
+		Diff:       `mock mock-2: variable orderId is "o1" in this test (taken at mock-1 body.id), and this call sent "o9" at url.path[1]`,
+		FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]", Kind: models.DiffKindVariable, Expected: "o1", Actual: "o9"}},
+	}}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, test)
+	out := sb.String()
+	for _, want := range []string{`url.path[1]: the test's variable is "o1", the call sent "o9"`, "variable orderId", "mock-1 body.id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "recorded \"o1\"") {
+		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
+	}
+}

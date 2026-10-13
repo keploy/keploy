@@ -187,15 +187,24 @@ stop_pid() {
 newest_run() { ls -1d keploy/reports/test-run-* 2>/dev/null | sort -t- -k3 -n | tail -n1; }
 REPORT() { echo "$(newest_run)/test-set-0-report.yaml"; }
 set_status() { grep -m1 '^status:' "$(REPORT)" 2>/dev/null | awk '{print $2}'; }
-case_statuses() { grep -E '^\s+status:' "$(REPORT)" 2>/dev/null | sort | uniq -c; }
+# case_statuses: each test case of the newest report and its status, by test
+# case (a test case's own status is the first status line of its block).
+case_statuses() {
+  awk '/^ *- kind:/{st=""} /^ *status:/{ if (st=="") st=$2 } /test_case_id:/{ print $2, st }' "$(REPORT)" 2>/dev/null | sort
+}
 # replay LOG MODE [VAR=VALUE...]: keploy test with the dependency down; RC is
-# its exit code.
+# its exit code. A run that wrote no report of its own fails the script: every
+# check after it would otherwise read the previous run's report.
 replay() {
-  local log="$1" mode="$2"; shift 2
+  local log="$1" mode="$2" before; shift 2
+  before="$(newest_run)"
   sudo -E env PATH="$PATH" "$@" "$REPLAY_BIN" test -c "python3 app.py $APP $DEP${mode:+ $mode}" --delay 5 \
     --generateGithubActions=false --disable-tele >"$log.log" 2>&1 </dev/null
   RC=$?
   own
+  if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
+    fail "$log: keploy test wrote no report (exit $RC)"; tail -30 "$log.log"
+  fi
 }
 expect_rc() { [ "$RC" = "$1" ] || fail "$2: keploy exited $RC, want $1"; }
 expect_failed_with() { # STEP WHAT: the newest set failed, its report holding WHAT
@@ -276,6 +285,7 @@ expect_failed_with "step 8" 'another JSON type'
 echo "== 9. switch off: the block is not read =="
 replay off ""
 OFF="$(case_statuses)"
+[ "$(echo "$OFF" | grep -c .)" -eq 2 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 2"
 grep -q 'variable_mismatch\|kind: variable' "$(REPORT)" && fail "switch off: a report mentions a variable"
 cp keploy.plain/test-set-0/mocks.yaml "$MOCKS"
 replay offplain ""

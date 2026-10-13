@@ -1757,6 +1757,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
 	}
+	if provenswitch.On() {
+		// A closest mock with variables is diffed with its recorded values
+		// at their places: a variable's place is never the difference.
+		request, liveBody = asRecordedForDiff(request, liveBody, closestMock)
+	}
 
 	mockReq := closestMock.Spec.HTTPReq
 	var fieldDiffs []models.MockFieldDiff
