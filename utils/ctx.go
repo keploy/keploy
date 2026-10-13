@@ -55,6 +55,29 @@ func RegisterPreCancelHook(fn func()) {
 	preCancelMu.Unlock()
 }
 
+// signalHold, when set, is what the first stop signal waits on before it
+// cancels the root context (SetSignalHold).
+var signalHold atomic.Pointer[func(stopNow <-chan struct{})]
+
+// SetSignalHold has the first SIGINT, SIGTERM or SIGHUP NewCtx receives wait,
+// before it cancels the root context, until hold returns: what the process is
+// still doing for someone else finishes first. A second signal while it waits
+// closes stopNow, and hold must then return at once; that signal also marks
+// the run InterruptedAgain. nil removes the hold.
+//
+// The keploy agent holds so: a recording's client (the CLI) owns its
+// lifetime, and the same signal often reaches both (`pkill -INT keploy`, a
+// container stop). Cancelled at once, the agent closed the streams the client
+// was still draining, and what its parsers still held from before the stop
+// was lost with it.
+func SetSignalHold(hold func(stopNow <-chan struct{})) {
+	if hold == nil {
+		signalHold.Store(nil)
+		return
+	}
+	signalHold.Store(&hold)
+}
+
 // interrupted records that a SIGNAL ended this process, as opposed to the CLI
 // cancelling its own root context during ordinary teardown.
 //
@@ -218,6 +241,29 @@ func NewCtx() context.Context {
 			fmt.Printf("Drain window elapsed; proceeding with shutdown.\n")
 		}
 
+		// What the process still does for someone else (SetSignalHold)
+		// finishes before the cancel; a second signal cuts it short.
+		// holdDone says it finished: nothing the process held for someone
+		// else is lost to a signal after it.
+		holdDone := false
+		if h := signalHold.Load(); h != nil {
+			stopNow := make(chan struct{})
+			held := make(chan struct{})
+			go func() {
+				defer close(held)
+				(*h)(stopNow)
+			}()
+			select {
+			case <-held:
+				holdDone = true
+			case sig2 := <-sigs:
+				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+				MarkInterruptedAgain()
+				close(stopNow)
+				<-held
+			}
+		}
+
 		// Run pre-cancel hooks SYNCHRONOUSLY while live state is still
 		// readable. fmt.Fprintf to stderr inside hooks is the right
 		// choice — it goes straight to the syscall and survives even
@@ -244,7 +290,14 @@ func NewCtx() context.Context {
 		// stayed registered and unread, so Ctrl+C did nothing and only
 		// SIGKILL, which skips all cleanup, could end the process.
 		for sig2 := range sigs {
-			fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			if holdDone {
+				// An agent whose recording client finished with it (the
+				// hold returned): a signal now, often the client's own stop
+				// of it, cuts nothing short.
+				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
+			} else {
+				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			}
 			MarkInterruptedAgain()
 		}
 	}()

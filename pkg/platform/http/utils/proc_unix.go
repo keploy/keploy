@@ -81,11 +81,11 @@ func StartCommand(cmd *exec.Cmd) error {
 }
 
 // gracefulStopTimeout bounds how long StopCommand waits for a SIGTERM'd process
-// group to exit before escalating to SIGKILL. StopCommand returns as soon as the
-// group is actually gone, so this is only the ceiling for a process that ignores
-// SIGTERM — the common case (a process that exits on SIGTERM) returns in well
-// under a second.
-const gracefulStopTimeout = 8 * time.Second
+// group to exit before escalating to SIGKILL (StopSignalWait). StopCommand
+// returns as soon as the group is actually gone, so this is only the ceiling
+// for a process that ignores SIGTERM — the common case (a process that exits
+// on SIGTERM) returns in well under a second.
+const gracefulStopTimeout = StopSignalWait
 
 // forceKillTimeout bounds the post-SIGKILL wait for the group to disappear.
 const forceKillTimeout = 3 * time.Second

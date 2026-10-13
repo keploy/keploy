@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the
@@ -389,6 +390,7 @@ section "Record Test Cases"
 echo "Starting Keploy in record mode..."
 $RECORD_BIN record -c "./my-app" 2>&1 | tee record.log &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 wait_for_http 8080
 endsec
 
@@ -398,11 +400,15 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
-sleep 5
+# Wait for the recording to end, not for a fixed time: keploy drains what it
+# captured before it exits, and that takes as long as the runner's load makes
+# it. The next recording reuses :8080 and the agent's ports. KEPLOY_PID is
+# tee's, which ends once keploy and everything it started have exited.
+wait_recording_end "$KEPLOY_PID" record.log || exit 1
 check_for_errors "record.log"
 endsec
 
@@ -413,12 +419,13 @@ if json_pass_supported; then
     section "Record Test Cases (json)"
     $RECORD_BIN record --storage-format json -c "./my-app" 2>&1 | tee record_json.log &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     wait_for_http 8080
     bash ./curl.sh
     sleep 5
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
+    wait_recording_end "$KEPLOY_PID" record_json.log || exit 1
     check_for_errors "record_json.log"
     endsec
 fi

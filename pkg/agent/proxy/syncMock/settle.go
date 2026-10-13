@@ -2,6 +2,8 @@ package manager
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -263,7 +265,8 @@ func testCaseSize(tc *models.TestCase) int64 {
 type watermarkBox struct{ w Watermark }
 
 // SetWatermark says when the verdict for a test case of this recording is
-// final (see Watermark); nil: at once, as when no capture can tell.
+// final (see Watermark); nil: at once, as when no capture can tell. It replaces
+// the one it set before; the watermarks AddWatermark added stay.
 func (m *SyncMockManager) SetWatermark(w Watermark) {
 	if m == nil {
 		return
@@ -273,6 +276,67 @@ func (m *SyncMockManager) SetWatermark(w Watermark) {
 		return
 	}
 	m.watermark.Store(&watermarkBox{w})
+}
+
+// AddWatermark adds a capture's watermark beside the one SetWatermark set: the
+// verdict for a test case is final once every one of them says so, and the
+// recording may still hand over something from before a time while any one of
+// them says it may. A capture that runs beside another one, and does not see
+// that one's connections, adds its own here: proxy mode's relays (the proxy
+// adds theirs as it starts) beside an embedder's capture, which it replaces
+// with SetWatermark as its recordings come and go. It returns the func that
+// removes w; the func is idempotent. A nil w adds nothing.
+func (m *SyncMockManager) AddWatermark(w Watermark) (remove func()) {
+	if m == nil || w == nil {
+		return func() {}
+	}
+	// Each addition is its own box, and is removed by it: a watermark need
+	// not be comparable, and one added twice is two.
+	box := &watermarkBox{w}
+	m.addedMu.Lock()
+	var next []*watermarkBox
+	if cur := m.added.Load(); cur != nil {
+		next = append(next, *cur...)
+	}
+	next = append(next, box)
+	m.added.Store(&next)
+	m.addedMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.addedMu.Lock()
+			defer m.addedMu.Unlock()
+			cur := m.added.Load()
+			if cur == nil {
+				return
+			}
+			next := make([]*watermarkBox, 0, len(*cur))
+			for _, o := range *cur {
+				if o != box {
+					next = append(next, o)
+				}
+			}
+			m.added.Store(&next)
+		})
+	}
+}
+
+// watermarks is every watermark of the recording: the one SetWatermark set,
+// then those AddWatermark added. Nil when there is none.
+func (m *SyncMockManager) watermarks() []Watermark {
+	if m == nil {
+		return nil
+	}
+	var out []Watermark
+	if b := m.watermark.Load(); b != nil {
+		out = append(out, b.w)
+	}
+	if a := m.added.Load(); a != nil {
+		for _, b := range *a {
+			out = append(out, b.w)
+		}
+	}
+	return out
 }
 
 // NoteHeld says the earliest end of a test case the recorder's stream still
@@ -290,29 +354,227 @@ func (m *SyncMockManager) NoteHeld(oldest time.Time) {
 
 // PendingBefore reports whether this recording may still hand over a test case
 // or a mock captured before `before`, and whether that can be told at all (a
-// capture with a Backlog watermark): a test case held for its verdict, or a
-// capture reader or parser that has not got past it.
+// capture with a Backlog watermark): a test case held for its verdict, or
+// still being built or queued for the stream, or a capture reader or parser
+// that has not got past it. See BacklogBefore.
 func (m *SyncMockManager) PendingBefore(before time.Time) (pending, known bool) {
-	if m == nil {
-		return false, false
-	}
-	b, ok := m.Watermark().(Backlog)
-	if !ok {
-		return false, false
-	}
-	if h := m.heldOldest.Load(); h != 0 && h <= before.UnixNano() {
-		return true, true
-	}
-	return b.PendingBefore(before), true
+	st := m.BacklogBefore(before)
+	return st.Pending, st.Known
 }
 
-// Watermark is what SetWatermark set, nil when none.
-func (m *SyncMockManager) Watermark() Watermark {
+// BacklogState is what a recording's stop learns of what the agent may still
+// hand over from before a time (BacklogBefore).
+type BacklogState struct {
+	// Known: a capture can tell (a Backlog watermark is set). When it is
+	// false the rest says nothing.
+	Known bool
+	// Pending: the agent may still hand over a test case or a mock captured
+	// before the time.
+	Pending bool
+	// Progress is a count that moves whenever the capture makes progress
+	// (Progressor): a stop that waits on a pending backlog can tell one that
+	// is being worked through from one that is not moving.
+	Progress uint64
+	// WaitingOn says what is pending, when Pending and it can be told.
+	WaitingOn string
+}
+
+// Progressor is a Backlog that can also count its progress: a count that
+// moves whenever it gets further (a parser consumes bytes, or returns).
+type Progressor interface {
+	Progress() uint64
+}
+
+// PendingExplainer is a Backlog that can say what it may still hand over from
+// before a time: nil when nothing.
+type PendingExplainer interface {
+	PendingOn(before time.Time) fmt.Stringer
+}
+
+// BacklogBefore is what this recording may still hand over from before
+// `before` (BacklogState): a test case the recorder's stream holds for its
+// verdict that ended by then, one the ingress is still building or has queued
+// for the stream, or, as each Backlog watermark tells, a capture reader or
+// parser that has not got past it. Known only when a Backlog watermark is set:
+// without one nothing can tell whether a parser is behind.
+func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
+	var st BacklogState
 	if m == nil {
-		return nil
+		return st
 	}
-	if b := m.watermark.Load(); b != nil {
-		return b.w
+	var backlogs []Backlog
+	for _, w := range m.watermarks() {
+		if b, ok := w.(Backlog); ok {
+			backlogs = append(backlogs, b)
+		}
+	}
+	if len(backlogs) == 0 {
+		return st
+	}
+	st.Known = true
+	st.Progress = m.incoming.progress()
+	for _, b := range backlogs {
+		if p, ok := b.(Progressor); ok {
+			st.Progress += p.Progress()
+		}
+	}
+	pending := func(why string) {
+		if !st.Pending {
+			st.Pending, st.WaitingOn = true, why
+		}
+	}
+	if h := m.heldOldest.Load(); h != 0 && h <= before.UnixNano() {
+		pending("a test case held for its verdict ended before it")
+	}
+	if why := m.incoming.pendingBefore(before); why != "" {
+		pending(why)
+	}
+	for _, b := range backlogs {
+		if st.Pending {
+			break
+		}
+		if x, ok := b.(PendingExplainer); ok {
+			if on := x.PendingOn(before); on != nil {
+				pending(on.String())
+			}
+			continue
+		}
+		if b.PendingBefore(before) {
+			pending("the capture has not got past it")
+		}
+	}
+	return st
+}
+
+// Watermark is what tells when the verdict for a test case of this recording
+// is final: the one SetWatermark set, the ones AddWatermark added, or, when
+// there are several, all of them together (each must say so). Nil when none.
+func (m *SyncMockManager) Watermark() Watermark {
+	ws := m.watermarks()
+	switch len(ws) {
+	case 0:
+		return nil
+	case 1:
+		return ws[0]
+	}
+	return allWatermarks(ws)
+}
+
+// allWatermarks is several watermarks as one: a verdict is final when each
+// says so (Settled); the first that can say what keeps one from being final
+// says it (Explainer). It is not Fenced: a watermark with a fence holds its own
+// test cases (a DaemonSet agent's), and is never added beside another.
+type allWatermarks []Watermark
+
+var _ Explainer = allWatermarks(nil)
+
+func (a allWatermarks) Settled(namespace, pod string, start, end time.Time) bool {
+	for _, w := range a {
+		if !w.Settled(namespace, pod, start, end) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a allWatermarks) HeldBy(namespace, pod string, start, end time.Time, fence uint64) fmt.Stringer {
+	for _, w := range a {
+		if w.Settled(namespace, pod, start, end) {
+			continue
+		}
+		if x, ok := w.(Explainer); ok {
+			if why := x.HeldBy(namespace, pod, start, end, fence); why != nil {
+				return why
+			}
+		}
 	}
 	return nil
+}
+
+// incomingBacklog is what the ingress has yet to hand the recorder's stream:
+// the test cases it is building, by the time their response came, and the
+// queues built test cases wait in until the stream takes them.
+type incomingBacklog struct {
+	mu       sync.Mutex
+	next     uint64
+	building map[uint64]time.Time
+	queues   map[uint64]func() int
+	// built counts the test cases built (or given up): progress.
+	built atomic.Uint64
+}
+
+// pendingBefore says why a test case from before `before` may still come from
+// the ingress: one whose response came by then is still being built, or a
+// queue holds test cases (whose times it cannot tell). "" when none may.
+func (b *incomingBacklog) pendingBefore(before time.Time) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, resp := range b.building {
+		if !resp.After(before) {
+			return "a test case whose response came before it is still being built"
+		}
+	}
+	for _, n := range b.queues {
+		if n() > 0 {
+			return "test cases wait in the ingress queue for the recorder's stream"
+		}
+	}
+	return ""
+}
+
+func (b *incomingBacklog) progress() uint64 { return b.built.Load() }
+
+// BuildingTestCase notes a test case whose response came at resp being built
+// by the ingress, and returns the func that says it is done: handed to the
+// stream's queue, or given up. A recording's stop waits on it
+// (BacklogBefore). The func is idempotent.
+func (m *SyncMockManager) BuildingTestCase(resp time.Time) (done func()) {
+	if m == nil {
+		return func() {}
+	}
+	b := &m.incoming
+	b.mu.Lock()
+	if b.building == nil {
+		b.building = make(map[uint64]time.Time)
+	}
+	b.next++
+	id := b.next
+	b.building[id] = resp
+	b.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			delete(b.building, id)
+			b.mu.Unlock()
+			b.built.Add(1)
+		})
+	}
+}
+
+// WatchTestCaseQueue notes a queue built test cases wait in for the
+// recorder's stream, by its length, and returns the func that stops watching
+// it. While it holds any, a recording's stop takes it that the agent may still
+// hand over a test case from before it (BacklogBefore).
+func (m *SyncMockManager) WatchTestCaseQueue(length func() int) (stop func()) {
+	if m == nil || length == nil {
+		return func() {}
+	}
+	b := &m.incoming
+	b.mu.Lock()
+	if b.queues == nil {
+		b.queues = make(map[uint64]func() int)
+	}
+	b.next++
+	id := b.next
+	b.queues[id] = length
+	b.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			delete(b.queues, id)
+			b.mu.Unlock()
+		})
+	}
 }

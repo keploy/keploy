@@ -281,6 +281,16 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 		return nil, errors.New("agent setupCtx is not initialized; ensure Setup() was called before StartIncomingProxy")
 	}
 
+	// A recording's incoming stream attaching begins a recording whose app
+	// is not stopping (incoming stopping.go). The ingress is told its app is
+	// stopping only by a client that started the agent (SetGracefulShutdown),
+	// and such a client's streams never reconnect (they resume only to an
+	// agent docker compose restarts), so an attach here is never one in the
+	// middle of a stop.
+	if s, ok := a.IncomingProxy.(interface{ SetStopping(bool) }); ok {
+		s.SetStopping(false)
+	}
+
 	// IncomingProxy.Start is now idempotent (a sync.Once inside
 	// IngressProxyManager.Start gates the ListenForIngressEvents
 	// goroutine) AND it updates the proxy's IncomingOptions every call,
@@ -397,6 +407,12 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 		}()
 	}
 
+	// A recording client that drains after its stop (the route marks ctx so)
+	// stops the app it started before the agent: a connection the app
+	// refuses from here is it gone on purpose (incoming stopping.go).
+	if s, ok := a.IncomingProxy.(interface{ SetStopping(bool) }); ok && models.DrainsAfterStop(ctx) {
+		s.SetStopping(true)
+	}
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 

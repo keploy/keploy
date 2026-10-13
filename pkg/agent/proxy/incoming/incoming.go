@@ -36,6 +36,9 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
+	// stopping: the recording it serves is stopping, and its app is
+	// stopped on purpose (SetStopping, stopping.go).
+	stopping atomic.Bool
 	mu       sync.Mutex
 	active   map[uint16]proxyStop
 	logger   *zap.Logger
@@ -511,9 +514,8 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 		if err != nil {
-			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
-				zap.String("final_app_addr", finalAppAddr),
-				zap.Error(err))
+			pm.logAppDialFailure(logger, "Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				err, zap.String("final_app_addr", finalAppAddr))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}

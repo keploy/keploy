@@ -237,6 +237,22 @@ type SyncMockManager struct {
 	// cap bounds memory instead.
 	recentWindows []resolvedWindow
 
+	// sentClaimed is the startup mocks the rescues sent with no owner while a
+	// request still in flight may take them (startupClaimedLocked), in request
+	// order: the resolve of the kept request that takes one adds it to its
+	// test's mapping (takeSentClaimedLocked), as it would have, had the mock
+	// waited for it, and one its claimer ends without goes back to the
+	// resolved kept window that left it (sentClaim.owner), as a held mock is
+	// owed back. A drop of one by its send is told to the test that takes it
+	// (sentClaimDone). They are not kept back: what is in the buffer at a stop
+	// is not counted as pending (BacklogBefore), and a mock kept there was lost
+	// when the stream closed first. Pruned once no request in flight can take
+	// one (pruneSentClaimedLocked); at most maxSentClaimed.
+	sentClaimed []sentClaim
+	// sentClaimedEvicted counts the notes forgotten at the bound
+	// (evictSentClaimedLocked).
+	sentClaimedEvicted atomic.Uint64
+
 	// open is the windows of requests read but not decided yet (OpenWindow),
 	// a min-heap on start: the earliest, the one every reaper asks for, is
 	// open[0]. A per-test mock requested at or after its start may be one of
@@ -463,6 +479,13 @@ type SyncMockManager struct {
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
 	watermark atomic.Pointer[watermarkBox]
+	// added is the watermarks AddWatermark added beside it (settle.go):
+	// copy-on-write under addedMu.
+	added   atomic.Pointer[[]*watermarkBox]
+	addedMu sync.Mutex
+	// incoming is what the ingress has yet to hand the recorder's stream:
+	// test cases being built, and the queues they wait in (settle.go).
+	incoming incomingBacklog
 	// heldOldest is the earliest end (UnixNano) of a test case the recorder's
 	// stream holds for its verdict (NoteHeld); 0 when none.
 	heldOldest atomic.Int64
@@ -491,10 +514,13 @@ type pressureRange struct {
 // ownedMock pairs a buffered mock with the name of the test case that owns it,
 // so the send path can record the OWNING TC when a capacity drop occurs. owner
 // is "" for mocks not owned by a specific test (session/connection/startup/
-// anonymous carve-outs) — those record nothing on a drop.
+// anonymous carve-outs) — those record nothing on a drop. noted says a
+// startup mock sent for a claim (noteSentClaimedLocked), whose send's end is
+// told to its note (sentClaimDone): the test that takes it is its owner.
 type ownedMock struct {
 	mock  *models.Mock
 	owner string
+	noted bool
 }
 
 // mergeByRequestTime merges sorted, which is in request order, into arrived,
@@ -832,14 +858,17 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 // closed/nil, or the bounded send budget is exhausted — the owner is recorded
 // via recordDroppedTC so record.go suppresses (rather than streams) that TC at
 // replay. owner == "" (session/connection/startup/anonymous) records nothing.
-// See sendToOutChan's doc comment for the locking rationale.
-func (m *SyncMockManager) sendToOutChanOwned(mock *models.Mock, owner string) {
-	if !m.trySendOwned(mock, owner) {
-		// Told outside outChanMu: the hook may take locks of its own.
-		if fn := m.onDrop.Load(); fn != nil {
-			(*fn)(mock)
-		}
+// See sendToOutChan's doc comment for the locking rationale. Reports whether
+// the mock was delivered.
+func (m *SyncMockManager) sendToOutChanOwned(mock *models.Mock, owner string) bool {
+	if m.trySendOwned(mock, owner) {
+		return true
 	}
+	// Told outside outChanMu: the hook may take locks of its own.
+	if fn := m.onDrop.Load(); fn != nil {
+		(*fn)(mock)
+	}
+	return false
 }
 
 // OnDrop has fn told of every mock dropped on the outChan capacity path (the
@@ -967,10 +996,17 @@ func (m *SyncMockManager) noteTaken(batch []ownedMock) {
 }
 
 // sendTaken sends mocks taken out of the buffer (noteTaken), and says each is
-// sent once its send has finished (or dropped it).
+// sent once its send has finished (or dropped it): to its note too, for a
+// startup mock sent for a claim (ownedMock.noted), before it stops being
+// pending, so the test that takes it is told of a drop before it is let go.
 func (m *SyncMockManager) sendTaken(batch []ownedMock) {
 	for _, om := range batch {
-		m.sendToOutChanOwned(om.mock, om.owner)
+		// Read before the send: once delivered, the mock is the consumer's.
+		name, at := om.mock.Name, om.mock.Spec.ReqTimestampMock
+		delivered := m.sendToOutChanOwned(om.mock, om.owner)
+		if om.noted {
+			m.sentClaimDone(name, at, delivered)
+		}
 		m.sent(om.mock)
 	}
 }
@@ -992,9 +1028,18 @@ func (m *SyncMockManager) sendTaken(batch []ownedMock) {
 // owed back to a resolved kept window if the request that claims it does not
 // take it (heldMock.owner), and one owed to it already (owed): what lies in
 // the window's part after its yield (Window.Yield) and was left, or held, for
-// a request that claimed it then (dropHeldLocked). No other held mock
-// can be a mock of a test case whose window is resolved, which is the only
-// kind that settles: a kept resolve takes every held mock inside its window,
+// a request that claimed it then (dropHeldLocked). A startup mock sent for
+// such a claim counts the same way (sentClaim.owner), until a request takes
+// it or the pass that gives it back to that window has its name for the
+// window's mapping (pruneSentClaimedLocked), which that pass sends after its
+// mocks, as it does an owed mock's: the mock is sent already, and without the
+// hold the window's test case went out while nothing would ever name it (with
+// no mapping, once it is delivered nothing is left to hand it). One a request
+// took counts until its send has finished (sentClaimDone): a drop is then
+// told to that request's test before its test case goes out.
+//
+// No other held mock can be a mock of a test case whose window is resolved,
+// which is the only kind that settles: a kept resolve takes every held mock inside its window,
 // and a mock of its window decoded later is claimed by the resolved window,
 // never held. Counted, they would hold back test cases of this and every other
 // manager asked until some unrelated request in flight ended. Only the
@@ -1021,6 +1066,12 @@ func (m *SyncMockManager) PendingIn(start, end time.Time) bool {
 	}
 	for _, o := range m.owed {
 		if in(o.mock.Spec.ReqTimestampMock) {
+			return true
+		}
+	}
+	lo, hi := m.sentClaimRangeLocked(start, end)
+	for _, c := range m.sentClaimed[lo:hi] {
+		if c.takenBy != "" || c.owner != nil && (c.owner.mapping || c.sent != claimDelivered) {
 			return true
 		}
 	}
@@ -1398,7 +1449,8 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 				// a request still in flight may own, which is held for it.
 				if isStartupMock(mock) {
 					mock.Name = "mock-" + generateRandomString(8)
-					mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+					noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
+					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 				} else {
 					m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
 				}
@@ -1424,7 +1476,8 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		// is ever persisted. Owns no specific test → owner "".
 		if isStartupMock(mock) {
 			mock.Name = "mock-" + generateRandomString(8)
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			continue
 		}
 		if behind {
@@ -1443,6 +1496,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		m.buffer[i] = nil
 	}
 	m.buffer = m.buffer[:keepIdx]
+	m.pruneSentClaimedLocked(&lateMappings)
 	gaveUp := m.fitHoldLocked(&tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
 	hold := m.holdStateLocked()
@@ -2846,6 +2900,235 @@ func isStartupMock(mk *models.Mock) bool {
 	return mk != nil && mk.TestModeInfo.IsStartup
 }
 
+// sentClaim is a startup mock sent with no owner that a request in flight may
+// take (sentClaimed): its name, when it was requested, and how its send went.
+type sentClaim struct {
+	name string
+	at   time.Time
+	// owner, if not nil, is the resolved kept window whose part after its
+	// yield covers it: that window's resolve left it, or it was sent after
+	// that resolve, for a request that claimed it then. If no request in
+	// flight takes it, it goes back to owner (pruneSentClaimedLocked), as a
+	// held mock is owed back to its window (heldMock.owner).
+	owner *resolvedWindow
+	// takenBy is the test whose kept resolve took it while its send had not
+	// finished: a drop then costs that test its mock, and is told to it
+	// (sentClaimDone). Nothing else takes it.
+	takenBy string
+	// sent is how its send went: claimSending until it has finished.
+	sent claimSend
+}
+
+// claimSend is how the send of a startup mock noted for a claim went.
+type claimSend uint8
+
+const (
+	claimSending claimSend = iota
+	claimDelivered
+	claimDropped
+)
+
+// maxSentClaimed bounds sentClaimed. Past it the oldest eighth is forgotten at
+// once (so a note at the bound costs a copy of the list once per eighth of it,
+// not at every note), and said (evictSentClaimedLocked): their mocks were
+// sent, and are left out of the mapping of the request that takes them, or of
+// the window they were to go back to, and a drop of one is told to no test.
+const maxSentClaimed = 1 << 16
+
+// startupClaimedLocked reports whether a request still in flight, other than
+// self's, may take a startup mock no resolved window owns: it started at or
+// before the mock was requested. The resolve of a request that claims it
+// (openClaimLocked) takes it, or, past a request's yield, that request's own,
+// which takes what no other request claims: a streaming response yields at
+// its headers, and the mocks its body's handler requests are still its.
+// Caller holds m.mu.
+func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bool {
+	at := mk.Spec.ReqTimestampMock
+	if at.IsZero() {
+		return false
+	}
+	for _, o := range m.open {
+		if o != self && !o.start.After(at) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteSentClaimedLocked is told of a startup mock a rescue sends with no owner,
+// named. The startup rescues send it at once, so no reaper drops it first and
+// the stop's drain does not wait on a buffer it cannot see. A request in
+// flight (other than self's) may take it: noted (sentClaimed), its resolve
+// adds it to its test's mapping. Mapped by no request, it reached the
+// recording, and its test case reached replay without it in its mapping
+// (mock-mismatch: the flush ticker fired between the parser decoding a test's
+// outgoing call and the test's resolve). owner, if not nil, is the resolved
+// kept window whose part after its yield covers it (sentClaim.owner). Reports
+// whether it was noted: its send's end must then be told (sentClaimDone).
+// Caller holds m.mu.
+func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, owner *resolvedWindow) bool {
+	if !m.startupClaimedLocked(mk, self) {
+		return false
+	}
+	if len(m.sentClaimed) >= maxSentClaimed {
+		m.evictSentClaimedLocked()
+	}
+	at := mk.Spec.ReqTimestampMock
+	i := sort.Search(len(m.sentClaimed), func(i int) bool { return at.Before(m.sentClaimed[i].at) })
+	m.sentClaimed = append(m.sentClaimed, sentClaim{})
+	copy(m.sentClaimed[i+1:], m.sentClaimed[i:])
+	m.sentClaimed[i] = sentClaim{name: mk.Name, at: at, owner: owner}
+	return true
+}
+
+// evictSentClaimedLocked forgets the oldest eighth of the notes at the bound
+// (maxSentClaimed), and says so: those a request took, or that were to go
+// back to a window, are no longer followed, so a drop of one is told to no
+// test, and one going back to a window is in no mapping. Caller holds m.mu.
+func (m *SyncMockManager) evictSentClaimedLocked() {
+	evict := m.sentClaimed[:maxSentClaimed/8]
+	followed := 0
+	for _, c := range evict {
+		if c.takenBy != "" || c.owner != nil {
+			followed++
+		}
+	}
+	n := copy(m.sentClaimed, m.sentClaimed[maxSentClaimed/8:])
+	clear(m.sentClaimed[n:])
+	m.sentClaimed = m.sentClaimed[:n]
+	total := m.sentClaimedEvicted.Add(uint64(len(evict)))
+	if logger := m.dropLogger(); logger != nil {
+		logger.Warn("startup mocks sent while requests that may take them were in flight are past the bound kept for them; the oldest are forgotten, and a test case that takes one of them may be saved without it in its mapping",
+			zap.Int("forgotten", len(evict)), zap.Int("forgottenFollowed", followed), zap.Uint64("forgottenSoFar", total),
+			zap.Int("bound", maxSentClaimed),
+			zap.String("next_step", "a request in flight since the recording's start (a long stream) keeps every startup mock after it claimable; end it, or record past the startup window, and re-record the test cases this run saved"))
+	}
+}
+
+// sentClaimRangeLocked returns the notes requested within [start, end]:
+// sentClaimed[lo:hi]. Caller holds m.mu.
+func (m *SyncMockManager) sentClaimRangeLocked(start, end time.Time) (lo, hi int) {
+	lo = sort.Search(len(m.sentClaimed), func(i int) bool { return !m.sentClaimed[i].at.Before(start) })
+	hi = sort.Search(len(m.sentClaimed), func(i int) bool { return m.sentClaimed[i].at.After(end) })
+	return lo, hi
+}
+
+// takeSentClaimedLocked is a kept resolve of [start, end], for testName,
+// taking the startup mocks sent for it (sentClaimed): those it would have
+// taken had they waited in the buffer, as it takes held mocks
+// (takeHeldLocked). A window that yielded (sharedFrom not zero) leaves those
+// requested after its yield that another request claims (others), recorded as
+// going back to self if that request does not take them, and those already
+// going back to a window decided before it (sentClaim.owner). The names of
+// those it takes are added to ids, its test's mapping, but for one whose send
+// dropped it: the test is told its mock was dropped (recordDroppedTC), as for
+// any mock of its own, and the name, which the recording never got, is left
+// out. One still being sent is told to the test if it drops it
+// (sentClaimDone). Caller holds m.mu.
+func (m *SyncMockManager) takeSentClaimedLocked(start, end, sharedFrom time.Time, others claims, testName string, self func() *resolvedWindow, ids []string) []string {
+	lo, hi := m.sentClaimRangeLocked(start, end)
+	stay := lo
+	for i := lo; i < hi; i++ {
+		c := m.sentClaimed[i]
+		switch {
+		case c.takenBy != "":
+		case !sharedFrom.IsZero() && c.at.After(sharedFrom) && (c.owner != nil || others.covers(c.at)):
+			if c.owner == nil { // left in this window's part after its yield
+				c.owner = self()
+			}
+		case c.sent == claimDropped:
+			m.recordDroppedTC(testName)
+			continue
+		default:
+			ids = append(ids, c.name)
+			if c.sent == claimDelivered {
+				continue
+			}
+			c.takenBy = testName
+		}
+		m.sentClaimed[stay] = c
+		stay++
+	}
+	k := stay + copy(m.sentClaimed[stay:], m.sentClaimed[hi:])
+	clear(m.sentClaimed[k:])
+	m.sentClaimed = m.sentClaimed[:k]
+	return ids
+}
+
+// sentClaimDone is told that the send of a startup mock noted for a claim
+// (noteSentClaimedLocked), named name and requested at at, has finished:
+// delivered, or dropped. A test that took it already is told of a drop
+// (recordDroppedTC), as for any mock of its own: its mapping names a mock the
+// recording never got. Otherwise the note keeps how it went, for the test
+// that takes it or the window it goes back to.
+func (m *SyncMockManager) sentClaimDone(name string, at time.Time, delivered bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lo, hi := m.sentClaimRangeLocked(at, at)
+	for i := lo; i < hi; i++ {
+		c := &m.sentClaimed[i]
+		if c.name != name {
+			continue
+		}
+		if c.takenBy == "" {
+			c.sent = claimDropped
+			if delivered {
+				c.sent = claimDelivered
+			}
+			return
+		}
+		if !delivered {
+			m.recordDroppedTC(c.takenBy)
+		}
+		n := i + copy(m.sentClaimed[i:], m.sentClaimed[i+1:])
+		clear(m.sentClaimed[n:])
+		m.sentClaimed = m.sentClaimed[:n]
+		return
+	}
+}
+
+// pruneSentClaimedLocked forgets the startup mocks sent for a claim that no
+// request in flight can take any more: none started at or before them, or,
+// for one that goes back to a resolved kept window (sentClaim.owner), none
+// claims it (openClaimLocked). Such a one goes back to that window once its
+// send has finished: into its test's mapping, by late (as handOwedLocked hands
+// a held mock back), or, dropped, told to its test (recordDroppedTC). One a
+// test took is kept until its send has finished (sentClaimDone). Caller holds
+// m.mu.
+func (m *SyncMockManager) pruneSentClaimedLocked(late *map[string][]string) {
+	k := 0
+	for _, c := range m.sentClaimed {
+		stays := c.takenBy != ""
+		switch {
+		case stays:
+		case c.owner == nil:
+			stays = m.openClaimsStartupLocked(c.at)
+		case m.openClaimLocked(c.at, nil) || c.sent == claimSending:
+			stays = true
+		case c.sent == claimDropped:
+			m.recordDroppedTC(c.owner.testName)
+		case c.owner.mapping:
+			if *late == nil {
+				*late = make(map[string][]string)
+			}
+			(*late)[c.owner.testName] = append((*late)[c.owner.testName], c.name)
+		}
+		if stays {
+			m.sentClaimed[k] = c
+			k++
+		}
+	}
+	clear(m.sentClaimed[k:])
+	m.sentClaimed = m.sentClaimed[:k]
+}
+
+// openClaimsStartupLocked reports whether a request in flight started at or
+// before at: the earliest open one did. Caller holds m.mu.
+func (m *SyncMockManager) openClaimsStartupLocked(at time.Time) bool {
+	w := m.earliestOpenLocked()
+	return w != nil && !w.start.After(at)
+}
+
 // ResolveRange resolves the test window [start, end]: kept (keep), its mocks
 // are handed on as testName's; a static-dedup duplicate's (keep false) are
 // pruned, bar what a request still in flight may own. For a kept request with
@@ -3083,9 +3366,10 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 					continue
 				}
 				mock.Name = "mock-" + generateRandomString(8)
+				noted := m.noteSentClaimedLocked(mock, w, refs.of(shared, behind))
 				// Duplicate's synthetic testName owns no real mapping →
 				// owner "" (records nothing on a capacity drop).
-				mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			} else {
 				// A duplicate's debris — unless a concurrent request still in
 				// flight may own it (a duplicate's window says nothing about
@@ -3141,7 +3425,8 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 						continue
 					}
 					mock.Name = "mock-" + generateRandomString(8)
-					mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+					noted := m.noteSentClaimedLocked(mock, w, refs.of(shared, behind))
+					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 				} else {
 					m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
 				}
@@ -3184,8 +3469,9 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 				continue
 			}
 			mock.Name = "mock-" + generateRandomString(8)
+			noted := m.noteSentClaimedLocked(mock, w, refs.of(shared, behind))
 			// Boot/startup traffic owns no specific test → owner "".
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			continue
 		}
 
@@ -3288,6 +3574,11 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	lateBinned += m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
 	hold := m.holdStateLocked()
 
+	// The startup mocks sent while this request was in flight, which it
+	// takes: in its mapping too.
+	if keep {
+		associatedMockIDs = m.takeSentClaimedLocked(start, end, sharedFrom, others, testName, self, associatedMockIDs)
+	}
 	if len(associatedMockIDs) > 0 && mappingChan != nil && mapping {
 		mappingEntry = &models.TestMockMapping{
 			TestName: testName,
@@ -3494,8 +3785,9 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 				continue
 			}
 			mock.Name = "mock-" + generateRandomString(8)
+			noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
 			// Startup/boot traffic owns no specific test → owner "".
-			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			continue
 		}
 

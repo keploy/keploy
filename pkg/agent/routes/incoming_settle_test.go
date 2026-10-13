@@ -230,14 +230,21 @@ type backlogWatermark struct {
 func (w *backlogWatermark) PendingBefore(time.Time) bool { return w.pending.Load() }
 
 // A recording's stop asks the agent whether it may still hand over something
-// captured before it; an agent whose capture cannot tell says so (501), and
-// the stop goes by quiet alone.
+// captured before it, and how far its capture has got; an agent whose capture
+// cannot tell says so (501), and the stop goes by quiet alone.
 func TestHandlePending(t *testing.T) {
 	a := &Agent{logger: zap.NewNop()}
-	ask := func() (int, string) {
+	ask := func() (int, PendingResponse) {
+		t.Helper()
 		rr := httptest.NewRecorder()
 		a.HandlePending(rr, httptest.NewRequest(http.MethodGet, "/agent/record/pending?before=1000", nil))
-		return rr.Code, strings.TrimSpace(rr.Body.String())
+		var out PendingResponse
+		if rr.Code == http.StatusOK {
+			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+				t.Fatalf("answer %q: %v", rr.Body.String(), err)
+			}
+		}
+		return rr.Code, out
 	}
 	syncmgr.Get().SetWatermark(nil)
 	if code, _ := ask(); code != http.StatusNotImplemented {
@@ -247,22 +254,32 @@ func TestHandlePending(t *testing.T) {
 	syncmgr.Get().SetWatermark(w)
 	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil); syncmgr.Get().NoteHeld(time.Time{}) })
 	w.pending.Store(true)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":true}` {
-		t.Fatalf("capture behind: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || !got.Pending || got.WaitingOn == "" {
+		t.Fatalf("capture behind: %d %+v, want pending, saying what it waits on", code, got)
 	}
 	w.pending.Store(false)
-	if code, body := ask(); code != http.StatusOK || body != `{"pending":false}` {
-		t.Fatalf("capture through: %d %s", code, body)
+	if code, got := ask(); code != http.StatusOK || got.Pending || got.WaitingOn != "" {
+		t.Fatalf("capture through: %d %+v", code, got)
 	}
 	// A test case held for its verdict that ended before the time asked
 	// about is pending too.
 	syncmgr.Get().NoteHeld(time.Unix(0, 999))
-	if _, body := ask(); body != `{"pending":true}` {
-		t.Fatalf("a held test case from before: %s", body)
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a held test case from before: %+v", got)
 	}
 	syncmgr.Get().NoteHeld(time.Unix(0, 1001))
-	if _, body := ask(); body != `{"pending":false}` {
-		t.Fatalf("a held test case from after: %s", body)
+	if _, got := ask(); got.Pending {
+		t.Fatalf("a held test case from after: %+v", got)
+	}
+	// So is one the ingress is still building.
+	done := syncmgr.Get().BuildingTestCase(time.Unix(0, 900))
+	if _, got := ask(); !got.Pending {
+		t.Fatalf("a test case being built from before: %+v", got)
+	}
+	_, b0 := ask()
+	done()
+	if _, got := ask(); got.Pending || got.Progress == b0.Progress {
+		t.Fatalf("a built test case: %+v, want clear with progress counted", got)
 	}
 }
 
@@ -552,4 +569,43 @@ func TestHandleIncoming_ItsOwnLossTakenBackIsNoLoss(t *testing.T) {
 	if n := syncmgr.Get().OpenLossTallies(); n != 0 {
 		t.Fatalf("%d loss tallies still open after the session ended", n)
 	}
+}
+
+// A test case added behind held ones that ended before all of them is held
+// from that moment: a stop's drain that asks the agent before the hold's next
+// tick must hear it is pending (NoteHeld), or the drain ends and the stream
+// drops it unsent.
+func TestHandleIncoming_ATestCaseHeldBehindOthersIsPendingAtOnce(t *testing.T) {
+	defer func(tick time.Duration) { testCaseHoldTick = tick }(testCaseHoldTick)
+	testCaseHoldTick = time.Hour // only what the stream does as a test case comes in
+
+	w := &backlogWatermark{} // never settled; its capture holds nothing
+	syncmgr.Get().SetWatermark(w)
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	tcs := make(chan *models.TestCase) // a send returns once the stream took it
+	a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	start := newStretch().Add(time.Second)
+	later := &models.TestCase{Name: "later", HTTPReq: models.HTTPReq{Timestamp: start.Add(2 * time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(3 * time.Second)}}
+	earlier := &models.TestCase{Name: "earlier", HTTPReq: models.HTTPReq{Timestamp: start}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second)}}
+	tcs <- later                                        // held first
+	tcs <- earlier                                      // held behind it, though it ended first
+	before := start.Add(time.Second + time.Millisecond) // after earlier ended, before later did
+	deadline := time.Now().Add(streamWait)
+	for !syncmgr.Get().BacklogBefore(before).Pending {
+		if time.Now().After(deadline) {
+			t.Fatal("a test case held behind others was not pending to a stop's drain before the hold's next tick")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(tcs)
 }

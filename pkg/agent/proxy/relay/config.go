@@ -156,6 +156,14 @@ type Config struct {
 	// back, so the other direction's later capture is teed first.
 	beforeTee func(fakeconn.Direction)
 
+	// ReaderLag, when positive, delivers each captured chunk to its parser
+	// no earlier than this long after the relay read it: the parser then runs
+	// that far behind the traffic, as a starved agent's does, while the
+	// application's bytes are forwarded as fast as ever. It exists to make
+	// capture lag deterministic in end-to-end tests (the proxy sets it from
+	// KEPLOY_DEBUG_PARSER_LAG); zero, the default, adds nothing.
+	ReaderLag time.Duration
+
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
 	ForwardBuf int

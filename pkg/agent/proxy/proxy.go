@@ -32,6 +32,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -405,6 +406,18 @@ type Proxy struct {
 	// negative disables half-close, so it is NOT clamped to zero the way
 	// recordBufferStallGrace is.
 	recordBufferHalfCloseGrace time.Duration
+
+	// capture follows the relays of the connections whose parser is
+	// recording, for the recording's capture watermark
+	// (capture_watermark.go). Added to the recording's manager once, as the
+	// proxy starts (addCaptureWatermark).
+	capture                *relay.Watermark
+	captureWatermarkOnce   sync.Once
+	removeCaptureWatermark func()
+
+	// parserLag is relay.Config.ReaderLag for every recorded connection:
+	// zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+	parserLag time.Duration
 
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
@@ -1041,6 +1054,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// Passed through unclamped: zero and negative both carry meaning
 	// (relay default / disabled), and relay.withDefaults resolves them.
 	proxy.recordBufferHalfCloseGrace = opts.Record.RecordBuffer.HalfCloseGrace
+
+	proxy.capture = relay.NewWatermark()
+	proxy.parserLag = debugParserLag(logger)
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
@@ -1713,6 +1729,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
+
+	// The recording's capture watermark: from here on its stream holds test
+	// cases until their verdict is final, and a stop drains what the
+	// parsers still hold (capture_watermark.go).
+	p.addCaptureWatermark()
 
 	// Start the continuous error drain so the error channel never fills up.
 	// This must happen before any connections are handled.
@@ -3531,6 +3552,11 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 					zap.Error(err))
 			}
 		}()
+	}
+
+	// The capture's watermark leaves the recording's manager with the proxy.
+	if p.removeCaptureWatermark != nil {
+		p.removeCaptureWatermark()
 	}
 
 	p.CloseErrorChannel()
