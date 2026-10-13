@@ -706,6 +706,8 @@ func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	if returnsWithin(returned, 200*time.Millisecond) {
 		t.Fatal("the group stopped waiting on a copy of the stop")
 	}
+	utils.MarkInterrupted() // the stop was a signal
+	t.Cleanup(utils.ClearInterrupted)
 	utils.OfferStopNow() // keploy said another interrupt stops it now
 	utils.MarkInterruptedAgain()
 	within(t, "awaitAgentExit", func() { <-returned })

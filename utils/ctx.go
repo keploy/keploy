@@ -63,8 +63,8 @@ var signalHold atomic.Pointer[func(stopNow <-chan struct{})]
 // SetSignalHold has the first SIGINT, SIGTERM or SIGHUP NewCtx receives wait,
 // before it cancels the root context, until hold returns: what the process is
 // still doing for someone else finishes first. A second signal while it waits
-// closes stopNow, and hold must then return at once; that signal also marks
-// the run InterruptedAgain. nil removes the hold.
+// closes stopNow, and hold must then return at once; that signal is counted
+// too (RepeatInterrupts). nil removes the hold.
 //
 // The keploy agent holds so: a recording's client (the CLI) owns its
 // lifetime, and the same signal often reaches both (`pkill -INT keploy`, a
@@ -136,52 +136,111 @@ type interruptLatch struct {
 
 // stopNow is closed by the interrupt that asks a stop still finishing its work
 // (a recording draining what the agent captured) to give that up: the first
-// that comes after the stop told the user one would (OfferStopNow). StopNow
+// that comes while the stop offers to end at one (OfferStopNow). StopNow
 // returns it.
 var stopNow atomic.Pointer[interruptLatch]
 
 func init() { ResetInterruptedAgain() }
 
-// OfferStopNow says the process has just told the user that one more interrupt
-// ends its stop at once ("press Ctrl+C again to stop now"): from here on, the
-// next interrupt does (StopNow). Only a stop already under way calls it (a
-// recording's drain, once the run has ended): the offer stands for the rest of
-// the process, and one made before the stop would let a copy of it end it. One that came before it is not the user's
-// answer to that, whatever it was. A single stop can arrive twice: a signal
-// sent to both sudo and the keploy it runs -- `sudo pkill -f keploy`, as CI
-// stops a recording -- reaches keploy once directly and once from sudo, which
-// hands its own copy on, and the copy comes as the first does, before keploy
-// has said anything. Taken for a second Ctrl+C, it gave a recording's drain up
-// at its start, and what the agent still held was lost.
-func OfferStopNow() {
+// OfferStopNow says the stop under way has just told the user that one more
+// interrupt ends it at once ("press Ctrl+C again to stop now"): while the
+// offer stands, until withdraw is called, the next interrupt does (StopNow).
+// An interrupt before it is not the user's answer to it, whatever it was. A
+// single stop can arrive twice: a signal sent to both sudo and the keploy it
+// runs -- `sudo pkill -f keploy`, as CI stops a recording -- reaches keploy
+// once directly and once from sudo, which hands its own copy on, and the copy
+// comes as the first does, before keploy has said anything. Taken for a second
+// Ctrl+C, it gave a recording's drain up at its start, and what the agent
+// still held was lost.
+//
+// So an offer is made only once the stop's first signal has come (Interrupted):
+// before it, the copy of that signal would find the offer standing. A stop
+// that ends on its own (the app exits, a record timer) offers once the user
+// has interrupted it, and a whole notice later (StopNowNotice), by when the
+// copy has come too. withdraw is called once the stop no longer waits, so the
+// offer does not stand for a later wait it did not tell the user of.
+func OfferStopNow() (withdraw func()) {
+	if !Interrupted() {
+		return func() {}
+	}
 	repeatInterrupts.mu.Lock()
-	repeatInterrupts.stopNowOffered = true
+	repeatInterrupts.offers++
 	repeatInterrupts.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			repeatInterrupts.mu.Lock()
+			repeatInterrupts.offers--
+			repeatInterrupts.mu.Unlock()
+		})
+	}
 }
 
-// StopNow returns a channel closed by the first interrupt that arrives after
-// OfferStopNow: the user asking a stop that said one would end it at once to
-// do so. Work a stop waits on for as long as it makes progress (a recording's
-// drain) selects on it, and offers it once it has told the user, so the user
-// can always end it.
+// StopNow returns a channel closed by the first interrupt that arrives while a
+// stop offers to end at one (OfferStopNow): the user asking a stop that said
+// one would end it at once to do so. Work a stop waits on for as long as it
+// makes progress (a recording's drain) selects on it, and offers it once it
+// has told the user, so the user can always end it.
 func StopNow() <-chan struct{} { return stopNow.Load().ch }
 
+// StopNowNotice paces a stop's offer to end at the user's next interrupt
+// (OfferStopNow) to the notices it gives while it waits: the offer is made at
+// a notice that comes a whole notice period after the one that first found the
+// stop's signal had come. The copy of that signal, which sudo hands on, comes
+// with it, not a notice period later. Not safe for concurrent use: the one
+// loop that gives the notices owns it.
+type StopNowNotice struct {
+	// signalled: the stop's first signal had come at the previous notice
+	// (or as the stop began).
+	signalled bool
+	withdraw  func()
+}
+
+// NewStopNowNotice starts the notices of a stop that begins now.
+func NewStopNowNotice() *StopNowNotice { return &StopNowNotice{signalled: Interrupted()} }
+
+// Next is called at each notice. It reports whether the notice says that
+// another interrupt stops it now: from this notice on (it makes the offer), or
+// since an earlier one.
+func (n *StopNowNotice) Next() (offering bool) {
+	if n.withdraw == nil && n.signalled {
+		n.withdraw = OfferStopNow()
+	}
+	n.signalled = Interrupted()
+	return n.withdraw != nil
+}
+
+// Withdraw withdraws the offer, if one was made: the stop no longer waits.
+func (n *StopNowNotice) Withdraw() {
+	if n.withdraw != nil {
+		n.withdraw()
+	}
+}
+
 // MarkInterruptedAgain is what every interrupt after the first does: it is
-// counted (RepeatInterrupts, InterruptedAfter), and, once a stop has offered to
-// end at one (OfferStopNow), it ends that stop (StopNow). It reports whether it
-// did. For tests too.
-func MarkInterruptedAgain() (stoppedNow bool) {
+// counted (RepeatInterrupts, InterruptedAfter), and, while a stop offers to
+// end at one (OfferStopNow), it ends that stop (StopNow). It reports whether
+// it did. For tests too.
+func MarkInterruptedAgain() (stoppedNow bool) { return noteRepeatInterrupt(nil) }
+
+// noteRepeatInterrupt is MarkInterruptedAgain. say, when set, is told whether
+// the interrupt ends the stop, and says so, before anything that waits on the
+// interrupt is woken: what an interrupt does is said before what it does.
+func noteRepeatInterrupt(say func(stoppedNow bool)) (stoppedNow bool) {
 	repeatInterrupts.mu.Lock()
 	defer repeatInterrupts.mu.Unlock()
+	stoppedNow = repeatInterrupts.offers > 0
+	if say != nil {
+		say(stoppedNow)
+	}
 	repeatInterrupts.n++
 	close(repeatInterrupts.next)
 	repeatInterrupts.next = make(chan struct{})
-	if !repeatInterrupts.stopNowOffered {
-		return false
+	if stoppedNow {
+		l := stopNow.Load()
+		l.once.Do(func() { close(l.ch) })
 	}
-	l := stopNow.Load()
-	l.once.Do(func() { close(l.ch) })
-	return true
+	return stoppedNow
 }
 
 // repeatInterrupts counts the interrupts after the first
@@ -190,9 +249,8 @@ var repeatInterrupts struct {
 	mu   sync.Mutex
 	n    uint64
 	next chan struct{}
-	// stopNowOffered: a stop has offered to end at the next one
-	// (OfferStopNow).
-	stopNowOffered bool
+	// offers is how many stops offer to end at the next one (OfferStopNow).
+	offers int
 }
 
 // RepeatInterrupts returns how many interrupts have arrived after the one
@@ -226,7 +284,7 @@ func ResetInterruptedAgain() {
 	stopNow.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.n = 0
 	repeatInterrupts.next = make(chan struct{})
-	repeatInterrupts.stopNowOffered = false
+	repeatInterrupts.offers = 0
 	repeatInterrupts.mu.Unlock()
 }
 
@@ -371,11 +429,13 @@ func NewCtx() context.Context {
 		// signal then, often the client's own stop of it, cuts nothing
 		// short.
 		for sig2 := range sigs {
-			if MarkInterruptedAgain() {
-				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
-			} else {
-				fmt.Printf("Signal received again: %s\n", sig2)
-			}
+			noteRepeatInterrupt(func(stoppedNow bool) {
+				if stoppedNow {
+					fmt.Printf("Signal received again: %s, stopping now\n", sig2)
+				} else {
+					fmt.Printf("Signal received again: %s\n", sig2)
+				}
+			})
 		}
 	}()
 

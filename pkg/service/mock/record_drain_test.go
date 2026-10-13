@@ -721,20 +721,26 @@ func TestDrainTrailingMocks_AnAgentGoneAtTheFirstLookIsAWarning(t *testing.T) {
 }
 
 // A second interrupt that reaches the agent too ends its stream as the user
-// gives the drain up: the user's stop, not the agent going away, and the run is
-// not failed for it. Both are ready when the drain's look returns: a drain that
-// went by the order its select took them in failed about half its runs, and 8
-// runs catch that all but surely.
+// gives the drain up: the user's stop, not the agent going away. What the agent
+// still held is not saved, so the drain is lost (the set is not saved over the
+// existing one), said at WARN as the user's stop. Both are ready when the
+// drain's look returns: a drain that went by the order its select took them in
+// failed about half its runs, and 8 runs catch that all but surely.
 func TestDrainTrailingMocks_ASecondInterruptAsTheStreamEndsIsTheUsersStop(t *testing.T) {
 	defer utils.ResetInterruptedAgain()
 	for i := 0; i < 8; i++ {
 		var frames atomic.Uint64
 		frames.Store(1)
 		// The drain has said another interrupt stops it now: this one does.
-		lost, logs, code := gatedDrain(t, nil, &frames, func() { utils.OfferStopNow(); utils.MarkInterruptedAgain() })
+		lost, logs, code := gatedDrain(t, nil, &frames, func() {
+			utils.MarkInterrupted() // the stop
+			utils.OfferStopNow()
+			utils.MarkInterruptedAgain()
+		})
+		utils.ClearInterrupted()
 		utils.ResetInterruptedAgain()
-		if lost || code != 0 || logs.FilterMessageSnippet("ended its mock stream").Len() != 0 {
-			t.Fatalf("run %d: a second interrupt was taken for the agent going away (lost=%v, exit code %d): %v", i, lost, code, logs.All())
+		if !lost || code != 0 || logs.FilterMessageSnippet("ended its mock stream").Len() != 0 {
+			t.Fatalf("run %d: want the user's stop, the drain lost and not the agent going away (lost=%v, exit code %d): %v", i, lost, code, logs.All())
 		}
 		if logs.FilterMessageSnippet("at a second interrupt").FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
 			t.Fatalf("run %d: the second interrupt was not said once at WARN: %v", i, logs.All())

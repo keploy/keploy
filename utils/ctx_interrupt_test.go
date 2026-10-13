@@ -63,3 +63,86 @@ func TestInterruptedAfterHearsOnlyLaterInterrupts(t *testing.T) {
 		t.Fatal("an interrupt during the stop was not heard")
 	}
 }
+
+// A stop offers to end at the user's next interrupt only once its first signal
+// has come, and a whole notice after the notice that first found it
+// (StopNowNotice): a single stop can arrive twice (sudo hands its own copy on
+// when a signal reaches both it and keploy), and the copy comes with the first,
+// never a notice later. Whether the stop began with the signal, or on its own
+// (the app exited, a record timer) with the signal coming during its wait, the
+// copy ends nothing, and the user's interrupt after the offer ends the stop.
+// A withdrawn offer ends nothing.
+func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
+	reset := func() { ResetInterruptedAgain(); ClearInterrupted() }
+	t.Cleanup(reset)
+	stopped := func() bool {
+		select {
+		case <-StopNow():
+			return true
+		default:
+			return false
+		}
+	}
+
+	t.Run("an offer before any signal is none", func(t *testing.T) {
+		reset()
+		OfferStopNow()
+		MarkInterrupted()
+		if MarkInterruptedAgain() || stopped() {
+			t.Fatal("an offer made before the stop's signal let its copy end the stop")
+		}
+	})
+
+	t.Run("a stop begun by a signal", func(t *testing.T) {
+		reset()
+		MarkInterrupted() // the stop
+		n := NewStopNowNotice()
+		if MarkInterruptedAgain() || stopped() {
+			t.Fatal("the stop's copy ended it before it said anything")
+		}
+		if !n.Next() {
+			t.Fatal("the first notice of a stop begun by a signal does not offer to end it")
+		}
+		if !MarkInterruptedAgain() || !stopped() {
+			t.Fatal("the user's interrupt after the offer did not end the stop")
+		}
+		n.Withdraw()
+	})
+
+	t.Run("a stop begun on its own, then interrupted", func(t *testing.T) {
+		reset()
+		n := NewStopNowNotice()
+		if n.Next() {
+			t.Fatal("a notice offered before any signal")
+		}
+		MarkInterrupted() // the user's stop, or a pattern kill's first copy
+		if n.Next() {
+			t.Fatal("the notice that first found the signal offered at once: its copy could still come")
+		}
+		if MarkInterruptedAgain() || stopped() { // the copy, after that notice
+			t.Fatal("the copy of the signal ended the stop")
+		}
+		if !n.Next() {
+			t.Fatal("the notice after the one that found the signal does not offer")
+		}
+		if !MarkInterruptedAgain() || !stopped() {
+			t.Fatal("the user's interrupt after the offer did not end the stop")
+		}
+		n.Withdraw()
+	})
+
+	t.Run("a withdrawn offer ends nothing", func(t *testing.T) {
+		reset()
+		MarkInterrupted()
+		n := NewStopNowNotice()
+		n.Next()
+		n.Withdraw()
+		n.Withdraw() // once only
+		if MarkInterruptedAgain() || stopped() {
+			t.Fatal("an interrupt after the stop withdrew its offer ended it")
+		}
+		if RepeatInterrupts() != 1 {
+			t.Fatalf("RepeatInterrupts() = %d, want every repeat counted", RepeatInterrupts())
+		}
+	})
+}

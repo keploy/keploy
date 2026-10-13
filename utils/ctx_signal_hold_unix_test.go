@@ -146,7 +146,7 @@ func TestNewCtx_TheFirstSignalWaitsOnTheHold(t *testing.T) {
 }
 
 // A second signal while the hold waits cuts it short (stopNow), marks the run
-// InterruptedAgain, and the root context is cancelled.
+// interrupted again (RepeatInterrupts), and the root context is cancelled.
 func TestNewCtx_ASecondSignalCutsTheHoldShort(t *testing.T) {
 	cmd, dir, waitFor, exited := signalHoldRun(t)
 	waitFor("ready")

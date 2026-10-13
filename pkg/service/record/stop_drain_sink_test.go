@@ -27,6 +27,8 @@ type heldAgent struct {
 	held    int
 	at      time.Time
 	started chan struct{}
+	// sent counts the mocks it has handed to its reader.
+	sent atomic.Int32
 }
 
 func (f *heldAgent) GetOutgoing(ctx context.Context, _ models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -37,6 +39,7 @@ func (f *heldAgent) GetOutgoing(ctx context.Context, _ models.OutgoingOptions) (
 		for i := 0; i < f.held; i++ {
 			select {
 			case ch <- mockAt(fmt.Sprintf("mock-%d", i), f.at):
+				f.sent.Add(1)
 			case <-ctx.Done():
 				return
 			}
@@ -44,6 +47,17 @@ func (f *heldAgent) GetOutgoing(ctx context.Context, _ models.OutgoingOptions) (
 		}
 	}()
 	return ch, nil
+}
+
+// heldBacklogAgent is a heldAgent that answers the drain's looks at its
+// backlog (backlog).
+type heldBacklogAgent struct {
+	*heldAgent
+	backlog *backlogAgent
+}
+
+func (a *heldBacklogAgent) BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error) {
+	return a.backlog.BacklogBefore(ctx, before)
 }
 
 func newHeldAgentRecorder(t *testing.T, held int, logger *zap.Logger) (*heldAgent, FrameChan, context.CancelFunc) {
@@ -96,6 +110,15 @@ func TestGetTestAndMockChans_SlowSinkIsNotCutOff(t *testing.T) {
 	}
 }
 
+// offerStopNow is a stop that told the user another interrupt stops it now:
+// one interrupted it, and it offered (utils.OfferStopNow).
+func offerStopNow(t *testing.T) {
+	t.Helper()
+	utils.MarkInterrupted()
+	t.Cleanup(utils.ClearInterrupted)
+	utils.OfferStopNow()
+}
+
 // A stop delivered twice is one stop. A signal sent to both sudo and keploy --
 // `sudo pkill -INT -f keploy`, as CI stops a recording -- reaches keploy once
 // directly and once from sudo, which hands its own copy on, and that copy can
@@ -108,7 +131,25 @@ func TestGetTestAndMockChans_AStopDeliveredTwiceSavesWhatTheAgentHeld(t *testing
 	t.Cleanup(utils.ResetInterruptedAgain)
 	core, logs := observer.New(zapcore.WarnLevel)
 	const held = 50
-	f, frames, stop := newHeldAgentRecorder(t, held, zap.New(core))
+	// The agent says what it holds from before the stop until it has sent
+	// it all: the drain waits on that, not on the stream's quiet alone.
+	f := &heldAgent{fakeInstr: &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase)},
+		held: held, at: time.Now(), started: make(chan struct{})}
+	agent := &backlogAgent{fakeInstr: f.fakeInstr, answer: func() (models.AgentBacklog, error) {
+		if f.sent.Load() < held {
+			return models.AgentBacklog{Verdict: models.BacklogPending, Progress: uint64(f.sent.Load())}, nil
+		}
+		return models.AgentBacklog{Verdict: models.BacklogClear, Progress: held}, nil
+	}}
+	r := &Recorder{logger: zap.New(core), instrumentation: &heldBacklogAgent{heldAgent: f, backlog: agent}, config: &config.Config{}, frameQuiet: 100 * time.Millisecond}
+	g, gctx := errgroup.WithContext(context.Background())
+	ctx, stop := context.WithCancel(gctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	frames, err := r.GetTestAndMockChans(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stop(); frames.Abandon() })
 	var got atomic.Int32
 	done := make(chan struct{})
 	go func() {
@@ -157,7 +198,7 @@ func TestGetTestAndMockChans_SecondInterruptEndsTheDrain(t *testing.T) {
 	for got.Load() < 50 {
 		time.Sleep(time.Millisecond)
 	}
-	utils.OfferStopNow() // the drain said another interrupt stops it now
+	offerStopNow(t) // the drain said another interrupt stops it now
 	utils.MarkInterruptedAgain()
 	select {
 	case <-done:
@@ -400,7 +441,7 @@ func TestGetTestAndMockChans_SecondInterruptEndsAQuietDrainTheAgentHoldsOpen(t *
 		t.Fatal("the drain ended while the agent said it still held frames from before the stop")
 	default:
 	}
-	utils.OfferStopNow() // the drain said another interrupt stops it now
+	offerStopNow(t) // the drain said another interrupt stops it now
 	utils.MarkInterruptedAgain()
 	select {
 	case <-done:
@@ -1032,13 +1073,16 @@ func TestDrain_WhatEndsTheStreamAfterALookDecidesTheVerdict(t *testing.T) {
 		defer utils.ResetInterruptedAgain()
 		for i := 0; i < 16; i++ {
 			r, logs := gatedMockDrain(t, 5*time.Millisecond, func(f *fakeInstr) {
-				utils.OfferStopNow() // the drain said another interrupt stops it now
+				offerStopNow(t) // the drain said another interrupt stops it now
 				utils.MarkInterruptedAgain()
 				close(f.outgoing)
 			})
 			utils.ResetInterruptedAgain()
-			if r.captureLost.Load() || logs.FilterMessageSnippet("ended its stream").Len() != 0 {
+			if logs.FilterMessageSnippet("ended its stream").Len() != 0 {
 				t.Fatalf("run %d: a second interrupt was taken for the agent going away: %v", i, logs.All())
+			}
+			if !r.captureLost.Load() {
+				t.Fatalf("run %d: a drain the user gave up did not leave the recording incomplete", i)
 			}
 			if logs.FilterMessageSnippet("at a second interrupt").FilterLevelExact(zapcore.WarnLevel).FilterField(zap.String("frames", "mocks")).Len() != 1 {
 				t.Fatalf("run %d: the second interrupt was not said once at WARN: %v", i, logs.All())
