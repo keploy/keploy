@@ -78,12 +78,18 @@ func agentFailed(ctx context.Context, err error) bool {
 	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
 }
 
+// containerTeardownProgressFile is where a containerised agent reports its
+// teardown (kdocker.AgentTeardownProgressFile). A variable only so that a test
+// running the agent command in-process points it at its own directory, not
+// at a path every process on the host shares.
+var containerTeardownProgressFile = kdocker.AgentTeardownProgressFile
+
 // reportTeardown has the agent report its teardown's progress, for the CLI
 // that stops it: it kills a stopping agent only once that has stopped making
 // progress (utils.ReportTeardownProgress). A native agent is told where
 // (--teardown-progress-file, flagPath), and that path is checked before the
 // agent, root under sudo, writes there; a containerised one writes into its
-// own container (kdocker.AgentTeardownProgressFile), where the CLI reads it
+// own container (containerTeardownProgressFile), where the CLI reads it
 // back.
 func reportTeardown(ctx context.Context, logger *zap.Logger, flagPath string, isDocker bool) {
 	switch {
@@ -92,7 +98,7 @@ func reportTeardown(ctx context.Context, logger *zap.Logger, flagPath string, is
 			logger.Warn("not reporting the agent's teardown progress: the CLI that stops it will wait for it to exit however long it takes", zap.Error(err))
 		}
 	case isDocker:
-		utils.ReportTeardownProgress(ctx, logger, kdocker.AgentTeardownProgressFile)
+		utils.ReportTeardownProgress(ctx, logger, containerTeardownProgressFile)
 	}
 }
 

@@ -150,6 +150,52 @@ type progressSink interface {
 	write(b []byte) error
 }
 
+// reporting is the reporters ReportTeardownProgress and
+// ReportTeardownProgressTo started, which run until the process exits unless
+// StopTeardownReporting ends them: stop is closed then and cleared, and the
+// next reporter started makes a new one.
+var reporting struct {
+	mu      sync.Mutex
+	stop    chan struct{}
+	running sync.WaitGroup
+	live    atomic.Int32 // how many are running (tests read it)
+}
+
+// startReporting starts a reporter on sink that StopTeardownReporting ends.
+func startReporting(ctx context.Context, logger *zap.Logger, sink progressSink) {
+	reporting.mu.Lock()
+	defer reporting.mu.Unlock()
+	if reporting.stop == nil {
+		reporting.stop = make(chan struct{})
+	}
+	reporting.running.Add(1)
+	reporting.live.Add(1)
+	done := reportTeardownProgress(ctx, logger, sink, reporting.stop, nil)
+	go func() {
+		<-done
+		reporting.live.Add(-1)
+		reporting.running.Done()
+	}()
+}
+
+// StopTeardownReporting ends every reporter ReportTeardownProgress and
+// ReportTeardownProgressTo started, and returns once none writes any more. An
+// agent's reporter runs until its process exits; this is for a test that
+// starts one (through the agent command) and must stop it before the
+// directory it writes in is removed. Tests only: an agent whose reports stop
+// is one its CLI never kills for want of progress. It ends the reporters of
+// the whole process, so a test that calls it must not run in parallel with
+// another that starts one.
+func StopTeardownReporting() {
+	reporting.mu.Lock()
+	defer reporting.mu.Unlock()
+	if reporting.stop != nil {
+		close(reporting.stop)
+		reporting.stop = nil
+	}
+	reporting.running.Wait()
+}
+
 // ReportTeardownProgress writes the agent's teardown progress to path, a path
 // the agent chose itself (a containerised agent's, in its own container): see
 // reportTeardownProgress.
@@ -157,7 +203,7 @@ func ReportTeardownProgress(ctx context.Context, logger *zap.Logger, path string
 	if path == "" {
 		return
 	}
-	reportTeardownProgress(ctx, logger, pathSink(path), nil, nil)
+	startReporting(ctx, logger, pathSink(path))
 }
 
 // ReportTeardownProgressTo writes the agent's teardown progress to path, a
@@ -177,7 +223,7 @@ func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path stri
 	if err != nil {
 		return err
 	}
-	reportTeardownProgress(ctx, logger, sink, nil, nil)
+	startReporting(ctx, logger, sink)
 	return nil
 }
 
@@ -185,14 +231,19 @@ func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path stri
 // (TeardownProgress, as JSON) to sink once ctx is done -- the root context,
 // whose cancel begins the teardown: at once, on every step and on
 // MarkDetachDone, and on every beat (TeardownBeat) until the process exits, or
-// stop is closed (tests; nil: never). Whatever an earlier agent left is
-// cleared now, so a CLI never reads it as this agent's. A failed write is only
-// logged: the CLI that reads no progress never kills for want of it.
+// stop is closed (StopTeardownReporting, and tests; nil: never). Whatever an
+// earlier agent left is cleared now, so a CLI never reads it as this agent's.
+// A failed write is only logged: the CLI that reads no progress never kills
+// for want of it.
 //
 // Each report is taken by snapshotTeardown, which runs between (tests; nil
 // otherwise) between its loads of Busy and Seq. The returned channel is
 // closed once the reporter has returned, which it does some time after stop
-// is closed (tests): it writes nothing after that.
+// is closed: closing stop alone does not end a write in flight, and a beat or
+// kick ready with it can win the select for another write. A test waits on
+// the channel before it removes the directory, or a write puts the report
+// (and its temporary file) back in it; once the channel is closed, the
+// reporter writes nothing more.
 func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progressSink, stop <-chan struct{}, between func()) (exited <-chan struct{}) {
 	if err := sink.clear(); err != nil && !os.IsNotExist(err) && logger != nil {
 		logger.Debug("failed to remove a stale teardown progress report", zap.Error(err))
@@ -202,6 +253,11 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// A sink that holds something open lets it go once its reporter has
+		// stopped (the agent's never does: it reports until it exits).
+		if c, ok := sink.(interface{ close() }); ok {
+			defer c.close()
+		}
 		select {
 		case <-ctx.Done():
 		case <-stop:
