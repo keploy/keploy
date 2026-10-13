@@ -159,6 +159,12 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	// holding frames, and the stream's ready frame then lost a random race
 	// against the timer that fired meanwhile.
 	var quietUntil time.Time
+	// stopCame starts the drain: the stop has come, now.
+	stopCame := func() {
+		stoppedAt = time.Now()
+		quietUntil = stoppedAt.Add(quiet)
+		resetTimer(idle, quiet)
+	}
 	// sinceStop counts the frames handed on since the stop. giveUp ends the
 	// drain at a second interrupt, and says what it got.
 	var sinceStop int
@@ -256,9 +262,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			giveUp()
 			return
 		case <-shutdownC:
-			stoppedAt = time.Now()
-			quietUntil = stoppedAt.Add(quiet)
-			resetTimer(idle, quiet)
+			stopCame()
 			continue
 		case <-idleC:
 			// Quiet is not proof: an agent whose capture can tell says whether
@@ -332,6 +336,13 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				}
 				return
 			}
+			// The stop and a frame can both be ready when this select runs,
+			// and it takes either: a frame taken once the stop has come is
+			// judged by it, as one taken after the stop branch would be, or
+			// what the app served after the stop is recorded.
+			if stoppedAt.IsZero() && ctx.Err() != nil {
+				stopCame()
+			}
 			if forward, progress := keep(item); forward && !hand(item, progress) {
 				return
 			}
@@ -339,17 +350,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	}
 }
 
-// testCaseCapturedAt is when a test case was complete, from the wire times the
-// agent stamped: its response, else its request, HTTP or gRPC. One with none
-// is undated: its Created is when the agent built it, not when it ran.
-func testCaseCapturedAt(tc *models.TestCase) time.Time {
-	for _, at := range [...]time.Time{tc.HTTPResp.Timestamp, tc.HTTPReq.Timestamp, tc.GrpcResp.Timestamp, tc.GrpcReq.Timestamp} {
-		if !at.IsZero() {
-			return at
-		}
-	}
-	return time.Time{}
-}
+// testCaseCapturedAt is when a test case was complete (TestCase.CompletedAt):
+// its response, else its request, HTTP or gRPC. One with neither is undated.
+func testCaseCapturedAt(tc *models.TestCase) time.Time { return tc.CompletedAt() }
 
 // resetTimer re-arms t for d, safely draining any pending fire first.
 func resetTimer(t *time.Timer, d time.Duration) {

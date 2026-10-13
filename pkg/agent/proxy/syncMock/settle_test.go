@@ -313,17 +313,30 @@ func TestTestCaseHold_EarliestStarts(t *testing.T) {
 	empty.EarliestStarts(func(string, string, time.Time) { t.Fatal("an empty hold reported a start") })
 }
 
-// A gRPC test case held behind an HTTP one has no HTTP end: the hold's oldest
-// end is still the HTTP one's, or a stop asking the agent would hear nothing
-// is held while that test case waits for its verdict.
-func TestTestCaseHold_OldestIsNotHiddenByATestCaseWithNoHTTPEnd(t *testing.T) {
+// A gRPC test case held beside an HTTP one ends when its response did: the
+// hold's oldest end is the earlier of the two, or a stop between them would
+// hear nothing is held while the earlier one waits (it is dropped unsent when
+// the stream ends). One with no wire time at all hides neither.
+func TestTestCaseHold_OldestCountsEveryHeldTestCasesEnd(t *testing.T) {
 	end := time.Unix(1000, 0)
+	grpcAt := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT,
+			GrpcReq: models.GrpcReq{Timestamp: at.Add(-time.Millisecond)}, GrpcResp: models.GrpcResp{Timestamp: at}}
+	}
+
 	h := NewTestCaseHold(&fakeWatermark{}, time.Hour, 1<<20) // nothing settles
 	h.Add(heldTC("http", end), "", "")
-	h.Add(&models.TestCase{Name: "grpc", Kind: models.GRPC_EXPORT,
-		GrpcReq: models.GrpcReq{Timestamp: end.Add(time.Second)}, GrpcResp: models.GrpcResp{Timestamp: end.Add(2 * time.Second)}}, "", "")
+	h.Add(grpcAt("grpc-later", end.Add(time.Second)), "", "")
+	h.Add(&models.TestCase{Name: "no-wire-time"}, "", "")
 	if got := h.Oldest(); !got.Equal(end) {
 		t.Fatalf("Oldest = %v, want the HTTP test case's end %v", got, end)
+	}
+
+	h = NewTestCaseHold(&fakeWatermark{}, time.Hour, 1<<20)
+	h.Add(heldTC("http", end), "", "")
+	h.Add(grpcAt("grpc-earlier", end.Add(-time.Second)), "", "") // held behind it
+	if got := h.Oldest(); !got.Equal(end.Add(-time.Second)) {
+		t.Fatalf("Oldest = %v, want the gRPC test case's end %v", got, end.Add(-time.Second))
 	}
 }
 
