@@ -41,6 +41,10 @@ const mockDrainStall = 5 * time.Second
 // per recording.
 const mockDrainQuiet = 500 * time.Millisecond
 
+// mockDrainNotice is how often drainTrailingMocks says it is still saving, and
+// that another interrupt stops it now.
+var mockDrainNotice = 5 * time.Second
+
 // recordsJudged is set by a build that judges what keploy mock record keeps
 // (JudgeRecords).
 var recordsJudged atomic.Bool
@@ -1022,9 +1026,18 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // already captured). Calls something left running keeps making do not hold
 // it. It must be called BEFORE the capture context is cancelled - see the
 // call site.
+//
+// The user can end it: every mockDrainNotice it says it is still saving and
+// that another interrupt stops it now, and from the first time it says so the
+// next interrupt does (utils.OfferStopNow, StopNow). One that came before is
+// not the user's answer to that: a stop sent to both sudo and keploy reaches
+// keploy a second time from sudo, as the first does.
 func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64) (lost bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
+	notice := time.NewTicker(mockDrainNotice)
+	defer notice.Stop()
+	savedAtStart := arrived()
 
 	last, _ := held()
 	looks := utils.BacklogLooks{Stall: mockDrainStallLooks}
@@ -1043,7 +1056,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// A second interrupt that reached the agent too ends its
 				// stream as it gives the drain up: the user's stop.
 				select {
-				case <-utils.InterruptedAgain():
+				case <-utils.StopNow():
 					m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
 						zap.String("next_step", "mocks the agent still held were not saved"))
 				default:
@@ -1051,10 +1064,14 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				}
 			}
 			return false
-		case <-utils.InterruptedAgain():
+		case <-utils.StopNow():
 			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
 				zap.String("next_step", "mocks the agent still held were not saved"))
 			return false
+		case <-notice.C:
+			m.logger.Info("Still saving the mocks the agent captured before the run ended; press Ctrl+C again to stop now, and lose the rest",
+				zap.Uint64("savedSinceTheEnd", arrived()-savedAtStart))
+			utils.OfferStopNow()
 		case <-quiet.C:
 			// Quiet means the stream brought nothing held while the consumer
 			// was free to take it: a consumer still persisting one is not

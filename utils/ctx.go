@@ -128,34 +128,58 @@ func MarkInterrupted() { interrupted.Store(true) }
 // ClearInterrupted is for tests, which share one process across cases.
 func ClearInterrupted() { interrupted.Store(false); interruptSignal.Store(0) }
 
-// interruptedAgain is closed when a second interrupt (SIGINT or SIGTERM)
-// arrives after the one that stopped the run: the user asking a stop that is
-// still finishing its work (a recording draining what the agent captured) to
-// give that up. InterruptedAgain returns it.
+// interruptLatch is a channel closed once.
 type interruptLatch struct {
 	once sync.Once
 	ch   chan struct{}
 }
 
-var interruptedAgain atomic.Pointer[interruptLatch]
+// stopNow is closed by the interrupt that asks a stop still finishing its work
+// (a recording draining what the agent captured) to give that up: the first
+// that comes after the stop told the user one would (OfferStopNow). StopNow
+// returns it.
+var stopNow atomic.Pointer[interruptLatch]
 
 func init() { ResetInterruptedAgain() }
 
-// InterruptedAgain is closed once a second interrupt has arrived. Work a stop
-// waits on for as long as it makes progress (a recording's drain) selects on
-// it, so the user can always end it.
-func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
-
-// MarkInterruptedAgain is what every interrupt after the first does; for
-// tests too.
-func MarkInterruptedAgain() {
-	l := interruptedAgain.Load()
-	l.once.Do(func() { close(l.ch) })
+// OfferStopNow says the process has just told the user that one more interrupt
+// ends its stop at once ("press Ctrl+C again to stop now"): from here on, the
+// next interrupt does (StopNow). One that came before it is not the user's
+// answer to that, whatever it was. A single stop can arrive twice: a signal
+// sent to both sudo and the keploy it runs -- `sudo pkill -f keploy`, as CI
+// stops a recording -- reaches keploy once directly and once from sudo, which
+// hands its own copy on, and the copy comes as the first does, before keploy
+// has said anything. Taken for a second Ctrl+C, it gave a recording's drain up
+// at its start, and what the agent still held was lost.
+func OfferStopNow() {
 	repeatInterrupts.mu.Lock()
+	repeatInterrupts.stopNowOffered = true
+	repeatInterrupts.mu.Unlock()
+}
+
+// StopNow returns a channel closed by the first interrupt that arrives after
+// OfferStopNow: the user asking a stop that said one would end it at once to
+// do so. Work a stop waits on for as long as it makes progress (a recording's
+// drain) selects on it, and offers it once it has told the user, so the user
+// can always end it.
+func StopNow() <-chan struct{} { return stopNow.Load().ch }
+
+// MarkInterruptedAgain is what every interrupt after the first does: it is
+// counted (RepeatInterrupts, InterruptedAfter), and, once a stop has offered to
+// end at one (OfferStopNow), it ends that stop (StopNow). It reports whether it
+// did. For tests too.
+func MarkInterruptedAgain() (stoppedNow bool) {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
 	repeatInterrupts.n++
 	close(repeatInterrupts.next)
 	repeatInterrupts.next = make(chan struct{})
-	repeatInterrupts.mu.Unlock()
+	if !repeatInterrupts.stopNowOffered {
+		return false
+	}
+	l := stopNow.Load()
+	l.once.Do(func() { close(l.ch) })
+	return true
 }
 
 // repeatInterrupts counts the interrupts after the first
@@ -164,6 +188,9 @@ var repeatInterrupts struct {
 	mu   sync.Mutex
 	n    uint64
 	next chan struct{}
+	// stopNowOffered: a stop has offered to end at the next one
+	// (OfferStopNow).
+	stopNowOffered bool
 }
 
 // RepeatInterrupts returns how many interrupts have arrived after the one
@@ -193,10 +220,11 @@ func InterruptedAfter(n uint64) <-chan struct{} {
 
 // ResetInterruptedAgain is for tests, which share one process across cases.
 func ResetInterruptedAgain() {
-	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.mu.Lock()
+	stopNow.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.n = 0
 	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.stopNowOffered = false
 	repeatInterrupts.mu.Unlock()
 }
 
@@ -333,20 +361,24 @@ func NewCtx() context.Context {
 		cancel()
 
 		// The stop can take a while: a recording drains what the agent
-		// captured before it, for as long as that keeps coming. A second
-		// interrupt gives that up (InterruptedAgain); without this, SIGINT
-		// stayed registered and unread, so Ctrl+C did nothing and only
-		// SIGKILL, which skips all cleanup, could end the process.
+		// captured before it, for as long as that keeps coming. Once it has
+		// told the user that another interrupt gives that up (OfferStopNow),
+		// the next one does (StopNow); without this, SIGINT stayed registered
+		// and unread, so Ctrl+C did nothing and only SIGKILL, which skips all
+		// cleanup, could end the process. One before that ends nothing: it
+		// may be the first one again (OfferStopNow).
 		for sig2 := range sigs {
-			if holdDone {
+			switch {
+			case !MarkInterruptedAgain():
+				fmt.Printf("Signal received again: %s; Keploy is still stopping\n", sig2)
+			case holdDone:
 				// An agent whose recording client finished with it (the
 				// hold returned): a signal now, often the client's own stop
 				// of it, cuts nothing short.
 				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
-			} else {
+			default:
 				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
 			}
-			MarkInterruptedAgain()
 		}
 	}()
 

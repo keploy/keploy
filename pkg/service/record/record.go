@@ -207,7 +207,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		}
 		var again <-chan struct{}
 		if draining {
-			again = utils.InterruptedAgain()
+			again = utils.StopNow()
 		}
 		onHanded := o.beforeHand(item)
 		handed := false
@@ -249,7 +249,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			shutdownC = ctx.Done()
 		} else {
 			idleC = idle.C
-			againC = utils.InterruptedAgain()
+			againC = utils.StopNow()
 		}
 		select {
 		case <-againC:
@@ -324,7 +324,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 					// stream as it gives the drain up: that is the user's
 					// stop, and said as one, whichever this select saw first.
 					select {
-					case <-utils.InterruptedAgain():
+					case <-utils.StopNow():
 						giveUp()
 					default:
 						r.agentEndedDrain(o.kind, &looks)
@@ -730,6 +730,13 @@ const drainProgressEvery = 5 * time.Second
 // frames, how many it has saved, and that a second interrupt ends it. The
 // drain has no fixed bound (forwardUntilDrained), so a user waiting on it must
 // be able to see that it is moving, and to end it. It returns the stop.
+//
+// The first time it says so, at the first tick whatever the drain is doing, it
+// offers the stop to the next interrupt (utils.OfferStopNow): one that came
+// before is not the user's answer to it. A stop sent to both sudo and keploy
+// (`sudo pkill -f keploy`, as CI stops a recording) reaches keploy a second
+// time from sudo, as the first does, and taken for a second Ctrl+C it gave the
+// drain up at its start.
 func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 	done := make(chan struct{})
 	start := r.frameProgress.Load()
@@ -737,22 +744,28 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		last, lastHolds := start, r.backlogHolds.Load()
+		offered := false
 		for {
 			select {
 			case <-done:
 				return
-			case <-utils.InterruptedAgain():
+			case <-utils.StopNow():
 				return
 			case <-t.C:
 			}
 			now, holds := r.frameProgress.Load(), r.backlogHolds.Load()
 			switch {
-			case now != last:
+			case now != last || !offered && holds == lastHolds:
 				r.logger.Info("Still saving what Keploy captured before the stop; press Ctrl+C again to stop now, and lose the rest",
 					zap.Uint64("savedSinceTheStop", now-start))
 			case holds != lastHolds:
 				r.logger.Info("Waiting for the keploy agent to finish parsing what it captured before the stop (its parsers are behind the traffic); press Ctrl+C again to stop now, and lose the rest",
 					zap.Uint64("savedSinceTheStop", now-start))
+			}
+			if !offered {
+				// Told: from here the next interrupt ends the drain.
+				utils.OfferStopNow()
+				offered = true
 			}
 			last, lastHolds = now, holds
 		}

@@ -2202,8 +2202,9 @@ func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 }
 
 // awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
-// the stop has begun (ctx is done), the user's second interrupt lets the
-// group go -- and with it a caller waiting on the group -- while the agent
+// the stop has begun (ctx is done), the user's second interrupt (utils.StopNow:
+// one after keploy said it would stop at once, not a copy of the first) lets
+// the group go -- and with it a caller waiting on the group -- while the agent
 // finishes its shutdown on its own; ok is false then.
 func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, pid int) (err error, ok bool) {
 	select {
@@ -2214,7 +2215,7 @@ func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, p
 	select {
 	case err = <-reaped:
 		return err, true
-	case <-utils.InterruptedAgain():
+	case <-utils.StopNow():
 		a.logger.Warn("Stopped waiting for the keploy agent; it is still shutting down on its own",
 			zap.Int("pid", pid))
 		return nil, false

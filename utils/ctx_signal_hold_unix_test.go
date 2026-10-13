@@ -25,6 +25,11 @@ const signalHoldLinger = "KEPLOY_TEST_SIGNAL_HOLD_LINGER"
 // signalHoldNone, set, runs the helper with no hold, as the CLI runs.
 const signalHoldNone = "KEPLOY_TEST_SIGNAL_HOLD_NONE"
 
+// signalHoldOffer, set, has the helper's stop tell the user, once its root
+// context is cancelled, that another signal ends it now (OfferStopNow), as a
+// recording's drain does.
+const signalHoldOffer = "KEPLOY_TEST_SIGNAL_HOLD_OFFER"
+
 func TestSignalHoldHelper(t *testing.T) {
 	dir := os.Getenv(signalHoldHelperDir)
 	if dir == "" {
@@ -57,20 +62,19 @@ func TestSignalHoldHelper(t *testing.T) {
 	ctx := NewCtx()
 	mark("ready")
 	<-ctx.Done()
+	if os.Getenv(signalHoldOffer) != "" {
+		OfferStopNow()
+	}
 	mark("cancelled")
 	if os.Getenv(signalHoldLinger) != "" {
 		// Still stopping when a later signal comes (the agent's client
 		// stopping it once it has closed its streams).
-		<-InterruptedAgain()
+		<-InterruptedAfter(0)
 		mark("again")
 		os.Exit(0)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "stopped-now")); err == nil {
-		select {
-		case <-InterruptedAgain():
-		default:
-			os.Exit(5) // a second signal that cut the hold short is not marked
-		}
+	if _, err := os.Stat(filepath.Join(dir, "stopped-now")); err == nil && RepeatInterrupts() == 0 {
+		os.Exit(5) // a second signal that cut the hold short is not counted
 	}
 	os.Exit(0)
 }
@@ -195,20 +199,32 @@ func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
 	}
 }
 
-// With no hold (the CLI), a second signal stops the process with what it was
-// still saving, its stop's drain, cut short, and says so: only a hold that
-// finished leaves nothing to lose.
+// With no hold (the CLI), a second signal after the stop told the user one
+// would end it at once (its drain does: OfferStopNow) stops the process with
+// what it was still saving cut short, and says so. One before that cuts
+// nothing short, and says the stop goes on: it may be the first signal again,
+// as sudo hands it on.
 func TestNewCtx_ASecondSignalWithNoHoldSaysWhatIsLost(t *testing.T) {
-	cmd, _, waitFor, exited, out := signalHoldRunOut(t, signalHoldNone+"=1", signalHoldLinger+"=1")
-	waitFor("ready")
-	_ = cmd.Process.Signal(syscall.SIGINT)
-	waitFor("cancelled")
-	_ = cmd.Process.Signal(syscall.SIGINT)
-	waitFor("again")
-	if err := <-exited; err != nil {
-		t.Fatalf("the run ended with %v", err)
-	}
-	if !strings.Contains(out.String(), "not saved") {
-		t.Fatalf("a second signal with no hold was not said to lose what was being saved:\n%s", out.String())
+	for _, offered := range []bool{true, false} {
+		env := []string{signalHoldNone + "=1", signalHoldLinger + "=1"}
+		if offered {
+			env = append(env, signalHoldOffer+"=1")
+		}
+		cmd, _, waitFor, exited, out := signalHoldRunOut(t, env...)
+		waitFor("ready")
+		_ = cmd.Process.Signal(syscall.SIGINT)
+		waitFor("cancelled")
+		_ = cmd.Process.Signal(syscall.SIGINT)
+		waitFor("again")
+		if err := <-exited; err != nil {
+			t.Fatalf("the run ended with %v", err)
+		}
+		said := out.String()
+		switch {
+		case offered && !strings.Contains(said, "stopping now; what Keploy was still saving is not saved"):
+			t.Fatalf("a second signal after the stop offered to end was not said to lose what was being saved:\n%s", said)
+		case !offered && (strings.Contains(said, "not saved") || !strings.Contains(said, "Keploy is still stopping")):
+			t.Fatalf("a second signal before the stop said what one does was said to cut it short:\n%s", said)
+		}
 	}
 }

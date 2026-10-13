@@ -431,6 +431,31 @@ func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
 	}
 }
 
+// A stop delivered twice is one stop: the copy of a signal that sudo hands on
+// (`sudo pkill -INT -f keploy` reaches keploy directly and from sudo) comes
+// before the drain says another interrupt stops it now (utils.OfferStopNow),
+// and ends nothing. Taken for a second Ctrl+C, it gave the drain up at once,
+// and the mock the agent still held was lost.
+func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	utils.MarkInterruptedAgain() // the copy, before the drain said anything
+	inst := &pendingInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+		quietFor:               4 * mockDrainQuiet,
+	}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "duplicate-stop"
+	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != 1 {
+		t.Fatalf("persisted %v: the copy of the stop gave the drain up before the agent handed its mock over", got)
+	}
+}
+
 // unansweredInstrumentation is pendingInstrumentation whose agent does not
 // answer the drain's looks while its parser is behind (a /record/pending that
 // times out), and says it holds nothing more once it has handed the mock over.
@@ -705,7 +730,8 @@ func TestDrainTrailingMocks_ASecondInterruptAsTheStreamEndsIsTheUsersStop(t *tes
 	for i := 0; i < 8; i++ {
 		var frames atomic.Uint64
 		frames.Store(1)
-		lost, logs, code := gatedDrain(t, nil, &frames, utils.MarkInterruptedAgain)
+		// The drain has said another interrupt stops it now: this one does.
+		lost, logs, code := gatedDrain(t, nil, &frames, func() { utils.OfferStopNow(); utils.MarkInterruptedAgain() })
 		utils.ResetInterruptedAgain()
 		if lost || code != 0 || logs.FilterMessageSnippet("ended its mock stream").Len() != 0 {
 			t.Fatalf("run %d: a second interrupt was taken for the agent going away (lost=%v, exit code %d): %v", i, lost, code, logs.All())
