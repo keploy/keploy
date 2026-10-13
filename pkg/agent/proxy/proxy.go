@@ -2530,7 +2530,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
-			if mismatch.MockMode() && isMockMiss(err) {
+			if quietMisses() && isMockMiss(err) {
 				return reportedMiss{err}
 			}
 			return err
@@ -4466,9 +4466,10 @@ func (p *Proxy) SendError(err error) {
 	}
 }
 
-// reportedMiss marks a mock miss that `keploy mock` already reports: the CLI
-// prints each miss once, named by its test, at the end of the run, so the
-// connection handler logs it at Debug rather than as an error.
+// reportedMiss marks a mock miss that `keploy mock` already reports under the
+// proven switch: the CLI prints each miss once, named by its test, at the end
+// of the run, and fails the run when it cannot read them, so the connection
+// handler logs it at Debug rather than as an error.
 type reportedMiss struct{ err error }
 
 func (r reportedMiss) Error() string { return r.err.Error() }
@@ -4488,12 +4489,20 @@ func isMockMiss(err error) bool {
 	return errors.Is(err, models.ErrNoMockMatched) || (errors.As(err, &reporter) && reporter != nil)
 }
 
+// quietMisses reports whether the agent leaves naming each miss to the CLI: a
+// `keploy mock` run under the proven switch, where a miss list the CLI cannot
+// read fails the run. Anywhere else the agent's own line is the one that
+// always shows, so it stays at Warn.
+func quietMisses() bool {
+	return mismatch.MockMode() && provenswitch.On()
+}
+
 // mockFailed reports a MockOutgoing failure and returns the error the
-// connection handler gets. In a `keploy mock` run, which names each miss once
-// at its end, a miss is logged at Debug and returned as reportedMiss; anything
-// else, and every other run, keeps the error log it always had.
+// connection handler gets. Where the CLI names each miss (quietMisses), a miss
+// is logged at Debug and returned as reportedMiss; anything else, and every
+// other run, keeps the error log it always had.
 func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
-	quiet := mismatch.MockMode() && isMockMiss(err)
+	quiet := quietMisses() && isMockMiss(err)
 	if quiet {
 		logger.Debug("failed to mock the outgoing message", zap.Error(err))
 	} else {
@@ -4507,11 +4516,11 @@ func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
 }
 
 // mismatchLog is how the mock-mismatch line is logged: Warn, so every replay
-// shows each miss as it happens, except in a `keploy mock` run, whose CLI
-// names each miss once with its test at the end (Debug there, or the miss
-// would be printed twice).
+// shows each miss as it happens, except where the CLI names each miss once
+// with its test at the end (quietMisses: Debug there, or the miss would be
+// printed twice).
 func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
-	if mismatch.MockMode() {
+	if quietMisses() {
 		return p.logger.Debug
 	}
 	return p.logger.Warn

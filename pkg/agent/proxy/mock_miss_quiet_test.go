@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -26,32 +27,48 @@ func missErr() error {
 	})
 }
 
-// Outside `keploy mock` (keploy test, sandbox and k8s replays) a miss keeps
-// the error log and the Warn mismatch line those modes always showed, and the
-// connection handler gets the error itself.
-func TestMockFailedKeepsTheLogsOutsideAMockRun(t *testing.T) {
-	mockModeFor(t, false)
-	core, logs := observer.New(zap.WarnLevel)
-	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 4)}
+// Outside `keploy mock` (keploy test, sandbox and k8s replays), and in a
+// `keploy mock` run with the proven switch off, a miss keeps the error log and
+// the Warn mismatch line, and the connection handler gets the error itself:
+// there the CLI's read of the misses can fail without failing the run, and
+// the agent's line is then the only place the miss shows.
+func TestMockFailedKeepsTheLogsUnlessTheCLINamesEveryMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mock   bool
+		proven string
+	}{
+		{"not a mock run", false, "1"},
+		{"mock run, switch off", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockModeFor(t, tc.mock)
+			t.Setenv(provenswitch.Env, tc.proven)
+			core, logs := observer.New(zap.WarnLevel)
+			p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 4)}
 
-	err := p.mockFailed(p.logger, missErr())
+			err := p.mockFailed(p.logger, missErr())
 
-	if errors.As(err, new(reportedMiss)) {
-		t.Fatal("a miss outside a mock run must not be marked as reported by the CLI")
-	}
-	if n := logs.FilterMessage("mock mismatch: no matching mock for outgoing call").FilterLevelExact(zap.WarnLevel).Len(); n != 1 {
-		t.Fatalf("want the Warn mismatch line once, got %d", n)
-	}
-	if n := logs.FilterMessage("failed to mock the outgoing message").Len(); n != 1 {
-		t.Fatalf("want the error log once, got %d", n)
+			if errors.As(err, new(reportedMiss)) {
+				t.Fatal("the miss must not be marked as reported by the CLI")
+			}
+			if n := logs.FilterMessage("mock mismatch: no matching mock for outgoing call").FilterLevelExact(zap.WarnLevel).Len(); n != 1 {
+				t.Fatalf("want the Warn mismatch line once, got %d", n)
+			}
+			if n := logs.FilterMessage("failed to mock the outgoing message").Len(); n != 1 {
+				t.Fatalf("want the error log once, got %d", n)
+			}
+		})
 	}
 }
 
-// In a `keploy mock` run the CLI names each miss once at the end, so the
+// In a `keploy mock` run under the proven switch the CLI names each miss once
+// at the end, and fails the run when it cannot read them, so the
 // agent logs the miss at Debug and marks it reported; a failure that is not a
 // miss (a parser or I/O error) keeps its error log there too.
 func TestMockFailedIsQuietOnlyForAMissInAMockRun(t *testing.T) {
 	mockModeFor(t, true)
+	t.Setenv(provenswitch.Env, "1")
 	core, logs := observer.New(zap.WarnLevel)
 	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 4)}
 

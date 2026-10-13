@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -371,7 +372,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		failedBy = FailedByStrict
 		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
 		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended; run the replay again with --debug to see each miss as it happens"))
+			zap.String("next_step", strictNext()))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
@@ -1129,10 +1130,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			summary = append(summary, zap.NamedError("reason", consumedErr))
 			next = "the keploy-agent container writes what it served and missed as compose stops it; check its logs above for why this one did not, and that its image is the one this keploy version runs"
 		}
-		if missesErr != nil {
-			// The agent logs each miss at Debug in a `keploy mock` run, so its
-			// logs name them only under --debug.
-			next += "; run the replay again with --debug to see each miss as it happens"
+		if missesErr != nil && provenswitch.On() {
+			// Under the proven switch the agent logs each miss at Debug in a
+			// `keploy mock` run, so its logs name them only under --debug.
+			next += "; " + debugHint
 		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
 			append(summary, zap.String("next_step", next))...)
@@ -1298,12 +1299,28 @@ func (m *mockService) announceServed(served map[string]models.MockState) {
 // its misses before it exits.
 const interruptedReadTimeout = 3 * time.Second
 
-// reportInterruptedMisses names the misses of a replay a signal stopped. The
-// agent logs them at Debug in a `keploy mock` run, so without this a replay
-// interrupted because a test hung on a missing mock would show none. Best
-// effort: the reads are bounded, and when they fail it says where to look.
+// debugHint is where the misses show when the CLI could not name them: under
+// the proven switch the agent logs each miss at Debug in a `keploy mock` run.
+const debugHint = "run the replay again with --debug to see each miss as it happens"
+
+func strictNext() string {
+	next := "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"
+	if provenswitch.On() {
+		next += "; " + debugHint
+	}
+	return next
+}
+
+// reportInterruptedMisses names the misses of a replay a signal stopped. Under
+// the proven switch the agent logs them at Debug in a `keploy mock` run, so
+// without this a replay interrupted because a test hung on a missing mock
+// would show none; with the switch off the agent's own lines already did.
+// Best effort: the reads are bounded, and when they fail it says where to look.
 func (m *mockService) reportInterruptedMisses(ctx context.Context, fromCompose bool) {
-	const hint = "run the replay again with --debug to see each miss as it happens"
+	if !provenswitch.On() {
+		return
+	}
+	const hint = debugHint
 	if fromCompose {
 		m.logger.Info("the replay was interrupted before its misses were read; " + hint)
 		return

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
@@ -486,10 +487,17 @@ func (r *missReader) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow,
 	return r.windows, nil
 }
 
-// A replay a signal stopped still names its misses, under their tests, even
-// though its context is already cancelled; when they cannot be read, it says
-// how to see them.
+// Under the proven switch a replay a signal stopped still names its misses,
+// under their tests, even though its context is already cancelled; when they
+// cannot be read, it says how to see them. With the switch off the agent's
+// own lines already named them, so it reads nothing.
 func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	off, offLogs := observer.New(zap.InfoLevel)
+	(&mockService{logger: zap.New(off), instrumentation: &missReader{err: context.DeadlineExceeded}}).reportInterruptedMisses(context.Background(), false)
+	require.Zero(t, offLogs.Len())
+
+	t.Setenv(provenswitch.Env, "1")
 	core, logs := observer.New(zap.InfoLevel)
 	at := runnerT0.Add(5 * time.Millisecond)
 	agent := &missReader{
@@ -500,8 +508,8 @@ func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	m.reportInterruptedMisses(ctx, false)
-	require.Equal(t, 1, logs.FilterMessage("no recorded mock matched a call").Len())
-	require.Equal(t, "TestA", logs.FilterMessage("no recorded mock matched a call").All()[0].ContextMap()["test"])
+	require.Equal(t, 1, logs.FilterMessage("no recorded mock matched an outgoing call").Len())
+	require.Equal(t, "TestA", logs.FilterMessage("no recorded mock matched an outgoing call").All()[0].ContextMap()["test"])
 
 	// The test the signal cut off never ended, so the agent has no window for
 	// it: its miss is not said to be outside every test.
@@ -509,7 +517,7 @@ func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
 	agent.windows = nil
 	m = &mockService{logger: zap.New(core), instrumentation: agent}
 	m.reportInterruptedMisses(ctx, false)
-	require.Equal(t, "(not in a finished test)", logs.FilterMessage("no recorded mock matched a call").All()[0].ContextMap()["test"])
+	require.Equal(t, "(not in a finished test)", logs.FilterMessage("no recorded mock matched an outgoing call").All()[0].ContextMap()["test"])
 
 	core, logs = observer.New(zap.InfoLevel)
 	m = &mockService{logger: zap.New(core), instrumentation: &missReader{err: context.DeadlineExceeded}}

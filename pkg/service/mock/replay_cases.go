@@ -400,7 +400,7 @@ func (m *mockService) reportMissesAs(misses []models.UnmatchedCall, byFlow []Flo
 		if next == "" {
 			next = "record this call with --on-miss record, or re-record the set"
 		}
-		m.logger.Warn("no recorded mock matched a call", append(fields, zap.String("next_step", next))...)
+		m.logger.Warn("no recorded mock matched an outgoing call", append(fields, zap.String("next_step", next))...)
 	}
 }
 
