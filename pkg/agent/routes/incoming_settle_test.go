@@ -416,6 +416,64 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 	}
 }
 
+// An app that serves on through the stop's drain (docker compose) keeps the
+// ingress handing test cases over: when the recording's client ends the
+// stream, the handler is as likely to be writing one as waiting. Either way
+// the session's summary is the ordinary one, at INFO, ended by its client,
+// not a warning that the stream broke at the end of a recording that went as
+// it should.
+func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	tcs := make(chan *models.TestCase) // the ingress's: never closed
+	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := streamOf(t, resp)
+
+	// Steady traffic after the stop.
+	stopFeed := make(chan struct{})
+	fed := make(chan struct{})
+	go func() {
+		defer close(fed)
+		big := strings.Repeat("x", 64<<10)
+		for {
+			at := time.Now()
+			select {
+			case tcs <- &models.TestCase{Name: "t", HTTPReq: models.HTTPReq{Timestamp: at, Body: big}, HTTPResp: models.HTTPResp{Timestamp: at}}:
+			case <-stopFeed:
+				return
+			}
+		}
+	}()
+	defer func() { close(stopFeed); <-fed }()
+	for i := 0; i < 3; i++ {
+		if _, ok := nextStreamed(t, names); !ok {
+			t.Fatal("the stream ended early")
+		}
+	}
+	resp.Body.Close() // the client's drain is done: it ends the stream
+
+	deadline := time.Now().Add(streamWait)
+	for logs.FilterMessage("agent: recording complete").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no summary once the client ended the stream")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := logs.FilterMessage("agent: recording complete").All()
+	if len(got) != 1 || got[0].Level != zapcore.InfoLevel || got[0].ContextMap()["ended_by"] != "client" {
+		t.Fatalf("summaries %v, want one at INFO ended by its client", got)
+	}
+	if w := logs.FilterLevelExact(zapcore.WarnLevel).All(); len(w) > 0 {
+		t.Fatalf("a client ending the stream under traffic was warned of: %q", w[0].Message)
+	}
+}
+
 // stopWatermark is a capture at a stop: every parser is past the stop, but
 // not past a test case that ended after it. A test case with no HTTP end
 // makes no claim of it.
