@@ -81,6 +81,19 @@ func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	return StopCommand(cmd, logger)
 }
 
+// KillAgentCommand ends cmd's process tree at once: StopCommand.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+	return StopCommand(cmd, logger)
+}
+
+// KillPTYCommand is KillAgentCommand: Windows has no PTY.
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil || handle.cmd == nil {
+		return nil
+	}
+	return KillAgentCommand(handle.cmd, logger)
+}
+
 // StdinOff is always false on Windows, which has no PTY.
 func StdinOff(*PTYHandle) bool { return false }
 

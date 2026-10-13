@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/routes"
+	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -88,6 +89,9 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// shutting down: see utils.IgnoreHangupOnceStopping.
 			utils.DieOnHangup()
 			utils.IgnoreHangupOnceStopping(ctx)
+			// The CLI's forced stop of an agent it may not signal itself
+			// (sudo's): see utils.DieOnEscalation.
+			utils.DieOnEscalation()
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -137,6 +141,20 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			default:
 				watchParentProcess(ctx, logger, int(clientPID))
 			}
+
+			// The teardown's progress, for the CLI that stops this agent: it
+			// kills a stopping agent only once that has stopped making
+			// progress (utils.ReportTeardownProgress). A native agent is told
+			// where; a containerised one writes it into its container, where
+			// the CLI reads it back.
+			progressFile, pfErr := cmd.Flags().GetString("teardown-progress-file")
+			if pfErr != nil {
+				logger.Debug("could not read the teardown-progress-file flag", zap.Error(pfErr))
+			}
+			if progressFile == "" && isDocker {
+				progressFile = kdocker.AgentTeardownProgressFile
+			}
+			utils.ReportTeardownProgress(ctx, logger, progressFile)
 
 			startAgentCh := make(chan int)
 			daemonSet := isDaemonSetAgent()

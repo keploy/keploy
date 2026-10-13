@@ -52,35 +52,44 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 
 // endAgent's decision on the CLI's stop. The agent is asked first, and one
 // that answers is not signalled. One that was up and is already going away is
-// waited for, and signalled only if it does not exit within the grace; the
-// user's second interrupt ends that wait without a signal (with a grace of an
-// hour, that case would not return otherwise). One whose stop request fails
-// otherwise, or that never answered (still starting: refused, as nothing
-// listens yet), is signalled at once. A signalled agent is then waited for, never killed (the
-// terminate func stands for SIGTERM, on which it exits). One already reaped is
+// signalled only if, after the grace, it has reported no teardown. One whose
+// stop request fails otherwise, or that never answered (still starting:
+// refused, as nothing listens yet), is signalled at once. Ctrl+C pressed
+// again before the stop kills it at once. The agent is then waited for (a
+// terminate stands for SIGTERM, on which it exits). One already reaped is
 // never signalled: its pid may be another process's by then.
 func TestEndAgent(t *testing.T) {
 	defer func(g time.Duration) { agentStoppingGrace = g }(agentStoppingGrace)
 	goingAway := fmt.Errorf(`Post "http://localhost:1/agent/stop": %w`, io.EOF)
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
 	failed := errors.New("agent stop http 500: boom")
+	const (
+		goingAwayLog = "already stopping"
+		decidedLog   = "reporting its teardown; it is not signalled"
+		nudgedLog    = "has reported no teardown"
+	)
 	for _, tc := range []struct {
 		name  string
 		ask   error
 		ready bool
-		// exits: the agent exits by itself once endAgent waits for it to,
-		// before any signal; reaped: it had already exited before the stop.
-		exits, reaped bool
-		grace         time.Duration
-		interrupt     bool
-		wantSignal    bool
+		// exitOnAsk: it exits as it is asked; exitAt: it exits by itself once
+		// endAgent has logged this; reaped: it had exited before the stop.
+		exitOnAsk  bool
+		exitAt     string
+		reaped     bool
+		reports    bool
+		grace      time.Duration
+		interrupt  bool
+		wantSignal bool
+		wantKill   bool
 	}{
-		{name: "it answers", ready: true, grace: time.Hour},
-		{name: "it answers, never answered before", grace: time.Hour},
-		{name: "it is going away, and exits", ask: goingAway, ready: true, exits: true, grace: time.Hour},
-		{name: "it is not listening any more, and exits", ask: refused, ready: true, exits: true, grace: time.Hour},
-		{name: "it is going away, but does not exit", ask: goingAway, ready: true, grace: 50 * time.Millisecond, wantSignal: true},
-		{name: "it is going away, and the user interrupts again", ask: goingAway, ready: true, grace: time.Hour, interrupt: true},
+		{name: "it answers", ready: true, exitOnAsk: true, grace: time.Hour},
+		{name: "it answers, never answered before", exitOnAsk: true, grace: time.Hour},
+		{name: "it is going away, and exits", ask: goingAway, ready: true, exitAt: goingAwayLog, grace: time.Hour},
+		{name: "it is not listening any more, and exits", ask: refused, ready: true, exitAt: goingAwayLog, grace: time.Hour},
+		{name: "it is going away and reports its teardown: never signalled", ask: goingAway, ready: true, reports: true, exitAt: decidedLog, grace: time.Millisecond},
+		{name: "it is going away but reports nothing after the grace", ask: goingAway, ready: true, grace: time.Millisecond, wantSignal: true},
+		{name: "Ctrl+C was pressed again before the stop", ask: goingAway, ready: true, grace: time.Hour, interrupt: true, wantKill: true},
 		{name: "its stop request fails otherwise", ask: failed, ready: true, grace: time.Hour, wantSignal: true},
 		{name: "it never answered: still starting", ask: refused, grace: time.Hour, wantSignal: true},
 		{name: "it never answered, and fails otherwise", ask: failed, grace: time.Hour, wantSignal: true},
@@ -101,18 +110,32 @@ func TestEndAgent(t *testing.T) {
 			if tc.reaped {
 				run.exited()
 			}
-			var signalled atomic.Bool
+			var signalled, killed atomic.Bool
+			ask := func() error {
+				if tc.exitOnAsk {
+					run.exited()
+				}
+				return tc.ask
+			}
 			terminate := func() error {
 				signalled.Store(true)
 				run.exited() // the agent exits on SIGTERM
 				return nil
 			}
+			kill := func() error {
+				killed.Store(true)
+				run.exited()
+				return nil
+			}
+			read := func() (utils.TeardownProgress, bool) {
+				return utils.TeardownProgress{Seq: 1}, tc.reports
+			}
 			returned := make(chan struct{})
-			if tc.exits {
-				// On its way out: it exits while endAgent waits for it, and
-				// only then, so a stop that signals before waiting is caught.
+			if tc.exitAt != "" {
+				// It exits once endAgent has got that far, and only then, so a
+				// stop that signals it before is caught.
 				go func() {
-					for logs.FilterMessageSnippet("already stopping; waiting for it to exit").Len() == 0 {
+					for logs.FilterMessageSnippet(tc.exitAt).Len() == 0 {
 						select {
 						case <-returned:
 							return
@@ -122,14 +145,17 @@ func TestEndAgent(t *testing.T) {
 					run.exited()
 				}()
 			}
-			go func() { a.endAgent(run, 1, func() error { return tc.ask }, terminate); close(returned) }()
+			go func() { a.endAgent(run, 1, ask, terminate, kill, read); close(returned) }()
 			select {
 			case <-returned:
 			case <-time.After(time.Minute):
 				t.Fatal("endAgent did not return")
 			}
-			if signalled.Load() != tc.wantSignal {
-				t.Fatalf("signalled=%v, want %v", signalled.Load(), tc.wantSignal)
+			if signalled.Load() != tc.wantSignal || killed.Load() != tc.wantKill {
+				t.Fatalf("signalled=%v killed=%v, want %v and %v", signalled.Load(), killed.Load(), tc.wantSignal, tc.wantKill)
+			}
+			if tc.wantSignal && tc.ready && agentGoingAway(tc.ask) && logs.FilterMessageSnippet(nudgedLog).Len() == 0 {
+				t.Fatal("signalled an agent going away without saying why")
 			}
 		})
 	}

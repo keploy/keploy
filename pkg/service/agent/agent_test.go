@@ -142,6 +142,27 @@ func TestHookAnswersDNSWithWhereTheHooksReachTheProxy(t *testing.T) {
 	}
 }
 
+// The agent's teardown records each of its stages as a step of its progress
+// (utils.TeardownStep), which the CLI that stopped it reads: a teardown that
+// records none is taken for one that has stopped making progress, and killed.
+func TestHookTeardownRecordsItsStages(t *testing.T) {
+	a := &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}, Proxy: &startedProxy{}, config: &config.Config{}}
+	grp, ctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
+	if err := a.Hook(ctx, models.HookOptions{Mode: models.MODE_TEST}); err != nil {
+		cancel()
+		t.Fatalf("the agent did not start: %v", err)
+	}
+	before := utils.TeardownSteps()
+	cancel()
+	if err := grp.Wait(); err != nil {
+		t.Fatalf("the teardown failed: %v", err)
+	}
+	if steps := utils.TeardownSteps() - before; steps < 3 {
+		t.Fatalf("the teardown recorded %d steps, want one as it begins and one after each of the proxy and the hooks", steps)
+	}
+}
+
 // captureProxy can begin a test's capture window; continuingProxy can also
 // continue one.
 type captureProxy struct {

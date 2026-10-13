@@ -41,6 +41,9 @@ func main() {
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
+	// An agent has detached everything by now: what is left is the exit
+	// (utils.MarkDetachDone).
+	utils.MarkDetachDone()
 	os.Exit(utils.ErrCode)
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	keployutils "go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -99,6 +101,41 @@ func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// KillAgentCommand ends the agent cmd started, at once, for a stop that has to
+// be forced (the CLI's stopWatch in pkg/platform/http). Started directly, the
+// agent is sent SIGKILL. Started through sudo, it runs as root, which the user
+// who ran keploy may not signal; sudo keeps that user's uid and hands
+// keployutils.EscalationSignal on to the agent, which then kills itself
+// (utils.DieOnEscalation). Through cmd.Process, so an agent already reaped is
+// never signalled. A process that has already exited is not an error.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	sig := os.Signal(syscall.SIGKILL)
+	if isSudo(cmd) {
+		sig = keployutils.EscalationSignal
+	}
+	if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		logger.Debug("failed to kill the agent", zap.Int("pid", cmd.Process.Pid), zap.Stringer("signal", sig), zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+// KillPTYCommand is KillAgentCommand for a command started on a PTY.
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil {
+		return nil
+	}
+	return KillAgentCommand(handle.cmd, logger)
+}
+
+// isSudo reports whether cmd runs sudo, which runs the agent as another user.
+func isSudo(cmd *exec.Cmd) bool {
+	return filepath.Base(cmd.Path) == "sudo"
 }
 
 // TerminatePTYCommand is TerminateCommand for a command started on a PTY: it
