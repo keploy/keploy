@@ -37,29 +37,67 @@ test:
         global: {"body": {"updated_at":[]}}
 KEPLOY_CFG
 
-send_request() {
-    local index=$1  
+# The app answers /api/locations and /api/locations/{area} by calling
+# pokeapi.co, a live third-party API behind Cloudflare. When that call gets a
+# status above 399 the app answers 500 with {"error":"bad status code : N"}
+# (the area handler, pokemon.go's FetchPokemons, has no return after its
+# error and appends "null"), and that is what this lane then records. Twice on 2026-10-13 (runs
+# 38342044826 and 38342500968) pokeapi.co answered 502: the recorded mock
+# carries Cloudflare's Server and Cf-Ray headers. That set held a 500 where
+# the location list should be, then a call for the area "null", and no
+# response of 8 KiB or more, and the strict mock-window phase below failed
+# blaming keploy. send_request writes "<call> <status>" for each call through
+# pokeapi.co to $2, and the app's answer to $2.<call>, so record_iterations can
+# tell a usable recording from one of pokeapi.co's outages.
 
+# answered NAME OUT STATUS_FILE: notes the app's answer OUT (curl's body, a
+# newline, then its status) to call NAME, and leaves its body in $response.
+answered() {
+    local code=${2##*$'\n'}
+    response=${2%$'\n'*}
+    echo "$1 $code" >> "$3"
+    printf '%s\n' "$response" > "$3.$1"
+}
+
+# all_200 STATUS_FILE: whether every call noted so far got a 200.
+all_200() {
+    ! grep -qv ' 200$' "$1"
+}
+
+send_request() {
+    local index=$1
+    local status_file=$2
+    local out location
+    # This runs in the background, and the WSL lane sources this script under
+    # set -euo pipefail: a call or a jq that fails must not end it before it
+    # stops keploy below, or the record never ends.
+    set +e +o pipefail
+
+    : > "$status_file"
     sleep 6
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:8080/api/locations; then
-            app_started=true
-        fi
+    # The first call that connects is the app's readiness, and is recorded as
+    # a test like the others.
+    until out=$(curl -s -w '\n%{http_code}' -X GET http://localhost:8080/api/locations); do
         sleep 3
     done
+    answered locations-probe "$out" "$status_file"
     
     echo "App started"
     
-    response=$(curl -s -X GET http://localhost:8080/api/locations)
+    # After a call through pokeapi.co that did not get a 200, the iteration is
+    # not usable whatever follows (an area named "null"), and each further call
+    # can wait a minute on an upstream that is failing: they are not made.
+    if all_200 "$status_file"; then
+        out=$(curl -s -w '\n%{http_code}' -X GET http://localhost:8080/api/locations)
+        answered locations "$out" "$status_file"
+    fi
 
-    # Extract any location from the reponse
-    location=$(echo "$response" | jq -r ".location[$index]")
-    
-    response=$(curl -s -X GET http://localhost:8080/api/locations/$location)
-
-    # Extract any pokemon from the response
-    pokemon=$(echo "$response" | jq -r ".[$index]")
+    if all_200 "$status_file"; then
+        # Extract any location from the reponse
+        location=$(echo "$response" | jq -r ".location[$index]")
+        out=$(curl -s -w '\n%{http_code}' -X GET "http://localhost:8080/api/locations/$location")
+        answered location-area "$out" "$status_file"
+    fi
     
     curl -s -X GET http://localhost:8080/api/greet
 
@@ -75,26 +113,115 @@ send_request() {
     sudo kill $pid
 }
 
+# The most times one iteration is recorded while pokeapi.co keeps answering
+# its calls with an error.
+upstream_attempts=5
+
+# test_sets: the test sets under ./keploy, by name.
+test_sets() {
+    if [ -d ./keploy ]; then
+        find ./keploy -mindepth 1 -maxdepth 1 -type d -name 'test-set-*' -printf '%f\n' | sort
+    fi
+}
+
+# upstream_answers SET_DIR: one line per HTTP mock in SET_DIR that is not a
+# 200: its name, status, request URL, and the Server, Cf-Ray and Server-Timing
+# headers that show where the answer came from.
+upstream_answers() {
+    if [ -f "$1/mocks.json" ]; then
+        jq -r 'select(.spec.resp.status_code != null and .spec.resp.status_code != 200)
+            | "\(.name) \(.spec.resp.status_code) \(.spec.req.url // "-") Server=\(.spec.resp.header.Server // "-") Cf-Ray=\(.spec.resp.header["Cf-Ray"] // "-") Server-Timing=\(.spec.resp.header["Server-Timing"] // "-")"' "$1/mocks.json"
+    elif [ -f "$1/mocks.yaml" ]; then
+        awk '
+            function flush() { if (st != "" && st != "200") print nm, st, u, "Server=" sv, "Cf-Ray=" cf, "Server-Timing=" tm }
+            /^---/ { flush(); nm = st = ""; u = sv = cf = tm = "-"; next }
+            NR == 1 { u = sv = cf = tm = "-" }
+            /^name:/ { nm = $2 }
+            $1 == "url:" { u = $2 }
+            $1 == "status_code:" { st = $2 }
+            $1 == "Server:" { sv = $2 }
+            $1 == "Cf-Ray:" { cf = $2 }
+            $1 == "Server-Timing:" { tm = $2 }
+            END { flush() }' "$1/mocks.yaml"
+    fi
+}
+
 record_iterations() {
     local extra_flags="${1:-}"
     local label="${extra_flags:+_json}"
+    local attempt status_file before new_sets set_dir first call body upstream answers not_upstream
     for i in {1..2}; do
         local app_name="http-pokeapi_${i}${label}"
-        send_request "$i" &
-        # shellcheck disable=SC2086
-        "$RECORD_BIN" record $extra_flags -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
-        if grep "ERROR" "${app_name}.txt"; then
-            echo "Error found in pipeline..."
-            cat "${app_name}.txt"
-            exit 1
-        fi
-        if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-          echo "Race condition detected in recording, stopping pipeline..."
-          cat "${app_name}.txt"
-          exit 1
-        fi
-        sleep 5
-        wait
+        attempt=1
+        while :; do
+            status_file="upstream-${app_name}-${attempt}.txt"
+            before=$(test_sets)
+            send_request "$i" "$status_file" &
+            # shellcheck disable=SC2086
+            "$RECORD_BIN" record $extra_flags -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
+            if grep "ERROR" "${app_name}.txt"; then
+                echo "Error found in pipeline..."
+                cat "${app_name}.txt"
+                exit 1
+            fi
+            if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+              echo "Race condition detected in recording, stopping pipeline..."
+              cat "${app_name}.txt"
+              exit 1
+            fi
+            sleep 5
+            wait
+            # The set this recording made: one, new.
+            new_sets=$(comm -13 <(echo "$before") <(test_sets))
+            if [ "$(grep -c . <<<"$new_sets")" -ne 1 ]; then
+                echo "::error::recording iteration ${i}${label:+ (json)} made $(grep -c . <<<"$new_sets") new test sets under ./keploy, want one: ${new_sets:-none}"
+                cat "${app_name}.txt"
+                exit 1
+            fi
+            set_dir="./keploy/${new_sets}"
+            # Usable: each of the three calls through pokeapi.co got a 200.
+            if [ "$(grep -c ' 200$' "$status_file")" -eq 3 ]; then
+                break
+            fi
+            echo "recording iteration ${i}${label:+ (json)} (attempt ${attempt}) into ${set_dir}: the app did not answer every call through pokeapi.co with 200:"
+            cat "$status_file"
+            echo "the mocks of ${set_dir} that are not a 200:"
+            upstream_answers "$set_dir" || true
+            # Recorded again only on proof that pokeapi.co itself answered
+            # the error: the app said "bad status code : N" with N a 5xx, and
+            # the recording holds an answer N to a location-area request from
+            # Cloudflare (its Server or Cf-Ray header). Anything else (no
+            # answer, a connection keploy dropped, a request keploy changed,
+            # a 4xx such as a 429 a client can bring on itself) is not
+            # pokeapi.co failing, and fails the lane.
+            first=$(grep -m 1 -v ' 200$' "$status_file" || true)
+            call=${first%% *}
+            body=$(cat "${status_file}.${call}" 2>/dev/null || true)
+            upstream=$(sed -nE 's/^\{"error":"bad status code : ([0-9]+)"\}(null)?$/\1/p' <<<"$body")
+            # Captured, not piped into grep -q: under pipefail an early exit
+            # of grep would fail the pipeline whatever it found.
+            answers=$(upstream_answers "$set_dir" || true)
+            not_upstream=""
+            if [ -z "$upstream" ]; then
+                not_upstream="its answer names no status from pokeapi.co"
+            elif ! [[ "$upstream" =~ ^5[0-9][0-9]$ ]]; then
+                not_upstream="pokeapi.co's ${upstream} is not a server error (a 4xx such as a 429 a client can bring on itself)"
+            elif ! grep -qE "^[^ ]+ ${upstream} (https://pokeapi\.co)?/api/v2/location-area[^ ]* (Server=cloudflare |.* Cf-Ray=[^-])" <<<"$answers"; then
+                not_upstream="${set_dir} holds no answer ${upstream} to a location-area request from pokeapi.co itself (Cloudflare's Server or Cf-Ray header)"
+            fi
+            if [ -n "$not_upstream" ]; then
+                echo "::error::recording iteration ${i}${label:+ (json)}: the app answered ${call:-a call} with ${first##* } (${body:-no body}), and ${not_upstream}. That is not pokeapi.co failing, so it is not recorded again."
+                cat "${app_name}.txt"
+                exit 1
+            fi
+            if [ "$attempt" -ge "$upstream_attempts" ]; then
+                echo "::error::pokeapi.co answered ${upstream} in ${upstream_attempts} recordings of iteration ${i}${label:+ (json)}: no usable recording can be made while it is failing. This is the third-party API, not keploy; its answers are above."
+                exit 1
+            fi
+            echo "::warning::pokeapi.co answered ${upstream} while recording iteration ${i}${label:+ (json)} (attempt ${attempt} of ${upstream_attempts}); discarding ${set_dir} and recording the iteration again"
+            rm -rf "$set_dir"
+            attempt=$((attempt + 1))
+        done
         echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
     done
 }
