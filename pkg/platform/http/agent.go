@@ -2280,10 +2280,8 @@ func (a *AgentClient) dockerModeRefused(err error, remedy string) error {
 // is how such a container gets to run keploy's docker mode at all. A write
 // this process is not allowed to make is tagged ErrPrivilegeRequired.
 func relaxPerfEventParanoid() error {
-	if current, err := os.ReadFile(perfEventParanoidPath); err == nil {
-		if level, err := strconv.Atoi(strings.TrimSpace(string(current))); err == nil && level <= 2 {
-			return nil
-		}
+	if level, err := utils.ReadPerfEventParanoid(perfEventParanoidPath); err == nil && level <= 2 {
+		return nil
 	}
 	err := os.WriteFile(perfEventParanoidPath, []byte("2\n"), 0644)
 	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) {

@@ -38,6 +38,16 @@
 #                          write and gets on with starting its agent     -> AGENT_EXIT (6)
 #   docker-N, --privileged 3 and 6 are the agent's reasons, 0 an agent
 #                          that stopped before it was ready              -> N, N, 1
+# perf-refused runs keploy as the k8s-proxy chart's sidecar holds it, with
+# CAP_BPF and CAP_PERFMON and not CAP_SYS_ADMIN, refused the perf_event_open(2)
+# of its sys_enter_socket tracepoint the way a Debian kernel above
+# perf_event_paranoid 2 refuses it (keploy/enterprise pipeline 10867). A
+# seccomp profile answers that one syscall with EACCES, as Debian's kernel
+# does, so the case runs on any kernel; the knob reads 3 from a file mounted
+# over it; SYS_ADMIN, which the mounts take, is dropped from what keploy runs
+# with. Its log has to name the sysctl and the fix, not only "permission
+# denied", and a cilium/ebpf that worded the refusal another way would lose
+# that here first                                                    -> 3
 # (A working environment is mock-linux.sh's job, on the runner itself.)
 #
 # Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
@@ -75,6 +85,7 @@ export HOME="$D/home"
 cd "$D/app" || exit 1
 CMD="sh -c 'touch $D/ran'"
 EXTRA=""
+RUN=""
 case "$CASE" in
   agent-no-ipv4)
     mount -t tracefs nodev /sys/kernel/tracing || exit 1
@@ -85,6 +96,12 @@ case "$CASE" in
       echo $? > "$D/$sub.exit"
     done
     exit 0
+    ;;
+  perf-refused)
+    mount -t tracefs nodev /sys/kernel/tracing || exit 1
+    echo 3 > "$D/perf_event_paranoid"
+    mount --bind "$D/perf_event_paranoid" /proc/sys/kernel/perf_event_paranoid || exit 1
+    RUN="setpriv --bounding-set -sys_admin --inh-caps -sys_admin --"
     ;;
   docker-*)
     if [ -n "${PIN_PARANOID:-}" ]; then
@@ -118,7 +135,7 @@ EOD
 esac
 for sub in record replay; do
   # shellcheck disable=SC2086
-  timeout -s INT 120 /work/keploy mock "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/$sub.log" 2>&1
+  timeout -s INT 120 $RUN /work/keploy mock "$sub" -c "$CMD" $EXTRA --disable-tele > "$D/$sub.log" 2>&1
   echo $? > "$D/$sub.exit"
 done
 SH
@@ -161,6 +178,12 @@ check docker-sysctl-relaxed 6 "this environment lacks something keploy needs" \
 check docker-3 3 "keploy does not have the kernel privileges it needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 check docker-6 6 "this environment lacks something keploy needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=6
 check docker-0 1 "the keploy agent exited before it became ready" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=0
+printf '%s\n' '{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["perf_event_open"],"action":"SCMP_ACT_ERRNO","errnoRet":13}]}' > "$WORK/perf-eacces.json"
+# Debian's kernel gets the restriction as the cause, any other the
+# restriction or a policy; both name the fix, which only this diagnosis says.
+check perf-refused 3 "to fix it, set kernel.perf_event_paranoid=2 on the host" \
+  --cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add SYS_RESOURCE --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined --security-opt seccomp="$WORK/perf-eacces.json"
 
 rm -rf "$WORK"
 if [ "$FAIL" -ne 0 ]; then

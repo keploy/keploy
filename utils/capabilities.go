@@ -4,8 +4,59 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 )
+
+// Linux capability numbers (include/uapi/linux/capability.h). Spelled out
+// here, not taken from golang.org/x/sys/unix, because this file builds on
+// every platform.
+const (
+	CapNetAdmin    = 12
+	CapSysPtrace   = 19
+	CapSysAdmin    = 21
+	CapSysResource = 24
+	CapPerfmon     = 38
+	CapBPF         = 39
+)
+
+// EffectiveCapabilities returns the process's effective capability set, the
+// CapEff mask in /proc/self/status, as a bit mask indexed by capability
+// number. Linux only.
+func EffectiveCapabilities() (uint64, error) {
+	content, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, fmt.Errorf("failed to read process status: %w", err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		hex, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		hex = strings.TrimSpace(hex)
+		caps, err := strconv.ParseUint(hex, 16, 64)
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse CapEff hex '%s': %w", hex, err)
+		}
+		return caps, nil
+	}
+	return 0, fmt.Errorf("could not find CapEff in /proc/self/status")
+}
+
+// ReadPerfEventParanoid returns the value of the kernel.perf_event_paranoid
+// knob at path (/proc/sys/kernel/perf_event_paranoid, or a test's file). The
+// knob is not namespaced: read from inside a container, it is the host's.
+func ReadPerfEventParanoid(path string) (int, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	level, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, fmt.Errorf("%s holds %q, not an integer: %w", path, strings.TrimSpace(string(b)), err)
+	}
+	return level, nil
+}
 
 // CheckRequiredPermissions verifies if the current process has the specific capabilities
 // required for Keploy to function correctly in Docker mode.
@@ -15,54 +66,22 @@ func CheckRequiredPermissions() error {
 		return nil
 	}
 
-	// Read /proc/self/status to find "CapEff".
-	content, err := os.ReadFile("/proc/self/status")
+	caps, err := EffectiveCapabilities()
 	if err != nil {
-		return fmt.Errorf("failed to read process status: %w", err)
+		return err
 	}
-
-	lines := strings.Split(string(content), "\n")
-	var capEffHex string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "CapEff:") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				capEffHex = parts[1]
-			}
-			break
-		}
-	}
-
-	if capEffHex == "" {
-		return fmt.Errorf("could not find CapEff in /proc/self/status")
-	}
-
-	// Parse hex string to uint64
-	var capUtils uint64
-	_, err = fmt.Sscanf(capEffHex, "%x", &capUtils)
-	if err != nil {
-		return fmt.Errorf("failed to parse CapEff hex '%s': %w", capEffHex, err)
-	}
-
-	// Define required bits based on Linux Capability constants
-	// CAP_NET_ADMIN = 12
-	// CAP_SYS_PTRACE = 19
-	// CAP_SYS_RESOURCE = 24
-	// CAP_BPF = 38
-	// CAP_PERFMON = 39
 
 	required := map[string]uint{
-		"NET_ADMIN":    12,
-		"SYS_PTRACE":   19,
-		"SYS_RESOURCE": 24,
-		"BPF":          38,
-		"PERFMON":      39,
+		"NET_ADMIN":    CapNetAdmin,
+		"SYS_PTRACE":   CapSysPtrace,
+		"SYS_RESOURCE": CapSysResource,
+		"BPF":          CapBPF,
+		"PERFMON":      CapPerfmon,
 	}
 
 	var missing []string
 	for name, bit := range required {
-		// specific check is: (cap_mask & (1 << bit))
-		if (capUtils & (uint64(1) << bit)) == 0 {
+		if caps&(uint64(1)<<bit) == 0 {
 			missing = append(missing, name)
 		}
 	}
