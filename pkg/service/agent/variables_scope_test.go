@@ -76,24 +76,6 @@ func TestATestsVariablesBeginAfterItsPool(t *testing.T) {
 	}
 }
 
-// A subtest begun inside its open parent shares the parent's variables.
-func TestASubtestKeepsItsParentsVariables(t *testing.T) {
-	a, p := orderAgent(t)
-	a.clientMocks.Store(uint64(0), &ClientMockStorage{})
-	ctx := context.Background()
-	_ = a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"m1"}, "pkg::TestA/case": {"m1"}})
-	if err := a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	p.tbl.BindAll(p.tbl.Gen(), []variables.Binding{{Name: "id", Value: "live-1", Recorded: "rec-1"}})
-	if err := a.BeginScopeAt(ctx, "pkg::TestA/case", 0, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := p.tbl.Lookup("id"); !ok {
-		t.Fatalf("the subtest's begin forgot its parent's variables; events %v", p.events)
-	}
-}
-
 // A begin that fails narrowed nothing, and begins no scope: nothing another
 // test bound meanwhile is forgotten.
 func TestAFailedBeginBeginsNoScope(t *testing.T) {

@@ -1029,3 +1029,47 @@ func TestVariables_TheClosestMockDiffLeavesEveryVariablePlaceOut(t *testing.T) {
 		t.Fatalf("the received call is not rendered as received: %q", rep.ReceivedReq)
 	}
 }
+
+// resetOnCursorDb begins the next test (its scope reset) the first time a
+// call reads the stateful cursor, after the variable pass checked it.
+type resetOnCursorDb struct {
+	varDb
+	done bool
+}
+
+func (d *resetOnCursorDb) MockCursorIndex(key string, n int) int {
+	if !d.done {
+		d.done = true
+		d.table.Reset()
+	}
+	return d.varDb.MockCursorIndex(key, n)
+}
+
+// A call whose answer could not be rendered because a test began meanwhile is
+// checked again against the new test, and its evidence is that check's.
+func TestVariables_AMissCheckedAcrossABeginIsCheckedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	create := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV("r1", "body.id")}), 1)
+	latest := reusable(at(varMock("mock-2", "GET", "http://store/orders/latest", "", 200, `{"id":"r1"}`,
+		models.MockVariables{"orderId": {Recorded: "r1", Answer: []string{"body.id"}}}), 2))
+	// Recorded twice, so the call reads the stateful cursor.
+	latest2 := reusable(at(varMock("mock-3", "GET", "http://store/orders/latest", "", 200, `{"id":"r1"}`,
+		models.MockVariables{"orderId": {Recorded: "r1", Answer: []string{"body.id"}}}), 3))
+	db := &resetOnCursorDb{}
+	db.perTest = []*models.Mock{create}
+	db.session = []*models.Mock{latest, latest2}
+	if ok, _, _ := matchVar(t, h, &db.varDb, liveReq("POST", "/orders", `{"id":"l1"}`)); !ok {
+		t.Fatal("the create should match")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ok, _, diag, err := h.match(ctx, liveReq("GET", "/orders/latest", ""), db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if diag == nil || diag.variable == nil || !strings.Contains(diag.variable.why, "before the call that binds it") {
+		t.Fatalf("the evidence is not the check against the new test: %+v", diag)
+	}
+}

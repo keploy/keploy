@@ -72,7 +72,6 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
-		nested := a.nestedInOpenTest(name, pid)
 		took, lost, err := a.beginTestClock(ctx, name, pid)
 		if lost.key.name != "" {
 			a.failLostScope(ctx, lost, at)
@@ -85,14 +84,14 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		}
 		a.openWindow(name, pid, at)
 		// Under the proven switch a test is the scope of the variables
-		// keploy mock replay binds: each test begins with none bound, and a
-		// subtest begun inside its open parent shares the parent's. One test
-		// is open at a time in an agent, so the agent keeps one table. The
-		// scope begins once the test's pool is in, at each return of a begin
-		// that succeeded, so a call checked against the previous pool binds
+		// keploy mock replay binds: each test begins with none bound. The
+		// proven wire refuses a begin while a test is open (ProvenBegin), so
+		// one test is one scope, and the agent keeps one table. The scope
+		// begins once the test's pool is in, at each return of a begin that
+		// succeeded, so a call checked against the previous pool binds
 		// nothing in it; a begin that fails narrowed nothing and begins none.
 		beginVariables := func() {
-			if provenswitch.On() && !nested {
+			if provenswitch.On() {
 				a.ResetVariables()
 			}
 		}
@@ -154,15 +153,6 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 	a.openWindow(name, pid, at)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil
-}
-
-// nestedInOpenTest reports whether a begin is a subtest of the test that holds
-// the run's clock, from the same worker (scope_clock.go lets it begin there).
-func (a *Agent) nestedInOpenTest(name string, pid int) bool {
-	a.clockMu.Lock()
-	defer a.clockMu.Unlock()
-	h := a.clockHeld
-	return h.name != "" && h.pid == uint32(pid) && strings.HasPrefix(name, h.name+"/")
 }
 
 // openWindow remembers when a test said it started, in either mode, so a client can read the windows later.
