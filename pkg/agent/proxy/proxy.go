@@ -1565,6 +1565,23 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 	})
 }
 
+// detachThenRemoveCA runs the last two stages of the proxy's shutdown: the
+// auxiliary hook's teardown (runAuxTeardown), which removes TLS uprobes, and
+// then the removal of this run's MITM CA from the OS trust store, so trust does
+// not persist after the run (no-op in docker/k8s mode and for a persisted
+// per-user CA). The CLI that stopped the agent must not kill it in the
+// middle of either -- a uprobe removal cut short leaks the breakpoint, a CA
+// tool cut short leaves a trust store half rewritten -- and either can take
+// long without a step of its own, so both are teardown work in progress
+// (utils.BeginTeardownWork), one span with a step between them.
+func (p *Proxy) detachThenRemoveCA(ctx context.Context) {
+	end := utils.BeginTeardownWork()
+	defer end()
+	p.runAuxTeardown(ctx)
+	utils.TeardownStep()
+	pTls.TeardownNativeCA(p.logger)
+}
+
 // getMockManager returns the current mock manager in a thread-safe manner.
 func (p *Proxy) getMockManager() *MockManager {
 	p.sessionMu.RLock()
@@ -2002,6 +2019,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		// Shutdown of downstream consumers is driven by ctx.Done()
 		// instead; the Go runtime garbage-collects MC once all
 		// references drop.
+		utils.TeardownStep()
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
 			if err := p.resetNsSwitchConfig(); err != nil {
@@ -2009,15 +2027,12 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		utils.TeardownStep()
 		// Remove TLS uprobes (and any other hook-owned kernel state) BEFORE
-		// forking update-ca-certificates below: a uprobe teardown that races
-		// that fork can inherit the last link reference into the child and
-		// then be killed mid-removal, leaking the breakpoint.
-		p.runAuxTeardown(ctx)
-		// Remove this run's MITM CA from the OS trust store so trust does not
-		// persist after the run (no-op in docker/k8s mode and for a persisted
-		// per-user CA).
-		pTls.TeardownNativeCA(p.logger)
+		// forking update-ca-certificates: a uprobe teardown that races that
+		// fork can inherit the last link reference into the child and then be
+		// killed mid-removal, leaking the breakpoint.
+		p.detachThenRemoveCA(ctx)
 		p.logger.Debug("proxy (skipListener) stopped")
 		return nil
 	}
@@ -2097,6 +2112,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
+		// Each stage of the proxy's shutdown is a step of the agent's
+		// teardown, which the CLI that stopped it reads (utils.TeardownStep).
+		utils.TeardownStep()
 		// Close the mock channel (if any in record mode) via
 		// SyncMockManager so the close is serialized with in-flight
 		// AddMock sends. A bare close(p.session.MC) here races the
@@ -2125,13 +2143,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 		p.nsSwitchMutex.Unlock()
+		utils.TeardownStep()
 		// Remove TLS uprobes (and any other hook-owned kernel state) before
-		// forking update-ca-certificates below — see the skipListener path.
-		p.runAuxTeardown(ctx)
-		// Remove this run's MITM CA from the OS trust store so trust does not
-		// persist after the run (no-op in docker/k8s mode and for a persisted
-		// per-user CA).
-		pTls.TeardownNativeCA(p.logger)
+		// forking update-ca-certificates — see the skipListener path.
+		p.detachThenRemoveCA(ctx)
 	}()
 
 	for {
@@ -2172,6 +2187,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
 				defer p.activeConns.Done()
+				// A connection's end is a step of the agent's teardown once it
+				// is stopping: the CLI that stopped it reads them as it drains
+				// (utils.TeardownStep). Before, it counts nothing anyone reads.
+				defer utils.TeardownStep()
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {

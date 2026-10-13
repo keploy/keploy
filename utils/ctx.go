@@ -31,8 +31,9 @@ var cancel context.CancelFunc
 // gives a definitive answer to "did the agent have unsent mocks at
 // the moment of shutdown" without depending on the structured logger.
 //
-// Hooks MUST be bounded, and well inside the stop grace the process is
-// given before it is killed (10s under docker and compose) — they run on
+// Hooks MUST be bounded, and well inside the stop grace the process may be
+// given before it is killed (10s under docker compose; a pod's grace period
+// under Kubernetes) — they run on
 // the signal-delivery goroutine and any blocking work delays the
 // cancellation and increases the chance of SIGKILL truncation. A hook
 // that has to do I/O bounds it itself, as the agent's replay-outcome
@@ -145,15 +146,58 @@ func init() { ResetInterruptedAgain() }
 // it, so the user can always end it.
 func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
 
-// MarkInterruptedAgain is what a second interrupt does; for tests.
+// MarkInterruptedAgain is what every interrupt after the first does; for
+// tests too.
 func MarkInterruptedAgain() {
 	l := interruptedAgain.Load()
 	l.once.Do(func() { close(l.ch) })
+	repeatInterrupts.mu.Lock()
+	repeatInterrupts.n++
+	close(repeatInterrupts.next)
+	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.mu.Unlock()
+}
+
+// repeatInterrupts counts the interrupts after the first
+// (MarkInterruptedAgain); next is closed, and replaced, at each.
+var repeatInterrupts struct {
+	mu   sync.Mutex
+	n    uint64
+	next chan struct{}
+}
+
+// RepeatInterrupts returns how many interrupts have arrived after the one
+// that stopped the run.
+func RepeatInterrupts() uint64 {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	return repeatInterrupts.n
+}
+
+// InterruptedAfter returns a channel closed once more than n interrupts have
+// arrived after the one that stopped the run (RepeatInterrupts). A stop that
+// takes RepeatInterrupts() as it begins selects on it to hear an interrupt
+// given while it runs, and not one that came before it -- a single stop
+// delivered twice among them: `sudo pkill -f keploy` signals both sudo and
+// keploy, and sudo hands its signal on to keploy too.
+func InterruptedAfter(n uint64) <-chan struct{} {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	if repeatInterrupts.n > n {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return repeatInterrupts.next
 }
 
 // ResetInterruptedAgain is for tests, which share one process across cases.
 func ResetInterruptedAgain() {
 	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
+	repeatInterrupts.mu.Lock()
+	repeatInterrupts.n = 0
+	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.mu.Unlock()
 }
 
 func NewCtx() context.Context {
@@ -264,6 +308,10 @@ func NewCtx() context.Context {
 			}
 		}
 
+		// After the hold, before the hooks and the cancel: see
+		// IgnoreHangupOnceStopping.
+		absorbHangupsIfStopping()
+
 		// Run pre-cancel hooks SYNCHRONOUSLY while live state is still
 		// readable. fmt.Fprintf to stderr inside hooks is the right
 		// choice — it goes straight to the syscall and survives even
@@ -331,14 +379,65 @@ func notifyHangups() chan os.Signal {
 
 // DieOnHangup gives SIGHUP back the action it had before NewCtx heard it:
 // death, or nothing if it was ignored as this process started. It is for a
-// process whose owner counts on a hang-up killing it: `keploy agent`. The CLI
-// closes the terminal it started an agent on to stop it
-// (startNativeAgentWithPTY in pkg/platform/http), and the enterprise
-// self-update supervisor hands its agent the SIGHUPs it gets and counts a
-// death by one as a deliberate stop. A SIGHUP that arrives between NewCtx and
+// process whose owner counts on a hang-up killing it: `keploy agent`, whose
+// terminal goes away with the user's (the CLI's PTY, an ssh session), and
+// whose enterprise self-update supervisor hands it the SIGHUPs it gets and
+// counts a death by one as a deliberate stop. A SIGHUP that arrives between NewCtx and
 // this call takes NewCtx's path, and stops the process gracefully instead.
+// Once the process is shutting down, IgnoreHangupOnceStopping takes over.
 func DieOnHangup() {
 	signal.Reset(syscall.SIGHUP)
+}
+
+// IgnoreHangupOnceStopping has a hang-up stop killing the process once its
+// shutdown has begun: the process finishes it however its terminal goes away.
+// It is for `keploy agent`, whose shutdown removes what it attached to the
+// kernel: a hang-up that killed it part way through removing a TLS uprobe
+// leaves the breakpoint in every process that maps the probed library ("failed
+// to unregister, leaking uprobe"), and loses what it was still saving. The CLI
+// that started an agent on a PTY no longer closes that terminal to stop a
+// running agent, but its own exit closes it, and so does a closed window or a
+// dropped ssh session. Before the shutdown a hang-up still kills (DieOnHangup).
+//
+// The switch is made by the root context's own cancel -- NewCtx's signal
+// handler and ExecCancel (Stop) -- just BEFORE it cancels, so nothing that
+// runs on the cancellation can be cut off by a hang-up arriving as it starts.
+// In NewCtx that is after the signal hold (SetSignalHold): while the agent
+// only waits for its recording client, nothing has been torn down yet, and a
+// hang-up still kills it. For a context ctx that ends some other way, the
+// switch is made when ctx is done.
+//
+// SIGHUP is ignored (SIG_IGN), which a program the agent starts from then on
+// inherits: the CA-restore tools its shutdown runs (keytool, certutil,
+// update-ca-certificates), which share its process group and terminal, finish
+// too instead of dying of the same hang-up part way through rewriting a trust
+// store. Programs started before the shutdown keep the default action.
+func IgnoreHangupOnceStopping(ctx context.Context) {
+	stoppingAbsorbsHangups.Store(true)
+	go func() {
+		<-ctx.Done()
+		absorbHangupsIfStopping()
+	}()
+}
+
+// stoppingAbsorbsHangups is set by IgnoreHangupOnceStopping; hangupsAbsorbed
+// once absorbHangupsIfStopping has made the switch.
+var (
+	stoppingAbsorbsHangups atomic.Bool
+	hangupsAbsorbed        atomic.Bool
+	absorbHangupsOnce      sync.Once
+)
+
+// absorbHangupsIfStopping ignores every SIGHUP from now on, when
+// IgnoreHangupOnceStopping asked for it.
+func absorbHangupsIfStopping() {
+	if !stoppingAbsorbsHangups.Load() {
+		return
+	}
+	absorbHangupsOnce.Do(func() {
+		signal.Ignore(syscall.SIGHUP)
+		hangupsAbsorbed.Store(true)
+	})
 }
 
 // Stop requires a reason to stop the server.
@@ -367,6 +466,7 @@ func Stop(logger *zap.Logger, reason string) error {
 }
 
 func ExecCancel() {
+	absorbHangupsIfStopping() // before the cancel: see IgnoreHangupOnceStopping
 	cancel()
 }
 

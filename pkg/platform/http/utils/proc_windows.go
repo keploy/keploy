@@ -75,12 +75,37 @@ func (h *PTYHandle) GetProcess() *os.Process {
 	return nil
 }
 
-// StopPTYCommand on Windows uses StopCommand since PTY is not supported.
-func StopPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+// TerminateCommand stops cmd's process tree. Windows has no SIGTERM to send
+// and keploy attaches no uprobes there, so it is StopCommand.
+func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+	return StopCommand(cmd, logger)
+}
+
+// KillAgentCommand ends cmd's process tree at once (StopCommand), now or not.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, _ bool) error {
+	return StopCommand(cmd, logger)
+}
+
+// KillPTYCommand is KillAgentCommand: Windows has no PTY.
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
 	if handle == nil || handle.cmd == nil {
 		return nil
 	}
-	return StopCommand(handle.cmd, logger)
+	return KillAgentCommand(handle.cmd, logger, now)
+}
+
+// StdinOff is always false on Windows, which has no PTY.
+func StdinOff(*PTYHandle) bool { return false }
+
+// RestoreTerminal has no terminal state to restore on Windows.
+func (h *PTYHandle) RestoreTerminal() {}
+
+// TerminatePTYCommand on Windows is TerminateCommand: PTY is not supported.
+func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil || handle.cmd == nil {
+		return nil
+	}
+	return TerminateCommand(handle.cmd, logger)
 }
 
 // ConfigureCommandForPTY configures the command's SysProcAttr for PTY execution.
@@ -141,4 +166,13 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// SetOwnProcessGroup starts cmd in a process group of its own
+// (CREATE_NEW_PROCESS_GROUP), which disables a console's Ctrl+C for it.
+func SetOwnProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 }

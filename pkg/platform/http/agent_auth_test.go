@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -339,4 +341,28 @@ func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A native agent is told where to report its teardown's progress, in a
+// directory of its start's own that only this user may write to, which its
+// stop reads to tell a teardown still making progress from one that has
+// stopped; the directory is removed once the agent has exited.
+func TestNativeAgentLaunch_TellsTheAgentWhereToReportItsTeardown(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	a := New(zap.NewNop(), nil, &config.Config{})
+	args, progress, remove := a.nativeAgentLaunch(models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797,
+		AgentURI: "http://localhost:26795/agent", Mode: models.MODE_RECORD})
+	i := slices.Index(args, "--teardown-progress-file")
+	require.GreaterOrEqual(t, i, 0, "the native agent is not told where to report its teardown: %v", args)
+	require.Less(t, i+1, len(args))
+	require.Equal(t, progress, args[i+1])
+	require.Equal(t, utils.TeardownProgressFileName, filepath.Base(progress))
+	st, err := os.Stat(filepath.Dir(progress))
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		require.Zero(t, st.Mode().Perm()&0o077, "others may write where the agent, root under sudo, reports")
+	}
+	remove()
+	_, err = os.Stat(filepath.Dir(progress))
+	require.True(t, os.IsNotExist(err), "the directory outlives the agent: %v", err)
 }

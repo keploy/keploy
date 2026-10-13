@@ -305,7 +305,10 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 }
 
 // notifyShutdown tells the agent the session is ending so connection errors are
-// logged at debug level. Bounded so an unresponsive agent can't hang teardown.
+// logged at debug level. The notification is bounded so an unresponsive agent
+// can't hang teardown; with --from-container, restoring the user's container
+// afterwards waits for the agent container to exit, or for a second Ctrl+C
+// (AgentClient.RestoreFromContainer).
 func (m *mockService) notifyShutdown() {
 	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

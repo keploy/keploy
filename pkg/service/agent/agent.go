@@ -675,17 +675,22 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	parentErrGrp.Go(func() error {
 		<-ctx.Done()
 
+		// Each stage of the teardown is a step of its progress, which the
+		// CLI that stopped this agent reads (utils.TeardownStep).
+		utils.TeardownStep()
 		proxyCtxCancel()
 		err := proxyErrGrp.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to stop the proxy")
 		}
+		utils.TeardownStep()
 
 		hookCtxCancel()
 		err = hookErrGrp.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to unload the hooks")
 		}
+		utils.TeardownStep()
 		return nil
 	})
 

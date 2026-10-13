@@ -48,6 +48,12 @@ const (
 	// of the stopped container instead, before its teardown removes it.
 	AgentOutcomeFile = "/tmp/keploy-mock-outcome.json"
 
+	// AgentTeardownProgressFile is where a containerised agent reports its
+	// teardown progress once it is stopped (utils.ReportTeardownProgress):
+	// keploy reads it out of the container to tell an agent still detaching
+	// from one that has stopped making progress, which alone it kills.
+	AgentTeardownProgressFile = "/tmp/keploy-agent-teardown.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
