@@ -21,7 +21,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,7 +86,7 @@ func deadAgentClient(t *testing.T, healthy bool) *AgentClient {
 	conf := &config.Config{}
 	conf.Agent.AgentURI = srv.URL
 	a := &AgentClient{logger: zap.NewNop(), conf: conf}
-	a.agentReached.Store(new(atomic.Bool)) // as startAgent does
+	a.run = newAgentRun() // as startAgent does
 	return a
 }
 
@@ -199,20 +198,20 @@ func TestAnAgentThatAnswersIsReady(t *testing.T) {
 		t.Fatalf("a healthy agent failed the setup: %v", err)
 	}
 	// It answered: a refused stop request is now an agent on its way out
-	// (stopAgentProcess), not one still starting.
-	if r := a.agentReached.Load(); r == nil || !r.Load() {
-		t.Fatal("an agent that answered its readiness check is not marked reached")
+	// (endAgent), not one still starting.
+	if !a.run.ready.Load() {
+		t.Fatal("an agent that answered its readiness check is not marked ready")
 	}
 }
 
-// One that never answered is not reached: stopping it signals it at once.
-func TestAnAgentThatNeverAnsweredIsNotReached(t *testing.T) {
+// One that never answered is not ready: stopping it signals it at once.
+func TestAnAgentThatNeverAnsweredIsNotReady(t *testing.T) {
 	a := deadAgentClient(t, false)
 	exited := make(chan error, 1)
 	exited <- errors.New("exit status 1")
 	_ = waitWithin(t, a, context.Background(), exited)
-	if r := a.agentReached.Load(); r != nil && r.Load() {
-		t.Fatal("an agent that never answered is marked reached")
+	if a.run.ready.Load() {
+		t.Fatal("an agent that never answered is marked ready")
 	}
 }
 

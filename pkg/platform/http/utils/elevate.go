@@ -16,8 +16,8 @@ package utils
 // Elevating anyway is not free. `sudo` prompts for a password on a machine
 // where nothing needs one, and it splits the run across two users: the client
 // and the application stay as the invoking user while the agent becomes root.
-// That asymmetry breaks things that look unrelated — StopCommand's
-// kill(-pgid) returns EPERM against a root process group, and $TMPDIR is
+// That asymmetry breaks things that look unrelated — a kill(-pgid) from the
+// client returns EPERM against a root process group, and $TMPDIR is
 // per-user on macOS, so the two halves stop agreeing on where temporary files
 // live.
 //

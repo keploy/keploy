@@ -84,8 +84,10 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			// A hang-up kills the agent, as it did before NewCtx made one
-			// stop keploy gracefully: see utils.DieOnHangup.
+			// stop keploy gracefully: see utils.DieOnHangup. Not once it is
+			// shutting down: see utils.IgnoreHangupOnceStopping.
 			utils.DieOnHangup()
+			utils.IgnoreHangupOnceStopping(ctx)
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {

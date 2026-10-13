@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,16 +14,16 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
-	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // An agent whose recording client has closed its streams stops by itself (the
 // signal that reached it too, held until then), and shuts its HTTP server: the
 // client's stop request then fails with EOF, or is refused. From an agent that
-// was up (agentReached, which stopAgentProcess checks), that is the agent on
-// its way out, not one to signal.
+// was up (agentRun.ready, which endAgent checks), that is the agent on its way
+// out, not one to signal at once.
 func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	// A server that closes the connection without answering, as a server
 	// shutting down does to a request it had not started on.
@@ -50,93 +49,98 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	}
 }
 
-// The stop of a native agent: one that answers is not signalled; one that was
-// up and is already going away is waited for, and signalled only if it does
-// not exit; one whose stop request fails otherwise, or that never answered
-// (still starting: refused, as nothing listens yet), is signalled at once.
-func TestStopAgentProcessSignalsOnlyAnAgentThatWillNotGo(t *testing.T) {
+// endAgent's decision on the CLI's stop. The agent is asked first, and one
+// that answers is not signalled. One that was up and is already going away is
+// waited for, and signalled only if it does not exit within the grace, or at
+// the user's second interrupt. One whose stop request fails otherwise, or that
+// never answered (still starting: refused, as nothing listens yet), is
+// signalled at once. A signalled agent is then waited for, never killed (the
+// terminate func stands for SIGTERM, on which it exits). One already reaped is
+// never signalled: its pid may be another process's by then.
+func TestEndAgent(t *testing.T) {
 	defer func(g time.Duration) { agentStoppingGrace = g }(agentStoppingGrace)
-
-	exited := make(chan struct{})
-	close(exited)
-	never := make(chan struct{})
 	goingAway := fmt.Errorf(`Post "http://localhost:1/agent/stop": %w`, io.EOF)
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	failed := errors.New("agent stop http 500: boom")
 	for _, tc := range []struct {
-		name     string
-		reached  bool
-		stopErr  error
-		procDone chan struct{}
-		grace    time.Duration
-		killed   bool
+		name  string
+		ask   error
+		ready bool
+		// exits: the agent exits by itself once endAgent waits for it to,
+		// before any signal; reaped: it had already exited before the stop.
+		exits, reaped bool
+		grace         time.Duration
+		interrupt     bool
+		wantSignal    bool
 	}{
-		{"it answers", true, nil, never, time.Hour, false},
-		{"it is going away, and exits", true, goingAway, exited, time.Hour, false},
-		{"it is not listening any more, and exits", true, refused, exited, time.Hour, false},
-		{"it is going away, but never exits", true, goingAway, never, 50 * time.Millisecond, true},
-		{"its stop request fails otherwise", true, errors.New("agent stop http 500: boom"), exited, time.Hour, true},
-		// Its process would exit (procDone closed): one taken for going away
-		// is waited for and not signalled.
-		{"it never answered: still starting", false, refused, exited, time.Hour, true},
+		{name: "it answers", ready: true, grace: time.Hour},
+		{name: "it answers, never answered before", grace: time.Hour},
+		{name: "it is going away, and exits", ask: goingAway, ready: true, exits: true, grace: time.Hour},
+		{name: "it is not listening any more, and exits", ask: refused, ready: true, exits: true, grace: time.Hour},
+		{name: "it is going away, but does not exit", ask: goingAway, ready: true, grace: 50 * time.Millisecond, wantSignal: true},
+		{name: "it is going away, and the user interrupts again", ask: goingAway, ready: true, grace: time.Hour, interrupt: true, wantSignal: true},
+		{name: "its stop request fails otherwise", ask: failed, ready: true, grace: time.Hour, wantSignal: true},
+		{name: "it never answered: still starting", ask: refused, grace: time.Hour, wantSignal: true},
+		{name: "it never answered, and fails otherwise", ask: failed, grace: time.Hour, wantSignal: true},
+		{name: "it was already reaped", ask: failed, ready: true, reaped: true, grace: time.Hour},
+		{name: "it was already reaped, going away", ask: goingAway, ready: true, reaped: true, grace: time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			if tc.interrupt {
+				utils.MarkInterruptedAgain()
+			}
 			agentStoppingGrace = tc.grace
-			a := &AgentClient{logger: zap.NewNop()}
-			reached := new(atomic.Bool)
-			reached.Store(tc.reached)
-			var killed atomic.Bool
-			a.stopAgentProcess(reached, func() error { return tc.stopErr }, tc.procDone, func() { killed.Store(true) })
-			if killed.Load() != tc.killed {
-				t.Fatalf("signalled=%v, want %v", killed.Load(), tc.killed)
+			core, logs := observer.New(zap.DebugLevel)
+			a := &AgentClient{logger: zap.New(core)}
+			run := newAgentRun()
+			run.ready.Store(tc.ready)
+			if tc.reaped {
+				run.exited()
+			}
+			var signalled atomic.Bool
+			terminate := func() error {
+				signalled.Store(true)
+				run.exited() // the agent exits on SIGTERM
+				return nil
+			}
+			returned := make(chan struct{})
+			if tc.exits {
+				// On its way out: it exits while endAgent waits for it, and
+				// only then, so a stop that signals before waiting is caught.
+				go func() {
+					for logs.FilterMessageSnippet("already stopping; waiting for it to exit").Len() == 0 {
+						select {
+						case <-returned:
+							return
+						case <-time.After(time.Millisecond):
+						}
+					}
+					run.exited()
+				}()
+			}
+			go func() { a.endAgent(run, 1, func() error { return tc.ask }, terminate); close(returned) }()
+			select {
+			case <-returned:
+			case <-time.After(time.Minute):
+				t.Fatal("endAgent did not return")
+			}
+			if signalled.Load() != tc.wantSignal {
+				t.Fatalf("signalled=%v, want %v", signalled.Load(), tc.wantSignal)
 			}
 		})
 	}
 }
 
-// The stop request, the grace for an agent on its way out, and the signal's
-// wait before a kill end before the recorders' teardown stops waiting on the
-// goroutine that stops the agent (30 s): otherwise an agent that hangs as it
-// goes is killed only after that wait gave up, if at all.
+// The stop request and the grace for an agent on its way out end before the
+// recorders' teardown stops waiting on the goroutine that stops the agent
+// (30 s): otherwise an agent that hangs as it goes is signalled only after
+// that wait gave up, if at all.
 func TestAgentStoppingGraceEndsBeforeTheTeardownWait(t *testing.T) {
-	if total := agentStopRequestTimeout + agentStoppingGrace + agentUtils.StopSignalWait; total >= 30*time.Second {
-		t.Fatalf("the stop request (%v), the grace (%v) and the signal's wait (%v) take %v, not under the teardown's 30 s wait",
-			agentStopRequestTimeout, agentStoppingGrace, agentUtils.StopSignalWait, total)
-	}
-}
-
-// Each agent a setup starts has not answered yet, whatever the one before it
-// did: a refused stop request to it is an agent still starting, signalled at
-// once (stopAgentProcess), not one on its way out. And the stop of the one
-// before it, which a setup retry leaves to its grace, still reads that one as
-// having answered: it is waited for, not signalled at once.
-func TestAStartedAgentIsNotReachedUntilItAnswers(t *testing.T) {
-	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
-	before := new(atomic.Bool)
-	before.Store(true) // the agent before it answered
-	a.agentReached.Store(before)
-	_, _ = a.startAgent(context.Background(), false, models.SetupOptions{})
-	if r := a.agentReached.Load(); r == nil || r.Load() {
-		t.Fatal("a new agent inherits the one before it having answered")
-	}
-	if !before.Load() {
-		t.Fatal("starting a new agent took back that the one before it answered: its stop signals it at once")
-	}
-}
-
-// An agent that has exited is not signalled: its PID may be another
-// process's by then.
-func TestAnAgentThatExitedIsNotSignalled(t *testing.T) {
-	procDone := make(chan struct{})
-	var killed atomic.Int32
-	kill := unlessExited(procDone, func() { killed.Add(1) })
-	kill()
-	if killed.Load() != 1 {
-		t.Fatal("an agent still running was not signalled")
-	}
-	close(procDone)
-	kill()
-	if killed.Load() != 1 {
-		t.Fatal("an agent that had exited was signalled")
+	if total := agentStopRequestTimeout + agentStoppingGrace; total >= 30*time.Second {
+		t.Fatalf("the stop request (%v) and the grace (%v) take %v, not under the teardown's 30 s wait",
+			agentStopRequestTimeout, agentStoppingGrace, total)
 	}
 }
 

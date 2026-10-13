@@ -27,7 +27,11 @@ const hangupHelperDir = "KEPLOY_TEST_HANGUP_HELPER"
 // test command and the agent does. It leaves in its directory:
 //
 //	ready      once it waits, whether SIGHUP is ignored
+//	holding    with KEPLOY_TEST_HANGUP_HOLD, once its signal hold waits:
+//	           whether hang-ups were absorbed by then
 //	hooks-ran  once the pre-cancel hooks have run
+//	stopping   once its shutdown has begun
+//	absorbed   as an agent, at the cancel: whether hang-ups were absorbed by then
 //	stopped    once its shutdown is done, whether it was interrupted
 func TestHangupHelper(t *testing.T) {
 	dir := os.Getenv(hangupHelperDir)
@@ -43,13 +47,66 @@ func TestHangupHelper(t *testing.T) {
 		}
 	}
 	ctx := NewCtx()
-	if os.Getenv("KEPLOY_TEST_HANGUP_AGENT") != "" {
+	agent := os.Getenv("KEPLOY_TEST_HANGUP_AGENT") != ""
+	if agent {
+		// As cli/agent.go does.
 		DieOnHangup()
+		IgnoreHangupOnceStopping(ctx)
 	}
 	RegisterPreCancelHook(func() { mark("hooks-ran", "") })
+	if agent {
+		// What the cancel finds, on both ways it is reached: the signal
+		// handler runs the pre-cancel hooks just before it, and Stop runs
+		// the cancel SetCancel installed.
+		RegisterPreCancelHook(func() { mark("absorbed", strconv.FormatBool(hangupsAbsorbed.Load())) })
+		orig := cancel
+		SetCancel(func() { mark("absorbed", strconv.FormatBool(hangupsAbsorbed.Load())); orig() })
+	}
+	if os.Getenv("KEPLOY_TEST_HANGUP_HOLD") != "" {
+		// As cli/agent.go holds the first stop signal while a recording's
+		// client still drains: here until the test says.
+		SetSignalHold(func(stopNow <-chan struct{}) {
+			mark("holding", strconv.FormatBool(hangupsAbsorbed.Load()))
+			for {
+				if _, err := os.Stat(filepath.Join(dir, "release-hold")); err == nil {
+					return
+				}
+				select {
+				case <-stopNow:
+					return
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+		})
+	}
 	mark("ready", strconv.FormatBool(signal.Ignored(syscall.SIGHUP)))
+	if os.Getenv("KEPLOY_TEST_HANGUP_STOP_API") != "" {
+		// Stopped as the agent API's /stop does (Stop), once the test says.
+		go func() {
+			for {
+				if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
+					ExecCancel()
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
 	<-ctx.Done()
-	time.Sleep(time.Second)
+	// No wait for anything: a hang-up from here on must not kill an agent.
+	mark("stopping", "")
+	if os.Getenv("KEPLOY_TEST_HANGUP_RELEASE") != "" {
+		// The shutdown lasts until the test says: through its hang-up,
+		// whatever the test's own scheduling.
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	} else {
+		time.Sleep(time.Second)
+	}
 	mark("stopped", strconv.FormatBool(Interrupted()))
 	os.Exit(0)
 }
@@ -258,5 +315,76 @@ func TestDieOnHangupLetsAHangUpKill(t *testing.T) {
 	st := r.wait()
 	if !st.Signaled() || st.Signal() != syscall.SIGHUP {
 		t.Fatalf("the run ended with %v, want it dead of SIGHUP\n%s", r.cmd.ProcessState, r.out.String())
+	}
+}
+
+// Once an agent is shutting down, a hang-up no longer kills it: it finishes
+// its shutdown, which removes what it attached to the kernel -- a hang-up that
+// killed it part way through removing a TLS uprobe leaked the breakpoint
+// (IgnoreHangupOnceStopping). The CLI that started it on a PTY can exit while
+// it shuts down, and that exit hangs it up. The hang-up is sent the moment the
+// shutdown has begun, on both ways a root context is cancelled: a signal, and
+// the agent API's stop. A signal the agent holds for its recording client
+// (SetSignalHold) has begun nothing while it waits, so hang-ups are not
+// absorbed then; they are once the hold ends, still before the cancel.
+func TestAnAgentShuttingDownSurvivesAHangUp(t *testing.T) {
+	for _, how := range []string{"signal", "signal-held", "stop-api"} {
+		t.Run(how, func(t *testing.T) {
+			catchHangups(t)
+			t.Setenv("KEPLOY_TEST_HANGUP_RELEASE", "1")
+			if how == "stop-api" {
+				t.Setenv("KEPLOY_TEST_HANGUP_STOP_API", "1")
+			}
+			if how == "signal-held" {
+				t.Setenv("KEPLOY_TEST_HANGUP_HOLD", "1")
+			}
+			r := startHangupRun(t, true)
+			if how != "stop-api" {
+				r.signal(syscall.SIGTERM)
+			} else if err := os.WriteFile(filepath.Join(r.dir, "stop"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if how == "signal-held" {
+				for !r.has("holding") {
+					select {
+					case err := <-r.exited:
+						t.Fatalf("the run ended before its signal hold: %v\n%s", err, r.out.String())
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+				if got := r.marker("holding"); got != "false" {
+					t.Errorf("hang-ups were absorbed while the agent only held the signal for its client: %q", got)
+				}
+				if r.has("stopping") {
+					t.Fatalf("the root context was cancelled during the signal hold\n%s", r.out.String())
+				}
+				if err := os.WriteFile(filepath.Join(r.dir, "release-hold"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for !r.has("stopping") {
+				select {
+				case err := <-r.exited:
+					t.Fatalf("the run ended before its shutdown began: %v\n%s", err, r.out.String())
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+			// Absorbed before the cancel, not merely before this hang-up
+			// arrived: anything that runs on the cancellation is covered.
+			if got := r.marker("absorbed"); got != "true" {
+				t.Errorf("hang-ups were not absorbed by the time the root context was cancelled: %q", got)
+			}
+			r.signal(syscall.SIGHUP)
+			if err := os.WriteFile(filepath.Join(r.dir, "release"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			st := r.wait()
+			if st.Signaled() {
+				t.Fatalf("a hang-up killed the agent during its shutdown (%v)\n%s", r.cmd.ProcessState, r.out.String())
+			}
+			if got := r.marker("stopped"); got != strconv.FormatBool(how != "stop-api") {
+				t.Fatalf("the agent's shutdown did not finish as it should: stopped = %q\n%s", got, r.out.String())
+			}
+		})
 	}
 }
