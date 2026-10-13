@@ -2536,6 +2536,17 @@ func exportMockScopeEnv(logger *zap.Logger, opts models.SetupOptions, agentPort 
 	if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
 		logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
 	}
+	// A claim marker inherited from an enclosing keploy run (this keploy was
+	// started by a test of another run) names a process of that run: left
+	// in place, this run's test processes would take themselves for its
+	// helpers and never claim, and their tests would pass unjudged. Only
+	// the proven wire has claims; with the switch off the environment is
+	// left as it was.
+	if provenswitch.On() {
+		if err := os.Unsetenv(models.TestPIDEnv); err != nil {
+			logger.Debug("failed to remove "+models.TestPIDEnv, zap.Error(err))
+		}
+	}
 }
 
 func (a *AgentClient) getApp() (*app.App, error) {
@@ -3156,9 +3167,17 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flag
 // GetScopeWindows fetches the per-test scope windows the wrapped runner reported
 // during a `keploy mock record` session (via /agent/scope/*), so the CLI can
 // correlate captured mocks into mappings.yaml. A missing endpoint (older agent)
-// returns an empty slice, degrading to suite-level recording.
+// returns nil, degrading to suite-level recording; under the proven switch it
+// is an error. Under the switch the read is the run's last (?final=1), which
+// closes the run: call it only once the test command has exited.
 func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	if provenswitch.On() {
+		// Every read the CLI makes is the run's last, once its command
+		// exited: the agent fails a test still open. With the switch off
+		// the read is the one keploy made before the switch.
+		url += "?final=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
@@ -3172,6 +3191,12 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 		res.Body.Close()
 	}()
 	if res.StatusCode == http.StatusNotFound {
+		// An agent without the scope API. Under the proven switch what each
+		// test did is keploy's verdict, so an agent that cannot say is an
+		// error, never "no tests".
+		if provenswitch.On() {
+			return nil, errors.New("this keploy agent does not report what each test did (its scope windows answered 404); run the agent of this keploy version")
+		}
 		return nil, nil
 	}
 	if res.StatusCode != http.StatusOK {
@@ -3212,6 +3237,44 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("set table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// PushProvenTable hands the agent, under the proven switch, the per-test
+// table and each key's pool slice (models.ScopeTableReq.Pool) in one
+// request. Every answer but 200 is an error: a replay judged per test must
+// not run on an agent that serves its tests and pool otherwise.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string) (retErr error) {
+	if pool == nil {
+		pool = map[string][]string{}
+	}
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			t, p := maps.Clone(table), maps.Clone(pool)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-table request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push scope table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
@@ -3288,6 +3351,48 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("scope gate returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// PushScopeSkips hands the agent the proven model's gate: the tests to skip,
+// by ID, each with its reason; an empty map skips nothing. Made again on a
+// restarted agent, like the scope gate. Any answer but 200 is a failure: a
+// replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := maps.Clone(skip)
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create the scope-gate request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push the tests to skip: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	answer, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent refused the tests to skip: status %d: %s", res.StatusCode, string(answer))
+	}
+	var ack models.ScopeGateResp
+	if err := json.Unmarshal(answer, &ack); err != nil || ack.V != models.ScopeProtocolVersion {
+		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without KEPLOY_PROVEN=1", string(answer))
+	}
+	if ack.Skips != len(skip) {
+		return fmt.Errorf("the agent applies %d of the %d tests to skip", ack.Skips, len(skip))
 	}
 	return nil
 }

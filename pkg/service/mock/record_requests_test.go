@@ -2,6 +2,8 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -212,8 +216,24 @@ func TestStartupMocks(t *testing.T) {
 		{name: "mock-3", ts: at(150)},
 		{name: "mock-4", ts: at(250)},
 	}
-	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}, startupMocks(windows, mocks))
-	require.Len(t, startupMocks(nil, mocks), 5)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2"}, {Name: "mock-4"}}, startupMocks(windows, mocks, nil))
+	require.Len(t, startupMocks(nil, mocks, nil), 5)
+
+	// Under the proven wire each pool mock carries the key of the claim it
+	// was made under (design v14 §5.2); one made before any claim has none.
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(200)}}
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "users"}}, startupMocks(windows, mocks, claims))
+}
+
+func TestClaimKeyAt(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	claims := []models.ScopeWindow{{Claim: "a", Start: at(0)}, {Claim: "b", Start: at(10)}}
+	require.Equal(t, "", claimKeyAt(claims, at(-1)))
+	require.Equal(t, "a", claimKeyAt(claims, at(0)), "a call at the claim's own instant is its")
+	require.Equal(t, "a", claimKeyAt(claims, at(9)))
+	require.Equal(t, "b", claimKeyAt(claims, at(10)))
+	require.Equal(t, "b", claimKeyAt(claims, at(1000)), "until the next claim")
+	require.Equal(t, "", claimKeyAt(nil, at(5)))
 }
 
 func stepsMarks() []models.ScopeWindow {
@@ -496,4 +516,192 @@ func TestRecordRequestsNeedNoAppPort(t *testing.T) {
 	opts, read := instr.setup()
 	require.True(t, opts.RecordRequests, "the tests' calls to the app are found at connect time, so no port is needed")
 	require.True(t, read)
+}
+
+// Under the proven switch a record leaves what each test did against real
+// infra, kept or not: a runner that failed makes the record restore the set
+// (here, remove a fresh one), and the per-test results are written after
+// that restore, so they survive it. With the switch off nothing is written.
+// A record whose command failed leaves its per-test results, and under the
+// switch keeps its recording: judging commits it test by test, keeping the
+// previous recording of the test that failed. With the switch off nothing is
+// kept, as before.
+func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			passed, failed := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
+			passed.Outcome, failed.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomeFailed
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
+				windows: []models.ScopeWindow{passed, failed}}
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			_ = svc.Record(context.Background())
+			set := (&mockService{config: cfg}).setName()
+			got, err := ReadRecordTestsReceipt(dir, set)
+			require.NoError(t, err)
+			if !proven {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got, "the per-test results were not left for judging")
+			require.Equal(t, []TestReceipt{
+				{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
+				{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+			}, got.Tests)
+			_, err = os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+			require.NoError(t, err, "under the switch the recording is kept for judging to commit test by test")
+		})
+	}
+}
+
+// Under the switch a record that cannot read what each test did keeps
+// nothing, and fails saying so; with it off the record keeps its mocks with
+// no per-test windows, as before the switch existed.
+func TestARecordThatCannotReadItsTestsKeepsNothing(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})}
+			instr.windowsErr = errors.New("connection reset by peer")
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			err := svc.Record(context.Background())
+			set := (&mockService{config: cfg}).setName()
+			_, statErr := os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+			if !proven {
+				require.NoError(t, err)
+				require.NoError(t, statErr, "the switch off: the mocks are kept")
+				return
+			}
+			require.ErrorContains(t, err, "keploy could not read what each test did from its agent, so nothing was kept")
+			require.True(t, os.IsNotExist(statErr), "a record that could not read its tests kept a recording")
+		})
+	}
+}
+
+// Under the switch a record whose tests made no call keeps them, as tests
+// with no mocks: judging needs their (empty) recordings. With the switch off
+// the existing set is left unchanged, as before.
+func TestARecordOfTestsWithoutCallsKeepsThemUnderTheSwitch(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			w := mark("orders::TestPure", 0, 10*time.Millisecond)
+			w.Outcome, w.Dir = models.ScopeOutcomePassed, "orders"
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+				windows: []models.ScopeWindow{w}}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			require.NoError(t, svc.Record(context.Background()))
+			set := (&mockService{config: cfg}).setName()
+			raw, err := os.ReadFile(filepath.Join(dir, set, "mappings.yaml"))
+			if !proven {
+				require.True(t, os.IsNotExist(err), "the switch off: a record without calls keeps nothing")
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, string(raw), "orders::TestPure")
+		})
+	}
+}
+
+// judgedBuild stands for a build that judges what the record keeps.
+func judgedBuild(t *testing.T) {
+	t.Helper()
+	JudgeRecords()
+	t.Cleanup(func() { recordsJudged.Store(false) })
+}
+
+// Under the switch, in a build no judge runs in, a failed record keeps
+// nothing, as before the switch: no one would commit it test by test, and
+// the previous recording must not be lost.
+func TestAFailedRecordNoOneJudgesKeepsNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	failed := mark("orders::TestB", 0, 10*time.Millisecond)
+	failed.Outcome = models.ScopeOutcomeFailed
+	instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
+		windows: []models.ScopeWindow{failed}}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	_ = svc.Record(context.Background())
+	set := (&mockService{config: cfg}).setName()
+	_, err := os.Stat(filepath.Join(dir, set, "mocks.yaml"))
+	require.True(t, os.IsNotExist(err), "a record no one judges kept a failed run's recording")
+	require.NoDirExists(t, filepath.Join(dir, set), "the fresh set's folder came back")
+}
+
+// Under the proven switch a test ID that ran more than once is retried: its
+// last attempt is its recording, failed if any attempt failed, and the calls
+// of its earlier attempts are no test's and no pool's.
+func TestFoldRetries(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "o::TestA", Start: at(0), End: at(10), Outcome: models.ScopeOutcomeFailed},
+		{Name: "o::TestB", Start: at(10), End: at(20), Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestA", Start: at(20), End: at(30), Outcome: models.ScopeOutcomePassed},
+	}
+	kept, earlier, retried := foldRetries(windows)
+	require.Equal(t, map[string]int{"o::TestA": 2}, retried)
+	require.Len(t, kept, 2)
+	require.Equal(t, "o::TestB", kept[0].Name)
+	require.Equal(t, at(20), kept[1].Start, "the last attempt is the recording")
+	require.Equal(t, models.ScopeOutcomeFailed, kept[1].Outcome, "failed if any attempt failed")
+	require.Equal(t, []models.ScopeWindow{windows[0]}, earlier)
+
+	mocks := []capturedMock{{name: "mock-0", ts: at(5)}, {name: "mock-1", ts: at(25)}, {name: "mock-2", ts: at(35)}}
+	require.Equal(t, []models.MockEntry{{Name: "mock-2"}}, startupMocks(kept, withoutRetries(mocks, earlier), nil),
+		"an earlier attempt's call is in no pool")
+
+	_, _, none := foldRetries(windows[:2])
+	require.Empty(t, none)
+
+	// An earlier attempt's subtests go with it.
+	withSubs := append([]models.ScopeWindow{}, windows...)
+	withSubs = append(withSubs,
+		models.ScopeWindow{Name: "o::TestA/sub", Start: at(2), End: at(8)},
+		models.ScopeWindow{Name: "o::TestA/sub", Start: at(22), End: at(28)})
+	kept, earlier, _ = foldRetries(withSubs)
+	require.Len(t, earlier, 2)
+	require.Equal(t, at(2), earlier[1].Start)
+	var subs []time.Time
+	for _, w := range kept {
+		if w.Name == "o::TestA/sub" {
+			subs = append(subs, w.Start)
+		}
+	}
+	require.Equal(t, []time.Time{at(22)}, subs)
 }

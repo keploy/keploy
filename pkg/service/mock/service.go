@@ -121,6 +121,13 @@ type SetPusher interface {
 	PushSetTable(ctx context.Context, root string, sets map[string]models.SetTable) error
 }
 
+// ProvenTablePusher is the Instrumentation extension a replay under the
+// proven switch needs: it hands the agent the per-test table and each key's
+// pool slice (models.ScopeTableReq.Pool) in one request.
+type ProvenTablePusher interface {
+	PushProvenTable(ctx context.Context, table, pool map[string][]string) error
+}
+
 type MappingReader interface {
 	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
 }

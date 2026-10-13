@@ -69,6 +69,11 @@ type composeInstr struct {
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
+	// pool is the pool slices the last proven table push sent.
+	pool map[string][]string
+	// windows is what the agent answers the windows read with.
+	windows []models.ScopeWindow
+
 	consumedMocks []models.MockState
 	consumedErr   error
 	mockErrors    []models.UnmatchedCall
@@ -81,6 +86,9 @@ type composeInstr struct {
 	// agentFailure is what the agent's container says about how it stopped
 	// (ComposeAgentFailureReader); nil: it outlived the app.
 	agentFailure func() error
+	// windowsErr is what reading the per-test windows (ScopeReader) fails
+	// with; nil: the run had no per-test windows.
+	windowsErr error
 
 	mu         sync.Mutex
 	events     []string
@@ -193,6 +201,20 @@ func (f *composeInstr) released() bool {
 		}
 	}
 	return false
+}
+
+func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	return f.windows, f.windowsErr
+}
+
+// PushScopeTable takes the per-test table (ScopePusher).
+func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
+
+// PushProvenTable takes the per-test table and the pool slices
+// (ProvenTablePusher), and keeps the slices.
+func (f *composeInstr) PushProvenTable(_ context.Context, _, pool map[string][]string) error {
+	f.pool = pool
+	return nil
 }
 
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {

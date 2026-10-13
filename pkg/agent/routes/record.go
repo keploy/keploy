@@ -99,6 +99,14 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Post("/replay/gate", a.HandleScopeGate)
+		// The proven wire's instance claim (scope_proven.go): a test
+		// process's keploy integration claims the run before its first test.
+		// Every method is routed to it, so with the switch off the path is
+		// the plain 404 it was before the wire existed.
+		r.HandleFunc("/instance", a.HandleInstance)
+		// What an integration refused, for the run's verdict to name
+		// (scope_proven.go). The plain 404 with the switch off.
+		r.HandleFunc("/refusal", a.HandleRefusal)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)

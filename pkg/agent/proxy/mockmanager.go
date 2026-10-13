@@ -112,6 +112,11 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+	// servedCount counts, per mock name, every time the mock answered a
+	// request this session, reset with consumedPersistent. A mock that may
+	// answer more than once keeps its first-use timestamp and its usage in
+	// consumedPersistent, so only a count tells that it answered again.
+	servedCount map[string]uint64
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -374,6 +379,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		revByKind:           make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
 		consumedPersistent:  make(map[string]models.MockState),
+		servedCount:         make(map[string]uint64),
 		connectionTrees:     make(map[string]*TreeDb),
 		connectionLastTs:    make(map[string]time.Time),
 		sweeperStop:         make(chan struct{}),
@@ -532,6 +538,9 @@ func (m *MockManager) ResetForReplaySession() {
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
+	}
+	if m.servedCount != nil {
+		m.servedCount = make(map[string]uint64)
 	}
 	m.consumedMu.Unlock()
 
@@ -3052,8 +3061,23 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if m.consumedPersistent != nil {
 		m.consumedPersistent[mock.Name] = mock
 	}
+	if m.servedCount != nil {
+		m.servedCount[mock.Name]++
+	}
 	m.consumedMu.Unlock()
 	return nil
+}
+
+// ServedCounts returns a copy of how many times each mock answered a request
+// this session. Never drained.
+func (m *MockManager) ServedCounts() map[string]uint64 {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]uint64, len(m.servedCount))
+	for k, v := range m.servedCount {
+		out[k] = v
+	}
+	return out
 }
 
 // GetConsumedMocks returns and drains the list of mocks that were consumed

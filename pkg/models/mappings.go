@@ -19,6 +19,11 @@ type MockEntry struct {
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	// Key is, for a start-up (pool) mock recorded under the proven switch,
+	// the key of the claim active when it was recorded: replay serves it
+	// only while a test process of that key holds the run and no test is
+	// open. Empty means PoolKeyNone.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
