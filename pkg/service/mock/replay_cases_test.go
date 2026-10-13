@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -279,14 +278,6 @@ func TestPairCasesPrefersTheSameQueryWhenACallIsNotMade(t *testing.T) {
 	require.True(t, out[1].Passed, "the call that was made is compared with its own recording")
 }
 
-func TestFailScanKeepsTheTopLevelTestsTheRunnerFailed(t *testing.T) {
-	f := &failScan{}
-	for _, chunk := range []string{"=== RUN   TestA\n--- FAIL: Te", "stA (0.00s)\n    --- FAIL: TestA/sub (0.00s)\n--- PASS: TestB (0.00s)\n", "--- FAIL: TestC (1.20s)\n--- FAIL: TestA (0.00s)\nFAIL\n"} {
-		_, _ = f.Write([]byte(chunk))
-	}
-	require.Equal(t, []string{"TestA", "TestC"}, f.list())
-}
-
 func TestReportMissesNamesTheTestOnce(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
 	m := &mockService{logger: zap.New(core)}
@@ -524,18 +515,6 @@ func TestAnInterruptedReplayNamesItsMisses(t *testing.T) {
 	m = &mockService{logger: zap.New(core), instrumentation: &missReader{err: context.DeadlineExceeded}}
 	m.reportInterruptedMisses(ctx, false)
 	require.Equal(t, 1, logs.FilterMessageSnippet("--debug").Len())
-}
-
-// A line longer than the scanner keeps is dropped whole: text inside it that
-// looks like a FAIL line is not one.
-func TestFailScanDropsAnOverlongLine(t *testing.T) {
-	f := &failScan{}
-	// One write longer than the cap whose last maxFailScanLine bytes begin
-	// with a FAIL-shaped text: keeping that tail would read it as a line.
-	inside := "--- FAIL: TestInside (0.00s) "
-	_, _ = f.Write([]byte(strings.Repeat("x", 10) + inside + strings.Repeat("y", maxFailScanLine-len(inside))))
-	_, _ = f.Write([]byte(" still the same long line\n--- FAIL: TestReal (0.00s)\n"))
-	require.Equal(t, []string{"TestReal"}, f.list())
 }
 
 // An --on-miss record run appends mocks to the set, naming each past the

@@ -1,11 +1,9 @@
 package mock
 
 import (
-	"bytes"
 	"context"
 	"net/url"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -52,7 +50,6 @@ type replayDetail struct {
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
-	failed   []string
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
@@ -436,56 +433,4 @@ func ranTests(windows []models.ScopeWindow) []RanTest {
 		}
 	}
 	return out
-}
-
-type failScan struct {
-	mu     sync.Mutex
-	rest   []byte
-	failed []string
-	// overlong is set while the line being read passed maxFailScanLine.
-	overlong bool
-}
-
-// maxFailScanLine bounds the partial line failScan keeps between writes.
-const maxFailScanLine = 64 << 10
-
-func (f *failScan) Write(p []byte) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.rest = append(f.rest, p...)
-	defer func() {
-		// A `--- FAIL:` line is short; a runner writing a long line with no
-		// newline must not grow this buffer without bound. Drop the partial
-		// line and the rest of it, so no text inside it is read as a line.
-		if len(f.rest) > maxFailScanLine {
-			f.rest, f.overlong = nil, true
-		}
-	}()
-	for {
-		i := bytes.IndexByte(f.rest, '\n')
-		if i < 0 {
-			break
-		}
-		line := string(f.rest[:i])
-		f.rest = f.rest[i+1:]
-		if f.overlong {
-			f.overlong = false
-			continue
-		}
-		if !strings.HasPrefix(line, "--- FAIL: ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 || strings.Contains(fields[2], "/") || slices.Contains(f.failed, fields[2]) {
-			continue
-		}
-		f.failed = append(f.failed, fields[2])
-	}
-	return len(p), nil
-}
-
-func (f *failScan) list() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.failed...)
 }

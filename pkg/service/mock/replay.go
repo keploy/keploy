@@ -277,17 +277,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    only once the app is fully down (its errgroup Wait is deferred), and
 	//    the sender is the goroutine running exactly that Run.
 	var appErr models.AppError
-	scan := &failScan{}
 	if composeAppExit != nil {
-		// The compose runner was started at step 2, on another goroutine:
-		// its output is not scanned (ReplayOutcome.Failed stays empty).
 		appErr = <-composeAppExit
 	} else {
-		// Set before Run, which starts the runner and waits for it, and
-		// cleared after; nothing else reads it in between.
-		utils.RunnerOut = scan
 		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
-		utils.RunnerOut = nil
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
@@ -339,7 +332,6 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
-		failed:   scan.list(),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail)
 	missed, missesKnown := counts.missed, counts.missed >= 0
@@ -1011,10 +1003,6 @@ type ReplayOutcome struct {
 	// Tests is each top-level test the replay reached, once, gated ones
 	// included (see ranTests).
 	Tests []RanTest
-	// Failed names the top-level tests the runner printed `--- FAIL:` for.
-	// Best-effort: it is read from the runner's stdout as keploy starts it, so
-	// it is empty under compose and on Windows, and for `go test -json`.
-	Failed []string
 }
 
 // RanTest is one top-level test a replay reached: its name, the set (folder)
@@ -1177,7 +1165,6 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				Starts:   startsByTest(detail.windows, detail.starts),
 				Sets:     ranSets(detail.windows),
 				Tests:    ranTests(detail.windows),
-				Failed:   detail.failed,
 			})
 		}
 	}
