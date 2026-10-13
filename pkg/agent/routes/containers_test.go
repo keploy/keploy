@@ -1,8 +1,11 @@
 package routes
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -10,6 +13,18 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.uber.org/zap"
 )
+
+// oneContainer resolves every destination to one postgres container per
+// destination port: an agent that reads Docker itself.
+type oneContainer struct{}
+
+func (oneContainer) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return containerkey.Container{ID: fmt.Sprint(dst.Port()), Image: "postgres:16", Port: 5432}, true, nil
+}
+
+func (oneContainer) Bind(context.Context)               {}
+func (oneContainer) Watch(context.Context, *zap.Logger) {}
+func (oneContainer) Endpoint() string                   { return "unix:///fake.sock" }
 
 // A docker-mode agent says it takes the CLI's container list and names
 // container destinations from it; an agent that reads Docker itself says

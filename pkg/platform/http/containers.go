@@ -43,7 +43,7 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 	uri := a.conf.Agent.AgentURI
 	v, ok := containerPushers.Load(uri)
 	if !ok {
-		takes, older, err := a.agentTakesContainers(ctx)
+		takes, older, err := a.agentTakesContainers(ctx, uri)
 		if err != nil {
 			// The session request that follows meets the same agent and
 			// says what is wrong with it.
@@ -58,7 +58,10 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 			}
 			return
 		}
-		v, _ = containerPushers.LoadOrStore(uri, containerkey.NewPusher(a.postContainers, a.conf.KeployContainer))
+		// The pusher gives its lists to the agent at uri, the one it was
+		// made for, whatever this client is set up for later.
+		post := func(ctx context.Context, s containerkey.Snapshot) error { return a.postContainers(ctx, uri, s) }
+		v, _ = containerPushers.LoadOrStore(uri, containerkey.NewPusher(post, a.conf.KeployContainer))
 	}
 	p, ok := v.(*containerkey.Pusher)
 	if !ok {
@@ -70,11 +73,11 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 	}
 }
 
-// agentTakesContainers asks the agent whether it names container
+// agentTakesContainers asks the agent at uri whether it names container
 // destinations from a list its client gives it, and whether it predates
 // container keys (it has no such route).
-func (a *AgentClient) agentTakesContainers(ctx context.Context) (takes, older bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/containers", nil)
+func (a *AgentClient) agentTakesContainers(ctx context.Context, uri string) (takes, older bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri+"/containers", nil)
 	if err != nil {
 		return false, false, err
 	}
@@ -95,13 +98,13 @@ func (a *AgentClient) agentTakesContainers(ctx context.Context) (takes, older bo
 	return false, false, fmt.Errorf("the agent answered %s", res.Status)
 }
 
-// postContainers gives the agent a container list.
-func (a *AgentClient) postContainers(ctx context.Context, s containerkey.Snapshot) error {
+// postContainers gives the agent at uri a container list.
+func (a *AgentClient) postContainers(ctx context.Context, uri string, s containerkey.Snapshot) error {
 	body, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+"/containers", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri+"/containers", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

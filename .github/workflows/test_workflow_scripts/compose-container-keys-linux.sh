@@ -65,7 +65,7 @@ PY
 # The app: answers each GET with its dependency's answer for the same path.
 # Under the switch (LISTED set) it first waits for keploy's CLI to say, at
 # Debug, that it gave the agent a container list with the dependency (LISTED,
-# its container name) in it, reading the run's log (KEPLOY_LANE_LOG, in /w) in
+# its container name, quoted as the line lists it) in it, reading the run's log (KEPLOY_LANE_LOG, in /w) in
 # whole lines: the dependency starts a moment before the app, and without the
 # wait the lane would assert that start race, not the keys. The dependency may
 # not listen yet either: /warmup is retried until it answers (the job's
@@ -83,7 +83,7 @@ def listed():
                 continue
             *lines, buf = (buf + chunk).split(b"\n")
             for line in lines:
-                if b"gave keploy's agent the list" in line and LISTED.encode() in line:
+                if b"gave keploy's agent the list" in line and b'"%s"' % LISTED.encode() in line:
                     return
 if LISTED:
     listed()

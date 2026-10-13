@@ -249,8 +249,10 @@ type Pusher struct {
 
 	mu sync.Mutex
 	// alive is the context of the session the index is read for and of its
-	// change loop; loopDone closes when that loop has ended. sentGen is the
-	// count of changes the agent was last given. logger is the last Push's.
+	// change loop; loopDone closes when that loop has ended (one loop at a
+	// time: a new session's starts after the last one's ended). sentGen is
+	// the count of changes the agent was last given. logger is the last
+	// Push's.
 	alive    context.Context
 	loopDone chan struct{}
 	sentGen  uint64
@@ -279,6 +281,15 @@ func NewPusher(post func(context.Context, Snapshot) error, agentContainer string
 func (p *Pusher) Push(ctx context.Context, logger *zap.Logger) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.alive != nil && p.alive.Err() != nil && p.loopDone != nil {
+		// The last session's change loop ends with its context, which has
+		// ended: wait for it outside p.mu, which it may be waiting for, so
+		// the new session's loop is the only one.
+		done := p.loopDone
+		p.mu.Unlock()
+		<-done
+		p.mu.Lock()
+	}
 	p.logger = logger
 	fresh := p.alive == nil || p.alive.Err() != nil
 	if fresh {
@@ -321,8 +332,8 @@ func (p *Pusher) send(ctx context.Context, force bool) error {
 }
 
 // loop gives the agent each change while its session lasts. An ended
-// session's loop never sends, and passes on a change it took to the next
-// session's loop, which may already run: no change is lost to it.
+// session's loop never sends: the next session's Push gives the agent the
+// whole list before that session's loop starts.
 func (p *Pusher) loop(ctx context.Context, logger *zap.Logger, done chan struct{}) {
 	defer close(done)
 	for {
@@ -331,10 +342,6 @@ func (p *Pusher) loop(ctx context.Context, logger *zap.Logger, done chan struct{
 			p.mu.Lock()
 			if ctx.Err() != nil {
 				p.mu.Unlock()
-				select {
-				case p.changed <- struct{}{}:
-				default: // a change is told already
-				}
 				return
 			}
 			err := p.send(ctx, false)
@@ -342,7 +349,8 @@ func (p *Pusher) loop(ctx context.Context, logger *zap.Logger, done chan struct{
 			if err != nil && ctx.Err() == nil && logger != nil {
 				// The next change, the next session start or the agent's
 				// restart gives it again.
-				logger.Debug("could not give keploy's agent the container list", zap.Error(err))
+				logger.Warn("keploy could not give its agent the list of the Docker daemon's containers: until it does, the agent names container destinations from the last list it was given",
+					zap.Error(err), zap.String("next_step", "check that keploy's agent is up; the next change, session start or agent restart gives it the list again"))
 			}
 		case <-ctx.Done():
 			return

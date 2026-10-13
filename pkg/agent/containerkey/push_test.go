@@ -20,10 +20,11 @@ import (
 // index does: a container's IPs, and a published port reached at one of the
 // host's addresses (the bridge gateway the app container sees). Its loopback
 // is the app container's own, so a published port is not reached there, not
-// even one bound to the host's 127.0.0.1.
+// even one bound to the host's 127.0.0.1, and not at an unspecified address,
+// though the host's own addresses, as the CLI reads them, include loopback.
 func TestAPushedSnapshotNamesAsTheIndexDoes(t *testing.T) {
 	f := testcontainers()
-	r, _ := watching(t, f, "172.17.0.1", "10.0.0.5")
+	r, _ := watching(t, f, "127.0.0.1", "::1", "172.17.0.1", "10.0.0.5")
 	s, _, ok := r.snapshot("")
 	if !ok || s.Endpoint != "unix:///var/run/docker.sock" {
 		t.Fatalf("snapshot = %+v, %v", s, ok)
@@ -37,7 +38,7 @@ func TestAPushedSnapshotNamesAsTheIndexDoes(t *testing.T) {
 			t.Errorf("pushed Lookup(%s) = %+v, %v, %v; want %+v", dst, got, ok, err, want)
 		}
 	}
-	for _, dst := range []string{"127.0.0.1:49153", "[::1]:49153", "127.0.0.1:49200", "203.0.113.7:49153"} {
+	for _, dst := range []string{"127.0.0.1:49153", "[::1]:49153", "127.0.0.1:49200", "0.0.0.0:49153", "[::]:49153", "203.0.113.7:49153"} {
 		if got, ok, _ := p.Lookup(netip.MustParseAddrPort(dst)); ok {
 			t.Errorf("pushed Lookup(%s) = %+v; the app container's loopback is its own", dst, got)
 		}

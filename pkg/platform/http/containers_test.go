@@ -88,6 +88,30 @@ func TestPushContainersGivesATakingAgentItsList(t *testing.T) {
 	}
 }
 
+// A pusher gives its lists to the agent it was made for, even after its
+// client is set up for another agent: that agent's own pusher, which leaves
+// that agent's own container out, gives it its lists.
+func TestAPusherGivesItsListsToItsOwnAgent(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	uri, _, got := standInContainersAgent(t, true)
+	t.Cleanup(func() { containerPushers.Delete(uri) })
+	other, _, gotOther := standInContainersAgent(t, true)
+	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: uri}})
+	a.pushContainers(t.Context())
+	<-got
+	a.conf.Agent.AgentURI = other // set up for another agent
+	v, ok := containerPushers.Load(uri)
+	if !ok {
+		t.Fatal("no pusher for the first agent")
+	}
+	if err := v.(*containerkey.Pusher).Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(gotOther) != 0 {
+		t.Fatalf("the first agent's pusher gave %d lists to it and %d to the other agent", len(got), len(gotOther))
+	}
+}
+
 // An agent that reads Docker itself is asked once and given nothing; without
 // the switch nothing is asked at all.
 func TestPushContainersLeavesOtherAgentsAlone(t *testing.T) {
@@ -117,7 +141,7 @@ func TestPostContainersReportsARefusal(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL + "/agent"}})
-	if err := a.postContainers(t.Context(), containerkey.Snapshot{}); err == nil {
+	if err := a.postContainers(t.Context(), a.conf.Agent.AgentURI, containerkey.Snapshot{}); err == nil {
 		t.Fatal("a refused list was taken for given")
 	}
 }

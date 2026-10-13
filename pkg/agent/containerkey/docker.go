@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -592,11 +593,17 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	if r.cur != st || st.err != nil || st.seq[e.id] != seq {
 		return false
 	}
-	defer r.notify() // the CLI pushes what changed to its docker-mode agent
+	// The CLI pushes what changed to its docker-mode agent (notify): a
+	// container dropped that the index never held changes nothing.
+	had := st.images[e.id] != ""
 	st.drop(e.id)
 	if e.image == "" {
+		if had {
+			r.notify()
+		}
 		return true
 	}
+	defer r.notify()
 	st.images[e.id] = e.image
 	st.names[e.id] = e.name
 	for _, a := range e.ips {
@@ -734,7 +741,7 @@ func (r *dockerIndex) refreshLocal(st *watchState) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cur == st {
+	if r.cur == st && !maps.Equal(st.local, local) {
 		st.local = local
 		r.notify()
 	}
@@ -801,13 +808,16 @@ func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	if id, ok := st.byIP[ip]; ok {
 		return Container{ID: id, Image: st.images[id], Port: dst.Port()}, true
 	}
-	// A loopback destination is this host's only where the index is read on
-	// the host; in a docker-mode agent it is the app container's own, which
-	// no published port is bound to.
-	hostLoopback := st.loopbackIsHost || !ip.IsLoopback()
-	onHost := (st.loopbackIsHost && ip.IsLoopback()) || st.local[ip]
+	// A loopback or unspecified destination is this host only where the
+	// index is read on the host. In a docker-mode agent it is the app
+	// container's own, which no published port is bound to, whatever the
+	// host's own addresses (loopback among them) say.
+	if !st.loopbackIsHost && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return Container{}, false
+	}
+	onHost := ip.IsLoopback() || st.local[ip]
 	for _, b := range st.published[dst.Port()] {
-		if (b.ip == ip && hostLoopback) || (onHost && b.ip.IsUnspecified() && b.ip.Is4() == ip.Is4()) {
+		if b.ip == ip || (onHost && b.ip.IsUnspecified() && b.ip.Is4() == ip.Is4()) {
 			return Container{ID: b.id, Image: st.images[b.id], Port: b.port}, true
 		}
 	}
