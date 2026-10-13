@@ -1794,9 +1794,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
 
 	// Reaped by a goroutine of its own, outside the group: a caller waiting on
-	// the group is let go by a second interrupt (awaitAgentExit) while the
-	// agent finishes its shutdown; one given while keploy waits for the
-	// agent also has the stop kill it (stopWatch).
+	// the group is let go by an interrupt given once the stop has begun
+	// (awaitAgentExit) while the agent finishes its shutdown; one given while
+	// keploy waits for the agent also has the stop kill it (stopWatch).
 	reaped := make(chan error, 1)
 	go func() {
 		defer utils.Recover(a.logger)
@@ -2202,20 +2202,23 @@ func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 }
 
 // awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
-// the stop has begun (ctx is done), the user's second interrupt (utils.StopNow:
-// one after keploy said it would stop at once, not a copy of the first) lets
-// the group go -- and with it a caller waiting on the group -- while the agent
-// finishes its shutdown on its own; ok is false then.
+// the stop has begun (ctx is done), an interrupt that comes after it lets the
+// group go -- and with it a caller waiting on the group -- while the agent
+// finishes its shutdown on its own; ok is false then. One that came before is
+// not counted (utils.InterruptedAfter): a recording cancels ctx only once its
+// drains are done, long after any copy of the stop's own signal (sudo hands
+// one on when a signal reaches both it and keploy) has come.
 func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, pid int) (err error, ok bool) {
 	select {
 	case err = <-reaped:
 		return err, true
 	case <-ctx.Done():
 	}
+	again := utils.InterruptedAfter(utils.RepeatInterrupts())
 	select {
 	case err = <-reaped:
 		return err, true
-	case <-utils.StopNow():
+	case <-again:
 		a.logger.Warn("Stopped waiting for the keploy agent; it is still shutting down on its own",
 			zap.Int("pid", pid))
 		return nil, false

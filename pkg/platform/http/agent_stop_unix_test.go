@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -33,7 +34,9 @@ import (
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
 
 // hangBound turns a regression that would hang a test into a failure. It is
@@ -686,9 +689,11 @@ func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 }
 
 // awaitAgentExit: the group waits for the agent's exit, and once the stop has
-// begun the user's second interrupt lets the group go, not the agent. Only one
-// after keploy said it would stop at once (utils.OfferStopNow): a copy of the
-// stop itself, which sudo hands on when a signal reaches both, is not one.
+// begun an interrupt the user gives lets the group go, not the agent. One from
+// before the stop began is not counted: a copy of the stop's own signal (sudo
+// hands one on), which comes long before a recording's drains are done and the
+// agent is stopped. No stop offers anything in this phase (the drains withdrew
+// theirs): the wait counts from when it began (utils.InterruptedAfter).
 func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -698,19 +703,20 @@ func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	returned := make(chan struct{})
 	var ok atomic.Bool
 	go func() { _, o := a.awaitAgentExit(ctx, reaped, 1); ok.Store(o); close(returned) }()
-	cancel()
+	utils.MarkInterruptedAgain() // the stop's copy, from sudo, during the drains
+	cancel()                     // the drains are done: the agent stop begins
 	if returnsWithin(returned, 200*time.Millisecond) {
-		t.Fatal("the group stopped waiting on the stop alone")
+		t.Fatal("the group stopped waiting on the stop, or on a copy of it from before")
 	}
-	utils.MarkInterruptedAgain() // the stop's copy, from sudo
-	if returnsWithin(returned, 200*time.Millisecond) {
-		t.Fatal("the group stopped waiting on a copy of the stop")
+	// The user presses Ctrl+C while keploy waits for the agent. (Repeated
+	// until heard: the wait counts from when it saw the stop begin.)
+	deadline := time.Now().Add(30 * time.Second)
+	for !returnsWithin(returned, 10*time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the user's interrupt during the agent stop did not let the group go")
+		}
+		utils.MarkInterruptedAgain()
 	}
-	utils.MarkInterrupted() // the stop was a signal
-	t.Cleanup(utils.ClearInterrupted)
-	utils.OfferStopNow() // keploy said another interrupt stops it now
-	utils.MarkInterruptedAgain()
-	within(t, "awaitAgentExit", func() { <-returned })
 	if ok.Load() {
 		t.Fatal("awaitAgentExit reported an exit it did not see")
 	}
@@ -720,6 +726,61 @@ func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	reaped2 <- nil
 	if _, o := a.awaitAgentExit(context.Background(), reaped2, 1); !o {
 		t.Fatal("awaitAgentExit missed the exit")
+	}
+}
+
+// The user's Ctrl+C while keploy waits for a stopping agent that runs under
+// sudo (a non-root user's), once the recording's drains are done and their
+// offers withdrawn: the stop says "(Ctrl+C stops it now)", and on the press
+// kills the agent, which for one under sudo only escalates the signal: it
+// dies once its teardown (uprobe removal) is through. The group lets go at
+// that press (awaitAgentExit), and does not wait out the teardown's bound to
+// then say a goroutine ignored its cancellation.
+func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	utils.MarkInterrupted() // the user's Ctrl+C stopped the recording
+	t.Cleanup(utils.ClearInterrupted)
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := clientFor(closedAgentURL(t))
+	a.logger = zap.New(core)
+	run := newAgentRun()
+	run.ready.Store(true)
+	reaped := make(chan error, 1)
+	t.Cleanup(func() { run.exited(); reaped <- nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	var grp errgroup.Group
+	var beat atomic.Uint64
+	killedNow := make(chan struct{})
+	var once sync.Once
+	grp.Go(func() error { a.awaitAgentExit(ctx, reaped, 1); return nil })
+	grp.Go(func() error {
+		<-ctx.Done()
+		a.endAgent(run, 1,
+			func() error { return nil }, // asked over its API
+			func() error { return nil },
+			func(now bool) error { // under sudo: the escalation signal only
+				if now {
+					once.Do(func() { close(killedNow) })
+				}
+				return nil
+			},
+			func(context.Context) (utils.TeardownProgress, bool) {
+				return utils.TeardownProgress{Seq: 1, Beat: beat.Add(1), Busy: true, Steps: true}, true
+			})
+		return nil
+	})
+	cancel() // setupCtxCancel: the agent stop begins
+	within(t, "the stop saying Ctrl+C stops it now", func() {
+		for logs.FilterMessageSnippet("Ctrl+C stops it now").Len() == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	utils.MarkInterruptedAgain() // the user presses Ctrl+C, as told
+	within(t, "the kill at the press", func() { <-killedNow })
+	// The bound only catches a group that never lets go; it lets go at once.
+	if _, timedOut := utils.DrainErrGroupStatus(a.logger, "record-setup", &grp, 30*time.Second); timedOut {
+		t.Fatalf("the user's Ctrl+C during the agent stop did not let the group go: %v", logs.FilterLevelExact(zapcore.ErrorLevel).All())
 	}
 }
 

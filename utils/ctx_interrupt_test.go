@@ -1,6 +1,9 @@
 package utils
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The CLI cancels its own root context when a `keploy mock` run ends -- that
 // is how its goroutines are torn down -- so a cancelled context says nothing
@@ -65,16 +68,21 @@ func TestInterruptedAfterHearsOnlyLaterInterrupts(t *testing.T) {
 }
 
 // A stop offers to end at the user's next interrupt only once its first signal
-// has come, and a whole notice after the notice that first found it
-// (StopNowNotice): a single stop can arrive twice (sudo hands its own copy on
-// when a signal reaches both it and keploy), and the copy comes with the first,
-// never a notice later. Whether the stop began with the signal, or on its own
-// (the app exited, a record timer) with the signal coming during its wait, the
-// copy ends nothing, and the user's interrupt after the offer ends the stop.
-// A withdrawn offer ends nothing.
+// has come, and a whole notice period, as measured, after that signal was
+// first seen (StopNowNotice): a single stop can arrive twice (sudo hands its
+// own copy on when a signal reaches both it and keploy), and the copy comes
+// with the first, never a period later. Whether the stop began with the
+// signal, or on its own (the app exited, a record timer) with the signal
+// coming during its wait, and even when a notice is read late, the copy ends
+// nothing, and the user's interrupt after the offer ends the stop. A withdrawn
+// offer ends nothing.
 func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 	reset := func() { ResetInterruptedAgain(); ClearInterrupted() }
 	t.Cleanup(reset)
+	now := time.Unix(1_000_000, 0)
+	defer func(c func() time.Time) { noticeClock = c }(noticeClock)
+	noticeClock = func() time.Time { return now }
+	const period = 5 * time.Second
 	stopped := func() bool {
 		select {
 		case <-StopNow():
@@ -96,12 +104,17 @@ func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 	t.Run("a stop begun by a signal", func(t *testing.T) {
 		reset()
 		MarkInterrupted() // the stop
-		n := NewStopNowNotice()
+		n := NewStopNowNotice(period)
 		if MarkInterruptedAgain() || stopped() {
 			t.Fatal("the stop's copy ended it before it said anything")
 		}
+		now = now.Add(period - time.Nanosecond)
+		if n.Next() {
+			t.Fatal("a notice offered before a whole period after the signal")
+		}
+		now = now.Add(time.Nanosecond)
 		if !n.Next() {
-			t.Fatal("the first notice of a stop begun by a signal does not offer to end it")
+			t.Fatal("the notice a whole period after the stop's signal does not offer")
 		}
 		if !MarkInterruptedAgain() || !stopped() {
 			t.Fatal("the user's interrupt after the offer did not end the stop")
@@ -109,21 +122,28 @@ func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 		n.Withdraw()
 	})
 
-	t.Run("a stop begun on its own, then interrupted", func(t *testing.T) {
+	t.Run("a stop begun on its own, then interrupted, its notices read late", func(t *testing.T) {
 		reset()
-		n := NewStopNowNotice()
+		n := NewStopNowNotice(period)
+		now = now.Add(period)
 		if n.Next() {
 			t.Fatal("a notice offered before any signal")
 		}
 		MarkInterrupted() // the user's stop, or a pattern kill's first copy
+		now = now.Add(period)
 		if n.Next() {
 			t.Fatal("the notice that first found the signal offered at once: its copy could still come")
 		}
 		if MarkInterruptedAgain() || stopped() { // the copy, after that notice
 			t.Fatal("the copy of the signal ended the stop")
 		}
+		now = now.Add(period / 2) // a notice read late, as its loop was busy
+		if n.Next() {
+			t.Fatal("a notice read late offered less than a whole period after the signal was seen")
+		}
+		now = now.Add(period / 2)
 		if !n.Next() {
-			t.Fatal("the notice after the one that found the signal does not offer")
+			t.Fatal("the notice a whole period after the signal was seen does not offer")
 		}
 		if !MarkInterruptedAgain() || !stopped() {
 			t.Fatal("the user's interrupt after the offer did not end the stop")
@@ -134,8 +154,11 @@ func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 	t.Run("a withdrawn offer ends nothing", func(t *testing.T) {
 		reset()
 		MarkInterrupted()
-		n := NewStopNowNotice()
-		n.Next()
+		n := NewStopNowNotice(period)
+		now = now.Add(period)
+		if !n.Next() {
+			t.Fatal("setup: no offer")
+		}
 		n.Withdraw()
 		n.Withdraw() // once only
 		if MarkInterruptedAgain() || stopped() {

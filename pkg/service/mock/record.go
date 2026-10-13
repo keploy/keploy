@@ -415,7 +415,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	drainFrom.Store(drainStart.UnixNano())
 	lost := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
 		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
-	}, func() uint64 { return uint64(heldSeen.Load()) })
+	}, func() uint64 { return uint64(heldSeen.Load()) }, recordDrainWords)
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
 		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
@@ -1027,20 +1027,21 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // it. It must be called BEFORE the capture context is cancelled - see the
 // call site.
 //
-// The user can end it: every mockDrainNotice it says it is still saving, and,
-// once the run has been interrupted, that another interrupt stops it now
-// (utils.StopNowNotice), and from then the next one does (StopNow). One that
+// The user can end it: every mockDrainNotice it says what it is still doing
+// (words.saving), and, once the run has been interrupted, that another
+// interrupt stops it now and what that costs (words.stopNow;
+// utils.StopNowNotice), and from then the next one does (StopNow). One that
 // came before is not the user's answer to that: a stop sent to both sudo and
 // keploy reaches keploy a second time from sudo, as the first does. A drain
-// the user ends so did not save what the agent still held: it is lost, and the
-// set is not saved over the existing one.
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64) (lost bool) {
+// the user ends so did not get what the agent still held: it is lost (said
+// with words.gaveUp).
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords) (lost bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
+	notice := utils.NewStopNowNotice(mockDrainNotice)
+	defer notice.Withdraw()
 	notices := time.NewTicker(mockDrainNotice)
 	defer notices.Stop()
-	notice := utils.NewStopNowNotice()
-	defer notice.Withdraw()
 	savedAtStart := arrived()
 
 	last, _ := held()
@@ -1061,20 +1062,20 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// stream as it gives the drain up: the user's stop.
 				select {
 				case <-utils.StopNow():
-					return m.stoppedNow()
+					return m.stoppedNow(words)
 				default:
 					return m.agentEndedDrain(&looks, arrived() == lookedAt)
 				}
 			}
 			return false
 		case <-utils.StopNow():
-			return m.stoppedNow()
+			return m.stoppedNow(words)
 		case <-notices.C:
-			msg := "Still saving what the keploy agent captured before the run ended"
+			msg := words.saving
 			if notice.Next() {
-				msg += "; press Ctrl+C again to stop now, and lose the rest"
+				msg += "; " + words.stopNow
 			}
-			m.logger.Info(msg, zap.Uint64("savedSinceTheEnd", arrived()-savedAtStart))
+			m.logger.Info(msg, zap.Uint64("sinceTheEnd", arrived()-savedAtStart))
 		case <-quiet.C:
 			// Quiet means the stream brought nothing held while the consumer
 			// was free to take it: a consumer still persisting one is not
@@ -1106,12 +1107,40 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 	}
 }
 
+// drainWords is how drainTrailingMocks speaks to its caller's user: of what
+// it is still doing, and of what ending it at a second interrupt costs.
+type drainWords struct {
+	// saving is what it is still doing, said every mockDrainNotice.
+	saving string
+	// stopNow, added to that once it offers to stop at the next interrupt,
+	// says so and what doing so costs.
+	stopNow string
+	// gaveUp and nextStep are said at WARN when the user ends it so.
+	gaveUp, nextStep string
+}
+
+// recordDrainWords are keploy mock record's: a recording ended before it has
+// every mock the agent captured is not saved over the existing set.
+var recordDrainWords = drainWords{
+	saving:   "Still saving the mocks the keploy agent captured before the run ended",
+	stopNow:  "press Ctrl+C again to stop now: this recording is then not saved, and the existing mock set is kept",
+	gaveUp:   "stopped saving the mocks the agent captured before the run ended, at a second interrupt",
+	nextStep: "this recording was not saved; the existing mock set is kept. Re-record it",
+}
+
+// replayDrainWords are keploy mock replay's: it collects the requests the
+// agent captured, for the run's report.
+var replayDrainWords = drainWords{
+	saving:   "Still collecting the requests the keploy agent captured before the run ended",
+	stopNow:  "press Ctrl+C again to stop now, and leave the rest out of this run's report",
+	gaveUp:   "stopped collecting the requests the agent captured before the run ended, at a second interrupt",
+	nextStep: "requests the agent still held are left out of this run's report",
+}
+
 // stoppedNow is drainTrailingMocks ended by the user's second interrupt
-// (utils.StopNow): what the agent still held is not saved, so the drain is
-// lost, and the set it recorded is not saved over the existing one.
-func (m *mockService) stoppedNow() (lost bool) {
-	m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
-		zap.String("next_step", "mocks the agent still held were not saved; the existing mock set is kept"))
+// (utils.StopNow): what the agent still held is not had, so the drain is lost.
+func (m *mockService) stoppedNow(words drainWords) (lost bool) {
+	m.logger.Warn(words.gaveUp, zap.String("next_step", words.nextStep))
 	return true
 }
 

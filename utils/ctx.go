@@ -154,10 +154,10 @@ func init() { ResetInterruptedAgain() }
 // still held was lost.
 //
 // So an offer is made only once the stop's first signal has come (Interrupted):
-// before it, the copy of that signal would find the offer standing. A stop
-// that ends on its own (the app exits, a record timer) offers once the user
-// has interrupted it, and a whole notice later (StopNowNotice), by when the
-// copy has come too. withdraw is called once the stop no longer waits, so the
+// before it, the copy of that signal would find the offer standing; and a
+// whole notice period after that signal was seen (StopNowNotice), by when the
+// copy has come too, whether the signal began the stop or came while a stop
+// that began on its own (the app exits, a record timer) waited. withdraw is called once the stop no longer waits, so the
 // offer does not stand for a later wait it did not tell the user of.
 func OfferStopNow() (withdraw func()) {
 	if !Interrupted() {
@@ -185,28 +185,47 @@ func StopNow() <-chan struct{} { return stopNow.Load().ch }
 
 // StopNowNotice paces a stop's offer to end at the user's next interrupt
 // (OfferStopNow) to the notices it gives while it waits: the offer is made at
-// a notice that comes a whole notice period after the one that first found the
-// stop's signal had come. The copy of that signal, which sudo hands on, comes
-// with it, not a notice period later. Not safe for concurrent use: the one
+// the first notice that comes a whole notice period (as measured, not as
+// scheduled) after the stop's first signal was seen -- as the stop began, or
+// at the first notice to find it. The copy of that signal, which sudo hands
+// on, comes with it, not a period later; a notice read late (its loop was
+// busy) does not bring the offer forward. Not safe for concurrent use: the one
 // loop that gives the notices owns it.
 type StopNowNotice struct {
-	// signalled: the stop's first signal had come at the previous notice
-	// (or as the stop began).
-	signalled bool
-	withdraw  func()
+	period time.Duration
+	// sawAt is when the stop's first signal was first seen to have come
+	// (zero: not yet).
+	sawAt    time.Time
+	withdraw func()
 }
 
-// NewStopNowNotice starts the notices of a stop that begins now.
-func NewStopNowNotice() *StopNowNotice { return &StopNowNotice{signalled: Interrupted()} }
+// noticeClock is StopNowNotice's clock: a test's to set.
+var noticeClock = time.Now
+
+// NewStopNowNotice starts the notices, every period, of a stop that begins
+// now. Call it before the notices' clock starts.
+func NewStopNowNotice(period time.Duration) *StopNowNotice {
+	n := &StopNowNotice{period: period}
+	if Interrupted() {
+		n.sawAt = noticeClock()
+	}
+	return n
+}
 
 // Next is called at each notice. It reports whether the notice says that
 // another interrupt stops it now: from this notice on (it makes the offer), or
 // since an earlier one.
 func (n *StopNowNotice) Next() (offering bool) {
-	if n.withdraw == nil && n.signalled {
+	now := noticeClock()
+	switch {
+	case n.withdraw != nil:
+	case n.sawAt.IsZero():
+		if Interrupted() {
+			n.sawAt = now
+		}
+	case now.Sub(n.sawAt) >= n.period:
 		n.withdraw = OfferStopNow()
 	}
-	n.signalled = Interrupted()
 	return n.withdraw != nil
 }
 

@@ -178,6 +178,47 @@ func TestGetTestAndMockChans_AStopDeliveredTwiceSavesWhatTheAgentHeld(t *testing
 	}
 }
 
+// The drain's notices make its offer to stop at the user's next interrupt
+// (reportDrainProgress, utils.StopNowNotice): a stop begun by a signal says
+// "press Ctrl+C again" at a notice, and the user's press after it ends the
+// stop; the stop's copy before it ends nothing; and a drain that is over
+// withdraws its offer, which then stands for no later wait.
+func TestReportDrainProgress_OffersThroughItsNotices(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	core, logs := observer.New(zapcore.InfoLevel)
+	r := &Recorder{logger: zap.New(core)}
+	offered := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never offers
+		for logs.FilterMessageSnippet("press Ctrl+C again").Len() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("the drain's notices never offered to stop now: %v", logs.All())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	utils.MarkInterrupted() // the stop
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("the stop's copy ended it")
+	}
+	stop := r.reportDrainProgress(20 * time.Millisecond)
+	offered(1)
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the user's press after the offer did not end the stop")
+	}
+	stop()
+
+	utils.ResetInterruptedAgain()
+	stop = r.reportDrainProgress(20 * time.Millisecond)
+	offered(2)
+	stop()
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("an offer stood once the drain was over")
+	}
+}
+
 // A second interrupt ends a drain that would otherwise go on while frames keep
 // coming, and says what it had saved: the user can always stop.
 func TestGetTestAndMockChans_SecondInterruptEndsTheDrain(t *testing.T) {

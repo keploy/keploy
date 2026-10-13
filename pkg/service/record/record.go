@@ -737,18 +737,19 @@ const drainProgressEvery = 5 * time.Second
 //
 // It says so once the stop has offered to end at the next interrupt
 // (utils.StopNowNotice): at the first notice when an interrupt stopped the
-// recording, and at the notice after the one that finds the user interrupted a
-// stop that began on its own (the app exited, a record timer). An interrupt
-// before that is not the user's answer to it: a stop sent to both sudo and
-// keploy (`sudo pkill -f keploy`, as CI stops a recording) reaches keploy a
-// second time from sudo, as the first does, and taken for a second Ctrl+C it
-// gave the drain up at its start. Every notice until the offer is made is
-// given, so the user is told as soon as it is.
+// recording, and a whole notice period after the user's interrupt was first
+// seen when the stop began on its own (the app exited, a record timer). An
+// interrupt before that is not the user's answer to it: a stop sent to both
+// sudo and keploy (`sudo pkill -f keploy`, as CI stops a recording) reaches
+// keploy a second time from sudo, as the first does, and taken for a second
+// Ctrl+C it gave the drain up at its start. A notice is given at the first
+// tick, whenever the drain moves, and at the tick that makes the offer, so the
+// user is told as soon as it is.
 func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	start := r.frameProgress.Load()
-	notice := utils.NewStopNowNotice()
+	notice := utils.NewStopNowNotice(every)
 	go func() {
 		defer close(exited)
 		defer notice.Withdraw()

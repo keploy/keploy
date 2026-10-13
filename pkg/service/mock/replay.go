@@ -355,7 +355,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 	if actual != nil {
 		m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
-			func() uint64 { return uint64(actual.seen.Load()) })
+			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords)
 	}
 	stopWatch()
 	actual.wait(mockDrainStall)
