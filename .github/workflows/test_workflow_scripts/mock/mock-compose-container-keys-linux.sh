@@ -56,8 +56,10 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("0.0.0.0", 9411), H).serve_forever()
 PY
 
-# The wrapped test runner: one test's calls to the dependency, by its service
-# name. Under the switch (LISTED set) it first waits for keploy's CLI to say,
+# The wrapped test runner: its calls to the dependency, by its service name.
+# It opens no test scope: a docker-mode run's test process cannot claim the run
+# under scope protocol v1, so its calls are the run's, outside tests. Under
+# the switch (LISTED set) it first waits for keploy's CLI to say,
 # at Debug, that it gave the agent a container list with the dependency
 # (LISTED, its container name) in it: it reads the run's log (KEPLOY_LANE_LOG,
 # in /w) in whole lines. The dependency starts a moment before the runner,
@@ -67,7 +69,6 @@ PY
 # counted.
 cat > runner.py <<'PY'
 import json, os, time, urllib.request
-AGENT, TOKEN = os.environ.get("KEPLOY_MOCK_AGENT"), os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
 LISTED, LOG = os.environ.get("LISTED"), os.environ.get("KEPLOY_LANE_LOG")
 def listed():
     with open(LOG, "rb") as f:
@@ -86,11 +87,6 @@ if LISTED:
 def get(path):
     with urllib.request.urlopen(os.environ.get("DEP_URL", "http://dep:9411") + path) as r:
         return json.load(r)
-def scope(path, body):
-    h = {"Content-Type": "application/json"}
-    if TOKEN:
-        h["Authorization"] = "Bearer " + TOKEN
-    urllib.request.urlopen(urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST")).read()
 while True:
     try:
         get("/warmup")
@@ -98,10 +94,8 @@ while True:
     except OSError as e:
         print("the dependency does not answer yet:", type(e).__name__, e, flush=True)
         time.sleep(1)
-scope("/agent/scope/begin", {"name": "compose_test", "canSkip": True})
 for p in ["/price/aapl", "/price/msft"]:
     assert get(p)["path"] == p
-scope("/agent/scope/end", {"name": "compose_test", "outcome": "passed"})
 print("RUNNER PASSED", flush=True)
 PY
 
@@ -114,8 +108,6 @@ runner_service() {
     volumes: [".:/w:z"] # :z relabels on SELinux hosts; ignored elsewhere
     command: python runner.py
     environment:
-      - KEPLOY_MOCK_AGENT
-      - KEPLOY_MOCK_AGENT_TOKEN
       - LISTED
       - KEPLOY_LANE_LOG
 YML
@@ -176,7 +168,7 @@ sudo docker network create "ckn-$ID" >/dev/null || { echo "FAIL: cannot create t
 sudo docker run -d --name "ckd-dep-$ID" --network "ckn-$ID" -v "$PWD:/w:z" -w /w "$IMAGE" python dep.py >/dev/null || { echo "FAIL: cannot start the dependency"; exit 1; }
 : > rec-run.log
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record \
-  -c "docker run --rm --name ckd-runner-$ID --network ckn-$ID -v $PWD:/w:z -w /w -e KEPLOY_MOCK_AGENT -e KEPLOY_MOCK_AGENT_TOKEN -e DEP_URL=http://ckd-dep-$ID:9411 -e LISTED=ckd-dep-$ID -e KEPLOY_LANE_LOG=/w/rec-run.log $IMAGE python runner.py" \
+  -c "docker run --rm --name ckd-runner-$ID --network ckn-$ID -v $PWD:/w:z -w /w -e DEP_URL=http://ckd-dep-$ID:9411 -e LISTED=ckd-dep-$ID -e KEPLOY_LANE_LOG=/w/rec-run.log $IMAGE python runner.py" \
   --container-name "ckd-runner-$ID" --name ck-run --disable-tele --debug 2>&1 | tee rec-run.log
 ran rec-run.log "${PIPESTATUS[0]}" "docker run record under the switch"
 keys_of ck-run | tee keys-run.txt
