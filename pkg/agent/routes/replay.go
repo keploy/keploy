@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,13 +80,30 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	mockErrors, err := a.svc.GetMockErrors(r.Context())
-	if err != nil {
+	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
+	}
+	// An incomplete read still hands back what was read, as the body every
+	// client decodes, and says it is incomplete in a header (only an agent with
+	// the proven switch on reads incompletely: see Proxy.GetMockErrors).
+	if err != nil {
+		w.Header().Set(models.UnmatchedCallsUnreadHeader, headerSafe(err.Error()))
 	}
 
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, mockErrors)
+}
+
+// headerSafe makes text one header value: control characters, newlines among
+// them, become spaces, so no cause can end the header early.
+func headerSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // BeginTestErrorCapture opens a per-test mock-error capture window in the proxy

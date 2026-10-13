@@ -58,6 +58,11 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// SkipReason says why keploy skipped this test: set on an IGNORED result
+	// whose skip carried a reason (a quarantine, with its class and why), and
+	// rendered into the JUnit <skipped> message and the text report. Empty for
+	// every other result, and for a test skipped without one.
+	SkipReason string `json:"skip_reason,omitempty" yaml:"skip_reason,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for
@@ -132,6 +137,38 @@ type FailureInfo struct {
 	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
 	MatchedCalls   []MatchedCall      `json:"matched_calls,omitempty" yaml:"matched_calls,omitempty"`
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
+	// UnmatchedCallsUnread says UnmatchedCalls may be missing calls: the
+	// agent's record of the calls no mock answered during this test could not
+	// all be read (models.ErrUnmatchedCallsUnread, or the read failed). The
+	// test's evidence is unknown, so its test set is not judged. Set only under
+	// the proven switch.
+	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// TestMocksUnread says the mocks this test consumed could not be read
+	// from keploy's agent, so whether it made every call it recorded is
+	// unknown: it has no verdict, and its test set is not judged. Set only
+	// under the proven switch, before any hook reads the result.
+	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
+	// did not consume: the mocks of its recorded mapping its per-test
+	// assertion owns (data-plane mocks; connection failures and
+	// protocol-phase mocks are not owned) that it made no call for, each of
+	// which fails it (a recorded call was not made). In recorded order, every
+	// one: Result.DepResult caps its rows and names a target, not the mock.
+	// Empty with the switch off, and for a test that owned none or whose
+	// consumption was not read (TestMocksUnread).
+	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+}
+
+// UnconsumedMock is a test mock a test did not consume
+// (FailureInfo.UnconsumedMocks).
+type UnconsumedMock struct {
+	Name string `json:"name" yaml:"name"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// ConsumedBy names another test of the set that consumed this mock, when
+	// one did: the call was made, by a sibling, and the order in which the
+	// shared mock pool served the two can decide which test it counts for,
+	// until each test's consumption is exact. Empty when no test consumed it.
+	ConsumedBy string `json:"consumed_by,omitempty" yaml:"consumed_by,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -213,6 +250,11 @@ type MockOutcome struct {
 	// with the served and missed calls comfortably up to suites of tens of
 	// thousands of tests.
 	Windows []ScopeWindow `json:"windows,omitempty"`
+	// MissedUnread is why Missed may be missing calls, empty when it is
+	// complete: the agent's read of the calls no mock answered was
+	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
+	// holds what was read.
+	MissedUnread string `json:"missed_unread,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -326,6 +368,10 @@ const (
 	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
 	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
 	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
+	// CallUnmatched: a call the test made got no recorded answer (a miss),
+	// which fails it under KEPLOY_PROVEN=1. The calls are in
+	// FailureInfo.UnmatchedCalls.
+	CallUnmatched FailureCategory = "UNMATCHED_CALL"
 	// TemplateVariable means a template variable place of the expected
 	// response was not satisfied by the answer (a {{capture ...}} that found
 	// no value of its type, or a use that did not hold its key's value), or
@@ -384,6 +430,11 @@ const (
 	// modelled, so a difference can never be reported as handled when the next
 	// replay would fail on it again.
 	NoiseFailureUnresolved NoiseFailureReason = "UNRESOLVED"
+	// NoiseFailureUnstableOrder — an array came back in another order (the order
+	// rule, matcher.ArrayReordered), and carries matcher.NoiseSkipUnstableOrder
+	// through. A refusal: noise on the array's fields would only hide the
+	// reorder, so the case stays failed and is judged as unstable order.
+	NoiseFailureUnstableOrder NoiseFailureReason = "UNSTABLE_ORDER"
 )
 
 // FailureAssessment contains JSON structural analysis of response body differences.

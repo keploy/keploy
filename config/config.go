@@ -505,6 +505,12 @@ type Test struct {
 	DisableStatefulMocks        bool          `json:"disableStatefulMocks" yaml:"disableStatefulMocks" mapstructure:"disableStatefulMocks"`                                          // Turn OFF cursor consumption of stateful data-plane mocks. Default FALSE (stateful on): repeated identical dependency requests are served successive recorded responses in record order, then saturate on the last, so a stateful sequence (a counter, a created-then-read row) replays as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first recorded response every time" behaviour. Only affects mocks classified ConsumeCursorSaturate (untagged/lax data-plane kinds); at one recorded response it is a no-op.
 	DisableMockCorrelation      bool          `json:"disableMockCorrelation" yaml:"disableMockCorrelation" mapstructure:"disableMockCorrelation"`                                    // Turn OFF request→response echo correlation. Default FALSE (on): when the app mints a random value (UUID/nonce/idempotency key), sends it to a dependency, and the dependency echoes it back, replay captures the live request value and renders it into the served response instead of replaying the stale recorded value (a mismatch) or masking it as noise (which hides regressions). Set true to serve the recorded value. Only affects mocks carrying learned correlations.
 	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
+	// SkipReasons is why a test the run skips is skipped: test set -> test case
+	// -> reason. Set at run time by whatever fills IgnoredTests with a reason
+	// (the proven model's verdicts gate), never read from keploy.yml. The
+	// replayer writes it into the IGNORED result's SkipReason under the proven
+	// switch.
+	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 // Report output formats for `keploy report --format`.

@@ -357,6 +357,13 @@ const (
 	ConsumedScopePerTest = "per-test"
 )
 
+// UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
+// agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
+// why. The body is still the list that was read, so a client that does not know
+// the header reads it as before. Only an agent with the proven switch on sends
+// it.
+const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
+
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
 }
