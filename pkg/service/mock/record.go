@@ -1194,7 +1194,25 @@ func foldRetries(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.S
 	}
 	var kept, earlier []models.ScopeWindow
 	retried := map[string]int{}
+	// An earlier attempt's subtest windows go with it: a subtest window
+	// that began inside an earlier attempt of its parent.
+	inEarlier := func(w models.ScopeWindow) bool {
+		top := parentOf(windows, w.Name)
+		if top == "" || runs[top] < 2 {
+			return false
+		}
+		for i, p := range windows {
+			if p.Name == top && i != last[top] && !w.Start.Before(p.Start) && !w.Start.After(p.End) {
+				return true
+			}
+		}
+		return false
+	}
 	for i, w := range windows {
+		if inEarlier(w) {
+			earlier = append(earlier, w)
+			continue
+		}
 		if parentOf(windows, w.Name) != "" || runs[w.Name] < 2 {
 			kept = append(kept, w)
 			continue

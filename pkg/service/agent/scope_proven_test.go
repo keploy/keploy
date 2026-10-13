@@ -981,8 +981,11 @@ func TestAnEmptyPoolServesNoPoolMock(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/test-a"), httpMock("mock-2", "GET", "http://h/test-b"))
 	ctx := context.Background()
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}
+	p.mu.Lock()
+	p.filtered = []*models.Mock{httpMock("sentinel", "GET", "http://h/never-armed")}
+	p.mu.Unlock()
 	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
-	require.Empty(t, p.filteredNames(), "before any claim")
+	require.Empty(t, p.filteredNames(), "before any claim: armed with no pool mock")
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
 	require.Nil(t, serr)

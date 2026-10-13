@@ -688,4 +688,20 @@ func TestFoldRetries(t *testing.T) {
 
 	_, _, none := foldRetries(windows[:2])
 	require.Empty(t, none)
+
+	// An earlier attempt's subtests go with it.
+	withSubs := append([]models.ScopeWindow{}, windows...)
+	withSubs = append(withSubs,
+		models.ScopeWindow{Name: "o::TestA/sub", Start: at(2), End: at(8)},
+		models.ScopeWindow{Name: "o::TestA/sub", Start: at(22), End: at(28)})
+	kept, earlier, _ = foldRetries(withSubs)
+	require.Len(t, earlier, 2)
+	require.Equal(t, at(2), earlier[1].Start)
+	var subs []time.Time
+	for _, w := range kept {
+		if w.Name == "o::TestA/sub" {
+			subs = append(subs, w.Start)
+		}
+	}
+	require.Equal(t, []time.Time{at(22)}, subs)
 }

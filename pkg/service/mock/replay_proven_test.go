@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -408,4 +409,34 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2"}, "users": {"mock-3"}}, instr.pool)
+}
+
+// Under the switch the replay never arms the whole pool before its run: the
+// table push armed the slice of calls made before any claim, and arming the
+// whole pool would let any test's mock answer them. With the switch off it
+// stages the whole pool, as before.
+func TestTheWholePoolIsNotArmedBeforeTheRunUnderTheSwitch(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			if on {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+			require.Equal(t, !on, slices.Contains(instr.seq(), "stage"), "%v", instr.seq())
+		})
+	}
 }
