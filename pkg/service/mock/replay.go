@@ -393,6 +393,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
 	m.propagateExit(appErr, "replay")
+	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
+		// The learn step's findings were not kept: keploy did not complete
+		// the round, whatever the test command did.
+		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
+	}
 	// WHOSE failure this is, from what the runner reported -- not from the
 	// global exit code. keploy's own internal failure (a panic in the app
 	// runner) also lands in utils.ErrCode, and recording that as
@@ -1242,6 +1248,9 @@ type replayCounts struct {
 	missed     int
 	missedData int
 	tests      []TestReceipt
+	// learnErr is why what the learn step learned could not be written: the
+	// round did not complete.
+	learnErr error
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -1354,9 +1363,17 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// for the reporter below.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
 	// What the learn step learned goes onto the recording, before the record
-	// that runs this round commits it.
-	if m.learning() && consumedErr == nil {
-		m.persistLearned(ctx, detail.set, consumed, flows)
+	// that runs this round commits it. A round whose learning cannot be read
+	// or kept did not complete: its record would judge recordings that lack
+	// what this round served.
+	var learned map[string][]string
+	var learnErr error
+	if m.learning() {
+		if consumedErr != nil {
+			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
+		} else {
+			learned, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
+		}
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
@@ -1396,6 +1413,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.missed, counts.missedData = -1, -1
 	}
 	counts.tests = withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows)
+	for i := range counts.tests {
+		counts.tests[i].Learned = learned[counts.tests[i].Name]
+	}
+	counts.learnErr = learnErr
 	return counts
 }
 

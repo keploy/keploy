@@ -4327,6 +4327,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusFaultUserApp
 	}
 
+	// What record's full round learned goes onto the recording before the
+	// set is reported, and is said per test; a prune after it keeps it
+	// (pruneKeeps). A round that could not keep it did not complete: its
+	// verdict would be about recordings that lack what it served.
+	if r.learning() && r.instrument {
+		if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
+			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
 	// Under the proven switch a set none of whose tests got a verdict, its
 	// tests IGNORED, verified nothing, and is IGNORED, as a set the run skips
 	// whole is, not PASSED. Last, so a status that says more (FAILED, not
@@ -4451,11 +4462,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
-	// What record's full round learned goes onto the recording first, and is
-	// said per test; a prune after it keeps it (pruneKeeps).
-	if r.learning() && r.instrument {
-		r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings)
-	}
 	if prune {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
@@ -4481,7 +4487,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.NoiseDetection() && r.instrument && !r.learning() {
+	} else if r.config.Test.NoiseDetection() && r.instrument && !provenswitch.On() {
+		// (Under the proven switch only record's full round writes what was
+		// learned, above: a replay in CI writes no recording.)
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.

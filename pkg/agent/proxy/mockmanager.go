@@ -53,6 +53,12 @@ import (
 // the atomic variants above.
 
 type MockManager struct {
+	// servedObserver, when set, is told of every mock a parser is served
+	// (consumed or reused), after the manager's own locks are released:
+	// under the proven switch, the learn step's earlier places of the test's
+	// recording (learn.Tracker.ServedMock).
+	servedObserver atomic.Pointer[func(*models.Mock)]
+
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
 	unfiltered *TreeDb
@@ -2344,7 +2350,12 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 	}
 }
 
-func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) (served bool) {
+	defer func() {
+		if served {
+			m.observeServed(new)
+		}
+	}()
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
@@ -2460,7 +2471,12 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updatedGlobal
 }
 
-func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) (served bool) {
+	defer func() {
+		if served {
+			m.observeServed(&mock)
+		}
+	}()
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
@@ -2558,7 +2574,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	return false
 }
 
-func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) (served bool) {
+	defer func() {
+		if served {
+			m.observeServed(&mock)
+		}
+	}()
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
@@ -2640,7 +2661,12 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // was never in the startup tree (e.g. it was a filtered/session/
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
-func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
+func (m *MockManager) DeleteStartupMock(mock models.Mock) (served bool) {
+	defer func() {
+		if served {
+			m.observeServed(&mock)
+		}
+	}()
 	if mock.Name == "" {
 		return false
 	}
@@ -2863,7 +2889,12 @@ func (m *MockManager) signalWindowChange() {
 // reuse telemetry surfaced by SessionMockHitCounts; for per-test mocks it
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
-func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+func (m *MockManager) MarkMockAsUsed(mock models.Mock) (served bool) {
+	defer func() {
+		if served {
+			m.observeServed(&mock)
+		}
+	}()
 	if mock.Name == "" {
 		return false
 	}
@@ -3059,6 +3090,22 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 // request (nil when none was detected). Used to carry schema-detected noise out
 // on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
 // alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
+// SetServedObserver makes f told of every mock a parser is served, from now
+// on (nil: none).
+func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
+	if f == nil {
+		m.servedObserver.Store(nil)
+		return
+	}
+	m.servedObserver.Store(&f)
+}
+
+func (m *MockManager) observeServed(mock *models.Mock) {
+	if f := m.servedObserver.Load(); f != nil && mock != nil {
+		(*f)(mock)
+	}
+}
+
 func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 	return spec.ReqBodyNoise
 }

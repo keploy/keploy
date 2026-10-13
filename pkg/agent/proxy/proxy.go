@@ -1704,6 +1704,11 @@ func hostPortFromAuthority(authority, scheme string) (string, int) {
 // goroutine since MockManager owns a per-instance ticker that only
 // stops on Close().
 func (p *Proxy) setMockManager(m *MockManager) {
+	if provenswitch.On() && m != nil {
+		// Every mock served in a test is an earlier place of its recording
+		// for the learn step (package matcher/learn).
+		m.SetServedObserver(p.learnTracker.ServedMock)
+	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
 	p.mockManager = m
@@ -4381,6 +4386,9 @@ func missSummaries(errs []error) []string {
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
 func (p *Proxy) EndTestErrorCapture() []error {
+	if provenswitch.On() {
+		p.learnTracker.End()
+	}
 	if acc := p.activeTestErrors.Swap(nil); acc != nil {
 		return acc.drain()
 	}
@@ -4486,6 +4494,10 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		// stay installed and grow for the rest of the process.
 		if acc := p.activeTestErrors.Swap(nil); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
+		}
+		if provenswitch.On() {
+			// The test is over: no test is open until the next one begins.
+			p.learnTracker.End()
 		}
 	} else {
 		// Rendezvous could not complete (errChannel full or the drain stalled

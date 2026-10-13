@@ -2,11 +2,11 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -31,25 +31,23 @@ type learnedPersister interface {
 
 // persistLearned writes what the learn step learned in a test set's replay
 // (the consumed mocks' learned noise and correlations) onto the set's
-// recording, before any prune, and says per test what it learned: "Record
-// prints every field it learned, per test" (design §7.2 step 10). A mock no
-// test consumed is named on its own.
-func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consumed map[string]models.MockState, mapping *models.Mapping) {
+// recording, and says per test what it learned: "Record prints every field
+// it learned, per test" (design §7.2 step 10). A mock no test consumed is
+// named on its own.
+func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consumed map[string]models.MockState, mapping *models.Mapping) error {
 	p, ok := r.mockDB.(learnedPersister)
 	if !ok {
-		r.logger.Warn("keploy's mock store cannot write what the learn step learned; it is not kept",
-			zap.String("testSetID", testSetID))
-		return
+		return errors.New("keploy's mock store cannot write what the learn step learned")
 	}
 	added, err := p.PersistLearned(ctx, testSetID, consumed)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to write what the learn step learned onto the mocks; it is not kept", zap.String("testSetID", testSetID))
-		return
+		return err
 	}
 	for _, line := range learnedByTest(added, mapping) {
 		r.logger.Info("learned fields that changed between record and replay",
 			zap.String("testSetID", testSetID), zap.String("test", line.test), zap.Strings("fields", line.fields))
 	}
+	return nil
 }
 
 // learnedLine is what the learn step learned for one test: each field as

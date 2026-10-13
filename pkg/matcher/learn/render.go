@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -73,19 +74,21 @@ func ReplaceTokens(s, v, w string) (string, bool) {
 }
 
 // RenderJSON renders a correlation into a JSON answer: at each leaf whose
-// noise path is in at, it writes live where the recorded value was (the
-// whole leaf, or a token of a string), keeping the leaf's own type and the
-// rest of the document byte for byte. It reports whether it changed
-// anything; a body that is not one JSON value comes back unchanged.
+// exact path (Leaf.Path, "body.items[0].id") is in at, it writes live where
+// the recorded value was (the whole leaf, or a token of a string), keeping
+// the leaf's own type and the rest of the document byte for byte. It reports
+// whether it changed anything; a body that is not one JSON value comes back
+// unchanged.
 func RenderJSON(body string, at map[string]bool, recorded, live string) (string, bool) {
 	if recorded == "" || recorded == live || len(at) == 0 {
 		return body, false
 	}
 	type frame struct {
 		obj       bool
-		risk      string // the container's own path in the noise dialect
+		path      string // the container's own exact path
 		key       string
 		expectKey bool
+		next      int // an array's next element
 	}
 	type edit struct {
 		start, end int
@@ -95,19 +98,19 @@ func RenderJSON(body string, at map[string]bool, recorded, live string) (string,
 	dec.UseNumber()
 	var stack []*frame
 	var edits []edit
-	// valueRisk is the noise-dialect path of the value the next token is.
-	valueRisk := func() string {
+	// valuePath is the exact path of the value the next token is, and moves
+	// an array on to its next element.
+	valuePath := func() string {
 		if len(stack) == 0 {
-			return ""
+			return "body"
 		}
 		top := stack[len(stack)-1]
-		if !top.obj {
-			return top.risk
+		if top.obj {
+			return top.path + "." + top.key
 		}
-		if top.risk == "" {
-			return top.key
-		}
-		return top.risk + "." + top.key
+		p := top.path + "[" + strconv.Itoa(top.next) + "]"
+		top.next++
+		return p
 	}
 	afterValue := func() {
 		if len(stack) > 0 && stack[len(stack)-1].obj {
@@ -127,15 +130,9 @@ func RenderJSON(body string, at map[string]bool, recorded, live string) (string,
 		if d, ok := tok.(json.Delim); ok {
 			switch d {
 			case '{':
-				stack = append(stack, &frame{obj: true, risk: valueRisk(), expectKey: true})
+				stack = append(stack, &frame{obj: true, path: valuePath(), expectKey: true})
 			case '[':
-				r := valueRisk()
-				if r == "" {
-					r = "[]"
-				} else {
-					r += "[]"
-				}
-				stack = append(stack, &frame{risk: r})
+				stack = append(stack, &frame{path: valuePath()})
 			case '}', ']':
 				if len(stack) == 0 {
 					return body, false
@@ -152,10 +149,7 @@ func RenderJSON(body string, at map[string]bool, recorded, live string) (string,
 				continue
 			}
 		}
-		path := "body"
-		if r := valueRisk(); r != "" {
-			path = "body." + r
-		}
+		path := valuePath()
 		afterValue()
 		if !at[path] {
 			continue

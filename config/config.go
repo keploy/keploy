@@ -498,6 +498,14 @@ type Test struct {
 	// LearnPool lets the learn step pair the set's pool mocks too: only a
 	// full record replaces the pool (models.OutgoingOptions.LearnPool).
 	LearnPool bool `json:"-" yaml:"-" mapstructure:"-"`
+	// LearnTests, when not nil, are the tests whose recordings the record has
+	// just made: what the learn step learns is written onto their own mocks
+	// only (and onto the pool's with LearnPool). A test that keeps its
+	// previous recording keeps it as it is: the current build's drift against
+	// an older build's recording is not non-determinism. nil writes onto
+	// every mock (keploy record's auto-replay, whose sets were all just
+	// recorded).
+	LearnTests map[string]bool `json:"-" yaml:"-" mapstructure:"-"`
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
 	// SchemaNoise* pair below is the previous one, kept so an existing
 	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via

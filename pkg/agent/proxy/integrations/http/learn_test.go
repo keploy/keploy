@@ -148,6 +148,7 @@ func TestLearnMatchLearnsAnEchoAsACorrelationAndRendersIt(t *testing.T) {
 func TestLearnMatchRefusesAVariableNothingFollows(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker(nil)
+	tr.Begin()
 	ctx := learn.WithTracker(context.Background(), tr)
 	db := &learnDb{perTest: []*models.Mock{
 		recorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
@@ -160,7 +161,7 @@ func TestLearnMatchRefusesAVariableNothingFollows(t *testing.T) {
 	if err != nil || served != nil || miss == nil {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
-	if miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "url.path.2 carries the value of body.order") || miss.closest == nil || miss.closest.Name != "mock-1" {
+	if miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "url.path.2 carries a value an earlier call of the test (mock-0) recorded") || miss.closest == nil || miss.closest.Name != "mock-1" {
 		t.Fatalf("miss %+v", miss.res)
 	}
 	if len(db.perTest) != 1 {
@@ -179,7 +180,9 @@ func (f *following) Follow(_ string, _ learn.Leaf, from learn.Place) bool {
 func TestLearnMatchHandsAVariableToItsRuntime(t *testing.T) {
 	h, n, opts := learnOn(t)
 	vars := &following{}
-	ctx := learn.WithTracker(context.Background(), learn.NewTracker(vars))
+	tr := learn.NewTracker(vars)
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
 	db := &learnDb{perTest: []*models.Mock{
 		recorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`),
 		recorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{}`),
@@ -256,7 +259,7 @@ func TestLearnedMatchHonoursWhatFLearned(t *testing.T) {
 	m.Spec.ReqBodyNoise = map[string][]string{"url.path.2": {}, "header.x-trace": {}}
 	m.Spec.Correlations = []models.FieldCorrelation{{RequestPath: "body.key", ResponsePaths: []string{"body.idempotency_key"}, RecordedValue: "k-1"}}
 	db := &learnDb{perTest: []*models.Mock{m}}
-	served, err := h.learnedMatch(context.Background(), live("POST", "/v1/charges/2", `{"key":"k-7","amount":5}`, map[string]string{"X-Trace": "t9"}), db, n)
+	served, err := h.learnedMatch(context.Background(), live("POST", "/v1/charges/2", `{"key":"k-7","amount":5}`, map[string]string{"X-Trace": "t9"}), db, n, models.OutgoingOptions{})
 	if err != nil || served == nil {
 		t.Fatalf("served %v err %v", served, err)
 	}
@@ -265,7 +268,7 @@ func TestLearnedMatchHonoursWhatFLearned(t *testing.T) {
 	}
 	// What was not learned is still compared: another amount is not served.
 	db = &learnDb{perTest: []*models.Mock{m}}
-	if served, _ := h.learnedMatch(context.Background(), live("POST", "/v1/charges/2", `{"key":"k-7","amount":6}`, map[string]string{"X-Trace": "t9"}), db, n); served != nil {
+	if served, _ := h.learnedMatch(context.Background(), live("POST", "/v1/charges/2", `{"key":"k-7","amount":6}`, map[string]string{"X-Trace": "t9"}), db, n, models.OutgoingOptions{}); served != nil {
 		t.Fatal("a value nothing learned is compared")
 	}
 }
@@ -281,5 +284,150 @@ func TestRenderLearnedOnlyWhereTheEchoWas(t *testing.T) {
 	}
 	if m.Spec.HTTPResp.Body != `{"echo":7,"count":7,"loc":"/x/7"}` || m.Spec.HTTPResp.Header["Location"] != "/x/7" {
 		t.Fatal("the recorded mock is never touched")
+	}
+}
+
+// Outside record's full round a request that came with an array in another
+// order is still unstable_order (design §7.3: F or C), and names the call it
+// was refused against; any other miss keeps the matcher's report.
+func TestOrderMissOutsideTheFullRound(t *testing.T) {
+	h, n, _ := learnOn(t)
+	db := &learnDb{perTest: []*models.Mock{recorded("m", 0, "POST", "/a", `{"ids":[1,2,3]}`, nil, `{}`)}}
+	miss := h.orderMiss(context.Background(), live("POST", "/a", `{"ids":[3,1,2]}`, nil), db, n)
+	if miss == nil || miss.res.Reason != models.MissUnstableOrder || miss.closest == nil || miss.closest.Name != "m" {
+		t.Fatalf("miss %+v", miss)
+	}
+	if len(db.perTest) != 1 {
+		t.Fatal("reading a miss consumes nothing")
+	}
+	if miss := h.orderMiss(context.Background(), live("POST", "/a", `{"ids":[1,2,3],"x":1}`, nil), db, n); miss != nil {
+		t.Fatalf("a changed request is not an order miss: %+v", miss.res)
+	}
+}
+
+// A value that flowed from an earlier call is a variable whatever its type
+// there, and inside a longer value: never noise (the reviewer's repros).
+func TestLearnMatchVariablesAreNeverNoise(t *testing.T) {
+	h, n, opts := learnOn(t)
+	for _, tc := range []struct {
+		name          string
+		first, second *models.Mock
+		f, s          *req
+	}{
+		{
+			"a number flowing into a path",
+			recorded("mock-0", 0, "POST", "/v1/orders", `{"order":12345}`, nil, `{}`),
+			recorded("mock-1", time.Second, "GET", "/v1/orders/12345", "", nil, `{}`),
+			live("POST", "/v1/orders", `{"order":54321}`, nil),
+			live("GET", "/v1/orders/54321", "", nil),
+		},
+		{
+			"a token flowing into a credential",
+			recorded("mock-0", 0, "POST", "/v1/login", `{"token":"tok-A"}`, nil, `{}`),
+			recorded("mock-1", time.Second, "GET", "/v1/me", "", map[string]string{"Authorization": "Bearer tok-A"}, `{}`),
+			live("POST", "/v1/login", `{"token":"tok-B"}`, nil),
+			live("GET", "/v1/me", "", map[string]string{"Authorization": "Bearer tok-B"}),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := learn.NewTracker(nil)
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			db := &learnDb{perTest: []*models.Mock{tc.first, tc.second}}
+			if served, miss, _ := h.learnMatch(ctx, tc.f, db, n, opts); served == nil || miss != nil {
+				t.Fatalf("the first call is paired: %+v", miss)
+			}
+			served, miss, _ := h.learnMatch(ctx, tc.s, db, n, opts)
+			if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged {
+				t.Fatalf("a value that flowed is refused until it can be followed: served %v miss %+v", served, miss)
+			}
+		})
+	}
+}
+
+// A value of another kind of mock earlier in the test (an id the app
+// inserted into a database) is a variable too.
+func TestLearnMatchFindsEarlierPlacesOfAnyKind(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker(nil)
+	tr.Begin()
+	tr.ServedMock(&models.Mock{Name: "pg-0", Kind: models.Postgres, Spec: models.MockSpec{ReqTimestampMock: learnAt,
+		Metadata: map[string]string{"query": "INSERT INTO users VALUES ($1)", "params": "u-77"}, GenericRequests: []models.Payload{{Message: []models.OutputBinary{{Data: "INSERT u-77"}}}}}})
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{recorded("mock-1", time.Second, "GET", "/v1/users/u-77", "", nil, `{}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/users/u-88", "", nil), db, n, opts)
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "(pg-0)") {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+}
+
+// What drifted in one element of an array is learned for that element alone.
+func TestLearnMatchNoiseNamesOneElement(t *testing.T) {
+	h, n, opts := learnOn(t)
+	pool := recorded("pool-0", 0, "POST", "/v1/put", `{"items":[{"k":"a","at":"t-1"},{"k":"b","at":"fixed"}]}`, nil, `{}`)
+	pool.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}}
+	opts.LearnPool = true
+	if served, miss, _ := h.learnMatch(context.Background(), live("POST", "/v1/put", `{"items":[{"k":"a","at":"t-2"},{"k":"b","at":"fixed"}]}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("paired: %+v", miss)
+	}
+	if got := db.pooled[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, map[string][]string{"body.items[0].at": {}}) {
+		t.Fatalf("learned %v", got)
+	}
+	// The other element's value never drifted: a change there is not excused.
+	served, _, _ := h.learnMatch(context.Background(), live("POST", "/v1/put", `{"items":[{"k":"a","at":"t-3"},{"k":"b","at":"REGRESSED"}]}`, nil), db, n, models.OutgoingOptions{Learn: true})
+	if served != nil {
+		t.Fatal("noise learned on items[0] excused items[1]")
+	}
+}
+
+// Outside every test a request belongs to the pool: a test's own mocks are
+// never paired then, and a partial record (no pool) pairs nothing.
+func TestLearnMatchOutsideATestPairsOnlyThePool(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker(nil) // no test has begun
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{recorded("mock-0", 0, "POST", "/a", `{"id":"x"}`, nil, `{}`)}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"y"}`, nil), db, n, opts); served != nil || miss == nil {
+		t.Fatalf("a test's mock was paired outside every test: served %v", served)
+	}
+	if served, _, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"x"}`, nil), db, n, opts); served == nil {
+		t.Fatal("an exact match is served outside a test, as before")
+	}
+}
+
+// ownedView is a view that scopes the pool to a test and knows of no open one.
+type ownedView struct{ *learnDb }
+
+func (ownedView) OwnedByTest(*models.Mock) (bool, bool) { return false, false }
+
+func TestLearnMatchAScopedViewWithNoTestPairsNothing(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker(nil)
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := ownedView{&learnDb{perTest: []*models.Mock{recorded("mock-0", 0, "POST", "/a", `{"id":"x"}`, nil, `{}`)}}}
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/a", `{"id":"y"}`, nil), db, n, opts); served != nil || miss == nil {
+		t.Fatalf("a mock the view does not say is the test's was paired: served %v", served)
+	}
+}
+
+// A multipart body is read by its own boundary, minted per request.
+func TestLearnMatchMultipartBoundary(t *testing.T) {
+	h, n, opts := learnOn(t)
+	body := func(b, file, note string) string {
+		return "--" + b + "\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n" + note + "\r\n--" + b +
+			"\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\n" + file + "\r\n--" + b + "--\r\n"
+	}
+	rec := recorded("mock-0", 0, "POST", "/up", body("AAA", "data", "n-1"), map[string]string{"Content-Type": "multipart/form-data; boundary=AAA"}, `{}`)
+	in := live("POST", "/up", body("BBB", "data", "n-2"), map[string]string{"Content-Type": "multipart/form-data; boundary=BBB"})
+	db := &learnDb{perTest: []*models.Mock{rec}}
+	served, miss, _ := h.learnMatch(context.Background(), in, db, n, opts)
+	if served == nil || miss != nil || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.note": {}}) {
+		t.Fatalf("served %v miss %+v consumed %+v", served, miss, db.consumed)
+	}
+	db = &learnDb{perTest: []*models.Mock{rec}}
+	if served, miss, _ := h.learnMatch(context.Background(), live("POST", "/up", body("CCC", "other", "n-1"), map[string]string{"Content-Type": "multipart/form-data; boundary=CCC"}), db, n, opts); served != nil || miss == nil {
+		t.Fatal("a file part is compared whole")
 	}
 }

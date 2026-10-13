@@ -111,6 +111,8 @@ func reorderedArrays(rec, live interface{}, known Known) []string {
 	return out
 }
 
+// walkReorder walks the two bodies at path (the exact path) and risk (the
+// request noise dialect's, relative to the body).
 func walkReorder(path, risk string, rec, live interface{}, known Known, out *[]string) {
 	switch r := rec.(type) {
 	case map[string]interface{}:
@@ -123,26 +125,23 @@ func walkReorder(path, risk string, rec, live interface{}, known Known, out *[]s
 			if !ok {
 				continue
 			}
-			childRisk := k
-			if risk != "" {
-				childRisk = risk + "." + k
-			}
-			walkReorder(path+"."+k, childRisk, rv, lv, known, out)
+			walkReorder(path+"."+k, childRisk(risk, k), rv, lv, known, out)
 		}
 	case []interface{}:
 		l, ok := live.([]interface{})
 		if !ok || len(l) != len(r) {
 			return
 		}
-		childRisk := "[]"
-		if risk != "" {
-			childRisk = risk + "[]"
-		}
+		elemRisk := arrayRisk(risk)
 		if len(r) >= 2 {
 			re, le := make([]interface{}, len(r)), make([]interface{}, len(l))
 			for i := range r {
-				re[i] = prune(childRisk, r[i], known)
-				le[i] = prune(childRisk, l[i], known)
+				// Each side's element at its own position: the recorded
+				// one's excused nodes are the recorded positions', and the
+				// live one's the live positions'.
+				ep := path + "[" + strconv.Itoa(i) + "]"
+				re[i] = prune(ep, elemRisk, r[i], known)
+				le[i] = prune(ep, elemRisk, l[i], known)
 			}
 			if matcher.ArrayReordered(re, le) {
 				*out = append(*out, path)
@@ -150,51 +149,57 @@ func walkReorder(path, risk string, rec, live interface{}, known Known, out *[]s
 			}
 		}
 		for i := range r {
-			walkReorder(path+"["+strconv.Itoa(i)+"]", childRisk, r[i], l[i], known, out)
+			walkReorder(path+"["+strconv.Itoa(i)+"]", elemRisk, r[i], l[i], known, out)
 		}
 	}
 }
 
-// prune is v without the nodes known excuses. risk is v's path in the
-// request noise dialect.
-func prune(risk string, v interface{}, known Known) interface{} {
-	if excusedNode(risk, v, known) {
+func childRisk(risk, k string) string {
+	if risk == "" {
+		return k
+	}
+	return risk + "." + k
+}
+
+func arrayRisk(risk string) string {
+	if risk == "" {
+		return "[]"
+	}
+	return risk + "[]"
+}
+
+// prune is v (at the exact path, and at risk in the request noise dialect)
+// without the nodes known excuses.
+func prune(path, risk string, v interface{}, known Known) interface{} {
+	if excusedNode(path, risk, v, known) {
 		return excusedMark
 	}
 	switch t := v.(type) {
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(t))
 		for k, child := range t {
-			childRisk := k
-			if risk != "" {
-				childRisk = risk + "." + k
-			}
-			if excusedNode(childRisk, child, known) {
+			if excusedNode(path+"."+k, childRisk(risk, k), child, known) {
 				continue
 			}
-			out[k] = prune(childRisk, child, known)
+			out[k] = prune(path+"."+k, childRisk(risk, k), child, known)
 		}
 		return out
 	case []interface{}:
-		childRisk := "[]"
-		if risk != "" {
-			childRisk = risk + "[]"
-		}
 		out := make([]interface{}, len(t))
 		for i, child := range t {
-			out[i] = prune(childRisk, child, known)
+			out[i] = prune(path+"["+strconv.Itoa(i)+"]", arrayRisk(risk), child, known)
 		}
 		return out
 	}
 	return v
 }
 
-func excusedNode(risk string, v interface{}, known Known) bool {
+func excusedNode(path, risk string, v interface{}, known Known) bool {
 	noise := "body"
 	if risk != "" {
 		noise = "body." + risk
 	}
-	leaf := Leaf{Noise: noise}
+	leaf := Leaf{Path: path, Noise: noise}
 	switch v.(type) {
 	case map[string]interface{}, []interface{}:
 	default:

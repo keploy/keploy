@@ -329,12 +329,22 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
 				// matcher as before.
-				if provenswitch.On() {
-					stub, err = h.learnedMatch(ctx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+				proven := provenswitch.On()
+				if proven {
+					stub, err = h.learnedMatch(ctx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
-					ok, stub, diag, err = h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+					// Under the switch the learn step of record's full round
+					// is the one request-noise learner, and what it learned is
+					// always followed (design v14 §7.2 step 10; U18): no other
+					// replay learns noise, and a learned correlation is never
+					// switched off.
+					detect, correlate := opts.NoiseDetection(), !opts.DisableMockCorrelation
+					if proven {
+						detect, correlate = false, true
+					}
+					ok, stub, diag, err = h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 				}
 			}
 			if err != nil {
@@ -347,6 +357,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
+				if lmiss == nil && provenswitch.On() {
+					// A call that came with an array in another order is
+					// unstable_order in every round, not only the full one.
+					lmiss = h.orderMiss(ctx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+				}
 				if lmiss != nil {
 					diag = lmiss.diag()
 				}

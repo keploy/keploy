@@ -1,8 +1,12 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/url"
 	"regexp"
 	"sort"
@@ -115,14 +119,17 @@ func recordedParts(m *models.Mock) httpParts {
 	if err == nil {
 		p.path = u.Path
 	}
+	// The recorded URL's own query first: URLParams joins a repeated
+	// parameter's values with ", ", which cannot be told apart from one value
+	// holding ", ".
 	switch {
+	case err == nil && u.RawQuery != "":
+		p.query = u.Query()
 	case len(r.URLParams) > 0:
 		p.query = make(map[string][]string, len(r.URLParams))
 		for k, v := range r.URLParams {
 			p.query[k] = strings.Split(v, ", ")
 		}
-	case err == nil:
-		p.query = u.Query()
 	}
 	for k, v := range r.Header {
 		p.header[strings.ToLower(k)] = v
@@ -196,8 +203,14 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		for i, v := range vs {
 			masked[i] = maskURLNoise(v, n.url)
 		}
-		sort.Strings(masked)
-		add("url.query."+k, strings.Join(masked, ", "), strings.ContainsAny(k, ".[]"))
+		if len(masked) > 1 {
+			// A repeated parameter's values come in any order, so no one of
+			// them has a place a learned entry could name: compared whole.
+			sort.Strings(masked)
+			s.Fixed["url.query."+k] = strings.Join(masked, "\x00")
+			continue
+		}
+		add("url.query."+k, masked[0], strings.ContainsAny(k, ".[]"))
 	}
 	for k, v := range p.header {
 		switch {
@@ -221,6 +234,12 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 			sort.Strings(vs)
 			add("body."+k, strings.Join(vs, ", "), strings.ContainsAny(k, ".[]"))
 		}
+	case p.mediaType == "multipart/form-data":
+		if !multipartLeaves(p, s.Leaves, s.Fixed) {
+			s.Fixed["body"] = "text " + string(p.body)
+			break
+		}
+		s.Fixed["body"] = "multipart"
 	default:
 		v, ok := learn.DecodeJSON(p.body)
 		if !ok {
@@ -232,6 +251,44 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		learn.JSONLeaves("body", v, s.Leaves)
 	}
 	return s
+}
+
+// multipartLeaves reads a multipart/form-data body by its own boundary: each
+// field part is a leaf (body.<name>), each file part a fixed part (its file
+// name and bytes), so a boundary minted per request is no difference. It
+// reports false for a body it cannot read.
+func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string]string) bool {
+	_, params, err := mime.ParseMediaType(p.header["content-type"])
+	if err != nil || params["boundary"] == "" {
+		return false
+	}
+	mr := multipart.NewReader(bytes.NewReader(p.body), params["boundary"])
+	seen := map[string]bool{}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return false
+		}
+		name := part.FormName()
+		if seen[name] {
+			// A repeated part name has no place of its own.
+			return false
+		}
+		seen[name] = true
+		if part.FileName() != "" {
+			fixed["body."+name] = "file " + part.FileName() + "\x00" + string(data)
+			continue
+		}
+		path := "body." + name
+		leaves[path] = learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: string(data), Unnamed: strings.ContainsAny(name, ".[]")}
+	}
 }
 
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
@@ -257,8 +314,11 @@ type httpKnown struct {
 
 // Excused implements learn.Known. Learned noise and correlations keep their
 // type; keploy.yml's noise and obfuscated values excuse type and presence.
+// What the learn step learned names a leaf by its exact path, an array
+// position included; noise learned before it (by the request-body learner
+// it replaces) names it in the request matcher's dialect.
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	if learnedCovers(k.learned, l.Noise) || k.correlated[l.Noise] {
+	if learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise) || k.correlated[l.Path] {
 		return true, true
 	}
 	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
@@ -278,16 +338,21 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 	return false, false
 }
 
-// learnedCovers reports whether learned noise names the leaf whose noise path
-// is noise: the leaf itself, or a container holding it. Unlike keploy.yml's
-// noise, a learned entry names exactly the field that drifted, never a field
-// whose name it happens to contain.
-func learnedCovers(learned map[string][]string, noise string) bool {
-	if _, ok := learned[noise]; ok {
+func hasKey(m map[string][]string, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// learnedCovers reports whether learned noise names the leaf at path: the
+// leaf itself, or a container holding it. Unlike keploy.yml's noise, a
+// learned entry names exactly the field that drifted, never a field whose
+// name it happens to contain, nor another element of its array.
+func learnedCovers(learned map[string][]string, path string) bool {
+	if _, ok := learned[path]; ok {
 		return true
 	}
 	for p := range learned {
-		if strings.HasPrefix(noise, p+".") || strings.HasPrefix(noise, p+"[]") {
+		if strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
 			return true
 		}
 	}
@@ -323,22 +388,15 @@ func respLeaves(r *models.HTTPResp) []learn.Leaf {
 }
 
 // bindings are the live values a request gives the correlations of the mock
-// it matched: each one's request leaf, when the request has exactly one leaf
-// there.
+// it matched: each one's request leaf, by its exact path.
 func bindings(live learn.Shape, corrs []models.FieldCorrelation) map[string]string {
 	if len(corrs) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(corrs))
 	for _, c := range corrs {
-		var found []learn.Leaf
-		for _, l := range live.Leaves {
-			if l.Noise == c.RequestPath {
-				found = append(found, l)
-			}
-		}
-		if len(found) == 1 {
-			out[c.RequestPath] = found[0].Value
+		if l, ok := live.Leaves[c.RequestPath]; ok {
+			out[c.RequestPath] = l.Value
 		}
 	}
 	return out
@@ -351,6 +409,126 @@ type learnMiss struct {
 	pool    []*models.Mock
 }
 
+// scope is what a request's scope offers: the HTTP candidates learn.Pair
+// takes (the test's own first, in recorded order, then the pool's; a pool
+// mock is pairable only with pool), and every mock of any kind the scope
+// shows, for the earlier places of the test's recording.
+type scope struct {
+	cands   []learn.Candidate
+	mocks   []*models.Mock // the candidates' mocks
+	http    []*models.Mock // every HTTP mock offered
+	visible []*models.Mock // every mock offered, of any kind
+}
+
+// learnScope reads the scope of a request. A mock is the test's own only
+// while a test is open (tracker): outside every test a request belongs to
+// the pool, and in a view that scopes the pool to a test
+// (integrations.TestOwnership), only the mocks it says are the test's.
+func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (scope, error) {
+	var sc scope
+	perTest, err := mockDb.GetPerTestMocksInWindow()
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to get per-test mocks")
+		return sc, errors.New("error while matching the request with the mocks")
+	}
+	session, err := mockDb.GetSessionMocks()
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to get session mocks")
+		return sc, errors.New("error while matching the request with the mocks")
+	}
+	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
+	httpPerTest, httpSession := inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
+	sc.http = append(append(make([]*models.Mock, 0, len(httpPerTest)+len(httpSession)), httpPerTest...), httpSession...)
+
+	open := tracker.Open()
+	owner, _ := mockDb.(integrations.TestOwnership)
+	var poolCands []learn.Candidate
+	var poolMocks []*models.Mock
+	for i, m := range sc.http {
+		if m == nil || m.Spec.HTTPReq == nil {
+			continue
+		}
+		rp := recordedParts(m)
+		d := destOf(live, rp)
+		// The key first: a body is decoded only for a candidate.
+		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
+			continue
+		}
+		own := open && i < len(httpPerTest)
+		if owner != nil {
+			owned, known := owner.OwnedByTest(m)
+			own = open && known && owned
+		}
+		c := learn.Candidate{
+			Shape:    n.shape(rp, d),
+			Known:    n.known(m),
+			Pairable: !m.IsProtocolPhase() && (own || pool),
+		}
+		if own {
+			sc.cands, sc.mocks = append(sc.cands, c), append(sc.mocks, m)
+		} else {
+			poolCands, poolMocks = append(poolCands, c), append(poolMocks, m)
+		}
+	}
+	sc.cands, sc.mocks = append(sc.cands, poolCands...), append(sc.mocks, poolMocks...)
+	return sc, nil
+}
+
+// exactGroup are the candidates that match live exactly, modulo what is
+// known: what a request recorded several times answers from, in turn
+// (cursorPick), and nothing else.
+func exactGroup(live learn.Shape, sc scope) []*models.Mock {
+	var out []*models.Mock
+	for i, c := range sc.cands {
+		if c.Shape.Key != live.Key {
+			continue
+		}
+		if d := learn.Compare(live, c.Shape, c.Known); d.Structural == "" && len(d.Drift) == 0 && len(d.Reordered) == 0 {
+			out = append(out, sc.mocks[i])
+		}
+	}
+	return out
+}
+
+// earlierRaw are the mocks of the test's recording that came before a
+// request recorded at at, as Classify reads them when no leaf names their
+// values: every mock any parser served earlier in the test, and every mock
+// the scope shows that was recorded before it. The paired mock is not one.
+func earlierRaw(paired *models.Mock, served, visible []*models.Mock) []learn.Raw {
+	var out []learn.Raw
+	for _, m := range served {
+		if m != nil && m.Name != paired.Name {
+			out = append(out, learn.RawOf(m, true))
+		}
+	}
+	for _, m := range visible {
+		if m != nil && m.Name != paired.Name && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
+			out = append(out, learn.RawOf(m, false))
+		}
+	}
+	return out
+}
+
+// orderMiss is the order rule's reading, under the proven switch outside
+// record's full round, of a request no mock answered: when the recorded call
+// it most resembles holds an array it sent with the recorded elements in
+// another order, the miss is unstable_order in any round (design §7.3), and
+// names that call. nil otherwise: the matcher's own report stands. It learns
+// nothing and serves nothing.
+func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise) *learnMiss {
+	live := liveParts(ctx, input)
+	liveShape := n.shape(live, sameDest)
+	sc, err := h.learnScope(mockDb, nil, live, liveShape, n, true)
+	if err != nil {
+		return nil
+	}
+	res := learn.Pair(liveShape, sc.cands)
+	if res.Outcome != learn.Miss || res.Reason != models.MissUnstableOrder || res.Index < 0 {
+		return nil
+	}
+	return &learnMiss{res: res, closest: sc.mocks[res.Index], pool: sc.http}
+}
+
 // learnMatch decides a request of record's full round (opts.Learn, under the
 // proven switch) with the learn step (design §7.2): the first mock that
 // matches it exactly, modulo what is known, is served; otherwise the unique
@@ -359,68 +537,27 @@ type learnMiss struct {
 // is a miss with its reason. It returns the mock to serve, or the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
-	test, earlier := tracker.Test()
+	test, earlier, served := tracker.Test()
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		perTest, err := mockDb.GetPerTestMocksInWindow()
+		sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get per-test mocks")
-			return nil, nil, errors.New("error while matching the request with the mocks")
+			return nil, nil, err
 		}
-		session, err := mockDb.GetSessionMocks()
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get session mocks")
-			return nil, nil, errors.New("error while matching the request with the mocks")
-		}
-		perTest, session = inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
-		pool := append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
 
-		// The test's own mocks are offered first, in recorded order, then the
-		// pool's: a test's mocks are its own before they are anyone's.
-		owner, _ := mockDb.(integrations.TestOwnership)
-		var cands, poolCands []learn.Candidate
-		var mocks, poolMocks []*models.Mock
-		for i, m := range pool {
-			if m == nil || m.Spec.HTTPReq == nil {
-				continue
-			}
-			rp := recordedParts(m)
-			d := destOf(live, rp)
-			// The key first: a body is decoded only for a candidate.
-			if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
-				continue
-			}
-			own := i < len(perTest)
-			if owner != nil {
-				if owned, known := owner.OwnedByTest(m); known {
-					own = owned
-				}
-			}
-			c := learn.Candidate{
-				Shape:    n.shape(rp, d),
-				Known:    n.known(m),
-				Pairable: !m.IsProtocolPhase() && (own || opts.LearnPool),
-			}
-			if own {
-				cands, mocks = append(cands, c), append(mocks, m)
-			} else {
-				poolCands, poolMocks = append(poolCands, c), append(poolMocks, m)
-			}
-		}
-		cands, mocks = append(cands, poolCands...), append(mocks, poolMocks...)
-
-		res := learn.Pair(liveShape, cands)
+		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
 		case learn.Exact:
-			m := mocks[res.Index]
+			m := sc.mocks[res.Index]
 			// A request recorded several times answers with each recorded
-			// answer in turn (cursorPick), as outside the learn step.
-			picked, commit := h.cursorPick(m, mocks, mockDb, !opts.DisableStatefulMocks)
-			served, claimed, err := h.claimLearned(ctx, picked, mockDb, nil, nil, bindings(liveShape, picked.Spec.Correlations))
+			// answer in turn (cursorPick), among the recordings it matches
+			// exactly, as outside the learn step.
+			picked, commit := h.cursorPick(m, exactGroup(liveShape, sc), mockDb, !opts.DisableStatefulMocks)
+			out, claimed, err := h.claimLearned(ctx, picked, mockDb, nil, nil, bindings(liveShape, picked.Spec.Correlations))
 			if err != nil {
 				return nil, nil, err
 			}
@@ -430,17 +567,18 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if commit != nil {
 				commit()
 			}
-			rec := cands[res.Index].Shape
+			rec := sc.cands[res.Index].Shape
 			if picked != m {
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
 			}
-			tracker.Served(test, earlierOf(picked, rec, liveShape, served))
-			return served, nil, nil
+			tracker.Served(test, earlierOf(picked, rec, liveShape, out))
+			return out, nil, nil
 
 		case learn.Paired:
-			m, c := mocks[res.Index], cands[res.Index]
-			learned := learn.Classify(res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, respLeaves(m.Spec.HTTPResp))
+			m, c := sc.mocks[res.Index], sc.cands[res.Index]
+			learned := learn.Classify(res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
+				earlierRaw(m, served, sc.visible), respLeaves(m.Spec.HTTPResp))
 			noise := map[string][]string{}
 			var corrs []models.FieldCorrelation
 			for _, l := range learned {
@@ -448,17 +586,17 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				case learn.KindVariable:
 					if !tracker.Variables().Follow(m.Name, l.Live, l.From) {
 						res.Outcome, res.Reason = learn.Miss, models.MissRequestChanged
-						res.Why = l.Recorded.Path + " carries the value of " + l.From.Path + " of an earlier call of the test, and keploy cannot follow it from there yet"
-						return nil, &learnMiss{res: res, closest: m, pool: pool}, nil
+						res.Why = l.Recorded.Path + " carries a value an earlier call of the test (" + l.From.Mock + ") recorded, and keploy cannot follow it from there yet"
+						return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 					}
 				case learn.KindCorrelation:
-					corrs = append(corrs, models.FieldCorrelation{RequestPath: l.Recorded.Noise, ResponsePaths: noisePaths(l.Echo), RecordedValue: l.Recorded.Value})
+					corrs = append(corrs, models.FieldCorrelation{RequestPath: l.Recorded.Path, ResponsePaths: leafPaths(l.Echo), RecordedValue: l.Recorded.Value})
 				default:
-					noise[l.Recorded.Noise] = []string{}
+					noise[l.Recorded.Path] = []string{}
 				}
 			}
 			all := append(append([]models.FieldCorrelation(nil), m.Spec.Correlations...), corrs...)
-			served, claimed, err := h.claimLearned(ctx, m, mockDb, noise, corrs, bindings(liveShape, all))
+			out, claimed, err := h.claimLearned(ctx, m, mockDb, noise, corrs, bindings(liveShape, all))
 			if err != nil {
 				return nil, nil, err
 			}
@@ -467,14 +605,14 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			}
 			for _, l := range learned {
 				h.Logger.Info("learned a field that changed between record and replay",
-					zap.String("mock", m.Name), zap.String("field", l.Recorded.Noise), zap.String("as", string(l.Kind)))
+					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			tracker.Served(test, earlierOf(m, c.Shape, liveShape, served))
-			return served, nil, nil
+			tracker.Served(test, earlierOf(m, c.Shape, liveShape, out))
+			return out, nil, nil
 		}
-		miss := &learnMiss{res: res, pool: pool}
+		miss := &learnMiss{res: res, pool: sc.http}
 		if res.Index >= 0 {
-			miss.closest = mocks[res.Index]
+			miss.closest = sc.mocks[res.Index]
 		}
 		return nil, miss, nil
 	}
@@ -493,14 +631,14 @@ func inRecordedOrder(mocks []*models.Mock) []*models.Mock {
 	return out
 }
 
-// noisePaths are leaves' noise paths, sorted, without repeats.
-func noisePaths(ls []learn.Leaf) []string {
+// leafPaths are leaves' exact paths, sorted, without repeats.
+func leafPaths(ls []learn.Leaf) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, l := range ls {
-		if !seen[l.Noise] {
-			seen[l.Noise] = true
-			out = append(out, l.Noise)
+		if !seen[l.Path] {
+			seen[l.Path] = true
+			out = append(out, l.Path)
 		}
 	}
 	sort.Strings(out)
@@ -534,49 +672,42 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock) learn
 }
 
 // learnedMatch serves, under the proven switch outside record's full round, a
-// request that a mock carrying what the learn step learned (noise or
-// correlations) matches exactly modulo that: the replays after F honour what
+// request whose first exact match, modulo what is known, carries what the
+// learn step learned (noise or correlations): the replays after F honour what
 // F learned, in every part of the request (its path, query, headers and
-// body), and render each correlation where F found its echo. A request it
-// does not serve goes on to the matcher as before.
-func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise) (*models.Mock, error) {
+// body), and render each correlation where F found its echo. The test's own
+// mocks come first, in recorded order, as in F; a request recorded several
+// times answers with each recorded answer in turn (cursorPick). A request
+// whose first exact match learned nothing, or that matches none, goes on to
+// the matcher as before.
+func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, error) {
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		perTest, err := mockDb.GetPerTestMocksInWindow()
+		sc, err := h.learnScope(mockDb, learn.TrackerFrom(ctx), live, liveShape, n, true)
 		if err != nil {
 			return nil, nil
 		}
-		session, err := mockDb.GetSessionMocks()
-		if err != nil {
+		group := exactGroup(liveShape, sc)
+		if len(group) == 0 {
 			return nil, nil
 		}
-		var hit *models.Mock
-		for _, m := range FilterHTTPMocks(append(append([]*models.Mock(nil), perTest...), session...)) {
-			if m == nil || m.Spec.HTTPReq == nil || len(m.Spec.ReqBodyNoise) == 0 && len(m.Spec.Correlations) == 0 {
-				continue
-			}
-			rp := recordedParts(m)
-			d := destOf(live, rp)
-			if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
-				continue
-			}
-			if diff := learn.Compare(liveShape, n.shape(rp, d), n.known(m)); diff.Structural == "" && len(diff.Drift) == 0 && len(diff.Reordered) == 0 {
-				hit = m
-				break
-			}
-		}
-		if hit == nil {
+		hit := group[0]
+		if len(hit.Spec.ReqBodyNoise) == 0 && len(hit.Spec.Correlations) == 0 {
 			return nil, nil
 		}
-		served, claimed, err := h.claim(ctx, hit, mockDb, nil, bindings(liveShape, hit.Spec.Correlations))
+		picked, commit := h.cursorPick(hit, group, mockDb, !opts.DisableStatefulMocks)
+		served, claimed, err := h.claim(ctx, picked, mockDb, nil, bindings(liveShape, picked.Spec.Correlations))
 		if err != nil {
 			return nil, err
 		}
 		if claimed {
+			if commit != nil {
+				commit()
+			}
 			return served, nil
 		}
 	}
@@ -606,9 +737,9 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 	why := "keploy's learn step: " + m.res.Why + "."
 	switch m.res.Reason {
 	case models.MissUnstableOrder:
-		why += " The app sent the array in another order than at record, so this test is judged unstable_order."
+		why += " The app sent the array in another order than it was recorded in (unstable_order)."
 	case models.MissRequestChanged:
-		why += " The request changed between record and this replay of the same build in a way keploy does not learn, so this test is judged request_changed."
+		why += " The request changed since it was recorded in a way keploy does not learn (request_changed)."
 	}
 	if r.NextSteps == "" {
 		r.NextSteps = why

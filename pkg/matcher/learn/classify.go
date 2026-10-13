@@ -1,8 +1,12 @@
 package learn
 
 import (
+	"encoding/json"
 	"sort"
+	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Side is the half of an exchange a value is in.
@@ -23,13 +27,24 @@ type Seen struct {
 	Live string
 }
 
-// Earlier is a mock F served earlier in the same test.
+// Earlier is an HTTP mock the learn step served earlier in the same test,
+// leaf by leaf: a variable found there has a place a runtime can bind it at.
 type Earlier struct {
 	Mock string
-	// At is when the mock's request was recorded: "earlier in the test's
-	// recording" is earlier than this.
+	// At is when the mock's request was recorded.
 	At   time.Time
 	Seen []Seen
+}
+
+// Raw is any other mock of the test's recording, of any kind: served earlier
+// in the test (Served), or recorded before the request L classifies (At).
+// Text is its recorded request and answer, the payload only, as one text: a
+// value found there flowed from that mock, at a place no leaf names.
+type Raw struct {
+	Mock   string
+	At     time.Time
+	Served bool
+	Text   string
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -44,7 +59,8 @@ const (
 	KindVariable    Kind = "variable"
 )
 
-// Place is where a value is: a mock, a side and a leaf.
+// Place is where a value is: a mock, and, when a leaf names it, a side and
+// the leaf. A place found in a mock's raw text has no side and no path.
 type Place struct {
 	Mock  string
 	Side  Side
@@ -64,33 +80,33 @@ type Learned struct {
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
-// (design §7.2 step 6). at is when that mock's request was recorded, earlier
-// the mocks F served before it in the same test, resp the leaves of its
-// recorded answer.
+// (design §7.2 step 6). at is when that mock's request was recorded;
+// earlier are the HTTP mocks F served before it in the same test, leaf by
+// leaf, and raw every other mock of the test's recording that came before
+// it; resp are the leaves of its recorded answer.
 //
-//   - Variable: the recorded value appeared earlier in the test's
-//     recording, at a place where F saw the request's live value too: the
-//     value flowed from there to here. The earliest such place binds it. A
-//     place where the recording holds the value but F saw another one did
-//     not feed this request, and binds nothing.
+//   - Variable: the recorded value appeared earlier in the test's recording,
+//     whatever its type there, as a whole value or as a token of a longer
+//     one, in any kind of mock. It is asserted equal to the live value at
+//     that earlier place, wherever F saw what: a value that came from
+//     somewhere is never stopped being compared. The earliest place a leaf
+//     names binds it; failing that, the first raw mock holding it.
 //   - Correlation: the recorded answer echoes the recorded value (a leaf
-//     equal to it, or a string holding it as a token), and the request
-//     names it alone (no other leaf of the request shares its noise path, so
-//     a later replay can tell which value to capture).
+//     equal to it, or a string holding it as a token).
 //   - Noise otherwise: not compared, its type still enforced.
 //
 // An empty recorded value is never followed: it carries nothing to follow.
-func Classify(drift []string, live, rec Shape, at time.Time, earlier []Earlier, resp []Leaf) []Learned {
-	order := append([]Earlier(nil), earlier...)
-	sort.SliceStable(order, func(i, j int) bool { return order[i].At.Before(order[j].At) })
+func Classify(drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf) []Learned {
+	served := append([]Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	out := make([]Learned, 0, len(drift))
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		if r.Value != "" {
-			if from, ok := flowedFrom(r, l, at, order); ok {
+			if from, ok := appeared(searched(r.Value, l.Value), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
-			} else if echo := echoes(r, resp); len(echo) > 0 && namesAlone(live, l) {
+			} else if echo := echoes(r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindCorrelation, echo
 			}
 		}
@@ -99,16 +115,50 @@ func Classify(drift []string, live, rec Shape, at time.Time, earlier []Earlier, 
 	return out
 }
 
-// flowedFrom is the earliest earlier place holding r's recorded value where
-// F saw l's live value.
-func flowedFrom(r, l Leaf, at time.Time, earlier []Earlier) (Place, bool) {
-	for _, e := range earlier {
-		if !e.At.Before(at) {
+// searched are the values a drifted leaf's recorded value may have come
+// from: the whole value, and each of its words the live value does not have
+// (a token minted earlier and sent in "Bearer <token>", an id in a path).
+// Words are split at anything but letters, digits, '-' and '_'.
+func searched(recorded, live string) []string {
+	out := []string{recorded}
+	liveWords := map[string]bool{}
+	for _, w := range words(live) {
+		liveWords[w] = true
+	}
+	for _, w := range words(recorded) {
+		if w != recorded && !liveWords[w] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func words(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-' || r == '_')
+	})
+}
+
+// appeared is the earlier place of the test's recording that holds one of
+// values: a leaf of an HTTP mock F served before (every one of them came
+// earlier in the test), else a raw mock served before or recorded before at.
+func appeared(values []string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
+	for _, e := range served {
+		for _, s := range e.Seen {
+			for _, v := range values {
+				if s.Leaf.Value == v || s.Leaf.Type == String && ContainsToken(s.Leaf.Value, v) {
+					return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise}, true
+				}
+			}
+		}
+	}
+	for _, x := range raw {
+		if !x.Served && !x.At.Before(at) {
 			continue
 		}
-		for _, s := range e.Seen {
-			if s.Leaf.Type == r.Type && s.Leaf.Value == r.Value && s.Live == l.Value {
-				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise}, true
+		for _, v := range values {
+			if ContainsToken(x.Text, v) {
+				return Place{Mock: x.Mock}, true
 			}
 		}
 	}
@@ -131,13 +181,51 @@ func echoes(r Leaf, resp []Leaf) []Leaf {
 	return out
 }
 
-// namesAlone reports whether no other leaf of the request shares l's noise
-// path.
-func namesAlone(s Shape, l Leaf) bool {
-	for p, o := range s.Leaves {
-		if p != l.Path && o.Noise == l.Noise {
-			return false
-		}
+// payloadKeys are the fields of a mock's spec that say where and when it was
+// recorded, not what it carried: a value found in them did not flow from the
+// mock.
+var payloadKeys = map[string]bool{
+	"metadata": true, "created": true, "reqtimestampmock": true, "restimestampmock": true,
+	"reqbodynoise": true, "correlations": true, "timestamp": true, "async": true,
+}
+
+// RawOf is a mock as Classify reads it when no leaf names its values: its
+// recorded request and answer, the payload only, as one text.
+func RawOf(m *models.Mock, served bool) Raw {
+	r := Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served}
+	b, err := json.Marshal(m.Spec)
+	if err != nil {
+		return r
 	}
-	return !l.Unnamed
+	var v interface{}
+	if json.Unmarshal(b, &v) != nil {
+		return r
+	}
+	b, err = json.Marshal(dropKeys(v))
+	if err == nil {
+		r.Text = string(b)
+	}
+	return r
+}
+
+// dropKeys is v without the object keys payloadKeys names, at any depth.
+func dropKeys(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, child := range t {
+			if payloadKeys[strings.ToLower(k)] {
+				continue
+			}
+			out[k] = dropKeys(child)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, child := range t {
+			out[i] = dropKeys(child)
+		}
+		return out
+	}
+	return v
 }

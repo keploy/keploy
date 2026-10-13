@@ -124,9 +124,16 @@ func TestPair(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
-	t.Run("an equal tie of different calls is request_changed", func(t *testing.T) {
+	t.Run("calls that drift in the same place pair with the first, in recorded order", func(t *testing.T) {
 		live := body(t, "k", `{"id":"z","x":1}`)
 		r := Pair(live, []Candidate{cand(body(t, "k", `{"id":"a","x":1}`), true), cand(body(t, "k", `{"id":"b","x":1}`), true)})
+		if r.Outcome != Paired || r.Index != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("an equal tie in different places is request_changed", func(t *testing.T) {
+		live := body(t, "k", `{"id":"z","x":1}`)
+		r := Pair(live, []Candidate{cand(body(t, "k", `{"id":"a","x":1}`), true), cand(body(t, "k", `{"id":"z","x":2}`), true)})
 		if r.Outcome != Miss || r.Reason != models.MissRequestChanged {
 			t.Fatalf("%+v", r)
 		}
@@ -202,10 +209,10 @@ func TestPair(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	at := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
-	rec := body(t, "k", `{"order":"o-1","nonce":"n-1","ts":5,"tags":["t1","t2"],"empty":""}`)
-	live := body(t, "k", `{"order":"o-9","nonce":"n-9","ts":6,"tags":["u1","t2"],"empty":"now"}`)
+	rec := body(t, "k", `{"order":"o-1","n":12345,"tok":"Bearer tok-A","nonce":"n-1","ts":"t-5","tags":["t1","t2"],"empty":"","db":"u-77"}`)
+	live := body(t, "k", `{"order":"o-9","n":54321,"tok":"Bearer tok-B","nonce":"n-9","ts":"t-6","tags":["u1","t2"],"empty":"now","db":"u-88"}`)
 	resp := map[string]Leaf{}
-	v, _ := DecodeJSON([]byte(`{"echo":"n-1","location":"/orders/x/n-1","count":5}`))
+	v, _ := DecodeJSON([]byte(`{"echo":"n-1","location":"/orders/x/n-1","items":[{"tag":"t1"}]}`))
 	JSONLeaves("body", v, resp)
 	var respLeaves []Leaf
 	for _, l := range resp {
@@ -213,50 +220,63 @@ func TestClassify(t *testing.T) {
 	}
 	earlier := []Earlier{
 		{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
-			// Where the order came from: recorded o-1, and F sent o-9 there.
-			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "o-1"}, Live: "o-9"},
-		}},
-		{Mock: "mock-later", At: at.Add(time.Second), Seen: []Seen{
-			{Side: Request, Leaf: Leaf{Path: "body.ts", Noise: "body.ts", Type: Number, Value: "5"}, Live: "6"},
-		}},
-		{Mock: "mock-2", At: at.Add(-2 * time.Second), Seen: []Seen{
-			// Holds the recorded 5, but F saw another value there: no flow.
-			{Side: Response, Leaf: Leaf{Path: "body.count", Noise: "body.count", Type: Number, Value: "5"}, Live: "5"},
+			// A string here, a number at the drifted leaf: the value flowed
+			// whatever its type.
+			{Side: Response, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "12345"}, Live: "12345"},
+			// F saw another value here than the request sends: the
+			// recorded value still came from here, and is asserted.
+			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "o-1"}, Live: "o-7"},
+			{Side: Response, Leaf: Leaf{Path: "body.token", Noise: "body.token", Type: String, Value: "tok-A"}, Live: "tok-A"},
 		}},
 	}
-	got := Classify([]string{"body.empty", "body.nonce", "body.order", "body.tags[0]", "body.ts"}, live, rec, at, earlier, respLeaves)
+	raw := []Raw{
+		// A database row the test inserted before: the id came from there.
+		{Mock: "pg-3", At: at.Add(-2 * time.Second), Text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
+		// Recorded after the paired call, and not served before it: not
+		// earlier.
+		{Mock: "pg-9", At: at.Add(time.Second), Text: `{"params":["t-5"]}`},
+	}
+	got := Classify([]string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts"}, live, rec, at, earlier, raw, respLeaves)
 	kinds := map[string]Kind{}
+	from := map[string]Place{}
 	for _, l := range got {
 		kinds[l.Recorded.Path] = l.Kind
+		from[l.Recorded.Path] = l.From
 	}
 	want := map[string]Kind{
-		"body.order": KindVariable,    // it flowed from mock-1's request
-		"body.nonce": KindCorrelation, // the answer echoes it, whole and as a token
-		// The answer's count holds the recorded 5. mock-2 holds it too, but F
-		// saw 5 there and sent 6 here, so nothing flowed from it; and
-		// mock-later, which F saw send 6, was recorded after this call.
-		"body.ts":      KindCorrelation,
-		"body.tags[0]": KindNoise, // every element shares its noise path: no correlation can name it
-		"body.empty":   KindNoise, // an empty recorded value carries nothing to follow
+		"body.order":   KindVariable,    // recorded earlier, whatever F saw there
+		"body.n":       KindVariable,    // a number that appeared earlier as a string
+		"body.tok":     KindVariable,    // tok-A appeared earlier, and is a token here
+		"body.db":      KindVariable,    // in an earlier mock of another kind
+		"body.nonce":   KindCorrelation, // the answer echoes it, whole and as a token
+		"body.tags[0]": KindCorrelation, // echoed by the answer's items[0].tag
+		"body.ts":      KindNoise,       // only a mock recorded after it holds it
+		"body.empty":   KindNoise,       // an empty recorded value carries nothing to follow
 	}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("kinds %v, want %v", kinds, want)
 	}
-	for _, l := range got {
-		switch l.Recorded.Path {
-		case "body.order":
-			if l.From != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id"}) {
-				t.Fatalf("from %+v", l.From)
-			}
-		case "body.nonce":
-			var paths []string
-			for _, e := range l.Echo {
-				paths = append(paths, e.Path)
-			}
-			if !reflect.DeepEqual(paths, []string{"body.echo", "body.location"}) && !reflect.DeepEqual(paths, []string{"body.location", "body.echo"}) {
-				t.Fatalf("echo %v", paths)
-			}
-		}
+	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id"}) {
+		t.Fatalf("body.order from %+v", from["body.order"])
+	}
+	if from["body.db"] != (Place{Mock: "pg-3"}) {
+		t.Fatalf("body.db from %+v: a raw mock's place has no leaf", from["body.db"])
+	}
+}
+
+func TestRawOfLeavesOutWhereAndWhen(t *testing.T) {
+	m := &models.Mock{Name: "m", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"connID": "77777"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "/v1/items/4242", Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+		ReqTimestampMock: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}}
+	r := RawOf(m, true)
+	if !ContainsToken(r.Text, "4242") || ContainsToken(r.Text, "77777") || strings.Contains(r.Text, "2026") {
+		t.Fatalf("raw text %s: it holds the payload only", r.Text)
+	}
+	if !r.Served || r.Mock != "m" {
+		t.Fatalf("%+v", r)
 	}
 }
 
@@ -285,7 +305,7 @@ func TestTokens(t *testing.T) {
 
 func TestRenderJSON(t *testing.T) {
 	in := "{\n  \"id\": \"n-1\",\n  \"other\": \"n-1\",\n  \"loc\": \"/o/n-1\",\n  \"count\": 7,\n  \"list\": [{\"id\": \"n-1\"}],\n  \"ok\": true\n}"
-	out, ok := RenderJSON(in, map[string]bool{"body.id": true, "body.loc": true, "body.list[].id": true}, "n-1", "n-9")
+	out, ok := RenderJSON(in, map[string]bool{"body.id": true, "body.loc": true, "body.list[0].id": true}, "n-1", "n-9")
 	want := "{\n  \"id\": \"n-9\",\n  \"other\": \"n-1\",\n  \"loc\": \"/o/n-9\",\n  \"count\": 7,\n  \"list\": [{\"id\": \"n-9\"}],\n  \"ok\": true\n}"
 	if !ok || out != want {
 		t.Fatalf("got %v\n%s\nwant\n%s", ok, out, want)
@@ -306,6 +326,10 @@ func TestRenderJSON(t *testing.T) {
 	if out, ok := RenderJSON(`not json`, map[string]bool{"body": true}, "json", "x"); ok || out != `not json` {
 		t.Fatalf("not json: %v %s", ok, out)
 	}
+	// Only the element the path names.
+	if out, ok := RenderJSON(`{"l":[{"id":"n-1"},{"id":"n-1"}]}`, map[string]bool{"body.l[1].id": true}, "n-1", "n-2"); !ok || out != `{"l":[{"id":"n-1"},{"id":"n-2"}]}` {
+		t.Fatalf("one element: %v %s", ok, out)
+	}
 	// HTML characters are not escaped into the answer.
 	if out, ok := RenderJSON(`{"u":"<a>n-1</a>"}`, map[string]bool{"body.u": true}, "n-1", "n-2"); !ok || out != `{"u":"<a>n-2</a>"}` {
 		t.Fatalf("escape: %v %s", ok, out)
@@ -314,26 +338,40 @@ func TestRenderJSON(t *testing.T) {
 
 func TestTracker(t *testing.T) {
 	tr := NewTracker(nil)
-	n, earlier := tr.Test()
-	if len(earlier) != 0 {
+	if tr.Open() {
+		t.Fatal("no test is open before the first begins")
+	}
+	tr.Begin()
+	if !tr.Open() {
+		t.Fatal("a test is open once it begins")
+	}
+	n, earlier, mocks := tr.Test()
+	if len(earlier) != 0 || len(mocks) != 0 {
 		t.Fatal("a new tracker holds nothing")
 	}
 	tr.Served(n, Earlier{Mock: "a"})
-	if _, e := tr.Test(); len(e) != 1 {
+	tr.ServedMock(&models.Mock{Name: "pg-1"})
+	if _, e, m := tr.Test(); len(e) != 1 || len(m) != 1 {
 		t.Fatal("served is earlier for the same test")
+	}
+	tr.End()
+	if tr.Open() {
+		t.Fatal("no test is open once it ends")
 	}
 	tr.Begin()
 	tr.Served(n, Earlier{Mock: "late"}) // the previous test's request ended after the boundary
-	if _, e := tr.Test(); len(e) != 0 {
-		t.Fatalf("a new test starts with nothing earlier, and a previous test's request does not leak into it: %v", e)
+	if _, e, m := tr.Test(); len(e) != 0 || len(m) != 0 {
+		t.Fatalf("a new test starts with nothing earlier, and a previous test's request does not leak into it: %v %v", e, m)
 	}
 	if tr.Variables().Follow("m", Leaf{}, Place{}) {
 		t.Fatal("without a variable runtime nothing is followed")
 	}
 	var nilTracker *Tracker
 	nilTracker.Begin()
+	nilTracker.End()
 	nilTracker.Served(0, Earlier{})
-	if n, e := nilTracker.Test(); n != 0 || e != nil {
-		t.Fatal("a nil tracker is inert")
+	nilTracker.ServedMock(&models.Mock{})
+	if n, e, m := nilTracker.Test(); n != 0 || e != nil || m != nil || !nilTracker.Open() {
+		t.Fatal("a nil tracker is inert, and knows of no test boundary")
 	}
 }

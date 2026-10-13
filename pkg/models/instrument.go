@@ -215,11 +215,11 @@ type OutgoingOptions struct {
 	// proven switch: the round that replays the build that was just
 	// recorded. Like SkipTLSMITM it sits in the padding after the TLS
 	// switches.
-	Learn bool
+	Learn bool `json:"Learn,omitempty"`
 	// LearnPool lets the learn step pair pool mocks too, not only the test's
 	// own: a full record replaces the pool, a partial one never changes it
 	// (design §7.2 step 10, §7.5).
-	LearnPool bool
+	LearnPool bool `json:"LearnPool,omitempty"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial

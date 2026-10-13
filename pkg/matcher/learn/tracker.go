@@ -3,6 +3,8 @@ package learn
 import (
 	"context"
 	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Tracker keeps, for the test that is running, the mocks F has served in it:
@@ -13,6 +15,8 @@ type Tracker struct {
 	mu     sync.Mutex
 	epoch  uint64
 	served []Earlier
+	mocks  []*models.Mock
+	open   bool
 	vars   Variables
 }
 
@@ -33,18 +37,55 @@ func (t *Tracker) Begin() {
 	t.mu.Lock()
 	t.epoch++
 	t.served = nil
+	t.mocks = nil
+	t.open = true
 	t.mu.Unlock()
 }
 
-// Test is the running test's number, and what F served in it so far. A
-// request reads it as it starts, and hands the number back to Served.
-func (t *Tracker) Test() (uint64, []Earlier) {
+// End ends the running test: until the next Begin no test is open, and a
+// request belongs to no test's own mocks.
+func (t *Tracker) End() {
 	if t == nil {
-		return 0, nil
+		return
+	}
+	t.mu.Lock()
+	t.open = false
+	t.mu.Unlock()
+}
+
+// Open reports whether a test is open. A nil tracker, which knows nothing of
+// tests, answers true.
+func (t *Tracker) Open() bool {
+	if t == nil {
+		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.epoch, append([]Earlier(nil), t.served...)
+	return t.open
+}
+
+// Test is the running test's number, what the learn step served in it so
+// far, leaf by leaf, and every mock any parser served in it so far
+// (ServedMock). A request reads it as it starts, and hands the number back
+// to Served.
+func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock) {
+	if t == nil {
+		return 0, nil, nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.epoch, append([]Earlier(nil), t.served...), append([]*models.Mock(nil), t.mocks...)
+}
+
+// ServedMock notes a mock any parser served in the running test: an earlier
+// place of the test's recording, whatever its kind, for Classify (Raw).
+func (t *Tracker) ServedMock(m *models.Mock) {
+	if t == nil || m == nil {
+		return
+	}
+	t.mu.Lock()
+	t.mocks = append(t.mocks, m)
+	t.mu.Unlock()
 }
 
 // Served adds a mock F served to test number n's history; nothing when that

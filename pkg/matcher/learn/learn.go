@@ -51,11 +51,13 @@ const (
 type Leaf struct {
 	// Path names the leaf exactly: object keys dot-joined, an array position
 	// bracketed ("body.items[0].id", "header.authorization",
-	// "url.query.page", "url.path.2").
+	// "url.query.page", "url.path.2"). What L learns is stored under it, so
+	// what drifted in one element of an array is learned for that element
+	// alone: F saw nothing of the others.
 	Path string
-	// Noise is the name learned noise and correlations are stored under: the
-	// request noise dialect, which has no array positions ("body.items[].id").
-	// Every element of an array shares it.
+	// Noise is the leaf's name in the request matcher's noise dialect, which
+	// has no array positions ("body.items[].id"), the one keploy.yml's body
+	// noise is written in: it is how declared noise names the leaf.
 	Noise string
 	Type  Type
 	Value string
@@ -112,17 +114,20 @@ type Diff struct {
 	Reordered []string
 }
 
-// count is the number of drifted leaves outside the reordered arrays: a
+// outside are the drifted leaves outside the reordered arrays, sorted: a
 // reorder explains every positional difference inside its array.
-func (d Diff) count() int {
-	n := 0
+func (d Diff) outside() []string {
+	var out []string
 	for _, p := range d.Drift {
 		if !insideAny(p, d.Reordered) {
-			n++
+			out = append(out, p)
 		}
 	}
-	return n
+	return out
 }
+
+// count is the number of drifted leaves outside the reordered arrays.
+func (d Diff) count() int { return len(d.outside()) }
 
 // insideAny reports whether path is one of arrays or below one.
 func insideAny(path string, arrays []string) bool {
@@ -262,19 +267,21 @@ type Result struct {
 //  3. Order first: an array the order rule refuses is not a drift.
 //  4. A pairable candidate differs only by values, in learnable leaves, with
 //     the same types.
-//  5. The candidate with the unique fewest drifted leaves is paired. When
-//     several tie, they pair only if their recorded requests are the same
-//     request (a call recorded twice), and then the first is taken: nothing
-//     L could compare tells them apart, and a test's mocks are consumed in
-//     recorded order. Otherwise the request is a miss: request_changed when
-//     some candidate had its key, unmocked_call when none did. When the
-//     closest candidate is one the order rule refused, it is
-//     unstable_order, and nothing is learned from that array.
+//  5. The candidate whose drift set is the unique minimum is paired: the set
+//     of fewest drifted leaves, which no other candidate's set of that size
+//     differs from. Candidates that share it (a call recorded several times,
+//     each time with another value in the same place) are told apart by
+//     nothing the request carries, and the first, in recorded order, is
+//     taken: a test's mocks are consumed in recorded order. Otherwise the
+//     request is a miss: request_changed when some candidate had its key,
+//     unmocked_call when none did. When the closest candidate is one the
+//     order rule refused, it is unstable_order, and nothing is learned from
+//     that array.
 func Pair(live Shape, cands []Candidate) Result {
 	type scored struct {
-		i int
-		d Diff
-		n int
+		i     int
+		d     Diff
+		drift []string // outside the reordered arrays
 	}
 	var pairable []scored
 	keyed, closest := false, Result{Outcome: Miss, Index: -1}
@@ -296,7 +303,7 @@ func Pair(live Shape, cands []Candidate) Result {
 			}
 			continue
 		}
-		pairable = append(pairable, scored{i: i, d: d, n: d.count()})
+		pairable = append(pairable, scored{i: i, d: d, drift: d.outside()})
 	}
 	if !keyed {
 		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}
@@ -313,16 +320,16 @@ func Pair(live Shape, cands []Candidate) Result {
 	var tied []scored
 	for _, s := range pairable[1:] {
 		switch {
-		case s.n < best.n:
+		case len(s.drift) < len(best.drift):
 			best, tied = s, nil
-		case s.n == best.n:
+		case len(s.drift) == len(best.drift):
 			tied = append(tied, s)
 		}
 	}
 	for _, t := range tied {
-		if !sameRequest(cands[best.i].Shape, cands[t.i].Shape) {
+		if !sameStrings(t.drift, best.drift) || !sameStrings(t.d.Reordered, best.d.Reordered) {
 			return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissRequestChanged,
-				Why: fmt.Sprintf("%d recorded calls differ from it equally, so none can be told apart as its recording", len(tied)+1)}
+				Why: fmt.Sprintf("%d recorded calls differ from it as much, in different places, so none can be told apart as its recording", len(tied)+1)}
 		}
 	}
 	if len(best.d.Reordered) > 0 {
@@ -332,12 +339,14 @@ func Pair(live Shape, cands []Candidate) Result {
 	return Result{Outcome: Paired, Index: best.i, Diff: best.d}
 }
 
-// sameRequest reports whether two recorded requests are the same request:
-// nothing L compares tells them apart.
-func sameRequest(a, b Shape) bool {
-	if a.Key != b.Key {
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	d := Compare(a, b, None)
-	return d.Structural == "" && len(d.Drift) == 0 && len(d.Reordered) == 0
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
