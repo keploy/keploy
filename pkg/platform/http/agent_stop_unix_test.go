@@ -686,7 +686,9 @@ func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 }
 
 // awaitAgentExit: the group waits for the agent's exit, and once the stop has
-// begun the user's second interrupt lets the group go, not the agent.
+// begun the user's second interrupt lets the group go, not the agent. Only one
+// after keploy said it would stop at once (utils.OfferStopNow): a copy of the
+// stop itself, which sudo hands on when a signal reaches both, is not one.
 func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -700,8 +702,13 @@ func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	if returnsWithin(returned, 200*time.Millisecond) {
 		t.Fatal("the group stopped waiting on the stop alone")
 	}
+	utils.MarkInterruptedAgain() // the stop's copy, from sudo
+	if returnsWithin(returned, 200*time.Millisecond) {
+		t.Fatal("the group stopped waiting on a copy of the stop")
+	}
+	utils.OfferStopNow() // keploy said another interrupt stops it now
 	utils.MarkInterruptedAgain()
-	<-returned
+	within(t, "awaitAgentExit", func() { <-returned })
 	if ok.Load() {
 		t.Fatal("awaitAgentExit reported an exit it did not see")
 	}

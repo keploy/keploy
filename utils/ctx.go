@@ -144,7 +144,9 @@ func init() { ResetInterruptedAgain() }
 
 // OfferStopNow says the process has just told the user that one more interrupt
 // ends its stop at once ("press Ctrl+C again to stop now"): from here on, the
-// next interrupt does (StopNow). One that came before it is not the user's
+// next interrupt does (StopNow). Only a stop already under way calls it (a
+// recording's drain, once the run has ended): the offer stands for the rest of
+// the process, and one made before the stop would let a copy of it end it. One that came before it is not the user's
 // answer to that, whatever it was. A single stop can arrive twice: a signal
 // sent to both sudo and the keploy it runs -- `sudo pkill -f keploy`, as CI
 // stops a recording -- reaches keploy once directly and once from sudo, which
@@ -315,9 +317,6 @@ func NewCtx() context.Context {
 
 		// What the process still does for someone else (SetSignalHold)
 		// finishes before the cancel; a second signal cuts it short.
-		// holdDone says it finished: nothing the process held for someone
-		// else is lost to a signal after it.
-		holdDone := false
 		if h := signalHold.Load(); h != nil {
 			stopNow := make(chan struct{})
 			held := make(chan struct{})
@@ -327,7 +326,6 @@ func NewCtx() context.Context {
 			}()
 			select {
 			case <-held:
-				holdDone = true
 			case sig2 := <-sigs:
 				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
 				MarkInterruptedAgain()
@@ -367,17 +365,16 @@ func NewCtx() context.Context {
 		// and unread, so Ctrl+C did nothing and only SIGKILL, which skips all
 		// cleanup, could end the process. One before that ends nothing: it
 		// may be the first one again (OfferStopNow).
+		// What a stop gives up at it, it says itself (a recording's drain:
+		// what the agent still held is not saved). An agent whose recording
+		// client finished with it (the hold returned) offers nothing: a
+		// signal then, often the client's own stop of it, cuts nothing
+		// short.
 		for sig2 := range sigs {
-			switch {
-			case !MarkInterruptedAgain():
-				fmt.Printf("Signal received again: %s; Keploy is still stopping\n", sig2)
-			case holdDone:
-				// An agent whose recording client finished with it (the
-				// hold returned): a signal now, often the client's own stop
-				// of it, cuts nothing short.
+			if MarkInterruptedAgain() {
 				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
-			default:
-				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
+			} else {
+				fmt.Printf("Signal received again: %s\n", sig2)
 			}
 		}
 	}()

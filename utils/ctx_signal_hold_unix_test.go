@@ -200,11 +200,10 @@ func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
 }
 
 // With no hold (the CLI), a second signal after the stop told the user one
-// would end it at once (its drain does: OfferStopNow) stops the process with
-// what it was still saving cut short, and says so. One before that cuts
-// nothing short, and says the stop goes on: it may be the first signal again,
-// as sudo hands it on.
-func TestNewCtx_ASecondSignalWithNoHoldSaysWhatIsLost(t *testing.T) {
+// would end it at once (its drain does: OfferStopNow) stops it now, and says
+// so; what that gives up, the stop says itself. One before that is said, and
+// claims nothing: it may be the first signal again, as sudo hands it on.
+func TestNewCtx_ASecondSignalWithNoHoldStopsNowOnlyOnceOffered(t *testing.T) {
 	for _, offered := range []bool{true, false} {
 		env := []string{signalHoldNone + "=1", signalHoldLinger + "=1"}
 		if offered {
@@ -221,9 +220,10 @@ func TestNewCtx_ASecondSignalWithNoHoldSaysWhatIsLost(t *testing.T) {
 		}
 		said := out.String()
 		switch {
-		case offered && !strings.Contains(said, "stopping now; what Keploy was still saving is not saved"):
-			t.Fatalf("a second signal after the stop offered to end was not said to lose what was being saved:\n%s", said)
-		case !offered && (strings.Contains(said, "not saved") || !strings.Contains(said, "Keploy is still stopping")):
+		case offered && !strings.Contains(said, "Signal received again: interrupt, stopping now"):
+			t.Fatalf("a second signal after the stop offered to end was not said to stop it now:\n%s", said)
+		case !offered && (strings.Contains(said, "stopping now") || strings.Contains(said, "not saved") ||
+			!strings.Contains(said, "Signal received again: interrupt")):
 			t.Fatalf("a second signal before the stop said what one does was said to cut it short:\n%s", said)
 		}
 	}

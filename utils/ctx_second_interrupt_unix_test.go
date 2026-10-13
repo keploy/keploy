@@ -118,10 +118,7 @@ func TestNewCtx_OnlyAnInterruptAfterTheStopSaysSoEndsIt(t *testing.T) {
 		t.Fatal("the stop's work was not told of the user's second interrupt")
 	}
 	said := out.String()
-	if !strings.Contains(said, "Signal received again: interrupt; Keploy is still stopping") {
-		t.Fatalf("the copy of the stop was not said to change nothing:\n%s", said)
-	}
-	if strings.Count(said, "stopping now") != 1 {
-		t.Fatalf("want one interrupt said to stop the run now, the user's second:\n%s", said)
+	if strings.Count(said, "Signal received again: interrupt") != 2 || strings.Count(said, "stopping now") != 1 {
+		t.Fatalf("want both repeats said, and only the user's second said to stop the run now:\n%s", said)
 	}
 }
