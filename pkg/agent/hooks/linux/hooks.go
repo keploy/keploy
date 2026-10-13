@@ -186,26 +186,23 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
-	// Allow the current process to lock memory for eBPF resources.
-	if err := rlimit.RemoveMemlock(); err != nil {
-		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
-		return err
-	}
-
-	// Load pre-compiled programs and maps into the kernel.
-	objs := bpfObjects{}
-	bpfopts := &ebpf.CollectionOptions{
+// hookLoadOptions are the options load() loads hookSpec() with: a verifier
+// log of every instruction and branch, from a 1 MiB buffer.
+func hookLoadOptions() *ebpf.CollectionOptions {
+	return &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
 			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
 			LogSizeStart: 1 * 1024 * 1024,
 		},
 	}
+}
 
+// hookSpec is the collection load() loads into the kernel: the compiled
+// objects, with k_sockops's program and attach types set.
+func hookSpec() (*ebpf.CollectionSpec, error) {
 	spec, err := loadBpf()
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to load BPF spec")
-		return err
+		return nil, err
 	}
 
 	programs := []struct {
@@ -221,6 +218,25 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			prog.Type = p.pType
 			prog.AttachType = p.aType
 		}
+	}
+	return spec, nil
+}
+
+func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	// Allow the current process to lock memory for eBPF resources.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
+		return err
+	}
+
+	// Load pre-compiled programs and maps into the kernel.
+	objs := bpfObjects{}
+	bpfopts := hookLoadOptions()
+
+	spec, err := hookSpec()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to load BPF spec")
+		return err
 	}
 
 	// Now load and assign into the kernel with the corrected spec.
