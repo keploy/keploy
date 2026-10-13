@@ -157,6 +157,13 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// DriftedCalls lists outgoing calls answered from a recorded mock although
+	// their request body differed from the recorded one outside known noise.
+	// Populated for every test, passing ones included: a served mock hides the
+	// change from the response check, so this is the only place it shows. Only
+	// recorded when request-noise detection is off — with detection on (the
+	// auto-replay that learns noise) such drift is being learned, not reported.
+	DriftedCalls []DriftedCall `json:"drifted_calls,omitempty" yaml:"drifted_calls,omitempty"`
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -200,6 +207,18 @@ type MatchedCall struct {
 	MockName string `json:"mock_name" yaml:"mock_name"`                   // internal mock reference for View Mock
 	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"` // Http, Mongo, Postgres, etc.
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
+}
+
+// DriftedCall is an outgoing call answered from a recorded mock although its
+// request body drifted from the recorded one on fields outside known noise
+// (learned req_body_noise and configured body noise). FieldDiffs carry the
+// recorded (Expected) and live (Actual) value per path, redacted like
+// UnmatchedCall's.
+type DriftedCall struct {
+	MockName   string          `json:"mock_name" yaml:"mock_name"`
+	Protocol   string          `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+	Summary    string          `json:"summary,omitempty" yaml:"summary,omitempty"`
+	FieldDiffs []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 }
 
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.

@@ -73,8 +73,8 @@ func TestAnUnconsumedConnectionFailureLeavesTheVerdictAsIfItWereAbsent(t *testin
 			}
 			for _, responseMatched := range []bool{true, false} {
 				for _, assertDeps := range []bool{true, false} {
-					with := resolveTestOutcome(responseMatched, mismatch([]models.MockEntry{http, tc.entry}, tc.kinds), false, assertDeps, false)
-					without := resolveTestOutcome(responseMatched, mismatch([]models.MockEntry{http}, nil), false, assertDeps, false)
+					with := resolveTestOutcome(responseMatched, mismatch([]models.MockEntry{http, tc.entry}, tc.kinds), false, assertDeps, false, false)
+					without := resolveTestOutcome(responseMatched, mismatch([]models.MockEntry{http}, nil), false, assertDeps, false, false)
 					if with != without {
 						t.Fatalf("response matched=%v, --assert-dependencies=%v: %+v with the connection failure, %+v without",
 							responseMatched, assertDeps, with, without)

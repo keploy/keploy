@@ -1,0 +1,49 @@
+name: Request Drift + Strict Request Matching (Linux)
+# A replay whose app sends a changed request to a dependency:
+#   - lenient: the recorded mock is still served; the report must name the
+#     change (failure_info.drifted_calls);
+#   - --mock-noise-strict: the mock is refused, and the test must fail even
+#     though the app's response still matches.
+# Runs on the build only: a released binary without the fix fails it by
+# design, and a permanently red leg is noise.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  request_drift_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: request-drift
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run request-drift test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/request-drift-linux.sh"
