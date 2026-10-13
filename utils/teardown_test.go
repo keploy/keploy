@@ -55,7 +55,7 @@ func TestReportTeardownProgress(t *testing.T) {
 	ctx, begin := context.WithCancel(context.Background())
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
-	reportTeardownProgress(ctx, zap.NewNop(), path, stop)
+	reportTeardownProgress(ctx, zap.NewNop(), pathSink(path), stop)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("an earlier agent's report is still there (%v): it would pass for this agent's", err)
 	}
@@ -80,5 +80,27 @@ func TestReportTeardownProgress(t *testing.T) {
 func TestReportTeardownProgressWithoutAPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	reportTeardownProgress(ctx, zap.NewNop(), "", nil) // returns, starts nothing
+	ReportTeardownProgress(ctx, zap.NewNop(), "") // returns, starts nothing
+	if err := ReportTeardownProgressTo(ctx, zap.NewNop(), ""); err != nil {
+		t.Fatalf("an empty command-line path: %v", err)
+	}
+}
+
+// Work in progress is reported as such until it ends, and its start and end
+// are each a step.
+func TestTeardownWorkIsReportedBusy(t *testing.T) {
+	defer func(b time.Duration) { teardownBeat = b }(teardownBeat)
+	teardownBeat = 5 * time.Millisecond
+	path := filepath.Join(t.TempDir(), "teardown.json")
+	ctx, begin := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	reportTeardownProgress(ctx, zap.NewNop(), pathSink(path), stop)
+	begin()
+	before := awaitReport(t, path, func(TeardownProgress) bool { return true }).Seq
+	end := BeginTeardownWork()
+	awaitReport(t, path, func(p TeardownProgress) bool { return p.Busy && p.Seq == before+1 })
+	end()
+	end() // once
+	awaitReport(t, path, func(p TeardownProgress) bool { return !p.Busy && p.Seq == before+2 })
 }

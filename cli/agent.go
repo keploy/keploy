@@ -78,6 +78,24 @@ func agentFailed(ctx context.Context, err error) bool {
 	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
 }
 
+// reportTeardown has the agent report its teardown's progress, for the CLI
+// that stops it: it kills a stopping agent only once that has stopped making
+// progress (utils.ReportTeardownProgress). A native agent is told where
+// (--teardown-progress-file, flagPath), and that path is checked before the
+// agent, root under sudo, writes there; a containerised one writes into its
+// own container (kdocker.AgentTeardownProgressFile), where the CLI reads it
+// back.
+func reportTeardown(ctx context.Context, logger *zap.Logger, flagPath string, isDocker bool) {
+	switch {
+	case flagPath != "":
+		if err := utils.ReportTeardownProgressTo(ctx, logger, flagPath); err != nil {
+			logger.Warn("not reporting the agent's teardown progress: the CLI that stops it will wait for it to exit however long it takes", zap.Error(err))
+		}
+	case isDocker:
+		utils.ReportTeardownProgress(ctx, logger, kdocker.AgentTeardownProgressFile)
+	}
+}
+
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
@@ -142,19 +160,11 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				watchParentProcess(ctx, logger, int(clientPID))
 			}
 
-			// The teardown's progress, for the CLI that stops this agent: it
-			// kills a stopping agent only once that has stopped making
-			// progress (utils.ReportTeardownProgress). A native agent is told
-			// where; a containerised one writes it into its container, where
-			// the CLI reads it back.
 			progressFile, pfErr := cmd.Flags().GetString("teardown-progress-file")
 			if pfErr != nil {
 				logger.Debug("could not read the teardown-progress-file flag", zap.Error(pfErr))
 			}
-			if progressFile == "" && isDocker {
-				progressFile = kdocker.AgentTeardownProgressFile
-			}
-			utils.ReportTeardownProgress(ctx, logger, progressFile)
+			reportTeardown(ctx, logger, progressFile, isDocker)
 
 			startAgentCh := make(chan int)
 			daemonSet := isDaemonSetAgent()

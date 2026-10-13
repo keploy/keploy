@@ -1743,13 +1743,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return err
 	}
 
-	args := a.nativeAgentArgs(opts)
-	// Where the agent reports its teardown's progress once it is stopped,
-	// which its stop reads (endAgent).
-	progress, removeProgress := teardownProgressPath(a.logger)
-	if progress != "" {
-		args = append(args, "--teardown-progress-file", progress)
-	}
+	args, progress, removeProgress := a.nativeAgentLaunch(opts)
 
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
@@ -1844,6 +1838,19 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	return nil
 }
 
+// nativeAgentLaunch is the argv of a native agent this client starts
+// (nativeAgentArgs), telling it where to report its teardown's progress once
+// it is stopped, which its stop reads (endAgent); and that path, with how to
+// remove it once the agent has exited.
+func (a *AgentClient) nativeAgentLaunch(opts models.SetupOptions) (args []string, progress string, removeProgress func()) {
+	args = a.nativeAgentArgs(opts)
+	progress, removeProgress = teardownProgressPath(a.logger)
+	if progress != "" {
+		args = append(args, "--teardown-progress-file", progress)
+	}
+	return args, progress, removeProgress
+}
+
 // teardownProgressPath returns where a native agent this client starts
 // reports its teardown's progress (utils.ReportTeardownProgress), in a
 // directory of that start's own, and how to remove the directory once the
@@ -1855,7 +1862,7 @@ func teardownProgressPath(logger *zap.Logger) (string, func()) {
 		logger.Debug("could not make a directory for the agent's teardown progress", zap.Error(err))
 		return "", func() {}
 	}
-	return filepath.Join(dir, "teardown.json"), func() { _ = os.RemoveAll(dir) }
+	return filepath.Join(dir, utils.TeardownProgressFileName), func() { _ = os.RemoveAll(dir) }
 }
 
 // StartedAgent reports whether this client started the agent it talks to
@@ -2068,6 +2075,8 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // began kills it at once. An agent already reaped is never signalled: its pid
 // may be another process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate, kill func() error, read func() (utils.TeardownProgress, bool)) {
+	// No drain gives up on the stop meanwhile (utils.BeginAgentStop).
+	defer utils.BeginAgentStop()()
 	ifRunning := func(f func() error) func() error {
 		return func() error {
 			if run.isGone() {
@@ -2941,31 +2950,64 @@ func containerEngineCommand(ctx context.Context, name string, argv ...string) *e
 	return c
 }
 
-// runAgentContainerCommand runs the container engine's CLI with args under
-// ctx (containerEngineCommand), and returns what output takes from it: as
-// root or in the docker group without sudo, and on Linux with sudo -n
-// (non-interactive) when that is refused.
-func runAgentContainerCommand(ctx context.Context, logger *zap.Logger, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
+// engineCLI runs the container engine's CLI for one stop of an agent's
+// container: as root or in the docker group without sudo, or -- on Linux,
+// when that is refused -- with sudo -n (non-interactive). Which of the two is
+// decided by the first command that succeeds and kept for the rest of the
+// stop, so a later command that fails for reasons of its own (a `cp` of a file
+// the agent has not written yet) does not try sudo again.
+type engineCLI struct {
+	logger *zap.Logger
+	mode   atomic.Int32 // engineUndecided, engineDirect or engineSudo
+}
+
+const (
+	engineUndecided int32 = iota
+	engineDirect
+	engineSudo
+)
+
+func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
+
+// run runs the engine's CLI with args under ctx (containerEngineCommand), and
+// returns what output takes from it.
+func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
-	out, err := output(containerEngineCommand(ctx, cli, args...))
-	if err != nil && ctx.Err() == nil && runtime.GOOS == "linux" {
-		logger.Debug("container engine command without sudo failed, trying with sudo -n",
-			zap.Strings("args", args), zap.Error(err))
-		out, err = output(containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...))
+	direct := func() ([]byte, error) { return output(containerEngineCommand(ctx, cli, args...)) }
+	sudo := func() ([]byte, error) {
+		return output(containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...))
+	}
+	switch e.mode.Load() {
+	case engineDirect:
+		return direct()
+	case engineSudo:
+		return sudo()
+	}
+	out, err := direct()
+	if err == nil {
+		e.mode.CompareAndSwap(engineUndecided, engineDirect)
+		return out, nil
+	}
+	if ctx.Err() != nil || runtime.GOOS != "linux" {
+		return out, err
+	}
+	e.logger.Debug("container engine command without sudo failed, trying with sudo -n",
+		zap.Strings("args", args), zap.Error(err))
+	out, err = sudo()
+	if err == nil {
+		e.mode.CompareAndSwap(engineUndecided, engineSudo)
 	}
 	return out, err
 }
 
-// agentContainerCommand runs the container engine's CLI with args
-// (runAgentContainerCommand) and returns its output, stderr included.
-func agentContainerCommand(ctx context.Context, logger *zap.Logger, args ...string) ([]byte, error) {
-	return runAgentContainerCommand(ctx, logger, (*exec.Cmd).CombinedOutput, args...)
+// combined runs args and returns their output, stderr included.
+func (e *engineCLI) combined(ctx context.Context, args ...string) ([]byte, error) {
+	return e.run(ctx, (*exec.Cmd).CombinedOutput, args...)
 }
 
-// agentContainerOutput runs the container engine's CLI with args
-// (runAgentContainerCommand) and returns its stdout alone.
-func agentContainerOutput(ctx context.Context, logger *zap.Logger, args ...string) ([]byte, error) {
-	return runAgentContainerCommand(ctx, logger, (*exec.Cmd).Output, args...)
+// stdout runs args and returns their stdout alone.
+func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) {
+	return e.run(ctx, (*exec.Cmd).Output, args...)
 }
 
 // dockerStopPoll is how often the CLI reads a stopping agent container's
@@ -2987,9 +3029,12 @@ var dockerStopPoll = time.Second
 // has SIGTERM sent again until the agent reports its teardown
 // (resendSIGTERM).
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
+	// No drain gives up on the stop meanwhile (utils.BeginAgentStop).
+	defer utils.BeginAgentStop()()
 	logger = logger.With(zap.String("container", name))
+	cli := newEngineCLI(logger)
 	kill := func() error {
-		out, err := agentContainerCommand(context.Background(), logger, "kill", name)
+		out, err := cli.combined(context.Background(), "kill", name)
 		if err != nil {
 			logger.Debug("Could not kill the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
@@ -3003,7 +3048,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 		return
 	default:
 	}
-	if out, err := agentContainerCommand(context.Background(), logger, "kill", "--signal", "SIGTERM", name); err != nil {
+	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
@@ -3015,7 +3060,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 	gone := make(chan struct{})
 	go func() {
 		defer close(gone)
-		if out, err := agentContainerCommand(waitCtx, logger, "wait", name); err != nil {
+		if out, err := cli.combined(waitCtx, "wait", name); err != nil {
 			logger.Debug("stopped waiting for the agent container",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
@@ -3027,12 +3072,12 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 		first, most := sigtermResendFirst, sigtermResendMax
 		go func() {
 			defer close(resent)
-			resendSIGTERM(waitCtx, reported, logger, name, first, most)
+			resendSIGTERM(waitCtx, reported, logger, cli, name, first, most)
 		}()
 	} else {
 		close(resent)
 	}
-	killed := stopWatch{logger: logger, gone: gone, read: readContainerProgress(waitCtx, logger, name),
+	killed := stopWatch{logger: logger, gone: gone, read: readContainerProgress(waitCtx, cli, name),
 		kill: kill, poll: dockerStopPoll, reported: reported}.run()
 	if killed {
 		// A killed container stops at once; the user's Ctrl+C, pressed again,
@@ -3063,7 +3108,7 @@ var (
 // sudo before it handles signals), and a pid namespace's init is sent only
 // the signals it handles: that SIGTERM was dropped. The intervals space the
 // resends out; nothing is decided by them.
-func resendSIGTERM(ctx context.Context, reported <-chan struct{}, logger *zap.Logger, name string, first, most time.Duration) {
+func resendSIGTERM(ctx context.Context, reported <-chan struct{}, logger *zap.Logger, cli *engineCLI, name string, first, most time.Duration) {
 	every := first
 	for {
 		next := time.NewTimer(every)
@@ -3073,10 +3118,11 @@ func resendSIGTERM(ctx context.Context, reported <-chan struct{}, logger *zap.Lo
 			return
 		case <-reported:
 			next.Stop()
+			logger.Debug("the agent has reported its teardown: it got a SIGTERM, and is not sent another")
 			return
 		case <-next.C:
 		}
-		if out, err := agentContainerCommand(ctx, logger, "kill", "--signal", "SIGTERM", name); err != nil && ctx.Err() == nil {
+		if out, err := cli.combined(ctx, "kill", "--signal", "SIGTERM", name); err != nil && ctx.Err() == nil {
 			logger.Debug("could not signal the agent container again",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}

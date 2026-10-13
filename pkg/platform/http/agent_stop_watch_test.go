@@ -10,9 +10,19 @@ import (
 	"go.uber.org/zap"
 )
 
-// p is a teardown progress report.
+// p is a teardown progress report from an agent that records its steps.
 func p(seq, beat uint64, done bool) utils.TeardownProgress {
-	return utils.TeardownProgress{Seq: seq, Beat: beat, Done: done}
+	return utils.TeardownProgress{Seq: seq, Beat: beat, Steps: true, Done: done}
+}
+
+// busy is p for an agent in the middle of work that takes no steps.
+func busy(seq, beat uint64) utils.TeardownProgress {
+	return utils.TeardownProgress{Seq: seq, Beat: beat, Steps: true, Busy: true}
+}
+
+// unstepped is p for an agent that does not say it records its steps.
+func unstepped(seq, beat uint64) utils.TeardownProgress {
+	return utils.TeardownProgress{Seq: seq, Beat: beat}
 }
 
 // The judge's verdicts, report by report: the founder's rule.
@@ -54,6 +64,18 @@ func TestStopJudge(t *testing.T) {
 		}},
 		{"detach done at the first report: killed a check later", []step{
 			{p(9, 7, true), keepWaiting}, {p(9, 7, true), keepWaiting}, {p(9, 8, true), killDetached},
+		}},
+		{"work in progress takes no step, and is never a stall", []step{
+			{busy(4, 0), keepWaiting}, {busy(4, 1), keepWaiting}, {busy(4, 5), keepWaiting},
+			{busy(4, 40), keepWaiting}, {p(5, 41, false), keepWaiting}, {p(5, 42, false), keepWaiting},
+			{p(5, 43, false), keepWaiting}, {p(5, 44, false), killStalled},
+		}},
+		{"an agent that does not record its steps is never killed for want of them", []step{
+			{unstepped(4, 0), keepWaiting}, {unstepped(4, 10), keepWaiting}, {unstepped(4, 1000), keepWaiting},
+		}},
+		{"but it is when it has detached everything and not exited", []step{
+			{unstepped(4, 0), keepWaiting}, {utils.TeardownProgress{Seq: 4, Beat: 1, Done: true}, keepWaiting},
+			{utils.TeardownProgress{Seq: 4, Beat: 2, Done: true}, killDetached},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,12 +133,19 @@ func (f *fakeAgent) kill() error {
 type watching struct {
 	finished chan struct{}
 	killed   atomic.Bool
+	judged   chan utils.TeardownProgress
 }
 
 // startWatch runs a stopWatch on f.
 func startWatch(f *fakeAgent, reported chan<- struct{}) *watching {
-	w := &watching{finished: make(chan struct{})}
-	sw := stopWatch{logger: zap.NewNop(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, reported: reported}
+	w := &watching{finished: make(chan struct{}), judged: make(chan utils.TeardownProgress, 4096)}
+	sw := stopWatch{logger: zap.NewNop(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, reported: reported,
+		judged: func(r utils.TeardownProgress) {
+			select {
+			case w.judged <- r:
+			default:
+			}
+		}}
 	go func() {
 		w.killed.Store(sw.run())
 		close(w.finished)
@@ -124,24 +153,30 @@ func startWatch(f *fakeAgent, reported chan<- struct{}) *watching {
 	return w
 }
 
-// awaitObserved returns once the watch has read want and judged it (a read
-// after it, which comes only once the judge is done with it), or once the
-// watch has returned.
+// awaitObserved returns once the watch has judged want -- its verdict on it
+// already acted on, a kill included -- or once the watch has returned.
 func awaitObserved(t *testing.T, f *fakeAgent, w *watching, want utils.TeardownProgress) {
 	t.Helper()
 	hung := time.After(time.Minute) // only turns a hang into a failure
-	seen := false
 	for {
 		select {
-		case r := <-f.reads:
-			if seen {
+		case r := <-w.judged:
+			if r == want {
+				// The verdict is acted on after the judge reports: wait for
+				// the next judgement, or the end, so a kill it decided on
+				// has happened.
+				select {
+				case <-w.judged:
+				case <-w.finished:
+				case <-hung:
+					t.Fatalf("the watch stopped judging after %+v", want)
+				}
 				return
 			}
-			seen = r == want
 		case <-w.finished:
 			return
 		case <-hung:
-			t.Fatalf("the watch never read %+v", want)
+			t.Fatalf("the watch never judged %+v", want)
 		}
 	}
 }

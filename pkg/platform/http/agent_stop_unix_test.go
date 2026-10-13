@@ -33,6 +33,7 @@ import (
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // hangBound turns a regression that would hang a test into a failure. It is
@@ -126,7 +127,7 @@ func TestStopAgentNeverHangsUpTheAgentsTerminal(t *testing.T) {
 //	detached     the detach done, beat after beat, forever
 //	endless      a step every beat, forever
 const fakeNativeAgent = `report() {
-  printf '{"seq":%d,"beat":%d,"done":%s}' "$1" "$2" "$3" > "$PROGRESS.tmp" && mv "$PROGRESS.tmp" "$PROGRESS"
+  printf '{"seq":%d,"beat":%d,"steps":true,"done":%s}' "$1" "$2" "$3" > "$PROGRESS.tmp" && mv "$PROGRESS.tmp" "$PROGRESS"
 }
 term=0
 trap 'term=1' TERM
@@ -411,9 +412,8 @@ func reportInContainer(t *testing.T, log string, r utils.TeardownProgress) strin
 }
 
 // awaitEngineRead returns once the stop under test has read report (a JSON
-// line reportInContainer returned) out of the container and judged it -- a
-// read after it, which the stop makes only once it is done with that one --
-// or once returned is closed.
+// line reportInContainer returned) out of the container, and read it once
+// more since, or once returned is closed.
 func awaitEngineRead(t *testing.T, log, report string, returned <-chan struct{}) {
 	t.Helper()
 	hung := time.After(hangBound)
@@ -572,8 +572,9 @@ func TestResendsStopOnceTheAgentReportsItsTeardown(t *testing.T) {
 	sigterm := "kill --signal SIGTERM " + stopTestContainer
 
 	log, release := fakeEngine(t)
+	core, logs := observer.New(zap.DebugLevel)
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, true); close(returned) }()
+	go func() { stopAgentContainer(zap.New(core), stopTestContainer, true); close(returned) }()
 	hung := time.After(hangBound)
 	for count(engineLines(t, log), sigterm) < 2 {
 		select {
@@ -590,8 +591,16 @@ func TestResendsStopOnceTheAgentReportsItsTeardown(t *testing.T) {
 			awaitEngineRead(t, log, reportInContainer(t, log, p(beat+1, beat, false)), returned)
 		}
 	}
-	// A resend already under way when the report was read may still land.
-	reportBeats(3)
+	// Once the resends have stopped, as they say, no SIGTERM follows.
+	stopped := time.After(hangBound)
+	for logs.FilterMessageSnippet("is not sent another").Len() == 0 {
+		select {
+		case <-stopped:
+			t.Fatalf("the resends never stopped after the agent reported its teardown; calls %q", engineLines(t, log))
+		default:
+		}
+		reportBeats(1)
+	}
 	settled := count(engineLines(t, log), sigterm)
 	reportBeats(10)
 	if n := count(engineLines(t, log), sigterm); n != settled {

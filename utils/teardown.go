@@ -3,8 +3,10 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +32,13 @@ type TeardownProgress struct {
 	// agent that is not scheduled does not beat, so a loaded host only
 	// slows the checks down.
 	Beat uint64 `json:"beat"`
+	// Busy says a stage the agent must not be killed in the middle of is in
+	// progress (BeginTeardownWork): no check counts as one without progress.
+	Busy bool `json:"busy"`
+	// Steps says the agent records its teardown's steps (DeclareTeardownSteps),
+	// so a teardown that takes none is one that has stopped: only such an
+	// agent is killed for want of progress.
+	Steps bool `json:"steps"`
 	// Done says the agent has detached everything it attached
 	// (MarkDetachDone): nothing a kill can cut short is left.
 	Done bool `json:"done"`
@@ -42,8 +51,10 @@ const TeardownBeat = time.Second
 var teardownBeat = TeardownBeat
 
 var (
-	teardownSeq  atomic.Uint64
-	teardownDone atomic.Bool
+	teardownSeq   atomic.Uint64
+	teardownWork  atomic.Int64
+	teardownSteps atomic.Bool
+	teardownDone  atomic.Bool
 	// teardownKick wakes the reporter to write a step or the end at once.
 	teardownKick = make(chan struct{}, 1)
 )
@@ -64,6 +75,40 @@ func TeardownStep() {
 	kickTeardownReport()
 }
 
+// BeginTeardownWork records the start of a stage of the teardown the agent
+// must not be killed in the middle of, and which can take long without a
+// step: removing what it attached to the kernel, a CA tool rewriting a trust
+// store. While one is in progress the CLI counts no check as one without
+// progress (TeardownProgress.Busy). The stage's start and its end -- the
+// returned func, which ends it once however often it is called -- are each a
+// step.
+func BeginTeardownWork() (end func()) {
+	teardownWork.Add(1)
+	TeardownStep()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			teardownWork.Add(-1)
+			TeardownStep()
+		})
+	}
+}
+
+// DeclareTeardownSteps says this agent records the steps of its whole
+// teardown (TeardownStep, BeginTeardownWork) through to MarkDetachDone, so
+// the CLI may take a teardown that takes none for one that has stopped, and
+// kill it. An agent that does not say so is never killed for want of
+// progress. It is for main to call, which knows everything the process tears
+// down -- including what it removes after the command has returned.
+func DeclareTeardownSteps() {
+	teardownSteps.Store(true)
+	kickTeardownReport()
+}
+
+// TeardownBusy reports whether a stage of the teardown begun with
+// BeginTeardownWork is in progress: what the reporter writes as Busy.
+func TeardownBusy() bool { return teardownWork.Load() > 0 }
+
 // TeardownSteps returns how many teardown steps have been recorded
 // (TeardownStep): what the reporter writes as Seq.
 func TeardownSteps() uint64 { return teardownSeq.Load() }
@@ -77,26 +122,59 @@ func MarkDetachDone() {
 	kickTeardownReport()
 }
 
-// ReportTeardownProgress writes the agent's teardown progress to path
-// (TeardownProgress, as JSON) once ctx is done -- the root context, whose
-// cancel begins the teardown: at once, on every step and on MarkDetachDone,
-// and on every beat (TeardownBeat) until the process exits. Whatever an
-// earlier agent left at path is removed now, so a CLI never reads it as this
-// agent's. Each write replaces the file whole (a rename), so a reader never
-// sees half of one. A failed write is only logged: the CLI that reads no
-// progress never kills for want of it.
-func ReportTeardownProgress(ctx context.Context, logger *zap.Logger, path string) {
-	reportTeardownProgress(ctx, logger, path, nil)
+// TeardownProgressFileName is the name a CLI gives the file it asks an agent
+// to report its teardown progress in (ReportTeardownProgressTo).
+const TeardownProgressFileName = "teardown.json"
+
+// progressSink is where a reporter writes: it clears what an earlier agent
+// left, and replaces the report whole (a rename), so a reader never sees half
+// of one.
+type progressSink interface {
+	clear() error
+	write(b []byte) error
 }
 
-// reportTeardownProgress is ReportTeardownProgress, whose reporter also ends
-// once stop is closed (tests; nil: never).
-func reportTeardownProgress(ctx context.Context, logger *zap.Logger, path string, stop <-chan struct{}) {
+// ReportTeardownProgress writes the agent's teardown progress to path, a path
+// the agent chose itself (a containerised agent's, in its own container): see
+// reportTeardownProgress.
+func ReportTeardownProgress(ctx context.Context, logger *zap.Logger, path string) {
 	if path == "" {
 		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) && logger != nil {
-		logger.Debug("failed to remove a stale teardown progress file", zap.String("path", path), zap.Error(err))
+	reportTeardownProgress(ctx, logger, pathSink(path), nil)
+}
+
+// ReportTeardownProgressTo writes the agent's teardown progress to path, a
+// path its command line gave (the CLI's --teardown-progress-file): see
+// reportTeardownProgress. An agent elevated by sudo writes there as root, so
+// the path is held to what a keploy CLI gives -- TeardownProgressFileName, in
+// a directory that is not a symlink, that no one but its owner may write to,
+// and that root, this user or the user sudo ran this agent for owns -- and
+// every write goes through that directory as it was opened, never through the
+// path again: whatever the command line says, the agent touches no other file.
+// It refuses a path that is not such, and reports nothing then.
+func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path string) error {
+	if path == "" {
+		return nil
+	}
+	sink, err := openCommandLineSink(path)
+	if err != nil {
+		return err
+	}
+	reportTeardownProgress(ctx, logger, sink, nil)
+	return nil
+}
+
+// reportTeardownProgress writes the agent's teardown progress
+// (TeardownProgress, as JSON) to sink once ctx is done -- the root context,
+// whose cancel begins the teardown: at once, on every step and on
+// MarkDetachDone, and on every beat (TeardownBeat) until the process exits, or
+// stop is closed (tests; nil: never). Whatever an earlier agent left is
+// cleared now, so a CLI never reads it as this agent's. A failed write is only
+// logged: the CLI that reads no progress never kills for want of it.
+func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progressSink, stop <-chan struct{}) {
+	if err := sink.clear(); err != nil && !os.IsNotExist(err) && logger != nil {
+		logger.Debug("failed to remove a stale teardown progress report", zap.Error(err))
 	}
 	every := teardownBeat // read here, not in the goroutine, which outlives a test
 	go func() {
@@ -110,10 +188,15 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, path string
 		var beat uint64
 		logged := false
 		for {
-			p := TeardownProgress{Seq: teardownSeq.Load(), Beat: beat, Done: teardownDone.Load()}
-			if err := writeTeardownProgress(path, p); err != nil && !logged && logger != nil {
+			p := TeardownProgress{Seq: teardownSeq.Load(), Beat: beat, Busy: teardownWork.Load() > 0,
+				Steps: teardownSteps.Load(), Done: teardownDone.Load()}
+			b, err := json.Marshal(p)
+			if err == nil {
+				err = sink.write(b)
+			}
+			if err != nil && !logged && logger != nil {
 				logged = true
-				logger.Debug("failed to write the agent's teardown progress", zap.String("path", path), zap.Error(err))
+				logger.Debug("failed to write the agent's teardown progress", zap.Error(err))
 			}
 			select {
 			case <-beats.C:
@@ -126,12 +209,14 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, path string
 	}()
 }
 
-// writeTeardownProgress replaces the file at path with p.
-func writeTeardownProgress(path string, p TeardownProgress) error {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return err
-	}
+// pathSink writes to a path the agent chose itself.
+type pathSink string
+
+func (p pathSink) clear() error { return os.Remove(string(p)) }
+
+// write replaces the file at p with b.
+func (p pathSink) write(b []byte) error {
+	path := string(p)
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
@@ -141,8 +226,6 @@ func writeTeardownProgress(path string, p TeardownProgress) error {
 		_ = os.Remove(tmp.Name())
 		return err
 	}
-	// Readable by the CLI that asked for it, which may not be this user (an
-	// agent elevated by sudo writes for the user who ran keploy).
 	if err := tmp.Chmod(0o644); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
@@ -155,6 +238,18 @@ func writeTeardownProgress(path string, p TeardownProgress) error {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		_ = os.Remove(tmp.Name())
 		return err
+	}
+	return nil
+}
+
+// checkCommandLinePath checks what can be checked of a command-line path
+// without opening anything: absolute, and naming TeardownProgressFileName.
+func checkCommandLinePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("the teardown progress file %q is not an absolute path", path)
+	}
+	if filepath.Base(path) != TeardownProgressFileName {
+		return fmt.Errorf("the teardown progress file %q is not named %s", path, TeardownProgressFileName)
 	}
 	return nil
 }

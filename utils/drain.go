@@ -3,6 +3,7 @@ package utils
 import (
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -39,6 +40,10 @@ func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout t
 // (and writing) after this returns. On that path err is nil, preserving the
 // "a timeout must never fail teardown" contract described above.
 //
+// The bound does not cut off a stop of a keploy agent still in progress
+// (BeginAgentStop): it ends on its own, and the rest of the group gets the
+// bound again once it has.
+//
 // So `!timedOut` is the "every goroutine in the group has returned" signal: a
 // non-nil err still means the group finished (one goroutine returned an error),
 // whereas timedOut means it did not join. A caller that then touches an artifact
@@ -47,15 +52,30 @@ func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout t
 func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, timeout time.Duration) (err error, timedOut bool) {
 	done := make(chan error, 1)
 	go func() { done <- g.Wait() }()
-	select {
-	case e := <-done:
-		return e, false
-	case <-time.After(timeout):
-		logger.Error("teardown drain timed out after cancellation; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
-			zap.String("group", name),
-			zap.Duration("timeout", timeout))
-		return nil, true
+	for {
+		select {
+		case e := <-done:
+			return e, false
+		case <-time.After(timeout):
+		}
+		// An agent stop still in progress is waited for; once it ends, the
+		// rest of the group gets the bound again.
+		idle, inProgress := agentStopsIdle()
+		if !inProgress {
+			break
+		}
+		logger.Info("waiting for the keploy agent to finish stopping before giving up on the rest of the teardown",
+			zap.String("group", name))
+		select {
+		case e := <-done:
+			return e, false
+		case <-idle:
+		}
 	}
+	logger.Error("teardown drain timed out after cancellation; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
+		zap.String("group", name),
+		zap.Duration("timeout", timeout))
+	return nil, true
 }
 
 // DrainErrGroupProgress is DrainErrGroupStatus bounded by progress instead of by
@@ -68,13 +88,24 @@ func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, s
 	done := make(chan struct{})
 	var werr error
 	go func() { werr = g.Wait(); close(done) }()
-	if WaitWhileProgressing(done, stall, progress) {
-		return werr, false
+	for !WaitWhileProgressing(done, stall, progress) {
+		// An agent stop still in progress is waited for; once it ends, the
+		// rest of the group gets the bound again.
+		idle, inProgress := agentStopsIdle()
+		if !inProgress {
+			logger.Error("teardown drain made no progress; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
+				zap.String("group", name),
+				zap.Duration("stalledFor", stall))
+			return nil, true
+		}
+		logger.Info("waiting for the keploy agent to finish stopping before giving up on the rest of the teardown",
+			zap.String("group", name))
+		select {
+		case <-done:
+		case <-idle:
+		}
 	}
-	logger.Error("teardown drain made no progress; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
-		zap.String("group", name),
-		zap.Duration("stalledFor", stall))
-	return nil, true
+	return werr, false
 }
 
 // WaitWhileProgressing waits for done for as long as progress() keeps changing,
@@ -205,4 +236,53 @@ func (l *BacklogLooks) Said() (models.BacklogVerdict, bool) {
 func (l *BacklogLooks) Held() bool {
 	v, ok := l.Said()
 	return ok && (v == models.BacklogPending || v == models.BacklogCannotTell)
+}
+
+// agentStops counts this process's stops of a keploy agent still in progress
+// (BeginAgentStop); idle is closed whenever there are none.
+var agentStops = struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{}
+}{idle: closedChannel()}
+
+func closedChannel() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}
+
+// BeginAgentStop records that this process is stopping a keploy agent, until
+// the returned end is called (once; later calls do nothing). A drain
+// (DrainErrGroupStatus, DrainErrGroupProgress) does not give up while one is
+// in progress: the stop ends on its own -- at the agent's exit, at a kill once
+// its teardown has stopped making progress, or at a second Ctrl+C
+// (pkg/platform/http, stopWatch) -- and a drain that gave up first let keploy
+// exit with the agent still running, its hooks attached, and nothing left to
+// kill it if its teardown had wedged.
+func BeginAgentStop() (end func()) {
+	agentStops.mu.Lock()
+	if agentStops.n == 0 {
+		agentStops.idle = make(chan struct{})
+	}
+	agentStops.n++
+	agentStops.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			agentStops.mu.Lock()
+			if agentStops.n--; agentStops.n == 0 {
+				close(agentStops.idle)
+			}
+			agentStops.mu.Unlock()
+		})
+	}
+}
+
+// agentStopsIdle returns a channel closed once no agent stop is in progress
+// (BeginAgentStop), and whether one is now.
+func agentStopsIdle() (idle <-chan struct{}, inProgress bool) {
+	agentStops.mu.Lock()
+	defer agentStops.mu.Unlock()
+	return agentStops.idle, agentStops.n > 0
 }

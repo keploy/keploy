@@ -91,3 +91,49 @@ func TestDrainErrGroupStatusTimeoutReportsTimedOut(t *testing.T) {
 	}
 	close(block) // unblock the leaked goroutine so the test process stays clean
 }
+
+// A drain whose bound has passed does not give up while an agent stop is in
+// progress (BeginAgentStop): the stop ends on its own -- at the agent's exit,
+// at a kill once its teardown stops making progress, or at a second Ctrl+C --
+// and a drain that gave up first let keploy exit with the agent still running.
+func TestADrainWaitsForAnAgentStopInProgress(t *testing.T) {
+	for _, progressDrain := range []bool{false, true} {
+		end := BeginAgentStop()
+		var g errgroup.Group
+		release := make(chan struct{})
+		g.Go(func() error { <-release; return nil }) // the stop goroutine
+		returned := make(chan bool, 1)
+		go func() {
+			var timedOut bool
+			if progressDrain {
+				_, timedOut = DrainErrGroupProgress(zap.NewNop(), "setup", &g, time.Millisecond, func() uint64 { return 0 })
+			} else {
+				_, timedOut = DrainErrGroupStatus(zap.NewNop(), "setup", &g, time.Millisecond)
+			}
+			returned <- timedOut
+		}()
+		select {
+		case <-returned:
+			t.Fatalf("progress=%v: the drain gave up while an agent stop was in progress", progressDrain)
+		case <-time.After(100 * time.Millisecond): // only that it has NOT returned yet
+		}
+		close(release) // the stop's goroutine returns as the stop ends
+		end()
+		select {
+		case timedOut := <-returned:
+			if timedOut {
+				t.Fatalf("progress=%v: the drain gave up although the group joined once the stop ended", progressDrain)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("progress=%v: the drain never returned", progressDrain)
+		}
+	}
+	// With no stop in progress the bound holds as before.
+	var g errgroup.Group
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	g.Go(func() error { <-block; return nil })
+	if _, timedOut := DrainErrGroupStatus(zap.NewNop(), "setup", &g, time.Millisecond); !timedOut {
+		t.Fatal("a drain with no agent stop in progress did not give up at its bound")
+	}
+}
