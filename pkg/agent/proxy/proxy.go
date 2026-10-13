@@ -2188,6 +2188,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
 				defer p.activeConns.Done()
+				// A connection's end is a step of the agent's teardown once it
+				// is stopping: the CLI that stopped it reads them as it drains
+				// (utils.TeardownStep). Before, it counts nothing anyone reads.
+				defer utils.TeardownStep()
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {

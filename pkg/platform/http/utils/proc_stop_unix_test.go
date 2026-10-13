@@ -5,6 +5,7 @@ package utils
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -98,20 +99,24 @@ func TestStdinGateEndsTheCopyOnceTheTerminalIsRestored(t *testing.T) {
 	}
 }
 
-// KillAgentCommand ends an agent started directly with SIGKILL. One started
-// through sudo is root, which the user may not signal; sudo is sent the
-// escalation signal instead, which it hands on to the agent
-// (keployutils.EscalationSignal). Here "sudo" is a script of that name that
-// says which signal reached it.
+// KillAgentCommand sends the agent the escalation signal, on which it kills
+// itself once no teardown work is in progress
+// (keployutils.EscalationSignal); at once (now), SIGKILL -- but not to sudo,
+// whose agent is root, which the user may not signal: sudo is sent the
+// escalation signal and hands it on. Here the stand-ins are scripts named
+// "keploy" and "sudo" that say which signal reached them.
 func TestKillAgentCommandKillsThroughSudo(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
+		now      bool
 		wantUSR2 bool
 	}{
-		{"keploy", false},
-		{"sudo", true},
+		{"keploy", false, true},
+		{"keploy", true, false},
+		{"sudo", false, true},
+		{"sudo", true, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/now=%v", tc.name, tc.now), func(t *testing.T) {
 			dir := t.TempDir()
 			bin, got, ready := filepath.Join(dir, tc.name), filepath.Join(dir, "got"), filepath.Join(dir, "ready")
 			script := "#!/bin/sh\ntrap 'echo usr2 > \"" + got + "\"; exit 0' USR2\ntouch \"" + ready + "\"\nwhile :; do sleep 0.01; done\n"
@@ -136,7 +141,7 @@ func TestKillAgentCommandKillsThroughSudo(t *testing.T) {
 				case <-time.After(5 * time.Millisecond):
 				}
 			}
-			if err := KillAgentCommand(cmd, zap.NewNop()); err != nil {
+			if err := KillAgentCommand(cmd, zap.NewNop(), tc.now); err != nil {
 				t.Fatalf("KillAgentCommand: %v", err)
 			}
 			select {
@@ -144,19 +149,17 @@ func TestKillAgentCommandKillsThroughSudo(t *testing.T) {
 			case <-time.After(time.Minute):
 				t.Fatal("the stand-in outlived KillAgentCommand")
 			}
-			st := cmd.ProcessState.Sys().(syscall.WaitStatus)
-			_, gotUSR2 := os.Stat(got)
-			if tc.wantUSR2 {
-				if gotUSR2 != nil {
-					t.Fatalf("sudo was not sent the escalation signal (it ended with %v)", cmd.ProcessState)
-				}
-				return
+			_, statErr := os.Stat(got)
+			if gotUSR2 := statErr == nil; gotUSR2 != tc.wantUSR2 {
+				t.Fatalf("sent the escalation signal = %v, want %v (it ended with %v)", gotUSR2, tc.wantUSR2, cmd.ProcessState)
 			}
-			if !st.Signaled() || st.Signal() != syscall.SIGKILL {
-				t.Fatalf("an agent started directly ended with %v, want SIGKILL", cmd.ProcessState)
+			if !tc.wantUSR2 {
+				if st := cmd.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
+					t.Fatalf("ended with %v, want SIGKILL", cmd.ProcessState)
+				}
 			}
 			// And never signals a process already reaped.
-			if err := KillAgentCommand(cmd, zap.NewNop()); err != nil {
+			if err := KillAgentCommand(cmd, zap.NewNop(), tc.now); err != nil {
 				t.Fatalf("KillAgentCommand on a reaped process: %v", err)
 			}
 		})

@@ -103,20 +103,23 @@ func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	return nil
 }
 
-// KillAgentCommand ends the agent cmd started, at once, for a stop that has to
-// be forced (the CLI's stopWatch in pkg/platform/http). Started directly, the
-// agent is sent SIGKILL. Started through sudo, it runs as root, which the user
-// who ran keploy may not signal; sudo keeps that user's uid and hands
-// keployutils.EscalationSignal on to the agent, which then kills itself
-// (utils.DieOnEscalation). Through cmd.Process, so an agent already reaped is
-// never signalled. A process that has already exited is not an error.
-func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+// KillAgentCommand ends the agent cmd started, for a stop that has to be
+// forced (the CLI's stopWatch in pkg/platform/http). The agent is sent
+// keployutils.EscalationSignal, on which it kills itself once no teardown work
+// is in progress (utils.DieOnEscalation): the CLI judged from a report a
+// moment old. now -- the user pressed Ctrl+C again -- sends SIGKILL instead,
+// where it can: to an agent started directly. One started through sudo runs
+// as root, which the user who ran keploy may not signal; sudo keeps that
+// user's uid and hands the escalation signal on to the agent. Through
+// cmd.Process, so an agent already reaped is never signalled. A process that
+// has already exited is not an error.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, now bool) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	sig := os.Signal(syscall.SIGKILL)
-	if isSudo(cmd) {
-		sig = keployutils.EscalationSignal
+	sig := os.Signal(keployutils.EscalationSignal)
+	if now && !isSudo(cmd) {
+		sig = syscall.SIGKILL
 	}
 	if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		logger.Debug("failed to kill the agent", zap.Int("pid", cmd.Process.Pid), zap.Stringer("signal", sig), zap.Error(err))
@@ -126,11 +129,11 @@ func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 }
 
 // KillPTYCommand is KillAgentCommand for a command started on a PTY.
-func KillPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
 	if handle == nil {
 		return nil
 	}
-	return KillAgentCommand(handle.cmd, logger)
+	return KillAgentCommand(handle.cmd, logger, now)
 }
 
 // isSudo reports whether cmd runs sudo, which runs the agent as another user.

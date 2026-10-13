@@ -1881,7 +1881,8 @@ func (a *AgentClient) StartedAgent() bool { return a.startedAgent.Load() }
 // (agentStopRequestTimeout) and it stay within the 30 s the recorders'
 // teardown waits on the goroutine that stops the agent (DrainErrGroup:
 // "record-setup", "mock-record"), so such an agent is signalled before that
-// wait gives up on it.
+// wait could give up on it -- which it does not while the agent reports the
+// steps of its teardown (stopWatch).
 var agentStoppingGrace = 15 * time.Second
 
 // agentStopRequestTimeout bounds the stop request itself (requestAgentStop),
@@ -2042,7 +2043,7 @@ const nativeStopPoll = 250 * time.Millisecond
 func (a *AgentClient) stopNativeAgent(run *agentRun, pid int, cmd *exec.Cmd, progress string) {
 	a.endAgent(run, pid, a.requestAgentStop,
 		func() error { return agentUtils.TerminateCommand(cmd, a.logger) },
-		func() error { return agentUtils.KillAgentCommand(cmd, a.logger) },
+		func(now bool) error { return agentUtils.KillAgentCommand(cmd, a.logger, now) },
 		readProgressFile(progress))
 }
 
@@ -2055,7 +2056,7 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 	h.RestoreTerminal()
 	a.endAgent(run, pid, a.requestAgentStop,
 		func() error { return agentUtils.TerminatePTYCommand(h, a.logger) },
-		func() error { return agentUtils.KillPTYCommand(h, a.logger) },
+		func(now bool) error { return agentUtils.KillPTYCommand(h, a.logger, now) },
 		readProgressFile(progress))
 }
 
@@ -2071,12 +2072,9 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
 // stopped making any, has detached everything and not exited, or the user
-// presses Ctrl+C again (stopWatch). A Ctrl+C pressed again before the stop
-// began kills it at once. An agent already reaped is never signalled: its pid
-// may be another process's by now.
-func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate, kill func() error, read func() (utils.TeardownProgress, bool)) {
-	// No drain gives up on the stop meanwhile (utils.BeginAgentStop).
-	defer utils.BeginAgentStop()()
+// presses Ctrl+C again while it is waited for (stopWatch). An agent already
+// reaped is never signalled: its pid may be another process's by now.
+func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
 			if run.isGone() {
@@ -2085,14 +2083,17 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate, kill func
 			return f()
 		}
 	}
-	terminate, kill = ifRunning(terminate), ifRunning(kill)
-	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)), gone: run.gone, read: read, kill: kill, poll: nativeStopPoll}
-	select {
-	case <-utils.InterruptedAgain():
-		watch.force("Ctrl+C was pressed again")
-		return
-	default:
+	terminate = ifRunning(terminate)
+	killIfRunning := func(now bool) error {
+		if run.isGone() {
+			return nil
+		}
+		return kill(now)
 	}
+	// Only an interrupt from here on forces the stop: one that came before
+	// it may be the first stop delivered twice (stopWatch).
+	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)), since: utils.RepeatInterrupts(),
+		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll}
 
 	err := ask()
 	switch {
@@ -2115,7 +2116,7 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate, kill func
 				return
 			case <-grace.C:
 			}
-			if _, reported := read(); reported {
+			if _, reported := read(context.Background()); reported {
 				a.logger.Debug("the keploy agent is reporting its teardown; it is not signalled")
 				return
 			}
@@ -3022,31 +3023,31 @@ var dockerStopPoll = time.Second
 // teardown makes progress, which it reports in its container
 // (readContainerProgress), and kills it (`kill`, SIGKILL) only once it has
 // stopped making any, has detached everything and not exited, or the user
-// presses Ctrl+C again (stopWatch); a Ctrl+C pressed again before the stop
-// began kills it at once. Not `stop`, whose grace period (10 s by default)
-// ends in a SIGKILL however the teardown is doing (agentRun says why that must
-// not land in it). unanswered (the agent never answered its readiness check)
-// has SIGTERM sent again until the agent reports its teardown
-// (resendSIGTERM).
+// presses Ctrl+C again while it is waited for (stopWatch). Not `stop`, whose
+// grace period (10 s by default) ends in a SIGKILL however the teardown is
+// doing (agentRun says why that must not land in it). unanswered (the agent
+// never answered its readiness check) has SIGTERM sent again until the agent
+// reports its teardown (resendSIGTERM).
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
-	// No drain gives up on the stop meanwhile (utils.BeginAgentStop).
-	defer utils.BeginAgentStop()()
 	logger = logger.With(zap.String("container", name))
+	// Only an interrupt from here on forces the stop: one that came before
+	// it may be the first stop delivered twice (stopWatch).
+	since := utils.RepeatInterrupts()
 	cli := newEngineCLI(logger)
-	kill := func() error {
-		out, err := cli.combined(context.Background(), "kill", name)
+	// kill(false) sends the agent the escalation signal, on which it dies
+	// once no teardown work is in progress (utils.DieOnEscalation); kill(true)
+	// is SIGKILL, at once.
+	kill := func(now bool) error {
+		args := []string{"kill", "--signal", "SIGUSR2", name}
+		if now {
+			args = []string{"kill", name}
+		}
+		out, err := cli.combined(context.Background(), args...)
 		if err != nil {
 			logger.Debug("Could not kill the agent container. It may have already stopped.",
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
 		return err
-	}
-	select {
-	case <-utils.InterruptedAgain():
-		logger.Warn("Stopping the keploy agent container by force: Ctrl+C was pressed again")
-		_ = kill()
-		return
-	default:
 	}
 	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
@@ -3077,14 +3078,14 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 	} else {
 		close(resent)
 	}
-	killed := stopWatch{logger: logger, gone: gone, read: readContainerProgress(waitCtx, cli, name),
+	killed := stopWatch{logger: logger, since: since, gone: gone, read: readContainerProgress(cli, name),
 		kill: kill, poll: dockerStopPoll, reported: reported}.run()
 	if killed {
 		// A killed container stops at once; the user's Ctrl+C, pressed again,
 		// ends the wait for an engine that does not say so.
 		select {
 		case <-gone:
-		case <-utils.InterruptedAgain():
+		case <-utils.InterruptedAfter(since):
 		}
 	}
 	stopWaiting()

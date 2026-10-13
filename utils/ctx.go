@@ -146,15 +146,58 @@ func init() { ResetInterruptedAgain() }
 // it, so the user can always end it.
 func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
 
-// MarkInterruptedAgain is what a second interrupt does; for tests.
+// MarkInterruptedAgain is what every interrupt after the first does; for
+// tests too.
 func MarkInterruptedAgain() {
 	l := interruptedAgain.Load()
 	l.once.Do(func() { close(l.ch) })
+	repeatInterrupts.mu.Lock()
+	repeatInterrupts.n++
+	close(repeatInterrupts.next)
+	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.mu.Unlock()
+}
+
+// repeatInterrupts counts the interrupts after the first
+// (MarkInterruptedAgain); next is closed, and replaced, at each.
+var repeatInterrupts struct {
+	mu   sync.Mutex
+	n    uint64
+	next chan struct{}
+}
+
+// RepeatInterrupts returns how many interrupts have arrived after the one
+// that stopped the run.
+func RepeatInterrupts() uint64 {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	return repeatInterrupts.n
+}
+
+// InterruptedAfter returns a channel closed once more than n interrupts have
+// arrived after the one that stopped the run (RepeatInterrupts). A stop that
+// takes RepeatInterrupts() as it begins selects on it to hear an interrupt
+// given while it runs, and not one that came before it -- a single stop
+// delivered twice among them: `sudo pkill -f keploy` signals both sudo and
+// keploy, and sudo hands its signal on to keploy too.
+func InterruptedAfter(n uint64) <-chan struct{} {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	if repeatInterrupts.n > n {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return repeatInterrupts.next
 }
 
 // ResetInterruptedAgain is for tests, which share one process across cases.
 func ResetInterruptedAgain() {
 	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
+	repeatInterrupts.mu.Lock()
+	repeatInterrupts.n = 0
+	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.mu.Unlock()
 }
 
 func NewCtx() context.Context {

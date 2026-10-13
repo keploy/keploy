@@ -25,8 +25,10 @@ import (
 // when an outer `timeout`/CI sends SIGKILL minutes later (observed: a CI lane
 // hung ~50 min despite a 15-min `timeout -s INT`).
 //
-// Bounding the drain guarantees the process exits promptly after cancellation.
-// On timeout it logs (so the offending goroutine is discoverable) and returns
+// Bounding the drain guarantees the process exits promptly after cancellation
+// -- except while it stops a keploy agent that will end on its own (an exit,
+// or a kill once its teardown stops making progress: BeginAgentStop). On
+// timeout it logs (so the offending goroutine is discoverable) and returns
 // nil; the leaked goroutine is reaped when the process exits. In the normal
 // case the goroutines drain in well under the timeout, so this is a no-op.
 func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout time.Duration) error {
@@ -277,6 +279,13 @@ func BeginAgentStop() (end func()) {
 			agentStops.mu.Unlock()
 		})
 	}
+}
+
+// AgentStopInProgress reports whether a stop of a keploy agent is holding
+// the drains (BeginAgentStop).
+func AgentStopInProgress() bool {
+	_, inProgress := agentStopsIdle()
+	return inProgress
 }
 
 // agentStopsIdle returns a channel closed once no agent stop is in progress

@@ -126,14 +126,18 @@ func TestStopAgentNeverHangsUpTheAgentsTerminal(t *testing.T) {
 //	stalled      no step, beat after beat, forever
 //	detached     the detach done, beat after beat, forever
 //	endless      a step every beat, forever
+//
+// It writes with shell builtins alone: an external writer (mv, touch) it ran
+// as it was killed would go on writing in the test's directory after it.
+// The stop skips a report it reads half written.
 const fakeNativeAgent = `report() {
-  printf '{"seq":%d,"beat":%d,"steps":true,"done":%s}' "$1" "$2" "$3" > "$PROGRESS.tmp" && mv "$PROGRESS.tmp" "$PROGRESS"
+  printf '{"seq":%d,"beat":%d,"steps":true,"done":%s}' "$1" "$2" "$3" > "$PROGRESS"
 }
 term=0
 trap 'term=1' TERM
-touch "$READY"
+: > "$READY"
 while [ "$term" = 0 ]; do sleep 0.01; done
-touch "$GOT"
+: > "$GOT"
 beat=0
 while :; do
   beat=$((beat + 1))
@@ -215,9 +219,16 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 					t.Fatal("the agent never got SIGTERM")
 				}
 				st := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				killed := st.Signaled() && st.Signal() == syscall.SIGKILL
+				// A verdict kills with the escalation signal (SIGUSR2, which
+				// kills this stand-in as it kills the agent); Ctrl+C pressed
+				// again with SIGKILL, at once.
+				want := syscall.Signal(syscall.SIGUSR2)
+				if tc.interrupt {
+					want = syscall.SIGKILL
+				}
+				killed := st.Signaled() && st.Signal() == want
 				if killed != tc.wantKill {
-					t.Fatalf("killed=%v (%v, %v), want killed=%v", killed, cmd.ProcessState, err, tc.wantKill)
+					t.Fatalf("killed=%v (%v, %v), want killed=%v by %v", killed, cmd.ProcessState, err, tc.wantKill, want)
 				}
 				if !tc.wantKill && err != nil {
 					t.Fatalf("the agent did not exit on its own: %v", err)
@@ -348,7 +359,8 @@ var stopTestContainer = fmt.Sprintf("keploy-stop-test-no-such-container-%d", os.
 
 // fakeEngine puts a `docker` first on PATH that logs each invocation's
 // arguments and, for `wait`, blocks until the test releases it -- or until a
-// `kill` without --signal (SIGKILL) ends the container. Its `cp` serves the
+// `kill` without --signal (SIGKILL), or with SIGUSR2 (the agent's escalation
+// signal, on which it kills itself), ends the container. Its `cp` serves the
 // agent's teardown progress as the engine does, a tar stream, from
 // engineProgressFile(log), and logs each read's content to engineReads(log);
 // `cp` is not logged as a call.
@@ -372,7 +384,7 @@ echo "$*" >> "` + log + `"
 if [ "$1" = wait ]; then
   while [ ! -e "` + release + `" ]; do sleep 0.05; done
 fi
-if [ "$1" = kill ] && [ "$2" != --signal ]; then
+if [ "$1" = kill ] && { [ "$2" != --signal ] || [ "$3" = SIGUSR2 ]; }; then
   : > "` + release + `"
 fi
 exit 0
@@ -511,8 +523,9 @@ func TestAnUnansweredAgentContainerIsSignalledAgainWhileWaited(t *testing.T) {
 }
 
 // The agent's container is waited for while its teardown makes progress, and
-// killed (`kill`, SIGKILL) only once it has stopped making any, or has
-// detached everything and is still there a check later.
+// killed only once it has stopped making any, or has detached everything and
+// is still there a check later -- with the escalation signal, on which the
+// agent dies once no teardown work is in progress (SIGUSR2), not SIGKILL.
 func TestTheAgentContainerIsKilledOnlyWhenItStopsProgressing(t *testing.T) {
 	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
 	dockerStopPoll = 5 * time.Millisecond
@@ -550,8 +563,11 @@ func TestTheAgentContainerIsKilledOnlyWhenItStopsProgressing(t *testing.T) {
 			}
 			within(t, "stopAgentContainer", func() { <-returned })
 			calls := engineLines(t, log)
-			if killed := count(calls, "kill "+stopTestContainer) == 1; killed != tc.wantKill {
+			if killed := count(calls, "kill --signal SIGUSR2 "+stopTestContainer) == 1; killed != tc.wantKill {
 				t.Fatalf("killed=%v, want %v; calls %q", killed, tc.wantKill, calls)
+			}
+			if count(calls, "kill "+stopTestContainer) != 0 {
+				t.Fatalf("calls %q: SIGKILL, though only Ctrl+C pressed again sends it", calls)
 			}
 			if count(calls, "kill --signal SIGTERM "+stopTestContainer) != 1 {
 				t.Fatalf("calls %q: want one SIGTERM", calls)
@@ -627,7 +643,8 @@ func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while the agent's container is waited for kills it.
+// Ctrl+C pressed again while the agent's container is waited for kills it at
+// once (SIGKILL).
 func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -696,25 +713,32 @@ func TestAwaitPreviousAgent(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again before the docker stop begins kills the container at
-// once, before the call returns -- or it would run on with its hooks and the
-// app's ports.
-func TestACtrlCPressedAgainBeforeTheDockerStopKillsAtOnce(t *testing.T) {
+// An interrupt that came before the docker stop began does not force it:
+// `sudo pkill -INT -f keploy` signals sudo and keploy both, and sudo hands its
+// signal on, so one stop reaches keploy twice. The container gets its SIGTERM
+// and is waited for; an interrupt during the wait would kill it.
+func TestAnInterruptBeforeTheDockerStopDoesNotForceIt(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
 	utils.MarkInterruptedAgain()
 	for _, ready := range []bool{true, false} {
 		log, release := fakeEngine(t)
+		run := newAgentRun()
+		run.ready.Store(ready)
+		returned := make(chan struct{})
+		go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
+		awaitEngineWait(t, log, returned)
+		// Only that it has NOT been killed: the container is still running,
+		// so a stop that counted the earlier interrupt kills it at once.
+		_ = returnsWithin(returned, 100*time.Millisecond)
 		if err := os.WriteFile(release, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		run := newAgentRun()
-		run.ready.Store(ready)
-		within(t, "stopAgentContainerFor", func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer) })
-		// Sent synchronously: it has gone out when the call returns, so it
-		// has before keploy can exit.
-		if got, want := strings.Join(engineLines(t, log), "|"), "kill "+stopTestContainer; got != want {
-			t.Fatalf("ready=%v: engine calls %q, want only %q before the call returned", ready, got, want)
+		within(t, "stopAgentContainerFor", func() { <-returned })
+		calls := engineLines(t, log)
+		requireSignalledAndWaited(t, calls)
+		if count(calls, "kill "+stopTestContainer) != 0 {
+			t.Fatalf("ready=%v: an interrupt from before the stop forced it; calls %q", ready, calls)
 		}
 	}
 }

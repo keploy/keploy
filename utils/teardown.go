@@ -28,9 +28,10 @@ type TeardownProgress struct {
 	// moves while the teardown makes progress.
 	Seq uint64 `json:"seq"`
 	// Beat counts the reporter's beats since the teardown began, one every
-	// TeardownBeat of the agent's own: each is one check of its progress. An
-	// agent that is not scheduled does not beat, so a loaded host only
-	// slows the checks down.
+	// TeardownBeat: each is one check of its progress. An agent the host does
+	// not schedule at all does not beat; one it does beats about once a
+	// second however slowly its teardown goes, so a stage that can take long
+	// without a step is reported as work in progress (BeginTeardownWork).
 	Beat uint64 `json:"beat"`
 	// Busy says a stage the agent must not be killed in the middle of is in
 	// progress (BeginTeardownWork): no check counts as one without progress.

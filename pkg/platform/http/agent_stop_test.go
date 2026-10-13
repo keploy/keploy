@@ -54,8 +54,9 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 // that answers is not signalled. One that was up and is already going away is
 // signalled only if, after the grace, it has reported no teardown. One whose
 // stop request fails otherwise, or that never answered (still starting:
-// refused, as nothing listens yet), is signalled at once. Ctrl+C pressed
-// again before the stop kills it at once. The agent is then waited for (a
+// refused, as nothing listens yet), is signalled at once. An interrupt that
+// came before the stop does not force it: one stop is often delivered twice.
+// The agent is then waited for (a
 // terminate stands for SIGTERM, on which it exits). One already reaped is
 // never signalled: its pid may be another process's by then.
 func TestEndAgent(t *testing.T) {
@@ -89,7 +90,7 @@ func TestEndAgent(t *testing.T) {
 		{name: "it is not listening any more, and exits", ask: refused, ready: true, exitAt: goingAwayLog, grace: time.Hour},
 		{name: "it is going away and reports its teardown: never signalled", ask: goingAway, ready: true, reports: true, exitAt: decidedLog, grace: time.Millisecond},
 		{name: "it is going away but reports nothing after the grace", ask: goingAway, ready: true, grace: time.Millisecond, wantSignal: true},
-		{name: "Ctrl+C was pressed again before the stop", ask: goingAway, ready: true, grace: time.Hour, interrupt: true, wantKill: true},
+		{name: "an interrupt that came before the stop does not force it", ready: true, exitOnAsk: true, grace: time.Hour, interrupt: true},
 		{name: "its stop request fails otherwise", ask: failed, ready: true, grace: time.Hour, wantSignal: true},
 		{name: "it never answered: still starting", ask: refused, grace: time.Hour, wantSignal: true},
 		{name: "it never answered, and fails otherwise", ask: failed, grace: time.Hour, wantSignal: true},
@@ -122,12 +123,12 @@ func TestEndAgent(t *testing.T) {
 				run.exited() // the agent exits on SIGTERM
 				return nil
 			}
-			kill := func() error {
+			kill := func(bool) error {
 				killed.Store(true)
 				run.exited()
 				return nil
 			}
-			read := func() (utils.TeardownProgress, bool) {
+			read := func(context.Context) (utils.TeardownProgress, bool) {
 				return utils.TeardownProgress{Seq: 1}, tc.reports
 			}
 			returned := make(chan struct{})

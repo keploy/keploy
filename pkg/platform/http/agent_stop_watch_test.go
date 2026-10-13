@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,6 +99,7 @@ type fakeAgent struct {
 	gone   chan struct{}
 	exit   sync.Once
 	killed atomic.Int32
+	now    atomic.Bool                 // the last kill was to be at once (Ctrl+C), not deferrable
 	reads  chan utils.TeardownProgress // each read's result, as far as the buffer holds
 }
 
@@ -111,7 +113,7 @@ func (f *fakeAgent) set(r utils.TeardownProgress) {
 	f.mu.Unlock()
 }
 
-func (f *fakeAgent) read() (utils.TeardownProgress, bool) {
+func (f *fakeAgent) read(context.Context) (utils.TeardownProgress, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	select {
@@ -123,7 +125,8 @@ func (f *fakeAgent) read() (utils.TeardownProgress, bool) {
 
 func (f *fakeAgent) exited() { f.exit.Do(func() { close(f.gone) }) }
 
-func (f *fakeAgent) kill() error {
+func (f *fakeAgent) kill(now bool) error {
+	f.now.Store(now)
 	f.killed.Add(1)
 	f.exited() // a killed agent exits
 	return nil
@@ -139,7 +142,7 @@ type watching struct {
 // startWatch runs a stopWatch on f.
 func startWatch(f *fakeAgent, reported chan<- struct{}) *watching {
 	w := &watching{finished: make(chan struct{}), judged: make(chan utils.TeardownProgress, 4096)}
-	sw := stopWatch{logger: zap.NewNop(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, reported: reported,
+	sw := stopWatch{logger: zap.NewNop(), since: utils.RepeatInterrupts(), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, reported: reported,
 		judged: func(r utils.TeardownProgress) {
 			select {
 			case w.judged <- r:
@@ -237,6 +240,9 @@ func TestStopWatchKillsAStalledTeardown(t *testing.T) {
 	if !awaitWatch(t, w) || f.killed.Load() != 1 {
 		t.Fatalf("a teardown stalled for %d checks was not killed once (kills: %d)", stallChecks, f.killed.Load())
 	}
+	if f.now.Load() {
+		t.Fatal("a stalled agent was killed at once: it must be told to die once no teardown work is in progress")
+	}
 }
 
 // An agent that has detached everything and is still there a check later is
@@ -255,9 +261,13 @@ func TestStopWatchKillsAnAgentDetachedButNotExiting(t *testing.T) {
 	if !awaitWatch(t, w) || f.killed.Load() != 1 {
 		t.Fatal("an agent detached but not exiting was not killed")
 	}
+	if f.now.Load() {
+		t.Fatal("a detached agent was killed at once: it must be told to die once no teardown work is in progress")
+	}
 }
 
-// Ctrl+C pressed again kills the agent at once, progressing or not.
+// Ctrl+C pressed again while keploy waits for the agent kills it at once,
+// progressing or not.
 func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -267,8 +277,8 @@ func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
 	awaitObserved(t, f, w, p(1, 0, false))
 	f.set(p(2, 1, false)) // still progressing
 	utils.MarkInterruptedAgain()
-	if !awaitWatch(t, w) || f.killed.Load() != 1 {
-		t.Fatal("Ctrl+C pressed again did not kill the agent")
+	if !awaitWatch(t, w) || f.killed.Load() != 1 || !f.now.Load() {
+		t.Fatalf("Ctrl+C pressed again did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
 	}
 }
 
@@ -293,5 +303,29 @@ func TestStopWatchNeverKillsAnAgentThatReportsNothing(t *testing.T) {
 	f.exited()
 	if awaitWatch(t, w) || f.killed.Load() != 0 {
 		t.Fatal("an agent that reported nothing was killed")
+	}
+}
+
+// A stop holds keploy's drains (utils.BeginAgentStop) only from the agent's
+// first report that it records its steps, and until the watch returns: such
+// a stop ends on its own. One of an agent that does not record its steps may
+// never end, and must not keep keploy from exiting.
+func TestOnlyAStopOfAnAgentThatRecordsItsStepsHoldsTheDrains(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	for _, steps := range []bool{false, true} {
+		f := newFakeAgent()
+		w := startWatch(f, nil)
+		r := utils.TeardownProgress{Seq: 1, Beat: 0, Steps: steps}
+		f.set(r)
+		awaitObserved(t, f, w, r)
+		if got := utils.AgentStopInProgress(); got != steps {
+			t.Fatalf("steps=%v: the stop holds the drains = %v", steps, got)
+		}
+		f.exited()
+		awaitWatch(t, w)
+		if utils.AgentStopInProgress() {
+			t.Fatalf("steps=%v: the stop still holds the drains after it ended", steps)
+		}
 	}
 }

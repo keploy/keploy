@@ -135,3 +135,76 @@ func TestACommandLineProgressPathIsChecked(t *testing.T) {
 		t.Fatalf("clear left the report: %v", err)
 	}
 }
+
+// TestEscalationWhileBusyHelper is not a test of its own: with
+// KEPLOY_TEST_ESCALATION_BUSY set it is an agent in the middle of teardown
+// work, which ends when the test writes "end" in that directory.
+func TestEscalationWhileBusyHelper(t *testing.T) {
+	dir := os.Getenv("KEPLOY_TEST_ESCALATION_BUSY")
+	if dir == "" {
+		return
+	}
+	DieOnEscalation()
+	end := BeginTeardownWork()
+	if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
+		os.Exit(3)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "end")); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	end()
+	time.Sleep(time.Hour)
+	os.Exit(0)
+}
+
+// The escalation signal does not kill an agent in the middle of teardown work
+// -- a uprobe removal, a CA tool rewriting a trust store -- but once that work
+// has ended: the CLI judged from a report a moment old.
+func TestTheEscalationWaitsForTeardownWork(t *testing.T) {
+	dir := t.TempDir()
+	helper := exec.Command(os.Args[0], "-test.run=^TestEscalationWhileBusyHelper$")
+	helper.Env = append(os.Environ(), "KEPLOY_TEST_ESCALATION_BUSY="+dir)
+	var out bytes.Buffer
+	helper.Stdout, helper.Stderr = &out, &out
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- helper.Wait() }()
+	t.Cleanup(func() { _ = helper.Process.Kill() })
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			break
+		}
+		select {
+		case err := <-exited:
+			t.Fatalf("the helper ended before it was ready: %v\n%s", err, out.String())
+		case <-hung:
+			t.Fatalf("the helper was never ready\n%s", out.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if err := helper.Process.Signal(EscalationSignal); err != nil {
+		t.Fatal(err)
+	}
+	select { // only that it has NOT died yet
+	case err := <-exited:
+		t.Fatalf("the escalation killed the agent in the middle of teardown work (%v)\n%s", err, out.String())
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := os.WriteFile(filepath.Join(dir, "end"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Minute):
+		t.Fatalf("the helper outlived the escalation once its work ended\n%s", out.String())
+	}
+	if st := helper.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
+		t.Fatalf("the helper ended with %v, want it killed (SIGKILL)\n%s", helper.ProcessState, out.String())
+	}
+}

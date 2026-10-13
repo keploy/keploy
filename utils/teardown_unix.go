@@ -11,31 +11,41 @@ import (
 	"strconv"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// EscalationSignal is what the CLI sends a stopping agent it has to kill but
-// may not signal itself: an agent elevated by sudo runs as root, which the
-// user who ran keploy cannot send SIGKILL, while sudo keeps that user's uid
-// and hands this signal on to the agent (checked with sudo 1.9.16p2).
+// EscalationSignal is what the CLI sends a stopping agent it has judged to
+// have stopped making progress, or to have detached everything and not exited
+// (pkg/platform/http, stopWatch); and, in place of SIGKILL, one it may not
+// signal itself: an agent elevated by sudo runs as root, which the user who
+// ran keploy cannot send SIGKILL, while sudo keeps that user's uid and hands
+// this signal on to the agent (checked with sudo 1.9.16p2).
 const EscalationSignal = syscall.SIGUSR2
 
 // DieOnEscalation has EscalationSignal kill this process (SIGKILL to itself,
-// or an exit where that cannot kill it: a pid namespace's init). It is for `keploy agent`, whose CLI sends it only when its
-// stop has to be forced: a second Ctrl+C, or a teardown that has stopped
-// making progress or has detached everything and not exited
-// (pkg/platform/http, stopWatch).
+// or an exit where that cannot kill it: a pid namespace's init) -- once no
+// teardown work is in progress (BeginTeardownWork). The CLI judges from a
+// report a moment old, and the agent may have begun such work since: a
+// uprobe removal, or a CA tool rewriting a trust store, which a kill must not
+// cut short. It is for `keploy agent`.
 func DieOnEscalation() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, EscalationSignal)
 	go func() {
 		<-c
+		for TeardownBusy() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if os.Getpid() == 1 {
+			// The init of its pid namespace (a container's PID 1), which no
+			// signal sent from inside the namespace kills, its own included:
+			// exit instead, the same end to anything in flight.
+			os.Exit(137)
+		}
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
-		// Still here: this is the init of its pid namespace (a container's
-		// PID 1), which no signal sent from inside the namespace kills, its
-		// own included. Exit instead: the same end to anything in flight.
-		os.Exit(137)
+		select {} // the kill may land after Kill returns (macOS)
 	}()
 }
 
