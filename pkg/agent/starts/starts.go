@@ -296,6 +296,9 @@ func (r *Registry) Stamp(m *models.Mock) {
 		return
 	}
 	m.SourcePID = pid
+	if w := r.ownerLocked(pid); w != nil {
+		m.Worker = w.pid
+	}
 	if m.Start != "" {
 		return
 	}
@@ -313,6 +316,19 @@ func (r *Registry) List() []Start {
 		out = append(out, *s)
 	}
 	return out
+}
+
+// ownerLocked is the registered worker pid is or descends from, nil when
+// none is known.
+func (r *Registry) ownerLocked(pid uint32) *worker {
+	if w, ok := r.workers[pid]; ok {
+		return w
+	}
+	if r.proc == nil {
+		return nil
+	}
+	_, w := r.chain(pid)
+	return w
 }
 
 func (r *Registry) chain(pid uint32) ([]uint32, *worker) {

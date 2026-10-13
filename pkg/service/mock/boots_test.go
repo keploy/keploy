@@ -11,10 +11,10 @@ func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
 	ms := func(n int) time.Time {
 		return time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Millisecond)
 	}
-	suites := []models.SuiteSpan{
-		{Dir: "/r/e2e/orders", Start: ms(0), End: ms(500)},
-		{Dir: "/r/e2e/payments", Start: ms(600), End: ms(900)},
-	}
+	owners := workerDirs([]models.ScopeWindow{
+		{Name: "/r/e2e/orders", Suite: true, Dir: "/r/e2e/orders", PID: 10, Start: ms(0), End: ms(500)},
+		{Name: "/r/e2e/payments", Suite: true, Dir: "/r/e2e/payments", PID: 20, Start: ms(600), End: ms(900)},
+	})
 	tests := []models.ScopeWindow{
 		{Name: "orders.TestCreate", Start: ms(100), End: ms(200), PID: 10},
 		{Name: "orders.TestReload", Start: ms(250), End: ms(450), PID: 10},
@@ -37,8 +37,10 @@ func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
 		{name: "config-eur", ts: ms(650), ref: "s3"},
 		{name: "worker-own", ts: ms(710), pid: 20},
 		{name: "go-build", ts: ms(20), pid: 99},
+		{name: "own-boot", ts: ms(5), pid: 10},
+		{name: "child-boot", ts: ms(610), pid: 77, worker: 20},
 	}
-	p := classify(tests, starts, suites, mocks)
+	p := classify(tests, starts, owners, mocks)
 	boot := map[string][]string{}
 	for _, b := range p.boots {
 		var names []string
@@ -52,7 +54,9 @@ func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
 		"/r/e2e/orders|shop#1@orders.TestReload": {"config-usd", "pg-handshake"},
 		"/r/e2e/payments|shop#1":                 {"config-eur"},
 		"/r/e2e/orders|shop#2@orders.TestReload": nil,
-		"/r/e2e/orders|":                         {"go-build"},
+		"/r/e2e/orders|":                         {"own-boot"},
+		"/r/e2e/payments|":                       {"child-boot"},
+		"|":                                      {"go-build"},
 	}
 	for k, want := range expect {
 		got, ok := boot[k]
@@ -99,25 +103,48 @@ func TestTestAtUsesTheOnlyOpenTestWhenTheCallerHasNone(t *testing.T) {
 	}
 }
 
-// With packages running in parallel, a start-up call belongs to a test of the
-// process that made it, not to whichever package's test starts next.
-func TestDirAtPrefersTheCallersProcess(t *testing.T) {
+// With packages running in parallel, a start-up call belongs to the folder of
+// the process that made it, whatever the time: a call from a process no
+// worker owns is served to every set, and a PID that marked two folders owns
+// neither.
+func TestStartupCallsGoByTheCallersProcessNeverByTime(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
-	tests := []models.ScopeWindow{
+	windows := []models.ScopeWindow{
+		{Name: "e2e/orders", Suite: true, Dir: "e2e/orders", PID: 10, Start: at(0), End: at(900)},
 		{Name: "TestOrders", Dir: "e2e/orders", PID: 10, Start: at(300), End: at(400)},
 		{Name: "TestBilling", Dir: "e2e/billing", PID: 20, Start: at(100), End: at(200)},
+		{Name: "TestA", Dir: "e2e/a", PID: 30, Start: at(100), End: at(200)},
+		{Name: "TestB", Dir: "e2e/b", PID: 30, Start: at(300), End: at(400)},
+		{App: true, Name: "shop#1", Dir: "e2e/x", PID: 40},
 	}
-	for _, c := range []struct {
-		pid  uint32
-		want string
-	}{
-		{10, "e2e/orders"},  // pid 10's call goes to pid 10's package
-		{20, "e2e/billing"}, // and pid 20's to its own
-		{0, "e2e/billing"},  // no pid: the next test to start
-		{99, "e2e/billing"}, // an unknown pid falls back to time
-	} {
-		if got := dirAt(tests, at(50), c.pid); got != c.want {
-			t.Fatalf("pid %d: got %q, want %q", c.pid, got, c.want)
+	owners := workerDirs(windows)
+	tests, _ := splitSuites(windows)
+	mocks := []capturedMock{
+		{name: "orders-early", ts: at(50), pid: 10},
+		{name: "billing-late", ts: at(950), pid: 20},
+		{name: "billing-child", ts: at(250), pid: 99, worker: 20},
+		{name: "nobody", ts: at(50), pid: 99},
+		{name: "no-pid", ts: at(50)},
+		{name: "two-folders", ts: at(250), pid: 30},
+	}
+	p := classify(tests, nil, owners, mocks)
+	got := map[string]string{}
+	for _, b := range p.boots {
+		for _, m := range b.Mocks {
+			got[m.Name] = b.Dir
+		}
+	}
+	want := map[string]string{
+		"orders-early":  "e2e/orders",
+		"billing-late":  "e2e/billing",
+		"billing-child": "e2e/billing",
+		"nobody":        "",
+		"no-pid":        "",
+		"two-folders":   "",
+	}
+	for name, dir := range want {
+		if d, ok := got[name]; !ok || d != dir {
+			t.Fatalf("%s: got %q (filed %v), want %q; all %v", name, d, ok, dir, got)
 		}
 	}
 }

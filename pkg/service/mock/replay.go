@@ -907,12 +907,17 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 		return st
 	}
+	var shared []string
 	for _, b := range mapping.Boots {
-		st := get(b.Dir)
 		names := make([]string, 0, len(b.Mocks))
 		for _, e := range b.Mocks {
 			names = append(names, e.Name)
 		}
+		if b.Dir == "" && b.Key == "" {
+			shared = append(shared, names...)
+			continue
+		}
+		st := get(b.Dir)
 		if b.Key == "" {
 			st.Runner = append(st.Runner, names...)
 		} else {
@@ -928,6 +933,15 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 		st.Tests[tc.ID] = owned
 		sets[setName(tc.Dir, root)] = st
+	}
+	if len(shared) > 0 {
+		if len(sets) == 0 {
+			sets[setName("", root)] = get("")
+		}
+		for k, st := range sets {
+			st.Runner = append(st.Runner, shared...)
+			sets[k] = st
+		}
 	}
 	for _, su := range mapping.Suites {
 		k := setName(su.Dir, root)

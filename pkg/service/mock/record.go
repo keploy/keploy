@@ -228,7 +228,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		mockCount++
 		kind := mk.Spec.Metadata["type"]
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, worker: mk.Worker, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -370,6 +370,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 	}
 	starts := appStarts(windows)
+	owners := workerDirs(windows)
 	windows, suites := splitSuites(windows)
 	if len(starts) == 0 && len(windows) > 0 {
 		m.logger.Info("no app start seen: calls made outside the tests are kept as the start-up of their test folder",
@@ -403,7 +404,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
-			plan := classify(windows, starts, suites, recorded)
+			plan := classify(windows, starts, owners, recorded)
 			byTest := plan.tests
 			byCase := correlateCases(windows, plan.perTest, capture.list(), stepWindows(windows))
 			for _, w := range windows {
@@ -626,13 +627,16 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
-	name  string
-	ts    time.Time
-	pid   uint32 // source worker PID (0 if unknown); enables exact parallel attribution
-	end   time.Time
-	boot  bool
-	start string
-	ref   string
+	name string
+	ts   time.Time
+	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	// worker is the PID of the scope-marking worker the caller descends from
+	// (0 if none is known).
+	worker uint32
+	end    time.Time
+	boot   bool
+	start  string
+	ref    string
 }
 
 // stagingSetID returns the staging set name record captures into while recording
