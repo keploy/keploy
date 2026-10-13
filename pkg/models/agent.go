@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -357,6 +358,13 @@ const (
 	ConsumedScopePerTest = "per-test"
 )
 
+// UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
+// agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
+// why. The body is still the list that was read, so a client that does not know
+// the header reads it as before. Only an agent with the proven switch on sends
+// it.
+const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
+
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
 }
@@ -402,4 +410,86 @@ type AppStartReq struct {
 	Port int       `json:"port"`
 	Pid  int       `json:"pid,omitempty"`
 	At   time.Time `json:"at,omitzero"`
+}
+
+// BacklogVerdict is what the agent answers when a recording's stop asks
+// whether it may still hand over something captured before the stop
+// (GET /agent/record/pending, AgentBacklog). It has three values, and a fourth
+// for an agent that can never tell: an answer that did not come is never read
+// as "nothing pending".
+type BacklogVerdict int
+
+const (
+	// BacklogCannotTell: no answer came (a timeout, a transport error, an
+	// error status, a body that does not decode). The agent may still hold
+	// something; the stop keeps waiting while it can. The zero value, so an
+	// answer that was never filled in is never taken for BacklogClear.
+	BacklogCannotTell BacklogVerdict = iota
+	// BacklogPending: the agent may still hand over something captured
+	// before the stop.
+	BacklogPending
+	// BacklogClear: the agent holds nothing more captured before the stop:
+	// its capture, parsers and test-case queue are through it. What it has
+	// already handed on and the client has not received yet (in its mock
+	// manager's channel, the stream's encoder, the socket) is not counted:
+	// clear is not delivered.
+	BacklogClear
+	// BacklogUnsupported: the agent cannot tell, and never will (it predates
+	// the route, or its capture has no watermark). The stop goes by its
+	// streams' quiet alone.
+	BacklogUnsupported
+)
+
+func (v BacklogVerdict) String() string {
+	switch v {
+	case BacklogPending:
+		return "pending"
+	case BacklogClear:
+		return "clear"
+	case BacklogUnsupported:
+		return "unsupported"
+	}
+	return "cannot tell"
+}
+
+// AgentBacklog is the agent's answer to whether it may still hand over a test
+// case or a mock captured before a time.
+type AgentBacklog struct {
+	Verdict BacklogVerdict
+	// Progress is a count that moves whenever the agent's capture gets
+	// further: with BacklogPending, a stop tells a backlog being worked
+	// through from one that is not moving. Zero from an agent that predates
+	// it.
+	Progress uint64
+	// WaitingOn says what is pending, when the agent can tell.
+	WaitingOn string
+}
+
+// DrainsAfterStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it after a recording's stop and closes it
+// before it stops the agent, and is the only thing that stops the agent: it
+// started it (natively, or in a container it runs). `keploy record` and
+// `keploy mock record` send it then. A stop signal the agent gets meanwhile
+// (a `pkill -INT keploy`, or a stop of its container, that reaches it too)
+// waits for such streams (utils.SetSignalHold). An agent something else
+// stops (docker compose, with the project the client waits on; kubelet, with
+// a sidecar's pod) gets no header, and stops on the signal as it always has:
+// held for the client, it would only be killed at that stop's timeout.
+const DrainsAfterStopHeader = "Keploy-Drains-After-Stop"
+
+type drainsAfterStopKey struct{}
+
+// WithDrainsAfterStop marks the agent frame streams opened on ctx as ones
+// their client drains after the stop and closes before it stops the agent.
+// The agent client sends DrainsAfterStopHeader for them when it started the
+// agent itself. On the agent, the graceful-shutdown ctx carries it while such
+// a client holds a stream: that client stops the app it started first.
+func WithDrainsAfterStop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, drainsAfterStopKey{}, true)
+}
+
+// DrainsAfterStop reports whether ctx was marked with WithDrainsAfterStop.
+func DrainsAfterStop(ctx context.Context) bool {
+	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
+	return v
 }

@@ -62,7 +62,7 @@ type resolvedCase struct {
 // values. The options tell the matcher what the body was when it was recorded,
 // for the headers that are a digest of it.
 func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckResult, sent *models.TestCase, answer *models.HTTPResp, testSetID string) resolvedCase {
-	res := run.Expected(sent.HTTPResp, *answer, templates.ExpectOptions{IgnoreOrdering: r.config.Test.IgnoreOrdering})
+	res := run.Expected(sent.HTTPResp, *answer, templates.ExpectOptions{IgnoreOrdering: r.responseIgnoreOrdering()})
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
 	for _, c := range res.Captures {
 		r.logger.Debug("captured a template value from the app's answer",
@@ -290,7 +290,7 @@ func (p *passValues) finish() {
 // the use is asserted at its own index (templates.Run.StreamUseFailures), so
 // nothing unties it there.
 func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.CheckResult, cases []*models.TestCase) {
-	if !r.config.Test.IgnoreOrdering || len(check.Places) == 0 {
+	if !r.responseIgnoreOrdering() || len(check.Places) == 0 {
 		return
 	}
 	byName := make(map[string]*models.TestCase, len(cases))

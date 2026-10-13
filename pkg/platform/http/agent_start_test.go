@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,7 +86,9 @@ func deadAgentClient(t *testing.T, healthy bool) *AgentClient {
 	t.Cleanup(srv.Close)
 	conf := &config.Config{}
 	conf.Agent.AgentURI = srv.URL
-	return &AgentClient{logger: zap.NewNop(), conf: conf}
+	a := &AgentClient{logger: zap.NewNop(), conf: conf}
+	a.agentReached.Store(new(atomic.Bool)) // as startAgent does
+	return a
 }
 
 // waitWithin runs waitForAgent with a ready budget far longer than the test
@@ -191,8 +194,25 @@ func TestAnInterruptWhileWaitingIsStillAnInterrupt(t *testing.T) {
 
 // And an agent that comes up is waited for, not failed.
 func TestAnAgentThatAnswersIsReady(t *testing.T) {
-	if err := waitWithin(t, deadAgentClient(t, true), context.Background(), make(chan error, 1)); err != nil {
+	a := deadAgentClient(t, true)
+	if err := waitWithin(t, a, context.Background(), make(chan error, 1)); err != nil {
 		t.Fatalf("a healthy agent failed the setup: %v", err)
+	}
+	// It answered: a refused stop request is now an agent on its way out
+	// (stopAgentProcess), not one still starting.
+	if r := a.agentReached.Load(); r == nil || !r.Load() {
+		t.Fatal("an agent that answered its readiness check is not marked reached")
+	}
+}
+
+// One that never answered is not reached: stopping it signals it at once.
+func TestAnAgentThatNeverAnsweredIsNotReached(t *testing.T) {
+	a := deadAgentClient(t, false)
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+	_ = waitWithin(t, a, context.Background(), exited)
+	if r := a.agentReached.Load(); r != nil && r.Load() {
+		t.Fatal("an agent that never answered is marked reached")
 	}
 }
 

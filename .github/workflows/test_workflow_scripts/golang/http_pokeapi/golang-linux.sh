@@ -129,6 +129,10 @@ if [ "$strict_phase" = true ]; then
     rm -rf ./strict-run
     mkdir ./strict-run
     cp -a ./keploy ./strict-run/keploy
+    # And a copy for the in-order phase further down (KEPLOY_PROVEN=1).
+    rm -rf ./proven-order-run
+    mkdir ./proven-order-run
+    cp -a ./keploy ./proven-order-run/keploy
 fi
 
 # Start the go-http app in test mode.
@@ -227,6 +231,74 @@ if [ "$strict_phase" = true ]; then
     done
 else
     echo "REPLAY_BIN ($REPLAY_BIN) is not a build or build-no-race artifact; skipping the strict mock-window replay"
+fi
+
+# Response arrays in order under the proven switch (KEPLOY_PROVEN=1, the
+# proven model's staging gate). /api/locations answers {"location":[...]}; the
+# recorded order of that array is reversed in a copy of the recordings, so the
+# app's live answer has the recorded elements in another order. With the switch
+# off, test.ignoreOrdering (on by default) compares arrays as multisets and the
+# set passes: that replay is the control. With it on, arrays are compared in
+# order, so exactly the edited tests fail and every other test still passes.
+if [ "$strict_phase" = true ]; then
+    reordered_tests=()
+    shopt -s nullglob
+    for tc in ./proven-order-run/keploy/test-set-*/tests/*.yaml; do
+        if [ "$(yq '.spec.req.url' "$tc")" != "http://localhost:8080/api/locations" ]; then
+            continue
+        fi
+        body=$(yq '.spec.resp.body' "$tc")
+        if [ "$(echo "$body" | jq '.location | length')" -lt 2 ]; then
+            continue
+        fi
+        REVERSED=$(echo "$body" | jq -c '.location |= reverse') yq -i '.spec.resp.body = strenv(REVERSED)' "$tc"
+        # Test names repeat across test sets: key each by its set.
+        reordered_tests+=("$(basename "$(dirname "$(dirname "$tc")")")/$(yq '.name' "$tc")")
+    done
+    shopt -u nullglob
+    if [ ${#reordered_tests[@]} -eq 0 ]; then
+        echo "::error::no recorded /api/locations test with a location array of two or more elements to reorder; the in-order phase would assert nothing"
+        exit 1
+    fi
+    echo "reversed the recorded location array of: ${reordered_tests[*]}"
+
+    for phase in off on; do
+        rm -rf ./proven-order-run/keploy/reports
+        if [ "$phase" = on ]; then
+            KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./proven-order-run --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs_order_${phase}.txt"
+        else
+            "$REPLAY_BIN" test -c "./http-pokeapi" --path ./proven-order-run --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs_order_${phase}.txt"
+        fi
+        if grep "WARNING: DATA RACE" "test_logs_order_${phase}.txt"; then
+            echo "::error::Race condition detected in the in-order replay (switch ${phase})"
+            exit 1
+        fi
+        shopt -s nullglob
+        order_reports=( ./proven-order-run/keploy/reports/test-run-0/test-set-*-report.yaml )
+        shopt -u nullglob
+        if [ ${#order_reports[@]} -eq 0 ]; then
+            echo "::error::the in-order replay (switch ${phase}) wrote no yaml test-set report"
+            cat "test_logs_order_${phase}.txt"
+            exit 1
+        fi
+        for report_file in "${order_reports[@]}"; do
+            set_id=$(basename "$report_file" -report.yaml)
+            while IFS=$'\t' read -r tcid status; do
+                want=PASSED
+                if [ "$phase" = on ]; then
+                    for r in "${reordered_tests[@]}"; do
+                        [ "$r" = "$set_id/$tcid" ] && want=FAILED
+                    done
+                fi
+                if [ "$status" != "$want" ]; then
+                    echo "::error::$(basename "$report_file"): $tcid is $status with KEPLOY_PROVEN ${phase}; want $want. Reversed: ${reordered_tests[*]}. With the switch off test.ignoreOrdering forgives the reorder; with it on response arrays are compared in order."
+                    cat "test_logs_order_${phase}.txt"
+                    exit 1
+                fi
+            done < <(yq -r '.tests[] | [.test_case_id, .status] | @tsv' "$report_file")
+        done
+        echo "✓ in-order phase, switch ${phase}: every test has the expected verdict"
+    done
 fi
 
 if json_pass_supported; then

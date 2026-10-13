@@ -85,6 +85,19 @@ func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Tim
 	return time.Time{}
 }
 
+// abortAfterTestSet reports whether the run stops after a test set that ended
+// with status. A set that is only not judged (its evidence could not all be
+// read: notJudged) does not stop it: the set fails as not judged, with every
+// reason, and the run goes on so every set gets its verdict; the run exits
+// non-zero. Anything else that is INTERNAL_ERR ends the round
+// (shouldAbortTestRun).
+func abortAfterTestSet(status models.TestSetStatus, cmdType utils.CmdType, notJudged bool) bool {
+	if notJudged && status == models.TestSetStatusInternalErr {
+		return false
+	}
+	return shouldAbortTestRun(status, cmdType)
+}
+
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
@@ -182,6 +195,9 @@ type runShape struct {
 	// into APP_FAULT, so the status describes the partial run itself rather
 	// than something that went wrong independently.
 	downgradedFromPassed bool
+	// notJudged is why an otherwise judged set is INTERNAL_ERR: evidence its
+	// verdict needs could not be read (proven switch). Empty otherwise.
+	notJudged string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -230,6 +246,9 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 		}
 		return ""
 	case models.TestSetStatusInternalErr:
+		if shape.notJudged != "" {
+			return withUnverifiedNote(shape.notJudged, shape)
+		}
 		return withUnverifiedNote("replay failed with an internal error - please report this issue if it persists", shape)
 	default:
 		return ""
@@ -364,6 +383,11 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// notJudgedSets are the test sets of this run that ended not judged
+	// (markNotJudged): INTERNAL_ERR that does not end the round.
+	notJudgedMu   sync.Mutex
+	notJudgedSets map[string]bool
+
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -433,6 +457,10 @@ type Replayer struct {
 	failedTCsBySetID      map[string][]string
 	mockMismatchFailures  *TestFailureStore
 	fallbackDeprecateOnce sync.Once
+	// quarantined is, under the proven switch, each test this run skipped for
+	// a reason, keyed by test set and test, for the run's summary.
+	quarantinedMu sync.Mutex
+	quarantined   map[[2]string]string
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -640,6 +668,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.consumedMockNames = make(map[string]struct{})
 	r.totalTestTimeTaken = 0
 	r.completeTestReportMu.Unlock()
+	r.forgetQuarantined()
 	r.failedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
 
@@ -964,7 +993,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
-				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
+				abortTestRun = abortAfterTestSet(testSetStatus, cmdType, r.notJudged(testSet))
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
@@ -1415,6 +1444,9 @@ func (r *Replayer) beforeFirstTestSet(ctx context.Context, testRunID string) {
 var testSetDrainTimeout = 30 * time.Second
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
+	// Whether this run of the set is judged is this run's to say: a mark left
+	// by an earlier attempt, or an earlier Start, says nothing about it.
+	r.forgetNotJudged(testSetID)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -1497,6 +1529,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
 		}
+		// Under the proven switch the report names each skipped test, with its
+		// reason, instead of counting them.
+		if rows := r.ignoredSetResults(testSetID, testCases); rows != nil {
+			for i := range rows {
+				if err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &rows[i]); err != nil {
+					utils.LogError(r.logger, err, "failed to insert test case result")
+					return models.TestSetStatusFailed, err
+				}
+			}
+			testReport.Tests = rows
+			testReport.Total = len(rows)
+			testReport.Ignored = len(rows)
+		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -1547,7 +1592,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Placeholders a test case cannot run with are refused now, before any
 	// is sent, and each such test case fails with the reason.
 	tmplCheck := tmplRun.Check(testCases, templates.CheckOptions{
-		IgnoreOrdering: r.config.Test.IgnoreOrdering,
+		IgnoreOrdering: r.responseIgnoreOrdering(),
 		Streaming:      pkg.IsHTTPStreamingTestCase,
 	})
 	r.refuseUntiedArrayUses(testSetID, &tmplCheck, testCases)
@@ -1569,6 +1614,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var obsolete int
 	var ignored int
 	var totalConsumedMocks = map[string]models.MockState{}
+	// consumers are the tests that consumed each mock, by name: whose an
+	// unconsumed test mock went to, when a sibling's (markConsumedBy).
+	consumers := map[string][]string{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
 	// perTestRegion names the per-test mocks this set hands the agent, the
 	// only ones an agent that says so reads consumed entries for (see
@@ -1620,6 +1668,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// comparing reusable/startup mocks would falsely demote tests to OBSOLETE
 	// (the same reason DNS mocks are excluded). MockEntry carries no tier, so
 	// we derive it from the loaded mocks (which do, via TestModeInfo.Lifetime).
+	//
+	// Under the proven switch it marks the protocol-phase mocks instead
+	// (excludedFromTestMockAssertion): a test owns every data-plane mock its
+	// mapping lists, whatever tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
 	// mockLookup maps a mock's name to its summary, protocol and target, for
 	// the report: the per-test and session mocks as recorded. Built as the
@@ -1629,7 +1681,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
-			if isReusableTierMock(m) {
+			if excludedFromTestMockAssertion(m) {
 				reusableMockNames[m.Name] = true
 			}
 		}
@@ -2242,6 +2294,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// per test.
 	depMissingTests := map[string]models.TestStatus{}
 	depAssertionInertWarned := false
+	// consumedUnread names the tests that own test mocks and whose consumed
+	// mocks could not be read (proven switch): see testMocksUnknown.
+	var consumedUnread []string
 	// The lookup of mock name -> summary, protocol and target from the mock
 	// registry (once per test set). `target` is added for the DepResult writer:
 	// neither models.MockEntry (the mapping side) nor models.MockState (the
@@ -2268,12 +2323,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if _, ok := ignoredTests[testCase.Name]; ok {
 			testCaseResult := &models.TestResult{
-				Kind:         models.HTTP,
+				Kind:         ignoredKind(testCase),
 				Name:         testSetID,
 				Status:       models.TestStatusIgnored,
 				TestCaseID:   testCase.Name,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -2379,12 +2435,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if _, ok := ignoredTests[testCase.Name]; ok {
 				testCaseResult := &models.TestResult{
-					Kind:         models.HTTP,
+					Kind:         ignoredKind(testCase),
 					Name:         testSetID,
 					Status:       models.TestStatusIgnored,
 					TestCaseID:   testCase.Name,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -2586,6 +2643,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					totalConsumedMocks[m.Name] = m
 				}
+				noteConsumers(consumers, testCase.Name, consumedMocks)
 			}
 
 			r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
@@ -2653,6 +2711,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     OBSOLETE — and, on the rows side, report every dependency as
 			//     missing — because of an unrelated transport error.
 			depAssertionValid := r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks && instrumentConsumedFetchErr == nil
+			// Under the proven switch a test that owns test mocks has no verdict
+			// when what it consumed could not be read: whether it made every
+			// recorded call is unknown.
+			testMocksUnread := testMocksUnknown(r.instrument && useMappingBased && isMappingEnabled, len(filteredExpectedNames), instrumentConsumedFetchErr)
+			if testMocksUnread {
+				consumedUnread = appendOnce(consumedUnread, testCase.Name)
+			}
 
 			mockSetMismatch := false
 			if depAssertionValid {
@@ -2705,7 +2770,35 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// is about to be marked FAILED instead of demoted to OBSOLETE, so
 			// suppressing its diffs would hand the user a red test with no
 			// explanation. Knob off (the default) is byte-identical to before.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.config.Test.AssertDependencies)
+			// Under the proven switch strict failure is always on, so a test
+			// whose mock set diverged is never demoted: its response diff is the
+			// explanation of its FAILED verdict and must be printed
+			// (assertTestMocks is on under the switch).
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
+
+			// Under the proven switch this test's misses are read now, once,
+			// with its response in, so the verdict, the result line, the
+			// counters and the retry list all hold a miss. Every result written
+			// for this test below attaches this read (attachMisses): a second
+			// read would find the agent's channel drained.
+			var earlyMisses *testMisses
+			earlyMissed := 0
+			if provenswitch.On() {
+				read := r.readMockErrors(runTestSetCtx)
+				earlyMisses, earlyMissed = &read, dataPlaneMisses(read.calls)
+			}
+			attachMisses := func(res *models.TestResult) {
+				if earlyMisses == nil {
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, res)
+					return
+				}
+				r.attachReadMockErrors(*earlyMisses, testSetID, testCase.Name, res)
+				missCategory(res)
+			}
+			// The switch fails this test whatever its answer says when a call
+			// of it got no recorded answer or a recorded call of it was not
+			// made: a comparison that matches prints no pass line for it.
+			failedOnItsOwn := earlyMissed > 0 || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -2715,7 +2808,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for HTTP test case"))
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					attachMisses(testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
@@ -2731,13 +2824,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				tmplPass.captured(testCase, resolved.captures)
 				captured = reportCaptures(resolved.captures)
 				templateFailures = reportFailures(resolved.failures)
-				if len(templateFailures) > 0 {
+				opts := resolved.opts
+				if failedOnItsOwn {
+					opts = append(opts, httpMatcher.WithoutPassLine())
+				}
+				if len(templateFailures) > 0 || failedOnItsOwn {
 					// The test case has failed on its own: the additive-schema
 					// auto-pass (compareHTTPRespForReplay) never passes it, and
 					// its comparison rows stay as compared.
-					testPass, testResult = r.compareHTTPResp(resolved.expected, httpResp, testSetID, emitFailureLogs, resolved.opts...)
+					testPass, testResult = r.compareHTTPResp(resolved.expected, httpResp, testSetID, emitFailureLogs, opts...)
 				} else {
-					testPass, testResult = r.compareHTTPRespForReplay(resolved.expected, httpResp, testSetID, emitFailureLogs, resolved.opts...)
+					testPass, testResult = r.compareHTTPRespForReplay(resolved.expected, httpResp, testSetID, emitFailureLogs, opts...)
 				}
 				if len(templateFailures) > 0 {
 					testPass = false
@@ -2751,7 +2848,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, errors.New("invalid response type for gRPC test case"))
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					attachMisses(testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
 						utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
@@ -2803,7 +2900,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// is read first, so a test case it fails never prints the
 				// comparison's pass line.
 				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
-				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0)
+				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || failedOnItsOwn)
 				if len(templateFailures) > 0 {
 					testPass = false
 					markTemplateFailures(testResult)
@@ -2853,9 +2950,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     --format json — only the verdict differs.
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
-			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.config.Test.AssertDependencies, r.config.Test.StrictFailure)
+			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure())
 			// A template failure is never demoted to OBSOLETE.
 			outcome = keepTemplateFailure(outcome, len(templateFailures) > 0)
+			// Under the proven switch a call of this test that got no recorded
+			// answer fails it (earlyMissed, read before the comparison).
+			if earlyMissed > 0 {
+				outcome = failOnMisses(outcome)
+				r.logger.Error("calls this test made got no recorded answer; failing testcase (KEPLOY_PROVEN=1); the report lists each under unmatched_calls",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Int("unmatchedCalls", earlyMissed))
+			}
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
 				r.logger.Error("strict schema-noise: expected mock was rejected (non-noise request-body drift); failing testcase even though the response matched",
@@ -2864,6 +2970,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.Strings("expectedMocks", filteredExpectedNames),
 					zap.Strings("actualMocks", filteredMockNames))
 			case mismatchLogDependencyReject:
+				if provenswitch.On() {
+					// The switch rejects it, whatever the flags say.
+					r.logger.Error("a recorded call of this test was not made during its window; failing testcase even though the response matched",
+						zap.String("testcase", testCase.Name),
+						zap.String("testset", testSetID),
+						zap.String("reason", vetoFlagName(true, false)),
+						zap.Strings("expectedMocks", filteredExpectedNames),
+						zap.Strings("actualMocks", filteredMockNames))
+					break
+				}
 				r.logger.Error("assert-dependencies: an expected per-test dependency was not observed during this test's window; failing testcase even though the response matched",
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
@@ -3078,7 +3194,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// transports — native and k8s alike reach the agent over HTTP,
 					// so the agent's error channel is consumed only inside the
 					// agent's own drain goroutine, never by the replayer.
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					if testMocksUnread {
+						// No verdict: its row says so, before any hook reads it.
+						testCaseResult.FailureInfo.TestMocksUnread = true
+					}
+					attachMisses(testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
 					// bottom of this file for DNS-filter + perTestConsumed-known
@@ -3130,7 +3250,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// loop already computes — no new capture path, and mock
 					// matching / serving is untouched.
 					depAssert := buildDepResults(expectedMocks, perTestConsumed, depAssertionValid && perTestConsumedKnown, reusableMockNames, mockKindByName, mockLookup)
-					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.config.Test.AssertDependencies)
+					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.assertTestMocks())
 					recordUnexercised(depMissingTests, testCase.Name, testStatus, depLevel)
 					switch depLevel {
 					case depLogError:
@@ -3188,7 +3308,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// miss during this test attaches here instead of leaking into a
 					// later test (or vanishing) when we bail out on this internal error.
 					failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: test case result is nil"))
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+					attachMisses(failedResult)
 					if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 						utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil test case result")
 					}
@@ -3201,7 +3321,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// (false, nil)). Same as above: finalize the window + persist a
 				// failed result so the miss surfaces and can't carry forward.
 				failedResult := r.CreateFailedTestResult(testCase, testSetID, started, errors.New("internal error: comparison returned no result"))
-				r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, failedResult)
+				attachMisses(failedResult)
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
 					utils.LogError(r.logger, insErr, "failed to insert failed test case result for nil comparison result")
 				}
@@ -3266,9 +3386,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// latch so a test set still emits at most ONE of these however many
 		// streaming tests it deferred.
 		//
-		// This pass writes no DepResult and never calls resolveTestOutcome (see
-		// the NOTE further down), so --assert-dependencies cannot promote
-		// anything here. Without this call a CI run that points the flag at a
+		// This pass never calls resolveTestOutcome, and with the proven switch
+		// off it writes no DepResult (see the NOTE further down), so
+		// --assert-dependencies cannot promote anything here. (Under the
+		// switch it judges its tests on their test mocks itself.) Without this call a CI run that points the flag at a
 		// set of SSE/chunked tests exits 0 for an assertion that never
 		// executed — the flag would be silently inert, which is exactly the
 		// failure mode the flag exists to remove. deferredStreaming is true
@@ -3430,15 +3551,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// is re-evaluated after the post-stream drain so extra mocks
 			// consumed while reading the stream body are counted too.
 			mockNames := make([]string, 0)
+			// streamConsumedErr is the first failure to read what this test
+			// consumed, before or after its stream was read.
+			var streamConsumedErr error
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
+					streamConsumedErr = err
 					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
 				} else {
 					for _, m := range consumedMocks {
 						totalConsumedMocks[m.Name] = m
 						mockNames = append(mockNames, m.Name)
 					}
+					noteConsumers(consumers, tc.Name, consumedMocks)
 				}
 			}
 
@@ -3446,17 +3572,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mockSetMismatch := false
 			hasExpectedMocks := len(expectedMocks) > 0
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 			}
-			// NOTE: models.Result.DepResult is deliberately NOT populated on
-			// the deferred streaming path, for the same reason MockMismatches
-			// is not (see models.TestResult.MockMismatches). deferred.expected
-			// Mocks is an un-tier-filtered name slice built before the run, so
+			// NOTE: with the proven switch off models.Result.DepResult is
+			// deliberately NOT populated on the deferred streaming path, for
+			// the same reason MockMismatches is not (see
+			// models.TestResult.MockMismatches). deferred.expectedMocks is an
+			// un-tier-filtered name slice built before the run, so
 			// reusable/startup-tier mocks would show up as per-test
 			// dependencies and go "missing" at random. Consumers must treat an
 			// absent DepResult as "not available for this run mode", never as
-			// "this test had no dependencies".
-			emitFailureLogs := !mockSetMismatch
+			// "this test had no dependencies". Under the switch the rows are
+			// written (attachStreamDepResults), from the filtered list the
+			// streamed test's own verdict reads.
+			//
+			// Under the switch a diverged mock set demotes nothing, so the
+			// diff of a failed answer is printed as the main loop prints it.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
 
 			if !ok {
 				// Handle streaming response type
@@ -3583,12 +3715,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument {
 				additionalMocks, drainErr := r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if drainErr != nil {
+					if streamConsumedErr == nil {
+						streamConsumedErr = drainErr
+					}
 					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
 				}
 				for _, m := range additionalMocks {
 					totalConsumedMocks[m.Name] = m
 					mockNames = append(mockNames, m.Name)
 				}
+				noteConsumers(consumers, tc.Name, additionalMocks)
 				consumedMocks = append(consumedMocks, additionalMocks...)
 			}
 
@@ -3598,9 +3734,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// mismatch, keep it suppressed — don't un-suppress just because
 			// the mock set still looks like a subset.
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
-					emitFailureLogs = !mockSetMismatch
+					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
 				}
 			}
 
@@ -3623,12 +3759,57 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// was delivered, frame by frame.
 				streamReceived, streamComplete = httpResp.Body, true
 			}
+			// Under the proven switch a streaming test owns its test mocks too,
+			// and fails when one of them was not consumed. Decided once what
+			// it consumed is read whole, before the comparison, so that
+			// nothing says it passed.
+			streamArmed := r.instrument && useMappingBased && isMappingEnabled
+			streamTestMocksUnread := false
+			streamOwned, streamUnconsumed := unconsumedTestMocks(streamArmed, expectedTestMockMappings[tc.Name], consumedMocks, mockKindByName, reusableMockNames)
+			if testMocksUnknown(streamArmed, streamOwned, streamConsumedErr) {
+				// Not judged rather than failed on a partial read.
+				consumedUnread = appendOnce(consumedUnread, tc.Name)
+				streamUnconsumed = nil
+				streamTestMocksUnread = true
+			}
+			// Said here unless the mock-set mismatch line below says it (once).
+			if len(streamUnconsumed) > 0 && !mockSetMismatch {
+				r.logger.Error("recorded calls of this streaming test were not made during it; failing it (KEPLOY_PROVEN=1)",
+					zap.String("testcase", tc.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("unconsumedMocks", namesOf(streamUnconsumed)))
+			}
+			// Its misses too, read once, now, and attached below.
+			var streamMisses *testMisses
+			streamMissed := 0
+			if provenswitch.On() {
+				read := r.readMockErrors(runTestSetCtx)
+				streamMisses = &read
+				if streamMissed = dataPlaneMisses(read.calls); streamMissed > 0 && !mockSetMismatch {
+					r.logger.Error("calls this streaming test made got no recorded answer; failing it (KEPLOY_PROVEN=1); the report lists each under unmatched_calls",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Int("unmatchedCalls", streamMissed))
+				}
+			}
+			// Every result written for this test below attaches that read.
+			attachStreamMisses := func(res *models.TestResult) {
+				if streamMisses == nil {
+					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, res)
+					return
+				}
+				r.attachReadMockErrors(*streamMisses, testSetID, tc.Name, res)
+				missCategory(res)
+			}
 			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
 			var streamOpts []httpMatcher.MatchOption
-			if len(streamTemplateFailures) > 0 {
+			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 {
 				streamOpts = append(streamOpts, httpMatcher.WithoutPassLine())
 			}
 			testPass, testResult := r.compareHTTPResp(expectedStream, httpResp, testSetID, emitFailureLogs, streamOpts...)
+			if len(streamUnconsumed) > 0 || streamMissed > 0 {
+				testPass = false
+			}
 			if testResult == nil {
 				// Matcher returned no result (e.g. an internal compare path returning
 				// (false, nil)). Handle it HERE, before the hadStreamingMismatch block
@@ -3636,7 +3817,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// a failed result so the miss surfaces and can't carry forward.
 				utils.LogError(r.logger, nil, "streaming test result is nil")
 				failedResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New("internal error: streaming comparison returned no result"))
-				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, failedResult)
+				attachStreamMisses(failedResult)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, failedResult); insErr != nil {
@@ -3701,6 +3882,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
+				} else if len(streamUnconsumed) > 0 || streamMissed > 0 {
+					reason := vetoUnconsumedTestMock
+					if len(streamUnconsumed) == 0 {
+						reason = vetoUnmatchedCall
+					}
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.String("reason", reason),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
+				} else if provenswitch.On() {
+					// Under the switch a failed answer is FAILED whatever the
+					// mock set did: the set's other consumption (a session-tier
+					// mock it shares) is no reason to re-record it.
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.String("reason", provenswitch.Env+"=1"),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
 				} else {
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
 						zap.String("testcase", tc.Name),
@@ -3727,8 +3931,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.config.Test.StrictFailure && len(streamTemplateFailures) == 0 {
-				// A template failure is never demoted to OBSOLETE.
+			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamMissed == 0 {
+				// A template failure is never demoted to OBSOLETE, nor is a
+				// test that left one of its test mocks unconsumed, or one a
+				// call of which got no recorded answer, nor, under the proven
+				// switch, any test.
 				testStatus = models.TestStatusObsolete
 				obsolete++
 			} else {
@@ -3775,11 +3982,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
+				// Under the proven switch a streamed test's test mocks are
+				// asserted as the main loop's are (unconsumedTestMocks), so its
+				// report carries the same rows and the same evidence: the
+				// presence rows (Result.DepResult), its DEPENDENCY_MISSING
+				// category, and the unconsumed test mocks by name. The inputs
+				// are the ones that verdict read.
+				testCaseResult.FailureInfo.TestMocksUnread = streamTestMocksUnread
+				if provenswitch.On() {
+					attachStreamDepResults(testCaseResult, testStatus, expectedTestMockMappings[tc.Name], consumedMocks, streamArmed && streamConsumedErr == nil, reusableMockNames, mockKindByName, mockLookup)
+				}
 
 				// Finalize the capture window now - AFTER CompareHTTPStream and the
 				// post-stream consumed-mock drain above, so in-stream mock misses
 				// are included - and attach them to this result.
-				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+				attachStreamMisses(testCaseResult)
 
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -3851,10 +4068,68 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	resultsComplete := resultsErr == nil && scoredResults >= success+failure+obsolete
 
+	// Under the proven switch an unconsumed test mock a sibling consumed is
+	// named with that sibling.
+	if pairs := markConsumedBy(testCaseResults, consumers); len(pairs) > 0 {
+		r.logger.Warn("tests failed for a recorded call that a sibling test made instead: the order the shared mock pool served them in can decide this until each test's consumption is exact (KEPLOY_PROVEN=1); each is named under unconsumed_mocks.consumed_by",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", pairs))
+	}
+	// Under the proven switch a test whose call got no recorded answer fails,
+	// before the hook, so the hook sees the verdicts it is to act on. The loop
+	// failed each already (earlyMissed, streamMissed); this finds one only if a
+	// path wrote a result without that verdict.
+	if missed := failTestsWithMisses(testCaseResults); len(missed) > 0 {
+		r.logger.Error("tests failed: a call they made got no recorded answer (KEPLOY_PROVEN=1); the report lists each call under unmatched_calls",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", missed))
+	}
+	// The evidence against each test, as the loop wrote it, before any hook can
+	// touch it (holdEvidenceFloor reads it back).
+	evidence := snapshotEvidence(testCaseResults)
 	err = r.hookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
+	}
+	// Under the proven switch the per-test verdicts, as the hook left them,
+	// drive the set: its counters, its status, and so the report, JUnit and the
+	// exit code. A hook may quarantine a test (IGNORED), but a test with
+	// evidence against it (a call no mock answered, a recorded call it did not
+	// make, as the loop wrote it before the hook ran) stays FAILED whatever the
+	// hook set, removed or cleared: that is held here, once, for every hook,
+	// test by test. A status that is no verdict counts as failed. The verdicts
+	// drive the set only when every test's result row is there to count;
+	// otherwise the loop's status stands. A set whose tests' consumption could
+	// not all be read has no verdict at all.
+	notJudged := ""
+	if provenswitch.On() {
+		var held []string
+		scored := len(testCaseResults)
+		testCaseResults, held = holdEvidenceFloor(testCaseResults, evidence)
+		// A test the floor put back is written to the report store too: the
+		// run's failed-test list is read back from it.
+		for i := scored; i < len(testCaseResults); i++ {
+			if insErr := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, &testCaseResults[i]); insErr != nil {
+				utils.LogError(r.logger, insErr, "failed to insert a test result the evidence floor put back")
+			}
+		}
+		if len(held) > 0 {
+			r.logger.Error("a before-test-result hook passed, relabelled or removed tests with evidence against them, or cleared that evidence; they stay FAILED (KEPLOY_PROVEN=1)",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", held))
+		}
+		tally := tallyFromVerdicts(setTally{success, failure, obsolete, ignored, testSetStatus}, testCaseResults, resultsComplete)
+		success, failure, obsolete, ignored, testSetStatus = tally.success, tally.failure, tally.obsolete, tally.ignored, tally.status
+		if len(consumedUnread) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+			notJudged = consumedUnreadReason(consumedUnread)
+			r.logger.Error("test-set is not judged: what some of its tests consumed could not be read from keploy's agent; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", consumedUnread))
+			testSetStatus = models.TestSetStatusInternalErr
+			// Not judged, not broken: the round goes on (abortAfterTestSet).
+			r.markNotJudged(testSetID)
+		}
 	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
@@ -3889,6 +4164,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
 		testSetStatus = resolvedStatus
+	}
+
+	// A test whose unmatched calls could not all be read has no verdict, so its
+	// set has none either: neither PASSED nor FAILED, and nothing a judge may
+	// read as either (proven switch). A set already not judged for what its
+	// tests consumed says both.
+	unreadMisses := testsWithUnreadMisses(testCaseResults)
+	if len(unreadMisses) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		notJudged = alsoNotJudged(notJudged, unreadMissesReason(unreadMisses))
+		r.logger.Error("test-set is not judged: the calls some of its tests made that no mock answered could not all be read from keploy's agent; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", unreadMisses),
+			zap.String("next_step", "check the agent's log for why the read was incomplete, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
 	}
 
 	appFailure := getLastAppErr()
@@ -4004,7 +4294,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade}),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged}),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -4948,11 +5238,12 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
 		}
-		// Skipped outright under auto-replay rather than left to the helper:
-		// this quiet pre-match exists only so the auto-pass gets its shot
-		// before failure logs are emitted, and calling the helper here as well
-		// as below would log the skip twice for the same test case.
-		if !r.config.Test.AutoReplay && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+		// Skipped outright when the auto-pass is off (auto-replay, the proven
+		// switch) rather than left to the helper: this quiet pre-match exists
+		// only so the auto-pass gets its shot before failure logs are emitted,
+		// and calling the helper here as well as below would log the skip twice
+		// for the same test case.
+		if !r.additiveAutoPassOff() && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
 		}
@@ -5059,6 +5350,16 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 	if r.config.Test.AutoReplay {
 		if qualifiesForHTTPResponseSchemaAdditionPass(result) {
 			r.logger.Info("skipping additive response-schema auto-pass during auto-replay",
+				zap.String("testcase", tc.Name),
+				zap.String("testset", testSetID))
+		}
+		return false
+	}
+	// The proven model asserts every response field: a response that gained a
+	// field is a difference like any other, and the test fails on it.
+	if provenswitch.On() {
+		if qualifiesForHTTPResponseSchemaAdditionPass(result) {
+			r.logger.Info("not auto-passing an additive response-schema change: every response field is asserted (KEPLOY_PROVEN=1)",
 				zap.String("testcase", tc.Name),
 				zap.String("testset", testSetID))
 		}
@@ -5368,6 +5669,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 					return
 				}
 			}
+			fmt.Print(r.quarantinedSummary())
 			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
@@ -5432,6 +5734,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				fmt.Printf(format.String(), args...)
 			}
 
+			fmt.Print(r.quarantinedSummary())
 			fmt.Print("\n<=========================================> \n\n")
 		}
 	}
@@ -6162,12 +6465,37 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
 // simulation-error / invalid-response returns — so the window is finalized for
 // THIS test and a miss is never carried forward to the next test or lost.
 func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
+	r.attachReadMockErrors(r.readMockErrors(ctx), testSetID, testCaseName, result)
+}
+
+// testMisses is one read of a test's misses (readMockErrors): the calls no
+// mock answered, and the read's error. asked is false when there was no agent
+// to ask (a base path).
+type testMisses struct {
+	calls []models.UnmatchedCall
+	err   error
+	asked bool
+}
+
+// readMockErrors reads, once, the calls of the test just run that no mock
+// answered. Under the proven switch the main loop reads them before its
+// verdict, which they are part of, and attaches that read afterwards.
+func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	// A miss is the agent's to report. A base path has none, and no mocks.
 	if r.noAgent {
+		return testMisses{}
+	}
+	calls, err := r.instrumentation.GetMockErrors(ctx)
+	return testMisses{calls: calls, err: err, asked: true}
+}
+
+// attachReadMockErrors attaches a read of a test's misses to its result.
+func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName string, result *models.TestResult) {
+	if !read.asked {
 		return
 	}
-	mockErrors, err := r.instrumentation.GetMockErrors(ctx)
-	if err != nil {
+	mockErrors, err := read.calls, read.err
+	if err != nil && !provenswitch.On() {
 		// Don't swallow silently. This test's misses can't be attached, but the
 		// agent-side window is reset when the next test opens its own (which
 		// drops a window never read, and says so), so the failure can't bleed
@@ -6178,6 +6506,18 @@ func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName
 			zap.String("testCaseID", testCaseName),
 			zap.Error(err))
 		return
+	}
+	if err != nil {
+		// Under the proven switch a miss fails its test, so a test whose misses
+		// could not all be read has no verdict: it is marked, whatever was read
+		// is still attached, and its test set is not judged (see
+		// testsWithUnreadMisses).
+		markUnmatchedCallsUnread(result)
+		r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCaseName),
+			zap.Int("callsRead", len(mockErrors)),
+			zap.Error(err))
 	}
 	for _, me := range mockErrors {
 		if result != nil {

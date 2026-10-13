@@ -1,7 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +193,156 @@ func TestRecordViaSupervisorLeavesNothingOutWhenTheBytesAfterItsParsersReturnCom
 	if recorded, _, _ := h.mgr.OrphanRangeCount(); recorded != 0 {
 		after, _ := h.mgr.WasMockOrphanedInWindow(stopped, time.Now())
 		t.Errorf("%d spans (one after the recording stopped: %v), want none: the connection carried bytes after its parser returned only once the recording had stopped, and a span leaves out the test cases in flight then", recorded, after)
+	}
+}
+
+// peekingParser reads the client's first chunk, waits until the next one is in
+// its stream, and returns without reading it: the connection carried a
+// request, teed to the parser, that the parser never recorded.
+type peekingParser struct {
+	stubParser
+	stream   chan *fakeconn.FakeConn
+	returned chan struct{}
+}
+
+func (peekingParser) IsV2() bool { return true }
+
+func (p peekingParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	defer close(p.returned)
+	p.stream <- s.V2.ClientStream
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return nil
+	}
+	_, _ = s.V2.ClientStream.Peek()
+	return nil
+}
+
+// A parser that returns with a request in its stream it never read recorded
+// only what it read: the request is left out, though the relay told the
+// connection of it as it forwarded it, before the parser returned. A rule that
+// went by the order of the two left it out of every span: a test case recorded
+// over it was saved without its mocks. And it is that request that is left
+// out, not the one the parser read: a test case over that one has its mocks.
+func TestRecordViaSupervisorLeavesOutTheRequestsItsParserReturnedWithoutReading(t *testing.T) {
+	parser := peekingParser{stream: make(chan *fakeconn.FakeConn, 1), returned: make(chan struct{})}
+	h := newStopHarness(t, parser, zap.NewNop())
+
+	one := h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	stream := <-parser.stream
+	two := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+	waitFor(t, parser.returned, "the parser never returned")
+	// The dispatcher closes the parser's streams once it has decided what the
+	// connection carries from here leaves out.
+	waitFor(t, stream.Done(), "the dispatcher never closed the parser's streams")
+
+	// The span opens as the parser's return is seen, or, when the relay tells
+	// of the request only after that, as it does: from when it was read
+	// either way.
+	waitUntilT(t, 10*time.Second, "a span covers the request the parser returned without reading: a test case recorded over it is saved without its mocks", func() bool {
+		over, _ := h.mgr.WasMockOrphanedInWindow(two.sent, two.arrived)
+		return over
+	})
+	if over, _ := h.mgr.WasMockOrphanedInWindow(one.sent, one.arrived); over {
+		t.Errorf("the request the parser read, between %v and %v, is in a span: a test case over it, whose mocks were recorded, is left out", one.sent, one.arrived)
+	}
+}
+
+// A parser that returns at its connection's end with server bytes it never
+// read leaves nothing out: they answer no request it read and did not answer
+// (a server's goodbye before it closes, MySQL's ERR at wait_timeout), the
+// server's own by the rule the floor applies to the server bytes it drops
+// between requests (Session.dropped).
+func TestRecordViaSupervisorLeavesNothingOutForServerBytesItsParserReturnedWithoutReading(t *testing.T) {
+	parser := returningParser{upTo: 1 << 30, returned: make(chan struct{})}
+	h := newStopHarness(t, parser, zap.NewNop())
+	h.send(t, "GET /only HTTP/1.1\r\n\r\n")
+	if _, err := h.destSvc.Write([]byte("goodbye")); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+	buf := make([]byte, len("goodbye"))
+	if _, err := io.ReadFull(h.clientApp, buf); err != nil {
+		t.Fatalf("app read: %v", err)
+	}
+	h.end(t)
+	waitFor(t, parser.returned, "the parser never returned")
+	if recorded, closed, open := h.mgr.OrphanRangeCount(); recorded != 0 {
+		t.Errorf("spans (recorded=%d, closed=%d, open=%d) for server bytes the parser returned without reading at its connection's end, want none", recorded, closed, open)
+	}
+}
+
+// The ledger sees every stop and every chunk of the connection, and the
+// parser's return before the tees are paused. Its rules are tested on their
+// own (parser_reads_test.go); the links to the dispatcher are pinned on the
+// source here, as relay_config_test.go pins the relay's:
+//   - OnCarried is reads.carried, or no chunk reaches it;
+//   - the session's OnStop is reads.stop, or a stop before the return is
+//     unknown to it, and the requests captured before that stop are in no span;
+//   - the recording's stop is stamped into it (context.AfterFunc on the
+//     recording's context), or what it leaves out as the recording stops has
+//     no bound;
+//   - reads.follow comes before the relay runs, or no chunk is kept;
+//   - reads.parserReturned() comes after sv.Run and before the teardown's
+//     r.PauseTees(), or the chunks the paused tees refuse are told of before
+//     the return.
+func TestRecordViaSupervisorWiresParserReads(t *testing.T) {
+	t.Parallel()
+	fields, _ := relayConfigLiteral(t)
+	if got := fields["OnCarried"]; got != "reads.carried" {
+		t.Errorf("relay.Config's OnCarried is %q, want reads.carried", got)
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy_v2.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy_v2.go: %v", err)
+	}
+	render := func(n ast.Node) string {
+		var buf bytes.Buffer
+		_ = printer.Fprint(&buf, fset, n)
+		return buf.String()
+	}
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "recordViaSupervisor" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("recordViaSupervisor not found in proxy_v2.go")
+	}
+	onStop, stamped := false, false
+	returnedAt, pausedAt, followedAt, relayAt, runAt := -1, -1, -1, -1, -1
+	for i, st := range fn.Body.List {
+		switch src := render(st); {
+		case src == "svSess.OnStop = reads.stop":
+			onStop = true
+		case strings.Contains(src, "context.AfterFunc(ctx,") && strings.Contains(src, "reads.recordingStopped("):
+			stamped = true
+		case src == "reads.follow(svSess.ClientStream, r.Teed)":
+			followedAt = i
+		case strings.HasPrefix(src, "go func() { relayDone <- r.Run("):
+			relayAt = i
+		case strings.HasPrefix(src, "result := sv.Run("):
+			runAt = i
+		case src == "reads.parserReturned()":
+			returnedAt = i
+		case src == "r.PauseTees()":
+			pausedAt = i
+		}
+	}
+	if followedAt < 0 || relayAt < 0 || followedAt > relayAt {
+		t.Errorf("reads.follow(svSess.ClientStream, r.Teed) at statement %d, the relay started at %d: the ledger must follow the parser's streams before the relay runs, or it goes back to deciding by order", followedAt, relayAt)
+	}
+	if runAt < 0 || returnedAt < runAt {
+		t.Errorf("sv.Run at statement %d, reads.parserReturned() at %d: the return is seen once Run has returned", runAt, returnedAt)
+	}
+	if !onStop {
+		t.Error("the session's OnStop is not reads.stop: a stop before the parser's return is unknown to the ledger")
+	}
+	if !stamped {
+		t.Error("the recording's stop is not stamped into the ledger with context.AfterFunc on the recording's context")
+	}
+	if returnedAt < 0 || pausedAt < 0 || returnedAt > pausedAt {
+		t.Errorf("reads.parserReturned() at statement %d, the teardown's r.PauseTees() at %d: the return must be seen before the tees are paused", returnedAt, pausedAt)
 	}
 }

@@ -156,6 +156,14 @@ type Config struct {
 	// back, so the other direction's later capture is teed first.
 	beforeTee func(fakeconn.Direction)
 
+	// ReaderLag, when positive, delivers each captured chunk to its parser
+	// no earlier than this long after the relay read it: the parser then runs
+	// that far behind the traffic, as a starved agent's does, while the
+	// application's bytes are forwarded as fast as ever. It exists to make
+	// capture lag deterministic in end-to-end tests (the proxy sets it from
+	// KEPLOY_DEBUG_PARSER_LAG); zero, the default, adds nothing.
+	ReaderLag time.Duration
+
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
 	ForwardBuf int
@@ -228,6 +236,22 @@ type Config struct {
 	// hung with traffic still flowing" from "whole connection is
 	// idle". Nil is safe.
 	BumpActivity func()
+
+	// OnCarried is told of each chunk the forwarder hands to the tee, on
+	// that forwarder: its direction, when it was read (Chunk.ReadAt), and
+	// whether the tee took it. through is the position just past the chunk
+	// in its direction's stream, in the offsets fakeconn.FakeConn counts
+	// what its reader is done with in (Consumed, ReadThrough): the reader
+	// has taken the whole chunk once those reach it. When the tee refused
+	// the chunk, through is where the stream already stood (the chunk moved
+	// nothing). That is what tells a chunk the parser read from one it never
+	// did, once the parser has stopped reading; the order in which the relay
+	// and the parser get to a chunk does not (the parser can read a chunk
+	// before the relay is done with it). A chunk the forwarder only stashes
+	// across a pause, with no push, is not told of. It runs on the
+	// forwarder, under the client hold's lock on that path, so it must not
+	// block or call back into the relay. Nil is safe.
+	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
 
 	// OnMarkMockIncomplete is invoked whenever the relay drops a
 	// tee chunk (memoryguard, cap, channel full) or processes a
@@ -517,6 +541,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.BumpActivity == nil {
 		out.BumpActivity = func() {}
+	}
+	if out.OnCarried == nil {
+		out.OnCarried = func(fakeconn.Direction, time.Time, bool, int64) {}
 	}
 	if out.OnMarkMockIncomplete == nil {
 		out.OnMarkMockIncomplete = func(string) {}

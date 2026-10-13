@@ -1,5 +1,6 @@
 #!/bin/bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # This script tests the grpc-protoscope sample application.
 # Keploy wraps the server to record incoming gRPC calls.
@@ -113,7 +114,9 @@ wait_for_port() {
 }
 
 kill_keploy_process() {
-    REC_PID=$(pgrep keploy | sort -n | head -1)
+    # The recording this lane started (its pipeline's keploy, rec_keploy), not
+    # whichever process named keploy has the lowest PID on the host.
+    REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
@@ -136,13 +139,21 @@ do_record() {
     local client_log="client${label}.log"
     # shellcheck disable=SC2086
     "$RECORD_BIN" record $extra_flags -c "./grpc-server" --generateGithubActions=false 2>&1 | tee "$log" &
+    # tee ends once keploy and everything it started (the agent, the app)
+    # have exited: they all write to it.
+    local rec_pid=$! rec_keploy
+    rec_keploy=$(jobs -p %%)
     wait_for_port 50051
     sleep 3
     ./grpc-client &> "$client_log"
     echo "Client finished sending gRPC request${label:+ (json)}."
     sleep 10
     kill_keploy_process
-    sleep 5
+    # Wait for the recording to end, not for a fixed time. The stop drains
+    # what the agent captured before it, for as long as that takes, and the
+    # next run must not start while this one still holds the app's port and
+    # the agent's.
+    wait_recording_end "$rec_pid" "$log" || exit 1
     check_for_errors "$log"
 }
 

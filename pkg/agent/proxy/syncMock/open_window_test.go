@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"runtime"
 	"strings"
@@ -1833,5 +1834,654 @@ func TestLeftOutWarningStaysSampledWhenLossesAreTakenBack(t *testing.T) {
 	}
 	if got := mgr.KeptRequestsLeftOut(); got != 0 {
 		t.Fatalf("KeptRequestsLeftOut = %d after every loss was taken back", got)
+	}
+}
+
+// The first test cases' mocks are startup mocks, and the periodic flush sends
+// one no resolved window owns at once, with no owner, so that no reaper drops
+// it first and the stop's drain does not wait on a buffer it cannot see. But
+// a request still in flight takes it: sent so, it reached the recording with
+// no test case, and its test case had no mock in its mapping (mock-mismatch,
+// run 38167903414: test-3's outgoing call was decoded before test-3's
+// resolve, and the flush ticker fired in between). It is still sent at once,
+// and the resolve of the request that takes it adds it to its mapping.
+func TestStartupMockAnOpenWindowClaimsIsMappedToItsRequest(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.resolvedTestCount = 2 // test-1 and test-2 resolved: test-3 is in the startup window
+
+	start := time.Now().Add(-time.Second)
+	win := mgr.OpenWindow(start, nil) // test-3's request is in flight
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(call) // its outgoing call is decoded before the request resolves
+	if !call.TestModeInfo.IsStartup {
+		t.Fatal("fixture: the call is not a startup mock")
+	}
+	mgr.FlushOwnedWindows() // the flush ticker fires in between
+	if !hasMock(sentMocks(out), call) {
+		t.Fatal("the flush kept back a startup mock: it is not persisted, nor seen by the stop's drain")
+	}
+	win.Keep()
+	mgr.ResolveKept(win, start, time.Now(), "test-3", true)
+	win.Close()
+	if !mappedIDs(maps, "test-3")[call.Name] {
+		t.Fatalf("test-3's mapping does not hold its own call %q: it was sent with no owner while test-3's request was in flight", call.Name)
+	}
+	if n := len(mgr.sentClaimed); n != 0 {
+		t.Fatalf("%d notes left once the request took the one it claimed, which was delivered", n)
+	}
+}
+
+// A startup mock sent while a request was in flight is not put in a mapping if
+// that request ends without taking it, and is forgotten then; one requested
+// before any request now in flight began (boot traffic) is in none.
+func TestStartupMockSentForAClaimIsInNoMappingNoRequestTakesItIn(t *testing.T) {
+	t.Parallel()
+	t.Run("its request ended without it", func(t *testing.T) {
+		out := make(chan *models.Mock, 16)
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		win := mgr.OpenWindow(start, nil)
+		call := httpMockAt(start.Add(10 * time.Millisecond))
+		mgr.AddMock(call)
+		mgr.FlushOwnedWindows()
+		win.Close() // the request ends without a resolve that takes it
+		mgr.FlushOwnedWindows()
+		if n := len(mgr.sentClaimed); n != 0 {
+			t.Fatalf("%d sent startup mocks still kept for a claim no request in flight can take", n)
+		}
+		mgr.ResolveRange(start, time.Now(), "test-later", true, true)
+		if mappedIDs(maps, "test-later")[call.Name] {
+			t.Fatal("a later request's mapping took a startup mock its own request ended without")
+		}
+	})
+	t.Run("requested before the request in flight began", func(t *testing.T) {
+		out := make(chan *models.Mock, 16)
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		boot := httpMockAt(start.Add(-time.Second))
+		mgr.AddMock(boot)
+		win := mgr.OpenWindow(start, nil)
+		mgr.FlushOwnedWindows()
+		if !hasMock(sentMocks(out), boot) {
+			t.Fatal("boot traffic from before the request in flight was not sent")
+		}
+		win.Keep()
+		mgr.ResolveKept(win, start, time.Now(), "test-1", true)
+		win.Close()
+		if mappedIDs(maps, "test-1")[boot.Name] {
+			t.Fatal("boot traffic from before the request began was put in its mapping")
+		}
+	})
+}
+
+// Another request's resolve, a duplicate cycle's cleanup, or a static-dedup
+// duplicate's window finds a startup mock that a request still in flight
+// takes: sent with no owner by any of them, it is in that request's mapping
+// once it resolves. Every startup rescue notes it (noteSentClaimedLocked).
+func TestStartupMockAnOpenWindowClaimsIsMappedWhicheverPassSendsIt(t *testing.T) {
+	t.Parallel()
+	duplicate := func(mgr *SyncMockManager, start time.Time) {
+		mgr.ResolveRange(start.Add(-5*time.Millisecond), start.Add(20*time.Millisecond), "test-0", false, true)
+	}
+	for _, tc := range []struct {
+		name          string
+		before, after func(mgr *SyncMockManager, start time.Time)
+	}{
+		{"another request's resolve", nil, func(mgr *SyncMockManager, start time.Time) {
+			o := start.Add(time.Second)
+			mgr.ResolveRange(o, o.Add(5*time.Millisecond), "test-other", true, true)
+		}},
+		{"a duplicate cycle's cleanup", nil, func(mgr *SyncMockManager, start time.Time) {
+			mgr.DeleteMocksStrictlyBefore(start.Add(time.Second))
+		}},
+		{"the duplicate's own resolve", nil, duplicate},
+		{"another request's resolve, decoded after the duplicate resolved", duplicate, func(mgr *SyncMockManager, start time.Time) {
+			o := start.Add(time.Second)
+			mgr.ResolveRange(o, o.Add(5*time.Millisecond), "test-other", true, true)
+		}},
+		{"the flush, decoded after the duplicate resolved", duplicate, func(mgr *SyncMockManager, _ time.Time) {
+			mgr.FlushOwnedWindows()
+		}},
+		{"the flush", nil, func(mgr *SyncMockManager, _ time.Time) {
+			mgr.FlushOwnedWindows()
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan *models.Mock, 16)
+			maps := make(chan models.TestMockMapping, 16)
+			mgr := lateMockTestManager(out, maps, true)
+			start := time.Now().Add(-3 * time.Second)
+			win := mgr.OpenWindow(start, nil) // test-3's request is in flight
+			if tc.before != nil {
+				tc.before(mgr, start)
+			}
+			call := httpMockAt(start.Add(10 * time.Millisecond))
+			mgr.AddMock(call)
+			tc.after(mgr, start)
+			if !hasMock(sentMocks(out), call) {
+				t.Fatal("fixture: the pass did not send the startup mock")
+			}
+			win.Keep()
+			mgr.ResolveKept(win, start, time.Now(), "test-3", true)
+			win.Close()
+			if !mappedIDs(maps, "test-3")[call.Name] {
+				t.Fatalf("test-3's mapping does not hold its own call %q, sent while test-3's request was in flight", call.Name)
+			}
+		})
+	}
+}
+
+// A streaming response yields at its headers (Window.Yield), and its kept
+// resolve still takes the mocks requested after the yield that no other
+// request claims: the mocks its body's handler requests. A startup mock
+// requested so is in its mapping, though the flush sent it before.
+func TestStartupMockAYieldedRequestTakesIsMappedToIt(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	start := time.Now().Add(-time.Second)
+	win := mgr.OpenWindow(start, nil)
+	win.Yield(start.Add(5 * time.Millisecond)) // the response's headers are out
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(call)
+	mgr.FlushOwnedWindows()
+	win.Keep()
+	mgr.ResolveKept(win, start, time.Now(), "test-3", true)
+	win.Close()
+	if !mappedIDs(maps, "test-3")[call.Name] {
+		t.Fatalf("test-3's mapping does not hold the call %q its streaming body requested", call.Name)
+	}
+}
+
+// A request's own resolve does not put in its mapping a startup mock outside
+// the window it resolves: it does not take it.
+func TestStartupMockAResolveMapsOnlyWhatItTakes(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	start := time.Now().Add(-time.Second)
+	win := mgr.OpenWindow(start, nil)
+	after := httpMockAt(start.Add(100 * time.Millisecond)) // requested past the end it resolves
+	mgr.AddMock(after)
+	mgr.FlushOwnedWindows()
+	win.Keep()
+	mgr.ResolveKept(win, start, start.Add(50*time.Millisecond), "test-3", true)
+	win.Close()
+	if !hasMock(sentMocks(out), after) {
+		t.Fatal("the startup mock was not sent")
+	}
+	if mappedIDs(maps, "test-3")[after.Name] {
+		t.Fatal("the resolve put in its mapping a mock outside its window")
+	}
+}
+
+// Nothing is kept back for a claim: the stop's drain, which asks what the
+// agent still holds from before the stop (BacklogBefore), does not see the
+// buffer, and a startup mock kept there for a request still in flight at the
+// stop was lost when the client closed its stream first.
+func TestStartupMockAClaimDoesNotHoldItBackFromTheStop(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	mgr := lateMockTestManager(out, make(chan models.TestMockMapping, 16), true)
+	mgr.SetWatermark(&backlogWatermark{})
+	start := time.Now().Add(-time.Second)
+	win := mgr.OpenWindow(start, nil) // a long request still in flight at the stop
+	defer win.Close()
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(call)
+	mgr.FlushOwnedWindows() // the ticks during the drain
+	if st := mgr.BacklogBefore(time.Now()); st.Known && !st.Pending && !hasMock(sentMocks(out), call) {
+		t.Fatal("the agent says it holds nothing from before the stop while a startup mock is still in its buffer, unsent")
+	}
+}
+
+// allMapped drains maps into each test's mapped mock names.
+func allMapped(maps chan models.TestMockMapping) map[string]map[string]bool {
+	got := map[string]map[string]bool{}
+	for {
+		select {
+		case e := <-maps:
+			if got[e.TestName] == nil {
+				got[e.TestName] = map[string]bool{}
+			}
+			for _, id := range e.MockIDs {
+				got[e.TestName][id] = true
+			}
+		default:
+			return got
+		}
+	}
+}
+
+// A streaming response yields at its headers, and a request that begins after
+// that yield claims what is requested after it: a startup mock its body's
+// handler requested then, sent at once, is left by its kept resolve for the
+// request that claims it. That request ends without taking it (a duplicate,
+// or a request filtered out): the mock goes back into the mapping of the
+// request that left it, as a held mock does (heldMock.owner), whether it was
+// sent before that resolve or after it, by whichever pass; and that request's
+// test case is held for it until then (PendingIn). In none, its test case
+// replays without it: mock-mismatch.
+func TestStartupMockAClaimerEndsWithoutGoesBackToTheRequestThatLeftIt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		// send has the startup mock sent, around A's kept resolve.
+		send func(mgr *SyncMockManager, call *models.Mock, resolveA func(), start time.Time)
+	}{
+		{"sent before the resolve", func(mgr *SyncMockManager, call *models.Mock, resolveA func(), _ time.Time) {
+			mgr.AddMock(call)
+			mgr.FlushOwnedWindows()
+			resolveA()
+		}},
+		{"sent after the resolve, by the flush", func(mgr *SyncMockManager, call *models.Mock, resolveA func(), _ time.Time) {
+			resolveA()
+			mgr.AddMock(call)
+			mgr.FlushOwnedWindows()
+		}},
+		{"sent after the resolve, by another request's resolve", func(mgr *SyncMockManager, call *models.Mock, resolveA func(), start time.Time) {
+			resolveA()
+			mgr.AddMock(call)
+			o := start.Add(time.Second)
+			mgr.ResolveRange(o, o.Add(5*time.Millisecond), "test-other", true, true)
+		}},
+		{"sent after the resolve, by a duplicate cycle's cleanup", func(mgr *SyncMockManager, call *models.Mock, resolveA func(), start time.Time) {
+			resolveA()
+			mgr.AddMock(call)
+			mgr.DeleteMocksStrictlyBefore(start.Add(time.Second))
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan *models.Mock, 16)
+			maps := make(chan models.TestMockMapping, 16)
+			mgr := lateMockTestManager(out, maps, true)
+			start := time.Now().Add(-3 * time.Second)
+			end := start.Add(20 * time.Millisecond)
+			a := mgr.OpenWindow(start, nil)
+			a.Yield(start.Add(5 * time.Millisecond)) // A's response headers are out
+			b := mgr.OpenWindow(start.Add(8*time.Millisecond), nil)
+			call := httpMockAt(start.Add(10 * time.Millisecond)) // A's body handler calls out
+			tc.send(mgr, call, func() {
+				a.Keep()
+				mgr.ResolveKept(a, start, end, "test-a", true)
+				a.Close()
+			}, start)
+			if !hasMock(sentMocks(out), call) {
+				t.Fatal("fixture: the startup mock was not sent")
+			}
+			if !mgr.PendingIn(start, end) {
+				t.Fatal("A's test case is not held for the call that goes back to it if B ends without it: it would go out before its mapping names it")
+			}
+			b.Close() // B ends with no kept resolve
+			mgr.FlushOwnedWindows()
+			if got := allMapped(maps); !got["test-a"][call.Name] {
+				t.Fatalf("the call %q A's body made is in no mapping once B ended without it (mappings: %v)", call.Name, got)
+			}
+			if n := len(mgr.sentClaimed); n != 0 {
+				t.Fatalf("%d notes left once the mock went back", n)
+			}
+			if mgr.PendingIn(start, end) {
+				t.Fatal("A's test case is still held once the call went back into its mapping")
+			}
+		})
+	}
+}
+
+// The same, for a startup mock in a static-dedup duplicate's window that a
+// request still in flight claims, in the part of a resolved kept window after
+// its yield: whichever pass sends it, it goes back to that window's request if
+// the claimer ends without it, as a mock no duplicate's window spans does.
+func TestStartupMockInADuplicatesWindowGoesBackToTheRequestThatLeftIt(t *testing.T) {
+	t.Parallel()
+	duplicate := func(mgr *SyncMockManager, start time.Time) {
+		mgr.ResolveRange(start.Add(9*time.Millisecond), start.Add(11*time.Millisecond), "test-0", false, true)
+	}
+	for _, tc := range []struct {
+		name string
+		send func(mgr *SyncMockManager, call *models.Mock, start time.Time)
+	}{
+		{"the flush", func(mgr *SyncMockManager, call *models.Mock, start time.Time) {
+			duplicate(mgr, start)
+			mgr.AddMock(call)
+			mgr.FlushOwnedWindows()
+		}},
+		{"the duplicate's own resolve", func(mgr *SyncMockManager, call *models.Mock, start time.Time) {
+			mgr.AddMock(call)
+			duplicate(mgr, start)
+		}},
+		{"another request's resolve, after the duplicate's", func(mgr *SyncMockManager, call *models.Mock, start time.Time) {
+			duplicate(mgr, start)
+			mgr.AddMock(call)
+			o := start.Add(time.Second)
+			mgr.ResolveRange(o, o.Add(5*time.Millisecond), "test-other", true, true)
+		}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan *models.Mock, 16)
+			maps := make(chan models.TestMockMapping, 16)
+			mgr := lateMockTestManager(out, maps, true)
+			start := time.Now().Add(-3 * time.Second)
+			a := mgr.OpenWindow(start, nil)
+			a.Yield(start.Add(5 * time.Millisecond))
+			b := mgr.OpenWindow(start.Add(8*time.Millisecond), nil)
+			a.Keep()
+			mgr.ResolveKept(a, start, start.Add(20*time.Millisecond), "test-a", true)
+			a.Close()
+			call := httpMockAt(start.Add(10 * time.Millisecond))
+			tc.send(mgr, call, start)
+			if !hasMock(sentMocks(out), call) {
+				t.Fatal("fixture: the pass did not send the startup mock")
+			}
+			b.Close()
+			mgr.FlushOwnedWindows()
+			if got := allMapped(maps); !got["test-a"][call.Name] {
+				t.Fatalf("the call %q is in no mapping once B ended without it (mappings: %v)", call.Name, got)
+			}
+		})
+	}
+}
+
+// What a request that claims a startup mock past another's yield takes is its
+// own, not the yielded request's, nor given back to it while the claimer is in
+// flight; and a startup mock is in one mapping only, however many kept
+// resolves span it.
+func TestStartupMockSentForAClaimIsInTheClaimersMappingOnly(t *testing.T) {
+	t.Parallel()
+	t.Run("claimed past another's yield", func(t *testing.T) {
+		out := make(chan *models.Mock, 16)
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		a := mgr.OpenWindow(start, nil)
+		a.Yield(start.Add(5 * time.Millisecond))
+		b := mgr.OpenWindow(start.Add(8*time.Millisecond), nil)
+		call := httpMockAt(start.Add(10 * time.Millisecond)) // B's call
+		mgr.AddMock(call)
+		mgr.FlushOwnedWindows()
+		a.Keep()
+		mgr.ResolveKept(a, start, start.Add(20*time.Millisecond), "test-a", true)
+		a.Close()
+		mgr.FlushOwnedWindows() // a tick while B, which claims it, is in flight
+		b.Keep()
+		mgr.ResolveKept(b, start.Add(8*time.Millisecond), start.Add(15*time.Millisecond), "test-b", true)
+		b.Close()
+		got := allMapped(maps)
+		if got["test-a"][call.Name] || !got["test-b"][call.Name] {
+			t.Fatalf("the call %q B claimed is in test-a's mapping (%v) or not in test-b's (%v)", call.Name, got["test-a"], got["test-b"])
+		}
+	})
+	t.Run("two kept resolves span it", func(t *testing.T) {
+		out := make(chan *models.Mock, 16)
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		w := mgr.OpenWindow(start, nil)
+		call := httpMockAt(start.Add(10 * time.Millisecond))
+		mgr.AddMock(call)
+		mgr.FlushOwnedWindows()
+		w.Keep()
+		mgr.ResolveKept(w, start, time.Now(), "test-1", true)
+		w.Close()
+		mgr.ResolveRange(start, time.Now(), "test-2", true, true)
+		got := allMapped(maps)
+		if !got["test-1"][call.Name] || got["test-2"][call.Name] {
+			t.Fatalf("the call %q is not in test-1's mapping alone: test-1 %v, test-2 %v", call.Name, got["test-1"], got["test-2"])
+		}
+	})
+}
+
+// A startup mock sent for a claim that the send drops (the output full past
+// its budget) costs the test that takes it its mock, as a drop of any of its
+// own mocks does: that test is told (WasMockDroppedForTC), and its mapping
+// does not name a mock the recording never got. Whether the drop came before
+// the resolve that takes it, after it, or before it went back to the request
+// that left it.
+func TestStartupMockSentForAClaimAndDroppedIsToldToTheTestThatTakesIt(t *testing.T) {
+	t.Parallel()
+	t.Run("dropped before the resolve", func(t *testing.T) {
+		out := make(chan *models.Mock) // no reader: the send's budget runs out
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		w := mgr.OpenWindow(start, nil)
+		call := httpMockAt(start.Add(10 * time.Millisecond))
+		mgr.AddMock(call)
+		mgr.FlushOwnedWindows()
+		if mgr.DropCount() != 1 {
+			t.Fatalf("fixture: %d mocks dropped, want the startup mock", mgr.DropCount())
+		}
+		w.Keep()
+		mgr.ResolveKept(w, start, time.Now(), "test-3", true)
+		w.Close()
+		if !mgr.WasMockDroppedForTC("test-3") {
+			t.Fatal("test-3 took a startup mock the send dropped, and is not told")
+		}
+		if mappedIDs(maps, "test-3")[call.Name] {
+			t.Fatalf("test-3's mapping names %q, which the recording never got", call.Name)
+		}
+	})
+	for _, delivered := range []bool{false, true} {
+		delivered := delivered
+		t.Run(fmt.Sprintf("taken while sent, delivered: %v", delivered), func(t *testing.T) {
+			out := make(chan *models.Mock, 16)
+			maps := make(chan models.TestMockMapping, 16)
+			mgr := lateMockTestManager(out, maps, true)
+			start := time.Now().Add(-time.Second)
+			w := mgr.OpenWindow(start, nil)
+			call := httpMockAt(start.Add(10 * time.Millisecond))
+			call.Name = "mock-sending"
+			mgr.mu.Lock()
+			noted := mgr.noteSentClaimedLocked(call, nil, nil) // a rescue's send is under way
+			mgr.mu.Unlock()
+			if !noted {
+				t.Fatal("fixture: the startup mock was not noted")
+			}
+			w.Keep()
+			mgr.ResolveKept(w, start, time.Now(), "test-3", true)
+			w.Close()
+			if !mappedIDs(maps, "test-3")[call.Name] {
+				t.Fatal("test-3's mapping does not name the startup mock it took while it was being sent")
+			}
+			mgr.sentClaimDone(call.Name, call.Spec.ReqTimestampMock, delivered)
+			if got := mgr.WasMockDroppedForTC("test-3"); got == delivered {
+				t.Fatalf("delivered %v, test-3 told of a drop %v", delivered, got)
+			}
+			if n := len(mgr.sentClaimed); n != 0 {
+				t.Fatalf("%d notes left once the send of the one taken finished", n)
+			}
+		})
+	}
+	t.Run("dropped, then gone back to the request that left it", func(t *testing.T) {
+		out := make(chan *models.Mock) // no reader
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		start := time.Now().Add(-time.Second)
+		a := mgr.OpenWindow(start, nil)
+		a.Yield(start.Add(5 * time.Millisecond))
+		b := mgr.OpenWindow(start.Add(8*time.Millisecond), nil)
+		call := httpMockAt(start.Add(10 * time.Millisecond))
+		mgr.AddMock(call)
+		mgr.FlushOwnedWindows() // dropped
+		a.Keep()
+		mgr.ResolveKept(a, start, start.Add(20*time.Millisecond), "test-a", true)
+		a.Close()
+		b.Close()
+		mgr.FlushOwnedWindows()
+		if !mgr.WasMockDroppedForTC("test-a") {
+			t.Fatal("the startup mock went back to test-a dropped, and test-a is not told")
+		}
+		if mappedIDs(maps, "test-a")[call.Name] {
+			t.Fatalf("test-a's mapping names %q, which the recording never got", call.Name)
+		}
+	})
+}
+
+// The notes are bounded (maxSentClaimed): at the bound the oldest eighth is
+// forgotten at once, not one at every note, which copied the whole list under
+// the manager's lock at each, and it is said: a test case may be saved without
+// a mock it took in its mapping.
+func TestStartupMockNotesAreBounded(t *testing.T) {
+	t.Parallel()
+	mgr := lateMockTestManager(make(chan *models.Mock, 1), make(chan models.TestMockMapping, 1), true)
+	core, logs := observer.New(zap.WarnLevel)
+	mgr.SetLogger(zap.New(core))
+	start := time.Now().Add(-time.Hour)
+	w := mgr.OpenWindow(start, nil)
+	defer w.Close()
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	for i := 0; i <= maxSentClaimed; i++ {
+		mk := httpMockAt(start.Add(time.Duration(i) * time.Microsecond))
+		mk.Name = fmt.Sprintf("mock-%d", i)
+		mgr.noteSentClaimedLocked(mk, nil, nil)
+	}
+	if got, want := len(mgr.sentClaimed), maxSentClaimed-maxSentClaimed/8+1; got != want {
+		t.Fatalf("%d notes past the bound, want %d", got, want)
+	}
+	if got, want := mgr.sentClaimed[0].name, fmt.Sprintf("mock-%d", maxSentClaimed/8); got != want {
+		t.Fatalf("the oldest note kept is %s, want %s: the oldest eighth is the one forgotten", got, want)
+	}
+	if n := mgr.sentClaimedEvicted.Load(); n != maxSentClaimed/8 {
+		t.Fatalf("%d notes counted as forgotten, want %d", n, maxSentClaimed/8)
+	}
+	if n := logs.FilterMessageSnippet("past the bound kept for them").Len(); n != 1 {
+		t.Fatalf("%d WARN lines for the notes forgotten, want 1", n)
+	}
+}
+
+// A note whose send is still under way stays until the send has finished,
+// even once no request in flight claims it: going back to its window then, a
+// drop of the mock after it was told to no test, and the window's test case
+// was saved naming a mock the recording never got.
+func TestStartupMockGoesBackOnlyOnceItsSendHasFinished(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	start := time.Now().Add(-time.Second)
+	b := mgr.OpenWindow(start, nil) // the claimer
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	call.Name = "mock-sending"
+	owner := &resolvedWindow{start: start.Add(-time.Second), end: start.Add(time.Second), testName: "test-a", mapping: true, keep: true}
+	mgr.mu.Lock()
+	noted := mgr.noteSentClaimedLocked(call, nil, owner) // a rescue's send is under way
+	mgr.mu.Unlock()
+	if !noted {
+		t.Fatal("fixture: the startup mock was not noted")
+	}
+	b.Close()
+	mgr.FlushOwnedWindows() // a tick while the send is blocked on a full output
+	if mappedIDs(maps, "test-a")[call.Name] {
+		t.Fatal("the mock went back into test-a's mapping while its send was still under way")
+	}
+	mgr.sentClaimDone(call.Name, call.Spec.ReqTimestampMock, false) // the send drops it
+	mgr.FlushOwnedWindows()
+	if !mgr.WasMockDroppedForTC("test-a") {
+		t.Fatal("the mock went back to test-a dropped, and test-a is not told")
+	}
+	if mappedIDs(maps, "test-a")[call.Name] {
+		t.Fatalf("test-a's mapping names %q, which the recording never got", call.Name)
+	}
+}
+
+// A request that takes a startup mock whose send is still under way keeps its
+// test case pending until the send has finished: a drop is told to that test
+// before its test case goes out, not after.
+func TestStartupMockTakenWhileSentKeepsItsTestPending(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	start := time.Now().Add(-time.Second)
+	end := start.Add(50 * time.Millisecond)
+	w := mgr.OpenWindow(start, nil)
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	call.Name = "mock-sending"
+	mgr.mu.Lock()
+	mgr.noteSentClaimedLocked(call, nil, nil) // a rescue's send is under way
+	mgr.mu.Unlock()
+	w.Keep()
+	mgr.ResolveKept(w, start, end, "test-3", true)
+	w.Close()
+	if !mgr.PendingIn(start, end) {
+		t.Fatal("test-3's test case can go out while the send of a mock it took is under way: a drop would be told to it too late")
+	}
+	mgr.sentClaimDone(call.Name, call.Spec.ReqTimestampMock, true)
+	if mgr.PendingIn(start, end) {
+		t.Fatal("test-3's test case is still held once the send of the mock it took was delivered")
+	}
+}
+
+// A window that maps no mocks (mapping off) has nothing to be handed once a
+// startup mock going back to it was delivered: its test case is not held for
+// it. With the send still under way it is, so a drop is told first.
+func TestStartupMockGoingBackToAnUnmappedWindowHoldsOnlyItsSend(t *testing.T) {
+	t.Parallel()
+	mgr := lateMockTestManager(make(chan *models.Mock, 16), make(chan models.TestMockMapping, 16), true)
+	start := time.Now().Add(-time.Second)
+	end := start.Add(time.Second)
+	b := mgr.OpenWindow(start, nil) // the claimer
+	defer b.Close()
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	call.Name = "mock-sending"
+	owner := &resolvedWindow{start: start, end: end, testName: "test-a", mapping: false, keep: true}
+	mgr.mu.Lock()
+	mgr.noteSentClaimedLocked(call, nil, owner)
+	mgr.mu.Unlock()
+	if !mgr.PendingIn(start, end) {
+		t.Fatal("the unmapped window's test case is not held while the send of a mock going back to it is under way")
+	}
+	mgr.sentClaimDone(call.Name, call.Spec.ReqTimestampMock, true)
+	if mgr.PendingIn(start, end) {
+		t.Fatal("the unmapped window's test case is held for a delivered mock it has no mapping to take")
+	}
+}
+
+// A startup mock going back to a yielded window (sentClaim.owner) is that
+// window's even once 8192 resolves have turned the ring of resolved windows
+// over and its claimer has ended: a stream decided after that, which yielded
+// before the mock, does not take it. With the ring alone deciding, the window
+// was gone from it, nothing claimed the mock any more, and the stream took it
+// into its own mapping: the window's test case replayed without it.
+func TestStartupMockGoesBackToItsWindowAfterTheRingTurnsOver(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 1<<14)
+	maps := make(chan models.TestMockMapping, 1<<14)
+	mgr := lateMockTestManager(out, maps, true)
+	s0 := time.Now().Add(-2 * time.Second)
+	at := func(ms int) time.Time { return s0.Add(time.Duration(ms) * time.Millisecond) }
+	stream := mgr.OpenWindow(at(-50), nil) // being sent since before A, its lock given back before A started
+	stream.Yield(at(-40))
+	a := mgr.OpenWindow(s0, nil)
+	a.Yield(at(100))
+	b := mgr.OpenWindow(at(200), nil) // claims what comes after it
+	a.Keep()
+	mgr.ResolveKept(a, s0, at(1000), "test-a", true)
+	a.Close()
+	call := httpMockAt(at(300)) // A's body handler calls out, past A's yield
+	mgr.AddMock(call)
+	mgr.FlushOwnedWindows()
+	if !hasMock(sentMocks(out), call) {
+		t.Fatal("fixture: the startup mock was not sent")
+	}
+	turnRingOver(mgr)
+	b.Close() // B ends without it
+	stream.Keep()
+	mgr.ResolveKept(stream, at(-50), at(2000), "test-s", true)
+	stream.Close()
+	mgr.FlushOwnedWindows()
+	got := allMapped(maps)
+	if got["test-s"][call.Name] || !got["test-a"][call.Name] {
+		t.Fatalf("the call %q went to test-s (%v) or not to test-a (%v): it goes back to the window that left it", call.Name, got["test-s"][call.Name], got["test-a"][call.Name])
 	}
 }

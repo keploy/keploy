@@ -181,10 +181,14 @@ func (p *Proxy) recordViaSupervisor(
 	// then on is left out: the tee's for a capture hole (OnCaptureDesync), the
 	// "parser retired" one below, and the one a parser that reports its own
 	// stop logs in its place (supervisor.ErrReported: the MySQL recorder's for
-	// lost framing). The spans read it in one place, openSpan, as each opens:
-	// at the stop (OnStop), from the connection's next bytes after its parser
-	// returns (StopFromNextBytes, below), or on the connection's traffic after
-	// a span closed for idleness (UnrecordedConn.Note). Read where a stop is
+	// lost framing). The followed spans read it in one place, openSpan, as
+	// each opens: at the stop (OnStop), from the connection's next bytes after
+	// its parser returns (StopFromNextBytes, below), or on the connection's
+	// traffic after a span closed for idleness (UnrecordedConn.Note). The
+	// closed spans of the requests a parser returned without reading go by
+	// the recording's stop instant instead (parserReads): those captured
+	// before it are a loss, whenever the return comes (and cover the test
+	// cases not streamed by then). Read where a stop is
 	// armed instead, it would let a span open after the recording had
 	// stopped, from a write the relay finishes once an app slow to read an
 	// answer reads it: the write would reopen a span closed for idleness after
@@ -209,7 +213,15 @@ func (p *Proxy) recordViaSupervisor(
 	}
 	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
-	svSess.OnStop = func(at time.Time) { unrecorded.Stop(at) }
+	// What the connection carries is noted through what its parser read
+	// (parserReads): once the parser's Run has returned, a request it read is
+	// recorded, whenever the relay gets to tell of it, and one it never read
+	// is not, whenever it was told of. Every stop goes through it,
+	// so the return knows whether one came first, and when.
+	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
+	svSess.OnStop = reads.stop
+	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
+	defer stopRecordingStamp()
 
 	relayCfg := relay.Config{
 		Logger: logger,
@@ -224,15 +236,15 @@ func (p *Proxy) recordViaSupervisor(
 		// untouched — a dest-side failure is survivable there. See
 		// relay.Config.ClientTLSFirst.
 		ClientTLSFirst: opts.UpstreamTLSVerify,
-		// Wrapped to also stamp when this connection last carried bytes.
+		BumpActivity:   sv.BumpActivity,
+		// Each chunk the forwarders hand to the tees (not those only stashed
+		// across a pause), to stamp when the connection last carried bytes.
 		// After a parser is retired the relay keeps forwarding, so this is
-		// the signal that says WHEN the dead connection was actually in
-		// use — which is what bounds the suppression window below to the
-		// periods that can really have cost a mock.
-		BumpActivity: func() {
-			sv.BumpActivity()
-			unrecorded.Note(time.Time{}) // on the wire now
-		},
+		// the signal that says WHEN the dead connection was actually in use
+		// — which is what bounds the suppression window below to the periods
+		// that can really have cost a mock. Once the parser's Run has
+		// returned, it also says which chunks it had read (parserReads).
+		OnCarried:            reads.carried,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
@@ -271,6 +283,8 @@ func (p *Proxy) recordViaSupervisor(
 		// "cannot resync" is the safe default for everything that has not
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
+		// Zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+		ReaderLag: p.parserLag,
 	}
 
 	// One call sets the relay's client-direction brake AND the parser's
@@ -290,8 +304,20 @@ func (p *Proxy) recordViaSupervisor(
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+
+	// The recording's capture watermark follows this connection while its
+	// parser runs (capture_watermark.go): a test case it carried bytes for
+	// is held until the parser is done with them, and a stop drains until
+	// the parser is past it. Once the parser has returned, and what it never
+	// read is left out (parserReads), nothing it parses can hand over a mock
+	// or open a span; what the connection carries after is the
+	// UnrecordedConn's.
+	untrack := p.capture.Track(r, fmt.Sprintf("connection %s to %s (%s parser)",
+		svSess.ClientConnID, dstConn.RemoteAddr(), parserType))
+	defer untrack()
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
@@ -491,14 +517,28 @@ func (p *Proxy) recordViaSupervisor(
 	// the parser can report (ReportStoppedOn), and those queued behind it. A
 	// parser that returned on its own recorded what it read, so the
 	// connection is left out from the next bytes it carries, if any (a parser
-	// that returns at its connection's end leaves no span). The first stop
-	// counts, so this is a no-op after a stamped one, a capture hole's
-	// included (OnCaptureDesync). Whether those next bytes cost the recording
-	// anything is decided as their span opens (openSpan), not here: they can
-	// come after the recording stopped, whether the parser returned before
-	// the stop or as it, from a write the relay finishes once an app slow to
-	// read an answer reads it, and they open no span then.
-	unrecorded.StopFromNextBytes()
+	// that returns at its connection's end leaves no span). What it never
+	// read is decided by where its streams stood as it returned, not by
+	// whether the relay told of a chunk before now (parserReads): the relay
+	// tells of a chunk once it has teed it, so the parser can have read it
+	// and returned by then, and it can have returned with requests in its
+	// stream it never took, told of before now. Those requests are left out
+	// here, in closed spans, up to the first stop if one came before, or the
+	// recording's stop. The first stop counts, so the return stops nothing
+	// after a stamped one, a capture hole's included (OnCaptureDesync).
+	// Whether the bytes after the return cost the recording anything is
+	// decided as their span opens (openSpan), not here: they can come after
+	// the recording stopped, whether the parser returned before the stop or
+	// as it, from a write the relay finishes once an app slow to read an
+	// answer reads it, and they open no span then. Called before the tees are
+	// paused below: a chunk a paused tee refuses is told of as after the
+	// return.
+	reads.parserReturned()
+	// Only now does the watermark stop following the connection: a test case
+	// held for what its parser never read is let go once that is left out
+	// (above), not before, when it would be checked against no span and
+	// saved without its mocks.
+	untrack()
 
 	// The teardown, the same whether the parser returned on its own or was
 	// retired. A parser's return never ends the relay (invariant I1): the

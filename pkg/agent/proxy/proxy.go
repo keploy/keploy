@@ -31,12 +31,14 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -168,6 +170,24 @@ type Proxy struct {
 	// owner to consume the marker); when false we use the legacy direct sweep.
 	errDrainActive atomic.Bool
 	errDrainOnce   sync.Once
+	// errDrainDone is closed when the StartErrorDrain goroutine exits. Under the
+	// proven switch a miss waits for the drain to take it, and GetMockErrors
+	// waits for the drain to reach its flush marker, each until this closes:
+	// the events that end those waits, in place of a deadline. Set before
+	// errDrainActive goes true, so a reader that sees the drain active sees it.
+	errDrainDone chan struct{}
+	// missLoss is, under the proven switch, why a miss was lost since the
+	// last read (the first cause): it could not be queued (the error drain
+	// had stopped, or never ran) or its test's list was full. The next
+	// GetMockErrors then reports its read incomplete (ErrUnmatchedCallsUnread),
+	// naming the cause, instead of returning a list a miss is missing from.
+	missLoss atomic.Pointer[string]
+	// pendingLost is set, under the proven switch and captureMu, when a miss
+	// made with no test's window open was dropped because pendingMockErrors
+	// was full. The next window decides whose loss it is: a set's first
+	// discards those misses (they are no test's), so it only says so; the next
+	// test's carries them, so its read is incomplete (missLoss).
+	pendingLost bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
@@ -385,6 +405,18 @@ type Proxy struct {
 	// negative disables half-close, so it is NOT clamped to zero the way
 	// recordBufferStallGrace is.
 	recordBufferHalfCloseGrace time.Duration
+
+	// capture follows the relays of the connections whose parser is
+	// recording, for the recording's capture watermark
+	// (capture_watermark.go). Added to the recording's manager once, as the
+	// proxy starts (addCaptureWatermark).
+	capture                *relay.Watermark
+	captureWatermarkOnce   sync.Once
+	removeCaptureWatermark func()
+
+	// parserLag is relay.Config.ReaderLag for every recorded connection:
+	// zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+	parserLag time.Duration
 
 	// cbshim is the eBPF-backed channel-binding shim. When non-nil,
 	// upstream-TLS-handshake captures publish (mitm_hash, real_hash)
@@ -1021,6 +1053,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// Passed through unclamped: zero and negative both carry meaning
 	// (relay default / disabled), and relay.withDefaults resolves them.
 	proxy.recordBufferHalfCloseGrace = opts.Record.RecordBuffer.HalfCloseGrace
+
+	proxy.capture = relay.NewWatermark()
+	proxy.parserLag = debugParserLag(logger)
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
 	// settled here; nothing is read off disk (see upstreamTLSOnce).
@@ -1693,6 +1728,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
+
+	// The recording's capture watermark: from here on its stream holds test
+	// cases until their verdict is final, and a stop drains what the
+	// parsers still hold (capture_watermark.go).
+	p.addCaptureWatermark()
 
 	// Start the continuous error drain so the error channel never fills up.
 	// This must happen before any connections are handled.
@@ -3523,6 +3563,11 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		}()
 	}
 
+	// The capture's watermark leaves the recording's manager with the proxy.
+	if p.removeCaptureWatermark != nil {
+		p.removeCaptureWatermark()
+	}
+
 	p.CloseErrorChannel()
 	if len(cleanupErrors) > 0 {
 		for _, err := range cleanupErrors {
@@ -4015,6 +4060,36 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 	return true
 }
 
+// The causes a read of the misses is incomplete for (missLoss).
+var (
+	missLostListFull        = fmt.Sprintf("a miss was dropped: the test's list of misses was full (%d)", maxPendingMockErrors)
+	missLostBetweenFull     = fmt.Sprintf("a miss made between two tests was dropped: the list of misses waiting for the next test was full (%d)", maxPendingMockErrors)
+	missLostDrainStopped    = "a miss could not be queued for its test: keploy's error drain had stopped"
+	missLostNoDrainChanFull = "a miss could not be queued for its test: keploy's error channel was full and no error drain was running"
+)
+
+// noteMissLost records, under the proven switch, that a miss was lost, and
+// why: the next read is then incomplete, naming the first cause, rather than
+// silently short.
+func (p *Proxy) noteMissLost(err error, cause string) {
+	if provenswitch.On() && isMockNotFoundErr(err) {
+		p.missLoss.CompareAndSwap(nil, &cause)
+	}
+}
+
+// missDroppedForRoom notes, under the proven switch, that a miss was dropped
+// because its test's list is full (maxPendingMockErrors).
+func (p *Proxy) missDroppedForRoom(err error) { p.noteMissLost(err, missLostListFull) }
+
+// pendingDroppedForRoom notes, under the proven switch and captureMu, that a
+// miss made with no window open was dropped because pendingMockErrors is full;
+// the next window decides whose loss it is (pendingLost).
+func (p *Proxy) pendingDroppedForRoom(err error) {
+	if provenswitch.On() && isMockNotFoundErr(err) {
+		p.pendingLost = true
+	}
+}
+
 // isMockNotFoundErr reports whether err is a parser mock-not-found error —
 // the only error class GetMockErrors surfaces to the replayer, and thus the
 // only class worth retaining in pendingMockErrors.
@@ -4043,10 +4118,13 @@ func (*flushMarker) Error() string { return "keploy: capture flush marker" }
 
 func (p *Proxy) StartErrorDrain(ctx context.Context) {
 	p.errDrainOnce.Do(func() {
+		done := make(chan struct{})
+		p.errDrainDone = done
 		p.errDrainActive.Store(true)
 		var discarded atomic.Int64
 		go func() {
 			defer utils.Recover(p.logger)
+			defer close(done)
 			defer p.errDrainActive.Store(false)
 			for {
 				select {
@@ -4069,11 +4147,16 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					p.captureMu.Lock()
 					acc := p.activeTestErrors.Load()
 					if acc != nil {
-						acc.addBounded(err, maxPendingMockErrors)
+						if !acc.addBounded(err, maxPendingMockErrors) {
+							p.missDroppedForRoom(err)
+						}
 						p.captureMu.Unlock()
 						continue
 					}
 					retained := isMockNotFoundErr(err) && p.pendingMockErrors.addBounded(err, maxPendingMockErrors)
+					if !retained {
+						p.pendingDroppedForRoom(err)
+					}
 					p.captureMu.Unlock()
 					if !retained {
 						// Log only the first discard and then every 100th to reduce noise.
@@ -4095,7 +4178,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // The replayer opens it for the first test of a test set. Misses retained
 // before it, with no window open (the app's startup, or a previous set's last
 // test's traffic), are not this test's: they are discarded so they don't
-// attach to it, and logged, so none is lost without a word.
+// attach to it, and logged, so none is lost without a word. Under the proven
+// switch too they reach no verdict: a set whose last test's late or async call
+// missed after its last read stays judged on what was read. Closing that is
+// the round's own count of calls in flight at its end, not this window.
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
 func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
@@ -4130,14 +4216,27 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 		}
 	}
 	between = append(between, p.pendingMockErrors.drain()...)
+	pendingLost := p.pendingLost
+	p.pendingLost = false
 	if carry {
 		for _, err := range between {
-			acc.addBounded(err, maxPendingMockErrors)
+			if !acc.addBounded(err, maxPendingMockErrors) {
+				p.missDroppedForRoom(err)
+			}
+		}
+		if pendingLost {
+			// They were this test's: its read is short of them.
+			p.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
 		}
 	}
 	p.captureMu.Unlock()
 	if !carry {
 		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
+		if pendingLost {
+			// They were no test's either: said, and no read is short of them.
+			p.logger.Warn("more mock mismatches were made while no test's capture window was open than keploy keeps; the rest were dropped, and they are not attributed to a test either",
+				zap.Int("kept", maxPendingMockErrors))
+		}
 	}
 	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
 }
@@ -4197,7 +4296,7 @@ func (p *Proxy) GetErrorChannel() <-chan error {
 // GetMockErrors drains all mock-not-found errors and returns them.
 // When StartErrorDrain is active, it reads from the test accumulator instead
 // of the channel (which is drained by the background goroutine).
-func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error) {
+func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	// Rendezvous with the drain goroutine BEFORE taking captureMu: push a flush
 	// marker and wait until the goroutine pulls it. FIFO ordering then
 	// guarantees every error the goroutine had already received from errChannel
@@ -4205,29 +4304,54 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 	// strand an in-flight miss (the remaining race the previous fix left open).
 	// The app has already responded by now, so this test's pushes precede the
 	// marker. A bounded wait keeps a stalled drain from blocking replay.
+	//
+	// Under the proven switch nothing is bounded by a clock: the waits end on
+	// the marker being reached, the drain stopping, or the caller giving up
+	// (unreadCause), and a read that could not vouch for every miss says so
+	// (ErrUnmatchedCallsUnread) rather than returning a list a miss may be
+	// missing from. On a starved machine the drain is slow, not wrong, and a
+	// deadline would turn slow into a verdict.
+	proven := provenswitch.On()
+	unreadCause := ""
 	rendezvousOK := false
 	drainActive := p.errDrainActive.Load()
 	if drainActive && p.errChannel != nil {
 		marker := &flushMarker{done: make(chan struct{})}
-		select {
-		case p.errChannel <- marker:
+		if proven {
+			rendezvousOK, unreadCause = p.flushOnEvents(ctx, marker)
+		} else {
 			select {
-			case <-marker.done:
-				rendezvousOK = true
-			case <-time.After(2 * time.Second):
-				// drain stalled — DON'T close the window below (see end).
+			case p.errChannel <- marker:
+				select {
+				case <-marker.done:
+					rendezvousOK = true
+				case <-time.After(2 * time.Second):
+					// drain stalled — DON'T close the window below (see end).
+				}
+			default:
+				// errChannel full (drain is behind) — marker not enqueued; DON'T
+				// close the window below.
 			}
-		default:
-			// errChannel full (drain is behind) — marker not enqueued; DON'T
-			// close the window below.
+		}
+	}
+	if proven {
+		if lost := p.missLoss.Swap(nil); lost != nil && unreadCause == "" {
+			unreadCause = *lost
 		}
 	}
 
 	p.captureMu.Lock()
 
 	// Pre-window stragglers (retained before the first capture window — e.g.
-	// startup traffic). Oldest first.
+	// startup traffic). Oldest first. A read that takes them is short of any
+	// that were dropped for room.
 	rawErrs := p.pendingMockErrors.drain()
+	if p.pendingLost {
+		p.pendingLost = false
+		if proven && unreadCause == "" {
+			unreadCause = missLostBetweenFull
+		}
+	}
 
 	// Legacy path only (no drain goroutine): errors sit unrouted in errChannel,
 	// so sweep them here. With the drain goroutine active, the rendezvous above
@@ -4319,15 +4443,61 @@ func (p *Proxy) GetMockErrors(_ context.Context) ([]models.UnmatchedCall, error)
 			}
 		}
 	}
+	if unreadCause != "" {
+		return errs, fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, unreadCause)
+	}
 	return errs, nil
 }
 
+// flushOnEvents is the proven switch's rendezvous with the error drain: queue
+// the flush marker and wait for the drain to reach it, ending only on events.
+// It returns whether the drain reached the marker, and when it did not, why:
+// the drain stopped (nothing will route a miss into the window again) or the
+// caller gave up on the read (its context ended).
+func (p *Proxy) flushOnEvents(ctx context.Context, marker *flushMarker) (bool, string) {
+	select {
+	case p.errChannel <- marker:
+	case <-p.errDrainDone:
+		return false, "keploy's error drain stopped before this read"
+	case <-ctx.Done():
+		return false, "the read was given up before the error drain took it: " + context.Cause(ctx).Error()
+	}
+	select {
+	case <-marker.done:
+		return true, ""
+	case <-p.errDrainDone:
+		return false, "keploy's error drain stopped before it routed every miss"
+	case <-ctx.Done():
+		return false, "the read was given up before the error drain routed every miss: " + context.Cause(ctx).Error()
+	}
+}
+
 // SendError sends an error to the error channel for external monitoring.
+//
+// Under the proven switch a miss is never dropped for want of room: while the
+// error drain runs it waits for the drain to take it, which the drain always
+// does (it holds nothing a sender holds). A miss that still cannot be queued,
+// because the drain has stopped or never started, is lost, and the next
+// GetMockErrors reports its read incomplete instead of silently short.
 func (p *Proxy) SendError(err error) {
+	proven := provenswitch.On() && isMockNotFoundErr(err)
+	if proven && p.errDrainActive.Load() {
+		select {
+		case p.errChannel <- err:
+			return
+		case <-p.errDrainDone:
+		}
+		p.noteMissLost(err, missLostDrainStopped)
+		p.logger.Error("keploy's error drain stopped; a call no mock answered could not be reported to its test", zap.Error(err))
+		return
+	}
 	select {
 	case p.errChannel <- err:
 	default:
 		p.logger.Error("Error channel is full, dropping error", zap.Error(err))
+		if proven {
+			p.noteMissLost(err, missLostNoDrainChanFull)
+		}
 	}
 }
 

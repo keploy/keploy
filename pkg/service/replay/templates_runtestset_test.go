@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.uber.org/zap"
@@ -2991,6 +2992,7 @@ func TestRunTestSet_AUseInAnArrayNoiseUntiesIsRefused(t *testing.T) {
 		refusedAt, refusedWhy string
 		edit                  string
 		failsAt               string
+		proven                bool
 	}{
 		{name: "R1 noise over the use's field", recorded: rec, answer: moved, noise: noise("id"), ignoreOrdering: true, want: models.TestStatusFailed,
 			refusedAt: "response body.orders[0].id", refusedWhy: "the noise entry body.id (globalNoise) covers its place",
@@ -3052,8 +3054,19 @@ func TestRunTestSet_AUseInAnArrayNoiseUntiesIsRefused(t *testing.T) {
 		{name: "ignoreOrdering off: the use is asserted at its own index", recorded: rec, answer: moved, noise: noise("id"), want: models.TestStatusFailed, failsAt: "body.orders[0].id"},
 		{name: "a use outside any array is asserted at its path under noise, not refused", recorded: `{"first":"{{string .orderA}}"}`, answer: `{"first":"ord_OTHER"}`,
 			noise: noise("first"), ignoreOrdering: true, want: models.TestStatusFailed, failsAt: "body.first"},
+		// Under the proven switch the comparison reads arrays in order
+		// whatever ignoreOrdering says (matcher.ResponseIgnoreOrdering), so
+		// noise over the use's field unties nothing: the use is asserted at
+		// its own index, as with ignoreOrdering off, and not refused.
+		{name: "proven: noise over the use's field, a moved id fails at its own index", recorded: rec, answer: moved, noise: noise("id"), ignoreOrdering: true, proven: true, want: models.TestStatusFailed, failsAt: "body.orders[0].id"},
+		{name: "proven: noise over the use's field, the answer as recorded", recorded: rec, answer: paid, noise: noise("id"), ignoreOrdering: true, proven: true, want: models.TestStatusPassed},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
 			app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 				mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
 					a.record(r)

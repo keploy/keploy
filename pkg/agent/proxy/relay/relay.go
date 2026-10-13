@@ -261,6 +261,10 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		remoteAddr = src.RemoteAddr()
 	}
 	r.clientStream = fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
+	// What the parser has consumed of each stream tells the capture
+	// watermark how far it has got (progress.go). Set, with the reader lag,
+	// before the drains start.
+	r.teeC2D.consumed, r.teeC2D.readerLag = r.clientStream.Consumed, cfg.ReaderLag
 	// The tee may only abandon a queued chunk once this stream is closed,
 	// so its drain cannot start until the stream exists.
 	r.teeC2D.start(r.clientStream.Done())
@@ -270,6 +274,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		destRemote = dst.RemoteAddr()
 	}
 	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
+	r.teeD2C.consumed, r.teeD2C.readerLag = r.destStream.Consumed, cfg.ReaderLag
 	r.teeD2C.start(r.destStream.Done())
 
 	return r
@@ -284,6 +289,16 @@ func (r *Relay) ClientStream() *fakeconn.FakeConn { return r.clientStream }
 // read from the real destination (bytes flowing dest → client). Safe
 // to call before or after Run starts.
 func (r *Relay) DestStream() *fakeconn.FakeConn { return r.destStream }
+
+// Teed is how many bytes of dir's stream the tee has taken for the parser so
+// far: the position just past the last chunk teed to it, in the offsets of
+// fakeconn.FakeConn.Consumed (Config.OnCarried).
+func (r *Relay) Teed(dir fakeconn.Direction) int64 {
+	if dir == fakeconn.FromClient {
+		return r.teeC2D.acceptedBytes()
+	}
+	return r.teeD2C.acceptedBytes()
+}
 
 // Directives returns the parser-writable directive channel. Parsers
 // send [directive.Directive] values here; the relay's directive
@@ -581,6 +596,17 @@ func (r *Relay) run(ctx context.Context) error {
 	return firstErr
 }
 
+// noteCarried tells the owner of a chunk the connection carried, as the
+// forwarder hands it to the tee t, and whether t took it (Config.OnCarried).
+// It runs on t's forwarder, the one goroutine that pushes into t, so t's
+// accepted bytes are, right after a push it took, the position just past the
+// chunk.
+func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
+	if r.cfg.OnCarried != nil {
+		r.cfg.OnCarried(c.Dir, c.ReadAt, teed, t.acceptedBytes())
+	}
+}
+
 // forward is one forwarder goroutine. src is the read side, dst is
 // the write side, t is the tee to push chunks into, seq is the
 // per-direction sequence counter.
@@ -591,7 +617,8 @@ func (r *Relay) run(ctx context.Context) error {
 //     ReadAt, the number (order) that orders it against the other
 //     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
 //  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
-//  4. Push the Chunk into the tee (non-blocking), with its SeqNo.
+//  4. Push the Chunk into the tee (non-blocking), with its SeqNo, and tell
+//     the owner it was carried (Config.OnCarried).
 //  5. Bump activity.
 //
 // Returns the first read or write error encountered. io.EOF is
@@ -608,8 +635,13 @@ func (r *Relay) forward(
 	bufSize := r.cfg.ForwardBuf
 	buf := make([]byte, bufSize)
 	log := r.cfg.Logger
+	// The chunk a Read returned is in this forwarder's hand until it is
+	// queued, refused or stashed (progress.go): released at the top of each
+	// iteration, before any park, and on the way out.
+	defer t.noteReleased()
 
 	for {
+		t.noteReleased()
 		// Early exit if the outer run is tearing down. We check both
 		// ctx and stopping; ctx.Done fires on external cancel, stopping
 		// fires after run's cleanup.
@@ -659,8 +691,12 @@ func (r *Relay) forward(
 		// without the parser observing a torn read.
 		var chunk fakeconn.Chunk
 		if n > 0 {
+			// In hand from here, before it is stamped: its stamp is then no
+			// earlier than a look that found nothing in hand (heldUnstamped).
+			t.noteReading()
 			chunk.Dir = dir
 			chunk.ReadAt = observedReadAt(src, time.Now())
+			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()
 			} else {
@@ -729,12 +765,16 @@ func (r *Relay) forward(
 				if (r.preDispatchActive.Load() || r.holdClient.Load()) && dir == fakeconn.FromClient {
 					chunk.SeqNo = seq.Add(1)
 					teed := t.push(chunk)
+					r.noteCarried(t, chunk, teed)
 					if teed && r.cfg.OnClientChunkTeed != nil {
 						r.cfg.OnClientChunkTeed()
 					}
 				}
 				n = 0
 			}
+			// Stashed (and teed, when the parser is to see it): no
+			// longer in this forwarder's hand while it parks.
+			t.noteReleased()
 			// Now that the post-Read stash is committed (or there
 			// were no in-flight bytes to stash), signal the directive
 			// handler that this forwarder is parked. This MUST happen
@@ -803,6 +843,7 @@ func (r *Relay) forward(
 				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
 				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
+				r.noteCarried(t, chunk, teed)
 				if teed && r.cfg.OnClientChunkTeed != nil {
 					r.cfg.OnClientChunkTeed()
 				}
@@ -860,6 +901,7 @@ func (r *Relay) forward(
 				r.cfg.beforeTee(dir)
 			}
 			teed := t.push(chunk)
+			r.noteCarried(t, chunk, teed)
 			// On a successful client→dest tee, signal the supervisor
 			// that a request chunk is in flight and awaiting a mock
 			// emission. This is the "pending work" signal the hang

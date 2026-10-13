@@ -9,6 +9,8 @@
 
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
 MODE=${1:-incoming}
 
 # TODO: remove it after v3 latest release 
@@ -188,6 +190,8 @@ if [ "$MODE" = "incoming" ]; then
   else
     "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
   fi
+  rec_pid=$! # tee's: it ends once keploy and all it started have exited
+  rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
  
  sleep 10
 
@@ -213,12 +217,14 @@ if [ "$MODE" = "incoming" ]; then
 
  echo "Stopping keploy record and server"
 
-  REC_PID=$(pgrep keploy | sort -n | head -1)
+  REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
   echo "$REC_PID Keploy PID"
   echo "Killing keploy"
   sudo kill -INT "$REC_PID" 2>/dev/null || true
 
- sleep 5
+ # Wait for the recording to end, not for a fixed time: it drains what the
+ # agent captured before it exits (wait-recording.sh).
+ wait_recording_end "$rec_pid" record_incoming.txt || exit 1
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
@@ -281,6 +287,8 @@ if [ "$MODE" = "incoming" ]; then
    else
      "$RECORD_BIN" record --storage-format json -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming_json.txt &
    fi
+   rec_pid=$!
+   rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
    sleep 10
    # Likewise the yaml pass's client still holds :18080: stop it, or this
    # pass's client cannot bind and the old one would serve this run.
@@ -292,9 +300,9 @@ if [ "$MODE" = "incoming" ]; then
    wait_for_log record_incoming_json.txt "gRPC server listening on :50051" 'Started ingress forwarding.*"orig_port": 50051' || exit 1
    run_fuzz || exit 1
    sleep 10
-   REC_PID=$(pgrep keploy | sort -n | head -1)
+   REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
    sudo kill -INT "$REC_PID" 2>/dev/null || true
-   sleep 5
+   wait_recording_end "$rec_pid" record_incoming_json.txt || exit 1
    sudo pkill -f "$FUZZER_SERVER_BIN" || true
    sleep 2
    check_for_errors record_incoming_json.txt
@@ -319,6 +327,8 @@ elif [ "$MODE" = "outgoing" ]; then
 
  # Record the client (it makes outgoing RPCs)
  "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
+ rec_pid=$!
+ rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
  sleep 10
 
  echo "Waiting for client to listen on 18080..."
@@ -334,11 +344,11 @@ elif [ "$MODE" = "outgoing" ]; then
  sleep 10
 
  echo "using the new commnad to stop keploy"
- REC_PID=$(pgrep keploy | sort -n | head -1)
+ REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
  echo "$REC_PID Keploy PID"
  echo "Killing keploy"
  sudo kill -INT "$REC_PID" 2>/dev/null || true
- sleep 5
+ wait_recording_end "$rec_pid" record_outgoing.txt || exit 1
 
  echo "Ensuring fuzzer client is stopped..."
  sleep 10
@@ -365,13 +375,15 @@ elif [ "$MODE" = "outgoing" ]; then
    "$FUZZER_SERVER_BIN" &> server_outgoing_json.txt &
    wait_for_log server_outgoing_json.txt "gRPC server listening on :50051" || exit 1
    "$RECORD_BIN" record --storage-format json -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing_json.txt &
+   rec_pid=$!
+   rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
    sleep 10
    for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
    run_fuzz || exit 1
    sleep 10
-   REC_PID=$(pgrep keploy | sort -n | head -1)
+   REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
    sudo kill -INT "$REC_PID" 2>/dev/null || true
-   sleep 5
+   wait_recording_end "$rec_pid" record_outgoing_json.txt || exit 1
    sudo pkill -f "$FUZZER_CLIENT_BIN" || true
    sleep 2
    check_for_errors server_outgoing_json.txt

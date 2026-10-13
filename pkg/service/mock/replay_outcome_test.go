@@ -330,6 +330,19 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			unwantLogs: []string{"incomplete"},
 		},
 		{
+			// Under the proven switch the agent's read of the misses can be
+			// incomplete; the account says so. Missed is then unknown, not
+			// the partial count: a short list that happens to be empty would
+			// pass --strict and claim the run isolated.
+			name:       "an account whose miss read was incomplete: missed unknown, and --strict fails as keploy's own error",
+			left:       models.MockOutcome{Consumed: twoConsumed, MissedUnread: "keploy's error drain stopped before this read"},
+			wantExit:   1,
+			wantErr:    true,
+			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "reason": models.ErrUnmatchedCallsUnread.Error() + ": keploy's error drain stopped before this read"},
+			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven"},
+			unwantLogs: []string{"writes what it served and missed as compose stops it"},
+		},
+		{
 			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
 			leftErr:    errors.New("the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"),
 			wantExit:   1,
@@ -406,6 +419,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantConsumed, wantMissed := len(tc.left.Consumed), len(tc.left.Missed)
 			if tc.leftErr != nil {
 				wantConsumed, wantMissed = -1, -1
+			}
+			if tc.left.MissedUnread != "" {
+				wantMissed = -1
 			}
 			if r.Consumed != wantConsumed || r.Missed != wantMissed {
 				t.Errorf("receipt consumed/missed = %d/%d, want %d/%d", r.Consumed, r.Missed, wantConsumed, wantMissed)
