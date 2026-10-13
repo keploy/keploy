@@ -366,6 +366,26 @@ func TestARecordedRefusalIsServed(t *testing.T) {
 		client:  switchedLogin,
 		want:    mysql.OK,
 	}, {
+		name:    "a full authentication refused (a wrong password on MySQL 8), then its retry's success",
+		session: []*models.Mock{named(fullAuthHandshake(refusal(6)), "mock-refused"), named(fullAuthHandshake(okAnswer(6)), "mock-ok")},
+		client:  fullAuthLogin,
+		want:    mysql.OK,
+	}, {
+		name:    "a refused full authentication",
+		session: []*models.Mock{named(fullAuthHandshake(refusal(6)), "mock-refused")},
+		client:  fullAuthLogin,
+		want:    mysql.ERR,
+	}, {
+		name:    "a fast authentication refused (an unknown database), then its retry's success",
+		session: []*models.Mock{named(fastAuthHandshake(refusal(3)), "mock-refused"), named(fastAuthHandshake(okAnswer(3)), "mock-ok")},
+		client:  fastAuthLogin,
+		want:    mysql.OK,
+	}, {
+		name:    "a refused fast authentication",
+		session: []*models.Mock{named(fastAuthHandshake(refusal(3)), "mock-refused")},
+		client:  fastAuthLogin,
+		want:    mysql.ERR,
+	}, {
 		name:    "this server's refusal, and another server's success recorded first",
 		session: []*models.Mock{elsewhere(named(nativeHandshake(), "mock-elsewhere")), refused()},
 		client:  nativeLogin,
@@ -387,38 +407,99 @@ func TestARecordedRefusalIsServed(t *testing.T) {
 	}
 }
 
-// A caching_sha2_password full authentication leaves its handshake in the
-// pool: a connection the recording holds no other handshake for authenticates
-// in full again, as the server asks. Its handshake was deleted, and a second
-// connection of an application that opened one while it was recorded was
-// closed unanswered.
-func TestAFullAuthenticationServesTheNextConnectionToo(t *testing.T) {
-	fullAuth := handshakeMock(mysql.CachingSha2,
+// fastAuthHandshake is a recorded caching_sha2_password handshake whose
+// fast authentication ended in verdict.
+func fastAuthHandshake(verdict mysql.Response) *models.Mock {
+	return handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess), verdict})
+}
+
+// fullAuthHandshake is a recorded caching_sha2_password handshake whose full
+// authentication without TLS (the client asked for the server's public key
+// and sent its password encrypted with it) ended in verdict.
+func fullAuthHandshake(verdict mysql.Response) *models.Mock {
+	return handshakeMock(mysql.CachingSha2,
 		[]mysql.Response{authMoreData(2, mysql.PerformFullAuthentication),
 			{PacketBundle: bundle(4, mysql.AuthStatusToString(mysql.AuthMoreData), &mysql.AuthMoreDataPacket{StatusTag: mysql.AuthMoreData, Data: "PUBLIC KEY"})},
-			okAnswer(6)},
+			verdict},
 		mysql.Request{PacketBundle: mysql.PacketBundle{
 			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1, SequenceID: 3}, Type: mysql.CachingSha2PasswordToString(mysql.RequestPublicKey)},
 			Message: "request_public_key",
 		}},
 		mysql.Request{PacketBundle: bundle(5, mysql.EncryptedPassword, "encrypted")},
 	)
-	db := &poolDb{fakeMockDb{session: []*models.Mock{fullAuth}}}
+}
+
+// fastAuthLogin is a client logging in as "app" with caching_sha2_password,
+// whose password the server has cached.
+func fastAuthLogin(c mysqlClient) {
+	c.t.Helper()
+	c.greetAndAnswer("app", mysql.CachingSha2)
+	if more := c.read(); len(more) == 0 || more[0] != mysql.AuthMoreData {
+		c.t.Fatalf("the client read %x, want the recorded AuthMoreData", more)
+	}
+}
+
+// fullAuthLogin is a client logging in as "app" with caching_sha2_password in
+// full, without TLS: it asks for the server's public key and sends its
+// password encrypted with it.
+func fullAuthLogin(c mysqlClient) {
+	c.t.Helper()
+	fastAuthLogin(c)
+	c.send(3, []byte{byte(mysql.RequestPublicKey)})
+	if key := c.read(); len(key) == 0 || key[0] != mysql.AuthMoreData {
+		c.t.Fatalf("the client read %x, want the recorded public key", key)
+	}
+	c.send(5, bytes.Repeat([]byte{0x5A}, 32)) // the password, encrypted with that key
+}
+
+// A caching_sha2_password full authentication leaves its handshake in the
+// pool: a connection the recording holds no other handshake for authenticates
+// in full again, as the server asks. Its handshake was deleted, and a second
+// connection of an application that opened one while it was recorded was
+// closed unanswered.
+func TestAFullAuthenticationServesTheNextConnectionToo(t *testing.T) {
+	db := &poolDb{fakeMockDb{session: []*models.Mock{fullAuthHandshake(okAnswer(6))}}}
 	for i := 1; i <= 2; i++ {
-		got := login(t, db, func(c mysqlClient) {
-			c.greetAndAnswer("app", mysql.CachingSha2)
-			if more := c.read(); len(more) == 0 || more[0] != mysql.AuthMoreData {
-				c.t.Fatalf("the client read %x, want the recorded AuthMoreData", more)
-			}
-			c.send(3, []byte{byte(mysql.RequestPublicKey)})
-			if key := c.read(); len(key) == 0 || key[0] != mysql.AuthMoreData {
-				c.t.Fatalf("the client read %x, want the recorded public key", key)
-			}
-			c.send(5, bytes.Repeat([]byte{0x5A}, 32)) // the password, encrypted with that key
-		})
-		if got != mysql.OK {
+		if got := login(t, db, fullAuthLogin); got != mysql.OK {
 			t.Fatalf("connection %d read %#x; want the recorded OK", i, got)
 		}
+	}
+}
+
+// Which handshakes replay can serve, and which refuse the login: the final
+// answer decides, after a caching_sha2_password exchange too, and a full
+// authentication's final answer comes after the public key only without TLS.
+func TestServableVerdict(t *testing.T) {
+	tlsFullAuth := func(verdict mysql.Response) *models.Mock {
+		return handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), verdict})
+	}
+	sha256Key := handshakeMock(mysql.CachingSha2, []mysql.Response{{PacketBundle: bundle(2, mysql.AuthStatusToString(mysql.AuthMoreData),
+		&mysql.AuthMoreDataPacket{StatusTag: mysql.AuthMoreData, Data: "-----BEGIN PUBLIC KEY-----"})}, okAnswer(3)})
+	for _, tc := range []struct {
+		name              string
+		m                 *models.Mock
+		useSSL            bool
+		servable, refuses bool
+	}{
+		{name: "native OK", m: nativeHandshake(), servable: true},
+		{name: "native ERR", m: handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), servable: true, refuses: true},
+		{name: "ERR after an auth switch", m: switchedHandshake(refusal(4)), servable: true, refuses: true},
+		{name: "fast auth, OK", m: fastAuthHandshake(okAnswer(3)), servable: true},
+		{name: "fast auth, ERR", m: fastAuthHandshake(refusal(3)), servable: true, refuses: true},
+		{name: "full auth, OK", m: fullAuthHandshake(okAnswer(6)), servable: true},
+		{name: "full auth, ERR", m: fullAuthHandshake(refusal(6)), servable: true, refuses: true},
+		{name: "full auth over TLS, OK", m: tlsFullAuth(okAnswer(4)), useSSL: true, servable: true},
+		{name: "full auth over TLS, ERR", m: tlsFullAuth(refusal(4)), useSSL: true, servable: true, refuses: true},
+		{name: "a TLS full auth, for a client without TLS", m: tlsFullAuth(okAnswer(4))},
+		{name: "fast auth cut short", m: handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess)})},
+		{name: "another mechanism's AuthMoreData", m: sha256Key},
+		{name: "no verdict", m: handshakeMock(mysql.Native, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if servable, refuses := servableVerdict(tc.m, tc.useSSL); servable != tc.servable || refuses != tc.refuses {
+				t.Fatalf("servableVerdict = %v, %v; want %v, %v", servable, refuses, tc.servable, tc.refuses)
+			}
+		})
 	}
 }
 
@@ -535,6 +616,23 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		phase   string
 		diff    string
 	}{{
+		name:    "a recorded public key request with no header",
+		session: []*models.Mock{headerlessPublicKeyRequest()},
+		client: func(c mysqlClient) {
+			fastAuthLogin(c)
+			c.send(3, []byte{byte(mysql.RequestPublicKey)})
+		},
+		summary: "connection phase: public key request",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "header mismatch",
+	}, {
+		name:    "a recorded verdict with no header, after a fast authentication",
+		session: []*models.Mock{headerlessFastAuthVerdict()},
+		client:  fastAuthLogin,
+		summary: "connection phase: caching_sha2_password authentication",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "cannot be read",
+	}, {
 		name:    "no recorded greeting",
 		session: []*models.Mock{noGreeting},
 		client:  func(mysqlClient) {},
@@ -613,4 +711,20 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 			requireConnectionMiss(t, <-done, tc.summary, tc.phase, tc.diff)
 		})
 	}
+}
+
+// headerlessPublicKeyRequest is a recorded full authentication whose public
+// key request has no header.
+func headerlessPublicKeyRequest() *models.Mock {
+	m := fullAuthHandshake(okAnswer(6))
+	m.Spec.MySQLRequests[1].Header = nil
+	return m
+}
+
+// headerlessFastAuthVerdict is a recorded fast authentication whose final
+// answer has no header.
+func headerlessFastAuthVerdict() *models.Mock {
+	m := fastAuthHandshake(okAnswer(3))
+	m.Spec.MySQLResponses[2].Header = nil
+	return m
 }

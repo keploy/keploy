@@ -701,32 +701,45 @@ func TestAMySQLHandshakeNoMockMatchesIsAMissOfItsTest(t *testing.T) {
 	})
 }
 
-// mysqlTestHR41 is the HandshakeResponse41 a mysql_native_password client of
-// user sends.
-func mysqlTestHR41(user string) *mysqlmodels.HandshakeResponse41Packet {
+// mysqlTestHR41 is the HandshakeResponse41 a client of user sends, asking for
+// plugin.
+func mysqlTestHR41(user string, plugin mysqlmodels.AuthPluginName) *mysqlmodels.HandshakeResponse41Packet {
 	const caps = uint32(mysqlmodels.CLIENT_PROTOCOL_41 | mysqlmodels.CLIENT_PLUGIN_AUTH | mysqlmodels.CLIENT_SECURE_CONNECTION)
 	return &mysqlmodels.HandshakeResponse41Packet{CapabilityFlags: caps, MaxPacketSize: 1 << 24, CharacterSet: 0x21,
-		Username: user, AuthResponse: make([]byte, 20), AuthPluginName: string(mysqlmodels.Native)}
+		Username: user, AuthResponse: make([]byte, 20), AuthPluginName: string(plugin)}
 }
 
-// mysqlTestHandshake is a recorded mysql_native_password handshake of user
-// "app" with 10.0.0.5:3306, recorded at at, whose server answered verdict.
-func mysqlTestHandshake(name string, at time.Time, verdict mysqlmodels.PacketBundle) *models.Mock {
-	packet := func(seq uint8, typ string, msg interface{}) mysqlmodels.PacketBundle {
-		return mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: seq}, Type: typ}, Message: msg}
+// mysqlTestPacket is one recorded packet.
+func mysqlTestPacket(seq uint8, typ string, msg interface{}) mysqlmodels.PacketBundle {
+	return mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: seq}, Type: typ}, Message: msg}
+}
+
+// mysqlTestVerdict is the server's final answer on a login, at seq: its OK, or
+// its refusal.
+func mysqlTestVerdict(seq uint8, refused bool) mysqlmodels.Response {
+	if refused {
+		return mysqlmodels.Response{PacketBundle: mysqlTestPacket(seq, mysqlmodels.StatusToString(mysqlmodels.ERR),
+			&mysqlmodels.ERRPacket{Header: mysqlmodels.ERR, ErrorCode: 1045, SQLStateMarker: "#", SQLState: "28000", ErrorMessage: "Access denied"})}
 	}
+	return mysqlmodels.Response{PacketBundle: mysqlTestPacket(seq, mysqlmodels.StatusToString(mysqlmodels.OK), &mysqlmodels.OKPacket{Header: mysqlmodels.OK, StatusFlags: 2})}
+}
+
+// mysqlTestHandshake is a recorded handshake of user "app" with
+// 10.0.0.5:3306 asking for plugin, recorded at at: the greeting and the
+// client's HandshakeResponse41, then the server's answers and the client's
+// further packets.
+func mysqlTestHandshake(name string, at time.Time, plugin mysqlmodels.AuthPluginName, answers []mysqlmodels.Response, requests ...mysqlmodels.Request) *models.Mock {
 	return &models.Mock{
 		Kind: models.MySQL,
 		Name: name,
 		Spec: models.MockSpec{
 			Metadata:      map[string]string{"type": "config", "connID": name, "destAddr": "10.0.0.5:3306"},
-			MySQLRequests: []mysqlmodels.Request{{PacketBundle: packet(1, mysqlmodels.HandshakeResponse41, mysqlTestHR41("app"))}},
-			MySQLResponses: []mysqlmodels.Response{
-				{PacketBundle: packet(0, mysqlmodels.AuthStatusToString(mysqlmodels.HandshakeV10), &mysqlmodels.HandshakeV10Packet{
+			MySQLRequests: append([]mysqlmodels.Request{{PacketBundle: mysqlTestPacket(1, mysqlmodels.HandshakeResponse41, mysqlTestHR41("app", plugin))}}, requests...),
+			MySQLResponses: append([]mysqlmodels.Response{
+				{PacketBundle: mysqlTestPacket(0, mysqlmodels.AuthStatusToString(mysqlmodels.HandshakeV10), &mysqlmodels.HandshakeV10Packet{
 					ProtocolVersion: 0x0a, ServerVersion: "8.0.36", ConnectionID: 7, AuthPluginData: make([]byte, 20),
-					CapabilityFlags: mysqlTestHR41("app").CapabilityFlags, CharacterSet: 0x21, StatusFlags: 2, AuthPluginName: string(mysqlmodels.Native)})},
-				{PacketBundle: verdict},
-			},
+					CapabilityFlags: mysqlTestHR41("app", plugin).CapabilityFlags, CharacterSet: 0x21, StatusFlags: 2, AuthPluginName: string(plugin)})},
+			}, answers...),
 			ReqTimestampMock: at,
 			ResTimestampMock: at,
 		},
@@ -734,84 +747,136 @@ func mysqlTestHandshake(name string, at time.Time, verdict mysqlmodels.PacketBun
 	}
 }
 
+// mysqlTestNative is a recorded mysql_native_password login, refused or not.
+func mysqlTestNative(name string, at time.Time, refused bool) *models.Mock {
+	return mysqlTestHandshake(name, at, mysqlmodels.Native, []mysqlmodels.Response{mysqlTestVerdict(2, refused)})
+}
+
+// mysqlTestFullAuth is a recorded caching_sha2_password full authentication
+// without TLS, refused (a wrong password, on MySQL 8) or not.
+func mysqlTestFullAuth(name string, at time.Time, refused bool) *models.Mock {
+	return mysqlTestHandshake(name, at, mysqlmodels.CachingSha2,
+		[]mysqlmodels.Response{
+			{PacketBundle: mysqlTestPacket(2, mysqlmodels.AuthStatusToString(mysqlmodels.AuthMoreData),
+				&mysqlmodels.AuthMoreDataPacket{StatusTag: mysqlmodels.AuthMoreData, Data: mysqlmodels.CachingSha2PasswordToString(mysqlmodels.PerformFullAuthentication)})},
+			{PacketBundle: mysqlTestPacket(4, mysqlmodels.AuthStatusToString(mysqlmodels.AuthMoreData), &mysqlmodels.AuthMoreDataPacket{StatusTag: mysqlmodels.AuthMoreData, Data: "PUBLIC KEY"})},
+			mysqlTestVerdict(6, refused),
+		},
+		mysqlmodels.Request{PacketBundle: mysqlmodels.PacketBundle{
+			Header:  &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{PayloadLength: 1, SequenceID: 3}, Type: mysqlmodels.CachingSha2PasswordToString(mysqlmodels.RequestPublicKey)},
+			Message: "request_public_key",
+		}},
+		mysqlmodels.Request{PacketBundle: mysqlTestPacket(5, mysqlmodels.EncryptedPassword, "encrypted")},
+	)
+}
+
+// writeMySQLPacket writes payload to c as one packet with sequence id seq.
+func writeMySQLPacket(c net.Conn, seq uint8, payload []byte) error {
+	_, err := c.Write(append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}, payload...))
+	return err
+}
+
 // A login the recording refused and then, retried, let in, is let in on every
 // connection, through the real mock manager: at boot, where the manager does
 // not move a reused handshake, inside a test window, where it does, and for
 // connections opened at once. Which recorded verdict a login gets depends on
-// nothing a connection changes in the pool. No miss is queued for any of them.
+// nothing a connection changes in the pool, with mysql_native_password and
+// with caching_sha2_password, whose refusal comes at the end of a full
+// authentication. No miss is queued for any of them.
 func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 64)}
-	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	rec := time.Now().Add(-time.Hour)
-	errPacket := mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: 2}, Type: mysqlmodels.StatusToString(mysqlmodels.ERR)},
-		Message: &mysqlmodels.ERRPacket{Header: mysqlmodels.ERR, ErrorCode: 1045, SQLStateMarker: "#", SQLState: "28000", ErrorMessage: "Access denied"}}
-	okPacket := mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: 2}, Type: mysqlmodels.StatusToString(mysqlmodels.OK)},
-		Message: &mysqlmodels.OKPacket{Header: mysqlmodels.OK, StatusFlags: 2}}
-	session := func() []*models.Mock {
-		return []*models.Mock{
-			mysqlTestHandshake("mock-refused", rec, errPacket),
-			mysqlTestHandshake("mock-ok", rec.Add(time.Second), okPacket),
-		}
-	}
+	for _, tc := range []struct {
+		name      string
+		plugin    mysqlmodels.AuthPluginName
+		handshake func(name string, at time.Time, refused bool) *models.Mock
+	}{
+		{"mysql_native_password", mysqlmodels.Native, mysqlTestNative},
+		{"caching_sha2_password full authentication", mysqlmodels.CachingSha2, mysqlTestFullAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 64)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			rec := time.Now().Add(-time.Hour)
+			session := func() []*models.Mock {
+				return []*models.Mock{tc.handshake("mock-refused", rec, true), tc.handshake("mock-ok", rec.Add(time.Second), false)}
+			}
 
-	// login opens one connection and returns the first byte of the verdict.
-	login := func() (byte, error) {
-		appEnd, agentEnd := net.Pipe()
-		connCtx := context.WithValue(context.WithValue(context.Background(), models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
-		served := make(chan struct{})
-		go func() {
-			defer close(served)
-			_ = p.mockMySQLOutgoing(connCtx, agentEnd, "10.0.0.5:3306", mm, models.OutgoingOptions{})
-			_ = agentEnd.Close()
-		}()
-		defer func() { _ = appEnd.Close(); <-served }()
-		if _, err := readOneMySQLPacket(appEnd); err != nil {
-			return 0, err
-		}
-		payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), mysqlTestHR41("app"))
-		if err != nil {
-			return 0, err
-		}
-		if _, err := appEnd.Write(append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 1}, payload...)); err != nil {
-			return 0, err
-		}
-		verdict, err := readOneMySQLPacket(appEnd)
-		if err != nil {
-			return 0, err
-		}
-		return verdict[4], nil
-	}
-	loginOK := func(phase string, i int) {
-		t.Helper()
-		got, err := login()
-		if err != nil || got != mysqlmodels.OK {
-			t.Errorf("%s, connection %d: verdict %#x, %v; want the recorded OK", phase, i, got, err)
-		}
-	}
+			// login opens one connection and returns the first byte of the
+			// server's final answer on the login.
+			login := func() (byte, error) {
+				appEnd, agentEnd := net.Pipe()
+				connCtx := context.WithValue(context.WithValue(context.Background(), models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+				served := make(chan struct{})
+				go func() {
+					defer close(served)
+					_ = p.mockMySQLOutgoing(connCtx, agentEnd, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+					_ = agentEnd.Close()
+				}()
+				defer func() { _ = appEnd.Close(); <-served }()
+				if _, err := readOneMySQLPacket(appEnd); err != nil {
+					return 0, err
+				}
+				payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), mysqlTestHR41("app", tc.plugin))
+				if err != nil {
+					return 0, err
+				}
+				if err := writeMySQLPacket(appEnd, 1, payload); err != nil {
+					return 0, err
+				}
+				answer, err := readOneMySQLPacket(appEnd)
+				if err != nil {
+					return 0, err
+				}
+				if tc.plugin == mysqlmodels.CachingSha2 && answer[4] == mysqlmodels.AuthMoreData {
+					// A full authentication: ask for the public key, and send
+					// the password encrypted with it.
+					if err := writeMySQLPacket(appEnd, 3, []byte{byte(mysqlmodels.RequestPublicKey)}); err != nil {
+						return 0, err
+					}
+					if _, err := readOneMySQLPacket(appEnd); err != nil {
+						return 0, err
+					}
+					if err := writeMySQLPacket(appEnd, 5, make([]byte, 32)); err != nil {
+						return 0, err
+					}
+					if answer, err = readOneMySQLPacket(appEnd); err != nil {
+						return 0, err
+					}
+				}
+				return answer[4], nil
+			}
+			loginOK := func(phase string, i int) {
+				t.Helper()
+				got, err := login()
+				if err != nil || got != mysqlmodels.OK {
+					t.Errorf("%s, connection %d: verdict %#x, %v; want the recorded OK", phase, i, got, err)
+				}
+			}
 
-	p.BeginTestErrorCapture()
-	mm.SetMocksWithWindow(nil, session(), models.BaseTime, time.Now().Add(time.Hour)) // boot
-	for i := 1; i <= 3; i++ {
-		loginOK("at boot", i)
-	}
-	mm.SetMocksWithWindow(nil, session(), time.Now().Add(-time.Minute), time.Now().Add(time.Hour)) // a test window
-	for i := 1; i <= 3; i++ {
-		loginOK("in a test window", i)
-	}
-	var wg sync.WaitGroup
-	for i := 1; i <= 4; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			loginOK("at once", i)
-		}(i)
-	}
-	wg.Wait()
-	misses, err := p.GetMockErrors(context.Background())
-	if err != nil || len(misses) != 0 {
-		t.Fatalf("misses %+v, %v; want none: every login was answered from the recording", misses, err)
+			p.BeginTestErrorCapture()
+			mm.SetMocksWithWindow(nil, session(), models.BaseTime, time.Now().Add(time.Hour)) // boot
+			for i := 1; i <= 3; i++ {
+				loginOK("at boot", i)
+			}
+			mm.SetMocksWithWindow(nil, session(), time.Now().Add(-time.Minute), time.Now().Add(time.Hour)) // a test window
+			for i := 1; i <= 3; i++ {
+				loginOK("in a test window", i)
+			}
+			var wg sync.WaitGroup
+			for i := 1; i <= 4; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					loginOK("at once", i)
+				}(i)
+			}
+			wg.Wait()
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil || len(misses) != 0 {
+				t.Fatalf("misses %+v, %v; want none: every login was answered from the recording", misses, err)
+			}
+		})
 	}
 }
