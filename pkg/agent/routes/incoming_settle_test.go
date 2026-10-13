@@ -416,6 +416,49 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 	}
 }
 
+// stopWatermark is a capture at a stop: every parser is past the stop, but
+// not past a test case that ended after it. A test case with no HTTP end
+// makes no claim of it.
+type stopWatermark struct{ stop time.Time }
+
+func (w stopWatermark) Settled(_, _ string, _, end time.Time) bool {
+	return end.IsZero() || !end.After(w.stop)
+}
+func (w stopWatermark) PendingBefore(time.Time) bool { return false }
+
+// A gRPC test case from before the stop that reaches the hold behind an HTTP
+// one whose verdict is not final (it ended after the stop) is held: the stop
+// must hear it is pending, or it ends the stream and the hold's Drain throws
+// the gRPC test case away, with the recording reported complete.
+func TestHandleIncoming_AGRPCTestCaseHeldBehindAnUnsettledOneIsPending(t *testing.T) {
+	stop := newStretch().Add(10 * time.Second)
+	syncmgr.Get().SetWatermark(stopWatermark{stop: stop})
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	tcs := make(chan *models.TestCase) // a send returns once the handler took it
+	a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Served across the stop: it ended after it, its verdict not final yet.
+	tcs <- &models.TestCase{Name: "http-after", HTTPReq: models.HTTPReq{Timestamp: stop.Add(-time.Second)}, HTTPResp: models.HTTPResp{Timestamp: stop.Add(time.Second)}}
+	// A gRPC call that completed before the stop; its pipeline ran behind.
+	tcs <- &models.TestCase{Name: "grpc-before", Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: stop.Add(-2 * time.Second)}, GrpcResp: models.GrpcResp{Timestamp: stop.Add(-time.Second)}}
+	// Taken only once the handler is done with the gRPC one.
+	tcs <- &models.TestCase{Name: "http-after-2", HTTPReq: models.HTTPReq{Timestamp: stop.Add(2 * time.Second)}, HTTPResp: models.HTTPResp{Timestamp: stop.Add(3 * time.Second)}}
+
+	if st := syncmgr.Get().BacklogBefore(stop); !st.Known || !st.Pending {
+		t.Fatalf("the agent said it held nothing from before the stop (%+v) while the gRPC test case that ended before it was held", st)
+	}
+}
+
 // Proxy mode has no watermark, so each test case is checked as it is streamed.
 // A mock left out for the incomplete-mock flag is reported when the parser
 // reaches it, which can be after the test cases recorded over its exchange
