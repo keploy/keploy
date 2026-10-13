@@ -256,6 +256,12 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if err := m.pushScopeTable(ctx, name); err != nil {
 		return err
 	}
+	if provenswitch.On() {
+		if err := m.pushTestBegins(ctx, name); err != nil {
+			utils.LogError(m.logger, err, "keploy cannot run the tests on the clocks they were recorded on", zap.String("mock-set", name))
+			return err
+		}
+	}
 	// Under the proven switch the deny list is the only gate: a run list
 	// (--run-only, or a wrapping build's ScopeGateSource) is not pushed.
 	var gate requestedGate
@@ -828,6 +834,47 @@ func poolSlices(mp *models.Mapping) map[string][]string {
 		pool[key] = append(pool[key], e.Name)
 	}
 	return pool
+}
+
+// pushTestBegins hands the agent when each test of the recording began
+// (mappings.yaml), so the agent moves the run's clock to a test's begin while
+// it is open, and back to the run's start time after it (design v14 §3.4). A
+// recording without per-test begins gives none, and its tests run at the
+// start time. A keploy that cannot read the recording's mappings refuses: its
+// tests would all run at the start time with no word.
+func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
+	pusher, ok := m.instrumentation.(TestBeginsPusher)
+	if !ok {
+		return errors.New("this keploy's agent client cannot move the clock per test")
+	}
+	reader, ok := m.mappingDB.(MappingReader)
+	if !ok {
+		return errors.New("this keploy cannot read when the recording's tests began (its mappings)")
+	}
+	mapping, err := reader.GetMapping(ctx, name)
+	if err != nil {
+		return fmt.Errorf("read when the tests of %s began: %w", name, err)
+	}
+	begins := testBegins(mapping)
+	if err := pusher.PushTestBegins(ctx, begins); err != nil {
+		return err
+	}
+	m.logger.Info("sent the agent when each test began in its recording", zap.Int("tests", len(begins)), zap.String("mock-set", name))
+	return nil
+}
+
+// testBegins is when each test of mapping began, by test ID.
+func testBegins(mapping *models.Mapping) map[string]time.Time {
+	begins := map[string]time.Time{}
+	if mapping == nil {
+		return begins
+	}
+	for _, tc := range mapping.TestCases {
+		if !tc.At.IsZero() {
+			begins[tc.ID] = tc.At
+		}
+	}
+	return begins
 }
 
 // replayWindows are the per-test windows of this replay. Under docker compose

@@ -355,6 +355,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		if in.Starts > 0 {
 			tc.Starts = in.Starts
 		}
+		if !in.At.IsZero() {
+			tc.At = in.At
+		}
 	}
 	if len(suites) > 0 {
 		mapping.Suites = suites

@@ -267,7 +267,9 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				"keploy could not arm the recorded calls of "+key+" made outside its tests: "+err.Error(), "check the agent's log")
 		}
 	}
-	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: models.InstanceRun}, nil
+	// The clock record the run's processes read: the integration exports it
+	// as KEPLOY_TIME_FILE to what it starts ("" when the run is not frozen).
+	return models.InstanceResp{V: models.ScopeProtocolVersion, Instance: models.InstanceRun, TimeFile: TimeFile()}, nil
 }
 
 // SetScopePool installs each key's pool slice for a replay (design v14 §5.2,

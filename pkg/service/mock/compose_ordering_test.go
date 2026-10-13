@@ -71,6 +71,10 @@ type composeInstr struct {
 	// reads failing is the normal case there, not an exotic one.
 	// pool is the pool slices the last proven table push sent.
 	pool map[string][]string
+	// begins is what the last push of the tests' recorded begins sent, and
+	// beginsErr what it fails with.
+	begins    map[string]time.Time
+	beginsErr error
 	// windows is what the agent answers the windows read with.
 	windows []models.ScopeWindow
 
@@ -215,6 +219,13 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 func (f *composeInstr) PushProvenTable(_ context.Context, _, pool map[string][]string) error {
 	f.pool = pool
 	return nil
+}
+
+// PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
+// fails with beginsErr.
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time) error {
+	f.begins = begins
+	return f.beginsErr
 }
 
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {

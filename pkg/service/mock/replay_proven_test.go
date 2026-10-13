@@ -409,6 +409,7 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2"}, "users": {"mock-3"}}, instr.pool)
+	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
 }
 
 // Under the switch the replay never arms the whole pool before its run: the

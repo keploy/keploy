@@ -229,3 +229,44 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 		t.Fatalf("a count that moved is said again: want a second line with %d, got %+v", calls+1, got)
 	}
 }
+
+// Under the proven switch, serveTreeListener tells OnProcess the owner of a
+// listener of the run's own tree a connection is addressed to.
+func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
+	recorded.reset()
+	defer recorded.reset()
+	prev := OnProcess
+	t.Cleanup(func() { OnProcess = prev })
+	t.Setenv("KEPLOY_PROVEN", "1")
+	seen := make(chan uint32, 4)
+	OnProcess = func(pid uint32) { seen <- pid }
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}()
+
+	p := selfCallProxy()
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		close(done)
+	}()
+	if pid := awaitEvent(t, seen, "OnProcess being told the listener's owner"); pid != uint32(os.Getpid()) {
+		t.Fatalf("OnProcess was told %d, want the listener's owner %d", pid, os.Getpid())
+	}
+	_ = cli.Close()
+	<-done
+}

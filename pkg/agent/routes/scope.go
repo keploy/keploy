@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -134,7 +135,12 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
 	if err := beginScope(r.Context(), a.svc, req); err != nil {
 		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		code := http.StatusInternalServerError
+		if errors.Is(err, agent.ErrOneTestAtATime) {
+			// release1-cut §2.1: 422 one_test_at_a_time.
+			code = http.StatusUnprocessableEntity
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	render.Status(r, http.StatusOK)
