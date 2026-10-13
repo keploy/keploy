@@ -1036,8 +1036,11 @@ func TestSanitizedMissKeepsTheVariablesPlaceNotItsValues(t *testing.T) {
 	// A body place keeps only that it is in the body: a JSON key can be a
 	// value the app sent.
 	b := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x", ClosestMock: "mock-3", MatchPhase: models.MatchPhaseVariable,
-		FieldDiffs: []models.MockFieldDiff{{Path: `body.users["alice@x.com"].id`, Kind: models.DiffKindTypeChanged, Expected: `"1"`, Actual: "1"}}})
-	if len(b.FieldDiffs) != 1 || b.FieldDiffs[0].Path != "body" || b.FieldDiffs[0].Kind != models.DiffKindTypeChanged || b.FieldDiffs[0].Expected != "" {
-		t.Fatalf("body place kept as %+v", b.FieldDiffs)
+		FieldDiffs: []models.MockFieldDiff{
+			{Path: `body.users["alice@x.com"].id`, Kind: models.DiffKindTypeChanged, Expected: `"1"`, Actual: "1"},
+			{Path: `body[0]["bob@x.com"]`, Kind: models.DiffKindVariable, Expected: "a", Actual: "b"},
+		}})
+	if len(b.FieldDiffs) != 2 || b.FieldDiffs[0].Path != "body" || b.FieldDiffs[0].Kind != models.DiffKindTypeChanged || b.FieldDiffs[0].Expected != "" || b.FieldDiffs[1].Path != "body" {
+		t.Fatalf("body places kept as %+v", b.FieldDiffs)
 	}
 }

@@ -28,14 +28,14 @@ func (s paramsSvc) UpdateMockParams(context.Context, models.MockFilterParams) er
 func (s paramsSvc) ResetVariables() { *s.events = append(*s.events, "reset") }
 
 // Under the proven switch every mock filter a client sends starts a test: the
-// variables bound so far are forgotten before the filter applies. With the
-// switch off nothing is forgotten.
+// variables bound so far are forgotten as the filter applies. With the
+// switch off nothing is forgotten. The scope begins once the new pool is in.
 func TestAMockFilterStartsATestsVariables(t *testing.T) {
 	for _, tc := range []struct {
 		proven string
 		want   string
 	}{
-		{"1", "reset filter"},
+		{"1", "filter reset"},
 		{"0", "filter"},
 	} {
 		t.Run("KEPLOY_PROVEN="+tc.proven, func(t *testing.T) {

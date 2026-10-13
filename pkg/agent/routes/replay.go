@@ -218,20 +218,21 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Under the proven switch every mock filter a client sends starts a test:
-	// keploy test sends one per test case, before the test case is sent, so
-	// a test case begins with no variable bound. The agent's own filters, as
-	// a test of keploy mock replay begins and ends, do not come through here
-	// (its scope is a root test: BeginScopeAt).
-	if provenswitch.On() {
-		if s, ok := a.svc.(interface{ ResetVariables() }); ok {
-			s.ResetVariables()
-		}
-	}
 	if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
+	}
+	// Under the proven switch every mock filter a client sends starts a test:
+	// keploy test sends one per test case, before the test case is sent, so
+	// a test case begins with no variable bound. The scope begins after the
+	// new pool is in, so a call checked against the previous pool binds
+	// nothing in it (variables.Table). The agent's own filters, as a test of
+	// keploy mock replay begins and ends, do not come through here.
+	if provenswitch.On() {
+		if s, ok := a.svc.(interface{ ResetVariables() }); ok {
+			s.ResetVariables()
+		}
 	}
 
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))

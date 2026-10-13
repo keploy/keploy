@@ -798,8 +798,8 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	ctx := context.Background()
 	x, y := liveReq("POST", "/orders", `{"id":"x"}`), liveReq("POST", "/orders", `{"id":"y"}`)
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
-	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, nil, nil, nil)
-	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, nil, nil, nil)
+	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, db.table.Gen(), nil, nil, nil)
 	hx, _ := h.pickHit(hitsX, db, true)
 	hy, _ := h.pickHit(hitsY, db, true)
 	if hx.mock != first || hy.mock != first {
@@ -828,7 +828,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ctx := context.Background()
 	pool, _ := splitVariableMocks(db.perTest)
-	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, db.table.Gen(), nil, nil, nil)
 	if len(hits) == 0 {
 		t.Fatal("the straggler should fit")
 	}
@@ -856,7 +856,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	}
 	pool, _ := splitVariableMocks(db.perTest)
 	read := liveReq("GET", "/orders/l1", "")
-	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, db.table.Gen(), nil, nil, nil)
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
@@ -937,5 +937,95 @@ func TestVariables_SwitchOffTheReportIsAsOnMain(t *testing.T) {
 	}
 	if !paths["body.id"] || !paths["body.item"] {
 		t.Fatalf("switch off: field diffs %+v", rep.FieldDiffs)
+	}
+}
+
+// A call made after its test's scope began is answered in it: the scope it is
+// checked in is the one it binds in.
+func TestVariables_ACallAfterTheScopeBeganIsAnswered(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	db.table.Reset() // a test began
+	// A safety net for a call that would be checked again forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ok, _, _, err := h.match(ctx, liveReq("POST", "/orders", `{"id":"l1","item":"pen"}`), db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+// swapDb begins the next test (its pool swapped in, then its scope begun) as
+// soon as a call has read the previous test's pool.
+type swapDb struct {
+	varDb
+	next    []*models.Mock
+	swapped bool
+}
+
+func (d *swapDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	pool, err := d.varDb.GetPerTestMocksInWindow()
+	if !d.swapped {
+		d.swapped = true
+		d.perTest = d.next
+		d.table.Reset()
+	}
+	return pool, err
+}
+
+// A call checked against the previous test's pool binds nothing in the test
+// that began meanwhile: it is checked again against the new pool.
+func TestVariables_ACallOfThePreviousPoolBindsNothingInTheNextTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &swapDb{}
+	db.perTest = createAndReadBack("ord-rec-1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ok, stub, _, err := h.match(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("the straggler: ok=%v stub=%v err=%v", ok, stub, err)
+	}
+	if got := db.table.Snapshot(); len(got) != 0 {
+		t.Fatalf("the straggler bound %+v in the next test", got)
+	}
+}
+
+// The field diffs of a call against a mock with variables leave out every
+// kind of variable place; a variable place that changed its JSON type is
+// named.
+func TestVariables_TheClosestMockDiffLeavesEveryVariablePlaceOut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders/o-rec?trace=t-rec", `{"id":"i-rec","n":"5","item":"pen"}`, 201, `{}`,
+		models.MockVariables{
+			"order": useV("o-rec", []string{"url.path[1]"}),
+			"trace": useV("t-rec", []string{"url.query.trace"}),
+			"ref":   useV("k-rec", []string{"header.X-Ref"}),
+			"id":    useV("i-rec", []string{"body.id"}),
+			"n":     useV("5", []string{"body.n"}),
+		}), 1)
+	m.Spec.HTTPReq.Header["X-Ref"] = "k-rec"
+	db := &varDb{perTest: []*models.Mock{m}}
+	req := makeReq("POST", "/orders/o-live")
+	req.URL.RawQuery = "trace=t-live"
+	req.Header = http.Header{"Content-Type": []string{"application/json"}, "X-Ref": []string{"k-live"}}
+	body := `{"id":"i-live","n":6,"item":"book"}`
+	rep := h.buildHTTPMismatchReport(req, []byte(body), db, nil, nil, nil, &matchDiag{phase: models.MatchPhaseBody, candidates: 1, schemaMatched: []*models.Mock{m}, pool: []*models.Mock{m}})
+	paths := map[string]bool{}
+	for _, d := range rep.FieldDiffs {
+		paths[d.Path] = true
+	}
+	for _, p := range []string{"path", "query.trace", "body.id"} {
+		if paths[p] {
+			t.Fatalf("the diff names variable place %s: %+v", p, rep.FieldDiffs)
+		}
+	}
+	if !paths["body.item"] || !paths["body.n"] {
+		t.Fatalf("the diff must name the changed field and the type change at a variable place: %+v", rep.FieldDiffs)
+	}
+	if !strings.Contains(rep.ReceivedReq, "o-live") || !strings.Contains(rep.ReceivedReq, "k-live") {
+		t.Fatalf("the received call is not rendered as received: %q", rep.ReceivedReq)
 	}
 }

@@ -87,9 +87,11 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		// keploy mock replay binds: each test begins with none bound. The
 		// integrations begin only top-level tests (a Go subtest runs inside
 		// its parent's scope, which it shares), and one test is open at a
-		// time in an agent, so the agent keeps one table.
+		// time in an agent, so the agent keeps one table. The scope begins
+		// once the test's pool is in (as this begin returns), so a call
+		// checked against the previous pool binds nothing in it.
 		if provenswitch.On() {
-			a.ResetVariables()
+			defer a.ResetVariables()
 		}
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]

@@ -90,6 +90,17 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, nil, ctx.Err()
 		}
 
+		// The variables' scope this attempt checks against is read before
+		// the pool: a test that begins after this read (its pool swapped in,
+		// then its scope begun) makes this attempt's binds stale, so a call
+		// checked against the previous test's mocks never binds in the next
+		// test (variables.Table.BindAll).
+		var varGen uint64
+		varTable := variableTable(mockDb)
+		if varTable != nil && provenswitch.On() {
+			varGen = varTable.Gen()
+		}
+
 		// Fetch HTTP mocks from BOTH pools:
 		//   - Per-test mocks (Lifetime=PerTest): test-specific app
 		//     HTTP calls, window-filtered at ingest, consumed on
@@ -150,8 +161,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if provenswitch.On() {
 			withVars, rest := splitVariableMocks(unfilteredMocks)
 			if len(withVars) > 0 {
-				table := variableTable(mockDb)
-				hits, problem, err := h.variablePass(ctx, input, withVars, table, headerNoise, userBodyNoise, urlNoise)
+				table := varTable
+				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
 				if err != nil {
 					return false, nil, nil, err
 				}

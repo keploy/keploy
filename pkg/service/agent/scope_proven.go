@@ -795,9 +795,6 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 		// A body place is kept as "body" alone, since a JSON key can be a
 		// value the app sent (a map keyed by an email). No value is kept.
 		for _, d := range m.FieldDiffs {
-			if d.Path == "" {
-				continue
-			}
 			path := d.Path
 			if strings.HasPrefix(path, "body.") || strings.HasPrefix(path, "body[") {
 				path = "body"

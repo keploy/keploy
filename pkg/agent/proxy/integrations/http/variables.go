@@ -364,12 +364,10 @@ type varHit struct {
 // variablePass returns the mocks of pool (in its order) that the live call
 // fits and whose variables hold, and otherwise the evidence of the first that
 // fits but whose variables do not hold, if any.
-func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
+//
+// gen is the variables' scope the caller read before it fetched pool.
+func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, gen uint64, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
 	live := liveView(input)
-	var gen uint64
-	if table != nil {
-		gen = table.Gen()
-	}
 	var hits []*varHit
 	var first *varProblem
 	for _, m := range pool {
@@ -869,7 +867,7 @@ func asRecordedForDiff(request *http.Request, liveBody []byte, m *models.Mock) (
 		for _, vp := range d.requestPlaces() {
 			r, okRec := rec.read(vp.place)
 			l, okLive := live.read(vp.place)
-			if !okRec || !okLive || l.body != r.body || l.kind != r.kind {
+			if !okRec || !okLive || l.kind != r.kind {
 				continue
 			}
 			if v, ok := live.putBack(vp.place, r); ok {
