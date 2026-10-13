@@ -263,12 +263,18 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	}
 	a.provenMu.Lock()
 	a.proven.claim = me
-	if prev != me || a.proven.key != key {
+	newClaim := prev != me || a.proven.key != key
+	if newClaim {
 		now := time.Now()
 		a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: key, Start: now, End: now})
 	}
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
+	if newClaim {
+		// The instance numbers its own containers outside its tests
+		// (containerkey).
+		containerkey.Default.BeginInstance()
+	}
 	if a.replaying() {
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {

@@ -499,6 +499,40 @@ func TestIndexGivesAReusedPortToItsNewContainer(t *testing.T) {
 	}
 }
 
+// A reused port goes to its new container when the two bindings overlap
+// without being the same address (a wildcard and a loopback binding, either
+// way round), and the old container's die never arrived: Docker gives no two
+// running containers overlapping bindings.
+func TestIndexGivesAReusedPortToItsNewContainerAcrossBindAddresses(t *testing.T) {
+	for _, tc := range []struct{ old, new string }{{"0.0.0.0", "127.0.0.1"}, {"127.0.0.1", "0.0.0.0"}} {
+		t.Run(tc.old+" then "+tc.new, func(t *testing.T) {
+			f := newFakeDocker()
+			f.set("a", running("postgres:16", "sha256:a", nil, nat.PortMap{"5432/tcp": published(tc.old, "49153")}))
+			r, applied := watching(t, f)
+			f.set("b", running("redis:7", "sha256:b", nil, nat.PortMap{"6379/tcp": published(tc.new, "49153")}))
+			f.msgs <- start("b")
+			<-applied
+			if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "b" {
+				t.Fatalf("the reused port = %+v, %v; want b's", c, ok)
+			}
+		})
+	}
+	// Bindings that do not overlap stay apart: an IPv6 wildcard leaves an
+	// IPv4 binding of the port alone.
+	f := newFakeDocker()
+	f.set("a", running("postgres:16", "sha256:a", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49153")}))
+	r, applied := watching(t, f)
+	f.set("b", running("redis:7", "sha256:b", nil, nat.PortMap{"6379/tcp": published("::", "49153")}))
+	f.msgs <- start("b")
+	<-applied
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "a" {
+		t.Fatalf("127.0.0.1 after an IPv6 binding of the port = %+v, %v; want a's", c, ok)
+	}
+	if c, ok := lookup(t, r, "[::1]:49153"); !ok || c.ID != "b" {
+		t.Fatalf("::1 = %+v, %v; want b's", c, ok)
+	}
+}
+
 // A failure holds for every lookup until the next Watch, which starts a fresh
 // watch; the failed one closes its client, and nothing it does afterwards
 // reaches the new one.

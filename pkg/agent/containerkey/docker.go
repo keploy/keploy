@@ -569,7 +569,7 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 		p := e.hostPort[i]
 		kept := st.published[p][:0:0]
 		for _, old := range st.published[p] {
-			if old.ip != b.ip {
+			if !overlap(old.ip, b.ip) {
 				kept = append(kept, old)
 			}
 		}
@@ -602,6 +602,14 @@ func (st *watchState) drop(id string) {
 	delete(st.ownIPs, id)
 	delete(st.ownPorts, id)
 	delete(st.images, id)
+}
+
+// overlap reports whether two bindings of one host port reach the same
+// address: the same address, or a wildcard and any address of its family.
+// Docker never gives two running containers overlapping bindings, so a
+// container that now holds one takes it from any container before it.
+func overlap(a, b netip.Addr) bool {
+	return a == b || ((a.IsUnspecified() || b.IsUnspecified()) && a.Is4() == b.Is4())
 }
 
 // boundTo is the addresses a published port's HostIP binds: "" binds all

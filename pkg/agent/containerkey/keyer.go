@@ -37,11 +37,14 @@ type resolver interface {
 // connection's key.
 //
 // A key's number counts the image's containers by their first connection
-// within the scope (design §3.1; one test worker per run, so the scope is the
-// open test, or the run outside tests). A test scope starts from the numbers
-// the run gave before the test began, so a container the suite set up keeps
-// its number inside every test, and one the test starts itself is numbered
-// after it: the same in a run of that one test as in a run of all of them.
+// within the scope (design §3.1): the open test, or, outside tests, the
+// instance, which is the test process that claimed the run (one at a time in
+// this release). Each instance starts from the numbers given before the run's
+// first claim, so a test process numbers the same whether the processes
+// before it ran or not. A test scope starts from the numbers its instance
+// gave before the test began, so a container the suite set up keeps its
+// number inside every test, and one the test starts itself is numbered after
+// it: the same in a run of that one test as in a run of all of them.
 //
 // A connection is named once, when the proxy accepts it, from the index, in
 // the scope open then; the key holds for the connection's life and goes when
@@ -52,9 +55,11 @@ type Keyer struct {
 	mu sync.Mutex
 	// res is nil where keploy cannot read Docker at all (Disable).
 	res resolver
-	// run numbers the run's containers outside tests; test, while a test is
-	// open, numbers that test's.
-	run, test *numbering
+	// run numbers the containers outside tests: the instance's, or the
+	// run's before its first claim; test, while a test is open, numbers that
+	// test's. unclaimed is the run's numbers at its first claim, which each
+	// instance starts from; nil before it.
+	run, test, unclaimed *numbering
 	// conns holds each open container connection's key, by the connection ID
 	// its mocks carry.
 	conns map[string]string
@@ -107,7 +112,19 @@ func (k *Keyer) Bind(ctx context.Context) {
 func (k *Keyer) Reset() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.run, k.test, k.conns, k.warned = newNumbering(), nil, map[string]string{}, false
+	k.run, k.test, k.unclaimed, k.conns, k.warned = newNumbering(), nil, nil, map[string]string{}, false
+}
+
+// BeginInstance starts a test process's numbering outside its tests, when it
+// claims the run: from the numbers the run gave before its first claim, not
+// from what the processes before it numbered.
+func (k *Keyer) BeginInstance() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.unclaimed == nil {
+		k.unclaimed = k.run.clone()
+	}
+	k.run, k.test = k.unclaimed.clone(), nil
 }
 
 // BeginTest opens a test's scope; a scope already open is replaced, since a

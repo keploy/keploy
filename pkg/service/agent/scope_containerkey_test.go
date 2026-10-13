@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -69,23 +68,45 @@ func TestTheWiresOpenTestNumbersItsOwnContainers(t *testing.T) {
 	require.Equal(t, k+"4", key(40005), "the refused begin numbered 40004 in a test of its own")
 }
 
-// A test whose process went away is closed by keploy (failOpen), and so is
-// its numbering.
+// A test keploy closes itself, failing it because it was still open at the
+// run's final read (failOpen), closes its numbering too.
 func TestATestKeployFailsClosesItsNumbering(t *testing.T) {
+	key := useTestKeyer(t)
+	a, _ := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	proc := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "k"}, proc.Process.Pid)
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestLingering"))
+	require.Nil(t, serr)
+	require.Equal(t, "container:postgres:16:5432#1", key(40001), "TestLingering's own container")
+	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "k::TestLingering").Outcome)
+	require.Equal(t, "container:postgres:16:5432#1", key(40002), "the numbering of the test keploy failed stayed open")
+}
+
+// Outside tests each test process (instance) numbers its own containers,
+// from the run's numbers before the first claim: what an earlier test
+// process numbered does not shift a later one's, so a package's tests number
+// the same in a run of every package and in a run of that one.
+func TestEachTestProcessNumbersFromTheRunsStart(t *testing.T) {
 	key := useTestKeyer(t)
 	a, _ := wireAgent(models.MODE_RECORD)
 	ctx := context.Background()
-	gone := child(t)
-	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "g"}, gone.Process.Pid)
+	const k = "container:postgres:16:5432#"
+	require.Equal(t, k+"1", key(40001), "a container of the run's, before any test process")
+
+	first := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, first.Process.Pid)
 	require.Nil(t, serr)
-	_, serr = a.ProvenBegin(ctx, begin("TestCrash"))
+	require.Equal(t, k+"2", key(40002), "the first test process's container")
+	kill(t, first)
+
+	claimSelf(t, a)
+	require.Equal(t, k+"2", key(40003), "the next test process numbered after the first one's container, or not after the run's")
+	require.Equal(t, k+"1", key(40001), "the run's container keeps its number")
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)
-	require.Equal(t, "container:postgres:16:5432#1", key(40001), "TestCrash's own container")
-	kill(t, gone)
-	_, serr = a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, os.Getpid())
-	require.Nil(t, serr)
-	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "g::TestCrash").Outcome)
-	require.Equal(t, "container:postgres:16:5432#1", key(40002), "the numbering of the test keploy failed stayed open")
+	require.Equal(t, k+"3", key(40004), "a test numbers after its own process's containers")
 }
 
 // A test the replay skips opens no numbering of its own: what is reached

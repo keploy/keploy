@@ -3,10 +3,8 @@ package routes
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +12,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -448,93 +445,5 @@ func TestScopeTableCarriesThePoolSlices(t *testing.T) {
 	svc = &poolSvc{}
 	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
 		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)
-	}
-}
-
-// oneContainer resolves every destination to one postgres container per
-// destination port.
-type oneContainer struct{}
-
-func (oneContainer) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
-	return containerkey.Container{ID: fmt.Sprint(dst.Port()), Image: "postgres:16", Port: 5432}, true, nil
-}
-
-func (oneContainer) Bind(context.Context)               {}
-func (oneContainer) Watch(context.Context, *zap.Logger) {}
-func (oneContainer) Endpoint() string                   { return "unix:///fake.sock" }
-
-func useKeyer(t *testing.T) *containerkey.Keyer {
-	t.Helper()
-	saved := containerkey.Default
-	containerkey.Default = containerkey.NewKeyer(oneContainer{})
-	t.Cleanup(func() { containerkey.Default = saved })
-	return containerkey.Default
-}
-
-func keyOf(t *testing.T, k *containerkey.Keyer, dst string) string {
-	t.Helper()
-	_, key, _ := k.Name(zap.NewNop(), "", dst)
-	return key
-}
-
-// Under the proven switch a test's begin opens its own numbering of
-// container destinations, and its end goes back to the run's: the suite's
-// container keeps #1 and each test's own container is #2.
-func TestScopeHandlersOpenAndCloseTheContainerNumbering(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "1")
-	k := useKeyer(t)
-	a := &Agent{logger: zap.NewNop(), svc: &timedScopeSvc{}}
-
-	if got := keyOf(t, k, "127.0.0.1:40001"); got != "container:postgres:16:5432#1" {
-		t.Fatalf("suite container = %q", got)
-	}
-	for _, test := range []struct{ name, dst string }{{"TestA", "127.0.0.1:40002"}, {"TestB", "127.0.0.1:40003"}} {
-		post(t, a.HandleScopeBegin, `{"name":"`+test.name+`"}`)
-		if got := keyOf(t, k, test.dst); got != "container:postgres:16:5432#2" {
-			t.Fatalf("%s's own container = %q", test.name, got)
-		}
-		post(t, a.HandleScopeEnd, `{"name":"`+test.name+`","outcome":"passed"}`)
-	}
-	// The run numbers on from its own: the tests' containers are not its.
-	if got := keyOf(t, k, "127.0.0.1:40004"); got != "container:postgres:16:5432#2" {
-		t.Fatalf("outside tests after them = %q, want the run's next number", got)
-	}
-}
-
-// numberedInTheRun reports whether a container first connected between the
-// begin and end given (a suite scope, or any scope without the switch) was
-// numbered by the run. A test begun next starts from the run's numbers, so its
-// own container is then #3; had the scope been a test's (left open or not),
-// the run would not know that container, and it would be #2.
-func numberedInTheRun(t *testing.T, begin, end string) bool {
-	t.Helper()
-	k := useKeyer(t)
-	a := &Agent{logger: zap.NewNop(), svc: &timedScopeSvc{}}
-	_ = keyOf(t, k, "127.0.0.1:40001")
-	post(t, a.HandleScopeBegin, begin)
-	_ = keyOf(t, k, "127.0.0.1:40002")
-	post(t, a.HandleScopeEnd, end)
-	post(t, a.HandleScopeBegin, `{"name":"TestNext"}`)
-	got := keyOf(t, k, "127.0.0.1:40003")
-	post(t, a.HandleScopeEnd, `{"name":"TestNext","outcome":"passed"}`)
-	return got == "container:postgres:16:5432#3"
-}
-
-// An app start (a suite scope) is not a test.
-func TestScopeHandlersOpenNoTestNumberingForASuite(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "1")
-	if !numberedInTheRun(t, `{"name":"app","suite":true}`, `{"name":"app","suite":true}`) {
-		t.Fatal("a suite begin opened a test's numbering")
-	}
-	// The same calls without "suite" do open one.
-	if numberedInTheRun(t, `{"name":"TestA"}`, `{"name":"TestA","outcome":"passed"}`) {
-		t.Fatal("a test begin did not open a test's numbering")
-	}
-}
-
-func TestScopeHandlersLeaveContainerNumberingAloneWithoutTheSwitch(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "")
-	if !numberedInTheRun(t, `{"name":"TestA"}`, `{"name":"TestA","outcome":"passed"}`) {
-		t.Fatal("with the switch off a test begin opened a test's numbering")
 	}
 }
