@@ -11,8 +11,7 @@ package http
 // restart. The CLI killed a running agent three ways: SIGKILL 8 s after a
 // SIGTERM (StopCommand, now removed), `docker stop`'s SIGKILL 10 s after its
 // SIGTERM, and a hang-up from closing the agent's terminal at once on stop.
-// Each landed wherever the agent's shutdown happened to be. Only a docker
-// agent that never answered is still ended as before (agentRun).
+// Each landed wherever the agent's shutdown happened to be (agentRun).
 
 import (
 	"context"
@@ -157,6 +156,10 @@ func TestStopAgentNeverHangsUpTheAgentsTerminal(t *testing.T) {
 // asked, its leader gets SIGTERM and is waited for, and nothing kills it --
 // answered or not.
 func TestStopNativeAgentSignalsAndWaits(t *testing.T) {
+	// A refused stop request from an agent that answered is one going away,
+	// given the grace before its signal; the grace is not what this tests.
+	defer func(g time.Duration) { agentStoppingGrace = g }(agentStoppingGrace)
+	agentStoppingGrace = time.Millisecond
 	for _, ready := range []bool{true, false} {
 		dir := t.TempDir()
 		readyFile, got := filepath.Join(dir, "ready"), filepath.Join(dir, "got-term")
@@ -213,8 +216,9 @@ func TestStopPTYAgentRestoresTheTerminalAndSignals(t *testing.T) {
 	}
 }
 
-// dockerAgentCancel, the `docker run` command's Cancel: the container is
-// stopped by the run's readiness, and then the client is killed.
+// dockerAgentCancel, the `docker run` command's Cancel: the container is sent
+// SIGTERM and waited for, answered or not, never `stop`, and then the client
+// is killed.
 func TestDockerAgentCancel(t *testing.T) {
 	for _, ready := range []bool{true, false} {
 		log, release := fakeEngine(t)
@@ -233,14 +237,77 @@ func TestDockerAgentCancel(t *testing.T) {
 		if err := client.Wait(); err == nil {
 			t.Fatalf("ready=%v: the docker client was not killed", ready)
 		}
-		want := "stop " + stopTestContainer
-		if ready {
-			want = "kill --signal SIGTERM " + stopTestContainer + "|wait " + stopTestContainer
-		}
-		if got := strings.Join(engineCalls(t, log), " "); got != want {
-			t.Fatalf("ready=%v: engine calls %q, want %q", ready, got, want)
+		requireSignalledAndWaited(t, engineLines(t, log))
+	}
+}
+
+// requireSignalledAndWaited fails the test unless the engine calls are a
+// SIGTERM to the container first, a wait for it, and nothing else but more of
+// the same SIGTERM: never `stop`, whose grace period ends in a SIGKILL.
+func requireSignalledAndWaited(t *testing.T, calls []string) {
+	t.Helper()
+	kill, wait := "kill --signal SIGTERM "+stopTestContainer, "wait "+stopTestContainer
+	if len(calls) == 0 || calls[0] != kill {
+		t.Fatalf("engine calls %q do not start with %q", calls, kill)
+	}
+	waited := false
+	for _, c := range calls {
+		switch c {
+		case kill:
+		case wait:
+			waited = true
+		default:
+			t.Fatalf("engine calls %q include %q", calls, c)
 		}
 	}
+	if !waited {
+		t.Fatalf("engine calls %q never wait for the container", calls)
+	}
+}
+
+// engineLines returns the engine invocations fakeEngine logged, one per call.
+func engineLines(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var calls []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if l != "" {
+			calls = append(calls, l)
+		}
+	}
+	return calls
+}
+
+// awaitEngineWait returns once the stop under test is waiting for the
+// container (the fake engine has logged the `wait`), and fails the test if the
+// stop returned first, or never gets there.
+func awaitEngineWait(t *testing.T, log string, returned <-chan struct{}) {
+	t.Helper()
+	hung := time.After(hangBound)
+	for count(engineLines(t, log), "wait "+stopTestContainer) == 0 {
+		if returnsWithin(returned, 5*time.Millisecond) {
+			t.Fatalf("the stop returned without waiting for the container; calls: %q", engineLines(t, log))
+		}
+		select {
+		case <-hung:
+			t.Fatalf("the stop never waited for the container; calls: %q", engineLines(t, log))
+		default:
+		}
+	}
+}
+
+// count returns how many of calls are call.
+func count(calls []string, call string) int {
+	n := 0
+	for _, c := range calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
 }
 
 // stopTestContainer is a container name no engine on this host has: should the
@@ -284,14 +351,9 @@ func engineCalls(t *testing.T, log string) []string {
 func TestStopAgentContainerSignalsAndWaitsWithoutStop(t *testing.T) {
 	log, release := fakeEngine(t)
 	returned := make(chan struct{})
-	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer); close(returned) }()
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
 
-	// The wait is running once it has logged itself.
-	for !strings.Contains(strings.Join(engineCalls(t, log), " "), "wait") {
-		if returnsWithin(returned, 20*time.Millisecond) {
-			t.Fatalf("stopAgentContainer returned without waiting; calls: %v", engineCalls(t, log))
-		}
-	}
+	awaitEngineWait(t, log, returned)
 	if returnsWithin(returned, 200*time.Millisecond) {
 		t.Fatal("stopAgentContainer returned while the container was still running")
 	}
@@ -305,14 +367,49 @@ func TestStopAgentContainerSignalsAndWaitsWithoutStop(t *testing.T) {
 	}
 }
 
-// An agent that never answered is stopped with `stop`, as always: its PID 1
-// may not handle SIGTERM yet.
-func TestStopUnansweredAgentContainerUsesStop(t *testing.T) {
-	log, _ := fakeEngine(t)
-	stopUnansweredAgentContainer(zap.NewNop(), stopTestContainer)
-	if got := strings.Join(engineCalls(t, log), " "); got != "stop "+stopTestContainer {
-		t.Fatalf("engine calls %q, want %q", got, "stop "+stopTestContainer)
+// An agent that never answered is sent SIGTERM again while it is waited for:
+// its PID 1 may still have been the OSS image's entrypoint, which drops the
+// first. It is never sent `stop`. An agent that answered is past the
+// entrypoint, and is sent SIGTERM once.
+func TestAnUnansweredAgentContainerIsSignalledAgainWhileWaited(t *testing.T) {
+	defer func(f, m time.Duration) { sigtermResendFirst, sigtermResendMax = f, m }(sigtermResendFirst, sigtermResendMax)
+	sigtermResendFirst, sigtermResendMax = time.Millisecond, 2*time.Millisecond
+	kill := "kill --signal SIGTERM " + stopTestContainer
+
+	log, release := fakeEngine(t)
+	returned := make(chan struct{})
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, true); close(returned) }()
+	hung := time.After(hangBound)
+	for count(engineLines(t, log), kill) < 3 {
+		if returnsWithin(returned, 5*time.Millisecond) {
+			t.Fatalf("stopAgentContainer returned while the container was running; calls: %q", engineLines(t, log))
+		}
+		select {
+		case <-hung:
+			t.Fatalf("an unanswered agent's container was not signalled again while waited for; calls: %q", engineLines(t, log))
+		default:
+		}
 	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainer", func() { <-returned })
+	requireSignalledAndWaited(t, engineLines(t, log))
+
+	log, release = fakeEngine(t)
+	returned = make(chan struct{})
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+	awaitEngineWait(t, log, returned)
+	// Only that it has NOT been signalled again: under load, too short a
+	// look can only miss a wrong resend, never fail a right stop.
+	_ = returnsWithin(returned, 100*time.Millisecond)
+	if n := count(engineLines(t, log), kill); n != 1 {
+		t.Fatalf("an agent that answered was sent SIGTERM %d times, want once", n)
+	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainer", func() { <-returned })
 }
 
 // The user's second interrupt ends terminateAgent's wait, not the agent: it
@@ -339,24 +436,18 @@ func TestTerminateAgentStopsWaitingOnASecondInterrupt(t *testing.T) {
 	}
 }
 
-// The docker stop is chosen by the run: kill + wait for a running agent,
-// `stop` for one that never answered.
-func TestStopAgentContainerForChoosesByReadiness(t *testing.T) {
-	log, _ := fakeEngine(t)
-	stopAgentContainerFor(zap.NewNop(), newAgentRun(), stopTestContainer)
-	if got := strings.Join(engineCalls(t, log), " "); got != "stop "+stopTestContainer {
-		t.Fatalf("unanswered agent: engine calls %q, want %q", got, "stop "+stopTestContainer)
-	}
-
-	log, release := fakeEngine(t)
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ready := newAgentRun()
-	ready.ready.Store(true)
-	stopAgentContainerFor(zap.NewNop(), ready, stopTestContainer)
-	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer; got != want {
-		t.Fatalf("running agent: engine calls %q, want %q", got, want)
+// The docker stop signals and waits for the container whether or not its
+// agent answered: the agent attaches its uprobes before it answers.
+func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
+	for _, ready := range []bool{true, false} {
+		log, release := fakeEngine(t)
+		if err := os.WriteFile(release, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run := newAgentRun()
+		run.ready.Store(ready)
+		within(t, "stopAgentContainerFor", func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer) })
+		requireSignalledAndWaited(t, engineLines(t, log))
 	}
 }
 
@@ -370,11 +461,7 @@ func TestStopAgentContainerStopsWaitingOnASecondInterrupt(t *testing.T) {
 	ready.ready.Store(true)
 	returned := make(chan struct{})
 	go func() { stopAgentContainerFor(zap.NewNop(), ready, stopTestContainer); close(returned) }()
-	for !strings.Contains(strings.Join(engineCalls(t, log), " "), "wait") {
-		if returnsWithin(returned, 20*time.Millisecond) {
-			t.Fatalf("stopAgentContainerFor returned without waiting; calls: %v", engineCalls(t, log))
-		}
-	}
+	awaitEngineWait(t, log, returned)
 	utils.MarkInterruptedAgain()
 	<-returned
 	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer; got != want {
@@ -435,8 +522,8 @@ func TestAwaitPreviousAgent(t *testing.T) {
 }
 
 // A second interrupt already given before the docker stop begins ends only the
-// waiting: the container is still sent its signal (`kill`, or `stop`), before
-// the call returns -- or it would run on with its hooks and the app's ports.
+// waiting: the container is still sent its SIGTERM before the call returns --
+// or it would run on with its hooks and the app's ports.
 func TestStopAgentContainerForSignalsEvenAfterASecondInterrupt(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -449,13 +536,10 @@ func TestStopAgentContainerForSignalsEvenAfterASecondInterrupt(t *testing.T) {
 		run := newAgentRun()
 		run.ready.Store(ready)
 		within(t, "stopAgentContainerFor", func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer) })
-		want := "stop " + stopTestContainer
-		if ready {
-			want = "kill --signal SIGTERM " + stopTestContainer
-		}
+		want := "kill --signal SIGTERM " + stopTestContainer
 		// Sent synchronously: it has gone out when the call returns, so it
 		// has before keploy can exit.
-		if got := strings.Join(engineCalls(t, log), " "); !strings.Contains(got, want) {
+		if got := engineLines(t, log); count(got, want) == 0 {
 			t.Fatalf("ready=%v: engine calls %q, want %q sent before the call returned", ready, got, want)
 		}
 	}

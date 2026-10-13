@@ -108,18 +108,20 @@ type AgentClient struct {
 // uprobes included, and the kernel abandons a uprobe removal whose thread is
 // killed part way ("failed to unregister, leaking uprobe"), leaving the
 // breakpoint in every process that maps the probed library. So the CLI stops
-// a native agent by asking it, or by SIGTERM, and waits for it (gone) --
-// never a kill on a timer, never a hang-up by closing its terminal (endAgent).
-// That holds before the agent answers too: it attaches its uprobes first.
+// an agent by asking it, or by SIGTERM, and waits for it (gone) -- never a
+// kill on a timer, never a hang-up by closing its terminal (endAgent,
+// stopAgentContainerFor). That holds before the agent answers too: it
+// attaches its uprobes first.
 //
 // ready is set once the agent answered its readiness check (waitForAgent), so
 // its HTTP server was up. It decides two things. A native agent whose stop
 // request then fails as if it were going away is waited for before it is
 // signalled (endAgent); before it answered, the same failure says only that it
-// is not listening yet. And an unanswered agent's container gets `stop`, as
-// always: its PID 1 may still be the entrypoint, which drops a SIGTERM
-// (stopAgentContainerFor). One run per start (startAgent): the stop of an
-// earlier start, which a setup retry waits for, reads its own.
+// is not listening yet. And an unanswered agent's container is sent SIGTERM
+// again while it is waited for: its PID 1 may still have been the OSS image's
+// entrypoint, which drops a SIGTERM (resendSIGTERM). One run per start
+// (startAgent): the stop of an earlier start, which a setup retry waits for,
+// reads its own.
 type agentRun struct {
 	ready    atomic.Bool
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
@@ -1556,21 +1558,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	// Buffered: the exit is reported whether or not anyone is still waiting.
 	exited := make(chan error, 1)
 
-	// One agent at a time: a retried start (RetryAgentSetup) waits for the
-	// agent it replaces to finish its shutdown, which is waited for, not
-	// killed (agentRun) -- it would otherwise run beside the new one, its
-	// hooks still attached for the same client.
-	if err := a.awaitPreviousAgent(ctx); err != nil {
+	agentCtx, cancel, run, err := a.beginRun(ctx)
+	if err != nil {
 		return nil, err
 	}
-
-	// Create a context for the agent that can be cancelled independently
-	agentCtx, cancel := context.WithCancel(ctx)
-	run := newAgentRun()
-	a.mu.Lock()
-	a.agentCancel = cancel
-	a.run = run
-	a.mu.Unlock()
 	if a.conf.Record.Synchronous {
 		opts.Synchronous = true
 	}
@@ -2026,9 +2017,10 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // its readiness check yet: an agent attaches its TLS uprobes before it answers
 // (the proxy's AfterStart), so one that has not answered may already be
 // removing them on that signal. An agent that answered and is already going
-// away (agentGoingAway) is first given agentStoppingGrace to exit, which the
-// user's second interrupt ends at once. An agent already reaped is left alone:
-// its pid may be another process's by now.
+// away (agentGoingAway) is first given agentStoppingGrace to exit; the user's
+// second interrupt ends that wait, and the agent, already on its way out, is
+// not signalled then. An agent already reaped is left alone: its pid may be
+// another process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error) {
 	err := ask()
 	if err == nil {
@@ -2048,6 +2040,9 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 			a.logger.Warn("the keploy agent was stopping but has not exited; sending it a stop signal",
 				zap.Duration("waited", agentStoppingGrace))
 		case <-utils.InterruptedAgain():
+			a.logger.Warn("Stopped waiting for the keploy agent; it is still shutting down on its own",
+				zap.Int("pid", pid))
+			return
 		}
 	} else {
 		a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
@@ -2058,6 +2053,25 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	a.terminateAgent(terminate, run, pid)
 }
 
+// beginRun begins a start of the agent: one agent at a time, so a retried
+// start (RetryAgentSetup) first waits for the agent it replaces to finish its
+// shutdown, which is waited for, not killed (agentRun) -- it would otherwise
+// run beside the new one, its hooks still attached for the same client. The
+// new start gets a run of its own, not ready until its agent answers, and a
+// context the CLI's stop cancels independently of ctx's other users.
+func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.CancelFunc, *agentRun, error) {
+	if err := a.awaitPreviousAgent(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	agentCtx, cancel := context.WithCancel(ctx)
+	run := newAgentRun()
+	a.mu.Lock()
+	a.agentCancel = cancel
+	a.run = run
+	a.mu.Unlock()
+	return agentCtx, cancel, run, nil
+}
+
 // awaitPreviousAgent returns once the agent of the previous start, if any, has
 // exited -- or with an error when ctx ends or the user interrupts again first.
 func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
@@ -2065,7 +2079,7 @@ func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 	if prev == nil || prev.isGone() {
 		return nil
 	}
-	a.logger.Info("Waiting for the previous keploy agent to exit before starting a new one (a second Ctrl+C stops waiting)")
+	a.logger.Info("Waiting for the previous keploy agent to exit before starting a new one (Ctrl+C stops waiting)")
 	select {
 	case <-prev.gone:
 		return nil
@@ -2855,21 +2869,16 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 	}
 }
 
-// stopAgentContainerFor stops the agent's container on the CLI's stop: a
-// running agent's is signalled and waited for (stopAgentContainer), and that
-// of an agent that never answered is stopped as it always was
-// (stopUnansweredAgentContainer; agentRun says why). The signal (`kill`, or
-// `stop`) is sent synchronously, as `stop` always was, so it has gone out
-// before keploy can exit; the user's second interrupt ends only the wait for
-// the container's exit.
+// stopAgentContainerFor stops the agent's container on the CLI's stop: it is
+// sent SIGTERM and waited for (stopAgentContainer), answered or not -- the
+// agent attaches its TLS uprobes before it answers (agentRun). The signal is
+// sent synchronously, as `stop` always was, so it has gone out before keploy
+// can exit; the user's second interrupt ends only the wait for the
+// container's exit. An agent that never answered is sent SIGTERM again while
+// it is waited for (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
-	if run.ready.Load() {
-		logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
-		stopAgentContainer(logger, name)
-		return
-	}
-	logger.Debug("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
-	stopUnansweredAgentContainer(logger, name)
+	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
+	stopAgentContainer(logger, name, !run.ready.Load())
 }
 
 // agentContainerCommand runs the container engine's CLI with args under ctx: as
@@ -2896,14 +2905,15 @@ func agentContainerCommand(ctx context.Context, logger *zap.Logger, args ...stri
 	return out, err
 }
 
-// stopAgentContainer stops a running agent's container and returns once it has
+// stopAgentContainer stops an agent's container and returns once it has
 // exited, or once the user interrupts again: it sends the agent SIGTERM
 // (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
 // (`wait`), however long its shutdown takes. Not `stop`, whose grace period
 // (10 s by default) ends in a SIGKILL (agentRun says why that must not land in
-// a running agent's shutdown); a loaded host takes longer than 10 s to shut an
-// agent down, and that is when the kill landed.
-func stopAgentContainer(logger *zap.Logger, name string) {
+// an agent's shutdown); a loaded host takes longer than 10 s to shut an agent
+// down, and that is when the kill landed. unanswered (the agent never answered
+// its readiness check) has SIGTERM sent again while it waits (resendSIGTERM).
+func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 	if out, err := agentContainerCommand(context.Background(), logger, "kill", "--signal", "SIGTERM", name); err != nil {
 		logger.Debug("Could not signal the agent container. It may have already stopped.",
 			zap.String("container", name), zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
@@ -2925,23 +2935,58 @@ func stopAgentContainer(logger *zap.Logger, name string) {
 		case <-waitCtx.Done():
 		}
 	}()
+	resent := make(chan struct{})
+	if unanswered {
+		// Joined before the stop returns: no resend outlives it.
+		first, most := sigtermResendFirst, sigtermResendMax
+		go func() {
+			defer close(resent)
+			resendSIGTERM(waitCtx, logger, name, first, most)
+		}()
+	} else {
+		close(resent)
+	}
 	if out, err := agentContainerCommand(waitCtx, logger, "wait", name); err != nil {
 		logger.Debug("stopped waiting for the agent container", zap.String("container", name),
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 	}
+	stopWaiting()
+	<-resent
 }
 
-// stopUnansweredAgentContainer stops the container of an agent that never
-// answered with `stop`, as keploy always has: its PID 1 may not be past the
-// OSS image's entrypoint yet (sh, then sudo before it handles signals), which
-// drops a SIGTERM, so only the kill after the grace period is sure to end it.
-func stopUnansweredAgentContainer(logger *zap.Logger, name string) {
-	if out, err := agentContainerCommand(context.Background(), logger, "stop", name); err != nil {
-		logger.Debug("Could not stop the docker container. It may have already stopped.",
-			zap.String("container", name), zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
-		return
+// sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits
+// before its first resend; each wait after it is twice the one before, up to
+// sigtermResendMax.
+var (
+	sigtermResendFirst = time.Second
+	sigtermResendMax   = 30 * time.Second
+)
+
+// resendSIGTERM sends the agent's container SIGTERM again, first after
+// first and then at intervals doubling up to most, until ctx ends: the
+// container has exited, or the user stopped waiting. An agent that never answered may have been signalled while its
+// PID 1 was still the OSS image's entrypoint (sh, then sudo before it handles
+// signals), and a pid namespace's init is sent only the signals it handles:
+// that SIGTERM was dropped. An agent that got an earlier one only logs the
+// next. The intervals space the resends out; nothing is decided by them.
+func resendSIGTERM(ctx context.Context, logger *zap.Logger, name string, first, most time.Duration) {
+	every := first
+	for {
+		next := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			next.Stop()
+			return
+		case <-next.C:
+		}
+		if out, err := agentContainerCommand(ctx, logger, "kill", "--signal", "SIGTERM", name); err != nil && ctx.Err() == nil {
+			logger.Debug("could not signal the agent container again", zap.String("container", name),
+				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		}
+		if every *= 2; every > most {
+			every = most
+		}
 	}
-	logger.Debug("Successfully sent stop command to the container.", zap.String("container", name))
 }
 
 // startInDockerWithPTY starts the docker agent with PTY support for interactive input (e.g., sudo password)
