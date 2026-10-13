@@ -45,10 +45,12 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 	if !ok {
 		takes, older, err := a.agentTakesContainers(ctx, uri)
 		if err != nil {
-			// The session request that follows meets the same agent and
-			// says what is wrong with it.
-			a.logger.Debug("could not ask keploy's agent whether it takes a container list", zap.Error(err))
-			return // asked again at the next session start
+			// Asked again at the next session start. Until then a
+			// docker-mode agent names container destinations by their
+			// address, which is said, not left to Debug.
+			a.logger.Warn("keploy could not ask its agent whether it takes the list of the Docker daemon's containers: a docker-mode agent names container destinations by their address until it is given one",
+				zap.Error(err), zap.String("next_step", "check that keploy's agent is up; the next session start asks again"))
+			return
 		}
 		if !takes {
 			containerPushers.Store(uri, noPusher)

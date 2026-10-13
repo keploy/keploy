@@ -624,6 +624,14 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	return true
 }
 
+// setChanged makes changed the signal notify tells: the keploy CLI's pusher
+// gives each session a signal of its own.
+func (r *dockerIndex) setChanged(changed chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.changed = changed
+}
+
 // notify counts a change and tells changed, if set, without waiting; r.mu
 // is held.
 func (r *dockerIndex) notify() {

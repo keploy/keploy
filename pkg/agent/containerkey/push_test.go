@@ -48,6 +48,35 @@ func TestAPushedSnapshotNamesAsTheIndexDoes(t *testing.T) {
 	}
 }
 
+// A container that took an IP whose old holder's die never arrived holds it
+// alone in the list, as it does in the CLI's index: the old container's own
+// record of its IPs still has it, and the agent must not be given both.
+func TestASnapshotGivesAReusedIPToItsNewContainer(t *testing.T) {
+	f := newFakeDocker()
+	f.set("pg", running("postgres:16", "sha256:p", []string{"172.18.0.2"}, nat.PortMap{}))
+	r, applied := watching(t, f)
+	f.set("redis", running("redis:7", "sha256:r", []string{"172.18.0.2"}, nat.PortMap{}))
+	f.msgs <- start("redis")
+	<-applied
+	s, _, ok := r.snapshot("")
+	if !ok {
+		t.Fatal("no snapshot")
+	}
+	for _, c := range s.Containers {
+		switch {
+		case c.ID == "pg" && len(c.IPs) != 0:
+			t.Fatalf("the list gives the dead holder %v", c.IPs)
+		case c.ID == "redis" && (len(c.IPs) != 1 || c.IPs[0] != "172.18.0.2"):
+			t.Fatalf("the list gives the new holder %v", c.IPs)
+		}
+	}
+	p := newPushedIndex()
+	p.apply(s)
+	if got, ok, err := p.Lookup(netip.MustParseAddrPort("172.18.0.2:6379")); err != nil || !ok || got.ID != "redis" {
+		t.Fatalf("pushed Lookup = %+v, %v, %v; want redis", got, ok, err)
+	}
+}
+
 // keploy's own agent container is left out of the list: its keys would
 // change with every keploy release.
 func TestASnapshotLeavesOutKeploysAgentContainer(t *testing.T) {
@@ -124,8 +153,10 @@ func TestASnapshotCarriesTheCLIsFailure(t *testing.T) {
 func TestAPushedIndexKeepsTheNewestList(t *testing.T) {
 	p := newPushedIndex()
 	p.Watch(t.Context(), nil) // returns at once
-	if _, ok, err := p.Lookup(netip.MustParseAddrPort("172.17.0.2:5432")); ok || err != nil {
-		t.Fatalf("before any list = %v, %v", ok, err)
+	// Before any list nothing is a container, and the lookup says why, so
+	// the session says it once (Keyer).
+	if _, ok, err := p.Lookup(netip.MustParseAddrPort("172.17.0.2:5432")); ok || !errors.Is(err, errNoList) {
+		t.Fatalf("before any list = %v, %v; want none, and errNoList", ok, err)
 	}
 	list := func(source string, seq uint64, id string) Snapshot {
 		return Snapshot{Source: source, Seq: seq, Containers: []SnapshotContainer{{ID: id, Image: "postgres:16", IPs: []string{"172.17.0.2"}}}}
@@ -285,6 +316,67 @@ func TestPushFollowsTheSessions(t *testing.T) {
 	}
 	if s := ps.last(); s.Err != "" {
 		t.Fatalf("the next session was given %+v", s)
+	}
+}
+
+// Each session's change loop reads a change signal of its own, which the
+// index tells from that session's Push on: the last session's loop, which
+// may still run when the next session starts, never takes a change meant for
+// the next one, and the next session's loop gives the agent each change.
+func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
+	f := testcontainers()
+	ps := newPosts()
+	p := testPusher(f, ps)
+	first, end := context.WithCancel(t.Context())
+	if err := p.Push(first, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-ps.sent
+	p.mu.Lock()
+	last := p.changed
+	p.mu.Unlock()
+	oldWatch := current(p.idx)
+	end()
+	<-oldWatch.done // the last session's watch reads no more events; its loop is not waited for
+	f.mu.Lock()
+	f.msgs = make(chan events.Message)
+	f.mu.Unlock()
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	<-ps.sent
+	p.mu.Lock()
+	next := p.changed
+	p.mu.Unlock()
+	p.idx.mu.Lock()
+	told := p.idx.changed
+	p.idx.mu.Unlock()
+	if next == last || told != next {
+		t.Fatalf("the next session's change signal is the last one's (%v), or the index tells another (%v)", next == last, told != next)
+	}
+	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
+	f.msgs <- start("new")
+	<-ps.sent
+	if len(ps.last().Containers) != 4 {
+		t.Fatalf("the next session's loop gave %+v", ps.last())
+	}
+}
+
+// A watch that fails mid-session (the CLI's event stream ended) gives the
+// agent a list that says so: it then names by address, and says why, rather
+// than naming from a list nothing keeps.
+func TestAWatchThatFailsMidSessionIsPushed(t *testing.T) {
+	f := testcontainers()
+	ps := newPosts()
+	p := testPusher(f, ps)
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	<-ps.sent
+	f.endStream(errors.New("unexpected EOF"))
+	<-ps.sent
+	if s := ps.last(); s.Err == "" || len(s.Containers) != 0 {
+		t.Fatalf("after the stream ended the agent was given %+v; want the failure", s)
 	}
 }
 

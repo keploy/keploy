@@ -98,12 +98,16 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 		if exclude != "" && st.names[id] == "/"+exclude {
 			continue
 		}
-		c := SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/")}
-		for _, a := range st.ownIPs[id] {
-			c.IPs = append(c.IPs, a.String())
-		}
 		at[id] = len(s.Containers)
-		s.Containers = append(s.Containers, c)
+		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/")})
+	}
+	// Each IP goes to the container the index names at it (byIP): a
+	// container that took an IP whose old holder's die never arrived holds
+	// it alone, though the old one's own list still has it.
+	for a, id := range st.byIP {
+		if i, ok := at[id]; ok {
+			s.Containers[i].IPs = append(s.Containers[i].IPs, a.String())
+		}
 	}
 	for hostPort, bs := range st.published {
 		for _, b := range bs {
@@ -171,12 +175,17 @@ func (p *pushedIndex) apply(s Snapshot) {
 	p.st, p.source, p.seq, p.endpoint = st, s.Source, s.Seq, s.Endpoint
 }
 
-// Lookup reads the list held; before the first, nothing is a container.
+// errNoList is a docker-mode agent's lookup before its CLI gave it a list:
+// nothing is a container then, and the session says so once (Keyer).
+var errNoList = errors.New("keploy's CLI has not given this agent the list of the Docker daemon's containers")
+
+// Lookup reads the list held; before the first, nothing is a container, and
+// it says why.
 func (p *pushedIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.st == nil {
-		return Container{}, false, nil
+		return Container{}, false, errNoList
 	}
 	if p.st.err != nil {
 		return Container{}, false, p.st.err
@@ -240,20 +249,21 @@ func ApplySnapshot(s Snapshot) error {
 // gives it to the agent: when asked (Push, before each session starts and
 // when the agent restarts), and on every change while the session lasts.
 type Pusher struct {
-	idx     *dockerIndex
-	post    func(context.Context, Snapshot) error
-	changed chan struct{}
+	idx  *dockerIndex
+	post func(context.Context, Snapshot) error
 	// exclude is keploy's own agent container's name.
 	exclude string
 	source  string
 
 	mu sync.Mutex
 	// alive is the context of the session the index is read for and of its
-	// change loop; loopDone closes when that loop has ended (one loop at a
-	// time: a new session's starts after the last one's ended). sentGen is
-	// the count of changes the agent was last given. logger is the last
-	// Push's.
+	// change loop; changed is that session's change signal, which the index
+	// tells and only that session's loop reads, so a loop whose session
+	// ended never takes a change meant for the next one. loopDone closes
+	// when the loop has ended. sentGen is the count of changes the agent was
+	// last given. logger is the last Push's.
 	alive    context.Context
+	changed  chan struct{}
 	loopDone chan struct{}
 	sentGen  uint64
 	logger   *zap.Logger
@@ -265,11 +275,9 @@ func NewPusher(post func(context.Context, Snapshot) error, agentContainer string
 	idx := newDockerIndex()
 	idx.host = clientEndpoint()
 	idx.waitOnce = true
-	changed := make(chan struct{}, 1)
-	idx.changed = changed
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return &Pusher{idx: idx, post: post, changed: changed, exclude: agentContainer, source: hex.EncodeToString(b)}
+	return &Pusher{idx: idx, post: post, exclude: agentContainer, source: hex.EncodeToString(b)}
 }
 
 // Push gives the agent the current list now, whether or not it changed (a
@@ -281,26 +289,21 @@ func NewPusher(post func(context.Context, Snapshot) error, agentContainer string
 func (p *Pusher) Push(ctx context.Context, logger *zap.Logger) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.alive != nil && p.alive.Err() != nil && p.loopDone != nil {
-		// The last session's change loop ends with its context, which has
-		// ended: wait for it outside p.mu, which it may be waiting for, so
-		// the new session's loop is the only one.
-		done := p.loopDone
-		p.mu.Unlock()
-		<-done
-		p.mu.Lock()
-	}
 	p.logger = logger
 	fresh := p.alive == nil || p.alive.Err() != nil
 	if fresh {
-		p.alive = ctx
+		// A new session: a change signal of its own, which the index tells
+		// from now on. The last session's loop, if it still runs, reads
+		// only its own, and ends with its session.
+		p.alive, p.changed = ctx, make(chan struct{}, 1)
+		p.idx.setChanged(p.changed)
 		p.idx.Bind(ctx)
 	}
 	p.idx.Watch(ctx, logger)
 	err := p.send(ctx, true)
 	if fresh {
 		p.loopDone = make(chan struct{})
-		go p.loop(ctx, logger, p.loopDone)
+		go p.loop(ctx, p.changed, logger, p.loopDone)
 	}
 	return err
 }
@@ -331,14 +334,15 @@ func (p *Pusher) send(ctx context.Context, force bool) error {
 	return nil
 }
 
-// loop gives the agent each change while its session lasts. An ended
-// session's loop never sends: the next session's Push gives the agent the
-// whole list before that session's loop starts.
-func (p *Pusher) loop(ctx context.Context, logger *zap.Logger, done chan struct{}) {
+// loop gives the agent each change while its session (ctx) lasts, as told on
+// that session's change signal. An ended session's loop never sends: the
+// next session's Push gives the agent the whole list, and its own loop each
+// change after.
+func (p *Pusher) loop(ctx context.Context, changed <-chan struct{}, logger *zap.Logger, done chan struct{}) {
 	defer close(done)
 	for {
 		select {
-		case <-p.changed:
+		case <-changed:
 			p.mu.Lock()
 			if ctx.Err() != nil {
 				p.mu.Unlock()
