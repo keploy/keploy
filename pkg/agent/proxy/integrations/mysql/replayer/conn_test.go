@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -166,7 +168,7 @@ func (c mysqlClient) greetAndAnswer(user string, plugin mysql.AuthPluginName) {
 // replay serves one client connection from db as the proxy does, and returns
 // the client's end and what Replay returns. The client's end is closed once
 // Replay returns, as the proxy closes it then.
-func replay(t *testing.T, db *fakeMockDb) (mysqlClient, <-chan error) {
+func replay(t *testing.T, db integrations.MockMemDb) (mysqlClient, <-chan error) {
 	t.Helper()
 	client, agentEnd := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = agentEnd.Close() })
@@ -223,99 +225,243 @@ func TestTheRecordedHandshakeIsServed(t *testing.T) {
 	}
 }
 
+// poolDb is a session pool with the mock manager's semantics the handshake
+// relies on: a reused handshake is re-stamped to the back of the pool
+// (UpdateUnFilteredMock), and a deleted one is gone (DeleteUnFilteredMock).
+// Mocks are told apart by name.
+type poolDb struct{ fakeMockDb }
+
+func (p *poolDb) UpdateUnFilteredMock(old, updated *models.Mock) bool {
+	for i, m := range p.session {
+		if m.Name == old.Name {
+			p.session = append(append(p.session[:i:i], p.session[i+1:]...), updated)
+			return true
+		}
+	}
+	return false
+}
+
+func (p *poolDb) DeleteUnFilteredMock(old models.Mock) bool {
+	for i, m := range p.session {
+		if m.Name == old.Name {
+			p.session = append(p.session[:i:i], p.session[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// login opens one connection to db as client says, and returns the first byte
+// of the server's verdict on the login: an OK, or an ERR, after which the
+// replayer must end the connection itself. It fails the test on a miss.
+func login(t *testing.T, db integrations.MockMemDb, client func(c mysqlClient)) byte {
+	t.Helper()
+	c, done := replay(t, db)
+	c.t = t
+	client(c)
+	got := c.read()
+	if len(got) == 0 {
+		t.Fatal("the client read an empty verdict")
+	}
+	if got[0] == mysql.ERR {
+		// The replayer ends a refused connection itself: the client reads
+		// the end of it without closing its own side first.
+		if rest, err := io.ReadAll(c.c); len(rest) != 0 || err != nil {
+			t.Fatalf("after the refusal the client read %q, %v; want the connection ended", rest, err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("Replay returned %v for a refusal it served; want nil", err)
+		}
+		return got[0]
+	}
+	_ = c.c.Close()
+	if err := <-done; errors.Is(err, models.ErrNoMockMatched) {
+		t.Fatalf("Replay returned the miss %v for a connection it served", err)
+	}
+	return got[0]
+}
+
+// nativeLogin is a client logging in as "app" with mysql_native_password.
+func nativeLogin(c mysqlClient) { c.greetAndAnswer("app", mysql.Native) }
+
 // A session mock replay cannot serve does not shadow a recorded handshake it
-// can, ahead of which it sorts, and a recorded refusal does not shadow a
-// recorded success of the same HandshakeResponse41 (a login refused, then
-// retried with success). Each was chosen before and the client was never
-// answered; now that an unanswerable connection is a miss, choosing one would
-// report a miss although the recording holds the handshake, and serving the
-// refusal would refuse a login the recording also holds a success for.
+// can, ahead of which it sorts. Each was chosen before and the client was
+// never answered; now that an unanswerable connection is a miss, choosing one
+// would report a miss although the recording holds a handshake for the client.
 func TestAnUnservableMockDoesNotShadowAServableHandshake(t *testing.T) {
 	greetingLater := nativeHandshake() // its first response is not the greeting
 	greetingLater.Spec.MySQLResponses = append([]mysql.Response{okAnswer(0)}, greetingLater.Spec.MySQLResponses...)
 	greetingOnly := nativeHandshake() // a connection that closed once greeted
 	greetingOnly.Spec.MySQLRequests, greetingOnly.Spec.MySQLResponses = nil, greetingOnly.Spec.MySQLResponses[:1]
+	nextFactor := handshakeMock(mysql.Native, []mysql.Response{{PacketBundle: bundle(2, mysql.AuthStatusToString(mysql.AuthNextFactor),
+		&mysql.AuthNextFactorPacket{PacketType: mysql.AuthNextFactor, PluginName: "authentication_fido_client"})}})
+	cutShort := handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess)}) // no OK after it
 	for name, first := range map[string]*models.Mock{
-		"a greeting that is not the first response":                         greetingLater,
-		"a greeting and nothing more":                                       greetingOnly,
-		"a refused login, recorded before its success":                      handshakeMock(mysql.Native, []mysql.Response{refusal(2)}),
-		"a login refused after an auth switch, recorded before its success": switchedHandshake(refusal(4)),
+		"a greeting that is not the first response":      greetingLater,
+		"a greeting and nothing more":                    greetingOnly,
+		"a verdict replay does not serve":                nextFactor,
+		"an AuthMoreData with nothing recorded after it": cutShort,
 	} {
 		t.Run(name, func(t *testing.T) {
 			first.Name = "mock-unservable"
-			client, done := replay(t, &fakeMockDb{session: []*models.Mock{first, nativeHandshake()}})
-			client.t = t
-			client.greetAndAnswer("app", mysql.Native)
-			if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
-				t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
-			}
-			_ = client.c.Close()
-			if err := <-done; errors.Is(err, models.ErrNoMockMatched) {
-				t.Fatalf("Replay returned the miss %v for a connection it served", err)
+			if got := login(t, &fakeMockDb{session: []*models.Mock{first, nativeHandshake()}}, nativeLogin); got != mysql.OK {
+				t.Fatalf("the client read %#x; want the recorded OK", got)
 			}
 		})
 	}
 }
 
-// A login the recording holds only a refusal for is refused, as the server
-// refused it: the client reads the recorded ERR, and the replayer ends the
-// connection, as the server ended it. That is no miss: the recording answers
-// the client. Before, the refusal was not served at all, and the client
-// waited, unanswered, for as long as it would.
+// A login the recording holds a refusal for is refused, as the server refused
+// it: the client reads the recorded ERR, and the replayer ends the connection,
+// as the server ended it. That is no miss: the recording answers the client.
+// Before, the refusal was not served at all, and the client waited,
+// unanswered, for as long as it would.
 //
-// A success recorded earlier against another server still serves this
-// server's client ahead of this server's refusal, as it did before: which
-// handshake serves is decided by recorded order and verdict, not by the
-// destination.
-func TestARecordedRefusalIsServed(t *testing.T) {
-	elsewhere := nativeHandshake() // another server's success, recorded first
-	elsewhere.Name = "mock-elsewhere"
+// The handshakes are served in recorded order, a refusal once: a login refused
+// and then retried with success, as the recording holds it, is refused, and
+// its retry is served the success, which then serves every later connection.
+// A handshake recorded for the server the client dialled goes ahead of
+// another server's.
+func TestARecordedRefusalIsServedOnceInRecordedOrder(t *testing.T) {
+	named := func(m *models.Mock, name string) *models.Mock { m.Name = name; return m }
+	elsewhere := named(nativeHandshake(), "mock-elsewhere") // another server's success, recorded first
 	elsewhere.Spec.Metadata = map[string]string{"type": "config", "connID": "1", "destAddr": "10.0.0.6:3306"}
+	switchedLogin := func(c mysqlClient) {
+		c.greetAndAnswer("app", mysql.Native)
+		c.answerSwitch(3)
+	}
 	for _, tc := range []struct {
 		name    string
 		session []*models.Mock
 		client  func(c mysqlClient)
-		answer  byte
+		want    []byte // the verdicts of successive connections
 	}{{
-		name:    "a refusal of the HandshakeResponse41",
-		session: []*models.Mock{handshakeMock(mysql.Native, []mysql.Response{refusal(2)})},
-		client:  func(c mysqlClient) { c.greetAndAnswer("app", mysql.Native) },
-		answer:  mysql.ERR,
+		name:    "a refusal of the HandshakeResponse41, then its retry's success",
+		session: []*models.Mock{named(handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), "mock-refused"), named(nativeHandshake(), "mock-ok")},
+		client:  nativeLogin,
+		want:    []byte{mysql.ERR, mysql.OK, mysql.OK},
 	}, {
-		name:    "a refusal of the AuthSwitchResponse",
-		session: []*models.Mock{switchedHandshake(refusal(4))},
-		client: func(c mysqlClient) {
-			c.greetAndAnswer("app", mysql.Native)
-			c.answerSwitch(3)
-		},
-		answer: mysql.ERR,
+		name:    "a refusal of the AuthSwitchResponse, then its retry's success",
+		session: []*models.Mock{named(switchedHandshake(refusal(4)), "mock-refused"), named(switchedHandshake(okAnswer(4)), "mock-ok")},
+		client:  switchedLogin,
+		want:    []byte{mysql.ERR, mysql.OK, mysql.OK},
 	}, {
-		name:    "another server's success, recorded first, ahead of this server's refusal",
-		session: []*models.Mock{elsewhere, handshakeMock(mysql.Native, []mysql.Response{refusal(2)})},
-		client:  func(c mysqlClient) { c.greetAndAnswer("app", mysql.Native) },
-		answer:  mysql.OK,
+		name:    "this server's refusal, ahead of another server's success recorded first",
+		session: []*models.Mock{elsewhere, named(handshakeMock(mysql.Native, []mysql.Response{refusal(2)}), "mock-refused")},
+		client:  nativeLogin,
+		want:    []byte{mysql.ERR, mysql.OK},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, done := replay(t, &fakeMockDb{session: tc.session})
-			client.t = t
-			tc.client(client)
-			if got := client.read(); len(got) == 0 || got[0] != tc.answer {
-				t.Fatalf("the client read %x after its handshake; want the recorded %#x", got, tc.answer)
-			}
-			if tc.answer == mysql.ERR {
-				// The replayer ends a refused connection itself: the client
-				// reads the end of it without closing its own side first.
-				if rest, err := io.ReadAll(client.c); len(rest) != 0 || err != nil {
-					t.Fatalf("after the refusal the client read %q, %v; want the connection ended", rest, err)
+			db := &poolDb{fakeMockDb{session: tc.session}}
+			for i, want := range tc.want {
+				if got := login(t, db, tc.client); got != want {
+					t.Fatalf("connection %d read %#x; want the recorded %#x", i+1, got, want)
 				}
-				if err := <-done; err != nil {
-					t.Fatalf("Replay returned %v for a refusal it served; want nil", err)
+			}
+		})
+	}
+}
+
+// A caching_sha2_password full authentication leaves its handshake in the
+// pool: a connection the recording holds no other handshake for authenticates
+// in full again, as the server asks. Its handshake was deleted, and a second
+// connection of an application that opened one while it was recorded was
+// closed unanswered.
+func TestAFullAuthenticationServesTheNextConnectionToo(t *testing.T) {
+	fullAuth := handshakeMock(mysql.CachingSha2,
+		[]mysql.Response{authMoreData(2, mysql.PerformFullAuthentication),
+			{PacketBundle: bundle(4, mysql.AuthStatusToString(mysql.AuthMoreData), &mysql.AuthMoreDataPacket{StatusTag: mysql.AuthMoreData, Data: "PUBLIC KEY"})},
+			okAnswer(6)},
+		mysql.Request{PacketBundle: mysql.PacketBundle{
+			Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1, SequenceID: 3}, Type: mysql.CachingSha2PasswordToString(mysql.RequestPublicKey)},
+			Message: "request_public_key",
+		}},
+		mysql.Request{PacketBundle: bundle(5, mysql.EncryptedPassword, "encrypted")},
+	)
+	db := &poolDb{fakeMockDb{session: []*models.Mock{fullAuth}}}
+	for i := 1; i <= 2; i++ {
+		got := login(t, db, func(c mysqlClient) {
+			c.greetAndAnswer("app", mysql.CachingSha2)
+			if more := c.read(); len(more) == 0 || more[0] != mysql.AuthMoreData {
+				c.t.Fatalf("the client read %x, want the recorded AuthMoreData", more)
+			}
+			c.send(3, []byte{byte(mysql.RequestPublicKey)})
+			if key := c.read(); len(key) == 0 || key[0] != mysql.AuthMoreData {
+				c.t.Fatalf("the client read %x, want the recorded public key", key)
+			}
+			c.send(5, bytes.Repeat([]byte{0x5A}, 32)) // the password, encrypted with that key
+		})
+		if got != mysql.OK {
+			t.Fatalf("connection %d read %#x; want the recorded OK", i, got)
+		}
+	}
+}
+
+// A plain password, sent over TLS in a full authentication, is not compared
+// with the recorded one, nor is its length, as no other authentication step
+// compares a credential: an application replayed with another password than
+// it was recorded with is served the recorded verdict. It was a miss. Its
+// sequence is checked, as the encrypted password's is.
+func TestAPlainPasswordIsNotCompared(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seq  uint8
+		miss bool
+	}{
+		{name: "another password", seq: 5},
+		{name: "a packet out of sequence", seq: 7, miss: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hs := handshakeMock(mysql.CachingSha2, nil)
+			app, agentEnd := net.Pipe()
+			t.Cleanup(func() { _ = app.Close(); _ = agentEnd.Close() })
+			decodeCtx := newDecodeCtx()
+			decodeCtx.LastOp = wire.NewLastOpMap()
+			decodeCtx.ServerGreetings = wire.NewGreetings()
+			decodeCtx.ServerGreetings.Store(agentEnd, hs.Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet))
+			type outcome struct {
+				refused bool
+				err     error
+			}
+			ret := make(chan outcome, 1)
+			go func() {
+				refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
+					req:  []mysql.Request{{PacketBundle: bundle(5, "plain password", "cmVjb3JkZWQtc2VjcmV0AA==")}}, // "recorded-secret\x00"
+					resp: []mysql.Response{okAnswer(6)},
+				}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+				ret <- outcome{refused, err}
+			}()
+			c := mysqlClient{t: t, c: app}
+			c.send(tc.seq, []byte("another-secret\x00"))
+			verdict := make(chan []byte, 1)
+			go func() {
+				var hdr [4]byte
+				if _, err := io.ReadFull(app, hdr[:]); err != nil {
+					verdict <- nil
+					return
+				}
+				payload := make([]byte, int(hdr[0])|int(hdr[1])<<8|int(hdr[2])<<16)
+				if _, err := io.ReadFull(app, payload); err != nil {
+					verdict <- nil
+					return
+				}
+				verdict <- payload
+			}()
+			o := <-ret
+			_ = agentEnd.Close() // ends the client's read when nothing was written
+			got := <-verdict
+			if tc.miss {
+				requireConnectionMiss(t, o.err, "connection phase: plain password", models.MatchPhaseExhausted, "sequence")
+				if len(got) != 0 {
+					t.Fatalf("the client read %x; want nothing before its connection is closed", got)
 				}
 				return
 			}
-			_ = client.c.Close()
-			if err := <-done; errors.Is(err, models.ErrNoMockMatched) {
-				t.Fatalf("Replay returned the miss %v for a connection it served", err)
+			if o.err != nil || o.refused {
+				t.Fatalf("simulatePlainPassword returned refused=%v, %v; want the recorded OK served", o.refused, o.err)
+			}
+			if len(got) == 0 || got[0] != mysql.OK {
+				t.Fatalf("the client read %x; want the recorded OK", got)
 			}
 		})
 	}

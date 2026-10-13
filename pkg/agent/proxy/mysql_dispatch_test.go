@@ -573,7 +573,15 @@ func (c *closeHook) Close() error {
 // the scheduler does.
 func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn)) []models.UnmatchedCall {
 	t.Helper()
-	p := startedDrainProxy(t, 16)
+	// Under the switch the proxy's error drain runs, and GetMockErrors waits
+	// for it on events. Without the switch it would wait for the drain on a
+	// two-second clock, so the proxy runs without one there: GetMockErrors
+	// then sweeps the error channel itself, and reads whatever was queued by
+	// the time the connection is closed, with no clock involved.
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	if provenswitch.On() {
+		p = startedDrainProxy(t, 16)
+	}
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)

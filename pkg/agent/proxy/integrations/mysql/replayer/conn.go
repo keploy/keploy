@@ -10,7 +10,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	pUtils "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
@@ -300,24 +299,26 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// NEW: Strictly find the first candidate whose HR41 matches (auth_response ignored in matcher).
 	// Try HR41 at index 0 and 1 to be tolerant to recording layout.
 
-	logger.Debug("matching handshake response", zap.Any("actual request", pkt))
+	// Not the packet: its auth response is the cleartext password under
+	// mysql_clear_password (PAM, LDAP, IAM tokens).
+	logger.Debug("matching handshake response", zap.String("user", hr41.Username), zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
 
-	selectedIdx := -1
-	hrIdx := -1
 	// compared counts the candidates whose recorded HandshakeResponse41 was
 	// compared. closest is why the closest of them did not match, for the
 	// miss's diff when none does: the first recorded for the destination the
 	// client dialled, else the first compared.
 	//
-	// Of the candidates that match, the earliest recorded serves, as it
-	// always has, except that a verdict replay serves on (an OK, or the
-	// AuthMoreData that starts caching_sha2_password) outranks a refusal
-	// recorded as an ERR, and an ERR outranks a verdict replay does not serve
-	// (verdictRank): a login refused with an ERR and then retried with
-	// success is answered with the success.
+	// Of the candidates that match, the one served is the first in pool
+	// order, which is recorded order with a reused handshake re-stamped to
+	// the back (updateMock), recorded for the destination the client dialled
+	// if one matches there. A candidate whose recorded verdict replay can
+	// serve (servableVerdict) goes ahead of one it cannot: an unservable
+	// one is chosen only when nothing else matches, so the miss names what
+	// it holds.
 	compared := 0
 	closest, closestForDest := "", ""
-	selectedRank := 0
+	type pick struct{ idx, hrIdx int }
+	var first, firstForDest, unservable *pick
 candidateLoop:
 	for i, m := range candidates {
 		// Only a mock that opens with the greeting can answer the client
@@ -341,14 +342,31 @@ candidateLoop:
 				}
 				continue
 			}
-			if r := verdictRank(recordedVerdict(m)); selectedIdx == -1 || r < selectedRank {
-				selectedIdx, hrIdx, selectedRank = i, idx, r
-				if r == 0 {
-					break candidateLoop
+			p := &pick{i, idx}
+			switch {
+			case !servableVerdict(m):
+				if unservable == nil {
+					unservable = p
 				}
+			case forDest(m):
+				firstForDest = p
+				break candidateLoop
+			case first == nil:
+				first = p
 			}
 			continue candidateLoop
 		}
+	}
+	selected := firstForDest
+	if selected == nil {
+		selected = first
+	}
+	if selected == nil {
+		selected = unservable
+	}
+	selectedIdx, hrIdx := -1, -1
+	if selected != nil {
+		selectedIdx, hrIdx = selected.idx, selected.hrIdx
 	}
 
 	// NEW: If nothing matched HR41 strictly, error out.
@@ -501,25 +519,19 @@ candidateLoop:
 		answered = stepAuthSwitchResponse
 	}
 
-	// The verdicts this switch serves are the ones verdictRank ranks below 2.
+	// The verdicts this switch serves are the ones servableVerdict accepts.
 	switch authDecider {
 	case mysql.StatusToString(mysql.OK), mysql.StatusToString(mysql.ERR):
-		var nativePassMocks reqResp
-		nativePassMocks.resp = resp[respIdx:]
-
 		// The recorded verdict, written as it was recorded: the server's OK,
 		// or its refusal of the login (an ERR, such as access denied or an
 		// unknown database). A refused login was answered nothing before:
 		// no case ran, and the client waited for as long as it would.
-		err := simulateNativePassword(ctx, logger, clientConn, nativePassMocks, handshakeMock, mockDb, decodeCtx)
+		refused, err := serveVerdict(ctx, logger, clientConn, &resp[respIdx].PacketBundle, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate native password")
 			return res, err
 		}
-		// A refusal is the server's last word on the connection, which it
-		// then closes. The replayer ends it too: a client is never left in a
-		// command phase its server never opened.
-		res.refused = authDecider == mysql.StatusToString(mysql.ERR)
+		res.refused = refused
 
 	case mysql.AuthStatusToString(mysql.AuthMoreData):
 
@@ -528,11 +540,12 @@ candidateLoop:
 		cacheSha2PassMock.resp = resp[respIdx:]
 
 		// It means we need to simulate the caching_sha2_password
-		err := simulateCacheSha2Password(ctx, logger, clientConn, dst, cacheSha2PassMock, handshakeMock, mockDb, decodeCtx)
+		refused, err := simulateCacheSha2Password(ctx, logger, clientConn, dst, cacheSha2PassMock, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate caching_sha2_password")
 			return res, err
 		}
+		res.refused = refused
 
 	default:
 		// An answer replay does not serve, such as a next authentication
@@ -546,51 +559,60 @@ candidateLoop:
 	return res, nil
 }
 
-func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, nativePassMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+// serveVerdict writes the server's recorded verdict on a login, verdict (its
+// OK, or its refusal as an ERR), to the client, and reports whether it was a
+// refusal. The handshake mock it comes from stays in the pool for the next
+// connection, re-stamped to the back of it (updateMock), when the verdict is
+// an OK; a refusal is served once and removed, as the server refused that one
+// login: a login refused and then retried with success, as the recording
+// holds it, is refused once and then served the success, in recorded order.
+func serveVerdict(ctx context.Context, logger *zap.Logger, clientConn net.Conn, verdict *mysql.PacketBundle, handshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
+	refused := verdict.Header != nil && verdict.Header.Type == mysql.StatusToString(mysql.ERR)
+	logger.Debug("the recorded verdict on the login", zap.Bool("refused", refused))
 
-	logger.Debug("final response for native password", zap.Any("response", nativePassMocks.resp[0].Header.Type))
-
-	// Send the final response (OK/Err) to the client
-	buf, err := wire.EncodeToBinary(ctx, logger, &nativePassMocks.resp[0].PacketBundle, clientConn, decodeCtx)
+	buf, err := wire.EncodeToBinary(ctx, logger, verdict, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode final response packet for native password")
-		return err
+		utils.LogError(logger, err, "failed to encode the recorded verdict on the login")
+		return false, err
 	}
 
 	_, err = clientConn.Write(buf)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
-		utils.LogError(logger, err, "failed to write final response for native password to the client")
-		return err
+		utils.LogError(logger, err, "failed to write the recorded verdict on the login to the client")
+		return false, err
 	}
 
-	//update the config mock (since it can be reused in case of more connections compared to record mode)
-	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb, nil)
-	if !ok {
-		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during native password")
+	if refused {
+		if !mockDb.DeleteUnFilteredMock(*handshakeMock) {
+			logger.Debug("the served refusal's handshake mock was already gone from the pool", zap.String("mock", handshakeMock.Name))
+		}
+		return true, nil
 	}
-
-	logger.Debug("native password completed successfully")
-
-	return nil
+	// The handshake can be reused, as more connections may open than were
+	// recorded.
+	if !updateMock(ctx, logger, handshakeMock, mockDb, nil) {
+		utils.LogError(logger, nil, "failed to update the handshake mock after serving its verdict")
+	}
+	return false, nil
 }
 
-func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, cacheSha2PassMock reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, cacheSha2PassMock reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
 	resp := cacheSha2PassMock.resp
 
 	// Get the AuthMoreData
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for auth more data")
-		return matchedHandshakeMiss(dst, stepCachingSha2, "no mysql mocks found for auth more data")
+		return false, matchedHandshakeMiss(dst, stepCachingSha2, "no mysql mocks found for auth more data")
 	}
 
 	// Get the auth more data packet
 	pkt, ok := resp[0].Message.(*mysql.AuthMoreDataPacket)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert auth more data packet")
-		return matchedHandshakeMiss(dst, stepCachingSha2, fmt.Sprintf("the recorded answer is a %T, not an AuthMoreData packet", resp[0].Message))
+		return false, matchedHandshakeMiss(dst, stepCachingSha2, fmt.Sprintf("the recorded answer is a %T, not an AuthMoreData packet", resp[0].Message))
 	}
 
 	var mechanismString string
@@ -614,22 +636,22 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode auth more data packet")
-		return err
+		return false, err
 	}
 
 	// Write the AuthMoreData packet to the client
 	_, err = clientConn.Write(authBuf)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write auth more data or auth switch request to the client")
-		return err
+		return false, err
 	}
 
 	if len(cacheSha2PassMock.resp) < 2 {
 		utils.LogError(logger, nil, "response mock not found for caching_sha2_password after auth more data")
-		return matchedHandshakeMiss(dst, stepCachingSha2, "response mock not found for caching_sha2_password after auth more data")
+		return false, matchedHandshakeMiss(dst, stepCachingSha2, "response mock not found for caching_sha2_password after auth more data")
 	}
 
 	//update the cacheSha2PassMock resp
@@ -638,151 +660,127 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	//simulate the caching_sha2_password auth mechanism
 	switch mechanismString {
 	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
-		err := simulateFullAuth(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
+		refused, err := simulateFullAuth(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate full auth")
-			return err
+			return false, err
 		}
+		return refused, nil
 	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
-		err := simulateFastAuthSuccess(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
+		refused, err := simulateFastAuthSuccess(ctx, logger, clientConn, dst, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate fast auth success")
-			return err
+			return false, err
 		}
+		return refused, nil
 	default:
 		// return an error
 		utils.LogError(logger, nil, "unknown caching_sha2_password mechanism", zap.String("mechanism", mechanismString))
-		return matchedHandshakeMiss(dst, stepCachingSha2, "the recording answers with an unknown caching_sha2_password mechanism: "+mechanismString)
+		return false, matchedHandshakeMiss(dst, stepCachingSha2, "the recording answers with an unknown caching_sha2_password mechanism: "+mechanismString)
 	}
-	return nil
 }
 
-func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fastAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fastAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
 	resp := fastAuthMocks.resp
 
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "final response mock not found for fast auth success")
-		return matchedHandshakeMiss(dst, stepCachingSha2, "final response mock not found for fast auth success")
+		return false, matchedHandshakeMiss(dst, stepCachingSha2, "final response mock not found for fast auth success")
 	}
 
 	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].Header.Type))
 
-	// Send the final response (OK/Err) to the client
-	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode final response packet for fast auth success")
-		return err
-	}
-
-	_, err = clientConn.Write(buf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write final response for fast auth success to the client")
-		return err
-	}
-
-	//update the config mock (since it can be reused in case of more connections compared to record mode)
-	//TODO: need to check when updateMock is unsuccessful
-	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb, nil)
-	if !ok {
-		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during fast auth success")
-	}
-
-	logger.Debug("fast auth success completed successfully")
-
-	return nil
+	return serveVerdict(ctx, logger, clientConn, &resp[0].PacketBundle, initialHandshakeMock, mockDb, decodeCtx)
 }
 
-func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
 
 	resp := fullAuthMocks.resp
 	req := fullAuthMocks.req
 
 	if decodeCtx.UseSSL {
 		logger.Debug("This is an ssl request, simulating plain password in caching_sha2_password full auth")
-		err := simulatePlainPassword(ctx, logger, clientConn, dst, fullAuthMocks, initialHandshakeMock, mockDb, decodeCtx)
+		refused, err := simulatePlainPassword(ctx, logger, clientConn, dst, fullAuthMocks, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate plain password in caching_sha2_password full auth")
-			return err
+			return false, err
 		}
-		return nil
+		return refused, nil
 	}
 
 	// read the public key request from the client
 	publicKeyRequestBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read public key request from client")
-		return err
+		return false, err
 	}
 
 	// decode the public key request
 	pkt, err := wire.DecodePayload(ctx, logger, publicKeyRequestBuf, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode public key request from client")
-		return err
+		return false, err
 	}
 
 	publicKey, ok := pkt.Message.(string)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert public key request packet")
-		return matchedHandshakeMiss(dst, stepPublicKey, fmt.Sprintf("the client sent a %s, not the recorded public key request", packetType(pkt)))
+		return false, matchedHandshakeMiss(dst, stepPublicKey, fmt.Sprintf("the client sent a %s, not the recorded public key request", packetType(pkt)))
 	}
 
 	// Get the public key response from the mock
 	if len(req) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for public key response")
-		return matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for public key response")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for public key response")
 	}
 
 	publicKeyMock, ok := req[0].Message.(string)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert public key response packet")
-		return matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key request")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key request")
 	}
 
 	// Match the header of the public key request
 	ok = matchHeader(*req[0].Header.Header, *pkt.Header.Header)
 	if !ok {
 		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[0].Header.Header), zap.Any("actual", pkt.Header.Header))
-		return matchedHandshakeMiss(dst, stepPublicKey, "header mismatch for public key request")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "header mismatch for public key request")
 	}
 
 	// Match the public key response from the client with the mock
 	if publicKey != publicKeyMock {
 		utils.LogError(logger, nil, "public key mismatch", zap.Any("actual", publicKey), zap.Any("expected", publicKeyMock))
-		return matchedHandshakeMiss(dst, stepPublicKey, "public key mismatch")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "public key mismatch")
 	}
 
 	// Get the AuthMoreData for sending the public key
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for auth more data (public key)")
-		return matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for auth more data (public key)")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for auth more data (public key)")
 	}
 
 	// Get the AuthMoreData packet
 	_, ok = resp[0].Message.(*mysql.AuthMoreDataPacket)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
-		return matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key to answer with")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key to answer with")
 	}
 
 	// encode the public key response
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode public key response packet")
-		return err
+		return false, err
 	}
 
 	// Write the public key response to the client
 	_, err = clientConn.Write(buf)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write public key response to the client")
-		return err
+		return false, err
 	}
 
 	// Read the encrypted password from the client
@@ -790,19 +788,19 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	encryptedPasswordBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read encrypted password from client")
-		return err
+		return false, err
 	}
 
 	// Get the packet from the buffer
 	encryptedPassPkt, err := mysqlUtils.BytesToMySQLPacket(encryptedPasswordBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to convert encrypted password to packet")
-		return err
+		return false, err
 	}
 
 	if len(req) < 2 {
 		utils.LogError(logger, nil, "no mysql mocks found for encrypted password during full auth")
-		return matchedHandshakeMiss(dst, stepEncryptedPassword, "no mysql mocks found for encrypted password during full auth")
+		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "no mysql mocks found for encrypted password during full auth")
 	}
 
 	// Get the encrypted password from the mock
@@ -810,55 +808,32 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	if encryptedPassMock.Header.Type != mysql.EncryptedPassword {
 		utils.LogError(logger, nil, "expected encrypted password mock not found", zap.Any("found", encryptedPassMock.Header.Type))
-		return matchedHandshakeMiss(dst, stepEncryptedPassword, fmt.Sprintf("expected %s but found %s", mysql.EncryptedPassword, encryptedPassMock.Header.Type))
+		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, fmt.Sprintf("expected %s but found %s", mysql.EncryptedPassword, encryptedPassMock.Header.Type))
 	}
 
 	// Since encrypted password can be different, we should just check the sequence number
 	if encryptedPassMock.Header != nil && encryptedPassMock.Header.Header != nil &&
 		encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
 		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
-		return matchedHandshakeMiss(dst, stepEncryptedPassword, "sequence number mismatch for encrypted password")
+		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "sequence number mismatch for encrypted password")
 	}
 
 	//Now send the final response (OK/Err) to the client
 	if len(resp) < 2 {
 		utils.LogError(logger, nil, "final response mock not found for full auth")
-		return matchedHandshakeMiss(dst, stepEncryptedPassword, "final response mock not found for full auth")
+		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "final response mock not found for full auth")
 	}
 
 	logger.Debug("final response for full auth", zap.Any("response", resp[1].Header.Type))
 
-	// Get the final response (OK/Err) from the mock
-	// Send the final response (OK/Err) to the client
-	buf, err = wire.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode final response packet for full auth")
-		return err
-	}
-
-	_, err = clientConn.Write(buf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write final response for full auth to the client")
-		return err
-	}
-
-	// FullAuth mechanism only comes for the first time unless COM_CHANGE_USER is called (that is not supported for now).
-	// Afterwards only fast auth success is expected. So, we can delete this.
-	ok = mockDb.DeleteUnFilteredMock(*initialHandshakeMock)
-	// TODO: need to check what to do in this case
-	if !ok {
-		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth")
-	}
-
-	logger.Debug("full auth completed successfully")
-
-	return nil
+	// The handshake stays in the pool, re-stamped to its back, for a
+	// connection the recording holds no other handshake for: the client
+	// authenticates in full again, as the server asks. It was deleted, and the
+	// next connection of a recording that held one handshake got none.
+	return serveVerdict(ctx, logger, clientConn, &resp[1].PacketBundle, initialHandshakeMock, mockDb, decodeCtx)
 }
 
-func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
 
 	req := fullAuthMocks.req
 	resp := fullAuthMocks.resp
@@ -867,80 +842,48 @@ func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn n
 	plainPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read plain password from client")
-		return err
+		return false, err
 	}
 
 	// Get the packet from the buffer
 	plainPassPkt, err := mysqlUtils.BytesToMySQLPacket(plainPassBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to convert plain password to packet")
-		return err
+		return false, err
 	}
 
-	plainPass := string(intgUtils.EncodeBase64(plainPassPkt.Payload))
+	// The password itself is not compared, as no other authentication step
+	// compares a credential (the HandshakeResponse41's auth response and the
+	// encrypted password are not): an application replayed with another
+	// password than it was recorded with is served the recorded verdict.
 
 	// Get the plain password from the mock
 	if len(req) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for plain password")
-		return matchedHandshakeMiss(dst, stepPlainPassword, "no mysql mocks found for plain password")
+		return false, matchedHandshakeMiss(dst, stepPlainPassword, "no mysql mocks found for plain password")
 	}
 
-	plainPassMock, ok := req[0].Message.(string)
-	if !ok {
+	if _, ok := req[0].Message.(string); !ok {
 		utils.LogError(logger, nil, "failed to assert plain password packet")
-		return matchedHandshakeMiss(dst, stepPlainPassword, "the handshake mock records no plain password")
+		return false, matchedHandshakeMiss(dst, stepPlainPassword, "the handshake mock records no plain password")
 	}
 
-	// Match the header of the plain password
-	ok = matchHeader(*req[0].Header.Header, plainPassPkt.Header)
-	if !ok {
-		utils.LogError(logger, nil, "header mismatch for plain password", zap.Any("expected", req[0].Header.Header), zap.Any("actual", plainPassPkt.Header))
-		return matchedHandshakeMiss(dst, stepPlainPassword, "header mismatch for plain password")
-	}
-
-	// Match the plain password from the client with the mock
-	if plainPass != plainPassMock {
-		// Neither password is logged: both are the plaintext credential
-		// (base64 of the cleartext the client sent over TLS).
-		utils.LogError(logger, nil, "plain password mismatch")
-		return matchedHandshakeMiss(dst, stepPlainPassword, "plain password mismatch")
+	// Only its sequence is checked, as the encrypted password's is: its
+	// length is the password's.
+	if req[0].Header == nil || req[0].Header.Header == nil || req[0].Header.Header.SequenceID != plainPassPkt.Header.SequenceID {
+		utils.LogError(logger, nil, "sequence number mismatch for plain password")
+		return false, matchedHandshakeMiss(dst, stepPlainPassword, "sequence number mismatch for plain password")
 	}
 
 	//Now send the final response (OK/Err) to the client
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "final response mock not found for full auth (plain password)")
-		return matchedHandshakeMiss(dst, stepPlainPassword, "final response mock not found for full auth (plain password)")
+		return false, matchedHandshakeMiss(dst, stepPlainPassword, "final response mock not found for full auth (plain password)")
 	}
 
 	logger.Debug("final response for full auth(plain password)", zap.Any("response", resp[0].Header.Type))
 
-	// Get the final response (OK/Err) from the mock
-	// Send the final response (OK/Err) to the client
-	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode final response packet for full auth (plain password)")
-		return err
-	}
-
-	_, err = clientConn.Write(buf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write final response for full auth (plain password) to the client")
-		return err
-	}
-
-	// FullAuth mechanism only comes for the first time unless COM_CHANGE_USER is called (that is not supported for now).
-	// Afterwards only fast auth success is expected. So, we can delete this.
-	ok = mockDb.DeleteUnFilteredMock(*initialHandshakeMock)
-	// TODO: need to check what to do in this case
-	if !ok {
-		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth (plain password) in ssl request")
-	}
-
-	logger.Debug("full auth (plain-password) in ssl request completed successfully")
-	return nil
+	return serveVerdict(ctx, logger, clientConn, &resp[0].PacketBundle, initialHandshakeMock, mockDb, decodeCtx)
 }
 
 // packetType names a decoded client packet for a miss's diff: its recorded
@@ -962,35 +905,29 @@ func hr41At(m *models.Mock, idx int) bool {
 	return idx < len(reqs) && reqs[idx].Header != nil && reqs[idx].Header.Type == mysql.HandshakeResponse41
 }
 
-// recordedVerdict is the server's recorded verdict on m's handshake: its
-// answer to the HandshakeResponse41 (responses[1], after the greeting), or,
-// after a recorded AuthSwitchRequest, its answer to the AuthSwitchResponse
-// (responses[2]). "" when the recording holds none.
-func recordedVerdict(m *models.Mock) string {
+// servableVerdict reports whether replay can serve m's recorded verdict on a
+// login whose HandshakeResponse41 matches it: its answer to the
+// HandshakeResponse41 (responses[1], after the greeting), or, after a recorded
+// AuthSwitchRequest, its answer to the AuthSwitchResponse (responses[2]), is
+// an OK, a refusal recorded as an ERR, or an AuthMoreData that starts
+// caching_sha2_password with the answer after it recorded. The verdict switch
+// in simulateInitialHandshake serves those, and must be kept in step with
+// this. A mock that holds no verdict, or one replay does not serve (such as a
+// next authentication factor), does not shadow one that can be served.
+func servableVerdict(m *models.Mock) bool {
 	resp := m.Spec.MySQLResponses
 	at := 1
 	if len(resp) > at && resp[at].Header != nil && resp[at].Header.Type == mysql.AuthStatusToString(mysql.AuthSwitchRequest) {
 		at = 2
 	}
 	if len(resp) <= at || resp[at].Header == nil {
-		return ""
+		return false
 	}
-	return resp[at].Header.Type
-}
-
-// verdictRank orders the recorded verdicts of the handshakes whose
-// HandshakeResponse41 matches the client's, lowest first: one replay serves on
-// (an OK, or the AuthMoreData that starts caching_sha2_password, whose full
-// authentication may itself still end in a refusal), then a refusal recorded
-// as an ERR, then a verdict replay does not serve, or none. The verdict switch
-// in simulateInitialHandshake serves the ones ranked below 2, and must be kept
-// in step with this.
-func verdictRank(verdict string) int {
-	switch verdict {
-	case mysql.StatusToString(mysql.OK), mysql.AuthStatusToString(mysql.AuthMoreData):
-		return 0
-	case mysql.StatusToString(mysql.ERR):
-		return 1
+	switch resp[at].Header.Type {
+	case mysql.StatusToString(mysql.OK), mysql.StatusToString(mysql.ERR):
+		return true
+	case mysql.AuthStatusToString(mysql.AuthMoreData):
+		return len(resp) > at+1
 	}
-	return 2
+	return false
 }

@@ -461,9 +461,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// the no_mocks miss. It was an error that did not wrap
 		// models.ErrNoMockMatched: the connection was dropped, the proxy
 		// dropped the error too, and the test that sent the command passed
-		// with no miss. The pool is empty, for one, once a full-authentication
-		// handshake has used up the only handshake mock and the test's window
-		// holds no data mock.
+		// with no miss. The pool is empty, for one, when a connection
+		// outlives the mocks its handshake was served from: the pool was
+		// replaced by one holding no MySQL mock.
 		if len(pool) == 0 {
 			logger.Debug("the mysql mock pool is empty")
 		}
