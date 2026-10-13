@@ -379,6 +379,13 @@ type BacklogState struct {
 	WaitingOn string
 }
 
+// Horizon is a Watermark that can also tell how far the capture has got:
+// every chunk stamped up to the time it returns has been read and noted. The
+// recording's open orphan spans extend no further (SyncMockManager.CapturedTo).
+type Horizon interface {
+	CapturedTo() time.Time
+}
+
 // Progressor is a Backlog that can also count its progress: a count that
 // moves whenever it gets further (a parser consumes bytes, or returns).
 type Progressor interface {

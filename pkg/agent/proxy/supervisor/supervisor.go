@@ -270,8 +270,15 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				// stop (Session.StoppedAt) here, where the supervisor
 				// learns it, before the stack is taken and the return
 				// handed on to be logged. A parser that returns nil has
-				// recorded what it read, and is not stopped here.
+				// recorded what it read, and is not stopped here. The
+				// exchange it was in, which it did not report, is left
+				// out from its request to the last byte it read.
 				sess.StoppedAt()
+				why := "it panicked"
+				if r == nil {
+					why = "it returned an error: " + ret.err.Error()
+				}
+				sess.ReportUnfinishedExchange(why)
 			}
 			if r != nil {
 				ret = fnReturn{

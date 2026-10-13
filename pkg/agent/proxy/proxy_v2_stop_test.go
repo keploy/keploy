@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -53,11 +56,13 @@ func (p stopThenHoldParser) RecordOutgoing(ctx context.Context, s *integrations.
 
 // A capture hole can come after the parser stopped on an exchange and before
 // it returns: the parser no longer reads, so its capture queue fills behind
-// it. The span the hole opens must start where the exchange's span ends, at
-// the session's stop instant (Session.StoppedAt): the bytes captured between
-// the two are lost with the parser, and a test case recorded over them was
-// saved without its mocks. The hole read the clock itself, so the two spans
-// stayed apart once the connection ended.
+// it. The span the hole opens starts at the session's stop instant
+// (Session.StoppedAt), which the parser's report stamped, not where the hole
+// read the clock: the bytes captured between the two are lost with the
+// parser, and a test case recorded over them was saved without its mocks. The
+// hole read the clock itself, so its span started after them. Here the parser
+// had read all the connection carried before its stop, so the exchange's span
+// (to the last byte it read) and the hole's meet.
 func TestRecordViaSupervisor_AHoleAfterTheParsersStopOpensItsSpanAtTheStop(t *testing.T) {
 	supervisor.ResetLeftOutWarningsForTest()
 	mgr := syncMock.New(nil)
@@ -91,6 +96,38 @@ func TestRecordViaSupervisor_AHoleAfterTheParsersStopOpensItsSpanAtTheStop(t *te
 	}
 	if n := mgr.MocksLeftOut(); n != 1 {
 		t.Fatalf("the manager counts %d mocks left out, want the exchange the parser stopped on", n)
+	}
+}
+
+// A capture hole stops its connection at the chunk it loses
+// (Session.StoppedAtHole), not where the parser had got to: the parser goes
+// on with what it had queued before the hole, intact, and records it, so a
+// test case over that backlog keeps its mocks and is not left out. Dated
+// where the parser had got to, the hole's span would leave out a full
+// capture queue of test cases on every hole.
+func TestRecordViaSupervisor_AHoleLeavesTheBacklogBeforeItToTheParser(t *testing.T) {
+	supervisor.ResetLeftOutWarningsForTest()
+	mgr := syncMock.New(nil)
+	parser := &heldParser{release: make(chan struct{}), took: make(chan struct{})}
+	defer close(parser.release)
+	// A 4-byte cap: the first write fits, a longer one is a hole.
+	h := newDesyncFeedHarnessCtx(t, syncMock.NewContext(context.Background(), mgr), parser, nil, 4)
+
+	sent := time.Now()
+	h.writeApp(t, []byte("a")) // queued, behind a parser that is not reading
+	waitUntilT(t, 5*time.Second, "the relay forwards the backlog", func() bool { return h.destSeen() == "a" })
+	arrived := time.Now()
+	time.Sleep(time.Millisecond) // so the hole's chunk is stamped after the backlog's window
+	h.writeApp(t, []byte("0123456789"))
+	waitUntilT(t, 5*time.Second, "the hole opens its span", func() bool {
+		recorded, _, _ := mgr.OrphanRangeCount()
+		return recorded >= 1
+	})
+	if over, _ := mgr.WasMockOrphanedInWindow(sent, arrived); over {
+		t.Fatal("the backlog queued before the hole, which the parser goes on to record, is left out: the hole's stop was dated where the parser had got to")
+	}
+	if over, _ := mgr.WasMockOrphanedInWindow(arrived, time.Now()); !over {
+		t.Fatal("what the connection carried from the hole on is in no span")
 	}
 }
 
@@ -232,6 +269,13 @@ type stopHarness struct {
 
 func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.Logger) *stopHarness {
 	t.Helper()
+	return newStopHarnessWith(t, parser, logger, nil)
+}
+
+// newStopHarnessWith is newStopHarness with tune, when non-nil, setting the
+// proxy up before the connection is recorded.
+func newStopHarnessWith(t *testing.T, parser integrations.Integrations, logger *zap.Logger, tune func(*Proxy)) *stopHarness {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
 	h := &stopHarness{mgr: syncMock.New(nil), done: make(chan error, 1)}
 	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), h.mgr), 30*time.Second)
@@ -266,6 +310,9 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 		recordBufferQueueSize:      64,
 		recordBufferStallGrace:     2 * time.Second,
 		recordBufferHalfCloseGrace: 200 * time.Millisecond,
+	}
+	if tune != nil {
+		tune(p)
 	}
 	go func() {
 		h.done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, integrations.HTTP,
@@ -460,6 +507,326 @@ func TestRecordViaSupervisor_TheSpanAfterAPanicStartsWhereTheParserDied(t *testi
 	}
 }
 
+// diesBehindParser reads the client's first chunk, then, once released, ends
+// without reporting the exchange it was in, as a parser behind its traffic
+// does that panics or returns an error: the chunks queued behind it are lost
+// with it.
+type diesBehindParser struct {
+	stubParser
+	read    chan struct{}
+	release chan struct{}
+	panics  bool
+}
+
+func (diesBehindParser) IsV2() bool { return true }
+
+func (p diesBehindParser) RecordOutgoing(ctx context.Context, s *integrations.RecordSession) error {
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return err
+	}
+	close(p.read)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if p.panics {
+		panic("a parser bug, hit behind the traffic")
+	}
+	return errors.New("a parser error, behind the traffic")
+}
+
+// A parser behind its traffic that panics or returns an error, without
+// reporting the exchange it was in, loses every request queued behind it. Its
+// stop is dated at the newest chunk the connection carried, so the span it
+// opens starts after that backlog; the requests it never read are left out
+// as its Run returns (parserReads), before the watermark lets go of the test
+// cases held for them.
+func TestRecordViaSupervisor_AParserThatDiesBehindItsTrafficLeavesItsBacklogOut(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		name := "returns an error"
+		if panics {
+			name = "panics"
+		}
+		t.Run(name, func(t *testing.T) {
+			parser := diesBehindParser{read: make(chan struct{}), release: make(chan struct{}), panics: panics}
+			h := newStopHarness(t, parser, zap.NewNop())
+
+			h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+			waitFor(t, parser.read, "the parser never read the first request")
+			// The parser's backlog: a request inside a test case, and one
+			// after it.
+			backlog := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+			after := h.send(t, "GET /three HTTP/1.1\r\n\r\n")
+
+			close(parser.release)
+			waitUntilT(t, 10*time.Second, "the parser's stop to open its span", func() bool {
+				over, _ := h.mgr.WasMockOrphanedInWindow(after.sent, after.arrived)
+				return over
+			})
+			waitUntilT(t, 10*time.Second, "the requests the parser never read to be left out as it returns", func() bool {
+				over, _ := h.mgr.WasMockOrphanedInWindow(backlog.sent, backlog.arrived)
+				return over
+			})
+			h.end(t)
+			h.requireInASpan(t, backlog, "queued behind a parser that "+name+", once the connection ended")
+		})
+	}
+}
+
+// diesInAnExchangeParser begins an exchange as HTTP/1 and MySQL do
+// (Session.NextRequest), reads it whole, its request and its response, and,
+// once released, dies before it records it: as a parser that panics building
+// the mock, or returns an error on it, does. The next request is queued
+// behind it.
+type diesInAnExchangeParser struct {
+	stubParser
+	read    chan struct{}
+	release chan struct{}
+	panics  bool
+}
+
+func (diesInAnExchangeParser) IsV2() bool { return true }
+
+func (p diesInAnExchangeParser) RecordOutgoing(ctx context.Context, s *integrations.RecordSession) error {
+	if _, err := s.V2.NextRequest(models.HTTP, false); err != nil {
+		return err
+	}
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return err
+	}
+	if _, err := s.V2.DestStream.ReadChunk(); err != nil {
+		return err
+	}
+	close(p.read)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if p.panics {
+		panic("a parser bug building the mock of the exchange it read")
+	}
+	return errors.New("a parser error on the exchange it read")
+}
+
+// The exchange a parser was in when it died is lost with it, though it had
+// read it whole: it had not recorded it. Neither the stop's span (from the
+// newest chunk) nor the requests it never read (the next one) covered it, and
+// a test case over it, ended once the app had the answer, was saved without
+// its mock. The supervisor now reports it as the parser would have, from its
+// request to the last byte it read (Session.ReportUnfinishedExchange).
+func TestRecordViaSupervisor_AParserThatDiesInAnExchangeItReadLeavesItOut(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		name := "returns an error"
+		if panics {
+			name = "panics"
+		}
+		t.Run(name, func(t *testing.T) {
+			parser := diesInAnExchangeParser{read: make(chan struct{}), release: make(chan struct{}), panics: panics}
+			h := newStopHarness(t, parser, zap.NewNop())
+
+			tcStart := time.Now()
+			h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+			resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+			if _, err := h.destSvc.Write([]byte(resp)); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, len(resp))
+			if _, err := io.ReadFull(h.clientApp, buf); err != nil {
+				t.Fatal(err)
+			}
+			tcEnd := time.Now() // the app has its answer: the test case ends
+			waitFor(t, parser.read, "the parser never read the exchange")
+			time.Sleep(time.Millisecond) // so the next request is stamped after the test case
+			next := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+
+			close(parser.release)
+			// The stop's span opens as the stop is stamped; the exchange is
+			// reported just after, on the supervisor's goroutine: wait for both.
+			waitUntilT(t, 10*time.Second, "the parser's stop to open its span and its exchange to be reported", func() bool {
+				over, _ := h.mgr.WasMockOrphanedInWindow(next.sent, next.arrived)
+				return over && h.mgr.MocksLeftOut() == 1
+			})
+			if over, _ := h.mgr.WasMockOrphanedInWindow(tcStart, tcEnd); !over {
+				t.Errorf("a test case over the exchange the parser died in, read whole and not recorded, is in no span: saved without its mock")
+			}
+			h.end(t)
+		})
+	}
+}
+
+// recordsThenDiesParser records its connection's first exchange, then begins
+// the next, reads its request and, once released, dies on it without
+// reporting it.
+type recordsThenDiesParser struct {
+	stubParser
+	recorded chan struct{}
+	release  chan struct{}
+}
+
+func (recordsThenDiesParser) IsV2() bool { return true }
+
+func (p recordsThenDiesParser) RecordOutgoing(ctx context.Context, s *integrations.RecordSession) error {
+	if _, err := s.V2.NextRequest(models.HTTP, false); err != nil {
+		return err
+	}
+	req, err := s.V2.ClientStream.ReadChunk()
+	if err != nil {
+		return err
+	}
+	resp, err := s.V2.DestStream.ReadChunk()
+	if err != nil {
+		return err
+	}
+	if err := s.V2.EmitMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: req.ReadAt, ResTimestampMock: resp.ReadAt}}); err != nil {
+		return err
+	}
+	if _, err := s.V2.NextRequest(models.HTTP, false); err != nil {
+		return err
+	}
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return err
+	}
+	close(p.recorded)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return errors.New("a parser error on the second exchange")
+}
+
+// What a parser recorded before it died is not lost with it: it ended that
+// exchange as it emitted its mock, and the exchange reported for it is the one
+// it died in (Session.ReportUnfinishedExchange), from that one's request. A
+// test case over the recorded exchange keeps its mock and is not left out.
+func TestRecordViaSupervisor_WhatAParserRecordedBeforeItDiedIsNotLeftOut(t *testing.T) {
+	parser := recordsThenDiesParser{recorded: make(chan struct{}), release: make(chan struct{})}
+	h := newStopHarness(t, parser, zap.NewNop())
+
+	tcStart := time.Now()
+	h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	resp := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	if _, err := h.destSvc.Write([]byte(resp)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(resp))
+	if _, err := io.ReadFull(h.clientApp, buf); err != nil {
+		t.Fatal(err)
+	}
+	tcEnd := time.Now()
+	time.Sleep(time.Millisecond) // so the next request is stamped after the test case
+	next := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+	waitFor(t, parser.recorded, "the parser never recorded the first exchange")
+
+	close(parser.release)
+	waitUntilT(t, 10*time.Second, "the exchange the parser died in to be left out", func() bool {
+		over, _ := h.mgr.WasMockOrphanedInWindow(next.sent, next.arrived)
+		return over && h.mgr.MocksLeftOut() == 1
+	})
+	if over, _ := h.mgr.WasMockOrphanedInWindow(tcStart, tcEnd); over {
+		t.Error("a test case over the exchange the parser recorded before it died is left out")
+	}
+	h.end(t)
+}
+
+// hungInExchangeParser begins an exchange as HTTP/1 does (NextRequest), reads
+// its request, and hangs there, deaf to its context, until released: a
+// parser the dispatcher must retire without it ever returning.
+type hungInExchangeParser struct {
+	stubParser
+	release chan struct{}
+}
+
+func (hungInExchangeParser) IsV2() bool { return true }
+
+func (p hungInExchangeParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	if _, err := s.V2.NextRequest(models.HTTP, false); err != nil {
+		return err
+	}
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return err
+	}
+	<-p.release
+	return nil
+}
+
+// A parser hung in an exchange, retired by the dispatcher (the hang
+// watchdog's abort) without ever returning, cannot report the exchange; the
+// abort reports it for it (Session.ReportUnfinishedExchange), as the
+// supervisor does for one that returns an error or panics.
+func TestRecordViaSupervisor_AParserRetiredInAnExchangeLeavesItOut(t *testing.T) {
+	parser := hungInExchangeParser{release: make(chan struct{})}
+	t.Cleanup(func() { close(parser.release) })
+	h := newStopHarnessWith(t, parser, zap.NewNop(), func(p *Proxy) { p.parserHangBudget = 200 * time.Millisecond })
+	one := h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	waitUntilT(t, 20*time.Second, "the exchange the retired parser was in to be left out", func() bool {
+		over, _ := h.mgr.WasMockOrphanedInWindow(one.sent, one.arrived)
+		return over && h.mgr.MocksLeftOut() == 1
+	})
+}
+
+// A chunk is the connection's traffic from when the relay read and stamped
+// it: the span of a stopped connection reaches it then (relay.Config.OnCapture,
+// noted at stamping), not only once the relay has written it on and teed it
+// (OnCarried), which a peer slow to read holds back. Noted only then, a test
+// case over a chunk the relay was blocked writing, checked meanwhile, was
+// saved without its mocks.
+func TestRecordViaSupervisor_AChunkIsNotedAsItIsStamped(t *testing.T) {
+	var cfg relay.Config
+	configured := make(chan struct{})
+	h := newStopHarnessWith(t, failingParser{}, zap.NewNop(), func(p *Proxy) {
+		p.relayConfigured = func(c *relay.Config) { cfg = *c; close(configured) }
+	})
+	h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	waitFor(t, configured, "the relay was never configured")
+	waitUntilT(t, 5*time.Second, "the stop opens its span", func() bool {
+		recorded, _, _ := h.mgr.OrphanRangeCount()
+		return recorded > 0
+	})
+	waitUntilT(t, 10*time.Second, "the span closes for idleness", func() bool {
+		_, _, open := h.mgr.OrphanRangeCount()
+		return open == 0
+	})
+	if cfg.OnCapture == nil {
+		t.Fatal("the relay is not told to note each chunk as it stamps it")
+	}
+	stamped := time.Now()
+	cfg.OnCapture(stamped) // a chunk read and stamped, not written on yet
+	if over, _ := h.mgr.WasMockOrphanedInWindow(stamped, stamped); !over {
+		t.Fatal("a chunk the relay stamped after the stop is in no span until it is written on")
+	}
+	h.end(t)
+}
+
+// hungParser reads nothing, and returns only when it is cancelled: a parser
+// hung with the connection's requests queued for it.
+type hungParser struct{ stubParser }
+
+func (hungParser) IsV2() bool { return true }
+
+func (hungParser) RecordOutgoing(ctx context.Context, _ *integrations.RecordSession) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A hung parser is retired once it has had work pending for the hang budget
+// with no progress, and its capture is paused and its streams closed. The
+// requests queued for it that it never read are left out as its Run returns
+// (parserReads), the older one too, though the stop is dated at the newest.
+func TestRecordViaSupervisor_AHungParsersStopCoversWhatWasQueuedForIt(t *testing.T) {
+	h := newStopHarnessWith(t, hungParser{}, zap.NewNop(), func(p *Proxy) { p.parserHangBudget = 200 * time.Millisecond })
+	queued := h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	time.Sleep(time.Millisecond) // so the second is stamped after the first
+	h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+	waitUntilT(t, 20*time.Second, "the requests the hung parser never read to be left out", func() bool {
+		over, _ := h.mgr.WasMockOrphanedInWindow(queued.sent, queued.arrived)
+		return over
+	})
+	h.end(t)
+}
+
 // endsAsTheRecordingStopsParser reads the client's first request, then ends as
 // the recording stops, in one of the ways a parser can: parked in a read, which
 // observes no ctx, as every live connection's parser is when a recording stops
@@ -600,4 +967,57 @@ func TestRecordViaSupervisor_TrafficAfterAnIdleCloseOpensNoSpanAsTheRecordingSto
 	if over, _ := h.mgr.WasMockOrphanedInWindow(stopped, time.Now()); after != before || over {
 		t.Errorf("%d spans, %d before the recording stopped; a span after the stop: %v. It leaves out the test cases in flight as the recording stops", after, before, over)
 	}
+}
+
+// gatedReadParser reads one client chunk, says so, and reads on to the
+// stream's end.
+type gatedReadParser struct {
+	stubParser
+	got chan struct{}
+}
+
+func (gatedReadParser) IsV2() bool { return true }
+
+func (p gatedReadParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+		return err
+	}
+	close(p.got)
+	for {
+		if _, err := s.V2.ClientStream.ReadChunk(); err != nil {
+			return nil
+		}
+	}
+}
+
+// A parser held behind its gate (KEPLOY_DEBUG_PARSER_GATE) gets nothing to
+// consume for as long as the test that set the gate chooses: the hang watchdog
+// is off for it, or it would take the parser for hung and retire it, and a
+// lane that orders parsers by their gates would test a retirement instead.
+func TestRecordViaSupervisor_AParserHeldBehindItsGateIsNotRetiredAsHung(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(debugParserGateEnv, dir)
+	const budget = 20 * time.Millisecond
+	parser := gatedReadParser{got: make(chan struct{})}
+	h := newStopHarnessWith(t, parser, zap.NewNop(), func(p *Proxy) {
+		p.parserHangBudget = budget
+		p.parserGates = debugParserGate(zap.NewNop())
+	})
+	h.send(t, "GET /held HTTP/1.1\r\nHost: x\r\n\r\n")
+	select {
+	case err := <-h.done:
+		t.Fatalf("the parser held behind its gate was retired (%v) within %v, 25 hang budgets", err, 25*budget)
+	case <-time.After(25 * budget):
+	}
+	if err := os.WriteFile(filepath.Join(dir, "1"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-parser.got:
+	case err := <-h.done:
+		t.Fatalf("the parser returned (%v) before its gate let the request through", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request never reached the parser once its gate opened")
+	}
+	h.end(t)
 }

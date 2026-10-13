@@ -1,19 +1,30 @@
 package supervisor
 
 import (
+	"errors"
+	"fmt"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// exchanges is NextRequest's state. Only the parser's goroutine touches it.
+// exchanges is NextRequest's state. Only the parser's goroutine writes it.
 type exchanges struct {
-	// kind is the kind of mock the parser records, for what the floor drops.
+	// kind is the kind of mock the parser records, for what the floor drops
+	// and for an exchange left unfinished (ReportUnfinishedExchange, which
+	// reads it from another goroutine). Set once, at the first request,
+	// before any exchange's start is published, and never written again:
+	// NextRequest refuses another kind.
 	kind models.Kind
 	// report is dropped, made once, at the first request, rather than a
 	// method value that every request's floor would allocate.
 	report func(fakeconn.Dropped)
 }
+
+// errKindChanged is NextRequest's refusal of a request of another kind than
+// the connection's first: a parser bug.
+var errKindChanged = errors.New("supervisor: NextRequest's kind changed")
 
 // leftOutUnanswered is why NextRequest's floor reports the server bytes it
 // drops at the start of a connection the capture joined mid-way. The text
@@ -62,6 +73,12 @@ const leftOutUnanswered = leftOutUnansweredCause + ": they were captured before 
 // the next command's answer, is told only by the next packet the server sends,
 // after a command with an answer. It returns the client stream's errors as
 // they are: io.EOF when the stream ends.
+//
+// A connection's parser records one kind of exchange: the kind of its first
+// request is the session's, and a request of another kind is refused
+// (errKindChanged). The kind is read from another goroutine for an exchange
+// left unfinished (ReportUnfinishedExchange), and an exchange begun under one
+// kind is not reported under another.
 func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chunk, error) {
 	c, err := s.ClientStream.Peek()
 	if err != nil {
@@ -71,9 +88,23 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 		return fakeconn.Chunk{}, fakeconn.ErrUnnumbered
 	}
 	if s.exchanges.report == nil {
+		// The first request: written before any exchange's start is
+		// published below, which ReportUnfinishedExchange reads it after.
 		s.exchanges.report = s.dropped
+		s.exchanges.kind = kind
+	} else if s.exchanges.kind != kind {
+		return fakeconn.Chunk{}, fmt.Errorf("%w: a %s request on a connection whose parser records %s exchanges", errKindChanged, kind, s.exchanges.kind)
 	}
-	s.exchanges.kind = kind
+	// An exchange begins here: the oldest open one, unless one is open
+	// already (ending that one moves the oldest open to the newest begun).
+	// The newest begun is the latest found, in stream order, whatever its
+	// stamp: a wall clock stepped back leaves no stamp from before it
+	// standing as an exchange still open.
+	if !c.ReadAt.IsZero() {
+		at := c.ReadAt.UnixNano()
+		s.exchangeNewest.Store(at)
+		s.exchangeAt.CompareAndSwap(0, at)
+	}
 	if !answerUnread {
 		s.DestStream.DropBefore(c.ConnSeq, s.exchanges.report)
 	}
@@ -122,10 +153,13 @@ func (s *Session) dropped(d fakeconn.Dropped) {
 		}
 		return
 	}
-	s.ReportLeftOut(&models.Mock{
+	// Reported apart from the exchanges the parser began: its capture
+	// times can read at or after the first request's (the two directions are
+	// stamped apart), and ended by them it ended that request's exchange.
+	s.reportLeftOut(&models.Mock{
 		Kind: s.exchanges.kind,
 		Spec: models.MockSpec{ReqTimestampMock: d.From, ResTimestampMock: d.To},
-	}, leftOutUnanswered)
+	}, leftOutUnanswered, false)
 }
 
 // EndExchanges is how a parser that starts its exchanges with NextRequest

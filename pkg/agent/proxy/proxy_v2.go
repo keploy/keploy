@@ -60,9 +60,11 @@ func (p *Proxy) recordViaSupervisor(
 ) error {
 	sv := supervisor.New(supervisor.Config{
 		Logger: logger,
-		// Leave HangBudget / MemCap / PanicReporter defaulted by the
+		// HangBudget is the supervisor's default (parserHangBudget is zero
+		// outside tests). Leave MemCap / PanicReporter defaulted by the
 		// supervisor package. Tune via config once we have production
 		// telemetry on the fallback rate.
+		HangBudget: p.parserHangBudget,
 	})
 	defer sv.Close()
 
@@ -205,13 +207,35 @@ func (p *Proxy) recordViaSupervisor(
 	// returns, before the stop, and is seen retired once the recording has
 	// stopped. Its span is a loss before the stop, and the session's summary
 	// counts the test cases it leaves out.
-	openSpan := func(start time.Time) func() {
+	//
+	// All of it is on the capture's clock: the relay's stamps of the chunks
+	// the connection carries (relay.Config.OnCapture, and OnCarried through
+	// parserReads), never the agent's. A stop is dated at the stamp of the last chunk the
+	// connection had carried (Session.CaptureClock), the span after it
+	// extends to each chunk it carries, it is idle once the relay has read
+	// nothing for the idle grace past its last chunk (relay.Relay.CapturedTo),
+	// and it then ends at that chunk. A parser behind its connection's
+	// traffic, by as much as the agent is starved, does not widen any of it
+	// by its lag. What the parser had not recorded by the stop is left out
+	// apart: the exchange it was in (Session.ReportUnfinishedExchange, or its
+	// own ReportStoppedOn), and the requests it never read (parserReads).
+	openSpan := func(start time.Time) syncMock.CaptureSpan {
 		if svSess.RecordingStopping() {
-			return func() {}
+			return syncMock.NoSpan
 		}
-		return svSess.OpenOrphanWindow(start)
+		return svSess.OpenOrphanSpan(start, syncMock.UnrecordedIdleGrace)
 	}
-	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
+	// r is the relay, built below; the follower asks it how far the capture
+	// of the connection has got only once the relay runs (a stop, or a
+	// chunk, starts it).
+	var r *relay.Relay
+	capturedTo := func() time.Time {
+		if r == nil {
+			return time.Now()
+		}
+		return r.CapturedTo()
+	}
+	unrecorded := syncMock.NewUnrecordedConnOnCapture(openSpan, capturedTo, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
 	// What the connection carries is noted through what its parser read
 	// (parserReads): once the parser's Run has returned, a request it read is
@@ -223,6 +247,15 @@ func (p *Proxy) recordViaSupervisor(
 	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
 	defer stopRecordingStamp()
 
+	// Nil unless KEPLOY_DEBUG_PARSER_GATE is set (debugParserGate). A parser
+	// held behind its gate gets nothing to consume, for as long as the test
+	// that set it chooses, and the hang watchdog would take it for hung and
+	// retire it: off for the connections the gate holds (a test hook; panic
+	// and memory-cap protection stay on).
+	readerGate := p.parserGate(ctx, logger, dstConn)
+	if readerGate != nil {
+		sv.SuspendWatchdog()
+	}
 	relayCfg := relay.Config{
 		Logger: logger,
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
@@ -244,7 +277,14 @@ func (p *Proxy) recordViaSupervisor(
 		// — which is what bounds the suppression window below to the periods
 		// that can really have cost a mock. Once the parser's Run has
 		// returned, it also says which chunks it had read (parserReads).
-		OnCarried:            reads.carried,
+		OnCarried: reads.carried,
+		// Every chunk the connection carries, by its stamp, as it is stamped:
+		// before its bytes are written on, so a chunk the relay is blocked
+		// writing to a slow peer is traffic already (relay.Relay.CapturedTo),
+		// and a span following the connection is extended to it then. The
+		// notes parserReads passes on (OnCarried) come once a chunk is teed;
+		// noting a stamp twice changes nothing.
+		OnCapture:            unrecorded.Note,
 		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
@@ -259,7 +299,8 @@ func (p *Proxy) recordViaSupervisor(
 		// session's stop instant, and OnStop opens the span there. A hole
 		// that comes after the parser stopped on an exchange
 		// (ReportStoppedOn), its queue full behind it, finds the stop stamped
-		// already, and the span open from where that exchange's span ends.
+		// already, and the span open from that stop: the requests queued
+		// before it are left out as the parser returns (parserReads).
 		// It costs the recording nothing as the recording stops
 		// (Session.RecordingStopping): no span opens (openSpan), and the tee
 		// then logs no WARN for it.
@@ -284,7 +325,8 @@ func (p *Proxy) recordViaSupervisor(
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
 		// Zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
-		ReaderLag: p.parserLag,
+		ReaderLag:  p.parserLag,
+		ReaderGate: readerGate,
 	}
 
 	// One call sets the relay's client-direction brake AND the parser's
@@ -300,8 +342,14 @@ func (p *Proxy) recordViaSupervisor(
 	// saying so. See relay.Config.EndAtHole.
 	applyEndAtHole(&relayCfg, svSess, parser)
 
-	r := relay.New(relayCfg, srcConn, dstConn)
+	if p.relayConfigured != nil {
+		p.relayConfigured(&relayCfg)
+	}
+	r = relay.New(relayCfg, srcConn, dstConn)
 
+	// A stop is dated on the capture's clock: the stamp of the newest chunk
+	// the connection had carried (Session.StoppedAt).
+	svSess.CaptureClock = r.LastCaptured
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
 	reads.follow(svSess.ClientStream, r.Teed)
@@ -360,6 +408,11 @@ func (p *Proxy) recordViaSupervisor(
 		// carries from there (OnStop), before the supervisor logs why it
 		// aborted and the dispatcher logs the retirement.
 		svSess.StoppedAt()
+		// The exchange it was in is lost with it: left out from its request
+		// to the last byte it read (Session.ReportUnfinishedExchange). A
+		// cancel of the recording reports nothing (RecordingStopping): the
+		// connection is torn down with it.
+		svSess.ReportUnfinishedExchange("it was retired: hung, or over its memory cap")
 		r.PauseTees()
 
 		// Then unblock the parser's ClientStream/DestStream reads so
@@ -513,8 +566,9 @@ func (p *Proxy) recordViaSupervisor(
 	// is gone, and the relay keeps forwarding. A parser that stopped on an
 	// exchange, died or was retired stopped the connection as its stop was
 	// stamped (OnStop, above), no later than the retirement: what it had
-	// captured and not recorded is lost, the exchange it was in, which only
-	// the parser can report (ReportStoppedOn), and those queued behind it. A
+	// captured and not recorded is lost, the exchange it was in, which the
+	// parser reports (ReportStoppedOn) or is reported for
+	// (ReportUnfinishedExchange), and those queued behind it. A
 	// parser that returned on its own recorded what it read, so the
 	// connection is left out from the next bytes it carries, if any (a parser
 	// that returns at its connection's end leaves no span). What it never

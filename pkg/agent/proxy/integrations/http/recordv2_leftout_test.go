@@ -113,10 +113,10 @@ func (r leftOutRun) warned() []observer.LoggedEntry {
 
 // A parser that returns on an exchange it cannot record reports it before it
 // returns, as every parser reports the exchange it stops on
-// (Session.ReportStoppedOn): its span, from its request to the stop, so the
-// test cases over it, and over what the connection carried that the parser had
-// not read yet, are left out; a count, for the recording's summary; and a WARN
-// with why. It used to mark the incomplete-mock flag and return: no later
+// (Session.ReportStoppedOn): its span, from its request to the last of it the
+// parser read, so the test cases over it are left out (the requests the
+// connection carried that the parser never read are left out apart, by the
+// dispatcher); a count, for the recording's summary; and a WARN with why. It used to mark the incomplete-mock flag and return: no later
 // EmitMock took the mark, so the exchange was lost with nothing reporting it,
 // and the test cases over it were saved and failed replay with no_mocks. Each
 // way the HTTP recorder stops on an exchange it captured and cannot record.
@@ -160,9 +160,8 @@ func TestRecordV2_ReportsAnExchangeItStopsOn(t *testing.T) {
 		},
 		{
 			// The response's first chunk frames and its tail does not: the
-			// span reaches the tail's write, the response's last, and on to
-			// the stop. A test case recorded over the tail is over the
-			// exchange too.
+			// span reaches the tail's write, the response's last. A test
+			// case recorded over the tail is over the exchange too.
 			name: "its response stops decoding past its first chunk",
 			feed: func(_ *supervisor.Session, sendReq, sendResp func([]byte, time.Time, time.Time), closeResp func()) {
 				sendReq(canonicalRequest, reqAt, reqAt)
@@ -201,13 +200,11 @@ func TestRecordV2_ReportsAnExchangeItStopsOn(t *testing.T) {
 			if over, _ := r.spans.Overlaps(tc.end, tc.end); !over {
 				t.Fatal("the span stops short of the exchange's end: a test case over its end is not left out")
 			}
-			// The stop came after recordV2 was called, past every byte it
-			// read, and no later than its return.
-			if over, _ := r.spans.Overlaps(r.started, r.started); !over {
-				t.Fatal("the span stops short of the stop: a test case over what the connection carried that the parser had not read yet is not left out")
-			}
-			if over, _ := r.spans.Overlaps(r.returned.Add(time.Millisecond), r.returned.Add(time.Second)); over {
-				t.Fatal("the span reaches past the stop")
+			// Not on to the stop, which came after recordV2 was called: the
+			// connection carried nothing more, and a test case in between
+			// that never used it is not over the exchange.
+			if over, _ := r.spans.Overlaps(tc.end.Add(time.Nanosecond), r.returned.Add(time.Second)); over {
+				t.Fatal("the span reaches past the last of the exchange the parser read: a test case after it that never used the connection is left out")
 			}
 			if over, _ := r.spans.Overlaps(reqAt.Add(-time.Second), reqAt.Add(-time.Millisecond)); over {
 				t.Fatal("the span starts before the exchange")

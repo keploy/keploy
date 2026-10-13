@@ -2,12 +2,17 @@ package recorder
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -290,11 +295,12 @@ func TestRecordV2_APipeliningClientsResponseItCannotFrameStopsTheConnection(t *t
 			if got := queryMocks(rec.mocks); got != 5 {
 				t.Fatalf("%d query mocks, want the 5 before the response it could not frame", got)
 			}
-			// The supervisor counts what the connection carries from the
-			// parser's retirement: the window reaches it, past every byte
-			// buffered.
-			if w, _ := rec.leftOut.last(); w[1].Before(server[len(server)-1].ReadAt) {
-				t.Fatalf("the window left out ends at %v, before the last byte the connection carried (%v)", w[1].Format(time.StampMicro), server[len(server)-1].ReadAt.Format(time.StampMicro))
+			// The window reaches the last byte the recorder read: the
+			// commands it never read are left out apart, by the dispatcher,
+			// and what the connection carries from the stop on is counted
+			// from there.
+			if w, _ := rec.leftOut.last(); !w[1].Equal(rec.readTo) {
+				t.Fatalf("the window left out ends at %v, want at the last byte the recorder read (%v)", w[1].Format(time.StampMicro), rec.readTo.Format(time.StampMicro))
 			}
 		})
 	}
@@ -507,5 +513,107 @@ func TestRecordV2_AnAnswerStampedAlikeWithItsCommandStopsTheConnection(t *testin
 	}
 	if got := rec.leftOut.count(); got != 2 {
 		t.Fatalf("%d exchanges left out, want the one it could not frame and the one the recording stopped in", got)
+	}
+}
+
+// consumedAll waits until the recorder has read every client byte pushed
+// (want), so it is past each of them, reading what comes next.
+func consumedAll(t *testing.T, sess *supervisor.Session, want int64, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for sess.ClientStream.Consumed() < want {
+		select {
+		case err := <-done:
+			t.Fatalf("RecordV2 returned (%v) before it read every client byte", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the recorder read %d of %d client bytes", sess.ClientStream.Consumed(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitingOnTheServer waits until the recorder is blocked reading the server's
+// stream: past everything before it, the config mock included.
+func waitingOnTheServer(t *testing.T, sess *supervisor.Session, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if w, _ := sess.DestStream.Waiting(); w {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("RecordV2 returned (%v) before it waited on the server", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the recorder never waited on the server's stream")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// unfinishedFrom stops the recorder as the supervisor or the dispatcher's
+// abort does for a parser that dies or is retired in an exchange, and returns
+// where the exchange it reports starts; ok false when it reports none.
+func unfinishedFrom(sess *supervisor.Session, spans *orphanSpans) (time.Time, bool) {
+	before := spans.count()
+	sess.StoppedAt()
+	sess.ReportUnfinishedExchange("it was retired: hung")
+	if spans.count() == before {
+		return time.Time{}, false
+	}
+	w, _ := spans.last()
+	return w[0], true
+}
+
+// The client packets the recorder passes over after a response it left out
+// (a LOAD DATA LOCAL INFILE's upload) are more of that exchange: they begin
+// none. A parser that is retired, or dies, in the command after them, which
+// the client sent minutes later, was said to have stopped in an exchange that
+// began at the upload, and every test case in between, on any connection, was
+// left out.
+func TestRecordV2_APacketPassedOverBeginsNoExchange(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	spans := &orphanSpans{}
+	h.sess.Orphans = spans
+	h.sess.Mgr = syncMock.New(nil)
+	base := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	greetingBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), greetingBuf[4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent int64
+	client := func(b []byte, at time.Time) {
+		sent += int64(len(b))
+		h.pushClient(b, at)
+	}
+	h.pushDest(greetingBuf, base)
+	client(cannedHandshakeResponse41(t, 1, false), base.Add(time.Millisecond))
+	h.pushDest(cannedOK(t, 2, greeting.CapabilityFlags), base.Add(2*time.Millisecond))
+	load := loadDataLocal(t)
+	client(load[0].command, base.Add(3*time.Millisecond))
+	h.pushDest(bytes.Join(load[0].reply, nil), base.Add(4*time.Millisecond))
+	client(load[1].command, base.Add(5*time.Millisecond)) // the upload, passed over
+	h.pushDest(bytes.Join(load[1].reply, nil), base.Add(6*time.Millisecond))
+	later := base.Add(5 * time.Minute)
+	client(cannedCOMQuery(t, 0, "SELECT 1"), later) // its answer never comes
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RecordV2(ctx, h.logger, h.sess) }()
+	t.Cleanup(func() { cancel(); h.closeStreams(); <-done })
+	consumedAll(t, h.sess, sent, done)
+
+	start, ok := unfinishedFrom(h.sess, spans)
+	if !ok {
+		t.Fatal("the exchange the recorder is in, the SELECT's, is not reported")
+	}
+	if !start.Equal(later) {
+		t.Fatalf("the exchange the recorder is in starts at %v, want the SELECT's %v: %v of a client sitting idle is in it", start, later, later.Sub(start))
 	}
 }

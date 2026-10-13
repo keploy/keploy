@@ -270,3 +270,36 @@ func TestWatermark_AParserWaitingWithTheOtherDirectionUnreadIsNotDone(t *testing
 		t.Fatal("PendingBefore(mid) = false while the parser waits on the client with the response to the request it took before mid unread")
 	}
 }
+
+// ReaderGate holds every chunk from the parser until it is closed, while the
+// application's bytes are forwarded at once; the watermark holds what waits
+// behind it.
+func TestWatermark_ReaderGateHoldsTheParserUntilItOpens(t *testing.T) {
+	gate := make(chan struct{})
+	h := newHarness(t, Config{ReaderGate: gate})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+
+	h.writeClient([]byte("held"))
+	h.readDest(4) // the application is not held
+	got := make(chan []byte, 1)
+	go func() {
+		c, err := h.r.ClientStream().ReadChunk()
+		if err == nil {
+			got <- c.Bytes
+		}
+	}()
+	awaitState(t, "the parser to wait behind the gate", func() bool { w, _ := h.r.ClientStream().Waiting(); return w })
+	select {
+	case b := <-got:
+		t.Fatalf("the parser got %q through a closed gate", b)
+	default:
+	}
+	if !w.PendingBefore(time.Now()) {
+		t.Fatal("PendingBefore: false while the chunk waited behind the gate")
+	}
+	close(gate)
+	if b := <-got; string(b) != "held" {
+		t.Fatalf("the parser got %q once the gate opened, want \"held\"", b)
+	}
+}

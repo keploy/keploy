@@ -150,6 +150,10 @@ type Relay struct {
 	// upstream socket out of order.
 	holdMu sync.Mutex
 
+	// created is when New built the relay (UnixNano): the capture's clock
+	// for a connection that has carried nothing yet (LastCaptured).
+	created int64
+
 	// preDispatchActive is true between [Relay.Run]'s pre-spawn
 	// [installPreDispatchPause] call (gated on
 	// [Config.PreDispatchPause]) and the
@@ -198,6 +202,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		directives: make(chan directive.Directive, 8),
 		acks:       make(chan directive.Ack, 8),
 		order:      connseq.Of(dst),
+		created:    time.Now().UnixNano(),
 	}
 	if r.order == nil {
 		// Every chunk is numbered (fakeconn.ErrUnnumbered), and only the
@@ -264,7 +269,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 	// What the parser has consumed of each stream tells the capture
 	// watermark how far it has got (progress.go). Set, with the reader lag,
 	// before the drains start.
-	r.teeC2D.consumed, r.teeC2D.readerLag = r.clientStream.Consumed, cfg.ReaderLag
+	r.teeC2D.consumed, r.teeC2D.readerLag, r.teeC2D.readerGate = r.clientStream.Consumed, cfg.ReaderLag, cfg.ReaderGate
 	// The tee may only abandon a queued chunk once this stream is closed,
 	// so its drain cannot start until the stream exists.
 	r.teeC2D.start(r.clientStream.Done())
@@ -274,7 +279,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		destRemote = dst.RemoteAddr()
 	}
 	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
-	r.teeD2C.consumed, r.teeD2C.readerLag = r.destStream.Consumed, cfg.ReaderLag
+	r.teeD2C.consumed, r.teeD2C.readerLag, r.teeD2C.readerGate = r.destStream.Consumed, cfg.ReaderLag, cfg.ReaderGate
 	r.teeD2C.start(r.destStream.Done())
 
 	return r
@@ -696,6 +701,11 @@ func (r *Relay) forward(
 			t.noteReading()
 			chunk.Dir = dir
 			chunk.ReadAt = observedReadAt(src, time.Now())
+			// Noted before it is marked stamped: a chunk in hand that is
+			// stamped has been told of (CapturedTo).
+			if r.cfg.OnCapture != nil {
+				r.cfg.OnCapture(chunk.ReadAt)
+			}
 			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()

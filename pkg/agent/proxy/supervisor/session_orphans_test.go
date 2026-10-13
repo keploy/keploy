@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -755,17 +756,19 @@ func TestAMockLeftOutIsSpannedOverItsOwnTimesOnly(t *testing.T) {
 // with ReportStoppedOn: one rule for every parser (the HTTP/1 recorder's
 // request or response that does not decode, the MySQL recorder's lost
 // framing). It is counted, said at WARN and cleared from the pending work like
-// any mock left out, and spanned from its request to the stop, not to the last
-// byte the parser read of it: the parser runs behind its connection, and the
-// span must meet the one opened for what the connection carries after the
-// stop. A mark on the flag is taken with it, since no later EmitMock would take
-// it, and the exchange is reported once, under the mark's cause; with none,
-// under the parser's reason, and the flag stays clear. The stop is the
-// session's stop instant (StoppedAt), the one that span starts at: read before
-// the report (by the abort that retired a parser still running, or at a capture
-// hole), it is that earlier instant. A request with no time is counted with no
-// span, and one stamped after the clock reads ends where it starts.
-func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
+// any mock left out, and spanned from its request to the last byte the parser
+// read (or wrote on) of it, not to the stop: the requests the connection
+// carried that the parser never read are left out apart (pkg/agent/proxy's
+// parserReads), and a span on to the stop left out every test case in it,
+// those that never used the connection too. The stop is still stamped as it
+// is reported (StoppedAt), the instant the span of what the connection carries
+// after it starts at, unless the abort that retired a parser still running,
+// or a capture hole, stamped it first. A mark on the flag is taken with it,
+// since no later EmitMock would take it, and the exchange is reported once,
+// under the mark's cause; with none, under the parser's reason, and the flag
+// stays clear. A request with no time is counted with no span, and one
+// stamped after the last byte read ends where it starts.
+func TestAParserStoppingOnAnExchangeReportsItUpToWhatTheParserRead(t *testing.T) {
 	prev := leftOutWarns
 	t.Cleanup(func() { leftOutWarns = prev })
 	type run struct {
@@ -775,11 +778,19 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		logs    *observer.ObservedLogs
 		cleared int
 	}
+	at := time.Now().Add(-time.Minute)
+	read := at.Add(3 * time.Second) // the last of the exchange the parser read
 	newRun := func() *run {
 		leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 		core, logs := observer.New(zapcore.DebugLevel)
 		r := &run{spans: &rawSpans{}, mgr: syncMock.New(nil), logs: logs}
-		r.s = &Session{Orphans: r.spans, Mgr: r.mgr, Logger: zap.New(core), ClientConnID: "stopped"}
+		dest := make(chan fakeconn.Chunk, 1)
+		dest <- fakeconn.Chunk{ReadAt: read.Add(-time.Millisecond), WrittenAt: read, Bytes: []byte("x")}
+		r.s = &Session{Orphans: r.spans, Mgr: r.mgr, Logger: zap.New(core), ClientConnID: "stopped",
+			DestStream: fakeconn.New(dest, nil, nil)}
+		if _, err := r.s.DestStream.ReadChunk(); err != nil {
+			t.Fatal(err)
+		}
 		r.s.OnPendingCleared = func() { r.cleared++ }
 		return r
 	}
@@ -791,7 +802,6 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		}
 		return w[0].ContextMap()
 	}
-	at := time.Now().Add(-time.Minute)
 
 	t.Run("its own reason", func(t *testing.T) {
 		r := newRun()
@@ -801,12 +811,12 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 		if len(r.spans.got) != 1 {
 			t.Fatalf("%d spans, want the exchange's", len(r.spans.got))
 		}
-		if sp := r.spans.got[0]; !sp[0].Equal(at) || sp[1].Before(before) || sp[1].After(after) {
-			t.Fatalf("the exchange is spanned over [%v, %v], want from its request (%v) to the stop (between %v and %v)",
-				sp[0], sp[1], at, before, after)
+		if sp := r.spans.got[0]; !sp[0].Equal(at) || !sp[1].Equal(read) {
+			t.Fatalf("the exchange is spanned over [%v, %v], want from its request (%v) to the last of it the parser read and wrote on (%v)",
+				sp[0], sp[1], at, read)
 		}
-		if stop := r.s.StoppedAt(); !r.spans.got[0][1].Equal(stop) {
-			t.Fatalf("the exchange is spanned up to %v, want the session's stop instant (%v), where the span after the stop starts", r.spans.got[0][1], stop)
+		if stop := r.s.StoppedAt(); stop.Before(before) || stop.After(after) {
+			t.Fatalf("the stop is %v, want it stamped as the exchange was reported (between %v and %v)", stop, before, after)
 		}
 		if n := r.mgr.MocksLeftOut(); n != 1 || r.cleared != 1 {
 			t.Fatalf("counted %d, pending work cleared %d times; want 1 and 1", n, r.cleared)
@@ -839,10 +849,12 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 	t.Run("a stop read first, at a retirement or a hole", func(t *testing.T) {
 		r := newRun()
 		stopped := r.s.StoppedAt()
-		time.Sleep(time.Millisecond)
 		r.s.ReportStoppedOn(models.HTTP, at, "http decode error: x")
-		if len(r.spans.got) != 1 || !r.spans.got[0][1].Equal(stopped) {
-			t.Fatalf("spanned over %v, want up to the earlier stop (%v), where the span after it starts", r.spans.got, stopped)
+		if len(r.spans.got) != 1 || !r.spans.got[0][1].Equal(read) {
+			t.Fatalf("spanned over %v, want up to the last of it the parser read (%v)", r.spans.got, read)
+		}
+		if got := r.s.StoppedAt(); !got.Equal(stopped) {
+			t.Fatalf("the stop moved from %v to %v: the earlier one is the connection's", stopped, got)
 		}
 	})
 	t.Run("a request with no time", func(t *testing.T) {
@@ -858,7 +870,7 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 			t.Fatalf("the WARN says %v, want no span recorded and its next_step", w)
 		}
 	})
-	t.Run("a request stamped after the clock reads", func(t *testing.T) {
+	t.Run("a request stamped after the last byte read", func(t *testing.T) {
 		r := newRun()
 		ahead := time.Now().Add(time.Hour)
 		r.s.ReportStoppedOn(models.HTTP, ahead, "http decode error: x")
@@ -871,11 +883,9 @@ func TestAParserStoppingOnAnExchangeReportsItUpToTheStop(t *testing.T) {
 }
 
 // A connection's stop is read from the clock once, at the first StoppedAt,
-// and every later call, from any goroutine, gets that same instant: the parser
-// ends the span of the exchange it stopped on there, and the span of what the
-// connection carries after the stop starts there, whether the parser's
-// retirement or a capture hole opens it, so nothing captured between the two
-// is in neither.
+// and every later call, from any goroutine, gets that same instant: the span
+// of what the connection carries after the stop starts there, whichever of the
+// parser's own stop, its retirement or a capture hole stamps it.
 func TestStoppedAtIsReadFromTheClockOnce(t *testing.T) {
 	s := &Session{}
 	before := time.Now()
@@ -1217,4 +1227,162 @@ func TestAResetStreamIsLeftOutWithItsOwnNextStep(t *testing.T) {
 	if got := w[0].ContextMap()["next_step"]; got != next {
 		t.Errorf("the WARN's next_step is %v, want the reset's", got)
 	}
+}
+
+// P20: a connection's stop is dated on the capture's clock (CaptureClock: the
+// stamp of the newest chunk it carried), not when the agent gets to it. A
+// parser ten seconds behind its traffic that stops on an exchange starts the
+// span of what the connection carries after the stop at the last chunk the
+// connection carried, and spans the exchange to the last of it the parser
+// read. Dated by the agent's clock, the span after the stop started ten
+// seconds late, and the exchange's covered everything any connection carried
+// in those ten seconds.
+func TestStoppedAtIsTheCapturesClock(t *testing.T) {
+	prev := leftOutWarns
+	t.Cleanup(func() { leftOutWarns = prev })
+	leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
+	wire := time.Now().Add(-10 * time.Second) // the exchange, ten seconds ago
+	last := wire.Add(20 * time.Millisecond)   // the last chunk the connection carried
+	spans := &rawSpans{}
+	var opened time.Time
+	read := wire.Add(5 * time.Millisecond) // the last of the exchange the parser read
+	client := make(chan fakeconn.Chunk, 1)
+	client <- fakeconn.Chunk{ReadAt: read, Bytes: []byte("x")}
+	s := &Session{Orphans: spans, Mgr: syncMock.New(nil), Logger: zap.NewNop(),
+		ClientStream: fakeconn.New(client, nil, nil),
+		CaptureClock: func() time.Time { return last },
+		OnStop:       func(at time.Time) { opened = at }}
+	if _, err := s.ClientStream.ReadChunk(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.ReportStoppedOn(models.HTTP, wire, "http decode error: x")
+	if got := s.StoppedAt(); !got.Equal(last) {
+		t.Fatalf("the stop is %v, want the stamp of the last chunk the connection carried (%v), not the agent's clock", got, last)
+	}
+	if len(spans.got) != 1 || !spans.got[0][0].Equal(wire) || !spans.got[0][1].Equal(read) {
+		t.Fatalf("the exchange is spanned over %v, want [%v, %v]: to the last of it the parser read", spans.got, wire, read)
+	}
+	if !opened.Equal(last) {
+		t.Fatalf("the span after the stop opens at %v, want the stop's stamp %v", opened, last)
+	}
+
+	// A capture clock with nothing to tell leaves the agent's clock.
+	before := time.Now()
+	s2 := &Session{CaptureClock: func() time.Time { return time.Time{} }}
+	if got := s2.StoppedAt(); got.Before(before.Round(0)) {
+		t.Fatalf("with no capture stamp the stop is %v, want the clock (after %v)", got, before)
+	}
+}
+
+// A parser that begins its exchanges with NextRequest is in one from its
+// request until it ends it (EmitMock, ReportLeftOut, MarkMockComplete). One
+// that stops without ending it (it panicked, returned an error, was retired)
+// cannot report it; ReportUnfinishedExchange does, from its request to the
+// last byte the parser read of it. An exchange ended, or a recording that is
+// stopping, reports nothing,
+// and ending an older exchange (a pipelined one, late) leaves the one in
+// progress unended.
+func TestAnExchangeAParserStopsInIsReported(t *testing.T) {
+	prev := leftOutWarns
+	t.Cleanup(func() { leftOutWarns = prev })
+	leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
+	base := time.Now().Add(-time.Minute).Round(0)
+	newSession := func() (*Session, *rawSpans) {
+		spans := &rawSpans{}
+		return &Session{Logger: zap.NewNop(), Mgr: syncMock.New(nil), Orphans: spans, Mocks: make(chan *models.Mock, 4),
+			CaptureClock: func() time.Time { return base.Add(5 * time.Second) }}, spans
+	}
+
+	s, spans := newSession()
+	s.exchanges.kind = models.HTTP
+	s.exchangeAt.Store(base.UnixNano()) // NextRequest began it
+	// The parser read the exchange up to a chunk stamped 3 s in; the stop is
+	// dated at the newest chunk the connection carried, 5 s in.
+	ch := make(chan fakeconn.Chunk, 1)
+	ch <- fakeconn.Chunk{ReadAt: base.Add(3 * time.Second), Bytes: []byte("x")}
+	s.DestStream = fakeconn.New(ch, nil, nil)
+	if _, err := s.DestStream.ReadChunk(); err != nil {
+		t.Fatal(err)
+	}
+	s.StoppedAt()
+	s.ReportUnfinishedExchange("it panicked")
+	if s.Mgr.MocksLeftOut() != 1 || len(spans.got) != 1 || !spans.got[0][0].Equal(base) || !spans.got[0][1].Equal(base.Add(3*time.Second)) {
+		t.Fatalf("the exchange the parser stopped in: %d left out, spans %v, want one over [%v, %v]: from its request to the last byte the parser read of it, not to the stop", s.Mgr.MocksLeftOut(), spans.got, base, base.Add(3*time.Second))
+	}
+	s.ReportUnfinishedExchange("again") // reported once
+	if s.Mgr.MocksLeftOut() != 1 {
+		t.Fatalf("the exchange was reported %d times", s.Mgr.MocksLeftOut())
+	}
+
+	for name, end := range map[string]func(*Session){
+		"emitted": func(s *Session) {
+			_ = s.EmitMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: base, ResTimestampMock: base.Add(time.Second)}})
+		},
+		"reported left out": func(s *Session) {
+			s.ReportLeftOut(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: base, ResTimestampMock: base.Add(time.Second)}}, "http decode error: x")
+		},
+		"ended with nothing to record": func(s *Session) { s.MarkMockComplete() },
+	} {
+		s, _ := newSession()
+		s.exchangeAt.Store(base.UnixNano())
+		end(s)
+		left := s.Mgr.MocksLeftOut()
+		s.StoppedAt()
+		s.ReportUnfinishedExchange("it panicked")
+		if s.Mgr.MocksLeftOut() != left {
+			t.Fatalf("%s: an exchange the parser ended was reported again as unfinished", name)
+		}
+	}
+
+	s, _ = newSession()
+	s.exchangeAt.Store(base.Add(2 * time.Second).UnixNano())
+	_ = s.EmitMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: base, ResTimestampMock: base.Add(time.Second)}})
+	if s.exchangeAt.Load() == 0 {
+		t.Fatal("emitting an older, pipelined exchange ended the one in progress")
+	}
+
+	s, _ = newSession()
+	done := make(chan struct{})
+	close(done)
+	s.RecordingDone = done
+	s.exchangeAt.Store(base.UnixNano())
+	s.StoppedAt()
+	s.ReportUnfinishedExchange("it panicked")
+	if s.Mgr.MocksLeftOut() != 0 {
+		t.Fatal("an exchange in flight as the recording stops was reported left out")
+	}
+	var none *Session
+	none.ReportUnfinishedExchange("x")
+}
+
+// OpenOrphanSpan opens a span on the capture's clock where the session's spans
+// go: the manager's, or Orphans' (OpenAt when it can; Open otherwise).
+func TestOpenOrphanSpanRoutesAsOpenOrphanWindow(t *testing.T) {
+	t0 := time.Now().Add(-time.Hour)
+	mgr := syncMock.New(nil)
+	s := &Session{Mgr: mgr}
+	sp := s.OpenOrphanSpan(t0, time.Millisecond)
+	sp.Extend(t0.Add(time.Second))
+	sp.Close(t0.Add(time.Second))
+	if ok, _ := mgr.WasMockOrphanedInWindow(t0.Add(500*time.Millisecond), t0.Add(500*time.Millisecond)); !ok {
+		t.Fatal("the span did not reach the manager")
+	}
+	if ok, _ := mgr.WasMockOrphanedInWindow(t0.Add(2*time.Second), time.Now()); ok {
+		t.Fatal("a span closed at its last chunk reaches past it")
+	}
+
+	own := &syncMock.Spans{}
+	s = &Session{Mgr: mgr, Orphans: own}
+	sp = s.OpenOrphanSpan(t0, time.Millisecond)
+	sp.Close(t0)
+	if closed, open := own.Counts(); closed != 1 || open != 0 {
+		t.Fatalf("Orphans holds %d closed, %d open spans; want the one, closed", closed, open)
+	}
+
+	raw := &rawSpans{}
+	s = &Session{Orphans: raw}
+	s.OpenOrphanSpan(t0, time.Millisecond).Close(t0) // Open, then its closer
+	var none *Session
+	none.OpenOrphanSpan(t0, time.Millisecond).Close(t0)
 }
