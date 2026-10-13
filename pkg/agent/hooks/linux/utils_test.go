@@ -311,13 +311,14 @@ func takeDownTracefsLayout(t *testing.T, dir string) {
 // there to check it.
 func buildTracefsLayout(t *testing.T, layout string) {
 	inOwnMountNamespace(t)
+	// Whether each detach worked is read back from mountinfo below, not from
+	// its error: root in a user namespace cannot detach what it inherited (a
+	// locked mount, EINVAL, or EACCES on a path it cannot search, such as a
+	// 0700 /sys/kernel/debug), and then no layout can be built here, and
+	// checking one would check the host's.
 	for _, p := range tracefsMountPoints(t, "/") {
-		if err := unix.Unmount(p, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) {
-			t.Fatalf("unmount %s: %v", p, err)
-		}
+		_ = unix.Unmount(p, unix.MNT_DETACH)
 	}
-	// A mount inherited into a user namespace is locked and stays (EINVAL):
-	// then no layout can be built, and checking one would check the host's.
 	if left := tracefsMountPoints(t, "/"); len(left) > 0 {
 		t.Skipf("these tracefs and debugfs mounts cannot be detached here: %v", left)
 	}
