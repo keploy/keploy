@@ -372,8 +372,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
 	if len(starts) == 0 && len(windows) > 0 {
-		m.logger.Info("no app start seen: calls made outside the tests are kept as the test process's start-up",
-			zap.String("next_step", "if the app runs as a child of the test, call AppStart(pid, port) after starting it so its start-up is kept apart"))
+		m.logger.Info("no app start seen: calls made outside the tests are kept as the start-up of their test folder",
+			zap.String("next_step", "if the tests start the app as its own process, send POST $KEPLOY_MOCK_AGENT/agent/app/start {\"port\": <port>, \"pid\": <app pid>} once it is ready, so its start-up is kept apart"))
 	}
 	if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
@@ -389,7 +389,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		keep = false
 		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("mock-set", name),
-			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
+			zap.String("next_step", noCallsNext))
 		m.propagateExit(appErr, "record")
 		return nil
 	}
@@ -450,7 +450,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "the app must be started by the test command (as a child process) and announced with AppStart(pid, port), or the tests made no outgoing calls"))
+			zap.String("next_step", noCallsNext))
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
@@ -505,9 +505,12 @@ func (m *mockService) noScopes(tests []models.ScopeWindow, readErr error, appErr
 	if readErr != nil {
 		return refusal{fmt.Sprintf("Recording stopped: keploy could not read which tests ran from its agent (%v).\n%s", readErr, last)}
 	}
-	return refusal{"Recording stopped: your tests ran but none called e2e.Scope(t), so keploy cannot tell which calls belong to which test.\n" +
-		"Call e2e.Scope(t) at the start of every test (it marks where the test begins and ends), then run keploy mock record again.\n" + last}
+	return refusal{"Recording stopped: your tests ran but none sent a scope mark, so keploy cannot tell which calls belong to which test.\n" +
+		"At the start of every test send POST $KEPLOY_MOCK_AGENT/agent/scope/begin {\"name\": \"<test>\", \"pid\": <test process pid>, \"dir\": \"<folder>\"}, and at its end POST $KEPLOY_MOCK_AGENT/agent/scope/end with the same body, then run keploy mock record again.\n" + last}
 }
+
+// noCallsNext is the next step when a recording captured no outgoing call.
+const noCallsNext = "the tests made no calls to a dependency while this command ran, or the process that made them was not started by this command"
 
 // saveSet backs the named set up to a sibling .<name>.previous directory so a
 // refused or interrupted re-record can be undone, and returns a restore(keep)

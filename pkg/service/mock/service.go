@@ -202,7 +202,7 @@ type Store interface {
 }
 
 // ScopedStore is a Store that can only publish a recording whose tests sent
-// scope marks (e2e.Scope): NeedsScopes reports true, and `keploy mock record`
+// scope marks (/agent/scope/begin and /agent/scope/end): NeedsScopes reports true, and `keploy mock record`
 // then refuses a run in which no test did, instead of publishing a recording
 // it cannot map to tests.
 type ScopedStore interface {

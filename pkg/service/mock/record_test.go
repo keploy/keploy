@@ -387,7 +387,7 @@ func TestRecordWithoutAnyTestMarkStopsWhenTheStoreNeedsThem(t *testing.T) {
 				return
 			}
 			require.ErrorIs(t, err, ErrRecordRefused)
-			require.Contains(t, err.Error(), "none called e2e.Scope(t)")
+			require.Contains(t, err.Error(), "none sent a scope mark")
 			require.Zero(t, store.pushes, "nothing is published")
 		})
 	}
