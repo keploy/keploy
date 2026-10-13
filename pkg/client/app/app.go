@@ -132,7 +132,7 @@ func (a *App) Setup(ctx context.Context) error {
 	case utils.FromContainer:
 		return a.SetupFromContainer(ctx)
 	case utils.DockerRun, utils.DockerStart:
-		err := a.SetupDocker()
+		err := a.SetupDocker(ctx)
 		if err != nil {
 			return err
 		}
@@ -143,7 +143,7 @@ func (a *App) Setup(ctx context.Context) error {
 			return err
 		}
 		extraArgs := agent.StartupAgentHook.GetArgs(ctx)
-		err := a.SetupCompose(extraArgs)
+		err := a.SetupCompose(ctx, extraArgs)
 		if err != nil {
 			return err
 		}
@@ -153,7 +153,10 @@ func (a *App) Setup(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) SetupDocker() error {
+// SetupDocker readies a `docker run`/`docker start` command. ctx is the run's:
+// the before-setup hook does its work under it, so cancelling the run (Ctrl-C)
+// ends that work too.
+func (a *App) SetupDocker(ctx context.Context) error {
 
 	if a.kind == utils.DockerStart {
 		running, err := a.docker.IsContainerRunning(a.container)
@@ -168,7 +171,7 @@ func (a *App) SetupDocker() error {
 	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd))
 
 	if HookImpl != nil {
-		newCmd, err := HookImpl.BeforeDockerSetup(context.Background(), a.cmd)
+		newCmd, err := HookImpl.BeforeDockerSetup(ctx, a.cmd)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker setup")
 			return err
@@ -179,7 +182,7 @@ func (a *App) SetupDocker() error {
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	// attaching the init container's PID namespace to the app container
-	err := a.modifyDockerRun(context.Background())
+	err := a.modifyDockerRun(ctx)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
@@ -248,7 +251,9 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	return nil
 }
 
-func (a *App) SetupCompose(extraArgs []string) error {
+// SetupCompose readies a compose command. ctx is the run's, as for SetupDocker:
+// the before-setup hook does its work under it.
+func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	if a.container == "" {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
@@ -257,7 +262,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	// In-memory path: compose content was provided directly (e.g. from the enterprise
 	// cloud command) to avoid writing sensitive env vars to disk.
 	if len(a.opts.InMemoryCompose) > 0 {
-		return a.setupComposeInMemory(extraArgs)
+		return a.setupComposeInMemory(ctx, extraArgs)
 	}
 
 	// In SetupCompose, first we try to find all the docker compose file paths in the current context.
@@ -297,7 +302,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 		return err
 	}
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, a.container)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker compose setup")
 			return err
@@ -367,7 +372,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 // compose YAML that was passed via opts.InMemoryCompose (never written to disk),
 // injects the keploy-agent service, serialises the result back to bytes, and
 // configures the command to pipe the content via stdin ("-f -").
-func (a *App) setupComposeInMemory(extraArgs []string) error {
+func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) error {
 	var compose docker.Compose
 	if err := yaml.Unmarshal(a.opts.InMemoryCompose, &compose); err != nil {
 		return fmt.Errorf("failed to parse in-memory compose YAML: %w", err)
@@ -390,7 +395,7 @@ func (a *App) setupComposeInMemory(extraArgs []string) error {
 	}
 
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), &compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, a.container)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
 			return err
