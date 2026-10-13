@@ -158,13 +158,15 @@ func (h *TestCaseHold) EarliestStarts(fn func(namespace, pod string, start time.
 // Bytes is about how many bytes the held test cases take.
 func (h *TestCaseHold) Bytes() int64 { return h.bytes }
 
-// Oldest is the earliest end of a test case held, zero when none is. One with
-// no HTTP response time (gRPC) has no end to say here: taken as zero, it would
-// say that nothing is held, and hide the others from a stop (NoteHeld).
+// Oldest is the earliest end of a test case held (TestCase.CompletedAt: a
+// gRPC one's is its response's), zero when none is. A stop waits while it is
+// at or before the stop (NoteHeld). One with no wire time at all says
+// nothing of when it ran and is skipped: taken as zero, it would say that
+// nothing is held.
 func (h *TestCaseHold) Oldest() time.Time {
 	var oldest time.Time
 	for _, e := range h.q {
-		end := e.TC.HTTPResp.Timestamp
+		end := e.TC.CompletedAt()
 		if end.IsZero() {
 			continue
 		}

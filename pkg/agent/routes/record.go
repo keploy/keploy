@@ -685,7 +685,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_up_to", testCaseHoldMax))
 		}
-		logRecordingComplete("agent: recording complete",
+		summary := "agent: recording complete"
+		if endedBy == "broken" {
+			// The test cases it still held are not sent (tcs_held_at_end).
+			summary, logRecordingComplete = "agent: the recording's stream broke before its client ended it; test cases the agent still held were not sent", a.logger.Warn
+		}
+		logRecordingComplete(summary,
 			// How the stream ended: "client" (it closed the stream),
 			// "capture" (it closed its channel) or "broken".
 			zap.String("ended_by", endedBy),

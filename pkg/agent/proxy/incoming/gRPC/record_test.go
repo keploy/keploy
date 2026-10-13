@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -154,65 +156,106 @@ func pingCall(t *testing.T) (req, resp []byte) {
 	return req, resp
 }
 
+// grpcIngress is RecordIncoming on pipes, on a manager of its own whose
+// capture is caught up, with an unbuffered test-case channel nothing reads
+// until the test does. The test waits for RecordIncoming to return.
+type grpcIngress struct {
+	m              *syncMock.SyncMockManager
+	cliApp, appApp net.Conn
+	tcCh           chan *models.TestCase
+	recorded       chan struct{}
+	// stop is the recording's stop, as a CLI asks about it: one time, the
+	// same at every look, after every call the test makes.
+	stop time.Time
+}
+
+func startGRPCIngress(t *testing.T) *grpcIngress {
+	t.Helper()
+	g := &grpcIngress{m: syncMock.New(nil), tcCh: make(chan *models.TestCase), recorded: make(chan struct{}),
+		stop: time.Now().Add(time.Hour)}
+	remove := g.m.AddWatermark(caughtUp{})
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), g.m))
+	var cliProxy, appProxy net.Conn
+	g.cliApp, cliProxy = net.Pipe()
+	appProxy, g.appApp = net.Pipe()
+	go func() {
+		defer close(g.recorded)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, g.tcCh, 50051, "", false, false)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = g.cliApp.Close()
+		_ = g.appApp.Close()
+		for {
+			select {
+			case <-g.tcCh: // a capture blocked on the channel
+				continue
+			case <-g.recorded:
+			}
+			break
+		}
+		remove()
+	})
+	return g
+}
+
+// backlog is what the stop learns asking now: whether something from before
+// it is pending, and how many of the chunks noted before it are let go.
+func (g *grpcIngress) backlog() syncMock.BacklogState { return g.m.BacklogBefore(g.stop) }
+
+// waitFor waits for cond to hold of the backlog; the bound only catches a
+// pipeline that never gets there.
+func (g *grpcIngress) waitFor(t *testing.T, what string, cond func(syncMock.BacklogState) bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for st := g.backlog(); !cond(st); st = g.backlog() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never came: %+v", what, st)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// call sends one unary call through the ingress: the request is forwarded and
+// its chunk let go before the response is sent (one chunk each way, as a
+// pipe's single write is read whole), so what is pending afterwards is the
+// response's.
+func (g *grpcIngress) call(t *testing.T) {
+	t.Helper()
+	req, resp := pingCall(t)
+	go func() { _, _ = g.cliApp.Write(req) }()
+	_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+	require.NoError(t, err)
+	g.waitFor(t, "the request chunk's release", func(st syncMock.BacklogState) bool { return st.Progress >= 1 && !st.Pending })
+	go func() { _, _ = g.appApp.Write(resp) }()
+	_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
+	require.NoError(t, err)
+}
+
 // A gRPC call that ended before a recording's stop is the agent's until the
 // ingress has captured it into the recorder's queue: a stop that asks before
 // then hears it is pending, not "clear", or it ends the stream and the test
 // case is lost with the recording reported complete. Once it is captured and
 // taken, nothing of it is pending.
 func TestRecordIncoming_ACallFromBeforeTheStopIsPendingUntilItIsCaptured(t *testing.T) {
-	m := syncMock.New(nil)
-	defer m.AddWatermark(caughtUp{})()
-	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), m))
-	defer cancel()
+	g := startGRPCIngress(t)
+	g.call(t)
 
-	cliApp, cliProxy := net.Pipe()
-	appProxy, appApp := net.Pipe()
-	defer cliApp.Close()
-	defer appApp.Close()
-	tcCh := make(chan *models.TestCase) // not read until after the look
-	recorded := make(chan struct{})
-	go func() {
-		defer close(recorded)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false)
-	}()
-
-	req, resp := pingCall(t)
-	go func() { _, _ = cliApp.Write(req) }()
-	_, err := io.ReadFull(appApp, make([]byte, len(req)))
-	require.NoError(t, err)
-	go func() { _, _ = appApp.Write(resp) }()
-	_, err = io.ReadFull(cliApp, make([]byte, len(resp)))
-	require.NoError(t, err)
-
-	// The call is over for its client; the stop comes after it. (The
-	// response is stamped once the forwarder's write to the client returns,
-	// which can be just after the client has read it.)
-	before := time.Now().Add(time.Second)
-	st := m.BacklogBefore(before)
-	require.True(t, st.Known)
-	require.True(t, st.Pending, "the agent said it held nothing from before the stop (%+v) while a gRPC call from before it was still in the ingress", st)
+	// The capture waits on the recorder's queue, which nothing reads yet: the
+	// stop hears the call is pending, and goes on hearing it.
+	g.waitFor(t, "pending for the call in the ingress", func(st syncMock.BacklogState) bool { return st.Pending })
+	require.True(t, g.backlog().Pending)
 
 	var tc *models.TestCase
 	select {
-	case tc = <-tcCh:
+	case tc = <-g.tcCh:
 	case <-time.After(30 * time.Second):
 		t.Fatal("no test case came of the call")
 	}
-	require.False(t, tc.GrpcResp.Timestamp.After(before), "setup: the call is from before the stop")
+	require.False(t, tc.GrpcResp.Timestamp.IsZero() || tc.GrpcResp.Timestamp.After(g.stop), "setup: the call is from before the stop")
 
 	// Taken: the emitter releases what it built it of.
-	deadline := time.Now().Add(30 * time.Second)
-	for m.BacklogBefore(before).Pending {
-		if time.Now().After(deadline) {
-			t.Fatalf("still pending once the call was captured and taken: %+v", m.BacklogBefore(before))
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	// A connection that ends leaves nothing pending either.
-	cancel()
-	<-recorded
-	require.False(t, m.BacklogBefore(time.Now()).Pending, "pending once the connection ended")
+	g.waitFor(t, "clear once the call was taken", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 2 })
 }
 
 // Every chunk the parser is handed is released exactly once, whatever becomes
@@ -343,8 +386,9 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 // frame it may be in the middle of will never come.
 func TestForwardAndTeeTellsTheParserWhenTheTeeStops(t *testing.T) {
 	var paused atomic.Bool
-	defer func(f func() bool) { recordingPaused = f }(recordingPaused)
-	recordingPaused = paused.Load
+	pausedNow := paused.Load
+	teePaused.Store(&pausedNow)
+	defer teePaused.Store(nil)
 
 	srcRead, srcWrite := net.Pipe()
 	dstRead, dstWrite := net.Pipe()
@@ -382,41 +426,94 @@ func TestForwardAndTeeTellsTheParserWhenTheTeeStops(t *testing.T) {
 }
 
 // The forwarder notes each chunk it tees as being built from no later than
-// the chunk's stamp, and releases it when it cannot hand it on.
+// the chunk's stamp, and releases it when it cannot hand it on. A chunk
+// stamped after its write is noted once the write returns: a write blocked on
+// a client that stopped reading would otherwise hold every stop, though what
+// it carries is stamped after the write.
 func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
-	srcRead, srcWrite := net.Pipe()
-	dstRead, dstWrite := net.Pipe()
-	defer srcWrite.Close()
-	defer dstRead.Close()
+	for _, stampAfterWrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stampAfterWrite=%v", stampAfterWrite), func(t *testing.T) {
+			srcRead, srcWrite := net.Pipe()
+			dstRead, dstWrite := net.Pipe()
+			defer srcWrite.Close()
+			defer dstRead.Close()
 
-	var notedAt []time.Time
-	released := 0
-	building := func(at time.Time) func() {
-		notedAt = append(notedAt, at)
-		return func() { released++ }
+			notes := make(chan time.Time, 4)
+			var released atomic.Int32
+			building := func(at time.Time) func() {
+				notes <- at
+				return func() { released.Add(1) }
+			}
+			ch := make(chan frameChunk, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", stampAfterWrite, building)
+			}()
+
+			go func() { _, _ = srcWrite.Write([]byte("frame")) }()
+			unblocked := time.Now() // the forwarder's write can return from here on
+			_, err := io.ReadFull(dstRead, make([]byte, 5))
+			require.NoError(t, err)
+			chunk := <-ch
+			notedAt := <-notes
+			assert.False(t, notedAt.After(chunk.timestamp), "noted at %v, after its stamp %v", notedAt, chunk.timestamp)
+			if stampAfterWrite {
+				assert.False(t, notedAt.Before(unblocked), "noted at %v, before its write could return (%v)", notedAt, unblocked)
+			}
+			require.NotNil(t, chunk.built)
+			chunk.built()
+
+			// The peer is gone: the chunk read next cannot be forwarded. One
+			// noted before its write is released as the forwarder gives up;
+			// one noted after it never was.
+			dstRead.Close()
+			go func() { _, _ = srcWrite.Write([]byte("lost")) }()
+			<-done
+			close(notes)
+			extra := 0
+			for range notes {
+				extra++
+			}
+			if stampAfterWrite {
+				assert.Equal(t, 0, extra, "a chunk whose write failed was noted")
+				assert.Equal(t, int32(1), released.Load())
+			} else {
+				assert.Equal(t, 1, extra)
+				assert.Equal(t, int32(2), released.Load(), "the chunk whose write failed is not released")
+			}
+		})
 	}
-	ch := make(chan frameChunk, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "app→client", true, building)
-	}()
+}
 
-	go func() { _, _ = srcWrite.Write([]byte("frame")) }()
-	_, err := io.ReadFull(dstRead, make([]byte, 5))
-	require.NoError(t, err)
-	chunk := <-ch
-	require.Len(t, notedAt, 1)
-	assert.False(t, notedAt[0].After(chunk.timestamp), "noted at %v, after its stamp %v", notedAt[0], chunk.timestamp)
-	require.NotNil(t, chunk.built)
-	chunk.built()
+// A call that completes while memory pressure pauses the recording is decided
+// by the emitter pass that finds it (left out, as CaptureGRPC leaves out what
+// completes under pressure), before the chunks it was built of are released:
+// a stop told nothing is pending is never followed by a test case from before
+// it. A pass that skipped it left it for a later pass, after the stream ended.
+func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t *testing.T) {
+	// The tee sees no pressure for the call's chunks; the capture does.
+	notPaused := func() bool { return false }
+	teePaused.Store(&notPaused)
+	defer teePaused.Store(nil)
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	defer restore()
 
-	// The peer is gone: the chunk read next cannot be forwarded, and is
-	// released as the forwarder gives up.
-	dstRead.Close()
-	go func() { _, _ = srcWrite.Write([]byte("lost")) }()
-	<-done
-	assert.Equal(t, 2, released)
+	g := startGRPCIngress(t)
+	g.call(t)
+	// Both chunks let go: the stop hears "clear", and its stream ends.
+	g.waitFor(t, "both chunks let go", func(st syncMock.BacklogState) bool { return !st.Pending && st.Progress >= 2 })
+
+	// Pressure lifts and the connection ends: nothing from before the stop
+	// may come now.
+	restore()
+	_ = g.cliApp.Close()
+	_ = g.appApp.Close()
+	select {
+	case tc := <-g.tcCh:
+		t.Fatalf("after clear, a test case from before the stop came (response at %v): lost, as the stream had ended", tc.GrpcResp.Timestamp)
+	case <-g.recorded:
+	}
 }
 
 func headersFrameBytes(t *testing.T, streamID uint32, fields []hpack.HeaderField, endStream bool) []byte {

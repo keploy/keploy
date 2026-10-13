@@ -91,6 +91,18 @@ func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
 }
 
+// CompletedAt is when the test case's exchange was complete, from the wire
+// times the agent stamped: its response, else its request, HTTP or gRPC. Zero
+// when it carries none: Created is when the agent built it, not when it ran.
+func (tc *TestCase) CompletedAt() time.Time {
+	for _, at := range [...]time.Time{tc.HTTPResp.Timestamp, tc.HTTPReq.Timestamp, tc.GrpcResp.Timestamp, tc.GrpcReq.Timestamp} {
+		if !at.IsZero() {
+			return at
+		}
+	}
+	return time.Time{}
+}
+
 type NoiseParams struct {
 	TestCaseID string              `json:"testCaseID"`
 	EditedBy   string              `json:"editedBy"`
