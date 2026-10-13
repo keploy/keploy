@@ -663,3 +663,29 @@ func TestAFailedRecordNoOneJudgesKeepsNothing(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "a record no one judges kept a failed run's recording")
 	require.NoDirExists(t, filepath.Join(dir, set), "the fresh set's folder came back")
 }
+
+// Under the proven switch a test ID that ran more than once is retried: its
+// last attempt is its recording, failed if any attempt failed, and the calls
+// of its earlier attempts are no test's and no pool's.
+func TestFoldRetries(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "o::TestA", Start: at(0), End: at(10), Outcome: models.ScopeOutcomeFailed},
+		{Name: "o::TestB", Start: at(10), End: at(20), Outcome: models.ScopeOutcomePassed},
+		{Name: "o::TestA", Start: at(20), End: at(30), Outcome: models.ScopeOutcomePassed},
+	}
+	kept, earlier, retried := foldRetries(windows)
+	require.Equal(t, map[string]int{"o::TestA": 2}, retried)
+	require.Len(t, kept, 2)
+	require.Equal(t, "o::TestB", kept[0].Name)
+	require.Equal(t, at(20), kept[1].Start, "the last attempt is the recording")
+	require.Equal(t, models.ScopeOutcomeFailed, kept[1].Outcome, "failed if any attempt failed")
+	require.Equal(t, []models.ScopeWindow{windows[0]}, earlier)
+
+	mocks := []capturedMock{{name: "mock-0", ts: at(5)}, {name: "mock-1", ts: at(25)}, {name: "mock-2", ts: at(35)}}
+	require.Equal(t, []models.MockEntry{{Name: "mock-2"}}, startupMocks(kept, withoutRetries(mocks, earlier), nil),
+		"an earlier attempt's call is in no pool")
+
+	_, _, none := foldRetries(windows[:2])
+	require.Empty(t, none)
+}

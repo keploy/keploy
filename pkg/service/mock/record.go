@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -498,7 +500,19 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
-	if err := repeatedScope(windows, existed); err != nil {
+	var retries []models.ScopeWindow
+	if provenswitch.On() {
+		// A test ID that ran more than once in a round is retried (design
+		// v14 §6.1, U16): its last attempt is its recording, and it failed
+		// if any attempt failed. The calls of the earlier attempts are no
+		// test's and no pool's.
+		var retried map[string]int
+		windows, retries, retried = foldRetries(windows)
+		for _, id := range slices.Sorted(maps.Keys(retried)) {
+			m.logger.Warn("a test ran more than once: its last attempt is its recording, and it counts failed if any attempt failed",
+				zap.String("test", id), zap.Int("attempts", retried[id]), zap.String("mock-set", name))
+		}
+	} else if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
 		m.logger.Error(err.Error())
 		return err
@@ -566,7 +580,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded, m.claims), suites)
+				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
 			}
 		}
 	}
@@ -1157,4 +1171,58 @@ func nothingCapturedNext() string {
 		return "confirm the tests call an external dependency (HTTP, MySQL, ...) and report themselves to keploy: in Go, make `defer keploytest.T(t)()` each test's first line (github.com/keploy/go-sdk/v3/keploytest)"
 	}
 	return "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"
+}
+
+// foldRetries keeps, of each top-level test that ran more than once, its
+// last attempt's window, failed if any attempt failed, and returns the
+// earlier attempts' windows apart, with how often each retried test ran.
+func foldRetries(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.ScopeWindow, map[string]int) {
+	last := map[string]int{}
+	failed := map[string]bool{}
+	runs := map[string]int{}
+	for i, w := range windows {
+		if parentOf(windows, w.Name) != "" {
+			continue
+		}
+		runs[w.Name]++
+		if j, ok := last[w.Name]; !ok || !w.Start.Before(windows[j].Start) {
+			last[w.Name] = i
+		}
+		if w.Outcome != models.ScopeOutcomePassed && w.Outcome != models.ScopeOutcomeSkipped {
+			failed[w.Name] = true
+		}
+	}
+	var kept, earlier []models.ScopeWindow
+	retried := map[string]int{}
+	for i, w := range windows {
+		if parentOf(windows, w.Name) != "" || runs[w.Name] < 2 {
+			kept = append(kept, w)
+			continue
+		}
+		retried[w.Name] = runs[w.Name]
+		if last[w.Name] != i {
+			earlier = append(earlier, w)
+			continue
+		}
+		if failed[w.Name] {
+			w.Outcome = models.ScopeOutcomeFailed
+		}
+		kept = append(kept, w)
+	}
+	return kept, earlier, retried
+}
+
+// withoutRetries is mocks without those captured during an earlier attempt
+// of a retried test (foldRetries).
+func withoutRetries(mocks []capturedMock, earlier []models.ScopeWindow) []capturedMock {
+	if len(earlier) == 0 {
+		return mocks
+	}
+	out := make([]capturedMock, 0, len(mocks))
+	for _, mk := range mocks {
+		if containing(earlier, mk.ts) == "" {
+			out = append(out, mk)
+		}
+	}
+	return out
 }
