@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestRunTestSet_ASetWhoseEveryTestIsIgnoredIsIgnored(t *testing.T) {
 
 				status := h.run(t)
 				rep := h.report.report
-				said := logs.FilterMessageSnippet("every test of the test-set was ignored").All()
+				said := logs.FilterMessageSnippet("nothing in the test-set was verified").All()
 				if !on {
 					if status != tc.off || rep.Status != string(tc.off) || len(said) != 0 {
 						t.Fatalf("switch off: set %s, report %s, said %d; want %s as today, and nothing said", status, rep.Status, len(said), tc.off)
@@ -140,6 +141,34 @@ func TestRunTestSet_APartialRunWithOnlyIgnoredRowsIsNotIgnored(t *testing.T) {
 	}
 }
 
+// unreadQuarantined is an agent whose consumed-mock read fails, with a hook
+// that then quarantines every test.
+type unreadQuarantined struct{ consumedReadFails }
+
+func (unreadQuarantined) BeforeTestResult(_ context.Context, _, _ string, results []models.TestResult) error {
+	everyRow(models.TestStatusIgnored)(results)
+	return nil
+}
+
+// A set not judged (what a test consumed could not be read) stays INTERNAL_ERR
+// when a hook then quarantines every test: not judged says more than IGNORED,
+// and fails the run, so the IGNORED rule must not pre-empt it.
+func TestRunTestSet_ANotJudgedSetWithOnlyIgnoredRowsIsNotIgnored(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 1, 0)
+	mappedTo(h, sessionTierHTTP("mock-1"))
+	h.replayer.hookImpl = unreadQuarantined{}
+
+	status := h.run(t)
+	rep := h.report.report
+	if rep.Success+rep.Failure+rep.Obsolete != 0 || rep.Ignored != 1 {
+		t.Fatalf("precondition: passed %d, failed %d, obsolete %d, ignored %d; want only test-1, quarantined", rep.Success, rep.Failure, rep.Obsolete, rep.Ignored)
+	}
+	if status != models.TestSetStatusInternalErr || !strings.Contains(rep.FailureReason, "not judged") {
+		t.Fatalf("set %s (%q); want INTERNAL_ERR, not judged: what test-1 consumed could not be read", status, rep.FailureReason)
+	}
+}
+
 // --json prints an IGNORED set's report, as it printed it when the set was
 // (wrongly) PASSED: a set does not drop out of the output for being IGNORED.
 func TestRunTestSet_AnIgnoredSetIsStillPrintedAsJSON(t *testing.T) {
@@ -150,9 +179,12 @@ func TestRunTestSet_AnIgnoredSetIsStillPrintedAsJSON(t *testing.T) {
 
 	out := captureStdout(t, func() { h.run(t) })
 	var printed models.TestReport
-	line := strings.TrimSpace(out)
-	if err := json.Unmarshal([]byte(line[strings.Index(line, "{"):]), &printed); err != nil {
-		t.Fatalf("no JSON report printed: %v\n%s", err, out)
+	at := strings.Index(out, "{")
+	if at < 0 {
+		t.Fatalf("no JSON report printed:\n%s", out)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out[at:])), &printed); err != nil {
+		t.Fatalf("the JSON report printed does not parse: %v\n%s", err, out)
 	}
 	if printed.TestSet != "test-set-0" || printed.Status != string(models.TestSetStatusIgnored) || printed.Ignored != 2 {
 		t.Fatalf("printed %+v; want test-set-0, IGNORED, 2 ignored", printed)

@@ -4282,15 +4282,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusFaultUserApp
 	}
 
-	// Under the proven switch a set every test of which was IGNORED verified
-	// nothing, and is IGNORED, as a set the run skips whole is: it is no pass.
-	// Last, so a status that says more (FAILED, not judged, a partial run)
-	// keeps its place.
+	// Under the proven switch a set none of whose tests got a verdict, its
+	// tests IGNORED, verified nothing, and is IGNORED, as a set the run skips
+	// whole is, not PASSED. Last, so a status that says more (FAILED, not
+	// judged, a partial run) keeps its place.
 	if everyTestIgnored(testSetStatus, success, failure, obsolete, ignored) {
-		r.logger.Warn("every test of the test-set was ignored, so nothing in it was verified: it is reported IGNORED, not PASSED ("+provenswitch.Env+"=1)",
+		r.logger.Warn("nothing in the test-set was verified: none of its tests passed or failed, and the rest were ignored; it is reported IGNORED, not PASSED ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Int("ignored", ignored),
-			zap.String("next_step", "each test's row in the report says why it was skipped; the set is verified only when at least one of its tests runs"))
+			zap.String("next_step", "the tests were skipped by the run's ignore list (test.ignoredTests) or set IGNORED by a before-test-result hook; the set is verified only when at least one of its tests runs"))
 		testSetStatus = models.TestSetStatusIgnored
 	}
 

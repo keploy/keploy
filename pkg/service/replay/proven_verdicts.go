@@ -187,8 +187,9 @@ func statusFromVerdicts(current models.TestSetStatus, failed int) models.TestSet
 // reported PASSED verified nothing: none of its tests passed, failed or was
 // obsolete, and some were IGNORED, skipped one by one or quarantined by a hook.
 // Such a set is reported IGNORED, as a set the run skips whole is, and never
-// PASSED: a run that verified nothing does not pass (design §8.2 rule 1). A set
-// with no test at all is scoredNothing's. With the switch off it stays PASSED.
+// PASSED (design §8.2 rule 1: a run that verified nothing does not pass; the
+// run's verdict is enterprise's, which fails such a run). A set with no test
+// at all is scoredNothing's. With the switch off it stays PASSED.
 func everyTestIgnored(status models.TestSetStatus, passed, failed, obsolete, ignored int) bool {
 	return provenswitch.On() && status == models.TestSetStatusPassed &&
 		passed+failed+obsolete == 0 && ignored > 0
