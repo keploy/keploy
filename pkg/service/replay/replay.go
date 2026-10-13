@@ -4282,6 +4282,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusFaultUserApp
 	}
 
+	// Under the proven switch a set every test of which was IGNORED verified
+	// nothing, and is IGNORED, as a set the run skips whole is: it is no pass.
+	// Last, so a status that says more (FAILED, not judged, a partial run)
+	// keeps its place.
+	if everyTestIgnored(testSetStatus, success, failure, obsolete, ignored) {
+		r.logger.Warn("every test of the test-set was ignored, so nothing in it was verified: it is reported IGNORED, not PASSED ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.Int("ignored", ignored),
+			zap.String("next_step", "each test's row in the report says why it was skipped; the set is verified only when at least one of its tests runs"))
+		testSetStatus = models.TestSetStatusIgnored
+	}
+
 	if !shouldIncludeAppLogs(testSetStatus) {
 		appLogs = ""
 	} else if appLogs == "" {
@@ -4651,13 +4663,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// TODO Need to decide on whether to use global variable or not
+	//
+	// An IGNORED set (everyTestIgnored) is shown in the run's summary as a set
+	// the run skips whole is.
 	verdict := TestReportVerdict{
 		total:     testReport.Total,
 		failed:    testReport.Failure,
 		passed:    testReport.Success,
 		obsolete:  testReport.Obsolete,
 		ignored:   testReport.Ignored,
-		status:    testSetStatus == models.TestSetStatusPassed,
+		status:    testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusIgnored,
 		duration:  timeTaken,
 		timeTaken: timeTaken.String(),
 	}
@@ -4674,7 +4689,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
-	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
+	// An IGNORED set here is one whose tests were each ignored (everyTestIgnored):
+	// it is printed as it was when it was reported PASSED.
+	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusIgnored {
 		if r.config.JSONOutput {
 			if err := utils.NewJSONWriter(true).Write(testReport); err != nil {
 				utils.LogError(r.logger, err, "failed to print json testrun summary")

@@ -170,6 +170,9 @@ func tallyFromVerdicts(loop setTally, results []models.TestResult, complete bool
 // set the run judged (PASSED or FAILED) is FAILED when a test failed and PASSED
 // otherwise; any other status (the app halted, keploy lost part of the run, the
 // user stopped it) is kept, since no per-test verdict can vouch for the set.
+// A PASSED set none of whose tests has a verdict, every one IGNORED, is made
+// IGNORED at the end of the set (everyTestIgnored), once every status that
+// says more (not judged, a partial run) has had its say.
 func statusFromVerdicts(current models.TestSetStatus, failed int) models.TestSetStatus {
 	if current != models.TestSetStatusPassed && current != models.TestSetStatusFailed {
 		return current
@@ -178,6 +181,17 @@ func statusFromVerdicts(current models.TestSetStatus, failed int) models.TestSet
 		return models.TestSetStatusFailed
 	}
 	return models.TestSetStatusPassed
+}
+
+// everyTestIgnored reports whether, under the proven switch, a set about to be
+// reported PASSED verified nothing: none of its tests passed, failed or was
+// obsolete, and some were IGNORED, skipped one by one or quarantined by a hook.
+// Such a set is reported IGNORED, as a set the run skips whole is, and never
+// PASSED: a run that verified nothing does not pass (design §8.2 rule 1). A set
+// with no test at all is scoredNothing's. With the switch off it stays PASSED.
+func everyTestIgnored(status models.TestSetStatus, passed, failed, obsolete, ignored int) bool {
+	return provenswitch.On() && status == models.TestSetStatusPassed &&
+		passed+failed+obsolete == 0 && ignored > 0
 }
 
 // consumedUnreadReason is the test-set report's reason for a set left unjudged
