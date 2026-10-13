@@ -1,11 +1,13 @@
 package tls
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,26 +68,33 @@ func sweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh, includeTrusts
 		logger.Debug("legacy CA fingerprint constant is malformed; skipping cleanup")
 		return
 	}
+	sweepCAByFingerprint(ctx, logger, fp, fresh, includeTruststores)
+}
 
-	removed := removeLegacyAnchors(logger, fp)
-	if removed > 0 {
-		logger.Info("removed retired static MITM CA anchors from the system trust store",
-			zap.Int("count", removed))
-		if err := refreshCaStore(ctx, fresh); err != nil {
-			logger.Debug("could not refresh the system CA store after removing legacy anchors", zap.Error(err))
-		}
+// sweepCAByFingerprint is sweepLegacyCA for a given fingerprint (the retired
+// CA's in production; a test passes one it can make a certificate for).
+//
+// The anchors are removed, the store regenerated and the JDK keystore
+// rewritten under the trust-store lock, like every other change keploy makes
+// to the store: other keploy agents on this machine regenerate from the same
+// anchors and rewrite the same keystore, and an anchor unlinked while one of
+// them is reading it fails that agent's regeneration. Only a host that still
+// has the retired CA takes the lock; the common case only reads.
+func sweepCAByFingerprint(ctx context.Context, logger *zap.Logger, fp [32]byte, fresh, includeTruststores bool) {
+	if anchors := findLegacyAnchors(fp); len(anchors) > 0 {
+		removeLegacyAnchors(ctx, logger, anchors, fresh)
 	}
 
 	removeLegacyJavaAlias(ctx, logger, fp)
 	removeLegacyTempFiles(logger, fp, includeTruststores)
 }
 
-// removeLegacyAnchors deletes, from each system CA directory, any file that is
+// findLegacyAnchors lists, from each system CA directory, every file that is
 // exactly one certificate whose fingerprint is the retired CA's. Requiring a
 // single-certificate file means a shared bundle (ca-certificates.crt,
 // ca-bundle.crt) is never touched — only the standalone anchor keploy wrote.
-func removeLegacyAnchors(logger *zap.Logger, fp [32]byte) int {
-	removed := 0
+func findLegacyAnchors(fp [32]byte) []string {
+	var found []string
 	for _, dir := range caStorePath {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -95,19 +104,39 @@ func removeLegacyAnchors(logger *zap.Logger, fp [32]byte) int {
 			if e.IsDir() {
 				continue
 			}
-			p := filepath.Join(dir, e.Name())
-			if !fileIsExactlyCert(p, fp) {
-				continue
+			if p := filepath.Join(dir, e.Name()); fileIsExactlyCert(p, fp) {
+				found = append(found, p)
 			}
-			if err := os.Remove(p); err != nil {
-				logger.Debug("could not remove a legacy CA anchor", zap.String("path", p), zap.Error(err))
-				continue
-			}
-			logger.Debug("removed legacy CA anchor", zap.String("path", p))
-			removed++
 		}
 	}
-	return removed
+	return found
+}
+
+// removeLegacyAnchors removes the given legacy anchors and regenerates the
+// store without them, under the trust-store lock.
+func removeLegacyAnchors(ctx context.Context, logger *zap.Logger, anchors []string, fresh bool) {
+	work, unlock, err := lockTrustStore(ctx, logger)
+	if err != nil {
+		logger.Debug("could not lock the trust store to remove the retired static MITM CA", zap.Strings("anchors", anchors), zap.Error(err))
+		return
+	}
+	defer unlock()
+	removed := 0
+	for _, p := range anchors {
+		if err := os.Remove(p); err != nil {
+			logger.Debug("could not remove a legacy CA anchor", zap.String("path", p), zap.Error(err))
+			continue
+		}
+		logger.Debug("removed legacy CA anchor", zap.String("path", p))
+		removed++
+	}
+	if removed == 0 {
+		return
+	}
+	logger.Info("removed retired static MITM CA anchors from the system trust store", zap.Int("count", removed))
+	if err := refreshCaStore(work, logger, fresh); err != nil {
+		logger.Debug("could not refresh the system CA store after removing legacy anchors", zap.Error(err))
+	}
 }
 
 // fileIsExactlyCert reports whether path decodes to exactly one CERTIFICATE PEM
@@ -158,8 +187,23 @@ func removeLegacyJavaAlias(ctx context.Context, logger *zap.Logger, fp [32]byte)
 		logger.Debug("a 'keployCA' JDK alias exists but is not the retired CA; leaving it", zap.String("cacerts", cacerts))
 		return
 	}
-	cmd := exec.CommandContext(ctx, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if systemTrustGenerates(cacerts) {
+		// A p11-kit output (Fedora, RHEL): keytool would rewrite it in place
+		// under every JVM that starts meanwhile, and the next regeneration —
+		// this run's install does one — drops an entry keytool added anyway.
+		return
+	}
+	// keytool rewrites the whole keystore file; another keploy agent importing
+	// its run CA into the same cacerts at this moment would lose its entry, or
+	// undo this removal.
+	work, unlock, err := lockTrustStore(ctx, logger)
+	if err != nil {
+		logger.Debug("could not lock the trust store to delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.Error(err))
+		return
+	}
+	defer unlock()
+	cmd := storeCommand(work, keytool, "-delete", "-alias", legacyCAAlias, "-keystore", cacerts, "-storepass", "changeit", "-noprompt")
+	if out, err := runStoreCommand(cmd); err != nil {
 		logger.Debug("could not delete the legacy JDK alias", zap.String("cacerts", cacerts), zap.ByteString("output", out), zap.Error(err))
 		return
 	}
@@ -243,20 +287,48 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 	}
 }
 
-// refreshCaStore rebuilds the system trust bundle after anchors were removed.
-// On Debian/Ubuntu update-ca-certificates --fresh also prunes stale hash-links
-// to a deleted anchor (a plain run leaves dangling /etc/ssl/certs symlinks that
-// Go ignores but that are confusing); other distros' tools regenerate wholesale.
-func refreshCaStore(ctx context.Context, fresh bool) error {
-	if commandExists("update-ca-certificates") {
-		args := []string{}
-		if fresh {
-			args = append(args, "--fresh")
-		}
-		return exec.CommandContext(ctx, "update-ca-certificates", args...).Run()
+// refreshCaStore rebuilds the system trust outputs from the anchors now in the
+// store, with the first of caStoreUpdateCmd this host has. The caller holds the
+// trust-store lock, and ctx is the one lockTrustStore returned: the distro
+// tools are not safe to run two at a time.
+//
+// Where that tool is update-ca-trust and the store is the p11-kit one of
+// Fedora and RHEL, keploy does the wrapper's work itself, without the gap the
+// wrapper leaves (swapP11KitTrust).
+//
+// With fresh, Debian's update-ca-certificates is given --fresh, which also
+// prunes stale hash-links to a deleted anchor (a plain run leaves dangling
+// /etc/ssl/certs symlinks that Go ignores but that are confusing). The other
+// distros' tools take no such flag; a bare run regenerates wholesale.
+func refreshCaStore(ctx context.Context, logger *zap.Logger, fresh bool) error {
+	tool := storeTool()
+	if tool == "" {
+		return fmt.Errorf("no valid CA store tools command found")
 	}
-	// update-ca-trust / the rest take no --fresh; a bare extract regenerates.
-	return updateCaStore(ctx)
+	if filepath.Base(tool) == "update-ca-trust" {
+		if handled, err := swapP11KitTrust(ctx, logger, tool); handled {
+			return err
+		}
+	}
+	var args []string
+	if fresh && filepath.Base(tool) == "update-ca-certificates" {
+		args = append(args, "--fresh")
+	}
+	if out, err := runStoreCommand(storeCommand(ctx, tool, args...)); err != nil {
+		return fmt.Errorf("%s failed: %w: %s", tool, err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+// storeTool is the path of the first of caStoreUpdateCmd this machine has: the
+// tool its trust store is regenerated with. "" when it has none.
+func storeTool() string {
+	for _, tool := range caStoreUpdateCmd {
+		if p, err := exec.LookPath(tool); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 func fileExists(path string) bool {
