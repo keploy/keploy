@@ -143,6 +143,21 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 	return out, nil
 }
 
+// OwnedByTest implements integrations.TestOwnership: a mock is the open
+// test's own when its worker's current allowlist (the test's mapping) names
+// it.
+func (s *scopedMockDb) OwnedByTest(m *models.Mock) (owned, known bool) {
+	if s.live || m == nil {
+		return false, false
+	}
+	v := s.current()
+	if v.allow == nil {
+		return false, false
+	}
+	_, owned = v.allow[m.Name]
+	return owned, true
+}
+
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetFilteredMocks())
 }
@@ -579,6 +594,7 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.
 var (
-	_ integrations.MockCursor = (*MockManager)(nil)
-	_ integrations.MockCursor = (*scopedMockDb)(nil)
+	_ integrations.MockCursor    = (*MockManager)(nil)
+	_ integrations.MockCursor    = (*scopedMockDb)(nil)
+	_ integrations.TestOwnership = (*scopedMockDb)(nil)
 )

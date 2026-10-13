@@ -208,6 +208,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		Learn:                     m.learning(),
+		LearnPool:                 m.learningPool(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -379,6 +381,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
 	}
 	detail := replayDetail{
+		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
@@ -1350,6 +1353,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// What each test used and missed, and its verdict: for the receipt, and
 	// for the reporter below.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	// What the learn step learned goes onto the recording, before the record
+	// that runs this round commits it.
+	if m.learning() && consumedErr == nil {
+		m.persistLearned(ctx, detail.set, consumed, flows)
+	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free

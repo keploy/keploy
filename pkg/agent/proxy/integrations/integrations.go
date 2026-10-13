@@ -301,6 +301,17 @@ type VariableStore interface {
 	Variables() *variables.Table
 }
 
+// TestOwnership is an optional MockMemDb capability: whether a mock is one of
+// the open test's own, which its mapping lists, rather than the pool's. A view
+// that scopes the pool to a test (`keploy mock replay`'s) knows; known is
+// false when no test is open in it, and a store that is no such view does
+// not implement it: there a test's own mocks are its per-test tier. The learn
+// step pairs the open test's own mocks, and the pool's only in a full record
+// (design v14 §7.2 step 10).
+type TestOwnership interface {
+	OwnedByTest(m *models.Mock) (owned, known bool)
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

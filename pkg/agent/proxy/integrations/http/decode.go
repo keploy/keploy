@@ -313,7 +313,30 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			var (
+				ok    bool
+				stub  *models.Mock
+				diag  *matchDiag
+				lmiss *learnMiss
+			)
+			switch {
+			case provenswitch.On() && opts.Learn:
+				// Record's full round: the learn step decides every request
+				// (design v14 §7.2).
+				stub, lmiss, err = h.learnMatch(ctx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				ok = stub != nil
+			default:
+				// Under the switch a replay first honours what the learn step
+				// learned onto the recording; anything else goes on to the
+				// matcher as before.
+				if provenswitch.On() {
+					stub, err = h.learnedMatch(ctx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					ok = stub != nil
+				}
+				if !ok && err == nil {
+					ok, stub, diag, err = h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+				}
+			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -324,7 +347,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
+				if lmiss != nil {
+					diag = lmiss.diag()
+				}
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				if lmiss != nil {
+					lmiss.explain(report)
+				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in

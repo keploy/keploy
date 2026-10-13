@@ -11,6 +11,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
@@ -2433,6 +2434,8 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
+			Variables:        variablesOf(new.Spec),
+			Binds:            bindsOf(new.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2484,6 +2487,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2539,6 +2544,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+				Variables:        variablesOf(mock.Spec),
+				Binds:            bindsOf(mock.Spec),
 				CarryOver:        true,
 			}); err != nil {
 				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
@@ -2588,6 +2595,8 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2683,6 +2692,8 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+			Variables:        variablesOf(mk.Spec),
+			Binds:            bindsOf(mk.Spec),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -3050,6 +3061,31 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 // alike — stores it on the kind-agnostic MockSpec.ReqBodyNoise field.
 func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 	return spec.ReqBodyNoise
+}
+
+// variablesOf is what a consumed mock's state carries of its variables:
+// under the proven switch, its own (MockSpec.Variables), the ones the learn
+// step learned on it included, which record's full round writes onto the
+// recording. Without the switch nothing, as before it.
+func variablesOf(spec models.MockSpec) models.MockVariables {
+	if !provenswitch.On() {
+		return nil
+	}
+	return spec.Variables.Clone()
+}
+
+// bindsOf is what a consumed mock's state carries of the variables the learn
+// step learned while answering it that are bound at an earlier mock
+// (MockSpec.Binds): under the proven switch only.
+func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
+	if !provenswitch.On() || len(spec.Binds) == 0 {
+		return nil
+	}
+	out := make(map[string]models.MockVariables, len(spec.Binds))
+	for m, v := range spec.Binds {
+		out[m] = v.Clone()
+	}
+	return out
 }
 
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {

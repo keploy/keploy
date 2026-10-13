@@ -1895,6 +1895,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
@@ -2017,6 +2019,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
@@ -4447,6 +4451,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
+	// What record's full round learned goes onto the recording first, and is
+	// said per test; a prune after it keeps it (pruneKeeps).
+	if r.learning() && r.instrument {
+		r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings)
+	}
 	if prune {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
@@ -4472,7 +4481,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.NoiseDetection() && r.instrument {
+	} else if r.config.Test.NoiseDetection() && r.instrument && !r.learning() {
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.

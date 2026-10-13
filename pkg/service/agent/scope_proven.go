@@ -789,14 +789,15 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, and the call's shape: for HTTP
+// the matcher's next step, when it happened, why it missed (the learn step's
+// reason, in record's full round), and the call's shape: for HTTP
 // the method and the path's shape, for SQL the statement with its literals
 // written "?" (sqlShape). Never a value the app sent (a query's literals or
 // bound parameters, a path's IDs, a body). The next step is the matcher's
 // own fixed advice (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At}
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, Reason: m.Reason}
 	switch {
 	case isHTTP(m.Protocol):
 		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {

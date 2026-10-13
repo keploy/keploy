@@ -7,7 +7,9 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // rootRelPath strips the kind-agnostic "body." prefix from a correlation path,
@@ -149,6 +151,9 @@ func renderCorrelations(served *models.Mock, bindings map[string]string) *models
 	if served == nil || len(bindings) == 0 || len(served.Spec.Correlations) == 0 || served.Spec.HTTPResp == nil {
 		return served
 	}
+	if provenswitch.On() {
+		return renderLearned(served, bindings)
+	}
 	out := served.ShallowCopy()
 	rc := *out.Spec.HTTPResp
 	rc.Header = maps.Clone(rc.Header)
@@ -163,6 +168,59 @@ func renderCorrelations(served *models.Mock, bindings map[string]string) *models
 			rc.Header[k] = strings.ReplaceAll(v, c.RecordedValue, live)
 		}
 		changed = true
+	}
+	if !changed {
+		return served
+	}
+	out.Spec.HTTPResp = &rc
+	return out
+}
+
+// renderLearned is renderCorrelations under the proven switch, where every
+// correlation is one the learn step learned from a value F saw drift,
+// whatever that value looks like (an agent finds none by shape there:
+// mocknoise.MaterializeCorrelations). So the live value is written only where
+// F found the recorded one echoed, at each of the correlation's
+// ResponsePaths, as the whole value or as a token of a string, and never
+// wherever the recorded text happens to occur: a drifted "7" echoed in one
+// field must not rewrite every other 7 of the answer.
+func renderLearned(served *models.Mock, bindings map[string]string) *models.Mock {
+	out := served.ShallowCopy()
+	rc := *out.Spec.HTTPResp
+	rc.Header = maps.Clone(rc.Header)
+	_, isJSON := learn.DecodeJSON([]byte(rc.Body))
+	changed := false
+	for _, c := range out.Spec.Correlations {
+		live, ok := bindings[c.RequestPath]
+		if !ok || c.RecordedValue == "" || live == c.RecordedValue {
+			continue
+		}
+		at := map[string]bool{}
+		for _, p := range c.ResponsePaths {
+			switch {
+			case strings.HasPrefix(p, "header."):
+				name := strings.TrimPrefix(p, "header.")
+				for k, v := range rc.Header {
+					if !strings.EqualFold(k, name) {
+						continue
+					}
+					if nv, ok := learn.ReplaceTokens(v, c.RecordedValue, live); ok {
+						rc.Header[k], changed = nv, true
+					}
+				}
+			case p == "body" && !isJSON:
+				if nb, ok := learn.ReplaceTokens(rc.Body, c.RecordedValue, live); ok {
+					rc.Body, changed = nb, true
+				}
+			default:
+				at[p] = true
+			}
+		}
+		if isJSON && len(at) > 0 {
+			if nb, ok := learn.RenderJSON(rc.Body, at, c.RecordedValue, live); ok {
+				rc.Body, changed = nb, true
+			}
+		}
 	}
 	if !changed {
 		return served

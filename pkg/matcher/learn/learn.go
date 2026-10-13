@@ -1,0 +1,343 @@
+// Package learn is the learn step of the proven model (design v14 §7.2, row
+// L). It runs in record's full round F only: the round that replays, right
+// after recording, the build that was just recorded. There a request that no
+// recorded mock answers exactly is paired with the recorded mock it drifted
+// from, and every value that drifted is learned as one of three things:
+//
+//   - noise: not compared from then on, its type still enforced;
+//   - a correlation: the mock's answer echoes the value, so the live value is
+//     rendered into the answer wherever the recorded one was;
+//   - a variable: the value appeared earlier in the test's recording, and is
+//     followed from that earlier place (bound there, asserted here).
+//
+// Nothing is decided by a value's shape. F replays the build that made the
+// recording, so whatever F sees change is non-determinism, never a
+// regression, and only what F saw change is learned. A request that differs
+// in anything L does not learn (a field added or removed, a type changed, an
+// array reordered, a fixed part such as the method) is not paired: it is a
+// miss, and its reason is judging's evidence (request_changed,
+// unstable_order, unmocked_call).
+//
+// The package is pure. A protocol adapter turns each request into a Shape
+// (its operation key, the parts that must be equal, and its learnable
+// leaves), and Pair and Classify decide. The HTTP adapter lives with the HTTP
+// parser.
+package learn
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// Type is a leaf's type. Two leaves of different types never pair: a type
+// change is not a drifting value.
+type Type byte
+
+// Leaf types. A JSON body's empty object and empty array are leaves too, so
+// that a container turning empty, or the reverse, is a change of shape.
+const (
+	String     Type = 's'
+	Number     Type = 'n'
+	Bool       Type = 'b'
+	Null       Type = 'z'
+	EmptyObj   Type = 'o'
+	EmptyArray Type = 'a'
+)
+
+// Leaf is one learnable value of a request or a response.
+type Leaf struct {
+	// Path names the leaf exactly: object keys dot-joined, an array position
+	// bracketed ("body.items[0].id", "header.authorization",
+	// "url.query.page", "url.path.2").
+	Path string
+	// Noise is the name learned noise and correlations are stored under: the
+	// request noise dialect, which has no array positions ("body.items[].id").
+	// Every element of an array shares it.
+	Noise string
+	Type  Type
+	Value string
+	// Unnamed: no path names the leaf alone (a JSON key holding '.', '[' or
+	// ']'), so nothing can be learned about it, and a drift there is a change
+	// L refuses.
+	Unnamed bool
+}
+
+// Shape is one request as L compares it.
+type Shape struct {
+	// Key is the operation key (design §7.2 step 2). Only requests with the
+	// same key are candidates for each other.
+	Key string
+	// Fixed are the parts that must be equal and are never learned (for HTTP
+	// the media type and which headers are sent), by name.
+	Fixed map[string]string
+	// Leaves are the learnable leaves, by Path.
+	Leaves map[string]Leaf
+	// Body is the decoded JSON body (numbers as json.Number), for the order
+	// rule. nil when the body is not JSON.
+	Body interface{}
+}
+
+// Known says which leaves a comparison excuses: noise keploy.yml declares,
+// noise learned onto the mock earlier, and the mock's correlations (whose
+// values are captured, not compared).
+type Known interface {
+	// Excused reports whether the leaf is not compared by value, and whether
+	// its type is still enforced (typed). leaf is the recorded leaf, or the
+	// live one when the recording lacks it. A typed leaf must also be
+	// present on both sides; an untyped one may be missing from either.
+	Excused(leaf Leaf) (excused, typed bool)
+}
+
+// None excuses nothing.
+var None Known = none{}
+
+type none struct{}
+
+func (none) Excused(Leaf) (bool, bool) { return false, false }
+
+// Diff is how a live request differs from a recorded one.
+type Diff struct {
+	// Structural names what differs that L does not learn (a fixed part, a
+	// leaf present on one side only, a type change, a drift no path can
+	// name), or "" when only values drifted.
+	Structural string
+	// Drift are the paths of the leaves whose value drifted, sorted.
+	Drift []string
+	// Reordered are the arrays the order rule refuses (matcher.ArrayReordered),
+	// by path, sorted: they came back with the recorded elements in another
+	// order.
+	Reordered []string
+}
+
+// count is the number of drifted leaves outside the reordered arrays: a
+// reorder explains every positional difference inside its array.
+func (d Diff) count() int {
+	n := 0
+	for _, p := range d.Drift {
+		if !insideAny(p, d.Reordered) {
+			n++
+		}
+	}
+	return n
+}
+
+// insideAny reports whether path is one of arrays or below one.
+func insideAny(path string, arrays []string) bool {
+	for _, a := range arrays {
+		if path == a || strings.HasPrefix(path, a+"[") || strings.HasPrefix(path, a+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// Compare says how live differs from rec, excusing what known excuses.
+func Compare(live, rec Shape, known Known) Diff {
+	if known == nil {
+		known = None
+	}
+	var d Diff
+	if name := fixedDiffers(live.Fixed, rec.Fixed); name != "" {
+		d.Structural = name + " differs"
+		return d
+	}
+	paths := make([]string, 0, len(rec.Leaves)+len(live.Leaves))
+	for p := range rec.Leaves {
+		paths = append(paths, p)
+	}
+	for p := range live.Leaves {
+		if _, ok := rec.Leaves[p]; !ok {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		r, inRec := rec.Leaves[p]
+		l, inLive := live.Leaves[p]
+		ref := r
+		if !inRec {
+			ref = l
+		}
+		excused, typed := known.Excused(ref)
+		switch {
+		case !inRec || !inLive:
+			if excused && !typed {
+				continue
+			}
+			if !inRec {
+				d.Structural = p + " is not in the recording"
+			} else {
+				d.Structural = p + " is missing"
+			}
+			return d
+		case l.Type != r.Type:
+			if excused && !typed {
+				continue
+			}
+			d.Structural = p + " changed type"
+			return d
+		case l.Value == r.Value || excused:
+			continue
+		case r.Unnamed:
+			d.Structural = p + " drifted, and no path names it alone"
+			return d
+		}
+		d.Drift = append(d.Drift, p)
+	}
+	d.Reordered = reorderedArrays(rec.Body, live.Body, known)
+	return d
+}
+
+// fixedDiffers names the first fixed part (in sorted order) the two requests
+// do not share, or "".
+func fixedDiffers(live, rec map[string]string) string {
+	names := make([]string, 0, len(rec)+len(live))
+	for n := range rec {
+		names = append(names, n)
+	}
+	for n := range live {
+		if _, ok := rec[n]; !ok {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		lv, inLive := live[n]
+		rv, inRec := rec[n]
+		if inLive != inRec || lv != rv {
+			return n
+		}
+	}
+	return ""
+}
+
+// Outcome is what L decided about a request.
+type Outcome int
+
+const (
+	// Miss: no recorded mock answers the request (Result.Reason says why).
+	Miss Outcome = iota
+	// Exact: a candidate matches modulo what is known (step 1).
+	Exact
+	// Paired: a candidate differs only by values L may learn, and it is the
+	// unique closest one (steps 4 and 5).
+	Paired
+)
+
+// Candidate is one recorded request L may serve.
+type Candidate struct {
+	Shape Shape
+	Known Known
+	// Pairable: the candidate may be paired, not only matched exactly. Only
+	// an unconsumed data-plane mock of the request's scope is (design §7.2
+	// step 2), and a pool mock only in a full record (step 10).
+	Pairable bool
+}
+
+// Result is L's decision about one request.
+type Result struct {
+	Outcome Outcome
+	// Index is the candidate served (Exact, Paired), or, for a miss, the one
+	// L refused on order or the closest one, -1 when there is none.
+	Index int
+	// Diff is that candidate's.
+	Diff Diff
+	// Reason, for a miss: models.MissRequestChanged, MissUnstableOrder or
+	// MissUnmockedCall.
+	Reason string
+	// Why, for a miss, is what differed, by path; it never holds a value.
+	Why string
+}
+
+// Pair decides one request against its candidates (design §7.2 steps 1-5),
+// which come in the order their scope offers them: the test's mocks in
+// recorded order, then the pool.
+//
+//  1. The first candidate that matches exactly, modulo what is known, is
+//     served.
+//  2. The others with the request's operation key are compared.
+//  3. Order first: an array the order rule refuses is not a drift.
+//  4. A pairable candidate differs only by values, in learnable leaves, with
+//     the same types.
+//  5. The candidate with the unique fewest drifted leaves is paired. When
+//     several tie, they pair only if their recorded requests are the same
+//     request (a call recorded twice), and then the first is taken: nothing
+//     L could compare tells them apart, and a test's mocks are consumed in
+//     recorded order. Otherwise the request is a miss: request_changed when
+//     some candidate had its key, unmocked_call when none did. When the
+//     closest candidate is one the order rule refused, it is
+//     unstable_order, and nothing is learned from that array.
+func Pair(live Shape, cands []Candidate) Result {
+	type scored struct {
+		i int
+		d Diff
+		n int
+	}
+	var pairable []scored
+	keyed, closest := false, Result{Outcome: Miss, Index: -1}
+	for i, c := range cands {
+		if c.Shape.Key != live.Key {
+			continue
+		}
+		keyed = true
+		d := Compare(live, c.Shape, c.Known)
+		if d.Structural == "" && d.count() == 0 && len(d.Reordered) == 0 {
+			return Result{Outcome: Exact, Index: i, Diff: d}
+		}
+		if !c.Pairable {
+			continue
+		}
+		if d.Structural != "" {
+			if closest.Index < 0 {
+				closest.Index, closest.Diff = i, d
+			}
+			continue
+		}
+		pairable = append(pairable, scored{i: i, d: d, n: d.count()})
+	}
+	if !keyed {
+		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}
+	}
+	if len(pairable) == 0 {
+		closest.Reason = models.MissRequestChanged
+		closest.Why = "it differs from every recorded call in more than values"
+		if closest.Index >= 0 {
+			closest.Why = "it differs from the closest recorded call in more than values: " + closest.Diff.Structural
+		}
+		return closest
+	}
+	best := pairable[0]
+	var tied []scored
+	for _, s := range pairable[1:] {
+		switch {
+		case s.n < best.n:
+			best, tied = s, nil
+		case s.n == best.n:
+			tied = append(tied, s)
+		}
+	}
+	for _, t := range tied {
+		if !sameRequest(cands[best.i].Shape, cands[t.i].Shape) {
+			return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissRequestChanged,
+				Why: fmt.Sprintf("%d recorded calls differ from it equally, so none can be told apart as its recording", len(tied)+1)}
+		}
+	}
+	if len(best.d.Reordered) > 0 {
+		return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissUnstableOrder,
+			Why: strings.Join(best.d.Reordered, ", ") + " has the recorded elements in another order"}
+	}
+	return Result{Outcome: Paired, Index: best.i, Diff: best.d}
+}
+
+// sameRequest reports whether two recorded requests are the same request:
+// nothing L compares tells them apart.
+func sameRequest(a, b Shape) bool {
+	if a.Key != b.Key {
+		return false
+	}
+	d := Compare(a, b, None)
+	return d.Structural == "" && len(d.Drift) == 0 && len(d.Reordered) == 0
+}

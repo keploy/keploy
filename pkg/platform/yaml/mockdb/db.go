@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -465,16 +466,32 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // only inside UpdateMocks, so running detection without pruning silently
 // discarded everything that was learned at process exit.
 func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
+	_, err := ys.persistLearned(ctx, testSetID, mockStates)
+	return err
+}
+
+// PersistLearned writes what the learn step of record's full round learned
+// (MockState.ReqBodyNoise and Correlations; package matcher/learn) onto the
+// set's mocks, without pruning anything, as PersistMockNoise does, and
+// returns by mock name what it added: each field as "<path> (noise)" or
+// "<path> (correlation)", sorted. What a mock already carried is not added
+// again.
+func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
+	return ys.persistLearned(ctx, testSetID, mockStates)
+}
+
+func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
 	// Only mocks that actually carry learned noise matter.
-	withNoise := make(map[string]map[string][]string)
+	withNoise := make(map[string]models.MockState)
 	for name, st := range mockStates {
-		if len(st.ReqBodyNoise) > 0 {
-			withNoise[name] = st.ReqBodyNoise
+		if len(st.ReqBodyNoise) > 0 || len(st.Correlations) > 0 {
+			withNoise[name] = st
 		}
 	}
 	if len(withNoise) == 0 {
-		return nil
+		return nil, nil
 	}
+	added := map[string][]string{}
 
 	mockFileName := "mocks"
 	if ys.MockName != "" {
@@ -492,14 +509,21 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	// non-HTTP mock, so learning under --schema-noise-detection WITHOUT
 	// --remove-unused-mocks silently discarded the learned noise at exit.
 	merge := func(mock *models.Mock) bool {
-		noise, ok := withNoise[mock.Name]
+		st, ok := withNoise[mock.Name]
 		if !ok {
 			return false
 		}
-		merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
-		changed := len(merged) != len(mock.Spec.ReqBodyNoise)
-		mock.Spec.ReqBodyNoise = merged
-		return changed
+		return len(mergeLearned(mock, st)) > 0
+	}
+	// record is merge for the pass that writes: it keeps what it added.
+	record := func(mock *models.Mock) {
+		st, ok := withNoise[mock.Name]
+		if !ok {
+			return
+		}
+		if a := mergeLearned(mock, st); len(a) > 0 {
+			added[mock.Name] = a
+		}
 	}
 
 	logPersisted := func(total int) {
@@ -520,7 +544,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		// same reasoning as updateMocksGob.
 		if err := ys.Close(); err != nil {
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
-			return err
+			return nil, err
 		}
 		scanned, changes := 0, false
 		err := forEachGobMock(gobPath, func(mock *models.Mock) error {
@@ -535,14 +559,14 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopScan) {
-			return err
+			return nil, err
 		}
 		if !changes {
-			return nil
+			return nil, nil
 		}
 		rw, err := newGobFileRewriter(gobPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer rw.discard()
 		total := 0
@@ -551,25 +575,25 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 				return err
 			}
 			total++
-			merge(mock)
+			record(mock)
 			return rw.write(mock)
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := rw.commit(); err != nil {
-			return err
+			return nil, err
 		}
 		logPersisted(total)
-		return nil
+		return added, nil
 	}
 
 	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !existsAny {
-		return nil
+		return nil, nil
 	}
 
 	// eachMock streams the file's mocks to fn, and the documents a rewrite
@@ -618,10 +642,10 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		return nil
 	}, nil)
 	if err != nil && !errors.Is(err, errStopScan) {
-		return err
+		return nil, err
 	}
 	if !changes {
-		return nil
+		return nil, nil
 	}
 
 	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
@@ -629,16 +653,50 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	total := 0
 	if err := eachMock(func(mock *models.Mock) error {
 		total++
-		merge(mock)
+		record(mock)
 		return rw.write(mock)
 	}, rw.copyDoc); err != nil {
-		return err
+		return nil, err
 	}
 	if err := rw.commit(); err != nil {
-		return err
+		return nil, err
 	}
 	logPersisted(total)
-	return nil
+	return added, nil
+}
+
+// mergeLearned writes the learned noise and correlations a consumed mock's
+// state carries onto the mock read from disk, and returns what it added,
+// each field as "<path> (noise)" or "<path> (correlation)", sorted. Noise is
+// monotonic (an entry on disk wins), and so are correlations, by request
+// path.
+func mergeLearned(mock *models.Mock, st models.MockState) []string {
+	var added []string
+	if len(st.ReqBodyNoise) > 0 {
+		for k := range st.ReqBodyNoise {
+			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
+				added = append(added, k+" (noise)")
+			}
+		}
+		mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
+	}
+	if len(st.Correlations) > 0 {
+		have := make(map[string]bool, len(mock.Spec.Correlations))
+		for _, c := range mock.Spec.Correlations {
+			have[c.RequestPath] = true
+		}
+		for _, c := range st.Correlations {
+			if have[c.RequestPath] {
+				continue
+			}
+			have[c.RequestPath] = true
+			c.ResponsePaths = append([]string(nil), c.ResponsePaths...)
+			mock.Spec.Correlations = append(mock.Spec.Correlations, c)
+			added = append(added, c.RequestPath+" (correlation)")
+		}
+	}
+	sort.Strings(added)
+	return added
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {

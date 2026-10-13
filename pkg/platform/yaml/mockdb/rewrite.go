@@ -224,9 +224,8 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 		// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
 		// disk-read mock before it is re-written. Stored uniformly on the
 		// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
-		if len(st.ReqBodyNoise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
-		}
+		// The learn step's correlations ride the same way (mergeLearned).
+		mergeLearned(mock, st)
 		return true
 	}
 	// Preserve mocks written after replay start.

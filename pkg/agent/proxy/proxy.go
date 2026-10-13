@@ -37,6 +37,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -117,6 +118,12 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 
 type Proxy struct {
 	logger *zap.Logger
+
+	// learnTracker keeps what record's full round served in the running
+	// test, for the learn step (package matcher/learn): a test begins
+	// whenever its error capture window opens (openTestErrorCapture). Under
+	// the proven switch the parsers find it on their connection's context.
+	learnTracker *learn.Tracker
 
 	IP4               string
 	IP6               string
@@ -998,6 +1005,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	warnIfRemovedRelayKnobSet(logger)
 	proxy := &Proxy{
 		logger:                    logger,
+		learnTracker:              learn.NewTracker(nil),
 		Port:                      opts.ProxyPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789
@@ -2410,6 +2418,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
+		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
 	}
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
@@ -4288,6 +4297,10 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
 func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
 
 func (p *Proxy) openTestErrorCapture(carry bool) {
+	if provenswitch.On() {
+		// The learn step's earlier places are the running test's.
+		p.learnTracker.Begin()
+	}
 	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
 	// Misses made with no test's window open — or into a window its test's
@@ -4514,6 +4527,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					FieldDiffs:       parserErr.MismatchReport.FieldDiffs,
 					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
+					// Why the call missed, when record's full round's learn
+					// step decided it: judging's evidence.
+					Reason: parserErr.MismatchReport.Reason,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
