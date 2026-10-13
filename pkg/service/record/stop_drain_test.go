@@ -442,6 +442,34 @@ func TestGetTestAndMockChans_NothingOfTrafficAfterTheStopIsRecorded(t *testing.T
 	}
 }
 
+// A frame already waiting when the forwarder first looks after the stop can
+// be taken before the stop is: select takes either. It is judged by the stop
+// all the same, or what the app served after the stop is recorded (docker
+// compose), whichever the select took first.
+func TestForwardUntilDrained_AFrameTakenOnceTheStopCameIsJudgedByIt(t *testing.T) {
+	t.Parallel()
+	const runs = 200 // select picks at random: each run is a coin toss without the fix
+	for i := 0; i < runs; i++ {
+		r := &Recorder{logger: zap.NewNop(), frameQuiet: 10 * time.Millisecond}
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := make(chan *models.TestCase, 1)
+		stream <- tcAt("after", time.Now().Add(time.Hour))
+		cancel() // the stop came before the forwarder looked
+		out := make(chan *models.TestCase, 1)
+		var afterStop []string
+		forwardUntilDrained(ctx, r, stream, out, make(chan struct{}), drainOpts[*models.TestCase]{
+			capturedAt:  testCaseCapturedAt,
+			dropped:     func(*models.TestCase) {},
+			closeStream: func() { close(stream) },
+			afterStop:   func(tc *models.TestCase) { afterStop = append(afterStop, tc.Name) },
+			kind:        "test cases",
+		})
+		if len(out) > 0 || len(afterStop) != 1 {
+			t.Fatalf("run %d: a test case served an hour after the stop was forwarded (%d) or not judged after it (%v)", i, len(out), afterStop)
+		}
+	}
+}
+
 func TestTestCaseCapturedAtIsWhenItWasComplete(t *testing.T) {
 	t.Parallel()
 	req, resp := time.Unix(100, 0), time.Unix(101, 0)

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -167,9 +168,18 @@ type frameChunk struct {
 	teeEnded bool
 }
 
-// recordingPaused reports memory pressure (memoryguard): a variable so a test
-// can stop the tee.
-var recordingPaused = memoryguard.IsRecordingPaused
+// teePaused, when set, is what the tee asks instead of memoryguard: a test
+// stops the tee apart from the capture with it.
+var teePaused atomic.Pointer[func() bool]
+
+// recordingPaused reports memory pressure to the tee (memoryguard, or
+// teePaused when set).
+func recordingPaused() bool {
+	if f := teePaused.Load(); f != nil {
+		return (*f)()
+	}
+	return memoryguard.IsRecordingPaused()
+}
 
 // release calls built, if set.
 func release(built func()) {
@@ -182,16 +192,24 @@ func release(built func()) {
 // into a test case (syncMock BuildingTestCase), from before the chunk is
 // stamped, at a time no later than its stamp: a stop that asks about a time
 // before its stamp is told of it from then on, however long the forwarder
-// waits between the two.
+// waits between the two. A chunk stamped after its write (stampAfterWrite) is
+// noted once the write has returned: a write blocked on a peer that stopped
+// reading holds no stop, as what it carries is stamped after the write anyway.
 func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, stampAfterWrite bool, building func(time.Time) func()) {
 	buf := make([]byte, 32*1024)
 	teeActive := !recordingPaused()
+	note := func() func() {
+		if teeActive && building != nil {
+			return building(time.Now())
+		}
+		return nil
+	}
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			var built func()
-			if teeActive && building != nil {
-				built = building(time.Now())
+			if !stampAfterWrite {
+				built = note()
 			}
 			readAt := time.Now()
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
@@ -202,6 +220,7 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 			}
 			timestamp := readAt
 			if stampAfterWrite {
+				built = note()
 				timestamp = time.Now()
 			}
 			if teeActive {
@@ -374,8 +393,13 @@ func drainFrameChunks(ch <-chan frameChunk) {
 // pairs and dispatches each via capture. Only called from the single emitter
 // goroutine to prevent duplicate emissions. ctx, t, appPort, synchronous, and
 // mapping are captured by the closure that RecordIncoming passes as capture.
+//
+// Every complete call is decided in the pass that finds it, under memory
+// pressure too, when capture leaves it out (CaptureGRPC): a pass that skipped
+// it would leave it for a later pass after the chunks it was built of were
+// released, so a stop told nothing was pending could be followed by it.
 func emitCompleteStreams(logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream)) {
-	if capture == nil || memoryguard.IsRecordingPaused() {
+	if capture == nil {
 		return
 	}
 
