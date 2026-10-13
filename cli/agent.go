@@ -109,7 +109,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			utils.IgnoreHangupOnceStopping(ctx)
 			// The CLI's forced stop of an agent it may not signal itself
 			// (sudo's): see utils.DieOnEscalation.
-			utils.DieOnEscalation()
+			utils.DieOnEscalation(ctx)
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {

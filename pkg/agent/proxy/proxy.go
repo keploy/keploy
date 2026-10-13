@@ -1572,15 +1572,14 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 // per-user CA). The CLI that stopped the agent must not kill it in the
 // middle of either -- a uprobe removal cut short leaks the breakpoint, a CA
 // tool cut short leaves a trust store half rewritten -- and either can take
-// long without a step of its own, so each is teardown work in progress
-// (utils.BeginTeardownWork).
+// long without a step of its own, so both are teardown work in progress
+// (utils.BeginTeardownWork), one span with a step between them.
 func (p *Proxy) detachThenRemoveCA(ctx context.Context) {
 	end := utils.BeginTeardownWork()
+	defer end()
 	p.runAuxTeardown(ctx)
-	end()
-	end = utils.BeginTeardownWork()
+	utils.TeardownStep()
 	pTls.TeardownNativeCA(p.logger)
-	end()
 }
 
 // getMockManager returns the current mock manager in a thread-safe manner.

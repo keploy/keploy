@@ -4,6 +4,7 @@ package utils
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,9 @@ func TestEscalationHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
-	DieOnEscalation()
+	stopping, stop := context.WithCancel(context.Background())
+	stop() // its stop has begun
+	DieOnEscalation(stopping)
 	if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
 		os.Exit(3)
 	}
@@ -144,7 +147,9 @@ func TestEscalationWhileBusyHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
-	DieOnEscalation()
+	stopping, stop := context.WithCancel(context.Background())
+	stop() // its stop has begun
+	DieOnEscalation(stopping)
 	end := BeginTeardownWork()
 	if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
 		os.Exit(3)
@@ -203,6 +208,77 @@ func TestTheEscalationWaitsForTeardownWork(t *testing.T) {
 	case <-exited:
 	case <-time.After(time.Minute):
 		t.Fatalf("the helper outlived the escalation once its work ended\n%s", out.String())
+	}
+	if st := helper.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
+		t.Fatalf("the helper ended with %v, want it killed (SIGKILL)\n%s", helper.ProcessState, out.String())
+	}
+}
+
+// TestEscalationBeforeTheStopHelper is not a test of its own: with
+// KEPLOY_TEST_ESCALATION_EARLY set it is an agent whose stop has not begun;
+// it marks "stopping" once its root context is cancelled, and waits.
+func TestEscalationBeforeTheStopHelper(t *testing.T) {
+	dir := os.Getenv("KEPLOY_TEST_ESCALATION_EARLY")
+	if dir == "" {
+		return
+	}
+	root, cancel := context.WithCancel(context.Background())
+	SetCancel(cancel)
+	DieOnEscalation(root)
+	if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
+		os.Exit(3)
+	}
+	<-root.Done()
+	if err := os.WriteFile(filepath.Join(dir, "stopping"), nil, 0o600); err != nil {
+		os.Exit(3)
+	}
+	time.Sleep(time.Hour)
+	os.Exit(0)
+}
+
+// Before an agent's stop has begun, the escalation signal begins it, as
+// SIGTERM would: a stray one -- an operator who meant SIGUSR1 -- does not kill
+// an agent with its CA installed. Once the stop has begun, it kills.
+func TestTheEscalationBeforeTheStopBeginsIt(t *testing.T) {
+	dir := t.TempDir()
+	helper := exec.Command(os.Args[0], "-test.run=^TestEscalationBeforeTheStopHelper$")
+	helper.Env = append(os.Environ(), "KEPLOY_TEST_ESCALATION_EARLY="+dir)
+	var out bytes.Buffer
+	helper.Stdout, helper.Stderr = &out, &out
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- helper.Wait() }()
+	t.Cleanup(func() { _ = helper.Process.Kill() })
+	await := func(name string) {
+		t.Helper()
+		hung := time.After(time.Minute) // only turns a hang into a failure
+		for {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				return
+			}
+			select {
+			case err := <-exited:
+				t.Fatalf("the helper ended before %q: %v\n%s", name, err, out.String())
+			case <-hung:
+				t.Fatalf("the helper never got to %q\n%s", name, out.String())
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+	await("ready")
+	if err := helper.Process.Signal(EscalationSignal); err != nil {
+		t.Fatal(err)
+	}
+	await("stopping") // the signal began the stop, and killed nothing
+	if err := helper.Process.Signal(EscalationSignal); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Minute):
+		t.Fatalf("the helper outlived the escalation once its stop had begun\n%s", out.String())
 	}
 	if st := helper.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
 		t.Fatalf("the helper ended with %v, want it killed (SIGKILL)\n%s", helper.ProcessState, out.String())

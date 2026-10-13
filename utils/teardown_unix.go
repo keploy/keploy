@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,28 +25,44 @@ import (
 // this signal on to the agent (checked with sudo 1.9.16p2).
 const EscalationSignal = syscall.SIGUSR2
 
-// DieOnEscalation has EscalationSignal kill this process (SIGKILL to itself,
-// or an exit where that cannot kill it: a pid namespace's init) -- once no
-// teardown work is in progress (BeginTeardownWork). The CLI judges from a
-// report a moment old, and the agent may have begun such work since: a
-// uprobe removal, or a CA tool rewriting a trust store, which a kill must not
-// cut short. It is for `keploy agent`.
-func DieOnEscalation() {
+// DieOnEscalation has EscalationSignal end this process. Before its stop has
+// begun (ctx, the root context, is not done yet) the signal begins it, as
+// SIGTERM would (ExecCancel): a stray one -- an operator who meant SIGUSR1,
+// the parsers' switch -- stops the agent gracefully instead of killing it
+// with its CA still installed. Once the stop has begun, the signal kills the
+// process (SIGKILL to itself, or an exit where that cannot kill it: a pid
+// namespace's init) as soon as no teardown work is in progress
+// (BeginTeardownWork): the CLI judged from a report a moment old, and the
+// agent may have begun a uprobe removal, or a CA tool rewriting a trust
+// store, since. It is for `keploy agent`.
+func DieOnEscalation(ctx context.Context) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, EscalationSignal)
 	go func() {
-		<-c
-		for TeardownBusy() {
+		for {
+			<-c
+			if ctx.Err() != nil {
+				break
+			}
+			ExecCancel()
+		}
+		for {
+			teardownWorkMu.Lock()
+			if teardownWork.Load() == 0 {
+				// Held across the kill: no work begins in between.
+				if os.Getpid() == 1 {
+					// The init of its pid namespace (a container's PID 1),
+					// which no signal sent from inside the namespace kills,
+					// its own included: exit instead, the same end to
+					// anything in flight.
+					os.Exit(137)
+				}
+				_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
+				select {} // the kill may land after Kill returns (macOS)
+			}
+			teardownWorkMu.Unlock()
 			time.Sleep(10 * time.Millisecond)
 		}
-		if os.Getpid() == 1 {
-			// The init of its pid namespace (a container's PID 1), which no
-			// signal sent from inside the namespace kills, its own included:
-			// exit instead, the same end to anything in flight.
-			os.Exit(137)
-		}
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
-		select {} // the kill may land after Kill returns (macOS)
 	}()
 }
 

@@ -52,10 +52,13 @@ const TeardownBeat = time.Second
 var teardownBeat = TeardownBeat
 
 var (
-	teardownSeq   atomic.Uint64
-	teardownWork  atomic.Int64
-	teardownSteps atomic.Bool
-	teardownDone  atomic.Bool
+	teardownSeq atomic.Uint64
+	// teardownWorkMu orders the start of teardown work against the
+	// escalation's check that none is in progress (DieOnEscalation).
+	teardownWorkMu sync.Mutex
+	teardownWork   atomic.Int64
+	teardownSteps  atomic.Bool
+	teardownDone   atomic.Bool
 	// teardownKick wakes the reporter to write a step or the end at once.
 	teardownKick = make(chan struct{}, 1)
 )
@@ -84,13 +87,18 @@ func TeardownStep() {
 // returned func, which ends it once however often it is called -- are each a
 // step.
 func BeginTeardownWork() (end func()) {
+	teardownWorkMu.Lock()
 	teardownWork.Add(1)
+	teardownWorkMu.Unlock()
 	TeardownStep()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			teardownWork.Add(-1)
+			// The step before the work ends: a report that reads the old
+			// step still reads the work in progress, never an idle agent
+			// that took no step.
 			TeardownStep()
+			teardownWork.Add(-1)
 		})
 	}
 }

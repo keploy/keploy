@@ -295,3 +295,37 @@ func agentStopsIdle() (idle <-chan struct{}, inProgress bool) {
 	defer agentStops.mu.Unlock()
 	return agentStops.idle, agentStops.n > 0
 }
+
+// AwaitAgentExit waits for an agent this process stopped to exit (gone), for
+// a step of keploy's teardown that needs it gone (the user's container
+// restored onto the ports it held, a new agent started in its place). It
+// gives up -- false -- after bound, as a drain does, unless an agent stop that
+// will end on its own is holding the drains then (BeginAgentStop), in which
+// case it waits for that to end and gives the exit the bound again; and it
+// gives up at an interrupt from interrupted (InterruptedAfter: one given
+// while it waits).
+func AwaitAgentExit(gone <-chan struct{}, bound time.Duration, interrupted <-chan struct{}) bool {
+	for {
+		timer := time.NewTimer(bound)
+		select {
+		case <-gone:
+			timer.Stop()
+			return true
+		case <-interrupted:
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		idle, inProgress := agentStopsIdle()
+		if !inProgress {
+			return false
+		}
+		select {
+		case <-gone:
+			return true
+		case <-interrupted:
+			return false
+		case <-idle:
+		}
+	}
+}

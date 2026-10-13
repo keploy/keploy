@@ -137,3 +137,42 @@ func TestADrainWaitsForAnAgentStopInProgress(t *testing.T) {
 		t.Fatal("a drain with no agent stop in progress did not give up at its bound")
 	}
 }
+
+// AwaitAgentExit waits for an agent's exit as a drain waits for its group: it
+// gives up after its bound -- unless an agent stop that will end on its own
+// holds the drains, when it waits for that and gives the exit the bound again
+// -- and at an interrupt given while it waits.
+func TestAwaitAgentExit(t *testing.T) {
+	closed := make(chan struct{})
+	close(closed)
+	if !AwaitAgentExit(closed, time.Hour, nil) {
+		t.Fatal("an agent that had exited was not waited for")
+	}
+	never := make(chan struct{})
+	if AwaitAgentExit(never, time.Millisecond, nil) {
+		t.Fatal("an agent that never exits was reported gone")
+	}
+	if AwaitAgentExit(never, time.Hour, closed) {
+		t.Fatal("an interrupt did not end the wait")
+	}
+
+	end := BeginAgentStop()
+	gone := make(chan struct{})
+	returned := make(chan bool, 1)
+	go func() { returned <- AwaitAgentExit(gone, time.Millisecond, nil) }()
+	select {
+	case <-returned:
+		t.Fatal("gave up on the exit while an agent stop held the drains")
+	case <-time.After(100 * time.Millisecond): // only that it has NOT returned yet
+	}
+	close(gone) // the stop ends as the agent exits
+	end()
+	select {
+	case ok := <-returned:
+		if !ok {
+			t.Fatal("the exit that came as the stop ended was not seen")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("never returned")
+	}
+}

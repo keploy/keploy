@@ -1788,8 +1788,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
 
 	// Reaped by a goroutine of its own, outside the group: a caller waiting on
-	// the group is let go by the user's second interrupt (awaitAgentExit),
-	// which also has the stop kill the agent (stopWatch).
+	// the group is let go by a second interrupt (awaitAgentExit) while the
+	// agent finishes its shutdown; one given while keploy waits for the
+	// agent also has the stop kill it (stopWatch).
 	reaped := make(chan error, 1)
 	go func() {
 		defer utils.Recover(a.logger)
@@ -2061,7 +2062,7 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 }
 
 // endAgent stops a native agent on the CLI's stop, and returns once it has
-// exited or been killed.
+// exited, or been killed at once at the user's Ctrl+C.
 //
 // It asks the agent over its API (ask). If that fails, the agent is sent
 // SIGTERM (terminate) -- whether or not it has answered its readiness check
@@ -2071,9 +2072,11 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // (agentGoingAway), which got its stop some other way: it is sent SIGTERM only
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
-// stopped making any, has detached everything and not exited, or the user
-// presses Ctrl+C again while it is waited for (stopWatch). An agent already
-// reaped is never signalled: its pid may be another process's by now.
+// stopped making any, or has detached everything and not exited -- kill(false),
+// on which it dies once no teardown work is in progress -- or, kill(true), at
+// once when the user presses Ctrl+C again while it is waited for (stopWatch).
+// An agent already reaped is never signalled: its pid may be another
+// process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
@@ -2155,22 +2158,41 @@ func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.Ca
 	return agentCtx, cancel, run, nil
 }
 
+// agentExitBound is how long a step that needs a stopped agent gone waits
+// for its exit while no stop is holding the drains (utils.AwaitAgentExit): the
+// drains' own bound.
+var agentExitBound = 30 * time.Second
+
 // awaitPreviousAgent returns once the agent of the previous start, if any, has
-// exited -- or with an error when ctx ends or the user interrupts again first.
+// exited -- or with an error when ctx ends, the user interrupts again, or the
+// wait has run agentExitBound with no stop holding the drains
+// (utils.AwaitAgentExit): a new agent beside the old one would hook the same
+// client twice.
 func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 	prev := a.currentRun()
 	if prev == nil || prev.isGone() {
 		return nil
 	}
 	a.logger.Info("Waiting for the previous keploy agent to exit before starting a new one (Ctrl+C stops waiting)")
-	select {
-	case <-prev.gone:
+	again := utils.InterruptedAfter(utils.RepeatInterrupts())
+	stop, waited := make(chan struct{}), make(chan struct{})
+	defer close(waited)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-again:
+		case <-waited:
+			return
+		}
+		close(stop)
+	}()
+	if utils.AwaitAgentExit(prev.gone, agentExitBound, stop) {
 		return nil
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	case <-utils.InterruptedAgain():
-		return fmt.Errorf("the previous keploy agent has not exited")
 	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	return fmt.Errorf("the previous keploy agent has not exited")
 }
 
 // awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
@@ -3017,12 +3039,13 @@ func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) 
 var dockerStopPoll = time.Second
 
 // stopAgentContainer stops an agent's container, and returns once it has
-// exited, or once it has been killed and has exited, or the user presses
-// Ctrl+C again. It sends the agent SIGTERM (`kill --signal SIGTERM`,
-// synchronously), waits for the container to stop (`wait`) while the agent's
-// teardown makes progress, which it reports in its container
-// (readContainerProgress), and kills it (`kill`, SIGKILL) only once it has
-// stopped making any, has detached everything and not exited, or the user
+// exited, or the user has pressed Ctrl+C again. It sends the agent SIGTERM
+// (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
+// (`wait`) while the agent's teardown makes progress, which it reports in its
+// container (readContainerProgress). It kills it only once it has stopped
+// making any, or has detached everything and not exited -- with the
+// escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
+// teardown work is in progress -- or at once (`kill`, SIGKILL) when the user
 // presses Ctrl+C again while it is waited for (stopWatch). Not `stop`, whose
 // grace period (10 s by default) ends in a SIGKILL however the teardown is
 // doing (agentRun says why that must not land in it). unanswered (the agent
@@ -3078,16 +3101,8 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) {
 	} else {
 		close(resent)
 	}
-	killed := stopWatch{logger: logger, since: since, gone: gone, read: readContainerProgress(cli, name),
+	stopWatch{logger: logger, since: since, gone: gone, read: readContainerProgress(cli, name),
 		kill: kill, poll: dockerStopPoll, reported: reported}.run()
-	if killed {
-		// A killed container stops at once; the user's Ctrl+C, pressed again,
-		// ends the wait for an engine that does not say so.
-		select {
-		case <-gone:
-		case <-utils.InterruptedAfter(since):
-		}
-	}
 	stopWaiting()
 	<-gone
 	<-resent
@@ -3974,22 +3989,19 @@ func (a *AgentClient) RestoreFromContainer() {
 			usrApp.RemoveReplacement()
 		}
 		run := a.currentRun()
+		since := utils.RepeatInterrupts()
 		a.stopAgent()
 		if !a.fromContainerWasRunning {
 			return
 		}
-		// The agent holds the app's ports until its container has exited, and
-		// it is waited for while its teardown makes progress (agentRun):
-		// restore after that, or once the user's second interrupt, which also
-		// kills it, says not to wait (restoreSourceContainer then retries the
-		// start while the ports are still held).
-		if run != nil {
-			select {
-			case <-run.gone:
-			case <-utils.InterruptedAgain():
-				a.logger.Warn("Stopped waiting for the keploy agent container to exit; restoring your container now",
-					zap.String("container", a.fromContainer))
-			}
+		// The agent holds the app's ports until its container has exited:
+		// restore after that -- or, as a drain gives up, once the wait has run
+		// its bound with no stop holding the drains, or the user presses
+		// Ctrl+C again (utils.AwaitAgentExit). restoreSourceContainer then
+		// retries the start while the ports are still held.
+		if run != nil && !utils.AwaitAgentExit(run.gone, agentExitBound, utils.InterruptedAfter(since)) {
+			a.logger.Warn("Restoring your container while the keploy agent container is still shutting down",
+				zap.String("container", a.fromContainer))
 		}
 		a.restoreSourceContainer(a.fromContainer)
 	})

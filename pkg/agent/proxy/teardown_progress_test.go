@@ -43,8 +43,8 @@ func TestTheHooksTeardownIsWorkInProgress(t *testing.T) {
 	if utils.TeardownBusy() {
 		t.Fatal("the teardown is still reported as work in progress after it")
 	}
-	if steps := utils.TeardownSteps() - before; steps < 4 {
-		t.Fatalf("the hook's teardown and the CA's removal recorded %d steps, want a start and an end each", steps)
+	if steps := utils.TeardownSteps() - before; steps < 3 {
+		t.Fatalf("the hook's teardown and the CA's removal recorded %d steps, want the work's start, its end, and one between them", steps)
 	}
 }
 
@@ -75,9 +75,9 @@ func TestTheProxysShutdownRecordsItsSteps(t *testing.T) {
 	case <-time.After(time.Minute): // only turns a hang into a failure
 		t.Fatal("start() did not return after its context was cancelled")
 	}
-	// Two stages, then the detach and the CA's removal, each begun and ended.
-	if steps := utils.TeardownSteps() - before; steps < 6 {
-		t.Fatalf("the proxy's shutdown recorded %d teardown steps, want at least 6", steps)
+	// Two stages, then the detach and the CA's removal: begun, between, ended.
+	if steps := utils.TeardownSteps() - before; steps < 5 {
+		t.Fatalf("the proxy's shutdown recorded %d teardown steps, want at least 5", steps)
 	}
 	if utils.TeardownBusy() {
 		t.Fatal("the proxy's shutdown left teardown work in progress")

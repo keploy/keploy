@@ -101,6 +101,9 @@ type fakeAgent struct {
 	killed atomic.Int32
 	now    atomic.Bool                 // the last kill was to be at once (Ctrl+C), not deferrable
 	reads  chan utils.TeardownProgress // each read's result, as far as the buffer holds
+	// busy: a kill that is not at once does not end it (it is in the
+	// middle of teardown work, and dies once that is over).
+	busy bool
 }
 
 func newFakeAgent() *fakeAgent {
@@ -128,7 +131,9 @@ func (f *fakeAgent) exited() { f.exit.Do(func() { close(f.gone) }) }
 func (f *fakeAgent) kill(now bool) error {
 	f.now.Store(now)
 	f.killed.Add(1)
-	f.exited() // a killed agent exits
+	if now || !f.busy {
+		f.exited() // a killed agent exits
+	}
 	return nil
 }
 
@@ -237,7 +242,8 @@ func TestStopWatchKillsAStalledTeardown(t *testing.T) {
 		}
 	}
 	f.set(p(7, stallChecks, false))
-	if !awaitWatch(t, w) || f.killed.Load() != 1 {
+	awaitWatch(t, w)
+	if f.killed.Load() != 1 {
 		t.Fatalf("a teardown stalled for %d checks was not killed once (kills: %d)", stallChecks, f.killed.Load())
 	}
 	if f.now.Load() {
@@ -258,7 +264,8 @@ func TestStopWatchKillsAnAgentDetachedButNotExiting(t *testing.T) {
 		t.Fatal("killed in the check that reported the detach done: it was given no check to exit")
 	}
 	f.set(p(5, 5, true))
-	if !awaitWatch(t, w) || f.killed.Load() != 1 {
+	awaitWatch(t, w)
+	if f.killed.Load() != 1 {
 		t.Fatal("an agent detached but not exiting was not killed")
 	}
 	if f.now.Load() {
@@ -327,5 +334,99 @@ func TestOnlyAStopOfAnAgentThatRecordsItsStepsHoldsTheDrains(t *testing.T) {
 		if utils.AgentStopInProgress() {
 			t.Fatalf("steps=%v: the stop still holds the drains after it ended", steps)
 		}
+	}
+}
+
+// A kill the judge decided on lets the agent finish the teardown work it is
+// in the middle of; the watch goes on waiting for its exit, and Ctrl+C
+// pressed meanwhile kills it at once.
+func TestStopWatchWaitsAfterAVerdictAndKillsAtCtrlC(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(n uint64) { stallChecks = n }(stallChecks)
+	stallChecks = 2
+	f := newFakeAgent()
+	f.busy = true
+	w := startWatch(f, nil)
+	for beat := uint64(0); beat <= stallChecks; beat++ {
+		f.set(p(3, beat, false))
+		awaitObserved(t, f, w, p(3, beat, false))
+	}
+	if f.killed.Load() != 1 || f.now.Load() {
+		t.Fatalf("a stalled agent was not sent the kill that waits for its work (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+	select { // only that it has NOT returned yet
+	case <-w.finished:
+		t.Fatal("the watch stopped waiting for an agent still in the middle of its work")
+	case <-time.After(100 * time.Millisecond):
+	}
+	utils.MarkInterruptedAgain()
+	if !awaitWatch(t, w) || f.killed.Load() != 2 || !f.now.Load() {
+		t.Fatalf("Ctrl+C after the verdict did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+}
+
+// A read that does not return (an engine's `cp` that hangs) never holds up
+// the watch's return at the agent's exit: its context is cancelled first.
+func TestStopWatchDoesNotWaitOnASlowRead(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	gone := make(chan struct{})
+	reading := make(chan struct{}, 1)
+	sw := stopWatch{logger: zap.NewNop(), since: utils.RepeatInterrupts(), gone: gone, poll: time.Millisecond,
+		read: func(ctx context.Context) (utils.TeardownProgress, bool) {
+			select {
+			case reading <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return utils.TeardownProgress{}, false
+		},
+		kill: func(bool) error { return nil }}
+	returned := make(chan struct{})
+	go func() { sw.run(); close(returned) }()
+	select {
+	case <-reading:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the watch never read")
+	}
+	close(gone)
+	select {
+	case <-returned:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the watch waited on a read that does not return")
+	}
+}
+
+// A stop holds the drains only while the agent beats: a frozen one (stopped,
+// or frozen by its cgroup), whose stop would not end, lets them keep their
+// bound; its beats coming back hold them again.
+func TestAFrozenAgentsStopLetsTheDrainsGo(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(d time.Duration) { holdStale = d }(holdStale)
+	holdStale = 50 * time.Millisecond
+	awaitHeld := func(want bool) {
+		t.Helper()
+		hung := time.After(time.Minute) // only turns a hang into a failure
+		for utils.AgentStopInProgress() != want {
+			select {
+			case <-hung:
+				t.Fatalf("the stop holds the drains = %v, want %v", !want, want)
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	f := newFakeAgent()
+	w := startWatch(f, nil)
+	f.set(p(1, 0, false)) // then frozen: the same report, read after read
+	awaitHeld(true)
+	awaitHeld(false)
+	f.set(p(2, 1, false)) // it beats again
+	awaitHeld(true)
+	f.exited()
+	awaitWatch(t, w)
+	if utils.AgentStopInProgress() {
+		t.Fatal("the stop still holds the drains after it ended")
 	}
 }

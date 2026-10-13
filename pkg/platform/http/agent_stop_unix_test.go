@@ -374,6 +374,9 @@ func fakeEngine(t *testing.T) (log, release string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
+if [ "$1" = cp ] && [ -e "` + filepath.Join(filepath.Dir(log), "slowcp") + `" ]; then
+  exec sleep 3600
+fi
 if [ "$1" = cp ]; then
   f="` + engineProgressFile(log) + `"
   [ -f "$f" ] || exit 1
@@ -628,6 +631,27 @@ func TestResendsStopOnceTheAgentReportsItsTeardown(t *testing.T) {
 	within(t, "stopAgentContainer", func() { <-returned })
 }
 
+// A `cp` out of the container that hangs never holds up the stop once the
+// container has exited: it runs under a context the stop cancels.
+func TestAHangingCpDoesNotHoldUpTheDockerStop(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 5 * time.Millisecond
+	log, release := fakeEngine(t)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(log), "slowcp"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	returned := make(chan struct{})
+	go func() { stopAgentContainer(zap.NewNop(), stopTestContainer, false); close(returned) }()
+	awaitEngineWait(t, log, returned)
+	_ = returnsWithin(returned, 50*time.Millisecond) // a `cp` is under way by now, as a rule
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainer, with a `cp` that hangs", func() { <-returned })
+}
+
 // The docker stop signals and waits for the container whether or not its
 // agent answered: the agent attaches its uprobes before it answers.
 func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
@@ -757,8 +781,32 @@ func TestAwaitPreviousAgentEndsOnContextOrInterrupt(t *testing.T) {
 		t.Fatal("awaitPreviousAgent ignored the caller's context")
 	}
 
+	// An interrupt given while it waits (one from before is no interrupt of
+	// the wait: it may be the first stop delivered twice).
+	returned := make(chan error, 1)
+	go func() { returned <- a.awaitPreviousAgent(context.Background()) }()
+	select { // only that it has NOT returned yet
+	case err := <-returned:
+		t.Fatalf("returned (%v) while the previous agent was still running", err)
+	case <-time.After(100 * time.Millisecond):
+	}
 	utils.MarkInterruptedAgain()
-	if err := a.awaitPreviousAgent(context.Background()); err == nil {
+	select {
+	case err := <-returned:
+		if err == nil {
+			t.Fatal("awaitPreviousAgent ignored the user's second interrupt")
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
 		t.Fatal("awaitPreviousAgent ignored the user's second interrupt")
+	}
+
+	// And it gives up after its bound, as a drain does, when no agent stop
+	// holds the drains: a new start must not wait forever for an agent that
+	// will not exit.
+	defer func(d time.Duration) { agentExitBound = d }(agentExitBound)
+	agentExitBound = time.Millisecond
+	utils.ResetInterruptedAgain()
+	if err := a.awaitPreviousAgent(context.Background()); err == nil {
+		t.Fatal("awaitPreviousAgent waited past its bound for an agent that never exits")
 	}
 }

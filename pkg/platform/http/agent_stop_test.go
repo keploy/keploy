@@ -54,9 +54,8 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 // that answers is not signalled. One that was up and is already going away is
 // signalled only if, after the grace, it has reported no teardown. One whose
 // stop request fails otherwise, or that never answered (still starting:
-// refused, as nothing listens yet), is signalled at once. An interrupt that
-// came before the stop does not force it: one stop is often delivered twice.
-// The agent is then waited for (a
+// refused, as nothing listens yet), is signalled at once. The agent is then
+// waited for (a
 // terminate stands for SIGTERM, on which it exits). One already reaped is
 // never signalled: its pid may be another process's by then.
 func TestEndAgent(t *testing.T) {
@@ -90,7 +89,6 @@ func TestEndAgent(t *testing.T) {
 		{name: "it is not listening any more, and exits", ask: refused, ready: true, exitAt: goingAwayLog, grace: time.Hour},
 		{name: "it is going away and reports its teardown: never signalled", ask: goingAway, ready: true, reports: true, exitAt: decidedLog, grace: time.Millisecond},
 		{name: "it is going away but reports nothing after the grace", ask: goingAway, ready: true, grace: time.Millisecond, wantSignal: true},
-		{name: "an interrupt that came before the stop does not force it", ready: true, exitOnAsk: true, grace: time.Hour, interrupt: true},
 		{name: "its stop request fails otherwise", ask: failed, ready: true, grace: time.Hour, wantSignal: true},
 		{name: "it never answered: still starting", ask: refused, grace: time.Hour, wantSignal: true},
 		{name: "it never answered, and fails otherwise", ask: failed, grace: time.Hour, wantSignal: true},
@@ -284,5 +282,78 @@ func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 		if fake.callIndex("start:") < 0 {
 			t.Fatalf("interrupt=%v: the user's container was not started again", interrupt)
 		}
+	}
+}
+
+// An interrupt that came before the stop does not force it: `sudo pkill -INT
+// -f keploy` signals sudo and keploy both, and sudo hands its signal on, so
+// one stop reaches keploy twice. The agent, asked to stop and making
+// progress, is waited for, not killed.
+func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	utils.MarkInterruptedAgain() // the stop, delivered twice
+	a := &AgentClient{logger: zap.NewNop()}
+	run := newAgentRun()
+	run.ready.Store(true)
+	var killed atomic.Bool
+	var reads atomic.Uint64
+	read := func(context.Context) (utils.TeardownProgress, bool) {
+		n := reads.Add(1)
+		return utils.TeardownProgress{Seq: n, Beat: n, Steps: true}, true
+	}
+	returned := make(chan struct{})
+	go func() {
+		a.endAgent(run, 1, func() error { return nil }, func() error { return nil },
+			func(bool) error { killed.Store(true); run.exited(); return nil }, read)
+		close(returned)
+	}()
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	for reads.Load() < 5 {
+		select {
+		case <-returned:
+			t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
+		case <-hung:
+			t.Fatal("the stop never read the agent's progress")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if killed.Load() {
+		t.Fatal("an interrupt from before the stop forced it")
+	}
+	run.exited()
+	select {
+	case <-returned:
+	case <-time.After(time.Minute):
+		t.Fatal("endAgent did not return once the agent exited")
+	}
+	if killed.Load() {
+		t.Fatal("an interrupt from before the stop forced it")
+	}
+}
+
+// --from-container: an agent container that never exits, and whose stop does
+// not hold the drains (its agent does not record its steps, so nothing would
+// end it), does not keep keploy from restoring the user's container and
+// exiting: the restore waits as long as a drain would.
+func TestRestoreFromContainerDoesNotWaitForeverForTheAgent(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(d time.Duration) { agentExitBound = d }(agentExitBound)
+	agentExitBound = 10 * time.Millisecond
+	fake := newRestoreFake(fakeContainer{running: true, hasEndpoint: true, publishedPorts: true})
+	a := restoreAgentWith(fake, demoSpec())
+	a.fromContainer = "demo-app"
+	a.fromContainerWasRunning = true
+	a.run = newAgentRun() // never exits
+	restored := make(chan struct{})
+	go func() { a.RestoreFromContainer(); close(restored) }()
+	select {
+	case <-restored:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the restore waited past its bound for an agent that never exits")
+	}
+	if fake.callIndex("start:") < 0 {
+		t.Fatal("the user's container was not started again")
 	}
 }

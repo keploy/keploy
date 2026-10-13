@@ -109,19 +109,22 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 }
 
 // stopWatch waits for a stopping agent to exit (gone), checking its teardown
-// progress (read) every poll, and kills it (kill) only when a stopJudge says
-// so -- kill(false): the agent dies once it is not in the middle of teardown
-// work -- or an interrupt arrives after the since-th one after the first
-// (utils.InterruptedAfter) -- kill(true), at once where the CLI can: the stop
-// takes utils.RepeatInterrupts() as it begins. reported, when set, is closed
-// at the agent's first report: its teardown has begun.
+// progress (read) every poll. It kills it (kill) when a stopJudge says so --
+// kill(false): the agent dies once it is not in the middle of teardown work
+// -- and goes on waiting for the exit; and at an interrupt that arrives after
+// the since-th one after the first (utils.InterruptedAfter) -- kill(true), at
+// once where the CLI can -- after which it waits no more. The stop takes
+// utils.RepeatInterrupts() as it begins. reported, when set, is closed at the
+// agent's first report: its teardown has begun.
 //
-// From the agent's first report that it records its steps (Steps) until the
-// watch returns, no drain gives up on keploy's teardown (utils.BeginAgentStop):
-// such a stop ends on its own, by the agent's exit or a kill. An agent that
-// does not record its steps is never killed for want of progress, so a stop
-// of one may never end: the drains keep their bound, and keploy can exit
-// while it finishes on its own.
+// While the agent reports that it records its steps (Steps) and keeps
+// beating, no drain gives up on keploy's teardown (utils.BeginAgentStop): its
+// stop ends on its own, by its exit or a kill. That hold ends with the watch,
+// at a kill decided by the judge, and while no beat has come for
+// holdStaleChecks of the agent's beats on the CLI's clock (a frozen agent,
+// whose stop would not end): the drains keep their bound then, and keploy
+// can exit while the agent finishes on its own. An agent that does not record
+// its steps never holds them.
 type stopWatch struct {
 	logger   *zap.Logger
 	since    uint64
@@ -135,12 +138,15 @@ type stopWatch struct {
 	judged func(utils.TeardownProgress)
 }
 
-// run returns once the agent has exited, or once it has been killed (true);
-// it does not wait for a killed agent's exit. The reads run on a goroutine of
-// their own, under a context run cancels before it joins them: a slow one (an
-// engine's `cp`) never holds up the exit or Ctrl+C.
+// holdStale is how long, on the CLI's clock, a stepping agent may go without
+// a beat before its stop stops holding the drains (stopWatch).
+var holdStale = time.Duration(stallChecks) * utils.TeardownBeat
+
+// run returns once the agent has exited (false), or once it has been killed
+// at once (true). The reads run on a goroutine of their own, under a context
+// run cancels before it joins them: a slow one (an engine's `cp`) never holds
+// up the exit or Ctrl+C.
 func (w stopWatch) run() bool {
-	w.logger.Debug("Waiting for the keploy agent to finish shutting down: it removes what it attached to the kernel before it exits, and is stopped by force only if it stops making progress (a second Ctrl+C stops it now)")
 	reports := make(chan utils.TeardownProgress, 1)
 	readCtx, stopReading := context.WithCancel(context.Background())
 	read := make(chan struct{})
@@ -169,10 +175,25 @@ func (w stopWatch) run() bool {
 			reports <- p
 		}
 	}()
-	held := func() {}
-	defer func() { held() }()
+
+	release := func() {}
+	holding := false
+	hold := func(on bool) {
+		switch {
+		case on && !holding:
+			release, holding = utils.BeginAgentStop(), true
+		case !on && holding:
+			release()
+			holding = false
+		}
+	}
+	defer hold(false)
+	stale := time.NewTimer(holdStale)
+	defer stale.Stop()
+
 	var judge stopJudge
-	reported, holding := false, false
+	reported, killed, beaten := false, false, false
+	var lastBeat uint64
 	again := utils.InterruptedAfter(w.since)
 	for {
 		var p utils.TeardownProgress
@@ -182,28 +203,41 @@ func (w stopWatch) run() bool {
 		case <-again:
 			w.force("Ctrl+C was pressed again", true)
 			return true
+		case <-stale.C:
+			hold(false) // no beat for a while: a stop that may not end
+			continue
 		case p = <-reports:
 		}
-		if !reported && w.reported != nil {
+		if !reported {
 			reported = true
-			close(w.reported)
+			w.logger.Info("Waiting for the keploy agent to finish shutting down: it removes what it attached to the kernel before it exits, and is stopped by force only if it stops making progress (Ctrl+C stops it now)")
+			if w.reported != nil {
+				close(w.reported)
+			}
 		}
-		if !holding && p.Steps {
-			holding = true
-			held = utils.BeginAgentStop()
+		if !beaten || p.Beat != lastBeat { // a beat: the agent is not frozen
+			beaten, lastBeat = true, p.Beat
+			stale.Reset(holdStale)
+			hold(p.Steps && !killed)
 		}
 		verdict := judge.observe(p)
 		if w.judged != nil {
 			w.judged(p)
 		}
+		if killed {
+			continue
+		}
 		switch verdict {
 		case killStalled:
 			w.force("its teardown has made no progress across the agent's last checks", false)
-			return true
 		case killDetached:
 			w.force("it has detached everything it attached but has not exited", false)
-			return true
+		default:
+			continue
 		}
+		// It dies once no teardown work is in progress; Ctrl+C kills it now.
+		killed = true
+		hold(false)
 	}
 }
 

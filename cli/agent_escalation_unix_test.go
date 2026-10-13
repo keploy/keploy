@@ -17,11 +17,15 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// The agent's CLI forces a stop with utils.EscalationSignal when it may not
-// signal the agent itself (sudo's): the agent command's PreRunE makes it kill
-// the agent where it stands (utils.DieOnEscalation).
+// The agent's CLI forces a stop with utils.EscalationSignal: the agent
+// command's PreRunE makes it kill a stopping agent once no teardown work is in
+// progress (utils.DieOnEscalation).
 func TestAgentDiesOfTheEscalationSignal(t *testing.T) {
-	_, agent, out, exited := startHangupAgent(t, false)
+	dir, agent, out, exited := startHangupAgent(t, true)
+	if err := agent.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitForMark(t, dir, "stopping", exited, out)
 	if err := agent.Process.Signal(utils.EscalationSignal); err != nil {
 		t.Fatal(err)
 	}
