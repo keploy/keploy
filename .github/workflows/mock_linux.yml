@@ -11,7 +11,10 @@ name: Mock Mode Regression (Linux)
 # dependency (one request recorded several times) and asserts record order,
 # per worker and per scope. Another runs more short-lived processes than the
 # agent's PID map holds between two calls and asserts both are recorded, then
-# replayed without reaching the dependency. Another replays with the
+# replayed without reaching the dependency. Another records, under the
+# proven switch, three containers of one image on random published ports and
+# asserts each call's mock names its container (the suite's #1, each test's
+# own #2), then replays against new containers on new ports. Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
@@ -117,6 +120,19 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
+
+      # The proven model (KEPLOY_PROVEN=1) names a dependency that runs in a
+      # container by the container: container:<image>:<port>#<n>, where n
+      # numbers the image's containers per test, after the suite's. Three
+      # containers of one image on random published ports must be keyed the
+      # suite's #1 and each test's own #2, replay against new containers on new
+      # ports, and record no keys without the switch.
+      - name: Run mock-mode container-keys e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-container-keys-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:

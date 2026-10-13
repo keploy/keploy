@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -143,6 +144,10 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), code)
 		return
 	}
+	// The test's own connections are numbered from here (containerkey).
+	if provenswitch.On() && !req.Suite {
+		containerkey.Default.BeginTest()
+	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, models.ScopeBeginResp{Status: "ok"})
 }
@@ -169,6 +174,9 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
+	if provenswitch.On() && !req.Suite {
+		containerkey.Default.EndTest()
+	}
 	if s, ok := a.svc.(scopeOutcomeNoter); ok {
 		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
 			s.NoteScopeOutcome(req.Name, req.Pid, outcome)

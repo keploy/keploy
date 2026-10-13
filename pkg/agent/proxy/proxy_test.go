@@ -10,17 +10,21 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -731,5 +735,182 @@ func TestHandleConnectionClosesTheTunnelWhenTheAppLeavesBeforeUsingIt(t *testing
 	}
 	if src.closes.Load() == 0 {
 		t.Fatal("handleConnection returned without closing the application's connection")
+	}
+}
+
+// containerAt names one address a container, as the index of the local
+// Docker daemon would for a container's published port.
+type containerAt struct {
+	addr string
+	c    containerkey.Container
+}
+
+func (r containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return r.c, dst.String() == r.addr, nil
+}
+
+func (containerAt) Bind(context.Context)               {}
+func (containerAt) Watch(context.Context, *zap.Logger) {}
+func (containerAt) Endpoint() string                   { return "unix:///fake.sock" }
+
+// probeSaw is what a parser saw of its connection's container key while the
+// proxy served it: through its context, and on a mock of its connection.
+type probeSaw struct {
+	fromCtx, stamped, connID string
+}
+
+// ctxProbe is a parser that takes every connection and reports what it saw.
+type ctxProbe struct{ saw chan probeSaw }
+
+func (ctxProbe) MatchType(context.Context, []byte) bool { return true }
+
+func (p ctxProbe) look(ctx context.Context) error {
+	connID, _ := ctx.Value(models.ClientConnectionIDKey).(string)
+	key, _ := containerkey.FromContext(ctx)
+	m := &models.Mock{ConnectionID: connID}
+	containerkey.Default.Stamp(m)
+	p.saw <- probeSaw{fromCtx: key, stamped: m.Spec.Metadata[containerkey.MetadataKey], connID: connID}
+	return nil
+}
+
+func (p ctxProbe) RecordOutgoing(ctx context.Context, _ *integrations.RecordSession) error {
+	return p.look(ctx)
+}
+
+func (p ctxProbe) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	return p.look(ctx)
+}
+
+// Under the proven switch the proxy names a container destination when it
+// accepts the connection: the parser's context carries the key, and the
+// mocks of that connection (by the connection ID the same context carries)
+// are stamped with it while it is open. Once handleConnection returns, the
+// keyer holds nothing of it. Without the switch nothing is named.
+func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			upstream := keepAliveHTTPUpstream(t)
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
+				c: containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566}})
+			t.Cleanup(func() { containerkey.Default = saved })
+
+			cfg := config.New()
+			cfg.Agent.Mode = models.MODE_RECORD
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			probe := ctxProbe{saw: make(chan probeSaw, 1)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{"probe": probe}
+			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: "probe"}}
+			if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			if _, err := io.WriteString(app, "GET /queue HTTP/1.1\r\nHost: dependency\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			saw := awaitEvent(t, probe.saw, "the parser being handed the connection")
+			awaitEvent(t, done, "handleConnection returning")
+
+			want := ""
+			if on {
+				want = "container:localstack/localstack:3.8:4566#1"
+			}
+			if saw.fromCtx != want || saw.stamped != want {
+				t.Fatalf("while open, the parser's context carried %q and its connection's mock was stamped %q, want %q", saw.fromCtx, saw.stamped, want)
+			}
+			m := &models.Mock{ConnectionID: saw.connID}
+			containerkey.Default.Stamp(m)
+			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != "" {
+				t.Fatalf("after the connection closed the keyer still stamped %q", got)
+			}
+		})
+	}
+}
+
+// sessionIndex is a container index that counts what the proxy asks of it.
+type sessionIndex struct {
+	at             map[string]containerkey.Container
+	binds, watches atomic.Int32
+}
+
+func (s *sessionIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	c, ok := s.at[dst.String()]
+	return c, ok, nil
+}
+
+func (s *sessionIndex) Bind(context.Context)               { s.binds.Add(1) }
+func (s *sessionIndex) Watch(context.Context, *zap.Logger) { s.watches.Add(1) }
+func (*sessionIndex) Endpoint() string                     { return "unix:///fake.sock" }
+
+// Only under the proven switch does the agent bind its reading of Docker to
+// its life, and a session start (Record, Mock) index the local daemon's
+// containers and number them afresh. Without the switch the proxy never
+// touches the index: no watch of the daemon (its goroutines, its connection,
+// its messages) and the numbering left as it was.
+func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			idx := &sessionIndex{at: map[string]containerkey.Container{
+				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432},
+				"172.17.0.3:5432": {ID: "b", Image: "postgres:16", Port: 5432},
+			}}
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(idx)
+			t.Cleanup(func() { containerkey.Default = saved })
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			bindContainerKeys(ctx)
+			cfg := config.New()
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			sessions := map[string]func(){
+				"Record": func() {
+					_ = p.Record(ctx, make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true})
+				},
+				// Mock can fail later, at its nsswitch setup: after the
+				// container keys' start, which is what is checked here.
+				"Mock": func() { _ = p.Mock(ctx, models.OutgoingOptions{}) },
+			}
+			for _, name := range []string{"Record", "Mock"} {
+				containerkey.Default.Reset()
+				_, a, _ := containerkey.Default.Name(nil, "a", "172.17.0.2:5432")
+				containerkey.Default.Forget("a")
+				sessions[name]()
+				_, b, _ := containerkey.Default.Name(nil, "b", "172.17.0.3:5432")
+				containerkey.Default.Forget("b")
+				want := "container:postgres:16:5432#2" // numbered after a, in the same session
+				if on {
+					want = "container:postgres:16:5432#1" // a new session
+				}
+				if a != "container:postgres:16:5432#1" || b != want {
+					t.Fatalf("around %s: a was %q and b %q, want b %q", name, a, b, want)
+				}
+			}
+			wantBinds, wantWatches := int32(0), int32(0)
+			if on {
+				wantBinds, wantWatches = 1, 2
+			}
+			if got := idx.binds.Load(); got != wantBinds {
+				t.Fatalf("the agent bound the index %d times, want %d", got, wantBinds)
+			}
+			if got := idx.watches.Load(); got != wantWatches {
+				t.Fatalf("Record and Mock watched the index %d times, want %d", got, wantWatches)
+			}
+		})
 	}
 }

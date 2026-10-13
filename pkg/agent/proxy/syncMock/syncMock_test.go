@@ -2,12 +2,14 @@ package manager
 
 import (
 	"context"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -2122,5 +2124,47 @@ func TestLateMockInOverlappingWindowsGoesToTheKeptOne(t *testing.T) {
 				t.Fatal("a mock inside a kept window was pruned because an overlapping duplicate window resolved first")
 			}
 		})
+	}
+}
+
+// oneContainerAt names one address a container, as the agent's index of the
+// local Docker daemon would.
+type oneContainerAt string
+
+func (a oneContainerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return containerkey.Container{ID: "c1", Image: "redis:7", Port: 6379}, dst.String() == string(a), nil
+}
+
+func (oneContainerAt) Bind(context.Context)               {}
+func (oneContainerAt) Watch(context.Context, *zap.Logger) {}
+func (oneContainerAt) Endpoint() string                   { return "unix:///fake.sock" }
+
+// Under the proven switch a mock a parser hands over is stamped with its
+// connection's container key, while that connection is still open; without
+// the switch the mock is handed on as it came.
+func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
+	saved := containerkey.Default
+	containerkey.Default = containerkey.NewKeyer(oneContainerAt("127.0.0.1:49153"))
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default.Name(zap.NewNop(), "7", "127.0.0.1:49153")
+
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 1)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.REDIS, ConnectionID: "7"})
+		got := (<-ch).Spec.Metadata[containerkey.MetadataKey]
+		want := ""
+		if on {
+			want = "container:redis:7:6379#1"
+		}
+		if got != want {
+			t.Fatalf("proven=%v: the mock's container key = %q, want %q", on, got, want)
+		}
 	}
 }
