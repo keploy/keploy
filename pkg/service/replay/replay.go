@@ -4287,10 +4287,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// whole is, not PASSED. Last, so a status that says more (FAILED, not
 	// judged, a partial run) keeps its place.
 	if everyTestIgnored(testSetStatus, success, failure, obsolete, ignored) {
-		r.logger.Warn("nothing in the test-set was verified: none of its tests passed or failed, and the rest were ignored; it is reported IGNORED, not PASSED ("+provenswitch.Env+"=1)",
+		r.logger.Warn("nothing in the test-set was verified: no test of it got a verdict (passed, failed or obsolete), and the ignored count says how many were ignored; it is reported IGNORED, not PASSED ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Int("ignored", ignored),
-			zap.String("next_step", "the tests were skipped by the run's ignore list (test.ignoredTests) or set IGNORED by a before-test-result hook; the set is verified only when at least one of its tests runs"))
+			zap.String("next_step", "its tests were skipped by the run's ignore list or set IGNORED by a before-test-result hook; the set is verified only when at least one of its tests runs and is not ignored"))
 		testSetStatus = models.TestSetStatusIgnored
 	}
 

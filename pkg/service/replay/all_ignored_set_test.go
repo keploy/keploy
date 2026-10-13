@@ -164,7 +164,7 @@ func TestRunTestSet_ANotJudgedSetWithOnlyIgnoredRowsIsNotIgnored(t *testing.T) {
 	if rep.Success+rep.Failure+rep.Obsolete != 0 || rep.Ignored != 1 {
 		t.Fatalf("precondition: passed %d, failed %d, obsolete %d, ignored %d; want only test-1, quarantined", rep.Success, rep.Failure, rep.Obsolete, rep.Ignored)
 	}
-	if status != models.TestSetStatusInternalErr || !strings.Contains(rep.FailureReason, "not judged") {
+	if status != models.TestSetStatusInternalErr || !strings.Contains(rep.FailureReason, "not judged") || !strings.Contains(rep.FailureReason, "consumed") {
 		t.Fatalf("set %s (%q); want INTERNAL_ERR, not judged: what test-1 consumed could not be read", status, rep.FailureReason)
 	}
 }
