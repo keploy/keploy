@@ -11,9 +11,13 @@
 #   - A, outside tests and inside test_two:  container:<image>:8000#1
 #   - B inside test_one, C inside test_two:  container:<image>:8000#2
 # so a test's own container is numbered the same in every test, after the
-# suite's. The replays start new containers on new ports and must name them the
-# same: all of them, test_two alone, and without the switch. A recording made
-# without the switch has no keys, and replays with the switch.
+# suite's. Recording again with every container new, on new ports, must name
+# them the same, and so must recording test_two alone. The switch's recording
+# replays without the switch, and a recording made without the switch has no
+# keys. (A replay under the switch needs a build that judges each test, keploy
+# enterprise; the agent names a replay's connections as it names a record's,
+# which pkg/agent/proxy's TestHandleConnectionNamesAContainerDestination
+# covers.)
 #
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test); DEP_IMAGE (the
 # dependency's image, python:3.11-slim by default).
@@ -232,40 +236,18 @@ for d in docs:
 PY
 }
 
-# replay_keys LOG: "<who> <containerKey>" for each connection the replay's
-# agent named, by the debug line it logs, whom it reached read from seen.txt.
-# Nothing compares the keys yet (S1 will), so that line is what shows them.
-replay_keys() {
-  python3 - "$1" <<'PY'
-import re, sys
-who = {}
-for l in open("seen.txt"):
-    w, p = l.split()
-    who[p] = w
-got = []
-for line in open(sys.argv[1], errors="replace"):
-    if "named a container destination" not in line:
-        continue
-    d = re.search(r'"destination": "127\.0\.0\.1:(\d+)"', line)
-    k = re.search(r'"containerKey": "([^"]+)"', line)
-    if d and k:
-        got.append("%s %s" % (who.get(d.group(1), "?"), k.group(1)))
-print("\n".join(sorted(got)))
-PY
-}
-
-# replay NAME LOG PROVEN [PYTEST ARGS]: replays the set, the suite's container
-# and the tests' own all new, with the agent's debug lines.
-replay() {
+# record NAME LOG PROVEN [PYTEST ARGS]: records the set with the agent's debug
+# lines, the suite's container and the tests' own all new, on new ports.
+record() {
   local name="$1" log="$2" proven="$3"
   shift 3
   start_suite
   : > "$log"
-  sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN="$proven" KEPLOY_LANE_LOG="$WORK/$log" "$REPLAY_BIN" mock replay -c "$CMD $*" --name "$name" --disable-tele --debug > "$log" 2>&1
+  sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN="$proven" KEPLOY_LANE_LOG="$WORK/$log" "$RECORD_BIN" mock record -c "$CMD $*" --name "$name" --disable-tele --debug > "$log" 2>&1
   local rc=$?
   grep -E "[0-9]+ (passed|failed|error)" "$log" | tail -3
   if [ "$rc" -ne 0 ]; then
-    echo "FAIL: replay of $name ($log) exited $rc"
+    echo "FAIL: record of $name ($log) exited $rc"
     tail -40 "$log"
     FAIL=1
   fi
@@ -293,54 +275,46 @@ expect() {
 }
 
 echo "== 1. record under the proven switch =="
-start_suite
-: > rec.log
-sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN=1 KEPLOY_LANE_LOG="$WORK/rec.log" "$RECORD_BIN" mock record -c "$CMD" --name ck --disable-tele --debug > rec.log 2>&1
-RC=$?
-grep -E "[0-9]+ (passed|failed|error)" rec.log | tail -3
-[ "$RC" -eq 0 ] || tail -40 rec.log
-[ "$RC" -eq 0 ] || { echo "FAIL: record exited $RC"; FAIL=1; }
+record ck rec.log 1
 grep -q "2 passed" rec.log || { echo "FAIL: pytest did not pass both tests while recording"; FAIL=1; }
 keys_of ck | sort > keys.txt
 cat keys.txt
 expect keys.txt "the recorded container keys are not the suite's #1 and each test's own #2" \
   "/boot ${want}#1" "/one ${want}#2" "/two-a ${want}#1" "/two-c ${want}#2"
 
-echo "== 2. replay against new containers on new random ports =="
-replay ck rep.log 1
-grep -q "2 passed" rep.log || { echo "FAIL: pytest did not pass both tests in replay"; FAIL=1; }
-replay_keys rep.log > rep.keys
-cat rep.keys
-expect rep.keys "the replay did not name the new containers as the record named the old ones" \
-  "a ${want}#1" "a ${want}#1" "b ${want}#2" "c ${want}#2"
+echo "== 2. record again, every container new on a new random port =="
+record ck-again rec-again.log 1
+grep -q "2 passed" rec-again.log || { echo "FAIL: pytest did not pass both tests recording again"; FAIL=1; }
+keys_of ck-again | sort > keys-again.txt
+cat keys-again.txt
+expect keys-again.txt "new containers on new ports were not named as the first record named the old ones" \
+  "/boot ${want}#1" "/one ${want}#2" "/two-a ${want}#1" "/two-c ${want}#2"
 
-echo "== 3. replay test_two alone: its own container is still #2 =="
-replay ck rep-two.log 1 -k test_two
-grep -q "1 passed" rep-two.log || { echo "FAIL: pytest did not pass test_two alone in replay"; FAIL=1; }
-replay_keys rep-two.log > rep-two.keys
-cat rep-two.keys
-expect rep-two.keys "test_two alone did not number its container as the full run did" \
-  "a ${want}#1" "a ${want}#1" "c ${want}#2"
+echo "== 3. record test_two alone: its own container is still #2 =="
+record ck-two rec-two.log 1 -k test_two
+grep -q "1 passed" rec-two.log || { echo "FAIL: pytest did not pass test_two alone while recording"; FAIL=1; }
+keys_of ck-two | sort > keys-two.txt
+cat keys-two.txt
+expect keys-two.txt "test_two alone did not number its container as the full run did" \
+  "/boot ${want}#1" "/two-a ${want}#1" "/two-c ${want}#2"
 
 echo "== 4. the switch's recording replays without the switch =="
-replay ck rep-off.log ""
+start_suite
+sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele --debug > rep-off.log 2>&1
+RC=$?
+grep -E "[0-9]+ (passed|failed|error)" rep-off.log | tail -3
+[ "$RC" -eq 0 ] || { echo "FAIL: the replay without the switch exited $RC"; tail -40 rep-off.log; FAIL=1; }
 grep -q "2 passed" rep-off.log || { echo "FAIL: pytest did not pass both tests in the replay without the switch"; FAIL=1; }
 untouched rep-off.log "an agent without the switch read Docker for container keys in replay"
 
-echo "== 5. without the switch nothing is keyed, and that recording replays with it =="
-start_suite
-sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "$CMD" --name ck-off --disable-tele --debug > rec-off.log 2>&1
-RC=$?
-grep -E "[0-9]+ (passed|failed|error)" rec-off.log | tail -3
-[ "$RC" -eq 0 ] || tail -40 rec-off.log
-[ "$RC" -eq 0 ] || { echo "FAIL: record without the switch exited $RC"; FAIL=1; }
+echo "== 5. without the switch nothing is keyed =="
+record ck-off rec-off.log ""
+grep -q "2 passed" rec-off.log || { echo "FAIL: pytest did not pass both tests recording without the switch"; FAIL=1; }
 untouched rec-off.log "an agent without the switch read Docker for container keys in record"
 keys_of ck-off | sort > keys-off.txt
 cat keys-off.txt
 expect keys-off.txt "a recording made without the switch carries container keys" \
   "/boot -" "/one -" "/two-a -" "/two-c -"
-replay ck-off rep-off-on.log 1
-grep -q "2 passed" rep-off-on.log || { echo "FAIL: the recording made without the switch did not replay with it"; FAIL=1; }
 
 # A race build reports a data race and carries on: fail on one in any leg.
 if grep -l "WARNING: DATA RACE" ./*.log; then

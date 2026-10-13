@@ -785,10 +785,15 @@ func (p ctxProbe) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.Condit
 // accepts the connection: the parser's context carries the key, and the
 // mocks of that connection (by the connection ID the same context carries)
 // are stamped with it while it is open. Once handleConnection returns, the
-// keyer holds nothing of it. Without the switch nothing is named.
+// keyer holds nothing of it. Without the switch nothing is named. The same in
+// a record (Record) and in a replay (Mock).
 func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
-	for _, on := range []bool{true, false} {
-		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+	for _, tc := range []struct {
+		mode models.Mode
+		on   bool
+	}{{models.MODE_RECORD, true}, {models.MODE_RECORD, false}, {models.MODE_TEST, true}, {models.MODE_TEST, false}} {
+		mode, on := tc.mode, tc.on
+		t.Run(fmt.Sprintf("%s/proven=%v", mode, on), func(t *testing.T) {
 			if on {
 				t.Setenv("KEPLOY_PROVEN", "1")
 			} else {
@@ -801,15 +806,23 @@ func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
 			t.Cleanup(func() { containerkey.Default = saved })
 
 			cfg := config.New()
-			cfg.Agent.Mode = models.MODE_RECORD
+			cfg.Agent.Mode = mode
 			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
 			probe := ctxProbe{saw: make(chan probeSaw, 1)}
 			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{"probe": probe}
 			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: "probe"}}
-			if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
-				t.Fatal(err)
+			opts := models.OutgoingOptions{DisableMysqlAutoDetect: true}
+			if mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				// Mock can fail last, at its nsswitch setup (root's), with
+				// the session already set up.
+				opts.Mocking = true
+				_ = p.Mock(context.Background(), opts)
 			}
-			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 
 			app, src := acceptedConn(t)
 			done := make(chan error, 1)

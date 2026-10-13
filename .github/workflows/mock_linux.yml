@@ -14,7 +14,8 @@ name: Mock Mode Regression (Linux)
 # replayed without reaching the dependency. Another records, under the
 # proven switch, three containers of one image on random published ports and
 # asserts each call's mock names its container (the suite's #1, each test's
-# own #2), then replays against new containers on new ports. Another replays with the
+# own #2), again with new containers on new ports, and for one test alone.
+# Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
@@ -125,8 +126,9 @@ jobs:
       # container by the container: container:<image>:<port>#<n>, where n
       # numbers the image's containers per test, after the suite's. Three
       # containers of one image on random published ports must be keyed the
-      # suite's #1 and each test's own #2, replay against new containers on new
-      # ports, and record no keys without the switch.
+      # suite's #1 and each test's own #2, be named the same when recorded
+      # again on new ports or one test alone, and record no keys without the
+      # switch.
       - name: Run mock-mode container-keys e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
