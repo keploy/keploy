@@ -250,53 +250,40 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 }
 
 // parseFramesFromChan reconstructs HTTP/2 frames from timestamped byte chunks
-// received via channel, then feeds them to the DefaultStreamManager. After the
-// frames of each chunk, it calls parsed with what releases the chunks it has
-// taken all of (frameChunk.built), for the emitter to release once it has
-// captured what their frames completed; parsed also wakes the emitter. When it
-// stops, it hands parsed the chunks it took part of at once (it gave up
-// mid-chunk, or the stream ended mid-frame), and releases those it never takes
-// (drainFrameChunks) as they come: none waits for the connection to end.
+// received via channel, then feeds them to the DefaultStreamManager.
+//
+// Each chunk's note (frameChunk.built) is let go once its frames are handled:
+// to parsed when it completed any, for the emitter to release once it has
+// decided what they completed (parsed also wakes the emitter), and at once
+// when it completed none. A chunk that ends mid-frame needs no note past
+// that: the frame is stamped with the time of the chunk that completes it
+// (HandleFrame), whose own note covers it. Held instead, it would keep a stop
+// waiting on a client that stopped reading mid-response, whose next chunk is
+// never forwarded. When the parser stops, what it never takes is released as
+// it comes (drainFrameChunks).
 func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
 	var buffer []byte
 	prefaceRead := isOutgoing
 
-	// inBuffer is the chunks with bytes still in buffer, oldest first, by
-	// where each ends in the stream; appended is how many bytes the stream
-	// has given so far.
-	type bufferedChunk struct {
-		end   int64
-		built func()
-	}
-	var inBuffer []bufferedChunk
-	var appended int64
-	// handOff hands parsed the chunks still in buffer: frames of them may be
-	// in the stream manager, and the emitter's next pass captures what they
-	// completed before it releases them.
-	handOff := func() {
-		if len(inBuffer) == 0 {
-			return
+	// letGo lets go of a chunk's note once its frames are handled.
+	letGo := func(c frameChunk, handled bool) {
+		switch {
+		case handled:
+			var done []func()
+			if c.built != nil {
+				done = []func(){c.built}
+			}
+			parsed(done)
+		default:
+			release(c.built)
 		}
-		done := make([]func(), 0, len(inBuffer))
-		for _, c := range inBuffer {
-			done = append(done, c.built)
-		}
-		inBuffer = nil
-		parsed(done)
 	}
-	// giveUp stops parsing: what it took goes on at once, and what is left
-	// on ch is released as it comes, until the forwarder closes ch.
-	giveUp := func() {
-		handOff()
-		drainFrameChunks(ch)
-	}
-	defer handOff()
 
 	for {
 		var chunk frameChunk
 		select {
 		case <-ctx.Done():
-			giveUp()
+			drainFrameChunks(ch)
 			return
 		case next, ok := <-ch:
 			if !ok {
@@ -306,7 +293,9 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 		}
 
 		if chunk.teeEnded {
-			giveUp()
+			// The rest of what the forwarder reads is not teed: the frame
+			// this parser is in the middle of will never be complete.
+			drainFrameChunks(ch)
 			return
 		}
 		if len(chunk.data) == 0 {
@@ -314,18 +303,16 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			continue
 		}
 		buffer = append(buffer, chunk.data...)
-		appended += int64(len(chunk.data))
-		if chunk.built != nil {
-			inBuffer = append(inBuffer, bufferedChunk{end: appended, built: chunk.built})
-		}
 
 		if !prefaceRead {
 			if len(buffer) < len(http2.ClientPreface) {
+				release(chunk.built)
 				continue
 			}
 			if !bytes.Equal(buffer[:len(http2.ClientPreface)], []byte(http2.ClientPreface)) {
 				logger.Debug("unexpected bytes instead of HTTP/2 preface")
-				giveUp()
+				release(chunk.built)
+				drainFrameChunks(ch)
 				return
 			}
 			buffer = buffer[len(http2.ClientPreface):]
@@ -343,7 +330,8 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 					zap.Bool("isOutgoing", isOutgoing),
 					zap.Uint32("frameLength", frameLength),
 					zap.Uint32("maxFrameSize", pkg.MaxFrameSize))
-				giveUp()
+				letGo(chunk, handled)
+				drainFrameChunks(ch)
 				return
 			}
 			frameSize := int(frameLength) + 9
@@ -354,7 +342,8 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			frame, consumed, err := pkg.ExtractHTTP2Frame(buffer[:frameSize])
 			if err != nil {
 				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
-				giveUp()
+				letGo(chunk, handled)
+				drainFrameChunks(ch)
 				return
 			}
 			buffer = buffer[consumed:]
@@ -367,17 +356,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			}
 			handled = true
 		}
-
-		// The chunks taken all of: their frames are in the stream manager.
-		taken := appended - int64(len(buffer))
-		var done []func()
-		for len(inBuffer) > 0 && inBuffer[0].end <= taken {
-			done = append(done, inBuffer[0].built)
-			inBuffer = inBuffer[1:]
-		}
-		if handled || len(done) > 0 {
-			parsed(done)
-		}
+		letGo(chunk, handled)
 	}
 }
 
