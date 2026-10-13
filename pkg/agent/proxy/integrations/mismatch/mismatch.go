@@ -355,11 +355,14 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		}
 		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
 	default:
+		// Not --update-test-mapping alone: it updates only a passing test's
+		// mapping, so a test this miss failed keeps its recorded one. With
+		// --disable-mapping the test is served its recorded window, and mapped
+		// if it passes (both are `keploy test` flags a mock run does not have).
 		if mockMode.Load() {
-			// --update-test-mapping is a `keploy test` flag; a mock run has no such option.
 			return "Request structure changed since recording. Re-record the mock set with '" + RecordCommand() + "'."
 		}
-		return "Request structure changed since recording. Re-record the test set with 'keploy record', or refresh mappings with --update-test-mapping if mocks were edited."
+		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
 }
 

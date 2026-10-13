@@ -863,7 +863,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 // (the default) a run creates mappings.yaml only when none exists, and never
 // touches it again. A run that left tests without a verdict or an answer has no
 // entries for them, so creating the file from it leaves those tests out for
-// good. The startup-only backfill would create the file just the same.
+// good. (The startup-only backfill writes only into a file that exists.)
 // --update-test-mapping writes a run with an unanswered test either way:
 // mapdb.Insert replaces only the entries this run has, so into an existing file
 // the unanswered test keeps its own, and a new file gains it on the next such
