@@ -643,10 +643,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 	// summarize says what this session recorded, and what it lost, however the
-	// stream ends (endedBy): the capture closing tc, the recording's client
-	// closing the stream once its stop's drain is done (how a native or docker
-	// recording ends: the ingress never closes tc), or the stream breaking.
-	endedBy := "broken"
+	// stream ends (endedBy): the capture closing tc, or the stream ending
+	// under it, which is how a native or docker recording ends (the ingress
+	// never closes tc): its client closes it once its stop's drain is done. A
+	// write that fails as the client goes cannot be told from a client that
+	// went away (net/http ends the request's context on either), and with an
+	// app that serves on through the drain the handler is as often writing as
+	// waiting when it goes: tcs_held_at_end, not a guess at why, says what an
+	// end left unsent.
+	endedBy := "client"
 	summarize := func() {
 		_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 		orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
@@ -685,14 +690,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_up_to", testCaseHoldMax))
 		}
-		summary := "agent: recording complete"
-		if endedBy == "broken" {
-			// The test cases it still held are not sent (tcs_held_at_end).
-			summary, logRecordingComplete = "agent: the recording's stream broke before its client ended it; test cases the agent still held were not sent", a.logger.Warn
-		}
-		logRecordingComplete(summary,
-			// How the stream ended: "client" (it closed the stream),
-			// "capture" (it closed its channel) or "broken".
+		logRecordingComplete("agent: recording complete",
+			// How the stream ended: "capture" (it closed its channel), or
+			// "client" (the stream ended under it).
 			zap.String("ended_by", endedBy),
 			zap.Int("tcs_sent_to_cli", tcsSentSoFar),
 			zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
@@ -756,7 +756,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
-			endedBy = "client"
 			return
 		case <-tickC:
 			if !release() {
@@ -772,7 +771,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					}
 					select {
 					case <-r.Context().Done():
-						endedBy = "client"
 						return
 					case <-holdTick.C:
 					}
