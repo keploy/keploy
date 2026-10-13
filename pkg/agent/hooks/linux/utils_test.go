@@ -210,6 +210,10 @@ func TestTracefsMountedAgreesWithCiliumInEveryLayout(t *testing.T) {
 	if err != nil {
 		t.Skipf("no mount namespace to leave: %v", err)
 	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range []struct {
 		layout  string
 		missing bool
@@ -221,7 +225,7 @@ func TestTracefsMountedAgreesWithCiliumInEveryLayout(t *testing.T) {
 		{"debugfs", false},
 	} {
 		t.Run(c.layout, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestTracefsMountedAgreesWithCiliumInEveryLayout$", "-test.v", "-test.count=1")
+			cmd := exec.Command(self, "-test.run=^TestTracefsMountedAgreesWithCiliumInEveryLayout$", "-test.v", "-test.count=1")
 			cmd.Env = append(os.Environ(), tracefsLayoutEnv+"="+c.layout,
 				fmt.Sprintf("%s=%v", tracefsWantMissingEnv, c.missing), tracefsParentNSEnv+"="+ns)
 			// Go marks / MS_REC|MS_PRIVATE in a child it unshares CLONE_NEWNS
@@ -229,6 +233,9 @@ func TestTracefsMountedAgreesWithCiliumInEveryLayout(t *testing.T) {
 			cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
 			out, err := cmd.CombinedOutput()
 			switch {
+			case errors.Is(err, os.ErrPermission):
+				// Root without CAP_SYS_ADMIN, as in a default container.
+				t.Skipf("a mount namespace cannot be made here: %v", err)
 			case strings.Contains(string(out), "--- SKIP: TestTracefsMountedAgreesWithCiliumInEveryLayout"):
 				t.Skipf("the %s layout cannot be built here:\n%s", c.layout, out)
 			case err != nil || !strings.Contains(string(out), "--- PASS: TestTracefsMountedAgreesWithCiliumInEveryLayout"):
@@ -238,9 +245,34 @@ func TestTracefsMountedAgreesWithCiliumInEveryLayout(t *testing.T) {
 	}
 }
 
+// inOwnMountNamespace is the guard each stage of a layout child passes before
+// it unmounts anything: it was started by the parent test (which names its
+// own mount namespace), it is in another one, and that one is private, so
+// nothing done in it propagates to the host's.
+func inOwnMountNamespace(t *testing.T) {
+	t.Helper()
+	parent := os.Getenv(tracefsParentNSEnv)
+	ns, err := os.Readlink("/proc/self/ns/mnt")
+	if parent == "" || err != nil || ns == parent {
+		t.Fatalf("not a layout child in a mount namespace of its own (this %q, %v; parent %q): refusing to unmount anything", ns, err, parent)
+	}
+	table, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(table), "\n") {
+		before, _, _ := strings.Cut(line, " - ")
+		for _, f := range strings.Fields(before) {
+			if strings.HasPrefix(f, "shared:") || strings.HasPrefix(f, "master:") {
+				t.Fatalf("a mount of this namespace still propagates (%s): refusing to unmount anything", line)
+			}
+		}
+	}
+}
+
 // tracefsMountPoints are the mount points of every tracefs and debugfs mount
-// in mountinfo whose mount point is under prefix, deepest first.
-func tracefsMountPoints(t *testing.T, prefix string) []string {
+// in mountinfo at or under dir ("/" for all), deepest first.
+func tracefsMountPoints(t *testing.T, dir string) []string {
 	t.Helper()
 	table, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
@@ -253,7 +285,7 @@ func tracefsMountPoints(t *testing.T, prefix string) []string {
 		if !ok || len(first) < 5 || len(second) == 0 || second[0] != "tracefs" && second[0] != "debugfs" {
 			continue
 		}
-		if p := mountinfoUnescape.Replace(first[4]); strings.HasPrefix(p, prefix) {
+		if p := mountinfoUnescape.Replace(first[4]); dir == "/" || p == dir || strings.HasPrefix(p, dir+"/") {
 			points = append(points, p)
 		}
 	}
@@ -261,32 +293,45 @@ func tracefsMountPoints(t *testing.T, prefix string) []string {
 	return points
 }
 
+// takeDownTracefsLayout undoes a layout under dir: its mounts detached, its
+// directories removed, never recursively (tracefs is the host's superblock,
+// and removing its instances would remove the host's).
+func takeDownTracefsLayout(t *testing.T, dir string) {
+	for _, p := range tracefsMountPoints(t, dir) {
+		_ = unix.Unmount(p, unix.MNT_DETACH)
+	}
+	for _, d := range []string{"tracefs", "events", "debugfs"} {
+		_ = os.Remove(filepath.Join(dir, d))
+	}
+	_ = os.Remove(dir)
+}
+
 // buildTracefsLayout, in the child's own mount namespace, detaches every
 // tracefs and debugfs mount, builds layout, and re-executes the test binary
 // there to check it.
 func buildTracefsLayout(t *testing.T, layout string) {
-	// The guard against touching the host's mounts.
-	if ns, err := os.Readlink("/proc/self/ns/mnt"); err != nil || ns == os.Getenv(tracefsParentNSEnv) {
-		t.Fatalf("not in a mount namespace of its own (%s, %v): refusing to unmount anything", ns, err)
-	}
+	inOwnMountNamespace(t)
 	for _, p := range tracefsMountPoints(t, "/") {
 		if err := unix.Unmount(p, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) {
 			t.Fatalf("unmount %s: %v", p, err)
 		}
 	}
-	// Never removed recursively (checkTracefsLayout): tracefs is the host's
-	// superblock, and removing its instances would remove the host's.
+	// A mount inherited into a user namespace is locked and stays (EINVAL):
+	// then no layout can be built, and checking one would check the host's.
+	if left := tracefsMountPoints(t, "/"); len(left) > 0 {
+		t.Skipf("these tracefs and debugfs mounts cannot be detached here: %v", left)
+	}
 	dir, err := os.MkdirTemp("", "keploy-tracefs-layout-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Runs where this stage ends without re-executing (a skip, a failure).
+	t.Cleanup(func() { takeDownTracefsLayout(t, dir) })
 	mount := func(src, target, fstype string, flags uintptr) {
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := unix.Mount(src, target, fstype, flags, ""); err != nil {
-			_ = os.Remove(target)
-			_ = os.Remove(dir)
 			t.Skipf("mount %s at %s: %v", fstype, target, err)
 		}
 	}
@@ -304,30 +349,33 @@ func buildTracefsLayout(t *testing.T, layout string) {
 		}
 	case "debugfs":
 		mount("debugfs", filepath.Join(dir, "debugfs"), "debugfs", 0)
+		// stat does not trigger the tracing directory's tracefs automount, so
+		// the layout stays a debugfs alone until cilium/ebpf walks into it.
 		if st, err := os.Stat(filepath.Join(dir, "debugfs", "tracing")); err != nil || !st.IsDir() {
 			t.Skipf("this kernel's debugfs has no tracing directory: %v", err)
 		}
 	default:
 		t.Fatalf("unknown layout %q", layout)
 	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := append(os.Environ(), tracefsLayoutDirEnv+"="+dir)
-	err = syscall.Exec(os.Args[0], os.Args, env)
-	t.Fatalf("re-execute %s to check the %s layout: %v", os.Args[0], layout, err)
+	err = syscall.Exec(self, os.Args, env)
+	t.Fatalf("re-execute %s to check the %s layout: %v", self, layout, err)
 }
 
 // checkTracefsLayout, in a fresh image of the test binary in the layout's
 // mount namespace, holds cilium/ebpf's lookup to the layout's answer and
-// tracefsMounted to cilium/ebpf's, then takes the layout down.
+// tracefsMounted to cilium/ebpf's, then takes the layout down. tracefsMounted
+// is asked before the attach as well as after: cilium/ebpf's open of the
+// event's file through a debugfs tracing directory automounts tracefs there,
+// after which the debugfs branch is no longer what answers.
 func checkTracefsLayout(t *testing.T, layout, dir string) {
-	defer func() {
-		for _, p := range tracefsMountPoints(t, dir) {
-			_ = unix.Unmount(p, unix.MNT_DETACH)
-		}
-		for _, d := range []string{"tracefs", "events", "debugfs"} {
-			_ = os.Remove(filepath.Join(dir, d))
-		}
-		_ = os.Remove(dir)
-	}()
+	inOwnMountNamespace(t)
+	defer takeDownTracefsLayout(t, dir)
+	mountedBefore := tracefsMounted()
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatalf("remove the memlock limit: %v", err)
 	}
@@ -348,7 +396,10 @@ func checkTracefsLayout(t *testing.T, layout, dir string) {
 	if want := os.Getenv(tracefsWantMissingEnv) == "true"; missing != want {
 		t.Fatalf("the %s layout: cilium/ebpf's lookup says %v; want tracefs missing %v", layout, err, want)
 	}
+	if mountedBefore == missing {
+		t.Fatalf("the %s layout: tracefsMounted() before the attach = %v, and cilium/ebpf's lookup says: %v", layout, mountedBefore, err)
+	}
 	if mounted := tracefsMounted(); mounted == missing {
-		t.Fatalf("the %s layout: tracefsMounted() = %v, and cilium/ebpf's lookup says: %v", layout, mounted, err)
+		t.Fatalf("the %s layout: tracefsMounted() after the attach = %v, and cilium/ebpf's lookup says: %v", layout, mounted, err)
 	}
 }

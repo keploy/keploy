@@ -261,6 +261,9 @@ func TestTheHooksLoadOnThisKernel(t *testing.T) {
 		t.Skip("loading the agent's eBPF objects needs root")
 	}
 	if err := rlimit.RemoveMemlock(); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("root without the capabilities eBPF needs, as in a default container: %v", err)
+		}
 		t.Fatalf("remove the memlock limit: %v", err)
 	}
 	spec, err := hookSpec()
@@ -270,6 +273,9 @@ func TestTheHooksLoadOnThisKernel(t *testing.T) {
 	var objs bpfObjects
 	if err := spec.LoadAndAssign(&objs, hookLoadOptions()); err != nil {
 		var ve *ebpf.VerifierError
+		if !errors.As(err, &ve) && errors.Is(err, os.ErrPermission) {
+			t.Skipf("root without the capabilities eBPF needs, as in a default container: %v", err)
+		}
 		if errors.As(err, &ve) {
 			t.Fatalf("the verifier refused the hooks on this kernel (%s): %v\n%s", kernelRelease(), err, strings.Join(ve.Log, "\n"))
 		}
