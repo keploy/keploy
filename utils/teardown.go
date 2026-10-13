@@ -86,7 +86,11 @@ func TeardownStep() {
 // progress (TeardownProgress.Busy). The stage's start and its end -- the
 // returned func, which ends it once however often it is called -- are each a
 // step.
-func BeginTeardownWork() (end func()) {
+func BeginTeardownWork() (end func()) { return beginTeardownWork(nil) }
+
+// beginTeardownWork is BeginTeardownWork, whose end runs between (tests; nil
+// otherwise) after its step and before the work is over.
+func beginTeardownWork(between func()) (end func()) {
 	teardownWorkMu.Lock()
 	teardownWork.Add(1)
 	teardownWorkMu.Unlock()
@@ -94,10 +98,13 @@ func BeginTeardownWork() (end func()) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			// The step before the work ends: a report that reads the old
-			// step still reads the work in progress, never an idle agent
-			// that took no step.
+			// The step before the work is over: a report, which loads Busy
+			// before Seq (snapshotTeardown), that reads the work as over
+			// reads this step too.
 			TeardownStep()
+			if between != nil {
+				between()
+			}
 			teardownWork.Add(-1)
 		})
 	}
@@ -150,7 +157,7 @@ func ReportTeardownProgress(ctx context.Context, logger *zap.Logger, path string
 	if path == "" {
 		return
 	}
-	reportTeardownProgress(ctx, logger, pathSink(path), nil)
+	reportTeardownProgress(ctx, logger, pathSink(path), nil, nil)
 }
 
 // ReportTeardownProgressTo writes the agent's teardown progress to path, a
@@ -170,7 +177,7 @@ func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path stri
 	if err != nil {
 		return err
 	}
-	reportTeardownProgress(ctx, logger, sink, nil)
+	reportTeardownProgress(ctx, logger, sink, nil, nil)
 	return nil
 }
 
@@ -181,12 +188,20 @@ func ReportTeardownProgressTo(ctx context.Context, logger *zap.Logger, path stri
 // stop is closed (tests; nil: never). Whatever an earlier agent left is
 // cleared now, so a CLI never reads it as this agent's. A failed write is only
 // logged: the CLI that reads no progress never kills for want of it.
-func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progressSink, stop <-chan struct{}) {
+//
+// Each report is taken by snapshotTeardown, which runs between (tests; nil
+// otherwise) between its loads of Busy and Seq. The returned channel is
+// closed once the reporter has returned, which it does some time after stop
+// is closed (tests): it writes nothing after that.
+func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progressSink, stop <-chan struct{}, between func()) (exited <-chan struct{}) {
 	if err := sink.clear(); err != nil && !os.IsNotExist(err) && logger != nil {
 		logger.Debug("failed to remove a stale teardown progress report", zap.Error(err))
 	}
-	every := teardownBeat // read here, not in the goroutine, which outlives a test
+	// Read now: a test restores it before the goroutine has returned.
+	every := teardownBeat
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		select {
 		case <-ctx.Done():
 		case <-stop:
@@ -197,9 +212,7 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 		var beat uint64
 		logged := false
 		for {
-			p := TeardownProgress{Seq: teardownSeq.Load(), Beat: beat, Busy: teardownWork.Load() > 0,
-				Steps: teardownSteps.Load(), Done: teardownDone.Load()}
-			b, err := json.Marshal(p)
+			b, err := json.Marshal(snapshotTeardown(beat, between))
 			if err == nil {
 				err = sink.write(b)
 			}
@@ -216,6 +229,24 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 			}
 		}
 	}()
+	return done
+}
+
+// snapshotTeardown is the report for beat. It is never torn -- a step from
+// before a stage of teardown work ended, paired with an agent no longer busy,
+// which the CLI would count as checks without progress for every beat since
+// the last report it read, up to the whole stage -- because of two orders:
+// the end of the work records its step before the work is over
+// (BeginTeardownWork), and the report loads Busy before Seq. So a report that
+// reads the work as over reads the step that ended it too. It runs between
+// (tests; nil otherwise) after its load of Busy and before its load of Seq.
+func snapshotTeardown(beat uint64, between func()) TeardownProgress {
+	busy := teardownWork.Load() > 0
+	if between != nil {
+		between()
+	}
+	return TeardownProgress{Seq: teardownSeq.Load(), Beat: beat, Busy: busy,
+		Steps: teardownSteps.Load(), Done: teardownDone.Load()}
 }
 
 // pathSink writes to a path the agent chose itself.
