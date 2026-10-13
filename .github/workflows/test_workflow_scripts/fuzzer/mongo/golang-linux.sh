@@ -9,6 +9,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -225,6 +227,7 @@ section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
 GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
@@ -236,28 +239,16 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process..."
 
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 
 echo "Sending SIGINT to keploy..."
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-# Wait up to 15 seconds for graceful shutdown
-SHUTDOWN_TIMEOUT=15
-for i in $(seq 1 $SHUTDOWN_TIMEOUT); do
-  if ! kill -0 "$REC_PID" 2>/dev/null; then
-    echo "Keploy exited after ${i}s"
-    break
-  fi
-  sleep 1
-done
-
-# Force kill if still alive
-if kill -0 "$REC_PID" 2>/dev/null; then
-  echo "::error::Keploy did not exit within ${SHUTDOWN_TIMEOUT}s, force killing..."
-  sudo kill -9 "$REC_PID" 2>/dev/null || true
-  sleep 1
-fi
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits, and a stop killed 15 s in lost what it still
+# held (wait-recording.sh; it fails the lane on a hang).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 
 check_for_errors "record.txt"
 echo "Recording stopped."
@@ -275,6 +266,7 @@ if json_pass_supported; then
     section "Start Recording (json)"
     GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record --storage-format json -c "$MONGO_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     endsec
 
     section "Generate Fuzzer Traffic (json)"
@@ -283,16 +275,9 @@ if json_pass_supported; then
     endsec
 
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    for i in $(seq 1 15); do
-        kill -0 "$REC_PID" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "$REC_PID" 2>/dev/null; then
-        sudo kill -9 "$REC_PID" 2>/dev/null || true
-        sleep 1
-    fi
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     check_for_errors "record_json.txt"
     endsec
 fi

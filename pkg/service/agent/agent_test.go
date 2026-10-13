@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -166,5 +167,54 @@ func TestContinueTestErrorCaptureFallsBackToBegin(t *testing.T) {
 	a = &Agent{logger: zap.NewNop(), Proxy: captureProxy{opened: &opened}}
 	if err := a.ContinueTestErrorCapture(context.Background()); err != nil || len(opened) != 1 || opened[0] != "begin" {
 		t.Fatalf("older proxy: err %v, opened %v; want [begin]", err, opened)
+	}
+}
+
+// stoppingIngress is an IncomingProxy that can be told the recording it serves
+// is stopping (the ingress manager's SetStopping).
+type stoppingIngress struct {
+	tc       chan *models.TestCase
+	stopping atomic.Bool
+}
+
+func (s *stoppingIngress) Start(context.Context, models.IncomingOptions) chan *models.TestCase {
+	return s.tc
+}
+func (s *stoppingIngress) SetStopping(v bool) { s.stopping.Store(v) }
+
+// gracefulProxy is a Proxy whose graceful shutdown does nothing more.
+type gracefulProxy struct{ coreAgent.Proxy }
+
+func (gracefulProxy) SetGracefulShutdown(context.Context) error { return nil }
+
+// A recording's graceful shutdown tells the ingress the recording is stopping
+// (its app is stopped on purpose before the agent, so what reaches the
+// ingress then finds no app and is not an ERROR); a recording's incoming
+// stream attaching tells it a recording has begun.
+func TestSetGracefulShutdownTellsTheIngressItIsStopping(t *testing.T) {
+	ing := &stoppingIngress{tc: make(chan *models.TestCase)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &Agent{logger: zap.NewNop(), Proxy: gracefulProxy{}, IncomingProxy: ing, setupCtx: ctx}
+	// A client that does not stop the app (docker compose, a k8s sidecar's
+	// session): its app goes on running, and a refusal is a real failure.
+	if err := a.SetGracefulShutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ing.stopping.Load() {
+		t.Fatal("a graceful shutdown from a client that does not stop the app told the ingress the app is going")
+	}
+	// One that drains after its stop stops the app it started first.
+	if err := a.SetGracefulShutdown(models.WithDrainsAfterStop(ctx)); err != nil {
+		t.Fatal(err)
+	}
+	if !ing.stopping.Load() {
+		t.Fatal("graceful shutdown did not tell the ingress the recording is stopping")
+	}
+	if _, err := a.StartIncomingProxy(ctx, models.IncomingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if ing.stopping.Load() {
+		t.Fatal("a recording that began is still taken for one stopping")
 	}
 }

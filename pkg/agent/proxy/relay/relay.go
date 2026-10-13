@@ -261,6 +261,10 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		remoteAddr = src.RemoteAddr()
 	}
 	r.clientStream = fakeconn.New(r.teeC2D.readCh(), localAddr, remoteAddr)
+	// What the parser has consumed of each stream tells the capture
+	// watermark how far it has got (progress.go). Set, with the reader lag,
+	// before the drains start.
+	r.teeC2D.consumed, r.teeC2D.readerLag = r.clientStream.Consumed, cfg.ReaderLag
 	// The tee may only abandon a queued chunk once this stream is closed,
 	// so its drain cannot start until the stream exists.
 	r.teeC2D.start(r.clientStream.Done())
@@ -270,6 +274,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		destRemote = dst.RemoteAddr()
 	}
 	r.destStream = fakeconn.New(r.teeD2C.readCh(), destLocal, destRemote)
+	r.teeD2C.consumed, r.teeD2C.readerLag = r.destStream.Consumed, cfg.ReaderLag
 	r.teeD2C.start(r.destStream.Done())
 
 	return r
@@ -630,8 +635,13 @@ func (r *Relay) forward(
 	bufSize := r.cfg.ForwardBuf
 	buf := make([]byte, bufSize)
 	log := r.cfg.Logger
+	// The chunk a Read returned is in this forwarder's hand until it is
+	// queued, refused or stashed (progress.go): released at the top of each
+	// iteration, before any park, and on the way out.
+	defer t.noteReleased()
 
 	for {
+		t.noteReleased()
 		// Early exit if the outer run is tearing down. We check both
 		// ctx and stopping; ctx.Done fires on external cancel, stopping
 		// fires after run's cleanup.
@@ -681,8 +691,12 @@ func (r *Relay) forward(
 		// without the parser observing a torn read.
 		var chunk fakeconn.Chunk
 		if n > 0 {
+			// In hand from here, before it is stamped: its stamp is then no
+			// earlier than a look that found nothing in hand (heldUnstamped).
+			t.noteReading()
 			chunk.Dir = dir
 			chunk.ReadAt = observedReadAt(src, time.Now())
+			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()
 			} else {
@@ -758,6 +772,9 @@ func (r *Relay) forward(
 				}
 				n = 0
 			}
+			// Stashed (and teed, when the parser is to see it): no
+			// longer in this forwarder's hand while it parks.
+			t.noteReleased()
 			// Now that the post-Read stash is committed (or there
 			// were no in-flight bytes to stash), signal the directive
 			// handler that this forwarder is parked. This MUST happen

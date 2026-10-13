@@ -312,3 +312,134 @@ func TestTestCaseHold_EarliestStarts(t *testing.T) {
 	empty := NewTestCaseHold(&fakeWatermark{}, time.Minute, 1<<20)
 	empty.EarliestStarts(func(string, string, time.Time) { t.Fatal("an empty hold reported a start") })
 }
+
+// backlogWatermark is a Backlog watermark whose answers the test sets.
+type backlogWatermark struct {
+	settled, pending atomic.Bool
+	progress         atomic.Uint64
+	on               string
+}
+
+func (b *backlogWatermark) Settled(_, _ string, _, _ time.Time) bool { return b.settled.Load() }
+func (b *backlogWatermark) PendingBefore(time.Time) bool             { return b.pending.Load() }
+func (b *backlogWatermark) Progress() uint64                         { return b.progress.Load() }
+func (b *backlogWatermark) PendingOn(time.Time) fmt.Stringer {
+	if !b.pending.Load() {
+		return nil
+	}
+	return stringerFunc(b.on)
+}
+
+type stringerFunc string
+
+func (s stringerFunc) String() string { return string(s) }
+
+// A watermark added beside the one SetWatermark sets: a verdict is final only
+// once both say so; the embedder replacing or clearing its own leaves the
+// added one; removing the added one leaves the embedder's.
+func TestAddWatermark_SitsBesideSetWatermark(t *testing.T) {
+	m := New(nil)
+	if m.Watermark() != nil {
+		t.Fatal("a manager with no watermark has one")
+	}
+	proxy := &backlogWatermark{}
+	remove := m.AddWatermark(proxy)
+	if m.Watermark() != Watermark(proxy) {
+		t.Fatal("the only watermark is not returned as it is")
+	}
+	embedder := &backlogWatermark{}
+	m.SetWatermark(embedder)
+	w := m.Watermark()
+	t0 := time.Unix(1000, 0)
+	for _, c := range []struct{ embedder, proxy, want bool }{
+		{false, false, false}, {true, false, false}, {false, true, false}, {true, true, true},
+	} {
+		embedder.settled.Store(c.embedder)
+		proxy.settled.Store(c.proxy)
+		if got := w.Settled("", "", t0, t0); got != c.want {
+			t.Fatalf("embedder settled %v, proxy settled %v: Settled %v, want %v", c.embedder, c.proxy, got, c.want)
+		}
+	}
+	m.SetWatermark(nil)
+	if m.Watermark() != Watermark(proxy) {
+		t.Fatal("clearing the embedder's watermark took the added one with it")
+	}
+	m.SetWatermark(embedder)
+	remove()
+	remove() // idempotent
+	if m.Watermark() != Watermark(embedder) {
+		t.Fatal("removing the added watermark did not leave the embedder's")
+	}
+}
+
+// What a stop learns of the agent's backlog: known only with a Backlog
+// watermark; pending while any watermark, a held test case, one being built,
+// or a queue of built ones says so; the progress of every watermark that
+// counts it, and of the ingress.
+func TestBacklogBefore(t *testing.T) {
+	m := New(nil)
+	stop := time.Unix(2000, 0)
+	if st := m.BacklogBefore(stop); st.Known {
+		t.Fatal("known with no watermark")
+	}
+	a, b := &backlogWatermark{on: "a's parser"}, &backlogWatermark{on: "b's parser"}
+	m.SetWatermark(a)
+	defer m.AddWatermark(b)()
+	if st := m.BacklogBefore(stop); !st.Known || st.Pending {
+		t.Fatalf("%+v, want known and clear", st)
+	}
+	b.pending.Store(true)
+	if st := m.BacklogBefore(stop); !st.Pending || st.WaitingOn != "b's parser" {
+		t.Fatalf("%+v, want pending on b", st)
+	}
+	b.pending.Store(false)
+	a.progress.Store(3)
+	b.progress.Store(4)
+	if st := m.BacklogBefore(stop); st.Progress != 7 {
+		t.Fatalf("progress %d, want the sum 7", st.Progress)
+	}
+
+	// A test case being built whose response came before the stop.
+	done := m.BuildingTestCase(stop.Add(-time.Second))
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatal("not pending while a test case from before the stop was being built")
+	}
+	if st := m.BacklogBefore(stop.Add(-2 * time.Second)); st.Pending {
+		t.Fatal("pending for a time before the test case being built")
+	}
+	before := m.BacklogBefore(stop).Progress
+	done()
+	done()
+	if st := m.BacklogBefore(stop); st.Pending || st.Progress == before {
+		t.Fatalf("%+v: a built test case still pending, or no progress counted", st)
+	}
+
+	// A queue of built test cases the stream has not taken.
+	var queued atomic.Int64
+	stopWatch := m.WatchTestCaseQueue(func() int { return int(queued.Load()) })
+	queued.Store(1)
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatal("not pending while built test cases waited in the queue")
+	}
+	queued.Store(0)
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatal("pending with the queue empty")
+	}
+	queued.Store(1)
+	stopWatch()
+	if st := m.BacklogBefore(stop); st.Pending {
+		t.Fatal("a queue no longer watched still counts")
+	}
+
+	// A test case the stream holds for its verdict.
+	m.NoteHeld(stop.Add(-time.Millisecond))
+	if st := m.BacklogBefore(stop); !st.Pending {
+		t.Fatal("not pending while a held test case ended before the stop")
+	}
+	m.NoteHeld(time.Time{})
+
+	// PendingBefore is BacklogBefore's verdict.
+	if pending, known := m.PendingBefore(stop); pending || !known {
+		t.Fatalf("PendingBefore (%v, %v), want (false, true)", pending, known)
+	}
+}

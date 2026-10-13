@@ -283,6 +283,8 @@ func (p *Proxy) recordViaSupervisor(
 		// "cannot resync" is the safe default for everything that has not
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
+		// Zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+		ReaderLag: p.parserLag,
 	}
 
 	// One call sets the relay's client-direction brake AND the parser's
@@ -305,6 +307,17 @@ func (p *Proxy) recordViaSupervisor(
 	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+
+	// The recording's capture watermark follows this connection while its
+	// parser runs (capture_watermark.go): a test case it carried bytes for
+	// is held until the parser is done with them, and a stop drains until
+	// the parser is past it. Once the parser has returned, and what it never
+	// read is left out (parserReads), nothing it parses can hand over a mock
+	// or open a span; what the connection carries after is the
+	// UnrecordedConn's.
+	untrack := p.capture.Track(r, fmt.Sprintf("connection %s to %s (%s parser)",
+		svSess.ClientConnID, dstConn.RemoteAddr(), parserType))
+	defer untrack()
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
@@ -521,6 +534,11 @@ func (p *Proxy) recordViaSupervisor(
 	// paused below: a chunk a paused tee refuses is told of as after the
 	// return.
 	reads.parserReturned()
+	// Only now does the watermark stop following the connection: a test case
+	// held for what its parser never read is let go once that is left out
+	// (above), not before, when it would be checked against no span and
+	// saved without its mocks.
+	untrack()
 
 	// The teardown, the same whether the parser returned on its own or was
 	// retired. A parser's return never ends the relay (invariant I1): the

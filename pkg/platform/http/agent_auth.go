@@ -46,6 +46,26 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return base.RoundTrip(clone)
 }
 
+// ownConnections returns rt sending each request on a connection of its own,
+// never one kept from an earlier request (http.Transport.DisableKeepAlives).
+// A RoundTripper it does not know is returned as it is.
+func ownConnections(rt http.RoundTripper) http.RoundTripper {
+	switch t := rt.(type) {
+	case nil:
+		return ownConnections(http.DefaultTransport)
+	case *bearerTransport:
+		c := *t
+		c.base = ownConnections(t.base)
+		return &c
+	case *http.Transport:
+		c := t.Clone()
+		c.DisableKeepAlives = true
+		return c
+	default:
+		return rt
+	}
+}
+
 // agentHTTPClient returns the client the AgentClient uses to reach its agent,
 // carrying the token when one is in play for this session.
 func agentHTTPClient(token string) http.Client {
