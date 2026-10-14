@@ -53,7 +53,8 @@ type resolver interface {
 // address, as without the switch.
 type Keyer struct {
 	mu sync.Mutex
-	// res is nil where keploy cannot read Docker at all (Disable).
+	// res is the index: the local daemon's, or, in a docker-mode agent, the
+	// list its CLI gives it (UsePushed).
 	res resolver
 	// run numbers the containers outside tests: the instance's, or the
 	// run's before its first claim; test, while a test is open, numbers that
@@ -67,18 +68,10 @@ type Keyer struct {
 	warned bool
 }
 
-// NewKeyer is a keyer that asks res which destinations are containers.
+// NewKeyer is a keyer that asks res, which is never nil, which destinations
+// are containers.
 func NewKeyer(res resolver) *Keyer {
 	return &Keyer{res: res, run: newNumbering(), conns: map[string]string{}}
-}
-
-// Disable stops k reading Docker: every destination is named by its address,
-// as without the switch. keploy's agent container has no Docker socket, so a
-// docker-mode agent disables its keyer at start.
-func (k *Keyer) Disable() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.res = nil
 }
 
 // Watch starts reading Docker for a session, if k can, and returns once the
@@ -90,9 +83,7 @@ func (k *Keyer) Watch(ctx context.Context, logger *zap.Logger) {
 	k.mu.Lock()
 	res := k.res
 	k.mu.Unlock()
-	if res != nil {
-		res.Watch(ctx, logger)
-	}
+	res.Watch(ctx, logger)
 }
 
 // Bind makes ctx, the agent's own, the bound of k's reading of Docker, so it
@@ -102,9 +93,7 @@ func (k *Keyer) Bind(ctx context.Context) {
 	k.mu.Lock()
 	res := k.res
 	k.mu.Unlock()
-	if res != nil {
-		res.Bind(ctx)
-	}
+	res.Bind(ctx)
 }
 
 // Reset starts a new session (a record or a replay of one test set): every
@@ -188,9 +177,6 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 func (k *Keyer) name(connID string, ap netip.AddrPort) (got Container, key string, ok bool, warn error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.res == nil {
-		return Container{}, "", false, nil
-	}
 	got, ok, err := k.res.Lookup(ap)
 	if err != nil {
 		if !k.warned && !errors.Is(err, context.Canceled) {
@@ -218,9 +204,6 @@ func (k *Keyer) endpoint() string {
 	k.mu.Lock()
 	res := k.res
 	k.mu.Unlock()
-	if res == nil {
-		return ""
-	}
 	return res.Endpoint()
 }
 

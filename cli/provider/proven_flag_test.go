@@ -223,13 +223,12 @@ func TestAgentDockerHostFlagSetsTheEndpoint(t *testing.T) {
 }
 
 // An agent in keploy's container has no Docker socket, so under the switch it
-// names no container destination instead of asking, and warning, on every
-// session.
-func TestDockerModeAgentDisablesContainerKeys(t *testing.T) {
+// names container destinations from the list its keploy CLI pushes.
+func TestDockerModeAgentTakesPushedContainers(t *testing.T) {
 	calls := 0
-	prev := disableContainerKeys
-	disableContainerKeys = func() { calls++ }
-	t.Cleanup(func() { disableContainerKeys = prev })
+	prev := usePushedContainers
+	usePushedContainers = func() { calls++ }
+	t.Cleanup(func() { usePushedContainers = prev })
 
 	// runAgentFlags does not pin the real switch, so the agent's argv
 	// carries --proven as its launcher passes it, and the switch is on in
@@ -237,11 +236,11 @@ func TestDockerModeAgentDisablesContainerKeys(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	runAgentFlags(t, "--"+provenswitch.AgentFlag, "--is-docker")
 	if calls != 1 {
-		t.Fatalf("a docker-mode agent disabled container keys %d times, want once", calls)
+		t.Fatalf("a docker-mode agent took pushed containers %d times, want once", calls)
 	}
 	runAgentFlags(t, "--"+provenswitch.AgentFlag)
 	if calls != 1 {
-		t.Fatal("a native agent disabled container keys")
+		t.Fatal("a native agent took pushed containers")
 	}
 	// Without the switch nothing is touched.
 	t.Setenv(provenswitch.Env, "")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -58,8 +59,18 @@ type dockerIndex struct {
 	applied func(id string)
 	// logger, the last session's, says at Debug which containers the index
 	// takes in.
-	logger   *zap.Logger
-	endpoint string
+	logger *zap.Logger
+	// changed, when set, is told (without waiting) whenever what the index
+	// knows changes: the keploy CLI pushes it to a docker-mode agent then.
+	changed chan struct{}
+	// waitOnce: say at Info only the first time a watch waits for its list
+	// (the keploy CLI's pusher starts a watch per session); waitSaid: it was.
+	waitOnce, waitSaid bool
+	// snapSeq numbers the snapshots the CLI gives a docker-mode agent;
+	// changeGen counts the changes notify told.
+	snapSeq   uint64
+	changeGen uint64
+	endpoint  string
 	// cur is the current watch; nil before the first. Every change a watch
 	// makes goes through its own state and counts only while it is cur, so
 	// an old watch ending never touches a newer one.
@@ -96,11 +107,16 @@ type watchState struct {
 	destroyed map[string]bool
 
 	images    map[string]string       // container ID -> image
+	names     map[string]string       // container ID -> "/<name>"
 	byIP      map[netip.Addr]string   // container IP -> container ID
 	published map[uint16][]binding    // host port -> what publishes it
 	ownIPs    map[string][]netip.Addr // container ID -> its IPs, to drop them
 	ownPorts  map[string][]uint16     // container ID -> its host ports
 	local     map[netip.Addr]bool     // this host's addresses
+	// loopbackIsHost: a loopback destination is this host (true wherever the
+	// index is read on the host; false in a docker-mode agent, whose
+	// loopback is the app container's own).
+	loopbackIsHost bool
 }
 
 // binding is a TCP port a container publishes on the host.
@@ -159,14 +175,14 @@ func (r *dockerIndex) Bind(ctx context.Context) {
 func (r *dockerIndex) Watch(ctx context.Context, logger *zap.Logger) {
 	r.mu.Lock()
 	r.logger = logger
-	need, host, parent := r.cur == nil || r.cur.err != nil, r.host, r.parent
+	need, host, parent := !live(r.cur), r.host, r.parent
 	r.mu.Unlock()
 	if need {
 		// Built and checked outside r.mu: the accept path's lookups wait on
 		// it, and this reads files and lists the host's interfaces.
 		st, api, endpoint := r.begin(host, parent)
 		r.mu.Lock()
-		if r.cur == nil || r.cur.err != nil {
+		if !live(r.cur) {
 			r.cur, r.endpoint = st, endpoint
 			if api != nil {
 				go r.watch(st.ctx, st, api)
@@ -186,15 +202,31 @@ func (r *dockerIndex) Watch(ctx context.Context, logger *zap.Logger) {
 		return
 	default:
 	}
+	r.mu.Lock()
+	quiet := r.waitOnce && r.waitSaid
+	r.waitSaid = true
+	r.mu.Unlock()
 	if logger != nil {
-		logger.Info("keploy names container destinations by the containers of the local Docker daemon, and is waiting for it to list them before the app starts",
-			zap.String("dockerEndpoint", r.Endpoint()))
+		msg, fields := "keploy names container destinations by the containers of the local Docker daemon, and is waiting for it to list them before the app starts", zap.String("dockerEndpoint", r.Endpoint())
+		if quiet {
+			logger.Debug(msg, fields)
+		} else {
+			logger.Info(msg, fields)
+		}
 	}
 	select {
 	case <-st.synced:
 	case <-ctx.Done():
 		r.failUnlisted(st, fmt.Errorf("the session ended before the Docker daemon listed its containers: %w", ctx.Err()))
 	}
+}
+
+// live reports whether st is a watch a session can use: there is one, it has
+// not failed, and its context (the agent's, or the session's the CLI bound it
+// to) has not ended. A watch whose context ended is not used even before it
+// notices: it is about to fail.
+func live(st *watchState) bool {
+	return st != nil && st.err == nil && st.ctx.Err() == nil
 }
 
 // begin builds a watch: the client, and the endpoint checked at once, so a
@@ -205,10 +237,8 @@ func (r *dockerIndex) begin(host string, parent context.Context) (*watchState, d
 		parent = context.Background()
 	}
 	wctx, stop := context.WithCancel(parent)
-	st := &watchState{ctx: wctx, synced: make(chan struct{}), done: make(chan struct{}), stop: stop,
-		seq: map[string]int{}, reading: map[string]bool{}, dirty: map[string]bool{}, destroyed: map[string]bool{},
-		images: map[string]string{}, byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
-		ownIPs: map[string][]netip.Addr{}, ownPorts: map[string][]uint16{}}
+	st := newWatchState()
+	st.ctx, st.stop = wctx, stop
 	refuse := func(err error) (*watchState, dockerAPI, string) {
 		st.err = err
 		stop()
@@ -424,6 +454,7 @@ func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchStat
 // drops the container.
 type entry struct {
 	id       string
+	name     string // "/<container name>", as Docker writes it
 	image    string
 	ips      []netip.Addr
 	bindings []binding
@@ -458,6 +489,9 @@ func (r *dockerIndex) add(ctx context.Context, api dockerAPI, st *watchState, c 
 		return
 	}
 	e := entry{id: c.ID, image: NormalizeImage(c.Image)}
+	if len(c.Names) > 0 {
+		e.name = c.Names[0]
+	}
 	for _, p := range c.Ports {
 		if p.Type == "tcp" {
 			e.publish(p.IP, p.PublicPort, p.PrivatePort)
@@ -493,6 +527,9 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 		return nil
 	}
 	e := entry{id: id, image: imageOf(got)}
+	if got.ContainerJSONBase != nil {
+		e.name = got.Name
+	}
 	if ns := got.NetworkSettings; ns != nil {
 		for _, n := range ns.Networks {
 			if n != nil {
@@ -556,11 +593,19 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	if r.cur != st || st.err != nil || st.seq[e.id] != seq {
 		return false
 	}
+	// The CLI pushes what changed to its docker-mode agent (notify): a
+	// container dropped that the index never held changes nothing.
+	had := st.images[e.id] != ""
 	st.drop(e.id)
 	if e.image == "" {
+		if had {
+			r.notify()
+		}
 		return true
 	}
+	defer r.notify()
 	st.images[e.id] = e.image
+	st.names[e.id] = e.name
 	for _, a := range e.ips {
 		st.byIP[a] = e.id
 	}
@@ -577,6 +622,34 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	}
 	st.ownPorts[e.id] = e.hostPort
 	return true
+}
+
+// setChanged makes changed the signal notify tells: the keploy CLI's pusher
+// gives each session a signal of its own.
+func (r *dockerIndex) setChanged(changed chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.changed = changed
+}
+
+// notify counts a change and tells changed, if set, without waiting; r.mu
+// is held.
+func (r *dockerIndex) notify() {
+	r.changeGen++
+	if r.changed == nil {
+		return
+	}
+	select {
+	case r.changed <- struct{}{}:
+	default:
+	}
+}
+
+func newWatchState() *watchState {
+	return &watchState{synced: make(chan struct{}), done: make(chan struct{}), stop: func() {},
+		seq: map[string]int{}, reading: map[string]bool{}, dirty: map[string]bool{}, destroyed: map[string]bool{},
+		images: map[string]string{}, names: map[string]string{}, byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
+		ownIPs: map[string][]netip.Addr{}, ownPorts: map[string][]uint16{}, loopbackIsHost: true}
 }
 
 // drop removes a container from st; r.mu is held.
@@ -602,6 +675,7 @@ func (st *watchState) drop(id string) {
 	delete(st.ownIPs, id)
 	delete(st.ownPorts, id)
 	delete(st.images, id)
+	delete(st.names, id)
 }
 
 // overlap reports whether two bindings of one host port reach the same
@@ -675,8 +749,9 @@ func (r *dockerIndex) refreshLocal(st *watchState) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.cur == st {
+	if r.cur == st && !maps.Equal(st.local, local) {
 		st.local = local
+		r.notify()
 	}
 }
 
@@ -709,6 +784,9 @@ func (r *dockerIndex) failLocked(st *watchState, err error) bool {
 	st.err = err
 	st.stop()
 	st.once.Do(func() { close(st.synced) })
+	if r.cur == st {
+		r.notify() // an older watch's end changes nothing a lookup reads
+	}
 	return true
 }
 
@@ -726,17 +804,32 @@ func (r *dockerIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 	if st.err != nil {
 		return Container{}, false, st.err
 	}
+	c, ok := st.find(dst)
+	return c, ok, nil
+}
+
+// find is the container dst reaches by st: a container's own IP, or a TCP
+// port a container publishes at that address (or on all addresses of its
+// family, when dst is this host's). r.mu is held.
+func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	ip := dst.Addr().Unmap()
 	if id, ok := st.byIP[ip]; ok {
-		return Container{ID: id, Image: st.images[id], Port: dst.Port()}, true, nil
+		return Container{ID: id, Image: st.images[id], Port: dst.Port()}, true
+	}
+	// A loopback or unspecified destination is this host only where the
+	// index is read on the host. In a docker-mode agent it is the app
+	// container's own, which no published port is bound to, whatever the
+	// host's own addresses (loopback among them) say.
+	if !st.loopbackIsHost && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return Container{}, false
 	}
 	onHost := ip.IsLoopback() || st.local[ip]
 	for _, b := range st.published[dst.Port()] {
 		if b.ip == ip || (onHost && b.ip.IsUnspecified() && b.ip.Is4() == ip.Is4()) {
-			return Container{ID: b.id, Image: st.images[b.id], Port: b.port}, true, nil
+			return Container{ID: b.id, Image: st.images[b.id], Port: b.port}, true
 		}
 	}
-	return Container{}, false, nil
+	return Container{}, false
 }
 
 // onThisHost reports whether a Docker endpoint is this host's daemon: a

@@ -426,6 +426,7 @@ const mockHandoffGrace = 30 * time.Second
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
+	a.pushContainers(ctx)
 
 	// Mirror the mock-noise pair onto BOTH spellings before the struct is
 	// marshalled. This is the send-side twin of the normalise Proxy.Record and
@@ -678,6 +679,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 			a.session().record(stepMockOutgoing, func(c context.Context) error { return a.MockOutgoing(c, opts) })
 		}
 	}()
+	a.pushContainers(ctx)
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -2583,6 +2585,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
+	forgetContainers(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),

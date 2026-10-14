@@ -303,6 +303,8 @@ type restartingAgent struct {
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
+	// order is every call that met the agent up, as "METHOD path".
+	order []string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -321,6 +323,7 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.conns[req.URL.Path]++
 		n := r.conns[req.URL.Path]
+		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
 		}
@@ -351,6 +354,11 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(models.TestMockMapping{TestName: fmt.Sprintf("mapping-%d", n)})
 		case "/agent/pcap/traffic", "/agent/pcap/keylog":
 			_, _ = fmt.Fprintf(w, "%s#%d\n", req.URL.Path, n)
+		case "/agent/containers": // a docker-mode agent: it takes container lists
+			_, _ = io.Copy(io.Discard, req.Body)
+			w.WriteHeader(http.StatusNoContent)
+		case "/agent/mock":
+			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
 			t.Errorf("unexpected request %s", req.URL.Path)
 		}

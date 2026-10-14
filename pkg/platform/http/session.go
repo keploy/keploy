@@ -387,6 +387,8 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
+	// A docker-mode agent that restarted holds no container list.
+	a.pushContainers(ctx)
 	return a.session().reapply(ctx, a.logger)
 }
 

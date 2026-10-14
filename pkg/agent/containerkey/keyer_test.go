@@ -105,9 +105,6 @@ func TestKeyerNamesOnlyAtAccept(t *testing.T) {
 	if len(k.conns) != 0 {
 		t.Fatalf("the keyer holds %d connections that are not containers", len(k.conns))
 	}
-	if _, _, ok := NewKeyer(nil).Name(zap.NewNop(), "1", "127.0.0.1:40002"); ok {
-		t.Fatal("a keyer with no resolver named a destination")
-	}
 }
 
 // A test's own containers are numbered within the test, so each test that
@@ -245,26 +242,6 @@ func TestKeyerWatchesOnlyWhenTold(t *testing.T) {
 	k.Watch(t.Context(), zap.NewNop())
 	if f.watches != 1 {
 		t.Fatalf("Watch started the index %d times", f.watches)
-	}
-	k.Disable()
-	k.Watch(t.Context(), zap.NewNop())
-	if f.watches != 1 {
-		t.Fatal("a disabled keyer started the index")
-	}
-}
-
-// A disabled keyer (a docker-mode agent, which has no Docker socket) asks
-// nothing and names nothing, and says nothing about it.
-func TestKeyerDisabledAsksNothing(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	f := newFake()
-	k := NewKeyer(f)
-	k.Disable()
-	if _, key, ok := k.Name(zap.New(core), "1", "127.0.0.1:40002"); ok || key != "" {
-		t.Fatalf("a disabled keyer named %q", key)
-	}
-	if f.looks != 0 || logs.Len() != 0 {
-		t.Fatalf("a disabled keyer looked %d times and logged %d lines", f.looks, logs.Len())
 	}
 }
 
