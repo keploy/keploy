@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/acceptcount"
 	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -268,6 +269,20 @@ type Proxy struct {
 	// losses counts the calls the proxy intercepted and could not record or
 	// mock (CaptureLosses).
 	losses captureloss.Counter
+	// accepts counts every connection the listener has accepted
+	// (Accepted). They are the connections the kernel counts only when the
+	// listener is the one the hooks marked: acceptsLn, set by listen while
+	// it is open, or acceptsErr saying why it is not (accepts.go). Both
+	// under acceptsMu.
+	accepts    acceptcount.Counter
+	acceptsMu  sync.Mutex
+	acceptsLn  net.Listener
+	acceptsErr error
+	// listenerCounter is the hooks' count of the listener's connections
+	// (SetListenerCounter); nil under the switch off. early holds what the
+	// canary accepted before its own connection, for the accept loop.
+	listenerCounter agent.ListenerCounter
+	early           []net.Conn
 
 	Listener net.Listener
 
@@ -2114,7 +2129,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 
 	// It will listen on all the interfaces
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
+	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
 		// Notify failure
@@ -2122,6 +2137,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return err
 	}
 	p.Listener = listener
+	// The kernel's count is proven before the proxy says it is ready
+	// (accepts.go).
+	p.canary(listener)
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Handshakes are held from the first session whose connections dial
 	// their destination (ensureHandshakeHold); one already set is honoured
@@ -2179,6 +2197,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if listener != nil {
 			listener.Close()
 		}
+		// What the listener never accepted, it never will: every wait on
+		// its count ends now, not after the slower steps below.
+		p.closeAccepts()
 		// Nothing accepts any more: stop holding handshakes now, not after
 		// the connections drain, so a SYN that arrives meanwhile is refused
 		// at once rather than dialled for and then refused.
@@ -2230,6 +2251,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		errCh := make(chan error, 1)
 		go func() {
 			defer utils.Recover(p.logger)
+			if early := p.takeEarly(); early != nil {
+				clientConnCh <- early
+				return
+			}
 			conn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
@@ -2249,6 +2274,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			// Its sequence number is taken before anything else: the
+			// agent waits on the numbers the kernel gave the connections
+			// completed to this listener (accepts.go).
+			p.countAccept(clientConn)
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
