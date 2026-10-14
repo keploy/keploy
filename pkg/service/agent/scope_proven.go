@@ -287,7 +287,8 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
 	if newClaim {
-		// The instance numbers its own containers outside its tests
+		// The instance is a scope of its own outside its tests: two
+		// containers configured the same are told apart only within one
 		// (containerkey).
 		containerkey.Default.BeginInstance()
 	}
@@ -501,9 +502,8 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Lock()
 	a.proven.open, a.proven.atBegin = id, counts
 	a.provenMu.Unlock()
-	// The test's own containers are numbered from here, after the run's
-	// (containerkey); closeOpen goes back to the run's numbering however the
-	// test closes.
+	// The test is a scope of its own from here (containerkey); closeOpen
+	// goes back to the run's however the test closes.
 	containerkey.Default.BeginTest()
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
@@ -616,8 +616,8 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 		}
 		a.provenMu.Unlock()
 		if closed {
-			// Connections from here on are numbered by the run again
-			// (containerkey).
+			// Connections from here on are the run's again, in a scope of
+			// their own until the next test (containerkey).
 			containerkey.Default.EndTest()
 		}
 	}()

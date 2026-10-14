@@ -91,7 +91,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
-		live := liveDestination(input)
+		live := liveDestination(ctx, input)
 		diag.live = &live
 	}
 	return ok, stub, diag, err
@@ -986,7 +986,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	proven := provenswitch.On()
 	var live destination
 	if proven {
-		live = liveDestination(input)
+		live = liveDestination(ctx, input)
 	}
 
 	for _, mock := range unfilteredMocks {

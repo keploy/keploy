@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -893,6 +895,16 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 	if provenswitch.On() {
+		// Which recorded container keys are ambiguous is read from the whole
+		// set, before any mock is refused or consumed.
+		var tally containerkey.RecordedTally
+		for _, m := range storage.filtered {
+			tally.Add(m)
+		}
+		for _, m := range storage.unfiltered {
+			tally.Add(m)
+		}
+		containerkey.Default.SetRecorded(&tally)
 		storage.filtered = a.refuseUnfollowable(storage.filtered)
 		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered)
 	}
@@ -1009,6 +1021,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// collecting from the resident slices afterward would silently drop it.
 	var asyncMocks []*models.Mock
 	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
+	// Under the proven switch, which recorded container keys are ambiguous
+	// is read from the whole set (containerkey.RecordedTally), every mock
+	// counted as it is decoded, before any is refused or parked on disk.
+	proven := provenswitch.On()
+	var tally containerkey.RecordedTally
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -1023,7 +1040,10 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mock := &m
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(mock)
-		if provenswitch.On() && !a.followable(mock) {
+		if proven {
+			tally.Add(mock)
+		}
+		if proven && !a.followable(mock) {
 			continue
 		}
 		if wantAsync && mock.IsAsync() {
@@ -1045,6 +1065,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		} else {
 			storage.unfiltered = append(storage.unfiltered, mock)
 		}
+	}
+	if proven {
+		containerkey.Default.SetRecorded(&tally)
 	}
 	if disk != nil {
 		disk.Finalize()

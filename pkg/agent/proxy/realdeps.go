@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -137,7 +138,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		return false, src, nil
 	}
 	if containerRepo == "" {
-		containerRepo = p.containerRepoAt(st, dstAddr)
+		containerRepo = p.containerRepoOfConn(ctx, st, dstAddr, connID)
 	}
 	d := realdeps.Decider{List: st.list, Book: st.book}
 	dec := d.AtAccept(dst, containerRepo)
@@ -302,12 +303,32 @@ func (p *Proxy) realAtHandshake(dest *agent.NetworkAddress) (string, bool) {
 	return dec.Label, true
 }
 
+// containerRepoOfConn is the image repository of the container accepted
+// connection connID reaches, for a list with container: entries: the one the
+// keyer placed it at, waiting, if the index did not place it at its accept,
+// for the containers the index was placing then (containerkey.Keyer.Placed,
+// never a configuration's read), so a container Docker started a moment
+// before is a mock.real destination, not a dependency recorded under its
+// key. Else what the index says of addr now (containerRepoAt).
+func (p *Proxy) containerRepoOfConn(ctx context.Context, st *realState, addr string, connID int64) string {
+	if !st.list.HasContainers() {
+		return ""
+	}
+	if c, ok := containerkey.Default.Placed(ctx, fmt.Sprint(connID)); ok {
+		return containerkey.Repository(c.Image)
+	}
+	return p.containerRepoAt(st, addr)
+}
+
 // containerRepoAt is the image repository of the container addr reaches, ""
 // for none, read for a list with container: entries from the index without
 // naming anything (containerkey.Keyer.Lookup): the handshake hold asks
-// before the connection is accepted, and naming it there would number its
-// container early and spend the session's one warning that Docker cannot be
-// read. While the index cannot be read, the run's container: entries match
+// before the connection is accepted, and naming it there would hold the
+// connection in the keyer before it is one and spend the session's one
+// warning that Docker cannot be read. It never waits: a container the index
+// is still placing is no container's yet to the hold, which then makes no
+// dial ahead for it (its accept waits, containerRepoOfConn, and relays it).
+// While the index cannot be read, the run's container: entries match
 // nothing, and the run says so once.
 func (p *Proxy) containerRepoAt(st *realState, addr string) string {
 	if !st.list.HasContainers() {

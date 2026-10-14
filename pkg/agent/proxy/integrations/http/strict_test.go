@@ -67,12 +67,10 @@ func TestStrictMatchesOnlyARequestToTheRecordedHost(t *testing.T) {
 	}
 }
 
-// The container key is recorded but not compared yet (strict.go): a
-// recording reached on another published port misses, though it is the same
-// container, and one recorded at the live authority is served, whatever
-// container it names. The key that names a container by its own
-// configuration replaces both.
-func TestStrictComparesTheAuthorityNotTheContainerKey(t *testing.T) {
+// A recording that names no container instance (made without the switch, or
+// with the first key format, whose number could swap) is compared by its
+// authority, whatever key it carries.
+func TestStrictComparesALegacyKeyedRecordingByAuthority(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	keyed := func(m *models.Mock, key string) *models.Mock {
 		m.Spec.Metadata = map[string]string{"containerKey": key}

@@ -55,7 +55,8 @@ func localListener(owner int, dstAddr string, port uint32) *models.MockedRow {
 
 // noteMockedLocal tells the sink that a call keploy records, or answers from
 // mocks, went to a local destination: a container, named by its container
-// key (ctrKey, when containerkey named the connection) whether it was
+// key, or its label while its configuration is unread (ctrKey,
+// containerkey.Label, when containerkey named the connection), whether it was
 // reached at a published port or at its own address, else an address of
 // this machine outside the run's tree (outside, from serveTreeListener). Any
 // other destination is not listed. Only keploy mock's runs list them.

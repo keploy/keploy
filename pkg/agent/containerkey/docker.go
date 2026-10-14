@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -26,6 +28,7 @@ import (
 type dockerAPI interface {
 	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
+	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (image.InspectResponse, error)
 	Events(ctx context.Context, options events.ListOptions) (<-chan events.Message, <-chan error)
 	DaemonHost() string
 	Close() error
@@ -57,6 +60,13 @@ type dockerIndex struct {
 	// applied, when set, is told each container read once the index holds
 	// what was read and the read's bookkeeping is done (tests wait on it).
 	applied func(id string)
+	// placeDone, when set, is told each container whose placing loop ended
+	// (tests wait on it).
+	placeDone func(id string)
+	// imageShared, if set, is told each read of a container that takes an
+	// image's defaults from another container's read of them in flight
+	// (imageConfig): tests see the image read once.
+	imageShared func(imageID string)
 	// logger, the last session's, says at Debug which containers the index
 	// takes in.
 	logger *zap.Logger
@@ -75,6 +85,29 @@ type dockerIndex struct {
 	// makes goes through its own state and counts only while it is cur, so
 	// an old watch ending never touches a newer one.
 	cur *watchState
+	// readSlots bounds the reads of the daemon in flight at once: the first
+	// list starts one per container it lists.
+	readSlots chan struct{}
+}
+
+// maxReads is how many containers the index reads from the daemon at once.
+const maxReads = 16
+
+// readSlot takes one of the index's read slots, waiting for one, and returns
+// its release; an index made with none reads without a bound.
+func (r *dockerIndex) readSlot() func() {
+	if r.readSlots == nil {
+		return func() {}
+	}
+	r.readSlots <- struct{}{}
+	return func() { <-r.readSlots }
+}
+
+// listed reports whether st holds container id (the first list put it in).
+func (r *dockerIndex) listed(st *watchState, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return st.images[id] != ""
 }
 
 // watchState is one watch of the daemon and the index it keeps.
@@ -105,9 +138,33 @@ type watchState struct {
 	reading   map[string]bool
 	dirty     map[string]bool
 	destroyed map[string]bool
+	// placing marks a container an event started or moved that the index
+	// has not placed since: where it is, not its configuration, is what a
+	// connection accepted meanwhile waits for (Pending). It is placed by its
+	// own loop (placeLoop), from the daemon's list, which Docker answers
+	// without waiting on the container, beside and never behind its reads:
+	// placingRun marks that loop running, placingDirty an event that came
+	// while it ran (it runs once more). Its placing ends with the list's
+	// answer, its read's put, or its die.
+	placing      map[string]bool
+	placingRun   map[string]bool
+	placingDirty map[string]bool
 
-	images    map[string]string       // container ID -> image
-	names     map[string]string       // container ID -> "/<name>"
+	images map[string]string // container ID -> image
+	names  map[string]string // container ID -> "/<name>"
+	// fingerprints is each container's Fingerprint, once a read of it is
+	// in; a container the first list put in waits for its read.
+	fingerprints map[string]string
+	// imageConfigs caches each image's defaults, by image ID, for
+	// Fingerprint: an image ID names one configuration for good.
+	imageConfigs map[string]ImageConfig
+	// imageReads is each image's read in flight, by image ID: a container of
+	// an image being read waits for that read, so an image is read once.
+	imageReads map[string]*imageRead
+	// readEnded closes, and is replaced, whenever a read of any container
+	// ends: what waits for a container's fingerprint (Fingerprint) looks
+	// again then.
+	readEnded chan struct{}
 	byIP      map[netip.Addr]string   // container IP -> container ID
 	published map[uint16][]binding    // host port -> what publishes it
 	ownIPs    map[string][]netip.Addr // container ID -> its IPs, to drop them
@@ -127,7 +184,7 @@ type binding struct {
 }
 
 func newDockerIndex() *dockerIndex {
-	return &dockerIndex{newAPI: newDockerAPI, hostAddrs: interfaceAddrs, socketExists: socketExists}
+	return &dockerIndex{newAPI: newDockerAPI, hostAddrs: interfaceAddrs, socketExists: socketExists, readSlots: make(chan struct{}, maxReads)}
 }
 
 func newDockerAPI(host string) (dockerAPI, error) {
@@ -385,12 +442,17 @@ func (r *dockerIndex) event(ctx context.Context, st *watchState, api dockerAPI, 
 	r.mu.Unlock()
 	if !read {
 		r.put(st, entry{id: id}, seq)
+		r.mu.Lock()
+		if st.placing[id] {
+			r.endPlacingLocked(st, id) // a container that died has nowhere to be placed
+		}
+		r.mu.Unlock()
 		if m.Action == events.ActionDestroy {
 			r.forget(st, id)
 		}
 		return
 	}
-	r.startRead(ctx, api, st, id)
+	r.startRead(ctx, api, st, id, true)
 }
 
 // forget drops the event count of a destroyed container, which no event
@@ -408,17 +470,85 @@ func (r *dockerIndex) forget(st *watchState, id string) {
 }
 
 // startRead reads container id, unless a read of it is in flight: then that
-// read runs once more when it ends, as of the latest event.
-func (r *dockerIndex) startRead(ctx context.Context, api dockerAPI, st *watchState, id string) {
+// read runs once more when it ends, as of the latest event. placing says the
+// container is to be placed too (an event started or moved it): by a loop of
+// its own, beside the read.
+func (r *dockerIndex) startRead(ctx context.Context, api dockerAPI, st *watchState, id string, placing bool) {
+	if placing && r.claimPlace(st, id) {
+		go r.placeLoop(ctx, api, st, id)
+	}
+	if r.claimRead(st, id) {
+		go r.readLoop(ctx, api, st, id)
+	}
+}
+
+// claimPlace marks container id as being placed and reports whether the
+// caller starts its placing loop: false when one runs, which then runs once
+// more.
+func (r *dockerIndex) claimPlace(st *watchState, id string) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !st.placing[id] {
+		// A list now says it is being placed (snapshot's Placing): a
+		// docker-mode agent waits for it as the index here does.
+		st.placing[id] = true
+		if r.cur == st {
+			r.notify()
+		}
+	}
+	if st.placingRun[id] {
+		st.placingDirty[id] = true
+		return false
+	}
+	st.placingRun[id] = true
+	return true
+}
+
+// placeLoop places container id from the daemon's list (placeFromList), once
+// more for each event that came meanwhile. It takes no read slot and never
+// waits for a read: held configuration reads, in every slot, never keep a
+// container from being placed.
+func (r *dockerIndex) placeLoop(ctx context.Context, api dockerAPI, st *watchState, id string) {
+	for {
+		r.mu.Lock()
+		seq := st.seq[id]
+		delete(st.placingDirty, id)
+		r.mu.Unlock()
+		r.placeFromList(ctx, api, st, id, seq)
+		r.mu.Lock()
+		// Once more for an event that came meanwhile, unless its placing
+		// ended since (a die).
+		again := st.placingDirty[id] && st.placing[id] && st.err == nil && ctx.Err() == nil
+		if !again {
+			delete(st.placingRun, id)
+			delete(st.placingDirty, id)
+		}
+		r.mu.Unlock()
+		if !again {
+			if r.placeDone != nil {
+				r.placeDone(id)
+			}
+			return
+		}
+	}
+}
+
+// claimRead marks container id as being read and reports whether the caller
+// starts the read: false when one is in flight, which then runs once more.
+func (r *dockerIndex) claimRead(st *watchState, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if st.reading[id] {
 		st.dirty[id] = true
-		r.mu.Unlock()
-		return
+		return false
 	}
 	st.reading[id] = true
-	r.mu.Unlock()
-	go r.readLoop(ctx, api, st, id)
+	if r.cur == st && st.images[id] != "" && st.fingerprints[id] == "" {
+		// A list now says it is being read (snapshot's Reading): a
+		// docker-mode agent waits for the list that ends the read.
+		r.notify()
+	}
+	return true
 }
 
 func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchState, id string) {
@@ -427,7 +557,10 @@ func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchStat
 		seq := st.seq[id]
 		delete(st.dirty, id)
 		r.mu.Unlock()
-		if err := r.read(ctx, api, st, id, seq); err != nil {
+		release := r.readSlot()
+		err := r.read(ctx, api, st, id, seq)
+		release()
+		if err != nil {
 			r.fail(st, err)
 		}
 		r.mu.Lock()
@@ -438,6 +571,16 @@ func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchStat
 			if st.destroyed[id] && st.listed {
 				delete(st.destroyed, id)
 				delete(st.seq, id)
+			}
+			close(st.readEnded)
+			st.readEnded = make(chan struct{})
+			if r.cur == st && st.images[id] != "" && st.fingerprints[id] == "" {
+				// A container the index holds whose read ended with no
+				// fingerprint (it could not be read): a list no longer
+				// says it is being read. A docker-mode agent waiting for
+				// its fingerprint, or for the reads in flight, is told
+				// by that list.
+				r.notify()
 			}
 		}
 		r.mu.Unlock()
@@ -450,12 +593,120 @@ func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchStat
 	}
 }
 
+// placeFromList places container id from the daemon's list, as of its event
+// seq, before its configuration is read: Docker answers a list from its own
+// view of its containers, without waiting on any of them, where an inspect
+// waits for a container another operation holds (Podman's list may wait as
+// an inspect does). Its placing ends
+// with the list's answer, whatever it is: a container the list does not show
+// running (not started yet, or gone) has no address to place, and its start
+// marks it again; one listed by image ID (its repository is in its
+// configuration only) is indexed by its read, and a connection to it
+// meanwhile is compared by its authority. The container keeps the
+// fingerprint the index has of it (entry.fromList).
+func (r *dockerIndex) placeFromList(ctx context.Context, api dockerAPI, st *watchState, id string, seq int) {
+	list, err := api.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(filters.Arg("id", id))})
+	if err == nil {
+		for _, c := range list {
+			if c.ID != id || isImageID(c.Image, c.ImageID) {
+				continue
+			}
+			e := summaryEntry(c)
+			e.placed, e.fromList = true, true
+			if r.put(st, e, seq) {
+				return // its placing ended with it
+			}
+			break
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if st.placing[id] && st.seq[id] == seq {
+		r.endPlacingLocked(st, id)
+	}
+}
+
+// endPlacingLocked ends container id's placing: what waits for it
+// (AwaitReadsOf) looks again, and a docker-mode agent is told. r.mu is held.
+func (r *dockerIndex) endPlacingLocked(st *watchState, id string) {
+	delete(st.placing, id)
+	close(st.readEnded)
+	st.readEnded = make(chan struct{})
+	if r.cur == st {
+		r.notify()
+	}
+}
+
+// imageRead is one read of an image's defaults, which every container of the
+// image read meanwhile waits for.
+type imageRead struct {
+	done chan struct{}
+	ic   ImageConfig
+	err  error
+}
+
+// imageConfig is image imageID's defaults, read once per image ID: from the
+// cache, from a read of it in flight, or read now. An image the daemon no
+// longer has gives none (and is not cached).
+func (r *dockerIndex) imageConfig(ctx context.Context, api dockerAPI, st *watchState, imageID string) (ImageConfig, error) {
+	r.mu.Lock()
+	if ic, ok := st.imageConfigs[imageID]; ok {
+		r.mu.Unlock()
+		return ic, nil
+	}
+	if rd := st.imageReads[imageID]; rd != nil {
+		r.mu.Unlock()
+		if r.imageShared != nil {
+			r.imageShared(imageID)
+		}
+		select {
+		case <-rd.done:
+			return rd.ic, rd.err
+		case <-ctx.Done():
+			return ImageConfig{}, ctx.Err()
+		}
+	}
+	rd := &imageRead{done: make(chan struct{})}
+	st.imageReads[imageID] = rd
+	r.mu.Unlock()
+	img, err := api.ImageInspect(ctx, imageID)
+	found := err == nil
+	switch {
+	case client.IsErrNotFound(err):
+		err = nil
+	case err != nil:
+	case img.Config != nil:
+		rd.ic = ImageConfig{Env: img.Config.Env, Cmd: img.Config.Cmd, Entrypoint: img.Config.Entrypoint, Labels: img.Config.Labels}
+	}
+	rd.err = err
+	r.mu.Lock()
+	delete(st.imageReads, imageID)
+	if found {
+		st.imageConfigs[imageID] = rd.ic
+	}
+	r.mu.Unlock()
+	close(rd.done)
+	return rd.ic, err
+}
+
 // entry is what the index keeps of one container; one with no image only
 // drops the container.
 type entry struct {
-	id       string
-	name     string // "/<container name>", as Docker writes it
-	image    string
+	id    string
+	name  string // "/<container name>", as Docker writes it
+	image string
+	// fingerprint is the container's Fingerprint; "" from the list, which
+	// does not carry its configuration.
+	fingerprint string
+	// placed: putting it ends its placing (placeFromList, or a read that
+	// found where it is), in the same change, so no list shows it neither
+	// placing nor placed.
+	placed bool
+	// fromList: what the daemon's list gives, with no configuration: the
+	// container keeps the fingerprint the index has of it (its read may
+	// have put it in first), since a container's configuration does not
+	// change while it lives.
+	fromList bool
 	ips      []netip.Addr
 	bindings []binding
 	hostPort []uint16 // bindings[i]'s host port
@@ -485,9 +736,35 @@ func (e *entry) addIP(s string) {
 // event.
 func (r *dockerIndex) add(ctx context.Context, api dockerAPI, st *watchState, c container.Summary) {
 	if isImageID(c.Image, c.ImageID) {
-		r.startRead(ctx, api, st, c.ID)
+		// Its repository is in its configuration only: it is indexed by its
+		// read. Not as being placed: what is at an address no connection
+		// waits for, as no placing of it is under way (a connection to it
+		// before its read is in is compared by its authority, and misses).
+		r.startRead(ctx, api, st, c.ID, false)
 		return
 	}
+	r.mu.Lock()
+	spoken := st.seq[c.ID] != 0
+	r.mu.Unlock()
+	if spoken {
+		return // an event spoke for it since the stream began: its read, or its die, has it
+	}
+	// Its configuration is read beside the others (its fingerprint): marked
+	// as being read before the list's entry is in, so nothing that finds the
+	// entry takes its missing fingerprint for an unreadable one.
+	start := r.claimRead(st, c.ID)
+	defer func() {
+		if start {
+			go r.readLoop(ctx, api, st, c.ID)
+		}
+	}()
+	r.put(st, summaryEntry(c), 0)
+}
+
+// summaryEntry is what the index keeps of a container from the daemon's
+// list: its name, image and addresses, and no fingerprint (the list does not
+// carry its configuration).
+func summaryEntry(c container.Summary) entry {
 	e := entry{id: c.ID, image: NormalizeImage(c.Image)}
 	if len(c.Names) > 0 {
 		e.name = c.Names[0]
@@ -505,7 +782,7 @@ func (r *dockerIndex) add(ctx context.Context, api dockerAPI, st *watchState, c 
 			}
 		}
 	}
-	r.put(st, e, 0)
+	return e
 }
 
 // read (re)indexes one container from its inspect, as of its event seq. A
@@ -519,6 +796,12 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 		return nil
 	case err != nil && ctx.Err() != nil:
 		return nil // the watch ended
+	case err != nil && r.listed(st, id):
+		// One container the index holds from the list could not be read:
+		// it keeps its entry with no fingerprint (its calls are compared by
+		// no key), and every other container keeps its own.
+		r.say(st, "could not read a container's configuration", zap.String("containerID", id), zap.Error(err))
+		return nil
 	case err != nil:
 		r.passOver(st, id, seq, "it could not be read: "+err.Error())
 		return err
@@ -526,9 +809,22 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 		r.passOver(st, id, seq, "it is not running")
 		return nil
 	}
-	e := entry{id: id, image: imageOf(got)}
+	// A read of a running container places it too, as of its event seq.
+	e := entry{id: id, image: imageOf(got), placed: true}
 	if got.ContainerJSONBase != nil {
 		e.name = got.Name
+	}
+	fp, err := r.fingerprintOf(ctx, api, st, got)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return nil // the watch ended
+	case err != nil:
+		// Its image could not be read: the container is indexed with no
+		// fingerprint (its calls are compared by no key), and the session
+		// keeps every other container's.
+		r.say(st, "could not read a container's image", zap.String("containerID", id), zap.Error(err))
+	default:
+		e.fingerprint = fp
 	}
 	if ns := got.NetworkSettings; ns != nil {
 		for _, n := range ns.Networks {
@@ -596,6 +892,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	// The CLI pushes what changed to its docker-mode agent (notify): a
 	// container dropped that the index never held changes nothing.
 	had := st.images[e.id] != ""
+	if e.fromList && e.fingerprint == "" {
+		e.fingerprint = st.fingerprints[e.id]
+	}
 	st.drop(e.id)
 	if e.image == "" {
 		if had {
@@ -606,6 +905,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	defer r.notify()
 	st.images[e.id] = e.image
 	st.names[e.id] = e.name
+	if e.fingerprint != "" {
+		st.fingerprints[e.id] = e.fingerprint
+	}
 	for _, a := range e.ips {
 		st.byIP[a] = e.id
 	}
@@ -621,6 +923,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 		st.published[p] = append(kept, b)
 	}
 	st.ownPorts[e.id] = e.hostPort
+	if e.placed && st.placing[e.id] {
+		r.endPlacingLocked(st, e.id)
+	}
 	return true
 }
 
@@ -648,7 +953,9 @@ func (r *dockerIndex) notify() {
 func newWatchState() *watchState {
 	return &watchState{synced: make(chan struct{}), done: make(chan struct{}), stop: func() {},
 		seq: map[string]int{}, reading: map[string]bool{}, dirty: map[string]bool{}, destroyed: map[string]bool{},
-		images: map[string]string{}, names: map[string]string{}, byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
+		placing: map[string]bool{}, placingRun: map[string]bool{}, placingDirty: map[string]bool{}, imageReads: map[string]*imageRead{},
+		images: map[string]string{}, names: map[string]string{}, fingerprints: map[string]string{}, imageConfigs: map[string]ImageConfig{}, readEnded: make(chan struct{}),
+		byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
 		ownIPs: map[string][]netip.Addr{}, ownPorts: map[string][]uint16{}, loopbackIsHost: true}
 }
 
@@ -676,6 +983,7 @@ func (st *watchState) drop(id string) {
 	delete(st.ownPorts, id)
 	delete(st.images, id)
 	delete(st.names, id)
+	delete(st.fingerprints, id)
 }
 
 // overlap reports whether two bindings of one host port reach the same
@@ -808,13 +1116,138 @@ func (r *dockerIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 	return c, ok, nil
 }
 
+// Fingerprint is container id's fingerprint, waiting while a read of it is in
+// flight (one the first list or an event started): a key is never taken
+// before its container's configuration is in. ok is false when the index
+// does not hold the container, or ctx ends first.
+func (r *dockerIndex) Fingerprint(ctx context.Context, id string) (string, bool) {
+	for {
+		r.mu.Lock()
+		st := r.cur
+		if st == nil || st.err != nil {
+			r.mu.Unlock()
+			return "", false
+		}
+		fp, held, reading, ended := st.fingerprints[id], st.images[id] != "", st.reading[id], st.readEnded
+		r.mu.Unlock()
+		switch {
+		case fp != "" && held:
+			return fp, true
+		case !reading:
+			return "", false
+		}
+		select {
+		case <-ended:
+		case <-ctx.Done():
+			return "", false
+		case <-st.ctx.Done():
+			return "", false
+		}
+	}
+}
+
+// Pending says whether a container could be at dst by the current watch
+// (couldBeAt), and which containers are being read now: what a connection to
+// dst the index has not placed waits for, at its first use, before it is
+// looked up again (Keyer.place). It never waits.
+func (r *dockerIndex) Pending(dst netip.AddrPort) ([]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.cur
+	if st == nil || st.err != nil {
+		return nil, false
+	}
+	return st.placingIDs(), st.couldBeAt(dst.Addr())
+}
+
+// AwaitReadsOf waits until none of the containers ids is still being placed
+// in the current watch, or ctx (or the watch) ends. A container started later
+// is not waited for: it would hold every call while containers keep starting.
+func (r *dockerIndex) AwaitReadsOf(ctx context.Context, ids []string) {
+	for {
+		r.mu.Lock()
+		st := r.cur
+		if st == nil || st.err != nil || !st.placingAny(ids) {
+			r.mu.Unlock()
+			return
+		}
+		ended := st.readEnded
+		r.mu.Unlock()
+		select {
+		case <-ended:
+		case <-ctx.Done():
+			return
+		case <-st.ctx.Done():
+			return
+		}
+	}
+}
+
+// placingIDs is the containers being placed. The index's lock is held.
+func (st *watchState) placingIDs() []string {
+	if len(st.placing) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(st.placing))
+	for id := range st.placing {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// placingAny reports whether any of ids is still being placed. The index's
+// lock is held.
+func (st *watchState) placingAny(ids []string) bool {
+	for _, id := range ids {
+		if st.placing[id] {
+			return true
+		}
+	}
+	return false
+}
+
+// couldBeAt reports whether a container could be at address a by st: not a
+// loopback or unspecified address where it is the app container's own (a
+// docker-mode agent's), which no container but the app's is at. Everywhere
+// else the keyer's own rule holds (couldBeContainer). The index's lock is
+// held.
+func (st *watchState) couldBeAt(a netip.Addr) bool {
+	a = a.Unmap()
+	return st.loopbackIsHost || !(a.IsLoopback() || a.IsUnspecified())
+}
+
+// fingerprintOf is the Fingerprint of an inspected container, reading its
+// image's defaults once per image ID. An image Docker no longer has (removed
+// while the container runs) gives no defaults to leave out: the fingerprint
+// then counts them, and the container misses rather than matches.
+func (r *dockerIndex) fingerprintOf(ctx context.Context, api dockerAPI, st *watchState, got container.InspectResponse) (string, error) {
+	c := Config{}
+	if got.Config != nil {
+		c.Env, c.Cmd, c.Entrypoint, c.Labels = got.Config.Env, got.Config.Cmd, got.Config.Entrypoint, got.Config.Labels
+	}
+	imageID := ""
+	if got.ContainerJSONBase != nil {
+		imageID = got.Image
+	}
+	var ic ImageConfig
+	if imageID != "" {
+		var err error
+		if ic, err = r.imageConfig(ctx, api, st, imageID); err != nil {
+			return "", err
+		}
+	}
+	c.Image = ic
+	return Fingerprint(c), nil
+}
+
 // find is the container dst reaches by st: a container's own IP, or a TCP
 // port a container publishes at that address (or on all addresses of its
 // family, when dst is this host's). r.mu is held.
 func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	ip := dst.Addr().Unmap()
 	if id, ok := st.byIP[ip]; ok {
-		return Container{ID: id, Image: st.images[id], Port: dst.Port()}, true
+		return Container{ID: id, Image: st.images[id], Port: dst.Port(), Fingerprint: st.fingerprints[id]}, true
 	}
 	// A loopback or unspecified destination is this host only where the
 	// index is read on the host. In a docker-mode agent it is the app
@@ -826,7 +1259,7 @@ func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	onHost := ip.IsLoopback() || st.local[ip]
 	for _, b := range st.published[dst.Port()] {
 		if b.ip == ip || (onHost && b.ip.IsUnspecified() && b.ip.Is4() == ip.Is4()) {
-			return Container{ID: b.id, Image: st.images[b.id], Port: b.port}, true
+			return Container{ID: b.id, Image: st.images[b.id], Port: b.port, Fingerprint: st.fingerprints[b.id]}, true
 		}
 	}
 	return Container{}, false

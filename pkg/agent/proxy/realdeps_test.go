@@ -435,9 +435,12 @@ type unreadableDocker struct{}
 func (unreadableDocker) Lookup(netip.AddrPort) (containerkey.Container, bool, error) {
 	return containerkey.Container{}, false, errors.New("dial unix /var/run/docker.sock: connect: permission denied")
 }
-func (unreadableDocker) Bind(context.Context)               {}
-func (unreadableDocker) Watch(context.Context, *zap.Logger) {}
-func (unreadableDocker) Endpoint() string                   { return "unix:///fake.sock" }
+func (unreadableDocker) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (unreadableDocker) Pending(netip.AddrPort) ([]string, bool)            { return nil, false }
+func (unreadableDocker) AwaitReadsOf(context.Context, []string)             {}
+func (unreadableDocker) Bind(context.Context)                               {}
+func (unreadableDocker) Watch(context.Context, *zap.Logger)                 {}
+func (unreadableDocker) Endpoint() string                                   { return "unix:///fake.sock" }
 
 // With Docker unreadable, a run whose mock.real lists container: entries says
 // once that they match nothing; the handshake's lookups name nothing, so the
@@ -549,4 +552,79 @@ func TestARealDialReachesOnlyTheListedAddress(t *testing.T) {
 	uses, _ := p.realTracker.EndTest()
 	require.Equal(t, []models.RealUse{{Dest: v6, Failed: 1}}, uses)
 	require.Empty(t, p.RealRun().Reached)
+}
+
+// placingContainer is a Docker index placing c at addr: it holds c there only
+// once placed closes, and until then says it is placing it (Pending). Each
+// wait for its placing is told on awaiting as it begins.
+type placingContainer struct {
+	addr     string
+	c        containerkey.Container
+	placed   chan struct{}
+	awaiting chan struct{}
+}
+
+func (f placingContainer) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	select {
+	case <-f.placed:
+		if dst.String() == f.addr {
+			return f.c, true, nil
+		}
+	default:
+	}
+	return containerkey.Container{}, false, nil
+}
+func (f placingContainer) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (f placingContainer) Pending(netip.AddrPort) ([]string, bool) {
+	select {
+	case <-f.placed:
+		return nil, true
+	default:
+		return []string{f.c.ID}, true
+	}
+}
+func (f placingContainer) AwaitReadsOf(ctx context.Context, _ []string) {
+	f.awaiting <- struct{}{}
+	select {
+	case <-f.placed:
+	case <-ctx.Done():
+	}
+}
+func (placingContainer) Bind(context.Context)               {}
+func (placingContainer) Watch(context.Context, *zap.Logger) {}
+func (placingContainer) Endpoint() string                   { return "unix:///fake.sock" }
+
+// A container: entry reaches a container Docker started a moment before the
+// connection, which the index was still placing at the accept: the accept
+// waits for that placing (never for its configuration), and the connection
+// is relayed to the real destination, never recorded or mocked under the
+// container's key.
+func TestAContainerEntryWaitsForItsContainersPlacing(t *testing.T) {
+	dst := realServer(t)
+	p := realProxy(t, []string{"container:redis"}, nil)
+	f := placingContainer{addr: dst, c: containerkey.Container{ID: "r", Image: "redis:7", Port: 6379},
+		placed: make(chan struct{}), awaiting: make(chan struct{}, 1)}
+	saved := containerkey.Default
+	containerkey.Default = containerkey.NewKeyer(f)
+	t.Cleanup(func() { containerkey.Default = saved })
+	if _, _, ok := containerkey.Default.Name(zap.NewNop(), "1", dst); ok {
+		t.Fatal("the container was placed at the accept")
+	}
+	app, accepted := realConnPair(t)
+	done := serveRealAsync(p, accepted, dst)
+	select {
+	case <-f.awaiting: // the accept waits for the placing
+	case s := <-done:
+		t.Fatalf("the accept decided (handled %v) without waiting for the container's placing", s.handled)
+	}
+	close(f.placed)
+	_, err := app.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, app.(*net.TCPConn).CloseWrite())
+	got, err := io.ReadAll(app)
+	require.NoError(t, err)
+	require.Equal(t, "real:hello", string(got))
+	s := <-done
+	require.True(t, s.handled, "the connection to the listed container was not relayed")
+	require.NoError(t, s.err)
 }

@@ -102,6 +102,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				raw:    reqBuf,
 			}
 
+			// Under the proven switch the request's destination is read once,
+			// as it comes: a use of its connection's container in the scope
+			// open now (containerkey), which every match of it then reads.
+			reqCtx := ctx
+			if provenswitch.On() {
+				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
+			}
+
 			if input.header.Get("Content-Encoding") != "" {
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
 				if err != nil {
@@ -313,7 +321,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			ok, stub, diag, err := h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
