@@ -1236,10 +1236,11 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	// The matcher names fields so already (it shapes each key); the
 	// evidence shapes each part again, for a field named by any other means.
 	miss := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal",
-		Differs: []string{"body.amount", "body.users.alice@example.role", "body.orders.123456.total", "header.authorization", "body.items[].sku9X0001234[]"}})
-	require.Equal(t, []string{"body.amount", "body.users.{}.role", "body.orders.{}.total", "header.authorization", "body.items[].{}[]"}, miss.Differs)
+		Differs: []string{"body.amount", "body.users.alice@example.role", "body.orders.123456.total", "header.authorization", "body.items[].sku9X0001234[]", "header.x-b3-traceid"}})
+	// A header's name is the protocol's: never written {}.
+	require.Equal(t, []string{"body.amount", "body.users.{}.role", "body.orders.{}.total", "header.authorization", "body.items[].{}[]", "header.x-b3-traceid"}, miss.Differs)
 	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil)
-	require.Contains(t, reason, "POST /charge to pay.internal had no recorded answer (body.amount, body.users.{}.role, body.orders.{}.total and 2 more differ)")
+	require.Contains(t, reason, "POST /charge to pay.internal had no recorded answer (body.amount, body.users.{}.role, body.orders.{}.total and 3 more differ)")
 	require.NotContains(t, reason, "alice")
 
 	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil)

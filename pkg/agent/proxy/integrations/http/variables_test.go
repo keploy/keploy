@@ -1483,8 +1483,9 @@ func TestVariables_AWrongHeaderTokenMissesThoughAnotherRecordingHasItAsALiteral(
 	if ok {
 		t.Fatalf("a wrong token was answered by %s", stub.Name)
 	}
-	// The evidence is this test's recording's (keploy #4801 makes it the
-	// one the cursor is at, a-2).
+	// The evidence is this test's recording's, never another test's: the
+	// variable pass names the first recording in the pool whose variable
+	// does not hold.
 	if p := wantProblem(t, ok, diag, "this call sent"); (p.mock != "a-1" && p.mock != "a-2") || p.place != "header.X-Tok" || p.kind != models.DiffKindVariable {
 		t.Fatalf("evidence %+v, want this test's recording's at header.X-Tok", p)
 	}
@@ -1521,5 +1522,109 @@ func TestVariables_ARefusedMockIsNoOtherHostsEvidence(t *testing.T) {
 	}
 	if diag.live == nil || diag.live.host != "store" {
 		t.Fatalf("the variable miss does not name where the call went: %+v", diag.live)
+	}
+}
+
+// In the variable pass each caller takes its own recordings in turn: two
+// callers whose recordings of a call with variables differ only in
+// Authorization, called out of record order (B first), are each answered with
+// their own recordings in record order (the shared-cursor bug of keploy
+// #4745's review, F17, through the variable pass).
+func TestVariables_EachCallerTakesItsOwnRecordingsInTurn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	mk := func(name, tok string, seq int) *models.Mock {
+		// A variable at the response only (bind from the request body is
+		// the same for every caller), so the request is the same bytes.
+		m := reusable(at(varMock(name, "POST", "http://api-server/v1/authorize", `{"resource":"c1"}`, 200, `{"who":"`+name+`"}`,
+			models.MockVariables{"res": bindV("c1", "body.resource")}), seq))
+		m.Spec.HTTPReq.Header["Authorization"] = "Bearer " + tok
+		return m
+	}
+	a1, b1, a2, b2 := mk("a-1", "A", 1), mk("b-1", "B", 2), mk("a-2", "A", 3), mk("b-2", "B", 4)
+	db := &varDb{session: []*models.Mock{a1, b1, a2, b2}}
+	call := func(tok string) string {
+		r := liveReq("POST", "http://api-server/v1/authorize", `{"resource":"c1"}`)
+		r.header.Set("Authorization", "Bearer "+tok)
+		ok, stub, diag, err := h.match(context.Background(), r, db, models.ProvenFlakyHeaderNoise(), nil, nil, true, false, false, true, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Logf("miss: %+v", diag)
+			return ""
+		}
+		return stub.Name
+	}
+	var got []string
+	for _, tok := range []string{"B", "A", "A", "B"} {
+		got = append(got, call(tok))
+	}
+	if strings.Join(got, ",") != "b-1,a-1,a-2,b-2" {
+		t.Errorf("the variable pass served %v, want b-1,a-1,a-2,b-2: a caller took another caller's turn", got)
+	}
+}
+
+// keploy.yml's noise widens the comparison of a recording with variables
+// outside their places, and the exact pass that may still answer a call
+// whose variables do not hold: a header in keploy.yml's header noise, and a
+// body field in its request-body noise.
+func TestVariables_KeployYmlNoiseWidensTheComparison(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	call := func(db *varDb, r *req, headerNoise, bodyNoise map[string][]string) (bool, *models.Mock) {
+		ok, stub, _, err := h.match(context.Background(), r, db, headerNoise, bodyNoise, nil, true, false, false, true, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok, stub
+	}
+
+	// A recording with variables, its X-Request-Id another value: served
+	// only with the header in keploy.yml's noise.
+	order := at(varMock("order", "POST", "http://store/orders", `{"id":"ord-rec"}`, 201, `{"id":"ord-rec"}`,
+		models.MockVariables{"orderId": bindV("ord-rec", "body.id", "body.id")}), 1)
+	order.Spec.HTTPReq.Header["X-Request-Id"] = "rq-1"
+	live := liveReq("POST", "/orders", `{"id":"ord-live"}`)
+	live.header.Set("X-Request-Id", "rq-2")
+	if ok, _ := call(&varDb{perTest: []*models.Mock{order}}, live, nil, nil); ok {
+		t.Fatal("another X-Request-Id was served without noise")
+	}
+	if ok, stub := call(&varDb{perTest: []*models.Mock{order}}, live, map[string][]string{"x-request-id": {}}, nil); !ok || stub.Name != "order" {
+		t.Fatal("keploy.yml's header noise did not widen the recording with variables")
+	}
+
+	// A call whose variable does not hold, which only an exact recording of
+	// that very call may answer: its body differs in a field keploy.yml's
+	// request-body noise names.
+	use := at(varMock("use", "POST", "http://store/confirm", `{"id":"ord-rec","ts":"t1"}`, 200, `{}`,
+		models.MockVariables{"orderId": useV("ord-rec", []string{"body.id"})}), 2)
+	exact := at(varMock("exact", "POST", "http://store/confirm", `{"id":"ord-x","ts":"t1"}`, 200, `{}`, nil), 3)
+	confirm := liveReq("POST", "/confirm", `{"id":"ord-x","ts":"t9"}`)
+	db := func() *varDb { return &varDb{perTest: []*models.Mock{use, exact}} }
+	if ok, stub := call(db(), confirm, nil, nil); ok {
+		t.Fatalf("a body differing outside noise was served %s", stub.Name)
+	}
+	if ok, stub := call(db(), confirm, nil, map[string][]string{"ts": {}}); !ok || stub.Name != "exact" {
+		t.Fatalf("keploy.yml's request-body noise did not widen the exact pass: ok=%v stub=%v", ok, stub)
+	}
+
+	// The same two the other way round: the recording with variables
+	// differs in a body field keploy.yml's noise names, and the exact one
+	// in a header it names.
+	stamped := at(varMock("stamped", "POST", "http://store/orders", `{"id":"ord-rec","ts":"t1"}`, 201, `{"id":"ord-rec"}`,
+		models.MockVariables{"orderId": bindV("ord-rec", "body.id", "body.id")}), 1)
+	if ok, stub := call(&varDb{perTest: []*models.Mock{stamped}}, liveReq("POST", "/orders", `{"id":"ord-live","ts":"t9"}`), nil, map[string][]string{"ts": {}}); !ok || stub.Name != "stamped" {
+		t.Fatal("keploy.yml's request-body noise did not widen the recording with variables")
+	}
+	exactHdr := at(varMock("exact-hdr", "POST", "http://store/confirm", `{"id":"ord-x","ts":"t1"}`, 200, `{}`, nil), 3)
+	exactHdr.Spec.HTTPReq.Header["X-Request-Id"] = "rq-1"
+	useHdr := at(varMock("use-hdr", "POST", "http://store/confirm", `{"id":"ord-rec","ts":"t1"}`, 200, `{}`,
+		models.MockVariables{"orderId": useV("ord-rec", []string{"body.id"})}), 2)
+	useHdr.Spec.HTTPReq.Header["X-Request-Id"] = "rq-1"
+	confirmHdr := liveReq("POST", "/confirm", `{"id":"ord-x","ts":"t1"}`)
+	confirmHdr.header.Set("X-Request-Id", "rq-2")
+	if ok, stub := call(&varDb{perTest: []*models.Mock{useHdr, exactHdr}}, confirmHdr, map[string][]string{"x-request-id": {}}, nil); !ok || stub.Name != "exact-hdr" {
+		t.Fatalf("keploy.yml's header noise did not widen the exact pass: ok=%v stub=%v", ok, stub)
 	}
 }
