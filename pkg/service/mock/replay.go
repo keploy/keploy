@@ -1421,6 +1421,11 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
+		// One attempt keploy could not read leaves the test unread, with
+		// that attempt's reason.
+		if w.Evidence.Unread && !ev.Unread {
+			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		}
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {

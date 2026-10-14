@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -378,6 +379,24 @@ func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
 	_, serr = a.ProvenEnd(context.Background(), models.ScopeReq{})
 	require.NotNil(t, serr)
 	require.Equal(t, http.StatusBadRequest, serr.Status)
+	require.Empty(t, refusalCodes(a), "an end with no test open refuses only that call")
+
+	// With another test open, the harness ended a test it did not begin:
+	// the open test is failed and closed, so the next test begins, and the
+	// run names the cause, once.
+	claimSelf(t, a)
+	_, serr = a.ProvenBegin(context.Background(), begin("TestB"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	require.Contains(t, serr.Message, "o::TestA ended while o::TestB was the open test")
+	_, serr = a.ProvenBegin(context.Background(), begin("TestC"))
+	require.Nil(t, serr, "TestB was closed: TestC begins")
+	require.Equal(t, []string{models.ScopeErrNotOpen}, refusalCodes(a))
+	w := windowOf(t, a, "o::TestB")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.Contains(t, w.Evidence.Reason, "ended while o::TestB was the open test")
 }
 
 // A miss fails the replayed test, which is recorded failed, and the run's own
@@ -436,6 +455,79 @@ func TestAnUnreadableMissListFailsTheTest(t *testing.T) {
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.Contains(t, w.Evidence.Reason, "the drain did not finish")
+	require.True(t, w.Evidence.Unread, "keploy could not read what the test did: the CLI's verdict is not judged, not the test's fault")
+}
+
+// A test keploy could not read is unread on its window, and that alone: it
+// is not also the run's refusal (the CLI would read it as an agent failure
+// and lose the test's own row).
+func TestAnUnreadTestIsNotTheRunsRefusal(t *testing.T) {
+	a, p := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.missErr = errors.New("the drain did not finish")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.NotNil(t, serr)
+	require.Empty(t, refusalCodes(a))
+}
+
+// A test keploy could neither read nor end: unread on its window, and its
+// end's failure (its mocks or clock not put back) is the run's, once.
+func TestAnUnreadTestKeployCouldNotEndIsTheRunsRefusal(t *testing.T) {
+	a, p := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	p.served = map[string]uint64{}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.mu.Lock()
+	p.missErr = errors.New("the drain did not finish")
+	p.setErr = errors.New("the proxy refused the pool")
+	p.mu.Unlock()
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.NotNil(t, serr)
+	p.mu.Lock()
+	p.setErr = nil
+	p.mu.Unlock()
+	require.Equal(t, []string{models.ScopeErrInternal}, refusalCodes(a))
+	var msg string
+	for _, w := range a.claimWindows() {
+		if w.Refused != nil {
+			msg = w.Refused.Message
+		}
+	}
+	require.Contains(t, msg, "keploy could not end o::TestA (its mocks or its clock may not be put back")
+	w := windowOf(t, a, "o::TestA")
+	require.True(t, w.Evidence.Unread)
+}
+
+// Keploy's failure to end a test is the run's whoever ends it: here the
+// next claim, once the test's process exited with it open.
+func TestAFailedEndAtAClaimHandoffIsTheRunsRefusal(t *testing.T) {
+	a, p := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
+	a.scopeTable = map[string][]string{"a::TestCrash": {"mock-1"}}
+	p.served = map[string]uint64{}
+	gone := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, gone.Process.Pid)
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestCrash"))
+	require.Nil(t, serr)
+	kill(t, gone)
+	p.mu.Lock()
+	p.setErr = errors.New("the proxy refused the pool")
+	p.mu.Unlock()
+	_, serr = a.ClaimInstance(ctx, models.InstanceReq{Key: "b"}, os.Getpid())
+	require.Nil(t, serr, "the run is free once its claimer exited")
+	p.mu.Lock()
+	p.setErr = nil
+	p.mu.Unlock()
+	require.Equal(t, []string{models.ScopeErrInternal}, refusalCodes(a))
 }
 
 // In a replay a proxy that cannot count answers cannot judge a test, so the
@@ -796,9 +888,23 @@ func TestATestWhoseEndFailedIsCountedFailed(t *testing.T) {
 	p.mu.Lock()
 	p.setErr = nil
 	p.mu.Unlock()
+	refusals := refusalCodes(a)
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.Contains(t, w.Evidence.Reason, "could not end o::TestA")
+	require.False(t, w.Evidence.Unread, "keploy read what the test did")
+	require.Equal(t, []string{models.ScopeErrInternal}, refusals, "keploy could not end the test: the run's, never the test's evidence")
+}
+
+// refusalCodes are the codes of the refusals the run has kept.
+func refusalCodes(a *Agent) []string {
+	var out []string
+	for _, w := range a.claimWindows() {
+		if w.Refused != nil {
+			out = append(out, w.Refused.Code)
+		}
+	}
+	return out
 }
 
 // A test whose name holds "::" (a subtest named after an IPv6 address) runs;
@@ -1043,4 +1149,81 @@ func TestSanitizedMissKeepsTheVariablesPlaceNotItsValues(t *testing.T) {
 	if len(b.FieldDiffs) != 2 || b.FieldDiffs[0].Path != "body" || b.FieldDiffs[0].Kind != models.DiffKindTypeChanged || b.FieldDiffs[0].Expected != "" || b.FieldDiffs[1].Path != "body" {
 		t.Fatalf("body places kept as %+v", b.FieldDiffs)
 	}
+}
+
+// The proven wire carries no pid, runner clock, folder or suite: a begin
+// or an end that sends one predates the protocol, and is refused, naming
+// them: a refused begin opens nothing, and a refused end fails and closes
+// the test it names. A v1 body runs.
+func TestTheWireRefusesThePidClockAndFolderOfTheOldWire(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	for _, tc := range []struct {
+		req  models.ScopeReq
+		sent string
+	}{
+		{models.ScopeReq{Name: "TestA", CanSkip: true, Pid: 4242}, "pid"},
+		{models.ScopeReq{Name: "TestA", CanSkip: true, At: time.Unix(1_800_000_000, 0)}, "at"},
+		{models.ScopeReq{Name: "TestA", CanSkip: true, Dir: "/repo/o"}, "dir"},
+		{models.ScopeReq{Name: "TestA", CanSkip: true, Pid: 1, Dir: "/repo/o"}, "pid, dir"},
+	} {
+		_, serr := a.ProvenBegin(ctx, tc.req)
+		require.NotNil(t, serr, tc.sent)
+		require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code, tc.sent)
+		require.Contains(t, serr.Message, "sends "+tc.sent+", which keploy's scope protocol v1 does not use", tc.sent)
+	}
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr, "nothing was opened by a refused begin")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed", Pid: 4242})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed", Suite: true})
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "sends suite")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.NotNil(t, serr, "the refused end failed and closed the test it named")
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+}
+
+// An end the wire refuses for the old wire's fields fails and closes the
+// test it names, with keploy's reason: left open, the next begin would be
+// refused one_test_at_a_time and the run blamed for two tests at once.
+func TestAnEndWithTheOldWiresFieldsFailsTheOpenTest(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed", Pid: 4242})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr, "the refused end closed TestA: TestB begins")
+	w := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.NotNil(t, w.Evidence)
+	require.Contains(t, w.Evidence.Reason, "sends pid")
+}
+
+// A harness refused at every test, by turns at its begin and its end, adds
+// each refusal once, and a refusal it has not made is still kept.
+func TestARefusalIsKeptOnceWhateverCameBetween(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	begin := models.RunRefusal{Code: models.ScopeErrUpgradeIntegration, Message: "predates protocol v1"}
+	end := models.RunRefusal{Code: models.ScopeErrUpgradeIntegration, Message: "sends pid"}
+	for i := 0; i < 2*maxRefusals; i++ {
+		a.NoteRefusal(begin)
+		a.NoteRefusal(end)
+	}
+	process := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "a second test process"}
+	a.NoteRefusal(process)
+	ws := a.claimWindows()
+	var got []models.RunRefusal
+	for _, w := range ws {
+		if w.Refused != nil {
+			got = append(got, *w.Refused)
+		}
+	}
+	require.Equal(t, []models.RunRefusal{begin, end, process}, got)
 }

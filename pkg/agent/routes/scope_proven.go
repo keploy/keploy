@@ -94,12 +94,16 @@ func writeScopeError(w http.ResponseWriter, r *http.Request, e *models.ScopeErro
 }
 
 func badScopeBody(w http.ResponseWriter, r *http.Request, what string, err error) {
-	writeScopeError(w, r, &models.ScopeError{
+	writeScopeError(w, r, scopeBodyErr(what, err))
+}
+
+func scopeBodyErr(what string, err error) *models.ScopeError {
+	return &models.ScopeError{
 		Status:  http.StatusBadRequest,
 		Code:    models.ScopeErrBadRequest,
 		Message: fmt.Sprintf("invalid %s request: %v", what, err),
 		Remedy:  "send a JSON body as keploy's scope protocol v1 describes",
-	})
+	}
 }
 
 // HandleInstance claims the run for the calling test process
@@ -159,7 +163,19 @@ func (a *Agent) provenBegin(w http.ResponseWriter, r *http.Request, p provenScop
 func (a *Agent) provenEnd(w http.ResponseWriter, r *http.Request, p provenScope, req models.ScopeReq) {
 	resp, serr := p.ProvenEnd(r.Context(), req)
 	if serr != nil {
-		writeScopeError(w, r, serr)
+		// An end the wire refuses because of its harness (an old one, or a
+		// body that is not the protocol's) is the run's to name, as at a
+		// begin: the verdict says why, rather than blaming the next begin
+		// (one_test_at_a_time). The service names the rest itself, once:
+		// keploy's own failure to end a test (endTest), and an end of
+		// another test than the open one. Keploy's failure to read a test
+		// is the test's window's (unread).
+		switch serr.Code {
+		case models.ScopeErrUpgradeIntegration, models.ScopeErrBadRequest:
+			a.refuse(w, r, serr)
+		default:
+			writeScopeError(w, r, serr)
+		}
 		return
 	}
 	render.Status(r, http.StatusOK)

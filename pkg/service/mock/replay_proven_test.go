@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -134,6 +135,35 @@ func TestWithEvidence(t *testing.T) {
 	})
 	require.NotNil(t, got[0].Evidence)
 	require.Contains(t, got[0].Evidence.Reason, "exited while the test was open")
+
+	// A test keploy could not read stays unread on its line, through the
+	// receipt the CLI reads: one unread attempt is enough. A read test's
+	// evidence says nothing of it.
+	got = withEvidence([]TestReceipt{{Name: "o::D", Outcome: "failed"}, {Name: "o::E", Outcome: "failed"}}, []models.ScopeWindow{
+		{Name: "o::D", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::D did: x", Unread: true}},
+		{Name: "o::D", Evidence: ev("GET /y", "")},
+		{Name: "o::E", Evidence: ev("GET /z", "")},
+	})
+	require.True(t, got[0].Evidence.Unread)
+	require.False(t, got[1].Evidence.Unread)
+	// An unread attempt after a read one: the line says unread, with the
+	// unread attempt's reason.
+	late := withEvidence([]TestReceipt{{Name: "o::F", Outcome: "failed"}}, []models.ScopeWindow{
+		{Name: "o::F", Evidence: &models.ScopeEvidence{Reason: "keploy: a miss", Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}}}},
+		{Name: "o::F", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::F did: y", Unread: true}},
+	})
+	require.True(t, late[0].Evidence.Unread)
+	require.Contains(t, late[0].Evidence.Reason, "could not tell what o::F did")
+	k := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(k, "set"), 0o755))
+	writeTestsReceipt(zap.NewNop(), k, TestsReceipt{Set: "set", Tests: got})
+	raw, err := os.ReadFile(filepath.Join(k, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(raw), "unread"), "only the unread test's line says it: %s", raw)
+	read, err := ReadTestsReceipt(k, "set")
+	require.NoError(t, err)
+	require.True(t, read.Tests[0].Evidence.Unread)
+	require.False(t, read.Tests[1].Evidence.Unread)
 }
 
 // The receipt counts the run's non-DNS misses under the proven switch only:

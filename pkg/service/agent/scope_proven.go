@@ -358,14 +358,17 @@ func (a *Agent) claimWindows() []models.ScopeWindow {
 const maxRefusals = 64
 
 // NoteRefusal records a refusal of the run (models.RunRefusal): one the wire
-// answered a claim or a begin with, or one an integration made and told the
-// agent. The CLI's verdict names it. A refusal like the last one is kept
-// once.
+// answered a claim, a begin or an end with, or one an integration made and
+// told the agent. The CLI's verdict names it. A refusal like one already
+// kept is kept once: a harness refused at every test, by turns for its
+// begin and its end, never crowds out a refusal it has not made.
 func (a *Agent) NoteRefusal(r models.RunRefusal) {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	if n := len(a.proven.refusals); n > 0 && *a.proven.refusals[n-1].Refused == r {
-		return
+	for _, w := range a.proven.refusals {
+		if *w.Refused == r {
+			return
+		}
 	}
 	if len(a.proven.refusals) >= maxRefusals {
 		return
@@ -411,7 +414,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"this test harness predates keploy's scope protocol v1: it cannot skip a test keploy quarantines, or it opens suite scopes",
 			"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
 	}
-	at := boundaryTime(req.At)
+	if serr := oldWireFields(req); serr != nil {
+		return models.ScopeBeginResp{}, serr
+	}
+	at := time.Now()
 	a.provenMu.Lock()
 	if a.proven.closed {
 		a.provenMu.Unlock()
@@ -480,6 +486,33 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
+// oldWireFields refuses a begin or an end that carries the old wire's
+// fields (release1-cut §2.1: no pid on the wire). The claim names the test
+// process, and the agent stamps each test's begin and end with its own
+// clock, so a pid, a runner's clock, a folder or a suite scope would decide
+// nothing, and a harness that sends them predates the protocol.
+func oldWireFields(req models.ScopeReq) *models.ScopeError {
+	var sent []string
+	if req.Pid != 0 {
+		sent = append(sent, "pid")
+	}
+	if !req.At.IsZero() {
+		sent = append(sent, "at")
+	}
+	if req.Dir != "" {
+		sent = append(sent, "dir")
+	}
+	if req.Suite {
+		sent = append(sent, "suite")
+	}
+	if len(sent) == 0 {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
+		"this test harness sends "+strings.Join(sent, ", ")+", which keploy's scope protocol v1 does not use: the claim names the test process, and keploy stamps each test's begin and end itself",
+		"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
+}
+
 // ProvenEnd closes the open test. An end without an outcome counts as
 // failed. In a replay, the test's misses and the data-plane mocks of its
 // mapping it did not consume fail it, with keploy's reason; a test keploy
@@ -492,20 +525,43 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if req.Name == "" {
 		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest, "an end names its test", "send the name its begin sent")
 	}
-	at := boundaryTime(req.At)
+	at := time.Now()
 	a.provenMu.Lock()
 	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
 	open, atBegin := a.proven.open, a.proven.atBegin
 	a.provenMu.Unlock()
+	if serr := oldWireFields(req); serr != nil {
+		// The test it names is failed and closed with keploy's reason:
+		// left open, it would be blamed on the next begin
+		// (one_test_at_a_time).
+		if open == id {
+			if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, atBegin, serr.Message); err != nil {
+				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
+			}
+		}
+		return models.ScopeEndResp{}, serr
+	}
 	if open != id {
 		// A harness that ends a test it was told to skip is warned.
 		a.noteEndOfGated(id, 0)
-		msg := fmt.Sprintf("%s ended, but it is not the open test", id)
-		if open == "" {
-			msg = fmt.Sprintf("%s ended, but no test is open", id)
+		msg := fmt.Sprintf("%s ended, but no test is open", id)
+		if open != "" {
+			msg = fmt.Sprintf("%s ended while %s was the open test", id, open)
 		}
-		return models.ScopeEndResp{}, scopeErr(http.StatusConflict, models.ScopeErrNotOpen, msg,
+		serr := scopeErr(http.StatusConflict, models.ScopeErrNotOpen, msg,
 			"end a test once, with the name its begin sent, and only when its begin was not answered skip")
+		// With another test open, the harness ended a test it did not
+		// begin: the open test is failed and closed with keploy's reason
+		// (left open, every later begin would be refused as two tests at
+		// once), and the run names the cause. An end with no test open
+		// refuses only that call.
+		if open != "" {
+			if _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, atBegin, msg); err != nil {
+				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
+			}
+			a.NoteRefusal(serr.Refusal())
+		}
+		return models.ScopeEndResp{}, serr
 	}
 	outcome := models.NormalizeScopeOutcome(req.Outcome)
 	if outcome == "" {
@@ -513,6 +569,9 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	}
 	ev, err := a.closeOpen(ctx, id, outcome, at, atBegin, "")
 	if err != nil {
+		// A test keploy could not read is unread on its window (its
+		// verdict is keploy's not-judged); a failure to end it is the run's
+		// refusal already (endTest).
 		return models.ScopeEndResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
@@ -565,6 +624,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 				ev = &models.ScopeEvidence{}
 			}
 			ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
+			ev.Unread = true
 			outcome = models.ScopeOutcomeFailed
 		case !ev.Empty():
 			ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
@@ -584,8 +644,14 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
 		// The window closed with the outcome above; a test whose end failed
-		// is counted failed, as its end answer says.
+		// is counted failed, as its end answer says. Its mocks or its clock
+		// may not be put back, which taints every test after it: the run's
+		// to name, as keploy's own failure, whoever ended the test and
+		// whatever its read did.
 		a.failClosedWindow(id, "keploy: keploy could not end "+id+": "+err.Error())
+		a.NoteRefusal(models.RunRefusal{Code: models.ScopeErrInternal,
+			Message: "keploy could not end " + id + " (its mocks or its clock may not be put back, so the tests after it may have run on them): " + err.Error(),
+			Remedy:  "check the agent's log, and run the tests again"})
 		if readErr == nil {
 			readErr = err
 		}
