@@ -155,9 +155,14 @@ func init() { ResetInterruptedAgain() }
 //
 // So an offer is made only once the stop's first signal has come (Interrupted):
 // before it, the copy of that signal would find the offer standing; and a
-// whole notice period after that signal was seen (StopNowNotice), by when the
-// copy has come too, whether the signal began the stop or came while a stop
-// that began on its own (the app exits, a record timer) waited.
+// whole notice period after that signal was seen (StopNowNotice), whether the
+// signal began the stop or came while a stop that began on its own (the app
+// exits, a record timer) waited. The copy comes with the first, not a period
+// later -- unless sudo is held from handing it on (starved, or stopped), which
+// no time can tell from a press, as Go gives a signal's sender to no one. So
+// what a press after an offer does must be safe for a copy too: a drain that
+// gives up fails its run loudly, and an agent's stop has the agent die only
+// once no teardown work is in progress at the first press.
 //
 // next is closed by the first interrupt after this offer: a wait that must
 // hear only an interrupt given to it (an agent's stop, after the drains, where
@@ -240,14 +245,15 @@ func NewStopNowNotice(period time.Duration) *StopNowNotice {
 // another interrupt stops it now: from this notice on (it makes the offer), or
 // since an earlier one.
 func (n *StopNowNotice) Next() (offering bool) {
-	now := noticeNow()
 	switch {
 	case n.withdraw != nil:
 	case n.sawAt.IsZero():
+		// The flag before the clock: a signal that comes between the two is
+		// then seen at the next notice, never stamped before it came.
 		if Interrupted() {
-			n.sawAt = now
+			n.sawAt = noticeNow()
 		}
-	case now.Sub(n.sawAt) >= n.period:
+	case noticeNow().Sub(n.sawAt) >= n.period:
 		n.next, n.withdraw = OfferStopNow()
 	}
 	return n.withdraw != nil

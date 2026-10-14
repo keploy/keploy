@@ -302,8 +302,9 @@ func agentStopsIdle() (idle <-chan struct{}, inProgress bool) {
 // gives up -- false -- after bound, as a drain does, unless an agent stop that
 // will end on its own is holding the drains then (BeginAgentStop), in which
 // case it waits for that to end and gives the exit the bound again; and it
-// gives up at an interrupt from interrupted (InterruptedAfter: one given
-// while it waits).
+// gives up once interrupted is closed: the agent's stop killed it at once at
+// the user's Ctrl+C (pkg/platform/http, agentRun.letGo), so there is no exit
+// left worth waiting for.
 func AwaitAgentExit(gone <-chan struct{}, bound time.Duration, interrupted <-chan struct{}) bool {
 	for {
 		timer := time.NewTimer(bound)

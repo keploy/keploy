@@ -275,9 +275,39 @@ func TestStopWatchKillsAnAgentDetachedButNotExiting(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while keploy waits for the agent, once the stop has
-// said that one stops it now, kills it at once, progressing or not.
+// A press while keploy waits for the agent, once the stop has said a press
+// stops it, escalates one step: the first has the agent die once no teardown
+// work is in progress -- one that is in the middle of some finishes it first
+// -- and a press after the stop has offered again kills it at once,
+// progressing or not.
 func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
+	f := newFakeAgent()
+	f.busy = true // removing what it attached to the kernel
+	f.set(p(1, 0, false))
+	w := startWatch(f, nil)
+	awaitObserved(t, f, w, p(1, 0, false))
+	f.set(p(2, 1, false)) // still progressing
+	ctrlCWhileWaited(t)
+	within(t, "the first press's kill", func() {
+		for f.killed.Load() < 1 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if f.now.Load() {
+		t.Fatal("the first press killed the agent at once, in the middle of its teardown work")
+	}
+	ctrlCAgainWhileWaited(t)
+	if !awaitWatch(t, w) || f.killed.Load() != 2 || !f.now.Load() {
+		t.Fatalf("the press after the second offer did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+}
+
+// The first press, with the agent between teardown steps, has it die at once
+// of the escalation: the watch sees it exit, and reports no kill at once.
+func TestStopWatchFirstCtrlCLetsAnIdleAgentDie(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
 	theStopWasASignal(t)
@@ -285,10 +315,52 @@ func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
 	f.set(p(1, 0, false))
 	w := startWatch(f, nil)
 	awaitObserved(t, f, w, p(1, 0, false))
-	f.set(p(2, 1, false)) // still progressing
 	ctrlCWhileWaited(t)
-	if !awaitWatch(t, w) || f.killed.Load() != 1 || !f.now.Load() {
-		t.Fatalf("Ctrl+C pressed again did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	if awaitWatch(t, w) || f.killed.Load() != 1 || f.now.Load() {
+		t.Fatalf("want the escalation only, and the watch to see the agent exit (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+}
+
+// A press that lands as the agent exits on its own (both ready when the
+// watch's loop looks) kills nothing: the watch reports the exit, never a kill
+// at once, which would have what waits on its exit let go and drop it.
+func TestStopWatchAPressAsTheAgentExitsIsNoKill(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	for i := 0; i < 40; i++ { // the loop's select takes either: 40 runs catch a wrong pick all but surely
+		utils.ResetInterruptedAgain()
+		utils.MarkInterrupted()
+		core, logs := observer.New(zapcore.InfoLevel)
+		f := newFakeAgent()
+		f.set(p(1, 0, true)) // between steps, past the judge's first look
+		var block atomic.Bool
+		inJudged := make(chan struct{}, 1)
+		release := make(chan struct{})
+		sw := stopWatch{logger: zap.New(core), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond,
+			judged: func(utils.TeardownProgress) {
+				if block.CompareAndSwap(true, false) {
+					inJudged <- struct{}{}
+					<-release // the watch's loop is busy a moment
+				}
+			}}
+		done := make(chan bool, 1)
+		go func() { done <- sw.run() }()
+		within(t, "the offer", func() {
+			for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent").Len() == 0 {
+				time.Sleep(time.Millisecond)
+			}
+		})
+		block.Store(true)
+		within(t, "the watch's loop held", func() { <-inJudged })
+		f.exited()                   // the agent exits on its own
+		utils.MarkInterruptedAgain() // as the user presses, as told
+		close(release)
+		var killedAtOnce bool
+		within(t, "the watch's return", func() { killedAtOnce = <-done })
+		if killedAtOnce {
+			t.Fatalf("run %d: a kill at once was reported for an agent that exited on its own (kills %d)", i, f.killed.Load())
+		}
 	}
 }
 
@@ -297,8 +369,9 @@ func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
 // keploy` reaches keploy twice, once from sudo, which hands its own copy on.
 // The copy is no Ctrl+C pressed while keploy waits: the agent, mid-teardown,
 // is not killed, and is only once the user presses after the stop has said a
-// press stops it now (a whole stopWatchOffer after the signal was seen; the
-// stop's clock is the test's here, so nothing hangs on scheduling).
+// press stops it (a whole stopWatchOffer after the signal was seen; the stop's
+// clock is the test's here, so nothing hangs on scheduling), and then as the
+// first press does: it dies once no teardown work is in progress.
 func TestStopWatchDoesNotTakeACopyOfTheStopForCtrlC(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	utils.ClearInterrupted()
@@ -327,7 +400,7 @@ func TestStopWatchDoesNotTakeACopyOfTheStopForCtrlC(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	advance(stopWatchOffer)
-	const offered = "Press Ctrl+C again to stop the keploy agent now"
+	const offered = "Press Ctrl+C again to stop the keploy agent"
 	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
 	for logs.FilterMessageSnippet(offered).Len() == 0 {
 		if time.Now().After(deadline) {
@@ -340,8 +413,8 @@ func TestStopWatchDoesNotTakeACopyOfTheStopForCtrlC(t *testing.T) {
 		t.Fatalf("a copy of the stop killed the agent mid-teardown (kills %d, now %v)", f.killed.Load(), f.now.Load())
 	}
 	utils.MarkInterruptedAgain() // the user, as told
-	if !awaitWatch(t, w) || f.killed.Load() != 1 || !f.now.Load() {
-		t.Fatalf("the user's Ctrl+C after the offer did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	if awaitWatch(t, w) || f.killed.Load() != 1 || f.now.Load() {
+		t.Fatalf("the user's Ctrl+C after the offer did not have the agent die once idle (kills %d, now %v)", f.killed.Load(), f.now.Load())
 	}
 }
 

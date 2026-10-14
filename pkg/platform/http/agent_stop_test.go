@@ -59,7 +59,7 @@ func theStopWasASignal(t *testing.T) {
 }
 
 // ctrlCWhileWaited is the user's Ctrl+C while keploy waits for a stopping
-// agent, pressed as told: once the stop has said one stops the agent now
+// agent, pressed as told: once the stop has said a press stops the agent
 // (stopWatch's offer), which a press before does not count. It presses until
 // one is heard.
 func ctrlCWhileWaited(t *testing.T) {
@@ -67,7 +67,27 @@ func ctrlCWhileWaited(t *testing.T) {
 	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
 	for !utils.MarkInterruptedAgain() {
 		if time.Now().After(deadline) {
-			t.Fatal("no stop ever said Ctrl+C stops the agent now")
+			t.Fatal("no stop ever said Ctrl+C stops the agent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// ctrlCAgainWhileWaited is the user's next Ctrl+C, once the stop has answered
+// the one before (withdrawn its offer) and offered again: it presses until a
+// press has found no offer standing, and then one is heard.
+func ctrlCAgainWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	withdrawn := false
+	for {
+		heard := utils.MarkInterruptedAgain()
+		if withdrawn && heard {
+			return
+		}
+		withdrawn = withdrawn || !heard
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never offered again")
 		}
 		time.Sleep(time.Millisecond)
 	}

@@ -138,6 +138,8 @@ const fakeNativeAgent = `report() {
 }
 term=0
 trap 'term=1' TERM
+# busy: in the middle of teardown work, it does not die of the escalation.
+[ "$MODE" = busy ] && trap '' USR2
 : > "$READY"
 while [ "$term" = 0 ]; do sleep 0.01; done
 : > "$GOT"
@@ -148,7 +150,7 @@ while :; do
     progressing) report "$beat" "$beat" false; [ "$beat" -ge 10 ] && exit 0 ;;
     stalled) report 1 "$beat" false ;;
     detached) report 1 "$beat" true ;;
-    endless) report "$beat" "$beat" false ;;
+    endless|busy) report "$beat" "$beat" false ;;
   esac
   sleep 0.01
 done`
@@ -166,14 +168,20 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 	defer func(n uint64) { stallChecks = n }(stallChecks)
 	stallChecks = 3
 	for _, tc := range []struct {
-		mode      string
-		interrupt bool
-		wantKill  bool
+		mode string
+		// presses: the user's Ctrl+C presses while keploy waits, each once
+		// the stop has said a press stops the agent.
+		presses  int
+		wantKill bool
+		// atOnce: killed by SIGKILL (a press after the first), not the
+		// escalation.
+		atOnce bool
 	}{
 		{mode: "progressing"},
 		{mode: "stalled", wantKill: true},
 		{mode: "detached", wantKill: true},
-		{mode: "endless", interrupt: true, wantKill: true},
+		{mode: "endless", presses: 1, wantKill: true},
+		{mode: "busy", presses: 2, wantKill: true, atOnce: true},
 	} {
 		for _, ready := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/ready=%v", tc.mode, ready), func(t *testing.T) {
@@ -201,18 +209,27 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 						t.Fatalf("the agent exited before it was ready: %v", <-waited)
 					}
 				}
-				if tc.interrupt {
+				if tc.presses > 0 {
 					theStopWasASignal(t)
 					go func() {
-						// Pressed until heard: once the stop has said a press
-						// stops the agent now (stopWatch), and its teardown
-						// has begun.
-						for {
-							if _, err := os.Stat(progress); err == nil && utils.MarkInterruptedAgain() {
-								return
-							}
+						// Each pressed until heard: once the stop has said a
+						// press stops the agent (stopWatch), its teardown has
+						// begun, and, for the next, the offer before was
+						// answered (a press finds none standing).
+						for pressed, withdrawn := 0, true; pressed < tc.presses; {
 							if returnsWithin(run.gone, 5*time.Millisecond) {
 								return
+							}
+							if _, err := os.Stat(progress); err != nil {
+								continue
+							}
+							heard := utils.MarkInterruptedAgain()
+							switch {
+							case heard && withdrawn:
+								pressed++
+								withdrawn = false
+							case !heard:
+								withdrawn = true
 							}
 						}
 					}()
@@ -225,11 +242,12 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 					t.Fatal("the agent never got SIGTERM")
 				}
 				st := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				// A verdict kills with the escalation signal (SIGUSR2, which
-				// kills this stand-in as it kills the agent); Ctrl+C pressed
-				// again with SIGKILL, at once.
+				// A verdict, and the first press, kill with the escalation
+				// signal (SIGUSR2, which kills this stand-in as it kills the
+				// agent once no teardown work is in progress); a later press
+				// with SIGKILL, at once.
 				want := syscall.Signal(syscall.SIGUSR2)
-				if tc.interrupt {
+				if tc.atOnce {
 					want = syscall.SIGKILL
 				}
 				killed := st.Signaled() && st.Signal() == want
@@ -673,9 +691,9 @@ func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while the agent's container is waited for, once the
-// stop has said a press stops it now, kills it at once (SIGKILL), and lets
-// what waits for its exit go.
+// Ctrl+C pressed while the agent's container is waited for, once the stop
+// has said a press stops it, sends the escalation signal: the agent dies once
+// no teardown work is in progress, here at once.
 func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -688,9 +706,8 @@ func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	awaitEngineWait(t, log, returned)
 	ctrlCWhileWaited(t)
 	within(t, "stopAgentContainerFor", func() { <-returned })
-	within(t, "the run let go", func() { <-ready.letGo })
-	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill "+stopTestContainer; got != want {
-		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed again kills the container", got, want)
+	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill --signal SIGUSR2 "+stopTestContainer; got != want {
+		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed escalates the container's stop", got, want)
 	}
 }
 
@@ -728,11 +745,12 @@ func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 
 // The user's Ctrl+C while keploy waits for a stopping agent that runs under
 // sudo (a non-root user's), once the recording's drains are done and their
-// offers withdrawn: the stop says a press stops the agent now, and on the
-// press kills it, which for one under sudo only escalates the signal: it dies
-// once its teardown (uprobe removal) is through. The group lets go at that
-// press (awaitAgentExit, run.letGo), and does not wait out the teardown's
-// bound to then say a goroutine ignored its cancellation.
+// offers withdrawn: the stop says a press stops the agent; at the press after
+// the one that escalated, it kills it at once, which for one under sudo still
+// only escalates the signal: it dies once its teardown (uprobe removal) is
+// through. The group lets go at that press (awaitAgentExit, run.letGo), and
+// does not wait out the teardown's bound to then say a goroutine ignored its
+// cancellation.
 func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -768,12 +786,15 @@ func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
 		return nil
 	})
 	cancel() // setupCtxCancel: the agent stop begins
-	within(t, "the stop saying a press stops the agent now", func() {
-		for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent now").Len() == 0 {
+	within(t, "the stop saying a press stops the agent", func() {
+		for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent").Len() == 0 {
 			time.Sleep(10 * time.Millisecond)
 		}
 	})
-	utils.MarkInterruptedAgain() // the user presses Ctrl+C, as told
+	// The user presses Ctrl+C, as told: the agent, busy removing its uprobes,
+	// does not die of the escalation; the user presses again once asked.
+	ctrlCWhileWaited(t)
+	ctrlCAgainWhileWaited(t)
 	within(t, "the kill at the press", func() { <-killedNow })
 	// The bound only catches a group that never lets go; it lets go at once.
 	if _, timedOut := utils.DrainErrGroupStatus(a.logger, "record-setup", &grp, 30*time.Second); timedOut {

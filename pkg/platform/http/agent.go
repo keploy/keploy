@@ -111,8 +111,10 @@ type AgentClient struct {
 // breakpoint in every process that maps the probed library. So the CLI stops
 // an agent by asking it, or by SIGTERM, and waits for it (gone) while its
 // teardown makes progress -- killing it only once that stops, or it has
-// detached everything and not exited, or the user presses Ctrl+C again
-// (stopWatch); never on a timer, never by a hang-up from closing its terminal
+// detached everything and not exited, or the user presses Ctrl+C once keploy
+// has said a press stops it (stopWatch: the first press has it die once no
+// teardown work is in progress, a later one kills it at once); never on a
+// timer, never by a hang-up from closing its terminal
 // (endAgent, stopAgentContainerFor). That holds before the agent answers too:
 // it attaches its uprobes first.
 //
@@ -2085,8 +2087,9 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
 // stopped making any, or has detached everything and not exited -- kill(false),
-// on which it dies once no teardown work is in progress -- or, kill(true), at
-// once when the user presses Ctrl+C again while it is waited for (stopWatch).
+// on which it dies once no teardown work is in progress -- or at the user's
+// Ctrl+C once the stop has said a press stops it: kill(false) at the first,
+// kill(true), at once, at one after that (stopWatch).
 // An agent already reaped is never signalled: its pid may be another
 // process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, read func(context.Context) (utils.TeardownProgress, bool)) {
@@ -3058,14 +3061,16 @@ func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) 
 var dockerStopPoll = time.Second
 
 // stopAgentContainer stops an agent's container, and returns once it has
-// exited, or once it killed it at once at the user's Ctrl+C (killedAtOnce). It sends the agent SIGTERM
+// exited, or once it killed it at once at the user's Ctrl+C (killedAtOnce).
+// It sends the agent SIGTERM
 // (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
 // (`wait`) while the agent's teardown makes progress, which it reports in its
 // container (readContainerProgress). It kills it only once it has stopped
 // making any, or has detached everything and not exited -- with the
 // escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
-// teardown work is in progress -- or at once (`kill`, SIGKILL) when the user
-// presses Ctrl+C again while it is waited for (stopWatch). Not `stop`, whose
+// teardown work is in progress -- or at the user's Ctrl+C once the stop has
+// said a press stops it: the escalation signal at the first, and at once
+// (`kill`, SIGKILL) at one after that (stopWatch). Not `stop`, whose
 // grace period (10 s by default) ends in a SIGKILL however the teardown is
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent

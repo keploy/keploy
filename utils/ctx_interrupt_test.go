@@ -168,3 +168,49 @@ func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 		}
 	})
 }
+
+// Next looks for the stop's signal before it reads the clock: a signal that
+// comes between the two (the notice's goroutine preempted there) is seen at
+// the next notice, never stamped as seen before it came, which would bring
+// the offer, and a copy's chance to be taken for a press, under a period.
+func TestStopNowNoticeNeverSeesTheSignalBeforeItCame(t *testing.T) {
+	ResetInterruptedAgain()
+	ClearInterrupted()
+	t.Cleanup(func() { ResetInterruptedAgain(); ClearInterrupted() })
+	const period = 5 * time.Second
+	now := time.Unix(1_000_000, 0)
+	armed := false
+	defer SetNoticeClockForTest(func() time.Time {
+		at := now
+		if armed {
+			// Preempted for 4 s right after reading the clock; the stop's
+			// signal came at the end of that.
+			armed = false
+			now = now.Add(4 * time.Second)
+			MarkInterrupted()
+		}
+		return at
+	})()
+	n := NewStopNowNotice(period) // a stop that began on its own
+	armed = true
+	n.Next()
+	if armed {
+		// This Next looked for the signal before it read the clock: the
+		// signal comes just after it.
+		armed = false
+		now = now.Add(4 * time.Second)
+		MarkInterrupted()
+	}
+	signalAt := now
+	for _, after := range []time.Duration{0, 2 * time.Second, period - time.Nanosecond} {
+		now = signalAt.Add(after)
+		if n.Next() {
+			t.Fatalf("offered %v after the stop's signal, under the %v period", after, period)
+		}
+	}
+	now = signalAt.Add(period)
+	if !n.Next() {
+		t.Fatal("no offer a whole period after the signal was seen")
+	}
+	n.Withdraw()
+}
