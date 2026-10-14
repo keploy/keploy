@@ -305,6 +305,7 @@ func TestAnUnservableMockDoesNotShadowAServableHandshake(t *testing.T) {
 		"a verdict replay does not serve":                   nextFactor,
 		"an AuthMoreData with nothing recorded after it":    cutShort,
 		"a full authentication cut short before its answer": fullAuthCutShort,
+		"a greeting with no header":                         headerlessGreeting(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			first.Name = "mock-unservable"
@@ -616,6 +617,32 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		phase   string
 		diff    string
 	}{{
+		name:    "a next authentication factor after a fast authentication",
+		session: []*models.Mock{fastAuthHandshake(nextFactorAnswer(3))},
+		client:  fastAuthLogin,
+		summary: "connection phase: caching_sha2_password authentication",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "AuthNextFactor, which replay does not serve",
+	}, {
+		name:    "a next authentication factor after a full authentication",
+		session: []*models.Mock{fullAuthHandshake(nextFactorAnswer(6))},
+		client: func(c mysqlClient) {
+			fullAuthLogin(c)
+		},
+		summary: "connection phase: encrypted password",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "AuthNextFactor, which replay does not serve",
+	}, {
+		name:    "a recorded public key with no header",
+		session: []*models.Mock{headerlessPublicKey()},
+		client: func(c mysqlClient) {
+			fastAuthLogin(c)
+			c.send(3, []byte{byte(mysql.RequestPublicKey)})
+		},
+		summary: "connection phase: public key request",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "cannot be read",
+	}, {
 		name:    "a recorded public key request with no header",
 		session: []*models.Mock{headerlessPublicKeyRequest()},
 		client: func(c mysqlClient) {
@@ -726,5 +753,27 @@ func headerlessPublicKeyRequest() *models.Mock {
 func headerlessFastAuthVerdict() *models.Mock {
 	m := fastAuthHandshake(okAnswer(3))
 	m.Spec.MySQLResponses[2].Header = nil
+	return m
+}
+
+// nextFactorAnswer is the server asking for a next authentication factor, at
+// seq: MySQL 8.0.27's multi-factor authentication, after the first factor.
+func nextFactorAnswer(seq uint8) mysql.Response {
+	return mysql.Response{PacketBundle: bundle(seq, mysql.AuthStatusToString(mysql.AuthNextFactor),
+		&mysql.AuthNextFactorPacket{PacketType: mysql.AuthNextFactor, PluginName: "authentication_fido_client"})}
+}
+
+// headerlessPublicKey is a recorded full authentication whose public key has
+// no header.
+func headerlessPublicKey() *models.Mock {
+	m := fullAuthHandshake(okAnswer(6))
+	m.Spec.MySQLResponses[2].Header = nil
+	return m
+}
+
+// headerlessGreeting is a recorded handshake whose greeting has no header.
+func headerlessGreeting() *models.Mock {
+	m := nativeHandshake()
+	m.Spec.MySQLResponses[0].Header = nil
 	return m
 }

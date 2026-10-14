@@ -50,7 +50,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// connection that closed once greeted), was chosen before and then
 	// never served, ahead of a mock that could have been.
 	isHandshakeMock := func(m *models.Mock) bool {
-		if m == nil || len(m.Spec.MySQLResponses) == 0 {
+		if m == nil || len(m.Spec.MySQLResponses) == 0 || m.Spec.MySQLResponses[0].Header == nil {
 			return false
 		}
 		if _, ok := m.Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet); !ok {
@@ -574,13 +574,21 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 // serveVerdict writes the server's recorded verdict on a login, verdict (its
 // OK, or its refusal as an ERR), to the client, and reports whether it was a
-// refusal. A verdict that cannot be read is a miss of the client's connection
-// to dst at step, the step the verdict answers. The handshake mock it comes from stays in the pool for the next
+// refusal. A verdict that cannot be read, or one that is neither, is a miss of
+// the client's connection to dst at step, the step the verdict answers, and
+// nothing is written for it. The handshake mock it comes from stays in the pool for the next
 // connection (updateMock), as more connections may open than were recorded.
 func serveVerdict(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst, step string, verdict *mysql.PacketBundle, handshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
 	if verdict.Header == nil {
 		utils.LogError(logger, nil, "the recorded verdict on the login has no header")
 		return false, matchedHandshakeMiss(dst, step, "the recorded verdict on the login cannot be read")
+	}
+	// Only an OK or an ERR ends a login. Anything else (a next
+	// authentication factor, after a caching_sha2_password first factor) is
+	// an answer replay does not serve, as on the native path.
+	if t := verdict.Header.Type; t != mysql.StatusToString(mysql.OK) && t != mysql.StatusToString(mysql.ERR) {
+		utils.LogError(logger, nil, "unsupported final answer on the login in the recording", zap.String("answer", t))
+		return false, matchedHandshakeMiss(dst, step, fmt.Sprintf("the recording answers the %s with a %s, which replay does not serve", step, t))
 	}
 	refused := verdict.Header.Type == mysql.StatusToString(mysql.ERR)
 	logger.Debug("the recorded verdict on the login", zap.Bool("refused", refused))
@@ -756,6 +764,10 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
 		return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key to answer with")
+	}
+	if resp[0].Header == nil {
+		utils.LogError(logger, nil, "the recorded public key has no header")
+		return false, matchedHandshakeMiss(dst, stepPublicKey, "the recorded public key cannot be read")
 	}
 
 	// encode the public key response
