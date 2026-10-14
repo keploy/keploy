@@ -21,10 +21,10 @@ func (s *setupInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions)
 
 // A replay its user cancels (Ctrl-C) while keploy sets up the environment ends
 // as an interrupted run, as record does: its error is the run's cancellation,
-// no ERROR line is logged, and the exit code is 0. The setup's error kept
+// no ERROR line is logged, and the exit code is 0 (as it was). The setup's error kept
 // that cause; keploy#4786 had Instrument replace it with its own words, so
 // Start logged "failed to instrument" at ERROR. A setup that fails on its own
-// is logged at ERROR with its cause, and fails the run.
+// is logged at ERROR by Start with its cause, and fails the run.
 func TestASetupTheRunCancelledIsTheRunsCancellation(t *testing.T) {
 	run := newBasePathRun(t, "", "t1")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,9 +54,10 @@ func TestASetupTheRunCancelledIsTheRunsCancellation(t *testing.T) {
 	if err == nil || errors.Is(err, context.Canceled) {
 		t.Fatalf("Start: %v, want the setup's failure", err)
 	}
+	// Start's own line, naming the cause (Instrument logs the failure too).
 	logged := run.errorLogs()
-	if len(logged) == 0 || !strings.Contains(strings.Join(logged, "\n"), "failed setting up the environment") {
-		t.Fatalf("a failed setup was not logged at ERROR: %q", logged)
+	if want := "failed to instrument: failed setting up the environment: " + boom.Error(); !strings.Contains(strings.Join(logged, "\n"), want) {
+		t.Fatalf("a failed setup did not log %q at ERROR: %q", want, logged)
 	}
 	if !strings.Contains(err.Error(), boom.Error()) {
 		t.Fatalf("Start: %v, want the setup's own error in it", err)
