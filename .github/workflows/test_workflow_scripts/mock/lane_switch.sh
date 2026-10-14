@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced by the mock lanes: which half of a lane this run runs.
 #   MOCK_LANE_SWITCH=off   only its runs without the proven switch, today's default
 #   MOCK_LANE_SWITCH=on    only its runs under KEPLOY_PROVEN=1, the flip's default
@@ -23,3 +24,6 @@ half() {
 SWITCH_VALUES=()
 if half off; then SWITCH_VALUES+=(""); fi
 if half on; then SWITCH_VALUES+=(1); fi
+
+# Loaded: a lane checks this status and that half is defined.
+true

@@ -49,8 +49,12 @@ fail() {
   FAIL=1
 }
 
-[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
-source "$MOCK_DIR/lane_switch.sh"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > dep.py <<'PY'
@@ -84,21 +88,20 @@ def check():
 PY
 
 # One test process running t1 (/a) then t2 (/b), each in a scope of its own.
-# argv: PORT [legacy-pid]: with legacy-pid, an agent without the switch is
-# sent this process's pid on each call, as today's parallel workers send it.
+# Each call is the wire's own: v1 under the switch, and without it the scope
+# API as it was, with this worker's pid (keploy_v1.py).
 cat > rec.py <<'PY'
 import os, sys, urllib.request
 import guard, keploy_v1 as k
-PORT, legacy_pid = sys.argv[1], len(sys.argv) > 2
+PORT = sys.argv[1]
 def call(p): return urllib.request.urlopen("http://127.0.0.1:%s%s" % (PORT, p)).read()
 guard.check()
 mode = k.claim(".", os.getcwd())
-pid = os.getpid() if legacy_pid else None
 print("CLAIM=" + mode, flush=True)
 for name, path, want in (("t1", "/a", b"AAA"), ("t2", "/b", b"BBB")):
-    assert k.begin(name, "rec.py", pid=pid) is None, "keploy told the record to skip " + name
+    assert k.begin(name, "rec.py") is None, "keploy told the record to skip " + name
     assert call(path) == want
-    reason = k.end(name, "passed", file="rec.py", pid=pid)
+    reason = k.end(name, "passed", file="rec.py")
     assert reason is None, "keploy failed %s: %s" % (name, reason)
 print("RECORD_OK", flush=True)
 PY
@@ -283,7 +286,7 @@ fi
 
 if half off; then
 echo "== 3. without the switch: record two endpoints under two pid scopes =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT legacy-pid" --name p --disable-tele 2>&1 | tee rec.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p --disable-tele 2>&1 | tee rec.log
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || fail "without the switch the record should pass (exit 0), got $RC"
 case "$(line_of rec.log CLAIM)" in

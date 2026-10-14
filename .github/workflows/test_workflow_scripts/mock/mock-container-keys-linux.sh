@@ -151,8 +151,12 @@ PY
 # collects, then begin each test with its file and canSkip, and end it with
 # its outcome), failing on any answer it cannot trust. Without the switch the
 # agent has no claim route, and the harness speaks the scope API as it was.
-[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
-source "$MOCK_DIR/lane_switch.sh"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 

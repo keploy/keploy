@@ -36,8 +36,12 @@ fi
 
 # This lane's directory: lane_switch.sh.
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
-source "$MOCK_DIR/lane_switch.sh"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 RECORD_BIN="${RECORD_BIN:-keploy}"
 ROOT="$(mktemp -d)"
 cd "$ROOT" || exit 1

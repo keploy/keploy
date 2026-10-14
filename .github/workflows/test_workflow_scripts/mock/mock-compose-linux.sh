@@ -41,8 +41,12 @@ REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
-[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
-source "$MOCK_DIR/lane_switch.sh"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 # Tear down only this project, by name. Never a blanket prune.
@@ -117,14 +121,19 @@ for attempt in range(30):
 # verdict sent at the end: under compose the agent is stopped with the runner,
 # so what the replay knows about the test comes from the account it leaves.
 # Any answer the harness cannot trust fails the runner.
+# No pid on the scope API without the switch: this process's pid is its
+# container's, and the agent (--pid=host) scopes a worker by the host pid it
+# sees on each connection, so a worker scope keyed on it would never apply
+# and the runner would be served the whole pool. Its test narrows the one
+# pid-less scope instead.
 import keploy_v1 as k
 print("CLAIM=" + k.claim(".", os.getcwd()), flush=True)
-assert k.begin("compose_test", "runner.py") is None, "keploy told the runner to skip compose_test"
+assert k.begin("compose_test", "runner.py", pid=None) is None, "keploy told the runner to skip compose_test"
 for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
-reason = k.end("compose_test", "passed", file="runner.py")
+reason = k.end("compose_test", "passed", file="runner.py", pid=None)
 assert reason is None, "keploy failed compose_test: %s" % reason
 # A call the recording does not have, made only when asked. The runner does not
 # depend on its answer: it is there for keploy to report as missed.
