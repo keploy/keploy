@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -566,6 +567,11 @@ type Recorder struct {
 	// agent still held from before the stop: the recording is incomplete,
 	// and ends as failed.
 	captureLost atomic.Bool
+	// realUncaptured is set, under the proven switch with a mock.real list,
+	// when keploy could neither capture nor relay as real a connection of
+	// the recording, or could not read whether it did (reportRealRun): the
+	// recording is incomplete, and ends as failed, as for a capture loss.
+	realUncaptured atomic.Bool
 	// heldFrames counts the test cases and mocks the frame drains handed on
 	// after the stop that may have been captured before it: what the agent's
 	// answer to a look (holdForBacklog) is about. Mappings, which it does not
@@ -1202,6 +1208,15 @@ func recordExitCode(err error) int {
 func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// A mock.real keploy cannot read is refused before anything runs (proven
+	// switch only).
+	if err := realclient.Check(r.mockReal()); err != nil {
+		utils.LogError(r.logger, err, "keploy cannot read keploy.yml mock.real")
+		// A recording that cannot start fails the process (the stop
+		// defer below arms the code for every later failure).
+		utils.SetExitCodeOnce(recordExitCode(err))
+		return err
+	}
 	// A recorder can be started again: this recording has not begun to stop,
 	// nor lost anything yet.
 	r.stopping.Store(false)
@@ -1482,12 +1497,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if composeAgent {
 			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
 			drainFrames()
+			// Read while the agent, which the app's stack carries, still
+			// runs: what it could not capture (mock.real).
+			if recordingStarted {
+				r.reportRealRun(ctx)
+			}
 		}
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
+			// Read before the frames drain: the agent stays up while this
+			// recording holds its streams open, even when the stop signal
+			// reached it too, and the app has stopped making calls.
+			if recordingStarted {
+				r.reportRealRun(ctx)
+			}
 			drainFrames()
 		}
 
@@ -1734,6 +1760,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// Under the proven switch: test cases recorded while the agent could
 		// not capture every call, or that could not be checked, fail the run.
 		if capWatch.finish(newTestSetID) {
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			incomplete = true
+		}
+		if r.realUncaptured.Load() {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 			incomplete = true
 		}
@@ -2727,6 +2757,15 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			return FrameChan{}, err
 		}
 		tlsPrivateKey = string(keyBytes)
+	}
+
+	// Under the proven switch the agent is handed the run's mock.real first
+	// (design v14 §4): its destinations are reached for real, never
+	// recorded, and each test case lists those its request used.
+	if err := realclient.Push(mockCtx, r.logger, r.instrumentation, r.mockReal()); err != nil {
+		cancel()
+		frameDrained() // the mapping forwarder is not started on these returns
+		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{

@@ -32,6 +32,17 @@ type TestReport struct {
 	// and when nothing was checked (an agent that does not count, a run that
 	// does not mock): a report does not tell those two apart.
 	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+	// Real is what the set's run saw of mock.real beyond its test cases
+	// (proven switch): the destinations it reached, and the connections
+	// keploy could not capture outside them. RealListed are the
+	// destinations the recordings of its test cases that ran list. Absent
+	// without a mock.real list.
+	Real       *RealRun `json:"real,omitempty" yaml:"real,omitempty"`
+	RealListed []string `json:"realListed,omitempty" yaml:"real_listed,omitempty"`
+	// RealFailure is why mock.real failed the set (design v14 §8.2 rule 4):
+	// a destination the recordings list that the run never reached, or
+	// that never answered. JUnit fails a case of its own with it.
+	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -130,6 +141,9 @@ type TestResult struct {
 	// failure without --strict-failure); the report still names the places.
 	// Absent when there is none.
 	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Real are the mock.real destinations the test case used while it ran
+	// (proven switch): its REAL rows. Absent when it used none.
+	Real []RealUse `json:"real,omitempty" yaml:"real,omitempty"`
 	// Variables are the test variables bound while the test case ran (proven
 	// switch): the values its request sent, and each value a dependency call
 	// carried where the learn step found it first, with where it was taken.

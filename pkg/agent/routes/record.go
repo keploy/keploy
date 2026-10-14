@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -122,6 +123,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// its path had before it existed.
 		r.HandleFunc("/real", a.HandleRealDeps)
 		r.HandleFunc("/real/run", a.HandleRealRun)
+		r.HandleFunc("/real/test", a.HandleRealTest)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		// The refused inserts into the hooks' PID maps, each a process they
@@ -233,10 +235,29 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
-		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	real := provenswitch.On() && len(req.Real) > 0
+	// A mock.real case without a recorded request time has nothing to
+	// freeze to: only its move onto real time below.
+	if !real || !req.TimeStamp.IsZero() {
+		if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
+			a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if real {
+		// A test case that uses mock.real runs on the real clock (F3): after
+		// the rest of the hook (a coverage window, say), its clock moves off
+		// the recorded request onto real time.
+		if err := agent.BeginRealTestCase(r.Context(), req.TestCaseName); err != nil {
+			a.logger.Error("could not put a test case that uses mock.real on the real clock", zap.String("testCase", req.TestCaseName), zap.Error(err))
+			code := http.StatusInternalServerError
+			if errors.Is(err, agent.ErrNoRealTestClock) {
+				code = http.StatusNotImplemented
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -436,6 +457,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// keploy record names each test case's mock.real destinations by when
+	// they were used: the uses are kept while this stream is open, and none
+	// after (proven switch only).
+	if k, ok := a.svc.(realUseKeeper); ok && provenswitch.On() {
+		k.KeepRealUses(true)
+		defer k.KeepRealUses(false)
+	}
 	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
@@ -523,6 +551,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
 			return true
+		}
+
+		// Under the proven switch, the mock.real destinations its request
+		// used, named as its mocks are, by time (design v14 §4): the
+		// test case's recording lists them, and its replay runs on the
+		// real clock.
+		if u, ok := a.svc.(realUseReader); ok && provenswitch.On() {
+			from, to := testCaseWindow(t)
+			t.Real = u.RealUsedDuring(from, to)
 		}
 
 		tcsSentSoFar++

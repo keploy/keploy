@@ -63,6 +63,9 @@ type NetworkTrafficDocJSON struct {
 	Start        string              `json:"start,omitempty"`
 
 	Variables models.MockVariables `json:"variables,omitempty"`
+
+	// Real is NetworkTrafficDoc.Real.
+	Real []string `json:"real,omitempty"`
 }
 
 // DocToJSON converts a NetworkTrafficDoc to its JSON-friendly representation
