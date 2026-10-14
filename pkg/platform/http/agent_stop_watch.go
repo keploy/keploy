@@ -131,8 +131,9 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 // before it alone: the first kills as a verdict does, and the drains still
 // wait for the agent's exit; one answering an offer made after that kills it
 // at once, kill(true), where the CLI can, after which the watch waits no
-// more. reported, when set, is closed at the agent's
-// first report: its teardown has begun.
+// more. The offers say what a press does where kill does something else
+// (reach). reported, when set, is closed at the agent's first report: its
+// teardown has begun.
 //
 // While the agent reports that it records its steps (Steps) and keeps
 // beating, no drain gives up on keploy's teardown (utils.BeginAgentStop): its
@@ -149,9 +150,59 @@ type stopWatch struct {
 	kill     func(now bool) error
 	poll     time.Duration
 	reported chan<- struct{}
+	// reach is what kill does where it is not the escalation signal at
+	// kill(false) and SIGKILL at kill(true): what the offers say a press
+	// does.
+	reach killReach
 	// judged, when set, is told each report once the judge has read it
 	// (tests).
 	judged func(utils.TeardownProgress)
+}
+
+// killReach is what a stopWatch's kill does to the agent, where that is not
+// what it does to an agent the CLI started directly on Linux or macOS, or in
+// a container: the escalation signal at kill(false), on which the agent dies
+// once no teardown work is in progress, and SIGKILL at kill(true).
+type killReach struct {
+	// firstAtOnce: kill(false) already ends the agent at once (Windows,
+	// which has no escalation signal, and where the agent attaches nothing
+	// to a kernel).
+	firstAtOnce bool
+	// noAtOnce: kill(true) also only sends the escalation signal: an agent
+	// run through sudo, as root, which the user who ran keploy may not
+	// SIGKILL. It still dies once no teardown work is in progress; keploy
+	// only stops waiting for it.
+	noAtOnce bool
+}
+
+// offer is what a stopWatch says a press does, before a press (first) or
+// after one.
+func (r killReach) offer(first bool) string {
+	switch {
+	case r.firstAtOnce:
+		return "Press Ctrl+C again to stop the keploy agent at once"
+	case first:
+		return "Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress"
+	case r.noAtOnce:
+		return "Press Ctrl+C again to stop waiting for the keploy agent: it still stops once no teardown work is in progress"
+	default:
+		return "Press Ctrl+C again to stop the keploy agent at once: what it has not yet removed from the kernel may stay attached"
+	}
+}
+
+// pressed is what a stopWatch says as it acts on a press, before a press
+// (first) or after one.
+func (r killReach) pressed(first bool) string {
+	switch {
+	case r.firstAtOnce && first:
+		return "Ctrl+C was pressed"
+	case first:
+		return "Ctrl+C was pressed: it stops once no teardown work is in progress"
+	case r.noAtOnce:
+		return "Ctrl+C was pressed again: keploy stops waiting for it, and it stops once no teardown work is in progress"
+	default:
+		return "Ctrl+C was pressed again"
+	}
 }
 
 // holdStale is how long, on the CLI's clock, a stepping agent may go without
@@ -244,24 +295,20 @@ func (w stopWatch) run() bool {
 				// The first press: the agent dies once no teardown work is
 				// in progress, as at a verdict. Its stop still ends on its
 				// own, so the drains still wait for it (hold).
-				if !w.force("Ctrl+C was pressed: it stops once no teardown work is in progress", false) {
+				if !w.force(w.reach.pressed(true), false) {
 					return false
 				}
 				pressed = true
 				continue
 			}
-			if !w.force("Ctrl+C was pressed again", true) {
+			if !w.force(w.reach.pressed(false), true) {
 				return false // it had exited: nothing was killed
 			}
 			return true
 		case <-ticks.C:
 			if !offering && notice.Next() {
 				offering = true
-				if pressed {
-					w.logger.Info("Press Ctrl+C again to stop the keploy agent at once: what it has not yet removed from the kernel may stay attached")
-				} else {
-					w.logger.Info("Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress")
-				}
+				w.logger.Info(w.reach.offer(!pressed))
 			}
 			continue
 		case <-stale.C:

@@ -353,12 +353,28 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// suite that never finished.
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
-	if actual != nil {
-		m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
-			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords)
+	stoppedNow := false
+	if actual != nil && m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+		func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords) {
+		select {
+		case <-utils.StopNow():
+			stoppedNow = true
+		default: // the agent ended the drain: failed at ERROR, by the drain
+		}
 	}
 	stopWatch()
 	actual.wait(mockDrainStall)
+	if stoppedNow {
+		// The user's Ctrl+C, at the drain's offer, gave up the requests the
+		// agent still held: what this run would judge is short of them, and
+		// a verdict on part of the run could pass a suite that did not. It
+		// ends as a replay the user stopped before it finished does (above):
+		// 128+N, unjudged, the last run's receipt left standing.
+		if code := utils.InterruptExitCode(); code != 0 {
+			utils.SetExitCodeOnce(code)
+		}
+		return nil
+	}
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).

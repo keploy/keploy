@@ -216,7 +216,7 @@ func TestEndAgent(t *testing.T) {
 					run.exited()
 				}()
 			}
-			go func() { a.endAgent(run, 1, ask, terminate, kill, read); close(returned) }()
+			go func() { a.endAgent(run, 1, ask, terminate, kill, killReach{}, read); close(returned) }()
 			select {
 			case <-returned:
 			case <-time.After(time.Minute):
@@ -361,11 +361,15 @@ func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 // An interrupt that came before the stop does not force it: `sudo pkill -INT
 // -f keploy` signals sudo and keploy both, and sudo hands its signal on, so
 // one stop reaches keploy twice. The agent, asked to stop and making
-// progress, is waited for, not killed.
+// progress, is waited for, not killed. The stop offers a press only a whole
+// period after its signal came: on the test's clock, which stands still,
+// never -- the copy comes once the stop has polled the agent a few times.
 func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
-	utils.MarkInterruptedAgain() // the stop, delivered twice
+	theStopWasASignal(t)
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
 	a := &AgentClient{logger: zap.NewNop()}
 	run := newAgentRun()
 	run.ready.Store(true)
@@ -378,21 +382,26 @@ func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
 	returned := make(chan struct{})
 	go func() {
 		a.endAgent(run, 1, func() error { return nil }, func() error { return nil },
-			func(bool) error { killed.Store(true); run.exited(); return nil }, read)
+			func(bool) error { killed.Store(true); run.exited(); return nil }, killReach{}, read)
 		close(returned)
 	}()
 	hung := time.After(time.Minute) // only turns a hang into a failure
-	for reads.Load() < 5 {
-		select {
-		case <-returned:
-			t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
-		case <-hung:
-			t.Fatal("the stop never read the agent's progress")
-		case <-time.After(time.Millisecond):
+	readsTo := func(n uint64) {
+		for reads.Load() < n {
+			select {
+			case <-returned:
+				t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
+			case <-hung:
+				t.Fatal("the stop never read the agent's progress")
+			case <-time.After(time.Millisecond):
+			}
 		}
 	}
+	readsTo(3)
+	utils.MarkInterruptedAgain() // the copy of the stop, as it waits
+	readsTo(6)
 	if killed.Load() {
-		t.Fatal("an interrupt from before the stop forced it")
+		t.Fatal("a copy of the stop forced it")
 	}
 	run.exited()
 	select {

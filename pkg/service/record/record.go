@@ -774,7 +774,7 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 					msg = "Waiting for the keploy agent to finish parsing what it captured before the stop (its parsers are behind the traffic)"
 				}
 				if offering {
-					msg += "; press Ctrl+C again to stop now, and lose the rest"
+					msg += "; press Ctrl+C again to stop now: the rest is then not saved, and this recording fails as incomplete"
 				}
 				r.logger.Info(msg, zap.Uint64("savedSinceTheStop", now-start))
 				said = true

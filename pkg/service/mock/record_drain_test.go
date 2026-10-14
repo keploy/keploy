@@ -435,11 +435,18 @@ func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
 // (`sudo pkill -INT -f keploy` reaches keploy directly and from sudo) comes
 // before the drain says another interrupt stops it now (utils.OfferStopNow),
 // and ends nothing. Taken for a second Ctrl+C, it gave the drain up at once,
-// and the mock the agent still held was lost.
+// and the mock the agent still held was lost. The drain offers only a whole
+// notice period after the stop's signal came: on the test's clock, which
+// stands still, never -- the copy comes after its notices have begun.
 func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
 	utils.ResetInterruptedAgain()
-	t.Cleanup(utils.ResetInterruptedAgain)
-	utils.MarkInterruptedAgain() // the copy, before the drain said anything
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	utils.MarkInterrupted() // the stop
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
 	inst := &pendingInstrumentation{
 		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
 		quietFor:               4 * mockDrainQuiet,
@@ -447,12 +454,36 @@ func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
 	db := &recordingMockDB{}
 	cfg := &config.Config{}
 	cfg.Mock.Name = "duplicate-stop"
-	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
-		t.Fatalf("Record: %v", err)
+	core, logs := observer.New(zapcore.InfoLevel)
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	}()
+	deadline := time.After(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessageSnippet(recordDrainWords.saving).Len() == 0 {
+		select {
+		case err := <-returned:
+			t.Fatalf("Record returned (%v) before its drain gave a notice: %v", err, logs.All())
+		case <-deadline:
+			t.Fatalf("the drain gave no notice: %v", logs.All())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	utils.MarkInterruptedAgain() // the copy, after the drain's notices began
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	case <-deadline:
+		t.Fatal("Record never returned")
 	}
 	inst.wg.Wait()
 	if got := db.inserted(); len(got) != 1 {
 		t.Fatalf("persisted %v: the copy of the stop gave the drain up before the agent handed its mock over", got)
+	}
+	if logs.FilterMessage(recordDrainWords.gaveUp).Len() != 0 {
+		t.Fatalf("the copy of the stop was taken for a second interrupt: %v", logs.All())
 	}
 }
 

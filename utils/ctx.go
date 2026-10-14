@@ -128,6 +128,14 @@ func MarkInterrupted() { interrupted.Store(true) }
 // ClearInterrupted is for tests, which share one process across cases.
 func ClearInterrupted() { interrupted.Store(false); interruptSignal.Store(0) }
 
+// SetInterruptSignalForTest records n as the number of the signal that
+// stopped this run, as NewCtx's handler does (InterruptExitCode), and returns
+// what puts the one before back. Tests only.
+func SetInterruptSignalForTest(n int) (restore func()) {
+	old := interruptSignal.Swap(int32(n))
+	return func() { interruptSignal.Store(old) }
+}
+
 // interruptLatch is a channel closed once.
 type interruptLatch struct {
 	once sync.Once
@@ -212,6 +220,9 @@ type StopNowNotice struct {
 	// next and withdraw are the offer's, once made (OfferStopNow).
 	next     <-chan struct{}
 	withdraw func()
+	// withdrawn: the stop no longer waits (Withdraw); nothing more is
+	// offered.
+	withdrawn bool
 }
 
 // noticeClock is StopNowNotice's clock (nil: time.Now): a test's to set
@@ -247,6 +258,8 @@ func NewStopNowNotice(period time.Duration) *StopNowNotice {
 // since an earlier one.
 func (n *StopNowNotice) Next() (offering bool) {
 	switch {
+	case n.withdrawn:
+		return false
 	case n.withdraw != nil:
 	case n.sawAt.IsZero():
 		// The flag before the clock: a signal that comes between the two is
@@ -261,11 +274,18 @@ func (n *StopNowNotice) Next() (offering bool) {
 }
 
 // Interrupt returns a channel closed by the first interrupt after the offer:
-// nil, which never is, until the offer is made.
-func (n *StopNowNotice) Interrupt() <-chan struct{} { return n.next }
+// nil, which never is, until the offer is made, and once it is withdrawn.
+func (n *StopNowNotice) Interrupt() <-chan struct{} {
+	if n.withdrawn {
+		return nil
+	}
+	return n.next
+}
 
-// Withdraw withdraws the offer, if one was made: the stop no longer waits.
+// Withdraw withdraws the offer, if one was made: the stop no longer waits,
+// and the notice offers nothing more.
 func (n *StopNowNotice) Withdraw() {
+	n.withdrawn = true
 	if n.withdraw != nil {
 		n.withdraw()
 	}
@@ -275,25 +295,21 @@ func (n *StopNowNotice) Withdraw() {
 // counted (RepeatInterrupts, InterruptedAfter), and, while a stop offers to
 // end at one (OfferStopNow), it ends that stop (StopNow). It reports whether
 // it did. For tests too.
-func MarkInterruptedAgain() (stoppedNow bool) { return noteRepeatInterrupt(nil) }
-
-// noteRepeatInterrupt is MarkInterruptedAgain. say, when set, is told whether
-// the interrupt ends a stop, and is called before anything that waits on the
-// interrupt is woken: what is said of an interrupt comes before what it does.
-func noteRepeatInterrupt(say func(stoppedNow bool)) (stoppedNow bool) {
+//
+// StopNow is closed before anything that waits on the repeat itself
+// (InterruptedAfter, an offer's next) is woken: whatever such a wait finds,
+// it finds a repeat that ended a stop to have ended it.
+func MarkInterruptedAgain() (stoppedNow bool) {
 	repeatInterrupts.mu.Lock()
 	defer repeatInterrupts.mu.Unlock()
 	stoppedNow = repeatInterrupts.offers > 0
-	if say != nil {
-		say(stoppedNow)
-	}
-	repeatInterrupts.n++
-	close(repeatInterrupts.next)
-	repeatInterrupts.next = make(chan struct{})
 	if stoppedNow {
 		l := stopNow.Load()
 		l.once.Do(func() { close(l.ch) })
 	}
+	repeatInterrupts.n++
+	close(repeatInterrupts.next)
+	repeatInterrupts.next = make(chan struct{})
 	return stoppedNow
 }
 
@@ -480,12 +496,12 @@ func NewCtx() context.Context {
 		// The line claims nothing: what a repeat does, the stop that acts on
 		// it says itself (a recording's drain: what the agent still held is
 		// not saved; an agent's stop: how it stops the agent), and one before
-		// any offer does nothing. It is said before anything waiting on the
-		// repeat is woken, so it comes before what the repeat makes happen.
+		// any offer does nothing. It is said before the repeat is noted, so
+		// it comes before what the repeat makes happen, and outside the
+		// repeats' lock, which a stdout that does not drain must not hold.
 		for sig2 := range sigs {
-			noteRepeatInterrupt(func(bool) {
-				fmt.Printf("Signal received again: %s\n", sig2)
-			})
+			fmt.Printf("Signal received again: %s\n", sig2)
+			MarkInterruptedAgain()
 		}
 	}()
 

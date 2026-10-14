@@ -2057,9 +2057,11 @@ const nativeStopPoll = 250 * time.Millisecond
 // over its API, or sent SIGTERM (its leader: sudo hands it on), and waited for
 // while its teardown makes progress, which it reports at progress (endAgent).
 func (a *AgentClient) stopNativeAgent(run *agentRun, pid int, cmd *exec.Cmd, progress string) {
+	var reach killReach
+	reach.firstAtOnce, reach.noAtOnce = agentUtils.KillAgentReach(cmd)
 	a.endAgent(run, pid, a.requestAgentStop,
 		func() error { return agentUtils.TerminateCommand(cmd, a.logger) },
-		func(now bool) error { return agentUtils.KillAgentCommand(cmd, a.logger, now) },
+		func(now bool) error { return agentUtils.KillAgentCommand(cmd, a.logger, now) }, reach,
 		readProgressFile(progress))
 }
 
@@ -2070,9 +2072,11 @@ func (a *AgentClient) stopNativeAgent(run *agentRun, pid int, cmd *exec.Cmd, pro
 // password prompt: sudo exits on it there.
 func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHandle, progress string) {
 	h.RestoreTerminal()
+	var reach killReach
+	reach.firstAtOnce, reach.noAtOnce = agentUtils.KillPTYReach(h)
 	a.endAgent(run, pid, a.requestAgentStop,
 		func() error { return agentUtils.TerminatePTYCommand(h, a.logger) },
-		func(now bool) error { return agentUtils.KillPTYCommand(h, a.logger, now) },
+		func(now bool) error { return agentUtils.KillPTYCommand(h, a.logger, now) }, reach,
 		readProgressFile(progress))
 }
 
@@ -2091,10 +2095,11 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // on which it dies once no teardown work is in progress -- or at the user's
 // Ctrl+C once the stop has said a press stops it, as that offer says:
 // kill(false) at a press answering the first offer, kill(true), at once, at
-// one answering an offer made after a press (stopWatch).
+// one answering an offer made after a press (stopWatch). reach is what kill
+// does where that differs (Windows, sudo): the offers say so.
 // An agent already reaped is never signalled: its pid may be another
 // process's by now.
-func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, read func(context.Context) (utils.TeardownProgress, bool)) {
+func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, reach killReach, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
 			if run.isGone() {
@@ -2113,7 +2118,7 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
-		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll}
+		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach}
 
 	err := ask()
 	switch {

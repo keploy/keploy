@@ -1129,12 +1129,13 @@ var recordDrainWords = drainWords{
 }
 
 // replayDrainWords are keploy mock replay's: it collects the requests the
-// agent captured, for the run's report.
+// agent captured, for the run's report. A run short of them is not judged
+// (Replay).
 var replayDrainWords = drainWords{
 	saving:   "Still collecting the requests the keploy agent captured before the run ended",
-	stopNow:  "press Ctrl+C again to stop now, and leave the rest out of this run's report",
+	stopNow:  "press Ctrl+C again to stop now: this run then ends unjudged, as one stopped before it finished",
 	gaveUp:   "stopped collecting the requests the agent captured before the run ended, at a second interrupt",
-	nextStep: "requests the agent still held are left out of this run's report",
+	nextStep: "this run ends unjudged, as one stopped before it finished; the last run's receipt is kept. Run it again",
 }
 
 // stoppedNow is drainTrailingMocks ended by the user's second interrupt

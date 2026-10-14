@@ -258,7 +258,8 @@ func closedChannel() chan struct{} {
 // the returned end is called (once; later calls do nothing). A drain
 // (DrainErrGroupStatus, DrainErrGroupProgress) does not give up while one is
 // in progress: the stop ends on its own -- at the agent's exit, at a kill once
-// its teardown has stopped making progress, or at a second Ctrl+C
+// its teardown has stopped making progress, or at a kill at once, at the
+// press of Ctrl+C that the stop offered for it after an earlier press
 // (pkg/platform/http, stopWatch) -- and a drain that gave up first let keploy
 // exit with the agent still running, its hooks attached, and nothing left to
 // kill it if its teardown had wedged.

@@ -125,11 +125,17 @@ func offerStopNow(t *testing.T) {
 // come after the stop has begun. Taken for a second Ctrl+C, it gave the drain
 // up at its start (savedSinceTheStop 0), and what the agent still held from
 // before the stop was lost. Only an interrupt after the drain said another one
-// stops it now (utils.OfferStopNow) ends it.
+// stops it now (utils.OfferStopNow) ends it, and the drain says so only a
+// whole notice period after the stop's signal came: on the test's clock, which
+// stands still, never -- the copy comes after the drain's notices have begun.
 func TestGetTestAndMockChans_AStopDeliveredTwiceSavesWhatTheAgentHeld(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
-	core, logs := observer.New(zapcore.WarnLevel)
+	utils.MarkInterrupted() // the stop
+	t.Cleanup(utils.ClearInterrupted)
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
+	core, logs := observer.New(zapcore.InfoLevel)
 	const held = 50
 	// The agent says what it holds from before the stop until it has sent
 	// it all: the drain waits on that, not on the stream's quiet alone.
@@ -163,7 +169,15 @@ func TestGetTestAndMockChans_AStopDeliveredTwiceSavesWhatTheAgentHeld(t *testing
 		}
 	}()
 	stop()
-	utils.MarkInterruptedAgain() // the copy sudo hands on, after the stop began
+	defer r.reportDrainProgress(20 * time.Millisecond)()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessageSnippet("Still saving").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the drain gave no notice: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	utils.MarkInterruptedAgain() // the copy sudo hands on, after the drain's notices began
 	close(f.started)
 	select {
 	case <-done:

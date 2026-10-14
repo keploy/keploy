@@ -86,6 +86,13 @@ func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, _ bool) error {
 	return StopCommand(cmd, logger)
 }
 
+// KillAgentReach says what KillAgentCommand does to the agent cmd started:
+// it ends it at once, now or not.
+func KillAgentReach(*exec.Cmd) (firstAtOnce, noAtOnce bool) { return true, false }
+
+// KillPTYReach is KillAgentReach: Windows has no PTY.
+func KillPTYReach(*PTYHandle) (firstAtOnce, noAtOnce bool) { return true, false }
+
 // KillPTYCommand is KillAgentCommand: Windows has no PTY.
 func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
 	if handle == nil || handle.cmd == nil {

@@ -306,6 +306,67 @@ func TestStopWatchKillsAtASecondCtrlC(t *testing.T) {
 	}
 }
 
+// Each offer says what the press it asks for does, as the kill it makes does
+// it: an agent under sudo cannot be killed at once by a user who may not
+// signal it as root -- keploy only stops waiting for it -- and on Windows
+// every kill is at once.
+func TestStopWatchOffersSayWhatItsKillDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		reach         killReach
+		first, second string // the offers
+		pressed       string // what is said at the second press
+	}{
+		{"direct", killReach{},
+			"Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress",
+			"Press Ctrl+C again to stop the keploy agent at once: what it has not yet removed from the kernel may stay attached",
+			"Stopping the keploy agent by force: Ctrl+C was pressed again"},
+		{"sudo", killReach{noAtOnce: true},
+			"Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress",
+			"Press Ctrl+C again to stop waiting for the keploy agent: it still stops once no teardown work is in progress",
+			"Stopping the keploy agent by force: Ctrl+C was pressed again: keploy stops waiting for it, and it stops once no teardown work is in progress"},
+		{"windows", killReach{firstAtOnce: true},
+			"Press Ctrl+C again to stop the keploy agent at once",
+			"Press Ctrl+C again to stop the keploy agent at once",
+			"Stopping the keploy agent by force: Ctrl+C was pressed again"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			theStopWasASignal(t)
+			core, logs := observer.New(zapcore.InfoLevel)
+			f := newFakeAgent()
+			f.busy = true // removing what it attached to the kernel: no kill but SIGKILL ends it
+			f.set(p(1, 0, false))
+			w := &watching{finished: make(chan struct{})}
+			sw := stopWatch{logger: zap.New(core), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond, reach: tc.reach}
+			go func() { w.killed.Store(sw.run()); close(w.finished) }()
+			t.Cleanup(func() { f.exited(); <-w.finished })
+			offers := func(n int) {
+				within(t, "the offer", func() {
+					for logs.FilterMessageSnippet("Press Ctrl+C again").Len() < n {
+						time.Sleep(time.Millisecond)
+					}
+				})
+			}
+			offers(1)
+			ctrlCWhileWaited(t)
+			offers(2)
+			ctrlCWhileWaited(t)
+			if !awaitWatch(t, w) {
+				t.Fatal("the second press was not taken")
+			}
+			said := logs.FilterMessageSnippet("Press Ctrl+C again").All()
+			if said[0].Message != tc.first || said[1].Message != tc.second {
+				t.Fatalf("offered %q, then %q; want %q, then %q", said[0].Message, said[1].Message, tc.first, tc.second)
+			}
+			if logs.FilterMessage(tc.pressed).Len() != 1 {
+				t.Fatalf("the second press was not said as %q: %v", tc.pressed, logs.FilterLevelExact(zapcore.WarnLevel).All())
+			}
+		})
+	}
+}
+
 // The first press, with the agent between teardown steps, has it die at once
 // of the escalation: the watch sees it exit, and reports no kill at once.
 func TestStopWatchFirstCtrlCLetsAnIdleAgentDie(t *testing.T) {
