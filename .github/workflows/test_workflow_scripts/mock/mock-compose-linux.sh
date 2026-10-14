@@ -10,6 +10,14 @@
 # compose path works at all; the ORDER of the agent calls is pinned by
 # TestComposeOrdering in pkg/service/mock, which can see it directly.
 #
+# Without the proven switch: today's default, which the flip deletes with the
+# switch. Under KEPLOY_PROVEN=1, which the flip makes the default, this
+# release runs a mock record or replay's test command natively only: keploy
+# cannot tell, inside a container, which process runs the tests. Step 0 checks
+# both are refused before anything starts: no compose project, no agent.
+# The runner's harness speaks scope protocol v1 (keploy_v1.py); without the
+# switch the agent has no claim route, and it speaks the scope API as it was.
+#
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test), set by the
 # calling workflow from .github/actions/download-binary's `path` output. The
 # agent image must be loaded as ghcr.io/keploy/keploy:v3-dev —
@@ -21,11 +29,14 @@ set -uo pipefail
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
+# This lane's directory: the shared harness (keploy_v1.py).
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {
@@ -98,24 +109,16 @@ for attempt in range(30):
 # The priced calls are one test, scoped the way a harness scopes it, with its
 # verdict sent at the end: under compose the agent is stopped with the runner,
 # so what the replay knows about the test comes from the account it leaves.
-# A failed scope call is ignored, so a step that takes the agent away runs
-# exactly as it would without one.
-TOKEN = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
-def scope(path, body):
-    h = {"Content-Type": "application/json"}
-    if TOKEN:
-        h["Authorization"] = "Bearer " + TOKEN
-    try:
-        urllib.request.urlopen(urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST"), timeout=5).read()
-    except Exception as e:
-        print("scope call failed:", type(e).__name__, flush=True)
-
-scope("/agent/scope/begin", {"name": "compose_test"})
+# Any answer the harness cannot trust fails the runner.
+import keploy_v1 as k
+print("CLAIM=" + k.claim(".", os.getcwd()), flush=True)
+assert k.begin("compose_test", "runner.py") is None, "keploy told the runner to skip compose_test"
 for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
-scope("/agent/scope/end", {"name": "compose_test", "outcome": "passed"})
+reason = k.end("compose_test", "passed", file="runner.py")
+assert reason is None, "keploy failed compose_test: %s" % reason
 # A call the recording does not have, made only when asked. The runner does not
 # depend on its answer: it is there for keploy to report as missed.
 if os.environ.get("UNRECORDED"):
@@ -187,6 +190,29 @@ priced_mocks() {
   n=$(sudo grep -c 'url: /price/' keploy/e2e/mocks.yaml 2>/dev/null)
   echo "${n:-0}"
 }
+
+# no_project_started LOG WHAT: keploy refused before compose or its agent ran.
+no_project_started() {
+  if [ -n "$(sudo docker ps -aq --filter name=mockc-runner)" ] || [ -n "$(sudo docker ps -aq --filter name=keploy-v3)" ]; then
+    echo "FAIL: $2 started a container before refusing:"; sudo docker ps -a; FAIL=1
+  fi
+  grep -q "RUNNER PASSED 3\|AGENT REFUSED" "$1" && { echo "FAIL: $2 ran the runner"; FAIL=1; }
+}
+
+echo "== 0. under the proven switch, a compose record and replay are refused before anything starts =="
+for verb in record replay; do
+  BIN=$RECORD_BIN
+  [ "$verb" = replay ] && BIN=$REPLAY_BIN
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$BIN" mock "$verb" \
+    -c "docker compose up" --container-name mockc-runner --name e2e-proven --disable-tele > "proven-$verb.log" 2>&1
+  RC=$?
+  echo "$verb under the switch exit=$RC"
+  [ "$RC" -eq 1 ] || { echo "FAIL: under the switch a compose $verb should be refused with exit 1, got $RC"; tail -20 "proven-$verb.log"; FAIL=1; }
+  grep -q "keploy mock $verb with KEPLOY_PROVEN runs the test command natively in this release" "proven-$verb.log" ||
+    { echo "FAIL: the refused compose $verb does not say this release runs the test command natively"; FAIL=1; }
+  no_project_started "proven-$verb.log" "a compose $verb under the switch"
+done
+cleanup
 
 echo "== 1. record a compose project =="
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record \

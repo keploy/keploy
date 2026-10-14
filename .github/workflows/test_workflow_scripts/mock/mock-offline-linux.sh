@@ -24,6 +24,13 @@
 #   loopback loopback only: record a dependency on 127.0.0.1, stop it, and
 #            replay it
 #
+# Every record phase runs again under KEPLOY_PROVEN=1, which the flip makes
+# the default (phases named *-proven, into sets of their own), and must record
+# the same. A replay under the switch needs a build that judges each test
+# (keploy enterprise): offline-proven checks this build refuses it before it
+# runs the test command. The replays above run without the switch, today's
+# default, which the flip deletes with the switch.
+#
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
@@ -101,13 +108,17 @@ PY
 cat > "$WORK/inside.sh" <<'SH'
 #!/bin/sh
 PHASE=$1
+# <phase>-proven: the phase under the proven switch, into a set of its own.
+BASE=${PHASE%-proven}
+PROVEN=""
+[ "$BASE" != "$PHASE" ] && PROVEN=1
 PIDS=""
 trap '[ -z "$PIDS" ] || kill $PIDS 2>/dev/null' EXIT
 cd "$WORK" || exit 1
 export HOME="$WORK/home"
 mkdir -p "$HOME"
 ip link set lo up || exit 1
-case "$PHASE" in
+case "$BASE" in
   online|offline|hosts-*)
     URL="http://dep.keploy.test:$PORT"
     echo "nameserver $DEP_IP" > "$WORK/resolv.conf"
@@ -122,16 +133,17 @@ case "$PHASE" in
     URL="http://127.0.0.1:$PORT"
     ;;
 esac
-case "$PHASE" in
+case "$BASE" in
   online|offline) SET=online ;;
   hosts-*) SET=hosts ;;
   loopback-*) SET=loopback ;;
 esac
-case "$PHASE" in
+[ -n "$PROVEN" ] && SET="$SET-proven"
+case "$BASE" in
   online|hosts-record|loopback-record) SUB=record ;;
   *) SUB=replay ;;
 esac
-if [ "$PHASE" = online ] || [ "$PHASE" = hosts-record ]; then
+if [ "$BASE" = online ] || [ "$BASE" = hosts-record ]; then
   # A veth pair only to hold DEP_IP: the veth driver is there wherever Docker
   # is, which a dummy link's module is not on every runner kernel.
   ip link add kdep0 type veth peer name kdep1 || exit 1
@@ -140,15 +152,15 @@ if [ "$PHASE" = online ] || [ "$PHASE" = hosts-record ]; then
   python3 depserver.py "$DEP_IP" "$PORT" &
   PIDS="$!"
 fi
-if [ "$PHASE" = online ]; then
+if [ "$BASE" = online ]; then
   python3 dnsserver.py "$DEP_IP" &
   PIDS="$PIDS $!"
 fi
-if [ "$PHASE" = hosts-record ]; then
+if [ "$BASE" = hosts-record ]; then
   { cat /etc/hosts; echo "$DEP_IP dep.keploy.test"; } > "$WORK/hosts"
   mount --bind "$WORK/hosts" /etc/hosts || exit 1
 fi
-if [ "$PHASE" = loopback-record ]; then
+if [ "$BASE" = loopback-record ]; then
   python3 depserver.py 127.0.0.1 "$PORT" &
   PIDS="$!"
 fi
@@ -167,7 +179,7 @@ echo "$DIRECT" > "$WORK/$PHASE.direct"
 # recorded answer for, which hosts-replay has to show.
 DEBUG=""
 [ "$PHASE" = hosts-replay ] && DEBUG="--debug"
-timeout -s INT -k 30 90 "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
+KEPLOY_PROVEN="$PROVEN" timeout -s INT -k 30 90 "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
 echo $? > "$WORK/$PHASE.exit"
 exit 0
 SH
@@ -231,6 +243,32 @@ phase loopback-record 0
   fail "loopback-record: want 2 HTTP mocks"
 phase loopback-replay 1
 proven_offline loopback
+
+# Under the proven switch: the same records.
+phase online-proven 0
+[ "$(grep -c '^kind: DNS' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
+  fail "online-proven: no DNS lookup was recorded"
+[ "$(grep -c '^kind: Http' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "online-proven: want 2 HTTP mocks"
+phase hosts-record-proven 0
+[ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
+  fail "hosts-record-proven: a DNS lookup was recorded for a name /etc/hosts answers"
+[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "hosts-record-proven: want 2 HTTP mocks"
+phase loopback-record-proven 0
+[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "loopback-record-proven: want 2 HTTP mocks"
+
+# ...and this build refuses the replay under it, offline, before the test
+# command runs.
+echo "--- offline-proven ---"
+sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+  unshare -n -m --propagation private "$WORK/inside.sh" offline-proven || fail "offline-proven: the namespace itself failed"
+[ "$(cat "$WORK/offline-proven.exit" 2>/dev/null)" = 1 ] ||
+  fail "offline-proven: keploy exited $(cat "$WORK/offline-proven.exit" 2>/dev/null), want this build's refusal (1)"
+grep -q "needs a keploy build that judges each test" "$WORK/offline-proven.log" ||
+  fail "offline-proven: keploy did not say it needs a build that judges each test"
+grep -q "^ok /" "$WORK/offline-proven.log" && fail "offline-proven: the refused replay ran the test command"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "mock offline e2e FAILED; logs, mocks and receipts are kept in $WORK"

@@ -40,6 +40,10 @@
 # without a password, and `sudo -v` asks for none (hup-user) or always asks
 # for one (hup-pty), so no password is ever typed.
 #
+# Every case runs twice: without the proven switch (today's default) and under
+# KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven). A
+# hang-up must match SIGTERM in each.
+#
 # Run it as a user with passwordless sudo, not as root.
 #
 # Env: RECORD_BIN (the keploy binary under test).
@@ -161,6 +165,10 @@ cat > "$WORK/inside.sh" <<'SH'
 #!/bin/sh
 CASE=$1 MODE=$2 GAP=$3 AS=$4 EXTRA=$5
 D="$WORK/$CASE"
+# <case>-proven is the case under the proven switch.
+BASE=${CASE%-proven}
+PROVEN=""
+[ "$BASE" != "$CASE" ] && PROVEN=1
 mkdir -p "$D/home" "$D/app"
 export HOME="$D/home"
 ip link set lo up || exit 1
@@ -175,7 +183,7 @@ if [ -n "$AS" ]; then
   # keploy runs `sudo -n -v` to learn whether sudo would ask it for a
   # password.
   VERIFYPW=never
-  [ "$CASE" = hup-pty ] && VERIFYPW=always
+  [ "$BASE" = hup-pty ] && VERIFYPW=always
   mount -t tmpfs -o mode=0755 tmpfs /etc/sudoers.d || exit 1
   printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\nDefaults:%s verifypw=%s\n' "$AS" "$AS" "$VERIFYPW" > /etc/sudoers.d/keploy-hangup
   chmod 0440 /etc/sudoers.d/keploy-hangup
@@ -183,6 +191,7 @@ if [ -n "$AS" ]; then
   # the user who ran it under sudo, and it was not run under sudo.
   set -- sudo -u "$AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="$HOME" PATH="$PATH"
 fi
+set -- "$@" env KEPLOY_PROVEN="$PROVEN"
 # shellcheck disable=SC2086 # EXTRA is flags, split on purpose
 "$@" python3 "$WORK/hangup.py" "$MODE" "$GAP" "$D/started" "$D/out" \
   "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT" \
@@ -255,23 +264,30 @@ hup_case() {
   [ "$EXIT_CODE" = "$TERM_EXIT" ] || fail "$name: keploy exited ${EXIT_CODE:-nothing} on a hang-up, and $TERM_EXIT on SIGTERM"
 }
 
-run_case term term 0
-TERM_EXIT=$EXIT_CODE
-[ "$TERM_EXIT" = 0 ] || fail "term: keploy exited ${TERM_EXIT:-nothing} on SIGTERM, want 0 (a stopped recording is not a failure)"
-hup_case hup-gap 0.1
-hup_case hup-nogap 0
-# --debug: only its debug log says which way keploy started its agent.
-hup_case hup-user 0.1 "$(id -un)" --debug
-if ! grep -aq "Starting native agent with args" "$WORK/hup-user/out" ||
-  grep -aq "Starting native agent with PTY" "$WORK/hup-user/out"; then
-  fail "hup-user: keploy did not start its agent with sudo -n, so the case did not check what it is for"
-fi
-hup_case hup-pty 0.1 "$(id -un)" --debug
-grep -aq "Starting native agent with PTY" "$WORK/hup-pty/out" ||
-  fail "hup-pty: keploy did not start its agent on a terminal of its own, so the case did not check what it is for"
+# all_cases <suffix>: every case, each named <case><suffix> ("-proven": under
+# the proven switch).
+all_cases() {
+  local x=$1
+  run_case "term$x" term 0
+  TERM_EXIT=$EXIT_CODE
+  [ "$TERM_EXIT" = 0 ] || fail "term$x: keploy exited ${TERM_EXIT:-nothing} on SIGTERM, want 0 (a stopped recording is not a failure)"
+  hup_case "hup-gap$x" 0.1
+  hup_case "hup-nogap$x" 0
+  # --debug: only its debug log says which way keploy started its agent.
+  hup_case "hup-user$x" 0.1 "$(id -un)" --debug
+  if ! grep -aq "Starting native agent with args" "$WORK/hup-user$x/out" ||
+    grep -aq "Starting native agent with PTY" "$WORK/hup-user$x/out"; then
+    fail "hup-user$x: keploy did not start its agent with sudo -n, so the case did not check what it is for"
+  fi
+  hup_case "hup-pty$x" 0.1 "$(id -un)" --debug
+  grep -aq "Starting native agent with PTY" "$WORK/hup-pty$x/out" ||
+    fail "hup-pty$x: keploy did not start its agent on a terminal of its own, so the case did not check what it is for"
+}
+all_cases ""
+all_cases -proven
 
 if [ "$FAIL" -ne 0 ]; then
-  for c in term hup-gap hup-nogap hup-user hup-pty; do
+  for c in term hup-gap hup-nogap hup-user hup-pty term-proven hup-gap-proven hup-nogap-proven hup-user-proven hup-pty-proven; do
     echo "--- $c: the last 40 lines keploy printed ---"
     tail -n 40 "$WORK/$c/out" 2>/dev/null
   done

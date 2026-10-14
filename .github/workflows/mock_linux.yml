@@ -6,8 +6,15 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
-# Another replays two concurrent workers under different named scopes and
-# asserts each is served only its own scope's mocks. Another replays a stateful
+# The lanes run their keploy commands both ways: without the proven switch
+# (today's default) and under KEPLOY_PROVEN=1, which the flip makes the default;
+# their harnesses speak scope protocol v1 (mock/keploy_v1.py). Under the switch
+# this build refuses a replay (it does not judge each test) and a docker
+# command, and the lanes assert those refusals.
+# Another, under the switch, asserts a second test process and a second open
+# test are refused (one_test_process_at_a_time, one_test_at_a_time) until
+# release 2; without it, replays two concurrent workers under different named
+# scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
 # per worker and per scope. Another runs more short-lived processes than the
 # agent's PID map holds between two calls and asserts both are recorded, then
@@ -95,6 +102,12 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
 
+      # Parallel test workers. Under KEPLOY_PROVEN=1 a refusal check until
+      # release 2: a second test process claiming the run, and a test begun
+      # while another is open, are refused with 422 one_test_process_at_a_time
+      # and one_test_at_a_time, and the run does not pass. Without the switch,
+      # two concurrent pid-scoped workers are each served only their own
+      # scope's mocks.
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

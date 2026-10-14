@@ -11,6 +11,13 @@
 # tests around this necessarily model that behaviour rather than proving it,
 # which is why this lane exists.
 #
+# The session above runs without the proven switch: today's default, which
+# the flip deletes with the switch. Under KEPLOY_PROVEN=1, which the flip makes
+# the default, this release runs a mock record's test command natively only,
+# so --from-container is refused, and refused BEFORE keploy touches the user's
+# container: the same container, never stopped or restarted, nothing of
+# keploy's started.
+#
 # Env: RECORD_BIN (the keploy binary under test), set by the calling workflow
 # from .github/actions/download-binary's `path` output. The agent image must be
 # loaded as ghcr.io/keploy/keploy:v3-dev - .github/actions/download-image does
@@ -128,6 +135,30 @@ ANON_VOL_BEFORE="$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination
   echo "FAIL: the fixture has no anonymous volume, so the swap it guards cannot be detected"
   exit 1
 }
+
+# identity: the container's id and when it last started. A stop and start,
+# or a rebuild, changes it.
+identity() {
+  sudo docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.State.Running}}' "$APP" 2>/dev/null
+}
+
+echo "--- under the proven switch: refused, the container untouched ---"
+BEFORE="$(identity)"
+# keploy re-execs itself under sudo for --from-container, with sudo -E: the
+# switch goes with it.
+KEPLOY_PROVEN=1 "$RECORD_BIN" mock record --from-container "$APP" --name fc-proven --path . --local --disable-ansi > record-proven.log 2>&1
+RC=$?
+[ "$RC" -eq 1 ] || fail "under the switch --from-container should be refused with exit 1, got $RC"
+sudo grep -aqF "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" record-proven.log ||
+  fail "the refused --from-container record does not say this release runs the test command natively"
+AFTER="$(identity)"
+[ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ] ||
+  fail "under the switch keploy touched the user's container before refusing (before: '$BEFORE', after: '$AFTER')"
+[ "$(sudo docker ps -aq --filter "name=^${APP}-keploy\$" | wc -l | tr -d ' ')" = 0 ] ||
+  fail "under the switch keploy started its replica of the app before refusing"
+[ "$(sudo docker ps -aq --filter 'name=keploy-restore-backup' | wc -l | tr -d ' ')" = 0 ] ||
+  fail "under the switch keploy left a restore backup before refusing"
+[ -e keploy/fc-proven ] && fail "under the switch the refused record wrote a mock set"
 
 echo "--- recording ---"
 "$RECORD_BIN" mock record --from-container "$APP" --name fc --path . --local --disable-ansi > record.log 2>&1 &

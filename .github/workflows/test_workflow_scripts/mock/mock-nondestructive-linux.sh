@@ -15,6 +15,11 @@
 #   4. re-records a different workload successfully       -> fully replaced.
 # A leftover staging set is a failure in every case.
 #
+# Run both ways, each in a directory of its own: without the proven switch
+# (today's default) and under KEPLOY_PROVEN=1, which the flip makes the
+# default. This build does not judge each test (keploy enterprise does), so
+# under the switch a record is kept or not exactly as without it.
+#
 # Env: RECORD_BIN (the keploy binary under test), set by download-binary.
 set -uo pipefail
 
@@ -28,8 +33,8 @@ if ! python3 -c "import pytest" 2>/dev/null; then
 fi
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
-WORK="$(mktemp -d)"
-cd "$WORK"
+ROOT="$(mktemp -d)"
+cd "$ROOT" || exit 1
 PORT=18997
 FAIL=0
 
@@ -44,7 +49,9 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self,*a): pass
 socketserver.TCPServer.allow_reuse_address=True
-with socketserver.TCPServer(("127.0.0.1",PORT),H) as s: s.serve_forever()
+with socketserver.TCPServer(("127.0.0.1",PORT),H) as s:
+    print("ready", flush=True)
+    s.serve_forever()
 PY
 
 cat > client.py <<PY
@@ -62,27 +69,44 @@ def test_items():  assert get("/items/42")["path"]=="/items/42"
 def test_health(): assert get("/health")["path"]=="/health"
 PY
 
-start_dep() { python3 depserver.py "$PORT" >dep.log 2>&1 & echo $!; }
-stop_dep()  { kill "$1" 2>/dev/null; sleep 1; }
+# start_dep: starts the dependency and waits for its ready line (DEP_PID).
+start_dep() {
+  : > dep.log
+  python3 depserver.py "$PORT" >dep.log 2>&1 &
+  DEP_PID=$!
+  until grep -qx ready dep.log 2>/dev/null; do
+    kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: $LABEL: the dependency exited before it listened"; cat dep.log; FAIL=1; return 1; }
+    sleep 0.1
+  done
+}
+stop_dep() { kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; }
 
 SET=nd
 MFILE="keploy/$SET/mocks.yaml"
 STAGING="keploy/$SET.keploy-staging"
 
 no_staging_left() {
-  [ ! -e "$STAGING" ] || { echo "FAIL: $1 left a staging set behind: $STAGING"; FAIL=1; }
+  [ ! -e "$STAGING" ] || { echo "FAIL: $LABEL: $1 left a staging set behind: $STAGING"; FAIL=1; }
 }
 
+# run_all <label> <KEPLOY_PROVEN value>: the four steps below, in a new
+# directory.
+run_all() {
+local LABEL="$1" PROVEN="$2"
+WORK="$ROOT/$LABEL"
+mkdir -p "$WORK" && cp "$ROOT/depserver.py" "$ROOT/client.py" "$ROOT/test_api.py" "$WORK/" && cd "$WORK" || exit 1
+echo "######## $LABEL (KEPLOY_PROVEN=${PROVEN}) ########"
+
 echo "== 1. record a baseline recording =="
-DEP_PID=$(start_dep); sleep 1
-sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec.log
-stop_dep "$DEP_PID"
-[ -f "$MFILE" ] || { echo "FAIL: baseline recording not written"; FAIL=1; echo "MOCK NON-DESTRUCTIVE E2E: FAILED"; exit 1; }
+start_dep || return
+sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec.log
+stop_dep
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: baseline recording not written"; FAIL=1; return; }
 # grep -c prints "0" and exits 1 on no match; capture the count, default to 0 if
 # the file is absent (so the test never trips on a multiline value).
 MOCKS=$(grep -c '^kind:' "$MFILE" 2>/dev/null); MOCKS=${MOCKS:-0}
 echo "baseline mocks: $MOCKS"
-[ "$MOCKS" -eq 3 ] || { echo "FAIL: expected 3 baseline mocks, got $MOCKS"; FAIL=1; }
+[ "$MOCKS" -eq 3 ] || { echo "FAIL: $LABEL: expected 3 baseline mocks, got $MOCKS"; FAIL=1; }
 BASE_HASH=$(sha256sum "$MFILE" | awk '{print $1}')
 echo "baseline hash: $BASE_HASH"
 no_staging_left "the baseline record"
@@ -90,17 +114,17 @@ no_staging_left "the baseline record"
 echo "== 2. a re-record that captures NOTHING must leave the recording intact =="
 # The command makes no external calls, so nothing is captured. Before the fix,
 # record deleted the set first, so this left the user with an empty set.
-sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -c 'pass'" --name "$SET" --disable-tele 2>&1 | tee rec-empty.log
-[ -f "$MFILE" ] || { echo "FAIL: a zero-capture re-record DESTROYED the existing recording"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'pass'" --name "$SET" --disable-tele 2>&1 | tee rec-empty.log
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: a zero-capture re-record DESTROYED the existing recording"; FAIL=1; }
 NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
-[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: a zero-capture re-record changed the existing recording ($NOW_HASH != $BASE_HASH)"; FAIL=1; }
+[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a zero-capture re-record changed the existing recording ($NOW_HASH != $BASE_HASH)"; FAIL=1; }
 no_staging_left "a zero-capture re-record"
 
 echo "== 3. a re-record whose command FAILS (capturing nothing) also preserves it =="
-sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -c 'import sys; sys.exit(7)'" --name "$SET" --disable-tele 2>&1 | tee rec-fail.log
-[ -f "$MFILE" ] || { echo "FAIL: a failed re-record DESTROYED the existing recording"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -c 'import sys; sys.exit(7)'" --name "$SET" --disable-tele 2>&1 | tee rec-fail.log
+[ -f "$MFILE" ] || { echo "FAIL: $LABEL: a failed re-record DESTROYED the existing recording"; FAIL=1; }
 NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
-[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: a failed re-record changed the existing recording"; FAIL=1; }
+[ "$NOW_HASH" = "$BASE_HASH" ] || { echo "FAIL: $LABEL: a failed re-record changed the existing recording"; FAIL=1; }
 no_staging_left "a failed re-record"
 
 echo "== 4. a successful re-record fully REPLACES the recording (clean rewrite) =="
@@ -111,17 +135,21 @@ from client import get
 def test_a(): assert get("/alpha")["path"]=="/alpha"
 def test_b(): assert get("/beta")["path"]=="/beta"
 PY
-DEP_PID=$(start_dep); sleep 1
-sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec2.log
-stop_dep "$DEP_PID"
+start_dep || return
+sudo -E env PATH="$PATH" KEPLOY_PROVEN="$PROVEN" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name "$SET" --disable-tele 2>&1 | tee rec2.log
+stop_dep
 MOCKS=$(grep -c '^kind:' "$MFILE" 2>/dev/null); MOCKS=${MOCKS:-0}
 echo "re-recorded mocks: $MOCKS"
-[ "$MOCKS" -eq 2 ] || { echo "FAIL: expected 2 mocks after a clean re-record, got $MOCKS"; FAIL=1; }
+[ "$MOCKS" -eq 2 ] || { echo "FAIL: $LABEL: expected 2 mocks after a clean re-record, got $MOCKS"; FAIL=1; }
 NOW_HASH=$(sha256sum "$MFILE" 2>/dev/null | awk '{print $1}')
-[ "$NOW_HASH" != "$BASE_HASH" ] || { echo "FAIL: a successful re-record did not replace the baseline"; FAIL=1; }
-grep -q '/alpha' "$MFILE" || { echo "FAIL: the new recording is missing its calls"; FAIL=1; }
-if grep -q '/users' "$MFILE"; then echo "FAIL: the baseline's calls survived a clean rewrite (appended, not replaced)"; FAIL=1; fi
+[ "$NOW_HASH" != "$BASE_HASH" ] || { echo "FAIL: $LABEL: a successful re-record did not replace the baseline"; FAIL=1; }
+grep -q '/alpha' "$MFILE" || { echo "FAIL: $LABEL: the new recording is missing its calls"; FAIL=1; }
+if grep -q '/users' "$MFILE"; then echo "FAIL: $LABEL: the baseline's calls survived a clean rewrite (appended, not replaced)"; FAIL=1; fi
 no_staging_left "a successful re-record"
+}
+
+run_all switch-off ""
+run_all switch-on 1
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK NON-DESTRUCTIVE E2E: PASSED"; else echo "MOCK NON-DESTRUCTIVE E2E: FAILED"; fi
 exit "$FAIL"

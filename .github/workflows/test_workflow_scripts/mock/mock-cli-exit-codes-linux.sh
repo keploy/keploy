@@ -8,23 +8,27 @@
 # be parsed or the wrong number of arguments; a group with no verb still shows
 # help (0); a valid subcommand resolves normally. (design §P0b.)
 #
-# Pure CLI behaviour: no sudo, no eBPF, no dependencies.
+# Pure CLI behaviour: no sudo, no eBPF, no dependencies. Every check runs
+# twice: without the proven switch (today's default) and under KEPLOY_PROVEN=1,
+# which the flip makes the default.
 set -uo pipefail
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 FAIL=0
 
 check() {
-  local want="$1"
+  local want="$1" proven got
   shift
-  "$RECORD_BIN" "$@" >/dev/null 2>&1
-  local got=$?
-  if [ "$got" -ne "$want" ]; then
-    echo "FAIL: 'keploy $*' exited $got, want $want"
-    FAIL=1
-  else
-    echo "ok: 'keploy $*' -> $got"
-  fi
+  for proven in "" 1; do
+    KEPLOY_PROVEN="$proven" "$RECORD_BIN" "$@" >/dev/null 2>&1
+    got=$?
+    if [ "$got" -ne "$want" ]; then
+      echo "FAIL: 'KEPLOY_PROVEN=$proven keploy $*' exited $got, want $want"
+      FAIL=1
+    else
+      echo "ok: 'KEPLOY_PROVEN=$proven keploy $*' -> $got"
+    fi
+  done
 }
 
 # Unknown verb on a command group is a usage error (8), never a false 0.

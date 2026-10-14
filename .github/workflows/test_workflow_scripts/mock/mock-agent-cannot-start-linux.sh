@@ -40,6 +40,18 @@
 #                          that stopped before it was ready              -> N, N, 1
 # (A working environment is mock-linux.sh's job, on the runner itself.)
 #
+# The cases above run without the proven switch, today's default. Under
+# KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven):
+#   unprivileged, no-tracefs  record fails as above (3, 6); this build refuses
+#                             the replay first, as it does any replay under
+#                             the switch: it does not judge each test       -> 1
+#   docker-unprivileged,      docker mode is refused before anything is
+#   docker-3                  checked or changed: no docker call, the pinned
+#                             perf_event_paranoid as it was                  -> 1
+# (agent-no-ipv4 runs the agent alone: an agent takes the switch only from
+# the --proven flag of the keploy that starts it, and under the switch no
+# keploy starts an agent container.)
+#
 # Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
 # image, which defaults to the runner's own distribution so the binary finds
 # the libc it was built against.
@@ -69,13 +81,16 @@ cat > "$WORK/inside.sh" <<'SH'
 #!/bin/sh
 CASE=$1
 D=/work/$CASE
+# <case>-proven is the case under the proven switch (KEPLOY_PROVEN, given to
+# the container).
+BASE=${CASE%-proven}
 mkdir -p "$D/home" "$D/app" "$D/bin"
 trap 'chown -R "$HOSTUID" "$D"' EXIT
 export HOME="$D/home"
 cd "$D/app" || exit 1
 CMD="sh -c 'touch $D/ran'"
 EXTRA=""
-case "$CASE" in
+case "$BASE" in
   agent-no-ipv4)
     mount -t tracefs nodev /sys/kernel/tracing || exit 1
     for sub in record replay; do
@@ -98,6 +113,7 @@ case "$CASE" in
     # `docker run ...`, and only runs once the agent is up.
     cat > "$D/bin/docker" <<EOD
 #!/bin/sh
+touch $D/docker-called
 case "\$1 \${2:-}" in
   "container run") exit ${AGENT_EXIT:?} ;;
   run*) touch $D/ran; exit 0 ;;
@@ -161,6 +177,42 @@ check docker-sysctl-relaxed 6 "this environment lacks something keploy needs" \
 check docker-3 3 "keploy does not have the kernel privileges it needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 check docker-6 6 "this environment lacks something keploy needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=6
 check docker-0 1 "the keploy agent exited before it became ready" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=0
+
+# check_proven <case> <record exit> <what record says> <replay exit> <what
+# replay says> <docker flags...>: the case under the proven switch, as
+# <case>-proven.
+check_proven() {
+  local name="$1-proven" sub got want says
+  local want_record=$2 says_record=$3 want_replay=$4 says_replay=$5
+  shift 5
+  echo "--- $name: expecting exit $want_record from its record run and $want_replay from its replay run ---"
+  docker run --rm --network none "$@" -e KEPLOY_PROVEN=1 -e HOSTUID="$(id -u):$(id -g)" \
+    -v "$WORK:/work" "$IMAGE" /work/inside.sh "$name" || fail "$name: the container itself failed"
+  for sub in record replay; do
+    want=$want_record says=$says_record
+    [ "$sub" = replay ] && want=$want_replay says=$says_replay
+    got="$(cat "$WORK/$name/$sub.exit" 2>/dev/null)"
+    if [ "$got" != "$want" ]; then
+      fail "$name: the $sub run exited ${got:-nothing}, want $want"
+      tail -n 30 "$WORK/$name/$sub.log" 2>/dev/null
+    fi
+    grep -aqF "$says" "$WORK/$name/$sub.log" 2>/dev/null ||
+      fail "$name: the $sub run's log does not say \"$says\""
+  done
+  [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
+  [ -e "$WORK/$name/docker-called" ] && fail "$name: keploy called docker before refusing docker mode under the switch"
+  if [ -f "$WORK/$name/perf_event_paranoid" ] && [ "$(cat "$WORK/$name/perf_event_paranoid")" != 4 ]; then
+    fail "$name: keploy changed perf_event_paranoid to $(cat "$WORK/$name/perf_event_paranoid") before refusing docker mode under the switch"
+  fi
+}
+
+JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
+check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged
+check_proven docker-unprivileged 1 "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" \
+  1 "keploy mock replay with KEPLOY_PROVEN runs the test command natively in this release" -e AGENT_EXIT=0
+check_proven docker-3 1 "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" \
+  1 "keploy mock replay with KEPLOY_PROVEN runs the test command natively in this release" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 
 rm -rf "$WORK"
 if [ "$FAIL" -ne 0 ]; then
