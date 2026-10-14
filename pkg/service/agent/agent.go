@@ -163,6 +163,7 @@ type Agent struct {
 	scopeMeta    map[scopeKey]scopeMeta
 	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
 	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
+	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -575,6 +576,7 @@ func (a *Agent) resetScopeState() {
 	// The tests' recorded begins belong to the replay that installed them;
 	// the clock's holder is given back by releaseTestClock, before this.
 	a.testBegins = nil
+	a.testReal = nil
 	a.scopeMu.Unlock()
 }
 

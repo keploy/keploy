@@ -190,6 +190,18 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-pid-map-overflow-linux.sh"
 
+      # The proven model's mock.real (KEPLOY_PROVEN=1, design v14 §4): an
+      # address entry and a name entry only the hosts file maps are reached
+      # for real and never recorded, and each test's recording lists the ones
+      # it used; another name at the same address is recorded, and a
+      # connection to it whose name keploy cannot read is closed as
+      # capture_incomplete. Without the switch the list is not read.
+      - name: Run mock-mode mock.real e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-real-deps-linux.sh"
+
       - name: Run mock-mode offline e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

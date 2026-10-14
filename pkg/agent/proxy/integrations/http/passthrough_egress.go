@@ -2,6 +2,7 @@ package http
 
 import (
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -20,9 +22,18 @@ import (
 // rule matched or the winning rule is mode:"off" (record normally). host is the
 // destination authority (request Host header preferred, URL host next); port
 // from dstCfg; method gates the built-ins (they are POST-only).
-func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
+//
+// Under the proven switch a built-in path row needs its protocol's
+// fingerprint (models.ResolveProven, design v14 §4, U19). The user's rules
+// are read as they are: keploy mock's CLI clears them (mock.real replaces
+// them, U18), keploy record and keploy test keep theirs until they read
+// mock.real.
+func passThroughEgressDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL, header http.Header) (models.PassThroughRule, bool) {
 	if u == nil {
 		return models.PassThroughRule{}, false
+	}
+	if provenswitch.On() {
+		return models.ResolveProven(opts.PassThroughPorts, opts.PassThroughHosts, host, port, method, u.Path, header)
 	}
 	// ResolvePassThrough is the whole decision — built-ins (incl. the legacy
 	// /v1/traces and /ingest paths) are in the default set, and a user off rule
@@ -269,6 +280,6 @@ func (p *ptRecorder) shouldRecord(key string, statusCode int) bool {
 // passThroughEgressDecision: it decides whether an outgoing request being
 // recorded targets a telemetry/noisy endpoint and, if so, its mode. host is the
 // request Host (falling back to URL host); port is the resolved destination port.
-func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL) (models.PassThroughRule, bool) {
-	return passThroughEgressDecision(opts, host, port, method, u)
+func passThroughRecordDecision(opts models.OutgoingOptions, host string, port uint32, method string, u *url.URL, header http.Header) (models.PassThroughRule, bool) {
+	return passThroughEgressDecision(opts, host, port, method, u, header)
 }

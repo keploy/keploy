@@ -19,14 +19,15 @@ import (
 type beginsSvc struct {
 	agent.Service
 	begins map[string]time.Time
+	real   map[string][]string
 	err    error
 }
 
-func (s *beginsSvc) SetTestBegins(_ context.Context, begins map[string]time.Time) error {
+func (s *beginsSvc) SetTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
 	if s.err != nil {
 		return s.err
 	}
-	s.begins = begins
+	s.begins, s.real = begins, real
 	return nil
 }
 
@@ -48,6 +49,12 @@ func TestHandleTestBegins(t *testing.T) {
 	if !svc.begins["pkg::TestA"].Equal(want) {
 		t.Fatalf("the service got begins %v", svc.begins)
 	}
+	if code := send(a, `{"begins":{},"real":{"pkg::TestB":["db.example.com:5432"]}}`); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if got := svc.real["pkg::TestB"]; len(got) != 1 || got[0] != "db.example.com:5432" {
+		t.Fatalf("the service got the REAL tests %v", svc.real)
+	}
 	if code := send(a, `{`); code != http.StatusBadRequest {
 		t.Fatalf("an unreadable body: status %d", code)
 	}
@@ -57,6 +64,9 @@ func TestHandleTestBegins(t *testing.T) {
 	// A build that freezes the clock but cannot move it per test.
 	if code := send(&Agent{logger: zap.NewNop(), svc: &beginsSvc{err: agent.ErrNoTestClock}}, `{"begins":{}}`); code != http.StatusNotImplemented {
 		t.Fatalf("a build that cannot move its clock per test: status %d", code)
+	}
+	if code := send(&Agent{logger: zap.NewNop(), svc: &beginsSvc{err: agent.ErrNoRealTestClock}}, `{"begins":{}}`); code != http.StatusNotImplemented {
+		t.Fatalf("a build that cannot put its clock on real time: status %d", code)
 	}
 	if code := send(&Agent{logger: zap.NewNop(), svc: &beginsSvc{err: errors.New("x")}}, `{"begins":{}}`); code != http.StatusInternalServerError {
 		t.Fatalf("another failure: status %d", code)

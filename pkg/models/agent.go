@@ -240,6 +240,10 @@ type ScopeWindow struct {
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open (design v14 §4): its REAL rows, and in a
+	// record, the REAL list its recording carries.
+	Real []RealUse `json:"real,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -283,6 +287,10 @@ type ScopeTableReq struct {
 // and back to the run's start time after it (design v14 §3.4).
 type TestBeginsReq struct {
 	Begins map[string]time.Time `json:"begins"`
+	// Real is, by test, the mock.real destinations its recording lists: such
+	// a test runs on the real clock, not at its recorded begin (design v14
+	// §3.4, F3). Absent when no test lists any.
+	Real map[string][]string `json:"real,omitempty"`
 }
 
 type SetTable struct {

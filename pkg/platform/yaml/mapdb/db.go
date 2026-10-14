@@ -358,6 +358,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		if !in.At.IsZero() {
 			tc.At = in.At
 		}
+		// The mock.real destinations this record's run of the test used
+		// (proven switch only): they replace what an earlier record wrote.
+		if len(in.Real) > 0 {
+			tc.Real = in.Real
+		}
 	}
 	if len(suites) > 0 {
 		mapping.Suites = suites

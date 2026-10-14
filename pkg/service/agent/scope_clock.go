@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +36,17 @@ type TestClock interface {
 	EndTestClock(ctx context.Context, test string) error
 }
 
+// RealTestClock is an optional extension of TestClock, for a build that can
+// put the run's clock on real time while a test is open: a test whose
+// recording lists a mock.real destination runs on the real clock, in every
+// replay (design v14 §3.4, F3), since the real dependency answers at real
+// time. EndTestClock moves the clock back to the run's start time after it,
+// as after any test. The agent calls it under its clock lock, as it calls
+// BeginTestClock.
+type RealTestClock interface {
+	BeginRealTestClock(ctx context.Context, test string) error
+}
+
 // TimeFiler is an optional extension of AgentHooks: the clock record the
 // run's processes read through KEPLOY_TIME_FILE.
 type TimeFiler interface {
@@ -59,19 +71,51 @@ func TimeFile() string {
 // recorded begins, with no word.
 var ErrNoTestClock = errors.New("this keploy agent freezes the run's clock but cannot move it to each test's recorded begin")
 
+// ErrNoRealTestClock is SetTestBegins' refusal under the proven switch when
+// the build freezes the run's clock but cannot put it on real time for a test
+// whose recording lists a mock.real destination (RealTestClock): the test
+// would run at its recorded begin against a dependency that answers at real
+// time.
+var ErrNoRealTestClock = errors.New("this keploy agent freezes the run's clock but cannot put it on real time for a test that uses mock.real")
+
 // SetTestBegins installs when each test of the replayed recording began, by
-// test name. The CLI installs them for a replay session, like the scope
-// table; a new session clears them (resetScopeState).
-func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time) error {
+// test name, and the mock.real destinations each test's recording lists
+// (real): those tests run on the real clock. The CLI installs them for a
+// replay session, like the scope table; a new session clears them
+// (resetScopeState).
+func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
 	if provenswitch.On() && TimeFile() != "" {
 		if _, ok := ActiveHooks.(TestClock); !ok {
 			return ErrNoTestClock
 		}
+		if _, ok := ActiveHooks.(RealTestClock); !ok && anyReal(real) {
+			return ErrNoRealTestClock
+		}
 	}
 	a.scopeMu.Lock()
 	a.testBegins = maps.Clone(begins)
+	a.testReal = nil
+	for test, dests := range real {
+		if len(dests) == 0 {
+			continue
+		}
+		if a.testReal == nil {
+			a.testReal = map[string][]string{}
+		}
+		a.testReal[test] = slices.Clone(dests)
+	}
 	a.scopeMu.Unlock()
 	return nil
+}
+
+// anyReal reports whether any test lists a mock.real destination.
+func anyReal(real map[string][]string) bool {
+	for _, dests := range real {
+		if len(dests) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // testClock is the build's TestClock when the proven switch is on.
@@ -120,6 +164,7 @@ func (a *Agent) beginTestClock(ctx context.Context, test string, pid int) (took 
 	a.scopeMu.Lock()
 	suite := a.scopeMeta[k].suite
 	at := a.testBegins[test]
+	real := len(a.testReal[test]) > 0
 	a.scopeMu.Unlock()
 	if suite {
 		return false, lostScope{}, nil
@@ -148,8 +193,8 @@ func (a *Agent) beginTestClock(ctx context.Context, test string, pid int) (took 
 	}
 	// A move is absolute: it also ends a move an earlier end could not undo.
 	// One that fails leaves the clock as it was, and what is in force stays
-	// marked.
-	if err := c.BeginTestClock(ctx, test, at); err != nil {
+	// marked. A test that uses mock.real runs on the real clock (F3).
+	if err := beginClock(ctx, c, test, at, real); err != nil {
 		a.logger.Error("keploy could not move the run's clock to when the test began in its recording; the test fails", zap.String("test", test), zap.Error(err))
 		if lost.key.name != "" {
 			// The lost holder is still lost: free the clock of it.
@@ -159,6 +204,24 @@ func (a *Agent) beginTestClock(ctx context.Context, test string, pid int) (took 
 	}
 	a.clockHeld, a.clockMoved, a.clockHeldStart = k, k, start
 	return true, lost, nil
+}
+
+// beginClock moves the run's clock for test: to at, or, for a test whose
+// recording lists a mock.real destination (real), onto real time. A build
+// that freezes the run and cannot do the latter fails the begin
+// (SetTestBegins refuses such a recording first); one that freezes nothing
+// has no clock to move, and its REAL test keeps the real clock it is on.
+func beginClock(ctx context.Context, c TestClock, test string, at time.Time, real bool) error {
+	if !real {
+		return c.BeginTestClock(ctx, test, at)
+	}
+	if rc, ok := c.(RealTestClock); ok {
+		return rc.BeginRealTestClock(ctx, test)
+	}
+	if TimeFile() == "" {
+		return nil
+	}
+	return ErrNoRealTestClock
 }
 
 // lostScope is a test that held the run's clock and whose worker exited
