@@ -97,12 +97,26 @@ func reusable(m *models.Mock) *models.Mock {
 	return m
 }
 
+// fixtureHosts names the dependency each path of these fixtures belongs to,
+// as the mocks above record it (their URLs' hosts); any other path is the
+// store's.
+var fixtureHosts = map[string]string{"log": "audit", "login": "auth", "session": "auth", "jobs": "jobs", "charge": "pay"}
+
+// liveReq is a live call as decode hands it to the matcher: with the Host the
+// application sent, which is the dependency the path belongs to.
 func liveReq(method, rawURL, body string) *req {
 	u, _ := url.Parse(rawURL)
+	host := u.Host
+	if host == "" {
+		first, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+		if host = fixtureHosts[first]; host == "" {
+			host = "store"
+		}
+	}
 	return &req{
 		method: method,
 		url:    u,
-		header: http.Header{"Content-Type": []string{"application/json"}},
+		header: http.Header{"Content-Type": []string{"application/json"}, "Host": []string{host}},
 		body:   []byte(body),
 		raw:    []byte(body),
 	}
@@ -357,7 +371,7 @@ func TestVariables_URLQueryAndHeaderPlaces(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, liveReq("GET", "/session?nonce=n-live", "")); !ok {
 		t.Fatal("the query place should bind")
 	}
-	r := liveReq("GET", "/items", "")
+	r := liveReq("GET", "http://api/items", "")
 	r.header.Set("X-Nonce", "n-other")
 	ok, _, diag := matchVar(t, h, db, r)
 	if p := wantProblem(t, ok, diag, "this call sent"); p.place != "header.X-Nonce" {

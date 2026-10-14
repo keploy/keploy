@@ -72,6 +72,9 @@ type matchDiag struct {
 	// variables do not hold (proven switch; see variables.go): the miss is
 	// reported as that, whatever else the cascade found.
 	variable *varProblem
+	// live is where the live request went, set under the proven switch
+	// (strict.go), so the report can name a destination that differs.
+	live *destination
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -85,6 +88,13 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
 	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
+
+	// Under the proven switch no path segment or query value is relaxed for
+	// its shape (design v14 row S1): what may differ between record and
+	// replay is declared or learned, never guessed from how it looks.
+	if provenswitch.On() {
+		autoURLDynamic = false
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -935,6 +945,14 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	// loop runs over the full mock set on every proxied request.
 	reqQuery := input.url.Query()
 
+	// Under the proven switch a recorded request answers only a request to
+	// the same place (strict.go): the same authority.
+	proven := provenswitch.On()
+	var live destination
+	if proven {
+		live = liveDestination(input)
+	}
+
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -974,6 +992,11 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
 			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name))
+			continue
+		}
+
+		if proven && !sameDestination(live, recordedDestination(mock)) {
+			h.Logger.Debug("the mock was recorded for another destination", zap.String("mock name", mock.Name))
 			continue
 		}
 
@@ -1808,7 +1831,16 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	//  1. a schema-match survivor (method+path+keys already matched — the
 	//     interesting drift is in query values, headers, or the body)
 	//  2. the lowest-Levenshtein "METHOD path" mock from the pool.
-	closestMock := pickClosestCandidate(request, schemaSurvivors, httpMocks)
+	closestPool := httpMocks
+	if diag != nil && diag.live != nil {
+		// Under the proven switch the closest recorded request is one to
+		// the same place, when there is one: a diff against another
+		// upstream's request explains nothing.
+		if same := sameDestinationMocks(*diag.live, httpMocks); len(same) > 0 {
+			closestPool = same
+		}
+	}
+	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
@@ -1826,6 +1858,9 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	mockReq := closestMock.Spec.HTTPReq
 	var fieldDiffs []models.MockFieldDiff
+	if diag != nil && diag.live != nil {
+		fieldDiffs = append(fieldDiffs, destinationDiff(*diag.live, closestMock)...)
+	}
 
 	// method / path pseudo-fields
 	if string(mockReq.Method) != diffReq.Method {
