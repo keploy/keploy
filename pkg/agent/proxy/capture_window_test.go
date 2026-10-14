@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -169,29 +172,57 @@ func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	}
 }
 
-// When GetMockErrors cannot close a test's window (the drain goroutine did not
-// meet its flush marker in time), it reads the window and leaves it installed.
-// What lands in it after that was made after the test's misses were taken,
-// between two tests: the next test that continues the capture carries it,
-// rather than dropping it as a window never read.
+// When GetMockErrors cannot close a test's window, it reads the window and
+// leaves it installed. What lands in it after that was made after the test's
+// misses were taken, between two tests: the next test that continues the
+// capture carries it, rather than dropping it as a window never read.
+//
+// The drain is running (errDrainDone set before errDrainActive, as
+// StartErrorDrain sets them) but never meets the flush marker. What ends the
+// read differs with the proven switch, so each case sets it: with the switch
+// off a bounded wait gives up on the drain; with it on nothing is bounded by
+// a clock, and the read ends when its caller gives it up, saying it could not
+// vouch for every miss (ErrUnmatchedCallsUnread). Left to the environment's
+// switch, the switch-on run waited for an event the test never sent.
 func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
-	p.errDrainActive.Store(true) // and no goroutine meets the marker: the degenerate path
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.errDrainDone = make(chan struct{}) // a drain that runs and never reaches the marker
+			p.errDrainActive.Store(true)
 
-	p.BeginTestErrorCapture()
-	p.activeTestErrors.Load().addBounded(mockMiss("POST /t1"), maxPendingMockErrors)
-	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "POST /t1" {
-		t.Fatalf("test1 expected [POST /t1], got %+v", got)
-	}
-	acc := p.activeTestErrors.Load()
-	if acc == nil {
-		t.Fatal("premise: the degenerate path closed the window")
-	}
-	acc.addBounded(mockMiss("SEND after test1 was read"), maxPendingMockErrors)
+			ctx := context.Background()
+			if proven {
+				// The caller gives the read up: the event that ends it.
+				given, giveUp := context.WithCancel(ctx)
+				giveUp()
+				ctx = given
+			}
+			p.BeginTestErrorCapture()
+			p.activeTestErrors.Load().addBounded(mockMiss("POST /t1"), maxPendingMockErrors)
+			got, err := p.GetMockErrors(ctx)
+			if len(got) != 1 || got[0].ActualSummary != "POST /t1" {
+				t.Fatalf("test1 expected [POST /t1], got %+v", got)
+			}
+			if proven != errors.Is(err, models.ErrUnmatchedCallsUnread) {
+				t.Fatalf("test1's read error %v; under the switch a read that could not close its window says so, and only then", err)
+			}
+			acc := p.activeTestErrors.Load()
+			if acc == nil {
+				t.Fatal("premise: the degenerate path closed the window")
+			}
+			acc.addBounded(mockMiss("SEND after test1 was read"), maxPendingMockErrors)
 
-	p.ContinueTestErrorCapture()
-	p.errDrainActive.Store(false) // the next read closes the window normally
-	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "SEND after test1 was read" {
-		t.Fatalf("test2 expected [SEND after test1 was read], got %+v", got)
+			p.ContinueTestErrorCapture()
+			p.errDrainActive.Store(false) // the next read closes the window normally
+			if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "SEND after test1 was read" {
+				t.Fatalf("test2 expected [SEND after test1 was read], got %+v", got)
+			}
+		})
 	}
 }
