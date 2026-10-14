@@ -20,10 +20,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #      answers as recorded and FAILS, its recorded call named under
 #      failure_info.unconsumed_mocks; every other test passes; the run exits
 #      non-zero;
-#   4. the same two replays of a copy without mappings.yaml (a recording made
-#      before S3): with the call removed, the run creates no mappings.yaml and
-#      says why; as recorded, every test consumes the calls of its window and
-#      the run creates one.
+#   4. a replay of a copy without mappings.yaml (a recording made before S3,
+#      or without the switch): each test owns the calls recorded inside its
+#      own window, derived as step 1's record derived them (S12), so every
+#      test passes with its dependencies checked, and no mappings.yaml is
+#      created (only record writes it).
 #
 # CI sources this script from a `bash -e` step: a command that is expected to
 # fail runs where errexit does not apply (an `if`, a `||` list).
@@ -232,41 +233,32 @@ done
 echo "✓ under KEPLOY_PROVEN=1 a test that no longer makes its recorded call fails with it named unconsumed, and nothing else does"
 
 # ---------------------------------------------------------------------------
-# 4. A recording without mappings.yaml (made before S3), under the switch.
+# 4. A recording without mappings.yaml (made before S3, or without the
+#    switch), under the switch.
 # ---------------------------------------------------------------------------
-# With the call removed, each /api/locations test leaves the call recorded in
-# its window unconsumed: the run must not create mappings.yaml from that.
-unmapped_rc=0
-KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi-nocall" --path ./unmapped-run --delay 7 --generateGithubActions=false > unmapped_removed_logs.txt 2>&1 || unmapped_rc=$?
-check_race unmapped_removed_logs.txt
-shopt -s nullglob
-created=( ./unmapped-run/keploy/test-set-*/mappings.yaml )
-shopt -u nullglob
-[ ${#created[@]} -eq 0 ] || fail "a run in which tests left the calls recorded in their windows unconsumed created ${created[*]} under KEPLOY_PROVEN=1" "${created[@]}"
-grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "KEPLOY_PROVEN=1" ||
-    fail "the run must say why it did not create mappings.yaml (exit $unmapped_rc)" unmapped_removed_logs.txt
-for tc in "$set_dir"/tests/*.yaml; do
-    [ "$(yq '.spec.req.url' "$tc")" = "http://localhost:8080/api/locations" ] || continue
-    id=$(yq '.name' "$tc")
-    grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "\"$id\"" ||
-        fail "the hold must name $id, which left its recorded call unconsumed" unmapped_removed_logs.txt
-done
-echo "✓ under KEPLOY_PROVEN=1 a replay that left a recorded call unconsumed creates no mappings.yaml"
-
-# As recorded, every test consumes the calls of its window: the run creates
-# the file, each test mapped to its own call.
-rm -rf ./unmapped-run/keploy/reports
+# A set with no mappings.yaml owns what its test windows held (S12): each test
+# the calls recorded inside its own window, derived as step 1's record derived
+# them. So the replay is step 2's: every test passes, each /api/locations test
+# with its dependencies checked against the call it owns; and the replay
+# creates no mappings.yaml: only record writes it.
 unmapped_rc=0
 KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./unmapped-run --delay 7 --generateGithubActions=false > unmapped_logs.txt 2>&1 || unmapped_rc=$?
 check_race unmapped_logs.txt
-[ "$unmapped_rc" -eq 0 ] || fail "the recording without mappings.yaml must replay green under KEPLOY_PROVEN=1 (exit $unmapped_rc)" unmapped_logs.txt
+"$REPLAY_BIN" report --format json --path ./unmapped-run > ndjson_unmapped.txt 2> ndjson_unmapped_err.txt || true
+if [ "$unmapped_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson_unmapped.txt > /dev/null; then
+    jq -s 'map({test_case_id, status, dependencies_checked})' ndjson_unmapped.txt
+    fail "under KEPLOY_PROVEN=1 a set without mappings.yaml must replay green, each test owning the calls of its own window (exit $unmapped_rc)" unmapped_logs.txt
+fi
+for id in "${location_tests[@]}"; do
+    if ! ID="$id" jq -es 'map(select(.test_case_id == env.ID)) | length == 1 and all(.dependencies_checked == true)' ndjson_unmapped.txt > /dev/null; then
+        jq -s 'map({test_case_id, status, dependencies_checked})' ndjson_unmapped.txt
+        fail "$id owns the call recorded in its window, so its dependencies must be checked: ownership was not derived from the test windows" unmapped_logs.txt
+    fi
+done
+grep -q "owns the calls recorded inside its own window" unmapped_logs.txt ||
+    fail "the replay did not say it derived each test's ownership from its window" unmapped_logs.txt
 shopt -s nullglob
 created=( ./unmapped-run/keploy/test-set-*/mappings.yaml )
 shopt -u nullglob
-[ ${#created[@]} -eq 1 ] || fail "a run in which every test consumed the calls of its window must create mappings.yaml" unmapped_logs.txt
-for i in "${!location_tests[@]}"; do
-    id=${location_tests[$i]}
-    got=$(ID="$id" yq '.tests[] | select(.id == strenv(ID)) | (.mock_entries // []) | .[].name' "${created[0]}" | tr '\n' ' ')
-    [ "$got" = "${owned_location_mocks[$i]} " ] || fail "the created mappings.yaml maps $id to ${got:-nothing}; want its own call ${owned_location_mocks[$i]}" "${created[0]}"
-done
-echo "✓ under KEPLOY_PROVEN=1 a replay in which every test consumed its recorded calls creates mappings.yaml"
+[ ${#created[@]} -eq 0 ] || fail "under KEPLOY_PROVEN=1 the replay created ${created[*]}; only record writes mappings.yaml" "${created[@]}"
+echo "✓ under KEPLOY_PROVEN=1 a set without mappings.yaml owns what its test windows held, replays green, and the replay writes no mappings.yaml"

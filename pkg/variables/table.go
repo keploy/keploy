@@ -124,6 +124,21 @@ func (t *Table) Reset() {
 	t.mu.Unlock()
 }
 
+// Clone is a table holding t's bindings in t's scope, sharing nothing with
+// it: a match checked against the clone binds nothing in t.
+func (t *Table) Clone() *Table {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	c := &Table{gen: t.gen}
+	if t.vals != nil {
+		c.vals = make(map[string]Binding, len(t.vals))
+		for k, v := range t.vals {
+			c.vals[k] = v
+		}
+	}
+	return c
+}
+
 // Snapshot returns the bindings in force, by name.
 func (t *Table) Snapshot() []Binding {
 	t.mu.Lock()

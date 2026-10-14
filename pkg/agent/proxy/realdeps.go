@@ -389,3 +389,17 @@ func (p *Proxy) otherLoopback(dec realdeps.Decision, dstAddr string, err error) 
 	}
 	return other.String(), true
 }
+
+// RealDestination is, under the proven switch, the mock.real entry a
+// recorded mock's destination is (realdeps.List.Recorded): a call to it is
+// reached for real, never served from a mock, so a test that owns the mock
+// (a recording made before the destination was listed) is neither served it
+// nor judged for it. ok is false for a mock whose recording does not say,
+// and without a list.
+func (p *Proxy) RealDestination(m *models.Mock) (string, bool) {
+	st := p.realList()
+	if st == nil {
+		return "", false
+	}
+	return st.list.Recorded(m)
+}

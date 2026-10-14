@@ -500,10 +500,15 @@ func (m *MockManager) ResetForReplaySession() {
 		return true
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
-	// Exact serving belongs to one replay session: the agent turns it on
-	// again for the next one.
-	m.exact.view.Store(nil)
+	// Exact serving belongs to one replay session. One that served exactly
+	// goes on serving, until the agent serves the next session, only the
+	// protocol-phase mocks of what is staged: no data-plane mock of the
+	// previous session answers an application kept alive across them.
 	m.exact.fired.Store(false)
+	m.exact.last.Store(nil)
+	if m.exact.view.Load() != nil {
+		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
+	}
 
 	// The never-drained per-name consumption history belongs to ONE test set.
 	//
@@ -621,6 +626,16 @@ func (m *MockManager) runIdleSweeper() {
 const connectionSweepInterval = 1 * time.Minute
 
 func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
+	filtered, unfiltered = m.statelessMocks(kind, key)
+	// Under exact serving a mock a parser evicted is gone until the next
+	// begin or end, as from every other read.
+	if v := m.exactView(); v != nil {
+		filtered, unfiltered = v.unspent(filtered), v.unspent(unfiltered)
+	}
+	return filtered, unfiltered
+}
+
+func (m *MockManager) statelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
 		key = strings.ToLower(dns.Fqdn(key))
 	}
@@ -1888,6 +1903,16 @@ func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 //   - Every successful read touches connectionLastTs so the
 //     idle-sweeper doesn't reclaim an active connection.
 func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	mocks, err := m.connectionMocks(connID)
+	// Under exact serving a connection mock a parser evicted is gone until
+	// the next begin or end, as from every other read.
+	if v := m.exactView(); v != nil && err == nil {
+		mocks = v.unspent(mocks)
+	}
+	return mocks, err
+}
+
+func (m *MockManager) connectionMocks(connID string) ([]*models.Mock, error) {
 	if connID == "" {
 		return nil, nil
 	}
@@ -2521,7 +2546,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	switch m.exactConsume(&mock, true) {
+	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2621,7 +2646,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	switch m.exactConsume(&mock, true) {
+	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2710,7 +2735,7 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
-	switch m.exactConsume(&mock, true) {
+	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2879,6 +2904,12 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 // callers) or no kind registered a carry-over predicate: consumers then treat
 // everything as released, as before. The returned schedule is immutable.
 func (m *MockManager) RecordedWindows() *models.WindowSchedule {
+	// Under exact serving what the view shows is due: a test's push is its
+	// own mocks, served while it is open, and the pool's is served between
+	// tests. No recorded window paces it (CurrentTestWindow is zero).
+	if m.exactView() != nil {
+		return nil
+	}
 	return m.recordedWindows.Load()
 }
 
@@ -2937,7 +2968,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
-	switch m.exactConsume(&mock, false) {
+	switch m.exactConsumeValue(mock, false) {
 	case exactServed:
 		return true
 	case exactRefused:

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -266,22 +267,60 @@ func TestPoolCursorsAreEachKeysOwn(t *testing.T) {
 	}
 }
 
-// Exact serving belongs to one replay session; without it nothing changes.
-func TestASessionResetTurnsExactServingOff(t *testing.T) {
+// Exact serving belongs to one replay session. A reset ends its test and
+// pool: until the agent serves the next session, no data-plane mock of the
+// previous one answers (an application kept alive across sessions), the
+// protocol-phase mocks do, no test has fired, and no outcome is left. A
+// manager that never served exactly is untouched by it.
+func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimeSession)
-	mm := stagedManager(t, nil, []*models.Mock{a})
-	mm.ServeExactTest("T", nil)
-	if sess, _ := mm.GetSessionMocks(); len(sess) != 0 {
-		t.Fatalf("a test that owns nothing is served %v", exactNames(sess))
-	}
+	cfg := exactMock("cfg", time.Second, models.LifetimeSession)
+	cfg.Spec.Metadata = map[string]string{"type": "config"}
+	mm := stagedManager(t, nil, []*models.Mock{a, cfg})
+	mm.ServeExactPool("-", []string{"a"})
+	mm.ServeExactTest("T", []*models.Mock{a})
 	mm.ResetForReplaySession()
-	if _, _, _, ok := mm.ExactTestOutcome(); ok {
-		t.Fatal("exact serving outlived its session")
+	if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "" {
+		t.Fatalf("the previous session's test is still read: %q %v", test, ok)
 	}
 	sess, _ := mm.GetSessionMocks()
+	equalNames(t, "after the reset", sess, "cfg")
+	if mm.WindowSnapshot().FirstTestFired || mm.WindowSnapshot().Active {
+		t.Fatal("the next session starts with a test fired or open")
+	}
+	if mm.DeleteUnFilteredMock(*a) {
+		t.Fatal("a mock of the previous session answered after the reset")
+	}
+
+	plain := stagedManager(t, nil, []*models.Mock{a})
+	plain.ResetForReplaySession()
+	if _, _, _, ok := plain.ExactTestOutcome(); ok {
+		t.Fatal("a reset turned exact serving on")
+	}
+	sess, _ = plain.GetSessionMocks()
 	equalNames(t, "without exact serving", sess, "a")
-	if mm.WindowSnapshot().FirstTestFired {
-		t.Fatal("the next session starts with a test fired")
+}
+
+// A consume that read a view before another replaced it lands on the view it
+// read: it answers nothing there, so what the replaced view says it
+// consumed is final.
+func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTest("T", []*models.Mock{a})
+	v := mm.exactView()
+	held, _ := mm.GetPerTestMocksInWindow()
+	mm.ServeExactPool("-", nil)
+	// The race: a consume that loaded v before the swap.
+	mk := *held[0]
+	mm.exact.view.Store(v)
+	verdict := mm.exactConsume(&mk, true)
+	if verdict != exactRefused {
+		t.Fatalf("a consume in a replaced view: %v", verdict)
+	}
+	if _, consumed, _, _ := mm.ExactTestOutcome(); len(consumed) != 0 {
+		t.Fatalf("the replaced view's outcome changed: %v", consumed)
 	}
 }
 
@@ -303,6 +342,12 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 		{"in test", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 0), models.MissInTest, 0},
 		{"extra call", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
 		{"outside", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 0), models.MissOutsideTest, 0},
+		// The matcher found it one more than the test recorded while the
+		// test was open; it is filed once the test's end has served the pool.
+		{"extra call filed as its test ended", func(mm *MockManager) {
+			mm.ServeExactTest("T", nil)
+			mm.ServeExactPool("-", nil)
+		}, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -404,4 +449,99 @@ func TestAnEvictedStagedMockIsBackAtTheNextBeginOrEnd(t *testing.T) {
 	mm.ServeExactPool("k", []string{"p"})
 	sess, _ = mm.GetSessionMocks()
 	equalNames(t, "gap 2", sess, "p", "handshake")
+}
+
+// A copy a previous attempt of a test read (a call in flight across the
+// test's end and its retry's begin) answers for nothing in the retry: the
+// retry's own copy of that mock still answers, once.
+func TestAStaleCopyFromThePreviousAttemptIsRefused(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{a})
+	mm.ServeExactTest("T", []*models.Mock{a})
+	stale, _ := mm.GetPerTestMocksInWindow()
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTest("T", []*models.Mock{a}) // the retry
+	if mm.DeleteFilteredMock(*stale[0]) {
+		_, consumed, unconsumed, _ := mm.ExactTestOutcome()
+		t.Fatalf("attempt 1's copy answered for the retry: consumed=%v unconsumed=%v", consumed, unconsumed)
+	}
+	own, _ := mm.GetPerTestMocksInWindow()
+	if len(own) != 1 || !mm.DeleteFilteredMock(*own[0]) {
+		t.Fatalf("the retry's own copy did not answer: %v", exactNames(own))
+	}
+	// A mock a parser builds by name carries no view: it is the open test's.
+	mm.ServeExactTest("T", []*models.Mock{a})
+	if !mm.MarkMockAsUsed(models.Mock{Name: "a", Kind: models.HTTP}) {
+		t.Fatal("a consume by name was refused")
+	}
+}
+
+// The outcome is the latest test's, read after it stopped being served: a
+// consume that lands after its end changes nothing, and the end's read is
+// final.
+func TestTheOutcomeIsTheEndedTestsAndFinal(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	b := exactMock("b", time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a, b}, nil)
+	mm.ServeExactPool("-", nil)
+	if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "" {
+		t.Fatalf("before any test: %q %v", test, ok)
+	}
+	mm.ServeExactTest("T", []*models.Mock{a, b})
+	held, _ := mm.GetPerTestMocksInWindow()
+	if !mm.DeleteFilteredMock(*held[0]) {
+		t.Fatal("a did not answer")
+	}
+	mm.ServeExactPool("-", nil)
+	if mm.DeleteFilteredMock(*held[1]) {
+		t.Fatal("a test mock answered after its test ended")
+	}
+	test, consumed, unconsumed, ok := mm.ExactTestOutcome()
+	if !ok || test != "T" || strings.Join(consumed, ",") != "a" || strings.Join(unconsumed, ",") != "b" {
+		t.Fatalf("outcome %q consumed=%v unconsumed=%v ok=%v", test, consumed, unconsumed, ok)
+	}
+}
+
+// A push parser paces server push by the recorded windows (RecordedWindows,
+// CurrentTestWindow). Under exact serving what the view shows is due: the
+// open test's push is its own mocks, and no recorded window holds it back.
+func TestUnderExactServingWhatTheViewShowsIsDue(t *testing.T) {
+	defer models.RegisterCarryOver(models.Kind("ExactPush"), func(*models.Mock) bool { return false })()
+	w1 := models.TestWindow{Start: exactT0, End: exactT0.Add(time.Second)}
+	w2 := models.TestWindow{Start: exactT0.Add(10 * time.Second), End: exactT0.Add(11 * time.Second)}
+	msg := exactMock("push", 10*time.Second+500*time.Millisecond, models.LifetimePerTest)
+
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	mm.SeedRecordedWindows([]models.TestWindow{w1, w2})
+	mm.SetMocksWithWindow([]*models.Mock{msg}, nil, models.BaseTime, time.Now())
+	if mm.RecordedWindows().Len() != 2 {
+		t.Fatal("without exact serving the seeded windows pace push")
+	}
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTest("test-2", []*models.Mock{msg})
+	start, _ := mm.CurrentTestWindow()
+	if !mm.RecordedWindows().Released(msg.Spec.ReqTimestampMock, start) {
+		t.Fatal("a push the open test owns is held under exact serving")
+	}
+}
+
+// A protocol-phase mock a parser evicts through a delete door is gone from
+// every read until the next begin or end, the DNS and connection reads too.
+func TestAnEvictedMockIsGoneFromTheStatelessAndConnectionReads(t *testing.T) {
+	conn := exactMock("conn", 0, models.LifetimeConnection)
+	conn.Spec.Metadata = map[string]string{"type": "connection", "connID": "c1"}
+	mm := stagedManager(t, nil, []*models.Mock{conn})
+	mm.ServeExactPool("-", nil)
+	got, _ := mm.GetConnectionMocks("c1")
+	equalNames(t, "before", got, "conn")
+	if !mm.DeleteUnFilteredMock(*conn) {
+		t.Fatal("the connection mock was not evicted")
+	}
+	got, _ = mm.GetConnectionMocks("c1")
+	equalNames(t, "evicted", got)
+	mm.ServeExactPool("-", nil)
+	got, _ = mm.GetConnectionMocks("c1")
+	equalNames(t, "after the next end", got, "conn")
 }

@@ -218,12 +218,18 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Exact serving's pool call begins no test (BeginsTestVariables below):
+	// values it gave would be bound nowhere.
+	if provenswitch.On() && !updateParamsReq.FilterParams.BeginsTestVariables() && len(updateParamsReq.FilterParams.Variables) > 0 {
+		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that serves the pool between test cases begins no test, and gives no values to bind"))
+		return
+	}
 	if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	// Under the proven switch every mock filter a client sends starts a test:
+	// Under the proven switch a mock filter a client sends starts a test:
 	// keploy test sends one per test case, before the test case is sent, so
 	// a test case begins with no variable bound. The scope begins after the
 	// new pool is in, so a call checked against the previous pool binds
@@ -234,7 +240,10 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	// An agent that can only forget begins the test with nothing bound, and
 	// refuses values it cannot bind: dropped, they would leave every call
 	// that uses one unbound, a failure of the app that is keploy's.
-	if provenswitch.On() {
+	// Exact serving's pool call (models.ExactServing, between test cases)
+	// begins no test: the variables the test case bound stay readable, and
+	// keploy test reads them after it (MockFilterParams.BeginsTestVariables).
+	if provenswitch.On() && updateParamsReq.FilterParams.BeginsTestVariables() {
 		given := updateParamsReq.FilterParams.Variables
 		switch s := a.svc.(type) {
 		case variableStarter:

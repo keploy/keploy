@@ -4153,6 +4153,11 @@ func (p *Proxy) ServeExactTest(test string, owned []*models.Mock) error {
 		return errNoMockManager
 	}
 	m.ServeExactTest(test, owned)
+	if p.asyncEngine != nil {
+		// A test opening is a window as the async lanes count them: where a
+		// per-test SetMocksWithWindow advanced them before exact serving.
+		p.asyncEngine.AdvanceWindow()
+	}
 	return nil
 }
 
@@ -4780,8 +4785,11 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	if m := p.getMockManager(); m != nil {
 		if proxyErr.MissKind = m.exactMissKind(); proxyErr.MissKind != "" {
 			// Only a miss made in the open test is an extra call, and only
-			// an extra call says how often the call was recorded.
-			if r := proxyErr.MismatchReport; r != nil && proxyErr.MissKind == models.MissInTest && r.MissKind == models.MissExtraCall {
+			// an extra call says how often the call was recorded. The
+			// matcher found it one against the test's own answered mocks,
+			// which only an open test has: an extra call filed after its
+			// test ended (its last call in flight) stays one.
+			if r := proxyErr.MismatchReport; r != nil && r.MissKind == models.MissExtraCall {
 				proxyErr.MissKind = models.MissExtraCall
 			} else {
 				proxyErr.Recorded = 0

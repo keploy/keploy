@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // extraCall tells, for a request no mock answered under exact serving (the
@@ -26,14 +27,26 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 	if len(answered) == 0 {
 		return 0
 	}
-	matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: answered}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
-	if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
+	// The test's bindings, on a copy: a mock that declares a variable is
+	// matched as it was answered, and the dry match binds nothing.
+	vars := variableTable(mockDb)
+	dry := func(mocks []*models.Mock) bool {
+		v := vars
+		if v != nil {
+			v = v.Clone()
+		}
+		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: mocks, vars: v}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
+		return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
+	}
+	if !dry(answered) {
 		return 0
 	}
+	// How often the test recorded the call: each answered mock the call
+	// matches on its own (recordings of one call may differ where its
+	// variables sit).
 	n := 0
 	for _, a := range answered {
-		if a.Spec.HTTPReq != nil && a.Spec.HTTPReq.Method == mk.Spec.HTTPReq.Method &&
-			a.Spec.HTTPReq.URL == mk.Spec.HTTPReq.URL && a.Spec.HTTPReq.Body == mk.Spec.HTTPReq.Body {
+		if dry([]*models.Mock{a}) {
 			n++
 		}
 	}
@@ -43,12 +56,17 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 // answeredOnly is a read-only view of a test's answered mocks, for extraCall:
 // it shows them as per-test mocks and nothing else, and every consume
 // "succeeds" without touching anything, so a match on it changes no state.
-// It keeps no variable table (integrations.VariableStore) for the same
-// reason: a match that follows a variable may bind it.
+// Its variable table (integrations.VariableStore) is a copy of the test's,
+// for the same reason: a match that follows a variable may bind it.
 type answeredOnly struct {
 	integrations.MockMemDb
 	mocks []*models.Mock
+	vars  *variables.Table
 }
+
+// Variables implements integrations.VariableStore: the copy of the test's
+// bindings (nil when the store keeps none).
+func (a answeredOnly) Variables() *variables.Table { return a.vars }
 
 func (a answeredOnly) GetPerTestMocksInWindow() ([]*models.Mock, error) { return a.mocks, nil }
 func (a answeredOnly) GetFilteredMocksInWindow() ([]*models.Mock, error) {

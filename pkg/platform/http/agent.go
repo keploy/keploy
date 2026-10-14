@@ -1327,7 +1327,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
-			a.session().record(stepMockParams, func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
 		}
 	}()
 	// Only a successful answer that says so sets it again below; a call that

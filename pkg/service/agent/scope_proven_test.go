@@ -41,8 +41,12 @@ type wireProxy struct {
 	// atServe is served when the test opened. setErr fails serving.
 	exactTest  string
 	exactNames []string
-	atServe    map[string]uint64
-	setErr     error
+	// lastTest and lastNames are the latest test opened, open or ended: its
+	// outcome is read after it stops being served.
+	lastTest  string
+	lastNames []string
+	atServe   map[string]uint64
+	setErr    error
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
@@ -80,6 +84,7 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	for _, m := range owned {
 		p.exactNames = append(p.exactNames, m.Name)
 	}
+	p.lastTest, p.lastNames = test, append([]string(nil), p.exactNames...)
 	p.atServe = make(map[string]uint64, len(p.served))
 	for k, v := range p.served {
 		p.atServe[k] = v
@@ -101,23 +106,23 @@ func (p *wireProxy) ServeExactPool(_ string, names []string) error {
 	return nil
 }
 
-// ExactTestOutcome: a test mock answered when served moved since its test
-// opened.
+// ExactTestOutcome: of the latest test opened, a test mock answered when
+// served moved since that test opened.
 func (p *wireProxy) ExactTestOutcome() (string, []string, []string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.exactTest == "" {
+	if p.lastTest == "" {
 		return "", nil, nil, true
 	}
 	var consumed, unconsumed []string
-	for _, n := range p.exactNames {
+	for _, n := range p.lastNames {
 		if p.served[n] > p.atServe[n] {
 			consumed = append(consumed, n)
 		} else {
 			unconsumed = append(unconsumed, n)
 		}
 	}
-	return p.exactTest, consumed, unconsumed, true
+	return p.lastTest, consumed, unconsumed, true
 }
 
 // exactless cannot serve each test exactly.
@@ -575,8 +580,10 @@ func TestAFailedEndAtAClaimHandoffIsTheRunsRefusal(t *testing.T) {
 	require.Nil(t, serr)
 	kill(t, gone)
 	p.mu.Lock()
-	// The end's pool serve fails; the new claim's pool is served.
-	p.failPools = 1
+	// The end serves the pool twice, and fails both: to stop serving the
+	// test before it reads it, and to restore it as the test's window
+	// closes. The new claim's pool is served.
+	p.failPools = 2
 	p.mu.Unlock()
 	_, serr = a.ClaimInstance(ctx, models.InstanceReq{Key: "b"}, os.Getpid())
 	require.Nil(t, serr, "the run is free once its claimer exited")
@@ -733,7 +740,7 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
-	reason := evidenceReason("orders::TestPlaceOrder", ev, a.mocksFound(ev.Unconsumed))
+	reason := evidenceReason("orders::TestPlaceOrder", ev, a.mocksFound(ev.Unconsumed), time.Time{})
 	require.Contains(t, reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
@@ -835,14 +842,14 @@ func TestEvidenceKeepsAnHTTPCallsShape(t *testing.T) {
 	declared := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://store/orders/kqzxwv"},
 		Variables: models.MockVariables{"orderId": {Recorded: "kqzxwv", Bind: "url.path[1]"}}}}
 	require.Equal(t, "GET store/orders/{} (mock-1)", mockText("mock-1", declared), "a mock's declared variable place holds a recorded value")
-	r := evidenceReason("orders::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{sanitizedMiss(miss)}, Unconsumed: []string{"mock-3"}}, map[string]*models.Mock{"mock-3": mock})
+	r := evidenceReason("orders::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{sanitizedMiss(miss)}, Unconsumed: []string{"mock-3"}}, map[string]*models.Mock{"mock-3": mock}, time.Time{})
 	for _, v := range []string{"alice@example.com", "ord_9f8e7d", "s3cret", "507f1f77bcf86cd799439011", "true"} {
 		require.NotContains(t, r, v)
 	}
 }
 
 func TestTheReasonQuotesAnIDTheShellWouldSplit(t *testing.T) {
-	r := evidenceReason("tests/a.py::test_x[1-2] y", &models.ScopeEvidence{Unconsumed: []string{"m"}}, nil)
+	r := evidenceReason("tests/a.py::test_x[1-2] y", &models.ScopeEvidence{Unconsumed: []string{"m"}}, nil, time.Time{})
 	require.Contains(t, r, "keploy mock quarantine 'tests/a.py::test_x[1-2] y' --reason")
 	require.Equal(t, "orders::TestA", shellQuote("orders::TestA"))
 }
@@ -1293,7 +1300,7 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 		Differs: []string{"body.amount", "body.users.alice@example.role", "body.orders.123456.total", "header.authorization", "body.items[].sku9X0001234[]", "header.x-b3-traceid"}})
 	// A header's name is the protocol's: never written {}.
 	require.Equal(t, []string{"body.amount", "body.users.{}.role", "body.orders.{}.total", "header.authorization", "body.items[].{}[]", "header.x-b3-traceid"}, miss.Differs)
-	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil)
+	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil, time.Time{})
 	require.Contains(t, reason, "POST /charge to pay.internal had no recorded answer (body.amount, body.users.{}.role, body.orders.{}.total and 3 more differ)")
 	require.NotContains(t, reason, "alice")
 
@@ -1301,7 +1308,7 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	// ID, token or random key the app sent reaches the reason.
 	shaped := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge/a1b2", Destination: "pay.internal",
 		Differs: []string{"body.users.kqzx9w.role", "body.keys.NffrFeUfNVaHib", "query.ord_9f8e"}})
-	shapedReason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{shaped}}, nil)
+	shapedReason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{shaped}}, nil, time.Time{})
 	require.Contains(t, shapedReason, "POST /charge/{} to pay.internal had no recorded answer (body.users.{}.role, body.keys.{} and query.{} differ)")
 	for _, v := range []string{"a1b2", "kqzx9w", "NffrFeUfNVaHib", "ord_9f8e"} {
 		require.NotContains(t, shapedReason, v)
@@ -1309,13 +1316,52 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	// The reason shapes what differs itself, part by part, for a miss not
 	// shaped before (a backstop: the strict comparison shapes each key).
 	raw := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge",
-		Differs: []string{"body.users.kqzx9w.role"}}}}, nil)
+		Differs: []string{"body.users.kqzx9w.role"}}}}, nil, time.Time{})
 	require.Contains(t, raw, "POST /charge had no recorded answer (body.users.{}.role differs)")
 
-	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil)
+	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil, time.Time{})
 	require.Contains(t, one, "POST /charge had no recorded answer (body.amount differs)")
-	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil)
+	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil, time.Time{})
 	require.Contains(t, two, "GET /x had no recorded answer (host and header.accept differ)")
-	none := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}}, nil)
+	none := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}}, nil, time.Time{})
 	require.Contains(t, none, "GET /x had no recorded answer.")
+}
+
+// endOrderProxy notes when the test stops being served and when its outcome
+// is read.
+type endOrderProxy struct {
+	*wireProxy
+	events []string
+}
+
+func (p *endOrderProxy) ServeExactPool(key string, names []string) error {
+	p.events = append(p.events, "pool")
+	return p.wireProxy.ServeExactPool(key, names)
+}
+
+func (p *endOrderProxy) ExactTestOutcome() (string, []string, []string, bool) {
+	p.events = append(p.events, "outcome")
+	return p.wireProxy.ExactTestOutcome()
+}
+
+// A test's end stops serving it before it reads what the test did: a call
+// that lands after the read cannot consume one of its mocks (round-2 review).
+func TestAnEndStopsServingTheTestBeforeItReadsTheOutcome(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &endOrderProxy{wireProxy: wp}
+	a.Proxy = p
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	wp.served["mock-1"] = 1
+	p.events = nil
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+	require.GreaterOrEqual(t, len(p.events), 2)
+	require.Equal(t, []string{"pool", "outcome"}, p.events[:2], "the outcome was read while the test was still served")
 }

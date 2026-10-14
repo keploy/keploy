@@ -311,12 +311,9 @@ func (p *workerPool) ServeExactTest(test string, _ []*models.Mock) error {
 	p.mu.Unlock()
 	return nil
 }
-func (p *workerPool) ServeExactPool(string, []string) error {
-	p.mu.Lock()
-	p.exactTest = ""
-	p.mu.Unlock()
-	return nil
-}
+func (p *workerPool) ServeExactPool(string, []string) error { return nil }
+
+// ExactTestOutcome is the latest test opened, open or ended.
 func (p *workerPool) ExactTestOutcome() (string, []string, []string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

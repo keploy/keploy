@@ -72,6 +72,16 @@ type provenWire struct {
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session.
 	staged bool
+	// servedSince is when exact serving began serving the open test
+	// (serveTestExactly): a miss made before it is no call of the test's.
+	servedSince time.Time
+	// realSaid names the recorded mocks already said to go to a mock.real
+	// destination (notReal).
+	realSaid map[string]bool
+	// unservable are the open test's mapped mocks the agent's store refused
+	// (variables this keploy cannot follow): nothing serves them, and its end
+	// counts each as a recorded call it did not make.
+	unservable []string
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -613,7 +623,19 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	if t := a.realTracker(); t != nil {
 		uses, incomplete = t.EndTest()
 	}
+	// When exact serving began serving the test: a miss made before it is
+	// no call of the test's (evidenceReason).
+	beganAt := a.servedSince()
 	if a.replaying() {
+		// The test stops being served before what it did is read: a call
+		// that lands after the read cannot consume one of its mocks, so the
+		// outcome read is final (ExactTestOutcome reads the ended view).
+		// A pool that cannot be served is keploy's failure to end the test,
+		// not to read it: the end serves the pool again below (EndScopeAt)
+		// and, failing again, makes it the run's refusal.
+		if err := a.servePoolExactly(ctx); err != nil {
+			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
+		}
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
 	}
 	if len(incomplete) > 0 {
@@ -631,19 +653,19 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.Unread = true
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
-		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
+		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
 		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
 		// and the test's outcome is its own against real infra.
-		ev.Reason = evidenceReason(id, ev, nil)
+		ev.Reason = evidenceReason(id, ev, nil, beganAt)
 	}
 	if len(uses) > 0 {
 		a.noteScopeReal(id, uses)
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
-	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil)
+	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
 	if why != "" {
 		if ev == nil {
 			ev = &models.ScopeEvidence{}
@@ -681,9 +703,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 // replay, and said on the window in a record.
 //
 // fromEvidence says ev's reason, if any, is keploy's text for its evidence
-// (evidenceReason), which is then written again with the losses in it; any
-// other reason (a read that failed) keeps its text, after the losses'.
-func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool) (*models.ScopeEvidence, string) {
+// (evidenceReason, with beganAt), which is then written again with the
+// losses in it; any other reason (a read that failed) keeps its text, after
+// the losses'.
+func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool, beganAt time.Time) (*models.ScopeEvidence, string) {
 	a.provenMu.Lock()
 	mark := a.proven.losses
 	a.provenMu.Unlock()
@@ -713,7 +736,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		if a.replaying() {
 			mocks = a.mocksFound(ev.Unconsumed)
 		}
-		ev.Reason = evidenceReason(id, ev, mocks)
+		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
 	default:
 		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
@@ -777,7 +800,10 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	if !ok || test != id {
 		return ev, fmt.Errorf("keploy's proxy was not serving %s exactly at its end (it was serving %q)", id, test)
 	}
-	ev.Unconsumed = unconsumed
+	a.provenMu.Lock()
+	unservable := append([]string(nil), a.proven.unservable...)
+	a.provenMu.Unlock()
+	ev.Unconsumed = append(unconsumed, unservable...)
 	return ev, nil
 }
 
@@ -792,10 +818,14 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 		return nil, errors.New("no mocks are loaded")
 	}
 	want := make(map[string]bool, len(names))
-	for _, n := range names {
-		want[n] = true
-	}
 	s.mu.RLock()
+	for _, n := range names {
+		// A mock the store refused was said as it was refused: it answers
+		// nothing (refusedOf).
+		if _, refused := s.refused[n]; !refused {
+			want[n] = true
+		}
+	}
 	for _, pool := range [][]*models.Mock{s.filtered, s.unfiltered} {
 		for _, m := range pool {
 			if m != nil && want[m.Name] {
@@ -833,6 +863,33 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 		return nil, fmt.Errorf("its mapping names mocks the loaded recording does not have: %s; record the set again", strings.Join(missing, ", "))
 	}
 	return out, nil
+}
+
+// servedSince is when exact serving began serving the open test; zero
+// when it does not.
+func (a *Agent) servedSince() time.Time {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.servedSince
+}
+
+// refusedOf is, in order, the names of names the agent's store refused that
+// are test mocks: a protocol-phase mock is no test's.
+func (a *Agent) refusedOf(names []string) []string {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, n := range names {
+		if s.refused[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // mocksFound is mocksByName for rendering only: what it cannot find is left out.
@@ -1032,20 +1089,37 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // evidenceReason is keploy's text for a failed test (design v14 §5.3). It
 // names calls by method, destination and URL shape (models.PathShape), never
 // by a body or a query value.
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock) string {
+// beganAt is when the test began being served: a miss filed outside every
+// test whose call was made at or after it was made as the test ended (its
+// last call in flight, filed once the test stopped being served); one made
+// before it, before the test began, an extra call of another test's
+// included.
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
+	}
+	// A miss whose call was made before the test began being served is no
+	// call of the test's, whatever kind it was filed with: one another test
+	// made, still in flight as that test ended, filed once this one began.
+	before := func(m models.UnmatchedCall) bool {
+		return !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
 	}
 	// One call made more often than recorded is said once: how often the
 	// test made it, and how often it was recorded.
 	extra := map[string]int{}
 	for _, m := range ev.Misses {
-		if m.Kind == models.MissExtraCall {
+		if m.Kind == models.MissExtraCall && !before(m) {
 			extra[missText(m)]++
 		}
 	}
 	for _, m := range ev.Misses {
+		if before(m) {
+			// Where it was made is not known: a miss is filed by the view
+			// served when it is filed, which may be after its own test.
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			continue
+		}
 		switch m.Kind {
 		case models.MissExtraCall:
 			call := missText(m)
@@ -1054,6 +1128,10 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 				delete(extra, call)
 			}
 		case models.MissOutsideTest:
+			if !beganAt.IsZero() && !m.At.IsZero() {
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				continue
+			}
 			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
 		default:
 			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
