@@ -4550,7 +4550,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
-					Recorded:         parserErr.MismatchReport.Recorded,
+					Recorded:         parserErr.Recorded,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -4707,10 +4707,18 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 	// Under exact serving (the proven switch) a miss says where it was made:
 	// in the open test, outside every test, or, as its matcher found, as one
 	// call more than the test recorded.
+	if r := proxyErr.MismatchReport; r != nil {
+		proxyErr.Recorded = r.Recorded
+	}
 	if m := p.getMockManager(); m != nil {
-		proxyErr.MissKind = m.exactMissKind()
-		if r := proxyErr.MismatchReport; r != nil && proxyErr.MissKind == models.MissInTest && r.MissKind == models.MissExtraCall {
-			proxyErr.MissKind, proxyErr.Recorded = models.MissExtraCall, r.Recorded
+		if proxyErr.MissKind = m.exactMissKind(); proxyErr.MissKind != "" {
+			// Only a miss made in the open test is an extra call, and only
+			// an extra call says how often the call was recorded.
+			if r := proxyErr.MismatchReport; r != nil && proxyErr.MissKind == models.MissInTest && r.MissKind == models.MissExtraCall {
+				proxyErr.MissKind = models.MissExtraCall
+			} else {
+				proxyErr.Recorded = 0
+			}
 		}
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing

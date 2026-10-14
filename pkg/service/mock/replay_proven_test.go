@@ -352,10 +352,15 @@ func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
 // slice, and names nothing loaded has are reported.
 func TestPoolSlices(t *testing.T) {
 	mp := &models.Mapping{Startup: []models.MockEntry{{Name: "mock-1", Key: "o"}, {Name: "mock-2"}, {Name: "mock-0", Key: "o"}, {Name: "mock-8", Key: "o"}}}
-	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}}, named("mock-0", "mock-1", "mock-2", "mock-3").mocks)
+	held := named("mock-0", "mock-1", "mock-2", "mock-3").mocks
+	// mock-cf is decoded but never held (a connection failure): a mapping
+	// may name it, and it is in no slice.
+	decoded := append(append([]*models.Mock(nil), held...), named("mock-cf").mocks...)
+	mp.Startup = append(mp.Startup, models.MockEntry{Name: "mock-cf"})
+	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-3"}}, pool)
 	require.Equal(t, []string{"mock-8", "mock-9"}, unknown)
-	pool, unknown = poolSlices(nil, nil, nil)
+	pool, unknown = poolSlices(nil, nil, nil, nil)
 	require.Empty(t, pool)
 	require.Empty(t, unknown)
 }

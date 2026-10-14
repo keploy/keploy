@@ -236,6 +236,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// (models.AgentBound: the connection failures, which it does not replay).
 	// loaded counts exactly that, for the empty-set WARN, the "verified
 	// nothing" exit, the receipt and the metered count.
+	// Every mock the set decoded, before what the agent never holds is left
+	// out: what a mapping may name (pushProvenTable).
+	decoded := append(append([]*models.Mock(nil), filtered...), unfiltered...)
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
@@ -254,7 +257,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional;
 	//    under the proven switch each test is judged by it, so required).
-	if err := m.pushScopeTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...)); err != nil {
+	if err := m.pushScopeTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...), decoded); err != nil {
 		return err
 	}
 	if provenswitch.On() {
@@ -744,11 +747,11 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-// Under the proven switch it is pushProvenTable, and loaded, the mocks the
-// agent holds, are what the table and the pool slices must name.
-func (m *mockService) pushScopeTable(ctx context.Context, name string, loaded []*models.Mock) error {
+// Under the proven switch it is pushProvenTable: loaded are the mocks the
+// agent holds, and decoded every mock the set decoded.
+func (m *mockService) pushScopeTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	if provenswitch.On() {
-		return m.pushProvenTable(ctx, name, loaded)
+		return m.pushProvenTable(ctx, name, loaded, decoded)
 	}
 	if m.mappingDB == nil {
 		return nil
@@ -790,7 +793,7 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, loaded []
 // startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
 // names a mock the recording does not have, refuses, and so does an agent
 // that refuses the table: nothing is served from a whole pool instead.
-func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded []*models.Mock) error {
+func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
@@ -824,7 +827,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded [
 		}
 		table[testName] = names
 	}
-	pool, unknown := poolSlices(mp, table, loaded)
+	pool, unknown := poolSlices(mp, table, loaded, decoded)
 	if len(unknown) > 0 {
 		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
 	}
@@ -839,12 +842,19 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded [
 // loaded mock no test's mapping lists, under the key its mappings' startup:
 // entry gives it, else models.PoolKeyNone (an older recording's, or one made
 // outside every claim). unknown lists, sorted, the names the table or the
-// startup entries give that no loaded mock has.
-func poolSlices(mp *models.Mapping, table map[string][]string, loaded []*models.Mock) (pool map[string][]string, unknown []string) {
-	have := make(map[string]bool, len(loaded))
-	for _, mk := range loaded {
+// startup entries give that no decoded mock has (a mock the agent never holds,
+// a connection failure, is decoded, and in no slice).
+func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded []*models.Mock) (pool map[string][]string, unknown []string) {
+	have := make(map[string]bool, len(decoded))
+	for _, mk := range decoded {
 		if mk != nil && mk.Name != "" {
 			have[mk.Name] = true
+		}
+	}
+	held := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			held[mk.Name] = true
 		}
 	}
 	missing := map[string]bool{}
@@ -866,6 +876,9 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded []*models.
 			}
 			if !have[e.Name] {
 				missing[e.Name] = true
+				continue
+			}
+			if !held[e.Name] {
 				continue
 			}
 			key := e.Key

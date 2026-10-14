@@ -1456,7 +1456,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.keep(results), nil
+		return v.reusable("", results, m.treeValues(m.startupTree(), "")), nil
 	}
 	return results, nil
 }
@@ -1679,7 +1679,7 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.keep(results), nil
+		return v.reusable("", results, m.treeValues(m.unfilteredTree(), "")), nil
 	}
 	return results, nil
 }
@@ -1712,7 +1712,7 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.keep(results), nil
+		return v.reusable(kind, results, m.treeValues(m.unfilteredTree(), kind)), nil
 	}
 	return results, nil
 }
@@ -2210,7 +2210,7 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.keep(results), nil
+		return v.reusable(kind, results, m.treeValues(m.startupTree(), kind)), nil
 	}
 	return results, nil
 }
@@ -2399,7 +2399,7 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	switch m.exactConsume(old) {
+	switch m.exactConsume(old, false) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2519,7 +2519,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	switch m.exactConsume(&mock) {
+	switch m.exactConsume(&mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2619,7 +2619,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	switch m.exactConsume(&mock) {
+	switch m.exactConsume(&mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2708,7 +2708,7 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
-	switch m.exactConsume(&mock) {
+	switch m.exactConsume(&mock, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2935,7 +2935,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
-	switch m.exactConsume(&mock) {
+	switch m.exactConsume(&mock, false) {
 	case exactServed:
 		return true
 	case exactRefused:

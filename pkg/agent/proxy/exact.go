@@ -41,9 +41,12 @@ type exactView struct {
 	// test is the open test's ID; "" while no test is open.
 	test string
 	// owned are the open test's test mocks, the manager's own copies, in
-	// recorded order; index is each one's position, by name.
-	owned []*models.Mock
-	index map[string]int
+	// recorded order; index is each one's position, by name. session marks
+	// those staged in the session tier (their kind derives a reusable
+	// lifetime): a parser that reads only that tier finds them there too.
+	owned   []*models.Mock
+	index   map[string]int
+	session []bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
@@ -54,6 +57,12 @@ type exactView struct {
 	// positions in the order they did.
 	consumed []bool
 	order    []int
+	// spent are the staged mocks this view shows that a parser consumed
+	// through a delete door (a per-test-lifetime pool mock, a protocol-phase
+	// mock a parser evicts): gone until the view changes at the next begin
+	// or end, as when each begin and end staged the set again. The staged
+	// trees keep them.
+	spent map[string]bool
 }
 
 // exactState is a manager's exact serving: off until the agent turns it on
@@ -83,6 +92,7 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		if _, dup := v.index[mk.Name]; dup {
 			continue
 		}
+		v.session = append(v.session, mk.TestModeInfo.Lifetime == models.LifetimeSession)
 		c := mk.ShallowCopy()
 		// Served as a per-test mock, consumed once, whatever lifetime its
 		// kind derives: every parser consumes a per-test mock through one
@@ -224,16 +234,18 @@ func (m *MockManager) exactMissKind() string {
 }
 
 // unanswered is the view's test mocks that have not answered, of kind (every
-// kind for ""), in recorded order.
-func (v *exactView) unanswered(kind models.Kind) []*models.Mock {
+// kind for ""), in recorded order; with sessionOnly, those staged in the
+// session tier.
+func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.Mock {
 	if v.test == "" || len(v.owned) == 0 {
 		return nil
 	}
+	only := len(sessionOnly) > 0 && sessionOnly[0]
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	out := make([]*models.Mock, 0, len(v.owned))
 	for i, mk := range v.owned {
-		if !v.consumed[i] && (kind == "" || mk.Kind == kind) {
+		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) {
 			out = append(out, mk)
 		}
 	}
@@ -246,6 +258,12 @@ func (v *exactView) unanswered(kind models.Kind) []*models.Mock {
 // itself (unanswered), never from the staged trees.
 func (v *exactView) shows(mk *models.Mock) bool {
 	if mk == nil {
+		return false
+	}
+	v.mu.Lock()
+	spent := v.spent[mk.Name]
+	v.mu.Unlock()
+	if spent {
 		return false
 	}
 	if mk.IsProtocolPhase() {
@@ -275,6 +293,28 @@ func (v *exactView) perTest(kind models.Kind, staged []*models.Mock) []*models.M
 	return append(v.unanswered(kind), v.keep(staged)...)
 }
 
+// reusable is a session-tier read under exact serving: the open test's
+// unanswered mocks staged in that tier, then what the view shows of the
+// session and the startup trees (each mock once). The reusable tiers show
+// one set, whichever a parser reads: the staging filed the pool in both, a
+// per-test-lifetime mock in the startup tree only, and a parser that reads
+// one tier alone (enterprise SQS reads the session tier, Kafka never the
+// startup tier) finds everything the view shows it.
+func (v *exactView) reusable(kind models.Kind, staged ...[]*models.Mock) []*models.Mock {
+	out := v.unanswered(kind, true)
+	seen := make(map[*models.Mock]struct{}, len(out))
+	for _, list := range staged {
+		for _, mk := range v.keep(list) {
+			if _, dup := seen[mk]; dup || (kind != "" && mk.Kind != kind) {
+				continue
+			}
+			seen[mk] = struct{}{}
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
 // exactVerdict is how exact serving settles a consume a parser reports.
 type exactVerdict int
 
@@ -291,8 +331,11 @@ const (
 	exactRefused
 )
 
-// exactConsume settles a parser's consume of mk under exact serving.
-func (m *MockManager) exactConsume(mk *models.Mock) exactVerdict {
+// exactConsume settles a parser's consume of mk under exact serving. evicts
+// is a delete door (DeleteFilteredMock, DeleteUnFilteredMock,
+// DeleteStartupMock): a staged mock the view shows is then spent until the
+// view changes, and the staged trees keep it.
+func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	v := m.exactView()
 	if v == nil || mk == nil {
 		return exactPass
@@ -312,10 +355,46 @@ func (m *MockManager) exactConsume(mk *models.Mock) exactVerdict {
 			return exactServed
 		}
 	}
-	if v.shows(mk) {
+	if !v.shows(mk) {
+		return exactRefused
+	}
+	if !evicts {
 		return exactPass
 	}
-	return exactRefused
+	v.mu.Lock()
+	if v.spent[mk.Name] {
+		v.mu.Unlock()
+		return exactRefused
+	}
+	if v.spent == nil {
+		v.spent = map[string]bool{}
+	}
+	v.spent[mk.Name] = true
+	v.mu.Unlock()
+	m.noteExactSpent(mk)
+	return exactServed
+}
+
+// noteExactSpent records that a staged mock answered through a delete door,
+// and tells the parsers that keep an index that it is gone until the view
+// changes.
+func (m *MockManager) noteExactSpent(mk *models.Mock) {
+	if err := m.flagMockAsUsed(models.MockState{
+		Name:             mk.Name,
+		Kind:             mk.Kind,
+		Usage:            models.Updated,
+		IsFiltered:       mk.TestModeInfo.IsFiltered,
+		SortOrder:        mk.TestModeInfo.SortOrder,
+		Type:             mk.Spec.Metadata["type"],
+		Lifetime:         mk.TestModeInfo.Lifetime,
+		ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
+		ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
+		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+	}); err != nil && m.logger != nil {
+		m.logger.Error("failed to flag mock as used", zap.Error(err))
+	}
+	m.bumpRevisionKind(mk.Kind)
+	m.bumpRevisionAll()
 }
 
 // noteExactServed records that test mock owned answered (consumed, served
@@ -354,4 +433,32 @@ func (m *MockManager) exactCursorKey(key string) (string, bool) {
 		return "", false
 	}
 	return v.poolKey + "\x00" + key, true
+}
+
+// startupTree and unfilteredTree are the staged reusable trees now.
+func (m *MockManager) startupTree() *TreeDb {
+	m.treesMu.RLock()
+	defer m.treesMu.RUnlock()
+	return m.startup
+}
+
+func (m *MockManager) unfilteredTree() *TreeDb {
+	m.treesMu.RLock()
+	defer m.treesMu.RUnlock()
+	return m.unfiltered
+}
+
+// treeValues is what tree holds, of kind (every kind for ""), in order.
+func (m *MockManager) treeValues(tree *TreeDb, kind models.Kind) []*models.Mock {
+	if tree == nil {
+		return nil
+	}
+	out := make([]*models.Mock, 0, 32)
+	tree.rangeValues(func(v interface{}) bool {
+		if mk, ok := v.(*models.Mock); ok && mk != nil && (kind == "" || mk.Kind == kind) {
+			out = append(out, mk)
+		}
+		return true
+	})
+	return out
 }

@@ -82,8 +82,11 @@ func TestAnOpenTestIsServedItsOwnMocksAndTheProtocolPhase(t *testing.T) {
 	}
 	sess, _ := mm.GetSessionMocks()
 	equalNames(t, "session union", sess, "a", "b", "handshake")
+	// The session tier shows the open test's mocks staged there (a, whose
+	// kind derives session lifetime) and the protocol-phase mocks: a parser
+	// that reads that tier alone finds them.
 	un, _ := mm.GetUnFilteredMocks()
-	equalNames(t, "session tier", un, "handshake")
+	equalNames(t, "session tier", un, "a", "handshake")
 	byKind, _ := mm.GetFilteredMocksByKind(models.HTTP)
 	equalNames(t, "per-test by kind", byKind, "a", "b")
 	if snap := mm.WindowSnapshot(); !snap.Active || !snap.FirstTestFired {
@@ -319,4 +322,86 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pool slice's per-test-lifetime mock (a Postgres query a second test
+// process's TestMain made) is staged in the startup tree only. Between tests
+// every reusable read shows it, whichever tier a parser reads: after a test
+// has fired, Postgres v3 routes such a query to its session engine, which
+// reads GetSessionScopedMocks.
+func TestBetweenTestsEveryReusableReadShowsThePoolSlice(t *testing.T) {
+	pg := exactMock("pg-pool", 0, models.LifetimePerTest)
+	pg.Kind = models.PostgresV3
+	pg.Spec.Metadata = map[string]string{"type": "mocks"}
+	owned := exactMock("pg-owned", time.Second, models.LifetimePerTest)
+	owned.Kind = models.PostgresV3
+	owned.Spec.Metadata = map[string]string{"type": "mocks"}
+	mm := stagedManager(t, []*models.Mock{pg, owned}, nil)
+	mm.ServeExactPool("pkg/a", nil)
+	mm.ServeExactTest("T1", []*models.Mock{owned})
+	mm.ServeExactPool("pkg/b", []string{"pg-pool"})
+	for name, read := range map[string]func() ([]*models.Mock, error){
+		"GetSessionScopedMocks": mm.GetSessionScopedMocks,
+		"GetUnFilteredMocks":    mm.GetUnFilteredMocks,
+		"GetStartupMocks":       mm.GetStartupMocks,
+		"GetSessionMocks":       mm.GetSessionMocks,
+		"GetUnFilteredMocksByKind": func() ([]*models.Mock, error) {
+			return mm.GetUnFilteredMocksByKind(models.PostgresV3)
+		},
+	} {
+		got, _ := read()
+		equalNames(t, name, got, "pg-pool")
+	}
+}
+
+// A parser that reads one reusable tier alone (enterprise SQS reads the
+// session tier) finds the open test's mocks staged there, and each answers
+// once.
+func TestASessionTierReaderSeesTheOpenTestsMocks(t *testing.T) {
+	send := exactMock("sqs-send", 0, models.LifetimeSession)
+	perTest := exactMock("pt", time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{perTest}, []*models.Mock{send})
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T", []*models.Mock{send, perTest})
+	ss, _ := mm.GetSessionScopedMocks()
+	equalNames(t, "session tier", ss, "sqs-send")
+	uk, _ := mm.GetUnFilteredMocksByKind(models.HTTP)
+	equalNames(t, "session tier by kind", uk, "sqs-send")
+	c := *ss[0]
+	if !mm.UpdateUnFilteredMock(ss[0], &c) {
+		t.Fatal("the test's own mock was refused")
+	}
+	if ss, _ = mm.GetSessionScopedMocks(); len(ss) != 0 {
+		t.Fatalf("an answered test mock is still read: %v", exactNames(ss))
+	}
+}
+
+// A staged mock the view shows that a parser consumes through a delete door
+// (a per-test-lifetime pool mock, a protocol-phase mock it evicts) answers
+// once until the view changes, and again in the next gap or test: the staged
+// trees keep it, as when each begin and end staged the set again.
+func TestAnEvictedStagedMockIsBackAtTheNextBeginOrEnd(t *testing.T) {
+	p := exactMock("p", 0, models.LifetimePerTest)
+	p.Kind = models.MySQL
+	p.Spec.Metadata = map[string]string{"type": "mocks"}
+	hs := configMock("handshake", time.Second)
+	mm := stagedManager(t, []*models.Mock{p}, []*models.Mock{hs})
+	mm.ServeExactPool("k", []string{"p"})
+	sess, _ := mm.GetSessionMocks()
+	equalNames(t, "gap 1", sess, "p", "handshake")
+	if !mm.DeleteFilteredMock(*sess[0]) || !mm.DeleteUnFilteredMock(*sess[1]) {
+		t.Fatal("a staged mock the view shows was refused")
+	}
+	if mm.DeleteFilteredMock(*sess[0]) || mm.DeleteUnFilteredMock(*sess[1]) {
+		t.Fatal("an evicted mock answered twice before the view changed")
+	}
+	if sess, _ = mm.GetSessionMocks(); len(sess) != 0 {
+		t.Fatalf("evicted mocks are still read: %v", exactNames(sess))
+	}
+	mm.ServeExactTest("T1", nil)
+	sess, _ = mm.GetSessionMocks()
+	equalNames(t, "in a test", sess, "handshake")
+	mm.ServeExactPool("k", []string{"p"})
+	sess, _ = mm.GetSessionMocks()
+	equalNames(t, "gap 2", sess, "p", "handshake")
 }
