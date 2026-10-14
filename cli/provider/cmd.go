@@ -1552,11 +1552,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
-		// keploy record and keploy test do not reach mock.real's
-		// destinations yet: under the proven switch they would record and
-		// mock them, so a list for them is refused instead.
-		if err := refuseRealOutsideMock(c.cfg, cmd.Name()); err != nil {
-			utils.LogError(c.logger, err, "refusing mock.real outside keploy mock")
+		// Under the proven switch mock.real replaces every setting that made
+		// calls live (U18): their flags are refused here, their keploy.yml
+		// keys dropped at the end of this case.
+		if err := refusePassthroughFlags(cmd, passthroughFlags...); err != nil {
+			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
 			return err
 		}
 
@@ -1674,7 +1674,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
+		if !provenswitch.On() {
+			// Under the switch the flag is refused above, and its keploy.yml
+			// default (bypassRules) is dropped below.
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
 
 		if cmd.Name() == "record" {
 			metadata, err := cmd.Flags().GetString("metadata")
@@ -2000,6 +2004,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.DisableMapping = disableMapping
 			}
 		}
+		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
 
 	case "normalize":
 		var err error
@@ -2700,7 +2705,7 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		// them (U18); the command's own --pass-through-ports, which keeps
 		// the app's ingress port off the proxy until the ingress row (PR 4),
 		// is kept.
-		dropPassthroughKeys(c.logger, c.cfg)
+		dropPassthroughKeys(c.logger, c.cfg, "mock")
 		if cmd.Flags().Changed("pass-through-ports") {
 			config.SetByPassPorts(c.cfg, bypassPorts)
 		}

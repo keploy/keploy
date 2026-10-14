@@ -256,12 +256,32 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 			})
 		}
 	}
+	// mock.real's rule 4 failed the set while its tests may all have
+	// passed: as an incomplete capture, a case of its own, failed.
+	if why := rep.RealFailure; why != "" {
+		suite.Tests++
+		suite.Failures++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitRealCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Failure: &junitFailure{
+				Message: "mock.real destination not reached",
+				Type:    "RealNotReached",
+				Text:    why,
+			},
+		})
+	}
 	return suite
 }
 
 // junitCaptureCase is the test case a suite whose capture was incomplete
 // carries, failed with the reason (buildJUnitSuite).
 const junitCaptureCase = "keploy capture"
+
+// junitRealCase is the test case a suite mock.real's rule 4 failed carries,
+// failed with the reason (buildJUnitSuite).
+const junitRealCase = "keploy mock.real"
 
 func buildFailure(t models.TestResult) *junitFailure {
 	var parts []string

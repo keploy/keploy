@@ -51,6 +51,12 @@ const (
 	// NAT between them, among the causes), so the proxy could not tell
 	// where it was going: it was refused, neither recorded nor mocked.
 	CaptureLossUnpairedConn CaptureLossKind = "unpaired_connection"
+	// CaptureLossRealUncaptured: connections to a mock.real destination's
+	// address keploy could neither capture nor relay as real (class e,
+	// design v14 §4): it could not read which name one was for, or a name
+	// one carried is not listed. What they carried reached nothing keploy
+	// saw. What names each destination and what to change.
+	CaptureLossRealUncaptured CaptureLossKind = "real_uncaptured"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -145,6 +151,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s) reached keploy's proxy that it could not tie to a connection of the application's (another address in between, a NAT among the causes), so keploy could not tell where they were going and refused them", c.Count)
 	case CaptureLossAppConnLost:
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
+	case CaptureLossRealUncaptured:
+		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

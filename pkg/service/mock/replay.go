@@ -45,6 +45,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// repeat. A user interrupt is not a failure and leaves the last receipt,
 	// which still truthfully describes the last completed run.
 	finished := false
+	// ran is the test command's own exit once it ran (step 8): a failure
+	// after it is keploy's, never "the test command never ran". nil before.
+	var ran *int
 	defer func() {
 		if finished || err == nil || parent.Err() != nil {
 			return
@@ -60,6 +63,20 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		code, runner, note := utils.ErrCode, -1, "the test command never ran"
 		failed := FailedBySetup
 		switch {
+		case ran != nil:
+			// The test command ran, and keploy could not read, or judge,
+			// what it did (its agent's windows, or what the run saw of
+			// mock.real): keploy's failure, after the command, whose own
+			// exit is kept.
+			runner, failed = *ran, FailedByKeploy
+			note = "the test command ran; keploy could not read what it did"
+			if *ran < 0 {
+				// Keploy failed under the command (its agent died).
+				note = "the test command ran; keploy did not complete the run"
+			}
+			if code == 0 {
+				code = 1
+			}
 		case code == 0:
 			code = 1
 		case code != utils.ExitKeployError && code == utils.ExitCodeFor(err):
@@ -87,8 +104,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			MinCoverage:    m.config.Mock.MinCoverage,
 			Version:        utils.Version,
 		})
-		// No test ran: an earlier run's per-test results must not stand next
-		// to this receipt as though they were its.
+		// No test ran, or keploy could not read what they did: an earlier
+		// run's per-test results must not stand next to this receipt as
+		// though they were its.
 		writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{Set: name, At: started.UTC().Truncate(time.Second)})
 	}()
 	// A replay the user stopped before keploy judged it did not verify the
@@ -398,6 +416,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// cancellation it mirrored nothing, and the replay exited 0 on a
 		// suite that never finished.
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
+	}
+	ran = new(int)
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped, models.ErrCtxCanceled, "":
+	case models.ErrUnExpected, models.ErrCommandError:
+		*ran = max(appErr.ExitCode, 1)
+	default:
+		// Keploy's own failure under the test command: it has no exit of
+		// its own to report.
+		*ran = -1
 	}
 	stoppedNow := false
 	if actual != nil && m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },

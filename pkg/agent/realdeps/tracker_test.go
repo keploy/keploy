@@ -26,8 +26,8 @@ func TestATestsRealRowsCountItsConnectionsAndFailedDials(t *testing.T) {
 	tr.Sent(2, "db:5432")
 	tr.Dialed(3, "auth.example.com:443", false)
 	tr.Dialed(4, "auth.example.com:443", true)
-	tr.H2("auth.example.com:443")
 	tr.Sent(4, "auth.example.com:443")
+	tr.H2("auth.example.com:443")
 	uses, inc := tr.EndTest()
 	require.Empty(t, inc)
 	require.Equal(t, []models.RealUse{
@@ -137,4 +137,88 @@ func TestAPendingConnectionIsChargedOnce(t *testing.T) {
 	_, inc := tr.EndTest()
 	require.Len(t, inc, 1)
 	require.True(t, done(), "charged at the test's end")
+}
+
+// keploy record names a test case's REAL destinations by its window: a use
+// (a send, or a dial that failed) from its request to its response, both
+// included. A wall clock that steps back keeps the uses in order.
+func TestUsedDuringNamesATestCasesWindow(t *testing.T) {
+	base := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	at := base
+	tr := &Tracker{now: func() time.Time { return at }}
+	tr.KeepUses(true)
+	use := func(d time.Duration, dest string, sent bool) {
+		at = base.Add(d)
+		if sent {
+			tr.Sent(1, dest)
+			return
+		}
+		tr.Dialed(2, dest, false)
+	}
+	use(10*time.Millisecond, "db:5432", true)
+	use(20*time.Millisecond, "auth:443", false)
+	use(40*time.Millisecond, "db:5432", true)
+	use(5*time.Millisecond, "cache:6379", true) // the wall clock stepped back
+
+	w := func(from, to time.Duration) []string { return tr.UsedDuring(base.Add(from), base.Add(to)) }
+	require.Equal(t, []string{"db:5432"}, w(6*time.Millisecond, 10*time.Millisecond), "a use at the window's end is in it")
+	require.Equal(t, []string{"cache:6379", "db:5432"}, w(0, 10*time.Millisecond))
+	require.Equal(t, []string{"auth:443", "db:5432"}, w(10*time.Millisecond, 20*time.Millisecond))
+	require.Nil(t, w(21*time.Millisecond, 39*time.Millisecond))
+	require.Equal(t, []string{"db:5432"}, w(40*time.Millisecond, time.Second))
+	require.Equal(t, []string{"cache:6379"}, w(time.Millisecond, 6*time.Millisecond))
+	require.Nil(t, tr.UsedDuring(time.Time{}, base), "a window with no start names nothing")
+	require.Nil(t, tr.UsedDuring(base.Add(time.Second), base), "nor one that ends before it starts")
+
+	tr.Reset()
+	require.Nil(t, w(0, time.Second), "a new run starts with no uses")
+}
+
+// A replay keeps no use points: nothing names its test cases by time.
+func TestUsesAreKeptOnlyWhenAsked(t *testing.T) {
+	tr := newTracker()
+	tr.Sent(1, "db:5432")
+	require.Nil(t, tr.UsedDuring(time.Time{}.Add(1), time.Now().Add(time.Hour)))
+	tr.KeepUses(true)
+	at := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	tr.Sent(1, "db:5432")
+	require.Equal(t, []string{"db:5432"}, tr.UsedDuring(at, at))
+	tr.KeepUses(true) // a reconnect's stream opens before the last closes
+	tr.KeepUses(false)
+	require.Equal(t, []string{"db:5432"}, tr.UsedDuring(at, at), "kept while any stream is open")
+	tr.KeepUses(false)
+	require.Nil(t, tr.UsedDuring(at, at), "the kept uses go with the last")
+	tr.KeepUses(false)
+	tr.Sent(1, "db:5432")
+	require.Nil(t, tr.UsedDuring(at, at), "an extra end keeps nothing")
+}
+
+// A pooled connection dialled before the last read reaches its destination
+// again when the destination answers it, not when bytes are written to it:
+// each read says what was reached since the one before.
+func TestAPooledConnectionReachesItsDestinationWhenItAnswers(t *testing.T) {
+	tr := newTracker()
+	tr.Dialed(1, "db:5432", true)
+	require.Equal(t, []string{"db:5432"}, tr.Run().Reached)
+	require.Empty(t, tr.Run().Reached, "a read says what was reached since the last")
+	tr.BeginTest()
+	tr.Sent(1, "db:5432")
+	require.Empty(t, tr.Run().Reached, "bytes written into a connection whose destination died reach nothing")
+	tr.Answered("db:5432")
+	_, _ = tr.EndTest()
+	require.Equal(t, []string{"db:5432"}, tr.Run().Reached)
+}
+
+// An h2 note that comes after a test boundary (the send was the last test's)
+// makes no row for the test that began: its own sends say h2.
+func TestAnH2NoteAfterATestBoundaryMakesNoRow(t *testing.T) {
+	var tr Tracker
+	tr.Claimed()
+	tr.BeginTest()
+	tr.Sent(1, "auth.example.com:443")
+	_, _ = tr.EndTest()
+	tr.BeginTest()
+	tr.H2("auth.example.com:443")
+	uses, _ := tr.EndTest()
+	require.Empty(t, uses)
 }

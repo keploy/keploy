@@ -2,89 +2,28 @@ package mock
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"maps"
 	"slices"
 
-	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.uber.org/zap"
+	"go.keploy.io/server/v3/pkg/service/realclient"
 )
 
-// RealDepsAgent is an optional Instrumentation extension: under the proven
-// switch the CLI hands its agent the run's mock.real as the run starts, and
-// reads at its end what the run saw of it beyond its tests (design v14 §4).
-type RealDepsAgent interface {
-	PushRealDeps(ctx context.Context, real []string) error
-	RealRun(ctx context.Context) (models.RealRun, error)
-}
+// RealDepsAgent is realclient.Agent: the agent client's mock.real calls.
+type RealDepsAgent = realclient.Agent
 
-// checkRealDeps refuses, before anything runs, a mock.real keploy cannot read
-// (proven switch only; without it the key is not read).
-func (m *mockService) checkRealDeps() error {
-	if !provenswitch.On() {
-		return nil
-	}
-	if _, err := realdeps.Parse(m.config.Mock.Real); err != nil {
-		return fmt.Errorf("keploy.yml mock.real: %w", err)
-	}
-	return nil
-}
+// checkRealDeps refuses, before anything runs, a mock.real keploy cannot read.
+func (m *mockService) checkRealDeps() error { return realclient.Check(m.config.Mock.Real) }
 
-// pushRealDeps hands the agent the run's mock.real (proven switch only), an
-// empty list too: it clears what an agent that served an earlier run kept.
-// An agent client or an agent that cannot take a list that names anything is
-// an error: those destinations would be recorded and mocked instead of
-// reached. An agent without the route (another build) has nothing to clear
-// when the list is empty.
+// pushRealDeps hands the agent the run's mock.real (realclient.Push).
 func (m *mockService) pushRealDeps(ctx context.Context) error {
-	if !provenswitch.On() {
-		return nil
-	}
-	empty := len(m.config.Mock.Real) == 0
-	a, ok := m.instrumentation.(RealDepsAgent)
-	if !ok {
-		if empty {
-			return nil
-		}
-		return errors.New("this keploy's agent client cannot hand its agent mock.real")
-	}
-	if err := a.PushRealDeps(ctx, m.config.Mock.Real); err != nil {
-		if empty && errors.Is(err, models.ErrNoRealRoute) {
-			return nil
-		}
-		return err
-	}
-	if empty {
-		return nil
-	}
-	m.logger.Info("these destinations are reached for real in this run, never recorded or mocked (mock.real)", zap.Strings("real", m.config.Mock.Real))
-	return nil
+	return realclient.Push(ctx, m.logger, m.instrumentation, m.config.Mock.Real)
 }
 
-// realRun reads what the run saw of mock.real beyond its tests, after the
-// run's last windows (proven switch only; nil without it). A read that fails
-// is an error: a REAL destination never reached, or a connection keploy
-// could not capture outside every test, must not go unsaid.
+// realRun reads what the run saw of mock.real beyond its tests
+// (realclient.Run).
 func (m *mockService) realRun(ctx context.Context) (*models.RealRun, error) {
-	if !provenswitch.On() {
-		return nil, nil
-	}
-	if len(m.config.Mock.Real) == 0 {
-		// Nothing was real: nothing to reach, and no name to fail to read.
-		return nil, nil
-	}
-	a, ok := m.instrumentation.(RealDepsAgent)
-	if !ok {
-		return nil, errors.New("this keploy's agent client cannot read the run's mock.real destinations")
-	}
-	run, err := a.RealRun(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &run, nil
+	return realclient.Run(ctx, m.instrumentation, m.config.Mock.Real)
 }
 
 // realDests are the destinations a test's REAL rows name: its recording's

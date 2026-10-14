@@ -2,6 +2,8 @@ package models
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -20,6 +22,10 @@ var ErrNoRealRoute = errors.New("this keploy agent has no mock.real route")
 // the proven switch.
 type RealDepsReq struct {
 	Real []string `json:"real"`
+	// Keep: a later push of the same run (keploy test's next test set). An
+	// agent that already holds this list keeps what the run saw; one that
+	// holds another, or none (a replacement), installs it afresh.
+	Keep bool `json:"keep,omitempty"`
 }
 
 // RealUse is a test's use of a mock.real destination: the connections that
@@ -62,10 +68,51 @@ type RealRun struct {
 	// successful connection to, in a test or outside one (design v14 §8.2
 	// rule 4).
 	Reached []string `json:"reached,omitempty" yaml:"reached,omitempty"`
-	// Outside are those first reached while no test was open: they ran on
-	// the run's start time, not on the real clock (design v14 §3.4, F6).
+	// Outside are those first reached in this read while no test was open
+	// (a dial that connected, or an answer on a pooled connection): the app
+	// talked to them on the run's start time, not on the real clock (design
+	// v14 §3.4, F6).
 	Outside []string `json:"outside,omitempty" yaml:"outside,omitempty"`
 	// Incomplete is capture_incomplete evidence charged to no test: it came
 	// after the run's last test ended.
 	Incomplete []CaptureIncomplete `json:"incomplete,omitempty" yaml:"incomplete,omitempty"`
+}
+
+// RealTest is what one keploy test case did with mock.real, read at its end
+// (GET /agent/real/test): its REAL rows, and the capture_incomplete evidence
+// charged to it.
+type RealTest struct {
+	Real       []RealUse           `json:"real,omitempty"`
+	Incomplete []CaptureIncomplete `json:"incomplete,omitempty"`
+}
+
+// RealUncapturedLosses is capture_incomplete evidence of class e as a capture
+// loss (CaptureLossRealUncaptured): one entry, counting the connections, whose
+// What names each destination once with what to change, the first few in
+// order. nil for none.
+func RealUncapturedLosses(inc []CaptureIncomplete) CaptureLosses {
+	if len(inc) == 0 {
+		return nil
+	}
+	const most = 3
+	type key struct{ dest, why string }
+	seen := map[key]bool{}
+	var what []string
+	more := 0
+	for _, c := range inc {
+		k := key{c.Destination, c.Why}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if len(what) == most {
+			more++
+			continue
+		}
+		what = append(what, c.Destination+": "+c.Why)
+	}
+	if more > 0 {
+		what = append(what, fmt.Sprintf("and %d more", more))
+	}
+	return CaptureLosses{{Kind: CaptureLossRealUncaptured, Count: uint64(len(inc)), What: strings.Join(what, "; ")}}
 }

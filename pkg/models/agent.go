@@ -474,6 +474,10 @@ type BeforeSimulateRequest struct {
 	TimeStamp    time.Time `json:"timestamp"`
 	TestSetID    string    `json:"testSetID"`
 	TestCaseName string    `json:"testCaseName"`
+	// Real, under the proven switch, is the mock.real destinations the test
+	// case's recording lists: its request runs on the real clock, not at
+	// TimeStamp (design v14 §3.4, F3).
+	Real []string `json:"real,omitempty"`
 }
 
 type AfterSimulateRequest struct {

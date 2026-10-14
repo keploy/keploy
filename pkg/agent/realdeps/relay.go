@@ -46,10 +46,22 @@ type Relay struct {
 	// Sent is told of every chunk of the client's bytes before it goes to
 	// the destination. It may be nil.
 	Sent func(n int)
-	// H2 is told when the client's ClientHello offers h2. It may be nil.
+	// Answered is told of each chunk of bytes the destination sends back: it
+	// is reached, whatever the dial was, and again on a pooled connection in
+	// every later read of the run's REAL bookkeeping. It may be nil.
+	Answered func()
+	// H2 is told, after Sent, of every chunk the client sends on a
+	// connection whose ClientHello offered h2, or that speaks h2c: a pooled
+	// connection carries the requests of many tests, and each of their REAL
+	// rows says other names may share it, not only the row of the test open
+	// at its handshake. It may be nil.
 	H2 func()
 	// Refused is told why a name check ended the connection. It may be nil.
 	Refused func(why string)
+
+	// h2: the connection offered h2. Set and read by the client's direction
+	// only.
+	h2 bool
 }
 
 // errRefused ends the client's direction when a name check fails.
@@ -71,7 +83,11 @@ func (r *Relay) Run(ctx context.Context) error {
 
 	back := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(r.Client, r.Dest)
+		var from io.Reader = r.Dest
+		if r.Answered != nil {
+			from = &answeredReader{r: r.Dest, answered: r.Answered}
+		}
+		_, err := io.Copy(r.Client, from)
 		if err == nil {
 			_ = closeWrite(r.Client)
 		} else {
@@ -111,7 +127,7 @@ func closeWrite(c net.Conn) error {
 // they carry when the connection was made REAL by its name. nil is a clean
 // end of the client's bytes.
 func (r *Relay) forward() error {
-	w := &sentWriter{w: r.Dest, sent: r.Sent}
+	w := &sentWriter{w: r.Dest, sent: r.sent}
 	if r.Check == nil {
 		return copyClean(w, r.In)
 	}
@@ -126,8 +142,8 @@ func (r *Relay) forward() error {
 		// Bytes that carry no name contradict none: the connection keeps
 		// the name it was made REAL by. h2c's names are not read: its row
 		// says so.
-		if errors.Is(err, ErrH2C) && r.H2 != nil {
-			r.H2()
+		if errors.Is(err, ErrH2C) {
+			r.h2 = true
 		}
 		return copyClean(w, r.In)
 	case errors.Is(err, io.EOF):
@@ -154,9 +170,7 @@ func (r *Relay) forward() error {
 	if !r.allowed(n.Host, 0, "its ClientHello names") {
 		return errRefused
 	}
-	if n.H2 && r.H2 != nil {
-		r.H2()
-	}
+	r.h2 = n.H2
 	return copyClean(w, r.In)
 }
 
@@ -378,6 +392,17 @@ func copyClean(w io.Writer, r io.Reader) error {
 	return err
 }
 
+// sent tells Sent of n bytes the client sent, and H2 when its connection
+// offered h2.
+func (r *Relay) sent(n int) {
+	if r.Sent != nil {
+		r.Sent(n)
+	}
+	if r.h2 && r.H2 != nil {
+		r.H2()
+	}
+}
+
 // sentWriter writes the client's bytes to the destination and tells of each
 // chunk before it goes: once the bytes are written, the destination can
 // answer, the app answer its test, and the test end before a write returns,
@@ -392,4 +417,18 @@ func (s *sentWriter) Write(p []byte) (int, error) {
 		s.sent(len(p))
 	}
 	return s.w.Write(p)
+}
+
+// answeredReader tells answered of each chunk of bytes it reads.
+type answeredReader struct {
+	r        io.Reader
+	answered func()
+}
+
+func (a *answeredReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.answered()
+	}
+	return n, err
 }

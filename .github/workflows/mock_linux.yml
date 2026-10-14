@@ -206,6 +206,16 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-real-deps-linux.sh"
 
+      # mock.real in keploy record and keploy test: a test case lists the REAL
+      # destination its request used and replays with it reached for real (a
+      # REAL case on the real clock); with it down, the run fails, saying the
+      # destination its recordings list was never reached.
+      - name: Run record/test mock.real e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/real-deps-record-test-linux.sh"
+
       - name: Run mock-mode offline e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

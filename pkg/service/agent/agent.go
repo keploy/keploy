@@ -842,6 +842,12 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
 		b.BeginTestErrorCapture()
 	}
+	if t := a.realTracker(); t != nil && provenswitch.On() {
+		// A set's first test: what the REAL connections did before it (the
+		// app's start-up) is the run's, and its own uses start here.
+		t.Claimed()
+		t.BeginTest()
+	}
 	return nil
 }
 
@@ -851,6 +857,11 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
 	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
 		c.ContinueTestErrorCapture()
+		if t := a.realTracker(); t != nil && provenswitch.On() {
+			// What was not captured since the last test ended is this
+			// test's, as a miss is.
+			t.BeginTest()
+		}
 		return nil
 	}
 	return a.BeginTestErrorCapture(ctx)

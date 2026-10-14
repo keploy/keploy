@@ -628,3 +628,31 @@ func TestAContainerEntryWaitsForItsContainersPlacing(t *testing.T) {
 	require.True(t, s.handled, "the connection to the listed container was not relayed")
 	require.NoError(t, s.err)
 }
+
+// A later push of the same run keeps what the run saw when the proxy holds
+// the list already; another list, or none, is installed afresh.
+func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ctx := context.Background()
+	p := &Proxy{logger: zap.NewNop()}
+	require.NoError(t, p.SetRealDeps(ctx, []string{"localhost:5432"}))
+	p.realTracker.Dialed(1, "localhost:5432", true)
+	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:5432"}))
+	require.Equal(t, []string{"localhost:5432"}, p.RealRun().Reached, "the same list keeps what the run saw")
+
+	p.realTracker.Dialed(1, "localhost:5432", true)
+	require.NoError(t, p.KeepRealDeps(ctx, []string{"localhost:6379"}))
+	require.Empty(t, p.RealRun().Reached, "another list starts afresh")
+	require.Equal(t, []string{"localhost:6379"}, p.realList().list.Labels())
+
+	fresh := &Proxy{logger: zap.NewNop()}
+	require.NoError(t, fresh.KeepRealDeps(ctx, []string{"localhost:5432"}))
+	require.NotNil(t, fresh.realList(), "a replacement agent is handed the list")
+	require.NoError(t, fresh.KeepRealDeps(ctx, nil))
+	require.Nil(t, fresh.realList(), "an empty list clears a list it held")
+
+	gp := &Proxy{logger: zap.NewNop(), GlobalPassthrough: true}
+	require.Error(t, gp.KeepRealDeps(ctx, nil), "global passthrough is refused, kept or not")
+	t.Setenv(provenswitch.Env, "")
+	require.Error(t, fresh.KeepRealDeps(ctx, nil))
+}

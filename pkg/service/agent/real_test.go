@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
@@ -197,4 +198,53 @@ func TestSetRealDepsNeedsAProxyThatRelaysThem(t *testing.T) {
 	a, p := realAgent(t, models.MODE_TEST)
 	require.NoError(t, a.SetRealDeps(ctx, []string{"localhost:5432"}))
 	require.Equal(t, []string{"localhost:5432"}, p.set)
+}
+
+// keploy test's test case windows (Begin/ContinueTestErrorCapture, then
+// /agent/real/test) carry each case's REAL rows and the evidence charged to
+// it: a set's first case starts with what came before it as the run's; each
+// later case takes what came since the last one ended, as a miss does.
+func TestKeployTestCasesCarryTheirRealRows(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	a, p := realAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	p.tracker.Incomplete("10.0.0.6:443", "the app's start-up") // before the first case: the run's
+
+	require.NoError(t, a.BeginTestErrorCapture(ctx))
+	p.tracker.Dialed(1, "db:5432", true)
+	p.tracker.Sent(1, "db:5432")
+	got, err := a.RealTest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []models.RealUse{{Dest: "db:5432", Conns: 1}}, got.Real)
+	require.Empty(t, got.Incomplete, "what came before the set's first case is the run's")
+
+	p.tracker.Incomplete("10.0.0.7:443", "between cases") // charged to the next case
+	require.NoError(t, a.ContinueTestErrorCapture(ctx))
+	got, err = a.RealTest(ctx)
+	require.NoError(t, err)
+	require.Empty(t, got.Real)
+	require.Len(t, got.Incomplete, 1)
+	require.Equal(t, "10.0.0.7:443", got.Incomplete[0].Destination)
+
+	run := p.tracker.Run()
+	require.Len(t, run.Incomplete, 1)
+	require.Equal(t, "10.0.0.6:443", run.Incomplete[0].Destination)
+
+	// An agent without a relaying proxy has nothing to report.
+	plain, _ := wireAgent(t, models.MODE_TEST)
+	got, err = plain.RealTest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, models.RealTest{}, got)
+}
+
+// keploy record names a test case's REAL destinations by its window.
+func TestRealUsedDuring(t *testing.T) {
+	a, p := realAgent(t, models.MODE_RECORD)
+	p.tracker.KeepUses(true) // keploy record's incoming stream keeps them
+	from := time.Now()
+	p.tracker.Dialed(1, "db:5432", true)
+	p.tracker.Sent(1, "db:5432")
+	require.Equal(t, []string{"db:5432"}, a.RealUsedDuring(from, time.Now()))
+	plain, _ := wireAgent(t, models.MODE_RECORD)
+	require.Nil(t, plain.RealUsedDuring(from, time.Now()))
 }

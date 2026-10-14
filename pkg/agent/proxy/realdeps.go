@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +22,9 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// SetRealDepsErrNoSwitch refuses mock.real to an agent without the switch.
+var SetRealDepsErrNoSwitch = errors.New("mock.real is the proven model's, and this keploy agent runs without " + provenswitch.Env)
 
 // realState is a run's mock.real as the proxy decides connections by it: the
 // list, and the run's name book.
@@ -67,7 +71,7 @@ func (st *realState) listedName(qname string) (string, bool) {
 // A list keploy cannot read is an error, and nothing is installed.
 func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	if !provenswitch.On() {
-		return errors.New("mock.real is the proven model's, and this keploy agent runs without " + provenswitch.Env)
+		return SetRealDepsErrNoSwitch
 	}
 	if p.GlobalPassthrough {
 		// Every connection would be live: a call mock.real does not list
@@ -101,6 +105,24 @@ func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	// one set up before this list arrived starts holding now.
 	p.ensureHandshakeHold(p.getSession())
 	return nil
+}
+
+// KeepRealDeps installs raw for a later part of the run that installed it
+// (keploy test's next test set): a proxy that already holds this list keeps
+// what the run saw of it, its bookkeeping and its names; one that holds
+// another list, or none, installs raw afresh (SetRealDeps).
+func (p *Proxy) KeepRealDeps(ctx context.Context, raw []string) error {
+	if !provenswitch.On() {
+		return SetRealDepsErrNoSwitch
+	}
+	list, err := realdeps.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if cur := p.real.Load(); !p.GlobalPassthrough && (cur == nil && list.Empty() || cur != nil && slices.Equal(cur.list.Labels(), list.Labels())) {
+		return nil
+	}
+	return p.SetRealDeps(ctx, raw)
 }
 
 // RealTracker is what the run's REAL connections did, for the agent's tests
@@ -217,8 +239,9 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	logger.Debug("relaying a connection to a mock.real destination")
 	r := &realdeps.Relay{
 		Client: client, In: br, Dest: dest, Check: dec.Check,
-		Sent: func(int) { p.realTracker.Sent(connID, dec.Label) },
-		H2:   func() { p.realTracker.H2(dec.Label) },
+		Sent:     func(int) { p.realTracker.Sent(connID, dec.Label) },
+		Answered: func() { p.realTracker.Answered(dec.Label) },
+		H2:       func() { p.realTracker.H2(dec.Label) },
 		Refused: func(why string) {
 			p.realTracker.Incomplete(dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
