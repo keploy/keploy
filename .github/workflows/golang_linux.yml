@@ -36,6 +36,9 @@ jobs:
           - name: mock-mismatch
             path: http-pokeapi
             script_dir: mock_mismatch
+          - name: proven-record-mappings
+            path: http-pokeapi
+            script_dir: proven_record_mappings
           - name: mock-mismatch-streaming
             path: sse-redis
             script_dir: mock_mismatch_streaming
