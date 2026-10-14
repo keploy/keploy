@@ -33,14 +33,15 @@ type learnedPersister interface {
 // persistLearned writes what the learn step learned onto the set's mocks, so
 // the recording the record commits carries it, says per test what was
 // learned (design §7.2 step 10), and returns it by test, each field as
-// "<mock> <what mockdb's PersistLearned added>". With config.Test.LearnTests set it writes only
+// "<mock> <what mockdb's PersistLearned added>", and what it wrote onto mocks
+// no test consumed (the set's start-up and pool), sorted. With config.Test.LearnTests set it writes only
 // onto the mocks of those tests (and onto the pool's with LearnPool): a test
 // the record did not record again keeps its recording as it is. expected is
 // each test's own mocks, by its mapping.
-func (m *mockService) persistLearned(ctx context.Context, set string, consumed []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, error) {
+func (m *mockService) persistLearned(ctx context.Context, set string, consumed []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
 	p, ok := m.mockDB.(learnedPersister)
 	if !ok {
-		return nil, errors.New("keploy's mock store cannot write what the learn step learned")
+		return nil, nil, errors.New("keploy's mock store cannot write what the learn step learned")
 	}
 	owner := map[string]string{}
 	for test, entries := range expected {
@@ -58,14 +59,14 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		// be written whole.
 		for target := range st.Binds {
 			if !m.learnsOnto(owner[target]) {
-				return nil, fmt.Errorf("the learn step learned a variable of %s bound at %s, a recording this record did not make", st.Name, target)
+				return nil, nil, fmt.Errorf("the learn step learned a variable of %s bound at %s, a recording this record did not make", st.Name, target)
 			}
 		}
 		states[st.Name] = st
 	}
 	added, err := p.PersistLearned(ctx, set, states)
 	if err != nil {
-		return nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
+		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
@@ -97,7 +98,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		sort.Strings(rest)
 		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
 	}
-	return byTest, nil
+	return byTest, rest, nil
 }
 
 // learnsOnto reports whether what the learn step learned is kept on a mock

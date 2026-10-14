@@ -548,6 +548,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		At:          started.UTC().Truncate(time.Second),
 		MocksDigest: digest,
 		Tests:       counts.tests,
+		Learned:     counts.learnedPool,
 	})
 	return keployFailure
 }
@@ -1249,6 +1250,8 @@ type replayCounts struct {
 	missed     int
 	missedData int
 	tests      []TestReceipt
+	// learnedPool is what the learn step wrote onto mocks no test consumed.
+	learnedPool []string
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
@@ -1368,12 +1371,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// or kept did not complete: its record would judge recordings that lack
 	// what this round served.
 	var learned map[string][]string
+	var learnedPool []string
 	var learnErr error
 	if m.learning() {
 		if consumedErr != nil {
 			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
 		} else {
-			learned, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
+			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
 		}
 	}
 
@@ -1417,6 +1421,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
 	}
+	counts.learnedPool = learnedPool
 	counts.learnErr = learnErr
 	return counts
 }
