@@ -1201,3 +1201,41 @@ func (s sharedRowsDB) GetTestCaseResults(context.Context, string, string) ([]mod
 	defer s.mu.Unlock()
 	return s.results, nil
 }
+
+// A test a capture loss failed stays FAILED whatever the BeforeTestResult hook
+// does: a hook that passes it and clears the loss gets both put back, with
+// CAPTURE_INCOMPLETE; a hook that quarantines it (IGNORED) is obeyed.
+func TestHoldEvidenceFloorKeepsACaptureLoss(t *testing.T) {
+	setSwitch(t, true)
+	lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2}}
+	results := []models.TestResult{{TestCaseID: "t", Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{CaptureIncomplete: lost}}}
+	if failed := failTestsWithCaptureLoss(results); len(failed) != 1 || results[0].Status != models.TestStatusFailed || !hasCategory(results[0], models.CaptureIncompleteCategory) {
+		t.Fatalf("failed %v, %s %v; want t FAILED with CAPTURE_INCOMPLETE", failed, results[0].Status, results[0].FailureInfo.Category)
+	}
+	before := snapshotEvidence(results)
+	results[0].Status = models.TestStatusPassed
+	results[0].FailureInfo.CaptureIncomplete = nil
+	results[0].FailureInfo.Category = nil
+	out, held := holdEvidenceFloor(results, before)
+	if len(held) != 1 || out[0].Status != models.TestStatusFailed || len(out[0].FailureInfo.CaptureIncomplete) != 1 || !hasCategory(out[0], models.CaptureIncompleteCategory) {
+		t.Fatalf("held %v, %s %+v %v; want FAILED with the loss and CAPTURE_INCOMPLETE put back", held, out[0].Status, out[0].FailureInfo.CaptureIncomplete, out[0].FailureInfo.Category)
+	}
+
+	results = []models.TestResult{{TestCaseID: "q", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{CaptureIncomplete: lost}}}
+	before = snapshotEvidence(results)
+	results[0].Status = models.TestStatusIgnored
+	out, _ = holdEvidenceFloor(results, before)
+	if out[0].Status != models.TestStatusIgnored {
+		t.Fatalf("a quarantined test: %s, want IGNORED", out[0].Status)
+	}
+}
+
+// With the switch off nothing is failed for a capture loss here (the set's own
+// check, which predates the switch, is what fails the set).
+func TestFailTestsWithCaptureLossNeedsTheSwitch(t *testing.T) {
+	setSwitch(t, false)
+	results := []models.TestResult{{TestCaseID: "t", Status: models.TestStatusPassed, FailureInfo: models.FailureInfo{CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1}}}}}
+	if failed := failTestsWithCaptureLoss(results); len(failed) != 0 || results[0].Status != models.TestStatusPassed {
+		t.Fatalf("switch off: failed %v, %s; want nothing failed", failed, results[0].Status)
+	}
+}
