@@ -1484,6 +1484,7 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
+		ev.CaptureIncomplete = append(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete...)
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {

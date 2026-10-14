@@ -133,6 +133,10 @@ const (
 type ScopeEvidence struct {
 	Misses     []UnmatchedCall `json:"misses,omitempty"`
 	Unconsumed []string        `json:"unconsumed,omitempty"`
+	// CaptureIncomplete is what the agent could not capture since the run
+	// began, when the test ended (design v14 §3.2): it taints the test open
+	// when it happened and every later one, which therefore fail in a replay.
+	CaptureIncomplete CaptureLosses `json:"captureIncomplete,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty"`
 }
@@ -163,7 +167,7 @@ func IDPart(s string) bool {
 
 // Empty reports whether there is no evidence.
 func (e *ScopeEvidence) Empty() bool {
-	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0)
+	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0)
 }
 
 // TestID is a test's ID on the wire (design v14 §6.2):

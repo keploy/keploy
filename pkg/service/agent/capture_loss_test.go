@@ -1,0 +1,132 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+func endPassed(t *testing.T, a *Agent, name string) models.ScopeEndResp {
+	t.Helper()
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin(name))
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+	require.Nil(t, serr)
+	return e
+}
+
+// A process the kernel refused a place in the PID map made calls keploy never
+// saw: the test open when it happened fails, and so does every test after it
+// in the run (design v14 §3.2, taint). The test before it does not.
+func TestACaptureLossFailsTheOpenTestAndEveryLaterOne(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestBefore").Action, "nothing lost yet")
+
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestDuring"))
+	require.Nil(t, serr)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 3, LastTargetErr: -7, TargetCapacity: 10240}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestDuring", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "keploy: capture incomplete: the kernel refused 3 insert(s) into keploy's PID maps")
+	require.Contains(t, e.Reason, "target_namespace_pids")
+	require.Contains(t, e.Reason, "keploy mock quarantine o::TestDuring")
+
+	after := endPassed(t, a, "TestAfter")
+	require.Equal(t, models.ScopeActionFail, after.Action, "the taint charges every test that begins after the loss")
+
+	// The windows last: reading them ends the run.
+	w := windowOf(t, a, "o::TestDuring")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 3, What: "target_namespace_pids: the map had no room for it (E2BIG; usually it is full)"}}, w.Evidence.CaptureIncomplete)
+	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestAfter").Outcome)
+	require.Nil(t, windowOf(t, a, "o::TestBefore").Evidence, "a test that ended before the loss is not charged")
+}
+
+// A loss between two tests charges the next test, not the one that ended.
+func TestACaptureLossBetweenTestsChargesTheNext(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestA").Action)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Excluded: 1}}
+	require.Equal(t, models.ScopeActionFail, endPassed(t, a, "TestB").Action)
+	require.Nil(t, windowOf(t, a, "o::TestA").Evidence)
+	require.Contains(t, windowOf(t, a, "o::TestB").Evidence.Reason, "excluded_pids")
+}
+
+// What was lost before the run's session began is not the run's.
+func TestACaptureLossBeforeTheSessionIsNotTheRuns(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 9}}
+	require.NoError(t, a.resetSession(context.Background()))
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestA").Action)
+}
+
+// A record never fails a test: the loss goes on the window, for judging, and
+// the test's own outcome stands.
+func TestARecordKeepsACaptureLossOnTheWindowAndNeverFails(t *testing.T) {
+	a, _ := wireAgent(models.MODE_RECORD)
+	claimSelf(t, a)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2}}
+	e := endPassed(t, a, "TestA")
+	require.Empty(t, e.Action)
+	w := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+	require.NotNil(t, w.Evidence)
+	require.Len(t, w.Evidence.CaptureIncomplete, 1)
+	require.Contains(t, w.Evidence.Reason, "capture incomplete")
+}
+
+// A test keploy cannot tell was fully captured is not judged as if it were:
+// a failed read, or hooks that cannot count, fail it in a replay and are said
+// on the window in a record.
+func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hooks func(a *Agent)
+		says  string
+	}{
+		{"a failed read", func(a *Agent) {
+			a.Hooks = countingHooks{err: errors.New("bad file descriptor")}
+		}, "bad file descriptor"},
+		{"hooks that cannot count", func(a *Agent) { a.Hooks = loadedHooks{} }, "cannot tell whether it captured every call"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(models.MODE_TEST)
+			claimSelf(t, a)
+			tc.hooks(a)
+			e := endPassed(t, a, "TestA")
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			require.Contains(t, e.Reason, "keploy could not tell whether every call of o::TestA was captured")
+			require.Contains(t, e.Reason, tc.says)
+			require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
+
+			r, _ := wireAgent(models.MODE_RECORD)
+			claimSelf(t, r)
+			tc.hooks(r)
+			require.Empty(t, endPassed(t, r, "TestA").Action)
+			require.Contains(t, windowOf(t, r, "o::TestA").Evidence.Reason, tc.says)
+		})
+	}
+}
+
+// A session whose start could not read the counts: every test of it is one
+// keploy cannot judge.
+func TestACaptureLossMarkThatCouldNotBeReadFailsTheReplayedTests(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	a.Hooks = countingHooks{err: errors.New("not loaded")}
+	require.NoError(t, a.resetSession(context.Background()))
+	a.Hooks = countingHooks{}
+	claimSelf(t, a)
+	e := endPassed(t, a, "TestA")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "at the start of the run")
+}

@@ -91,7 +91,11 @@ func wireAgent(mode models.Mode) (*Agent, *wireProxy) {
 	cfg := &config.Config{}
 	cfg.Agent.Mode = mode
 	cfg.Agent.ClientNSPID = uint32(os.Getppid())
-	return &Agent{logger: zap.NewNop(), Proxy: p, config: cfg}, p
+	// Hooks that count capture losses and have lost nothing, marked as a
+	// session start marks them (resetSession).
+	a := &Agent{logger: zap.NewNop(), Proxy: p, config: cfg, Hooks: countingHooks{}}
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	return a, p
 }
 
 func begin(name string) models.ScopeReq { return models.ScopeReq{Name: name, CanSkip: true} }
