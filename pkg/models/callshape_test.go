@@ -170,6 +170,7 @@ func TestCallShape(t *testing.T) {
 		{"HTTP with no path", "HTTP", "GET", "GET"},
 		{"MySQL", "MySQL", "COM_QUERY SELECT * FROM users WHERE email = 'alice@example.com' AND id = 42", "COM_QUERY SELECT * FROM users WHERE email = ? AND id = ?"},
 		{"Postgres", "PostgresV2", "SELECT 1", "SELECT ?"},
+		{"SQL withheld from its first byte", "MySQL", "/* ping */ SELECT 1", "…"},
 		{"another protocol has no shape", "Redis", "GET session:alice", ""},
 	}
 	for _, c := range cases {
@@ -249,6 +250,9 @@ func TestSQLShapeWithholdsWhatItCannotRead(t *testing.T) {
 		"SELECT `unclosed FROM t WHERE p = 'secret'":                          "SELECT …",
 		"COM_STMT_EXECUTE SELECT 1 params=[secret]":                           "COM_STMT_EXECUTE SELECT ?",
 		"params=[secret]": "",
+		// Withheld from its first byte: a leading comment.
+		"/* ping */ SELECT 1": "…",
+		"-- secret":           "…",
 	} {
 		require.Equal(t, want, SQLShape(in), in)
 		for _, secret := range []string{"alice", "s3cr3t", "secret", "abc", "zz", "diary"} {

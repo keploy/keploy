@@ -544,7 +544,9 @@ scan:
 	}
 	out := strings.TrimSpace(sqlSpace.ReplaceAllString(b.String(), " "))
 	if withheld {
-		out += " …"
+		// A statement withheld from its first byte (a leading comment) is
+		// "…" alone, not " …".
+		out = strings.TrimSpace(out + " …")
 	}
 	if len(out) > maxSQLText {
 		i := maxSQLText
