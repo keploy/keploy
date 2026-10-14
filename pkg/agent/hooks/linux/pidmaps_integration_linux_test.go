@@ -41,6 +41,9 @@ const socketHelperEnv = "KEPLOY_PIDMAP_TEST_HELPER"
 const ownPIDNSEnv = "KEPLOY_PIDMAP_TEST_PIDNS"
 
 func TestMain(m *testing.M) {
+	if step := os.Getenv(unixHelperEnv); step != "" {
+		os.Exit(runUnixHelper(step))
+	}
 	if os.Getenv(socketHelperEnv) == "1" {
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 		if err != nil {
