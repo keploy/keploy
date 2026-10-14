@@ -1051,7 +1051,8 @@ func TestVariables_TheClosestMockDiffLeavesEveryVariablePlaceOut(t *testing.T) {
 }
 
 // resetOnCursorDb begins the next test (its scope reset) the first time a
-// call reads the stateful cursor, after the variable pass checked it.
+// call reads the stateful cursor store (a recording's served mark), after the
+// variable pass checked it.
 type resetOnCursorDb struct {
 	varDb
 	done bool
@@ -1074,7 +1075,7 @@ func TestVariables_AMissCheckedAcrossABeginIsCheckedAgain(t *testing.T) {
 		models.MockVariables{"orderId": bindV("r1", "body.id")}), 1)
 	latest := reusable(at(varMock("mock-2", "GET", "http://store/orders/latest", "", 200, `{"id":"r1"}`,
 		models.MockVariables{"orderId": {Recorded: "r1", Answer: []string{"body.id"}}}), 2))
-	// Recorded twice, so the call reads the stateful cursor.
+	// Reusable, so the call reads their served marks.
 	latest2 := reusable(at(varMock("mock-3", "GET", "http://store/orders/latest", "", 200, `{"id":"r1"}`,
 		models.MockVariables{"orderId": {Recorded: "r1", Answer: []string{"body.id"}}}), 3))
 	db := &resetOnCursorDb{}
@@ -1186,7 +1187,7 @@ func TestVariables_ARepeatedCallTakesTheRecordingsInRecordOrder(t *testing.T) {
 // A recording whose variables do not hold (here one of a variable no call
 // binds) is passed over: the next recording in record order that holds
 // answers, each in turn.
-func TestVariables_TheCursorPassesARecordingWhoseVariablesDoNotHold(t *testing.T) {
+func TestVariables_ARecordingWhoseVariablesDoNotHoldIsPassedOver(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	db := &varDb{session: []*models.Mock{
 		pollAt("r-1", 1, "one", models.MockVariables{"token": bindV("T", "body.token")}),
@@ -1626,5 +1627,43 @@ func TestVariables_KeployYmlNoiseWidensTheComparison(t *testing.T) {
 	confirmHdr.header.Set("X-Request-Id", "rq-2")
 	if ok, stub := call(&varDb{perTest: []*models.Mock{useHdr, exactHdr}}, confirmHdr, map[string][]string{"x-request-id": {}}, nil); !ok || stub.Name != "exact-hdr" {
 		t.Fatalf("keploy.yml's header noise did not widen the exact pass: ok=%v stub=%v", ok, stub)
+	}
+}
+
+// Recordings of one call made at the same instant take their turns in the
+// order they were recorded, each its own: a pool keeps its recorded order on
+// equal times (FilterConfigMocksMapping), and staging numbers it so
+// (buildTier's ID), whatever the names say; serving one marks no other.
+func TestVariables_RecordingsOfOneInstantTakeTurnsInRecordedOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	echo := func(name, key string) *models.Mock {
+		return reusable(at(varMock(name, "POST", "http://pay/charge", `{"key":"`+key+`"}`, 200, `{"echo":"`+key+`"}`,
+			models.MockVariables{"key": {Recorded: key, Bind: "body.key", Answer: []string{"body.echo"}, Echo: true}}), 1))
+	}
+	staged := func() []*models.Mock {
+		pool := []*models.Mock{echo("t-c", "k-3"), echo("t-a", "k-1"), echo("t-b", "k-2")}
+		for i, m := range pool {
+			m.TestModeInfo.ID = i
+		}
+		return pool
+	}
+	charge := func(h *HTTP, db *varDb, i int, stateful bool) string {
+		ok, stub, diag, err := h.match(context.Background(), liveReq("POST", "/charge", `{"key":"x-`+strconv.Itoa(i)+`"}`), db, nil, nil, nil, true, false, false, stateful, true)
+		if err != nil || !ok {
+			t.Fatalf("charge %d: ok=%v err=%v diag=%+v", i+1, ok, err, diag)
+		}
+		return stub.Name
+	}
+	h, db := newHTTP(), &varDb{session: staged()}
+	var got []string
+	for i := 0; i < 4; i++ {
+		got = append(got, charge(h, db, i, true))
+	}
+	if g := strings.Join(got, " "); g != "t-c t-a t-b t-b" {
+		t.Fatalf("charges answered by %s, want t-c t-a t-b t-b", g)
+	}
+	// Without stateful mocks the first recorded answers, by the same order.
+	if g := charge(newHTTP(), &varDb{session: staged()}, 0, false); g != "t-c" {
+		t.Fatalf("stateful mocks off: answered by %s, want t-c", g)
 	}
 }

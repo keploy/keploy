@@ -280,7 +280,9 @@ type MockMemDb interface {
 // n, and is called only once the response is actually served, so a failed or
 // retried match does not skip a recording. The agent's MockManager implements
 // it, and every MockMemDb wrapper must forward it — a wrapper that drops it
-// silently turns stateful replay off for the calls it wraps.
+// silently turns stateful replay off for the calls it wraps. A key need not
+// name a request: the HTTP variable pass keeps a served mark per recording in
+// the same store (n = 2), under keys no request's cursor uses.
 //
 // A peek and the commit after it must come from the same goroutine, with no
 // other peek of the same store in between: a wrapper may resolve per peek what

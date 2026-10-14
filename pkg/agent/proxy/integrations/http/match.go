@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -466,9 +465,9 @@ func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) 
 
 // servedKey is the stateful cursor store's key of m's served mark, apart from
 // every request's cursor key (cursorKey). A recording's name is unique in its
-// test set, whose staging resets the store; its recorded time breaks a tie.
+// test set, whose staging resets the store.
 func servedKey(m *models.Mock) string {
-	return "served\x00" + m.Name + "\x00" + m.Spec.ReqTimestampMock.UTC().Format(time.RFC3339Nano)
+	return "served\x00" + m.Name
 }
 
 // cursorGroup returns the recordings of schemaMatched that are bestMatch's
