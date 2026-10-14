@@ -420,14 +420,20 @@ func fmtTestTime(timeTaken string) string {
 
 // provenEvidenceLines are a failed test's calls that got no recorded answer
 // (DNS left out, as the verdict leaves it out) and its unconsumed test mocks,
-// one line each, under the proven switch.
+// one line each, under the proven switch. A call is named by its shape
+// (models.MissShape), as the proven model's evidence names it: the JUnit file
+// is a CI artifact, and a call's URL or statement can hold the values the
+// app sent (an email, an ID, a token).
 func provenEvidenceLines(fi models.FailureInfo) []string {
 	var lines []string
 	for _, c := range fi.UnmatchedCalls {
 		if strings.EqualFold(c.Protocol, "DNS") {
 			continue
 		}
-		line := fmt.Sprintf("call with no recorded answer: %s %s", c.Protocol, c.ActualSummary)
+		line := "call with no recorded answer: " + c.Protocol
+		if shape := models.MissShape(c); shape != "" {
+			line += " " + shape
+		}
 		if c.Destination != "" {
 			line += " (to " + c.Destination + ")"
 		}

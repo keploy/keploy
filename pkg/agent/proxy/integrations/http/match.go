@@ -1723,7 +1723,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	}
 
 	if diag != nil && diag.variable != nil {
-		return variableMismatchReport(request, liveBody, dest, actualKey, diag, httpMocks)
+		// A variable's place counts the segments of the escaped path
+		// (variables.go), so this miss names its path escaped too: a %2F
+		// stays inside its segment, and the place names the segment the
+		// miss's shape writes {} (models.MissShape).
+		return variableMismatchReport(request, liveBody, dest, request.Method+" "+request.URL.EscapedPath(), diag, httpMocks)
 	}
 
 	phase := models.MatchPhaseExhausted

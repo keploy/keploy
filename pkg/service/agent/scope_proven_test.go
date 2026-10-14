@@ -399,7 +399,7 @@ func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.True(t, strings.HasPrefix(e.Reason, "keploy: "), e.Reason)
-	require.Contains(t, e.Reason, "POST /audit/{} to 127.0.0.1:18282 had no recorded answer")
+	require.Contains(t, e.Reason, "POST /audit/{}?x={} to 127.0.0.1:18282 had no recorded answer")
 	require.Contains(t, e.Reason, "a MySQL call to db:3306 had no recorded answer")
 	require.Contains(t, e.Reason, "keploy mock quarantine orders::TestPlaceOrder --reason")
 	require.NotContains(t, e.Reason, "secret", "no value the app sent is rendered")
@@ -410,7 +410,7 @@ func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
 	require.NotNil(t, w.Evidence)
 	require.Len(t, w.Evidence.Misses, 2)
 	require.Empty(t, w.Evidence.Misses[0].ReceivedReq, "evidence keeps summaries only")
-	require.Equal(t, "POST /audit/{}", w.Evidence.Misses[0].ActualSummary, "an HTTP miss keeps its method and path shape")
+	require.Equal(t, "POST /audit/{}?x={}", w.Evidence.Misses[0].ActualSummary, "an HTTP miss keeps its method and URL shape: its query names, never their values")
 	require.Equal(t, "SELECT * FROM users WHERE token=?", w.Evidence.Misses[1].ActualSummary, "a query's literals never reach the evidence: it keeps the statement's shape")
 
 	all, err := a.GetMockErrors(ctx)
@@ -608,25 +608,6 @@ func TestASessionStartEndsWithItsCaller(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
-// No secret written as a literal survives sqlShape, whatever surrounds it:
-// every combination of a prefix, a literal form and a suffix is shaped.
-func TestSQLShapeKeepsNoLiteral(t *testing.T) {
-	prefixes := []string{"", "SELECT * FROM `t` WHERE a = ", "UPDATE `x'y` SET b = ", "SELECT `a\"b`, ", "SELECT 1 -- ", "SELECT $q$ ", "INSERT INTO t VALUES (", "SELECT E", "SELECT _utf8mb4", "SELECT X"}
-	literals := []string{"'SeCrEt'", "\"SeCrEt\"", "'Se''CrEt'", "'Se\\'CrEt'", "'SeCrEt", "`SeCrEt`'SeCrEt'", "$t$SeCrEt$t$", "/* SeCrEt */", "'a' 'SeCrEt'"}
-	suffixes := []string{"", ")", " AND c = 'SeCrEt'", " params=[SeCrEt]", " `z`"}
-	for _, p := range prefixes {
-		for _, l := range literals {
-			for _, sfx := range suffixes {
-				q := p + l + sfx
-				got := sqlShape(q)
-				if strings.Contains(strings.ToLower(strings.ReplaceAll(got, "`SeCrEt`", "")), "secret") {
-					t.Errorf("sqlShape(%q) = %q keeps the literal", q, got)
-				}
-			}
-		}
-	}
-}
-
 // Evidence keeps a miss's shape and the matcher's advice, never a value:
 // an HTTP path's IDs and query, a SQL statement's literals.
 func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
@@ -643,33 +624,6 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Empty(t, m.ClosestMockReq)
 	require.Empty(t, m.ReceivedReq)
 
-	require.Equal(t, "SELECT ? …", sqlShape("SELECT 'it''s"), "a literal never closed withholds the rest")
-	require.Equal(t, "INSERT INTO t VALUES (?, ?, ?, ?)", sqlShape("INSERT INTO t VALUES (0x1F, 3.5e2, 'x', 'it''s')"))
-	for in, want := range map[string]string{
-		// MySQL's bound parameters are values the app sent.
-		"COM_STMT_EXECUTE SELECT id FROM users WHERE email = ? AND pw = ? params=[alice@example.com, s3cr3t]": "COM_STMT_EXECUTE SELECT id FROM users WHERE email = ? AND pw = ?",
-		// Where a literal with a backslash ends depends on sql_mode.
-		`UPDATE users SET bio = 'it\'s my secret diary' WHERE id = 7`:        "UPDATE users SET bio = ? …",
-		`SELECT 1 WHERE a = 'x\' OR pw = ' AND token = 'abc' AND ssn = 'zz'`: "SELECT ? WHERE a = ? …",
-		"SELECT $tag$secret$tag$":                  "SELECT …",
-		"SELECT 1 -- secret":                       "SELECT ? …",
-		"SELECT 1 /* secret */":                    "SELECT ? …",
-		"SELECT 1 # secret":                        "SELECT ? …",
-		"SELECT * FROM t WHERE id = $1 AND n = $2": "SELECT * FROM t WHERE id = $1 AND n = $2",
-		"SELECT col1, t2.c3 FROM t2 WHERE x = 42":  "SELECT col1, t2.c3 FROM t2 WHERE x = ?",
-		// A quote inside a backtick identifier would flip what is a literal.
-		"UPDATE `user's` SET password = 'secret' WHERE id = 7":                "UPDATE …",
-		"SELECT name AS `Customer\"s Name` FROM c WHERE email = 'alice@x.io'": "SELECT name AS …",
-		"SELECT `users`.`email` FROM `users` WHERE `id` = 7":                  "SELECT `users`.`email` FROM `users` WHERE `id` = ?",
-		"SELECT `unclosed FROM t WHERE p = 'secret'":                          "SELECT …",
-		"COM_STMT_EXECUTE SELECT 1 params=[secret]":                           "COM_STMT_EXECUTE SELECT ?",
-		"params=[secret]": "",
-	} {
-		require.Equal(t, want, sqlShape(in), in)
-		for _, secret := range []string{"alice", "s3cr3t", "secret", "abc", "zz", "diary"} {
-			require.NotContains(t, sqlShape(in), secret, in)
-		}
-	}
 	// The matcher's next step names the fields that differed; a map's keys
 	// can be values, so a path keeps its shape.
 	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
@@ -684,9 +638,29 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
 }
 
-func TestPathShapeDropsValues(t *testing.T) {
-	require.Equal(t, "/users/{}/orders", pathShape("/users/42/orders?token=abc"))
-	require.Equal(t, "/v1/{}", pathShape("/v1/7c01d2e9"))
+// A miss, its reason text and a recorded mock's name keep an HTTP call's
+// method and its URL's shape (models.PathShape), never a value in the URL.
+func TestEvidenceKeepsAnHTTPCallsShape(t *testing.T) {
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /users/alice@example.com/orders/ord_9f8e7d?token=s3cret", Destination: "api.internal:8080"}
+	require.Equal(t, "GET /users/{}/orders/{}?token={}", sanitizedMiss(miss).ActualSummary)
+	require.Equal(t, "GET /users/{}/orders/{}?token={} to api.internal:8080", missText(miss))
+	mock := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "DELETE", URL: "http://pay.internal:8443/carts/507f1f77bcf86cd799439011?force=true"}}}
+	require.Equal(t, "DELETE pay.internal:8443/carts/{}?force={} (mock-3)", mockText("mock-3", mock))
+	grpc := models.UnmatchedCall{Protocol: "gRPC", ActualSummary: "/orders.v1.OrderService/PlaceOrder", Destination: "orders:9090"}
+	require.Equal(t, "/orders.v1.OrderService/PlaceOrder to orders:9090", missText(sanitizedMiss(grpc)), "a gRPC miss names its RPC")
+	// A test variable's place names a path segment that holds the app's
+	// value: it is {}, whatever its look.
+	variable := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwv", MatchPhase: models.MatchPhaseVariable, ClosestMock: "mock-1",
+		FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]", Expected: "kqzxwv", Actual: "kqzxwv"}}})
+	require.Equal(t, "GET /orders/{}", variable.ActualSummary)
+	require.Equal(t, "GET /orders/{}", missText(variable))
+	declared := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://store/orders/kqzxwv"},
+		Variables: models.MockVariables{"orderId": {Recorded: "kqzxwv", Bind: "url.path[1]"}}}}
+	require.Equal(t, "GET store/orders/{} (mock-1)", mockText("mock-1", declared), "a mock's declared variable place holds a recorded value")
+	r := evidenceReason("orders::TestA", &models.ScopeEvidence{Misses: []models.UnmatchedCall{sanitizedMiss(miss)}, Unconsumed: []string{"mock-3"}}, map[string]*models.Mock{"mock-3": mock})
+	for _, v := range []string{"alice@example.com", "ord_9f8e7d", "s3cret", "507f1f77bcf86cd799439011", "true"} {
+		require.NotContains(t, r, v)
+	}
 }
 
 func TestTheReasonQuotesAnIDTheShellWouldSplit(t *testing.T) {
@@ -964,13 +938,6 @@ func TestTheClaimsAreInTheWindows(t *testing.T) {
 	for _, w := range ws {
 		require.Empty(t, w.Claim, "the claims belong to the session that made them")
 	}
-}
-
-// Digits inside a kept backtick span are written "?", in case the span was
-// misread (a Postgres operator, a multi-byte character set's trail byte).
-func TestSQLShapeMasksDigitsInNames(t *testing.T) {
-	require.Equal(t, "SELECT a `~ ? AND b ~` c", sqlShape("SELECT a `~ 999 AND b ~` c"))
-	require.Equal(t, "SELECT `t?` FROM x", sqlShape("SELECT `t1` FROM x"))
 }
 
 // An empty pool (a recording with no start-up mock) is a pool: between

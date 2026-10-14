@@ -199,6 +199,9 @@ func TestVariables_AUseOfAnotherValueIsAMissWithEvidence(t *testing.T) {
 			if !strings.Contains(rep.Diff, "orderId") || !strings.Contains(rep.Diff, "mock-1 body.id") || rep.NextSteps == "" {
 				t.Fatalf("the report must name the variable and where it was bound: diff %q next %q", rep.Diff, rep.NextSteps)
 			}
+			if got := models.MissShape(models.UnmatchedCall{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, FieldDiffs: rep.FieldDiffs}); got != "GET /orders/{}" {
+				t.Fatalf("the miss's shape is %q, want the variable's place written {}", got)
+			}
 			if len(db.perTest) != 1 {
 				t.Fatal("the read-back's mock must not be consumed by a call it did not answer")
 			}
