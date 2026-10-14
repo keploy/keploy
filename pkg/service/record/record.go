@@ -455,6 +455,7 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 
 	for mapping := range mappings {
 		r.frameProgress.Add(1)
+		r.mappingsStreamed.Add(1)
 		realMockEntries, lostMock, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs)
 
 		// Persisted anyway (see resolveMappingEntries), so record that this test
@@ -566,6 +567,11 @@ type Recorder struct {
 	// The frame drains start later, once the app is stopped (natively); a
 	// stream the agent ends in between is one it ended after the stop.
 	stopping atomic.Bool
+	// mappingsStreamed counts the test-mock mappings the agent handed over
+	// this recording. A recording made without --sync that the agent mapped
+	// itself (enterprise's static dedup resolves its windows in the agent)
+	// derives none from its test windows (windowMappings.write).
+	mappingsStreamed atomic.Uint64
 	// unsupportedBacklogOnce says once that the agent cannot tell what it
 	// still holds.
 	unsupportedBacklogOnce sync.Once
@@ -1098,6 +1104,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	r.stopping.Store(false)
 	r.captureLost.Store(false)
 	r.heldFrames.Store(0)
+	r.mappingsStreamed.Store(0)
 
 	sessionStart := time.Now()
 
@@ -1286,6 +1293,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
 	var insertedMu sync.Mutex
+	// Under the proven switch a recording made without --sync writes its
+	// mappings.yaml at the end, derived from its test windows; nil otherwise.
+	windowMaps := r.newWindowMappings()
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -1453,6 +1463,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 				r.logger.Warn("deferred-orphan revoke: testDB does not support DeleteTests; leaving orphaned test cases in the set",
 					zap.Int("count", len(toDelete)))
 			}
+		}
+
+		// The test cases the set keeps are final: map them (a no-op unless
+		// this recording derives its mappings from its test windows).
+		if recordingStarted && newTestSetID != "" {
+			windowMaps.write(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load())
 		}
 
 		/*
@@ -2007,6 +2023,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 			// After the insert, which is what names an auto-named test case.
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
+				windowMaps.addLostTest(testCase)
 				if ctx.Err() != nil {
 					// Once shutdown has begun nothing reads insertTestErrChan:
 					// Start's select has already returned, and this loop keeps
@@ -2041,6 +2058,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
+				windowMaps.addTest(testCase)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
@@ -2222,6 +2240,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 					})
 				}
+				windowMaps.addMock(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()
