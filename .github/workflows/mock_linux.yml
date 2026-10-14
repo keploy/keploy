@@ -529,7 +529,7 @@ jobs:
       - name: Run the PID map integration test (root)
         run: |
           set -o pipefail
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount' -test.v | tee /tmp/pidmap.out
-          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount; do
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified' -test.v | tee /tmp/pidmap.out
+          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; exit 1; }
           done

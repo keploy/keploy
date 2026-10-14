@@ -24,15 +24,18 @@ func (a *Agent) proxyConnSides() (coreAgent.ProxyConnsReporter, coreAgent.Accept
 	return h, p, nil
 }
 
-// ProxyConns reads the counts of the connections to the proxy's marked
-// listener (models.ProxyConnCounts): what it accepted (every number up to
-// Accepted), what the kernel dropped at it, and what the kernel completed to
-// it, in that order. accept() returns a connection only after the kernel
-// numbered it, so Accepted, read first, is never higher than Established,
-// read after it: if it is, the kernel's count was lost (its program detached,
-// its object replaced), and the answer is an error. An agent whose hooks or
-// proxy cannot count, or whose listener is not marked or has closed, gives an
-// error wrapping models.ErrProxyConnsUnsupported: "unknown", never 0.
+// ProxyConns reads the counts of the connections to the proxy
+// (models.ProxyConnCounts): what the proxy accepted (every number up to
+// Accepted), what the kernel dropped at its listener, what the kernel
+// completed to it, then how far the application's own connections are
+// settled and how many it has made, in that order. Each count read first is
+// never higher than the one it is compared with, read after it: accept()
+// returns a connection only after the kernel numbered it, and an application
+// connection is settled only after it was numbered. A count read first that
+// is higher means a count was lost (the kernel's program detached, its object
+// replaced), and the answer is an error. An agent whose hooks or proxy cannot
+// count, or whose listener is not marked or has closed, gives an error
+// wrapping models.ErrProxyConnsUnsupported: "unknown", never 0.
 func (a *Agent) ProxyConns(ctx context.Context) (models.ProxyConnCounts, error) {
 	h, p, err := a.proxyConnSides()
 	if err != nil {
@@ -53,29 +56,61 @@ func (a *Agent) ProxyConns(ctx context.Context) (models.ProxyConnCounts, error) 
 	if acc > est {
 		return models.ProxyConnCounts{}, fmt.Errorf("%w: the proxy accepted every connection up to %d and the kernel counted only %d: the kernel's count was lost", models.ErrProxyConnsUnsupported, acc, est)
 	}
-	return models.ProxyConnCounts{Established: est, Accepted: acc, ListenDrops: drops}, nil
+	settled, err := h.AppConnsSettled()
+	if err != nil {
+		return models.ProxyConnCounts{}, err
+	}
+	app, err := h.AppConnsEstablished(ctx)
+	if err != nil {
+		return models.ProxyConnCounts{}, err
+	}
+	if settled > app {
+		return models.ProxyConnCounts{}, fmt.Errorf("%w: %d of the application's connections are settled and the kernel counted only %d: its count was lost", models.ErrProxyConnsUnsupported, settled, app)
+	}
+	return models.ProxyConnCounts{Established: est, Accepted: acc, ListenDrops: drops, AppConns: app, AppSettled: settled}, nil
+}
+
+// WaitProxySettled returns once every call the application had started when
+// counts was read is in the proxy's hands: every application connection
+// numbered up to counts.AppConns is settled (its proxy side completed, or it
+// was lost, a capture loss charged to the open test), and then every
+// connection the kernel has completed to the proxy by that moment has been
+// accepted. An application connection whose connect() returned before the
+// read is waited for even while its final ACK has not reached the proxy's
+// side (a loaded host, a held or dropped packet). Connections made after the
+// read cannot hold it back. It has no deadline of its own, and ends with
+// ctx's error, or with an error when the counts cannot be read, a count was
+// lost, or the listener closes. A test's begin and end call it with the counts
+// they read.
+func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCounts) error {
+	h, _, err := a.proxyConnSides()
+	if err != nil {
+		return err
+	}
+	if _, err := a.ProxyConns(ctx); err != nil {
+		return err
+	}
+	if err := h.WaitAppConnsSettled(ctx, counts.AppConns); err != nil {
+		return err
+	}
+	// Every application connection read is now paired (its proxy side
+	// numbered) or lost: the proxy's count read now covers the paired ones.
+	now, err := a.ProxyConns(ctx)
+	if err != nil {
+		return err
+	}
+	return a.WaitProxyAccepted(ctx, max(now.Established, counts.Established))
 }
 
 // WaitProxyAccepted returns once the proxy has accepted every connection the
-// kernel numbered 1..n. The kernel numbers each connection as it counts it,
-// and the proxy reads the number from each socket it accepts, so the wait is
-// for exactly the connections a read of n covered: connections completed
-// later cannot hold it back, and one accepted ahead of an earlier one cannot
-// end it early. It has no deadline of its own, and ends with ctx's error, or
-// with an error when the counts cannot be read or the listener closes. A
-// test's begin and end call it with the Established they read from
-// ProxyConns.
-//
-// What it cannot see: a connection the application's connect() has completed
-// whose final ACK the kernel has not yet processed on the proxy's side is not
-// numbered yet. If the kernel's TCP layer dropped that ACK at the listener
-// (its accept queue full, among the causes), the listener's drops grow, and
-// the test is not verified (ListenDrops); a drop before TCP (the device's
-// backlog, a veth, netfilter) does not show there. If the ACK is only late (a
-// loaded host defers it to ksoftirqd), the window is that delay: a call made
-// without waiting for its answer (fire and forget) at a test's very end can
-// reach the proxy after the end read, in the next test. The application's own
-// count of its completed connects, paired by source port, closes that gap.
+// kernel numbered 1..n on its side. The kernel numbers each connection as it
+// counts it, and the proxy reads the number from each socket it accepts, so
+// the wait is for exactly the connections a read of n covered: connections
+// completed later cannot hold it back, and one accepted ahead of an earlier
+// one cannot end it early. It has no deadline of its own, and ends with ctx's
+// error, or with an error when the counts cannot be read or the listener
+// closes. It does not see an application connection whose proxy side is not
+// complete yet: WaitProxySettled does.
 func (a *Agent) WaitProxyAccepted(ctx context.Context, n uint64) error {
 	_, p, err := a.proxyConnSides()
 	if err != nil {

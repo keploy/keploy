@@ -23,6 +23,11 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if proxyCounts && a.Proxy != nil {
 		out = append(out, proxy.CaptureLosses()...)
 	}
+	// The application's connections the hooks saw lost before the proxy
+	// got them (under the proven switch; none otherwise).
+	if hooks, ok := a.Hooks.(coreAgent.CaptureLossReporter); ok && a.Hooks != nil {
+		out = append(out, hooks.CaptureLosses()...)
+	}
 	refusals, err := a.PIDMapRefusals(ctx)
 	switch {
 	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):

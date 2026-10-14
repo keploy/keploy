@@ -139,17 +139,54 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 		p.failCount(fmt.Errorf("reach an accepted connection's socket: %w", err))
 		return false
 	}
-	seq, err := p.listenerCounter.ProxyConnSeq(rc)
+	pairing, err := p.listenerCounter.ProxyConnPair(rc)
 	if err != nil {
 		p.failCount(err)
 		return false
 	}
-	p.accepts.Add(seq)
+	p.pairs.Store(pairKey(conn), pairing)
+	p.accepts.Add(pairing.Seq)
 	if _, err := p.accepts.Accepted(); err != nil {
 		p.failCount(err)
 		return false
 	}
 	return true
+}
+
+// pairKey names an accepted connection by its two addresses, unique while it
+// lives.
+func pairKey(conn net.Conn) string {
+	return conn.RemoteAddr().String() + "|" + conn.LocalAddr().String()
+}
+
+// pairedDest is where an accepted connection of the counted listener is
+// going, from its own socket (ProxyConnPairing), under the proven switch: ok
+// says the counter had it. A connection the kernel tied to no application
+// connection has no destination (dst nil): the proxy refuses it, a capture
+// loss, rather than guess one from a key another connection may share. Taken
+// once.
+func (p *Proxy) pairedDest(conn net.Conn) (dst *agent.NetworkAddress, ok bool) {
+	if p.listenerCounter == nil {
+		return nil, false
+	}
+	v, ok := p.pairs.LoadAndDelete(pairKey(conn))
+	if !ok {
+		return nil, false
+	}
+	pairing := v.(agent.ProxyConnPairing)
+	if pairing.AppSeq == 0 || pairing.Dst == nil {
+		return nil, true
+	}
+	return pairing.Dst, true
+}
+
+// refuseUnpaired counts, and says, an accepted connection the kernel tied to
+// no connection of the application's: keploy cannot tell where it is going.
+func (p *Proxy) refuseUnpaired(conn net.Conn) {
+	p.losses.Add(models.CaptureLossUnpairedConn, "from "+conn.RemoteAddr().String())
+	p.logger.Warn("keploy refused a connection to its proxy that the kernel could not tie to a connection of the application's: it cannot tell where the connection was going",
+		zap.String("from", conn.RemoteAddr().String()),
+		zap.String("next_step", "keploy's proxy must see the application's own addresses: check for a NAT between the application and the agent"))
 }
 
 func (p *Proxy) failCount(err error) {
@@ -200,6 +237,12 @@ func ListenMarked(ctx context.Context, addr string, mark func(rc syscall.RawConn
 	}
 	if markErr == nil && !marked {
 		markErr = errors.New("its listen never offered its socket to be marked")
+	}
+	// No TCP Fast Open, whatever the kernel's default: a Fast Open
+	// connection's proxy side completes at its SYN, before the kernel numbers
+	// the application's side of it, so the two would never pair.
+	if markErr == nil {
+		markErr = noFastOpen(ln)
 	}
 	return ln, markErr, nil
 }

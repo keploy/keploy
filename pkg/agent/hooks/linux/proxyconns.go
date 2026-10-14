@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -37,10 +38,16 @@ func (h *Hooks) MarkProxyListener(rc syscall.RawConn) error {
 	}); err != nil {
 		return fmt.Errorf("reach the proxy's listening socket: %w", err)
 	}
-	if markErr == nil {
-		h.proxyMarked.Store(true)
+	if markErr != nil {
+		return markErr
 	}
-	return markErr
+	// The application's side of the count starts with the first mark.
+	h.appOnce.Do(func() { h.app.startErr = h.startAppConns() })
+	if h.app.startErr != nil {
+		return h.app.startErr
+	}
+	h.proxyMarked.Store(true)
+	return nil
 }
 
 func markListenerFD(m *ebpf.Map, fd int) error {
@@ -51,37 +58,57 @@ func markListenerFD(m *ebpf.Map, fd int) error {
 	if proto != unix.IPPROTO_TCP {
 		return fmt.Errorf("the proxy's listening socket is protocol %d, not plain TCP (%d): the kernel never copies a mark into an MPTCP listener's connections", proto, unix.IPPROTO_TCP)
 	}
-	if err := m.Update(int32(fd), uint64(0), ebpf.UpdateAny); err != nil {
+	if err := m.Update(int32(fd), proxyConnMark{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("mark the proxy's listening socket in proxy_listener_mark: %w", err)
 	}
 	return nil
 }
 
-// ProxyConnSeq is the sequence number k_sockops wrote into the accepted
-// connection rc's socket as it counted it (proxy_listener_mark's value): the
-// kernel counts a connection before accept() can return it, so an accepted
-// connection of the marked listener always has one. None, or 0, is an error.
-func (h *Hooks) ProxyConnSeq(rc syscall.RawConn) (uint64, error) {
+// proxyConnMark is proxy_listener_mark's value (struct proxy_conn_mark_t):
+// the listener's is all zero; an accepted connection's has its number, and
+// the application connection it pairs with and that one's original
+// destination.
+type proxyConnMark struct {
+	Seq    uint64
+	AppSeq uint64
+	Dst    structs.DestInfo
+}
+
+// ProxyConnPair is what k_sockops wrote into the accepted connection rc's
+// socket as it counted it (proxy_listener_mark's value): the kernel counts a
+// connection before accept() can return it, so an accepted connection of the
+// marked listener always has its number. None, or 0, is an error.
+func (h *Hooks) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing, error) {
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
 	m := h.objects.ProxyListenerMark
 	if m == nil {
-		return 0, errors.New("the hooks are not loaded: proxy_listener_mark is not open")
+		return agent.ProxyConnPairing{}, errors.New("the hooks are not loaded: proxy_listener_mark is not open")
 	}
-	var seq uint64
+	var v proxyConnMark
 	var lerr error
 	if err := rc.Control(func(fd uintptr) {
-		lerr = m.Lookup(int32(fd), &seq)
+		lerr = m.Lookup(int32(fd), &v)
 	}); err != nil {
-		return 0, fmt.Errorf("reach the accepted connection's socket: %w", err)
+		return agent.ProxyConnPairing{}, fmt.Errorf("reach the accepted connection's socket: %w", err)
 	}
-	if errors.Is(lerr, ebpf.ErrKeyNotExist) || (lerr == nil && seq == 0) {
-		return 0, errors.New("an accepted connection of the proxy's marked listener has no sequence number: the kernel did not count it")
+	if errors.Is(lerr, ebpf.ErrKeyNotExist) || (lerr == nil && v.Seq == 0) {
+		return agent.ProxyConnPairing{}, errors.New("an accepted connection of the proxy's marked listener has no sequence number: the kernel did not count it")
 	}
 	if lerr != nil {
-		return 0, fmt.Errorf("read the accepted connection's sequence number: %w", lerr)
+		return agent.ProxyConnPairing{}, fmt.Errorf("read the accepted connection's sequence number: %w", lerr)
 	}
-	return seq, nil
+	p := agent.ProxyConnPairing{Seq: v.Seq, AppSeq: v.AppSeq}
+	if v.AppSeq != 0 {
+		p.Dst = &agent.NetworkAddress{
+			Version:   v.Dst.IPVersion,
+			IPv4Addr:  v.Dst.DestIP4,
+			IPv6Addr:  v.Dst.DestIP6,
+			Port:      v.Dst.DestPort,
+			KernelPid: v.Dst.KernelPid,
+		}
+	}
+	return p, nil
 }
 
 // proxyConnsValue is proxy_conns_established's value: its bpf_spin_lock, and
