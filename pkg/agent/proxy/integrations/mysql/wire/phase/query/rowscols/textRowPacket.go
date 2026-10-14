@@ -13,6 +13,9 @@ import (
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_row.html
 
 func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mysql.ColumnDefinition41) (*mysql.TextRow, int, error) {
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("text row packet too short: %d bytes", len(data))
+	}
 	offset := 0
 	row := &mysql.TextRow{
 		Header: mysql.Header{
@@ -23,7 +26,12 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 
 	offset += 4
 
-	for _, col := range columns {
+	for i, col := range columns {
+		// A row cut short (misframed, or a capture hole) is an error, not a
+		// panic: a panic kills the recorder for the rest of its connection.
+		if offset >= len(data) {
+			return nil, offset, fmt.Errorf("text row has %d of its %d values", i, len(columns))
+		}
 		dataLength := data[offset]
 		if dataLength == 0xfb { // NULL
 			row.Values = append(row.Values, mysql.ColumnEntry{

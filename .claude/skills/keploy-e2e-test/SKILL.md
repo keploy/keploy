@@ -221,8 +221,13 @@ source `test-iid.sh` and `update-java.sh` via that path.
 On Linux, `keploy` needs root for eBPF — most scripts use `sudo` on
 specific commands. Don't add `sudo` to the whole script invocation if the
 script doesn't already do that; copy the pattern used by the existing
-scripts (selective `sudo -E env PATH=$PATH "$RECORD_BIN" …`, sometimes
-`sudo "$RECORD_BIN" config --generate`).
+scripts (selective `sudo -E env PATH=$PATH "$RECORD_BIN" …`).
+
+A script that needs settings in `keploy.yml` WRITES them, with a heredoc.
+Do not `sed` a generated config: `keploy config --generate` emits only the
+settings that differ from Keploy's defaults, so a `sed` looking for a default
+value (`global: {}`, `selectedTests: {}`) matches nothing, patches nothing,
+and the run goes green having ignored the rule you meant to add.
 
 On macOS/Windows the same script pattern won't work unmodified — in those
 environments either fall back to the `*_macos.yml` / `*_windows.yml` /

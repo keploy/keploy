@@ -22,8 +22,11 @@ package mismatch
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -53,6 +56,11 @@ const maxFieldDiffs = 25
 // Builder assembles a models.MockMismatchReport with consistent rendering.
 type Builder struct {
 	report models.MockMismatchReport
+	// comparedDests is the set of upstreams the mocks this miss was actually
+	// compared against were recorded for — evidence for the destination-scope
+	// check in Build(). nil means "the question is undecidable" — see
+	// WithComparedDestinations.
+	comparedDests []string
 }
 
 // NewReport starts a report for one missed call. actualSummary should be the
@@ -60,6 +68,7 @@ type Builder struct {
 // (prepared stmt 12)", "find users").
 func NewReport(protocol, actualSummary string) *Builder {
 	return &Builder{report: models.MockMismatchReport{
+		At:            time.Now(),
 		Protocol:      protocol,
 		ActualSummary: actualSummary,
 	}}
@@ -71,6 +80,76 @@ func NewReport(protocol, actualSummary string) *Builder {
 // calls several services.
 func (b *Builder) WithDestination(dest string) *Builder {
 	b.report.Destination = dest
+	return b
+}
+
+// WithComparedDestinations supplies the upstream authority of every mock this
+// miss was actually compared against, so Build() can tell a call whose
+// upstream is absent from that set apart from a drifted request.
+//
+// WHY THIS EXISTS — the sibling-container scope asymmetry (KUBERNETES; the
+// check itself is mode-neutral, and so is the guidance it selects — see
+// models.OutOfScopeDestinationCauses, which names the pod model as a
+// Kubernetes specific because native and docker runs have no pod):
+//
+// keploy's RECORD path arms exactly ONE container: the one the user named in
+// the record request (RecordRequest.Container). The DS agent honours it
+// precisely — sibling containers in the same pod log "matchedSession": false
+// and nothing they send is ever captured. The REPLAY path has no such
+// narrowing: the sandbox pod's keploy-agent intercepts the WHOLE pod network
+// namespace, so a sibling container's egress IS intercepted, finds no mock
+// (there was never one to find), and gets reported to the user as a mock
+// mismatch.
+//
+// That is the shape the check was built from, not the limit of what it
+// catches: a destination absent from the compared set is equally the
+// signature of endpoint/config drift between the recording and replay
+// environments, and of a per-test mock window that excluded the very mock
+// this call needed — both of which happen in every execution mode.
+//
+// Before this check, such a miss fell through to the generic "Request
+// structure changed since recording. Re-record the test set..." hint, which
+// is false twice over: nothing changed, and the closest mock it pointed at
+// was on a different upstream entirely. In one reported recording that was 23 of
+// 28 unmatched calls, each diffed against a mock for another host — noise
+// that buried the 5 misses that were genuinely the application's and cost two
+// engineers real debugging time.
+//
+// WHAT THE VERDICT MAY AND MAY NOT SAY. It speaks for the compared set and
+// nothing wider. It must never be rendered as "this destination was never
+// recorded": that is a claim about the whole recording, and local state
+// cannot support it — protocols that consume mocks on match (HTTP deletes
+// per-test mocks via DeleteFilteredMock, and the agent then strips them from
+// every later pool) lose a host from their pools the moment its last mock is
+// served, so "absent from what survives" and "never recorded" are different
+// facts. Every attempt to assert the stronger one produced a false claim
+// about a real upstream. The weaker claim is always true, and it still
+// removes both things that misled the reader: the "re-record, the request
+// structure changed" advice, and leading with a diff against another host.
+//
+// The interception itself is deliberately NOT changed here: narrowing it
+// needs cgroup-scoped BPF (the excluded_pids map is keyed by ROOT-namespace
+// TGIDs, which the replay agent — living in the pod's PID namespace — cannot
+// enumerate from /proc), and it is harmless anyway, because k8s-proxy
+// attaches a deny-all-egress NetworkPolicy to every replay pod, so the
+// sibling's call cannot reach its upstream either way. Only the REPORT was
+// harmful, so only the REPORT is fixed. This is diagnostic-only by
+// construction: it can change what a miss SAYS, never whether a call matches.
+//
+// Callers must pass nil whenever they cannot read a destination off EVERY
+// mock they compared — nil means undecidable, and an undecidable check leaves
+// today's message exactly as it was. One unreadable mock is enough: it could
+// be the very mock that targeted the live call.
+//
+// Protocol reach: the mechanism is protocol-agnostic — any parser that can
+// name the upstreams of its compared mocks may feed it — but HTTP is the only
+// caller today, because it is the only protocol whose recorded mocks carry a
+// destination at all (Mongo/MySQL/Postgres/Generic store wire payloads with
+// no authority in them). Every other protocol therefore leaves the verdict at
+// models.DestinationScopeUnknown, and their reports read exactly as they did
+// before this check existed.
+func (b *Builder) WithComparedDestinations(dests []string) *Builder {
+	b.comparedDests = dests
 	return b
 }
 
@@ -122,6 +201,22 @@ func (b *Builder) WithRenderedRequests(mockReq, receivedReq string) *Builder {
 // and returns the finished report.
 func (b *Builder) Build() *models.MockMismatchReport {
 	r := b.report
+	// Destination scope is decided BEFORE the next-steps default so the
+	// verdict and the guidance can never disagree.
+	//
+	// It is written to its OWN field, never over MatchPhase. The phase is the
+	// cascade's stopping point (no_schema_candidates / body_mismatch /
+	// strict_noise_reject), which is what tells a reader how far matching got
+	// — triage information that an earlier cut of this code destroyed by
+	// overwriting it, leaving the CLI printing "[match stopped at:
+	// destination_not_recorded]", a phase that never ran.
+	//
+	// MatchPhaseNoMocks is left unscored: "there were no mocks at all" has
+	// its own accurate message, and there is no compared set to speak about,
+	// so the question is not even asked.
+	if r.MatchPhase != models.MatchPhaseNoMocks {
+		r.DestinationScope = destinationScope(r.Destination, b.comparedDests)
+	}
 	if r.Diff == "" {
 		r.Diff = RenderFieldDiffs(r.FieldDiffs)
 	}
@@ -153,6 +248,37 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 	return strings.Join(parts, "; ")
 }
 
+// mockMode is on when the agent serves a `keploy mock record|replay` session.
+// Such a run is recorded again with `keploy mock record`, not `keploy record`,
+// so the hints below name that command; every other run keeps the old text.
+//
+// It is one switch for the whole process, as the agent runs in one mode. Tests
+// in this package that set it restore it with t.Cleanup and must not call
+// t.Parallel: a parallel test would read the other's mode and fail on hint
+// text it never asked for.
+var mockMode atomic.Bool
+
+// SetMockMode is called by the agent at setup with its --mock-mode flag.
+func SetMockMode(on bool) { mockMode.Store(on) }
+
+// MockMode reports whether the agent serves a `keploy mock` session. A
+// protocol that writes its own hint with WithNextSteps uses it to leave out
+// advice a mock run cannot act on, such as test.globalNoise: `keploy mock
+// replay` sends the agent no NoiseConfig (its MockOutgoing options in
+// pkg/service/mock/replay.go), so noise from keploy.yml never reaches a
+// matcher there.
+func MockMode() bool { return mockMode.Load() }
+
+// RecordCommand is the command that records this run again. A protocol that
+// writes its own hint with WithNextSteps names the command through it, so a
+// mock run never points at `keploy record`.
+func RecordCommand() string {
+	if mockMode.Load() {
+		return "keploy mock record"
+	}
+	return "keploy record"
+}
+
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
 // real remedies are noise (for drifting values) and re-recording (for
@@ -167,9 +293,52 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 	}
 	switch {
 	case r.MatchPhase == models.MatchPhaseNoMocks:
-		return "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with 'keploy record'."
+		if mockMode.Load() {
+			return "No recorded mocks were available to match against for this protocol in the selected mock set. Re-record the mock set with '" + RecordCommand() + "'."
+		}
+		return "No recorded mocks were available to match against for this protocol in the selected test set. Re-record the test set with '" + RecordCommand() + "'."
+	case r.DestinationScope == models.DestinationScopeNotInComparedSet:
+		// Ahead of the value-drift branch on purpose: when nothing in the
+		// compared set targets this upstream, the closest mock belongs to a
+		// DIFFERENT one, so its field diffs describe a comparison that was
+		// never meaningful. Telling the user to noise those fields would be a
+		// second misdirection stacked on the first.
+		scope := "recorded mock"
+		if r.Protocol != "" {
+			scope = "recorded " + r.Protocol + " mock"
+		}
+		// ONE sentence — the only part of this guidance that differs between
+		// two out-of-scope misses is WHICH upstream they went to. The likely
+		// causes and the caveat are identical for every one of them and live
+		// in models.OutOfScopeDestinationCauses, which renderers emit once
+		// per test. An out-of-scope container produces one miss per outgoing
+		// call it makes (23 of 28 unmatched calls in the recording this was
+		// built from); the paragraph that used to be inlined here was ~1 KB,
+		// repeated per miss, in the report AND in the agent's per-miss
+		// next_step log field.
+		lead := fmt.Sprintf("No %s in the compared set targets %s.", scope, r.Destination)
+		if r.ClosestMock != "" {
+			// Only claimed when a closest mock was actually picked; the
+			// no-candidate branch of the HTTP builder renders no diff at all.
+			lead += " The closest mock is on a different upstream, so its differences are not evidence about this call."
+		}
+		return lead
 	case onlyValueDrift:
 		paths := make([]string, 0, len(r.FieldDiffs))
+		for _, d := range r.FieldDiffs {
+			paths = append(paths, d.Path)
+		}
+		if mockMode.Load() {
+			// `keploy mock replay` sends the agent no noise config, so
+			// test.globalNoise would not change the next run's match. Only
+			// the HTTP parser acts on --on-miss, and only when it can reach
+			// the real dependency.
+			hint := fmt.Sprintf("Only values drifted (%s). If the change is expected, re-record the mock set with '%s'", strings.Join(paths, ", "), RecordCommand())
+			if r.Protocol == ProtocolHTTP {
+				hint += ", or, with the dependency reachable, capture the new calls with 'keploy mock replay --on-miss record'"
+			}
+			return hint + "."
+		}
 		// Body diffs are reported "body."-prefixed for readability, but HTTP
 		// request matching reads the request-body noise bucket with
 		// root-relative keys — so strip the prefix in the copy-paste hint to
@@ -177,17 +346,23 @@ func defaultNextSteps(r *models.MockMismatchReport) string {
 		// request matcher never consults.
 		bodyKeys := make([]string, 0, len(r.FieldDiffs))
 		for _, d := range r.FieldDiffs {
-			paths = append(paths, d.Path)
 			if k := strings.TrimPrefix(d.Path, "body."); k != d.Path {
 				bodyKeys = append(bodyKeys, k)
 			}
 		}
 		if len(bodyKeys) > 0 {
-			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with 'keploy record'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "))
+			return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add the request-body fields under test.globalNoise.requestbody with root-relative keys (e.g. requestbody: {%s: []}); otherwise re-record with '%s'.", strings.Join(paths, ", "), strings.Join(bodyKeys, ": [], "), RecordCommand())
 		}
-		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with 'keploy record'.", strings.Join(paths, ", "))
+		return fmt.Sprintf("Only values drifted (%s). If these are dynamic (timestamps, ids, tokens), add them to the matching noise (test.globalNoise); otherwise re-record with '%s'.", strings.Join(paths, ", "), RecordCommand())
 	default:
-		return "Request structure changed since recording. Re-record the test set with 'keploy record', or refresh mappings with --update-test-mapping if mocks were edited."
+		// Not --update-test-mapping alone: it updates only a passing test's
+		// mapping, so a test this miss failed keeps its recorded one. With
+		// --disable-mapping the test is served its recorded window, and mapped
+		// if it passes (both are `keploy test` flags a mock run does not have).
+		if mockMode.Load() {
+			return "Request structure changed since recording. Re-record the mock set with '" + RecordCommand() + "'."
+		}
+		return "Request structure changed since recording. Re-record the test set with '" + RecordCommand() + "', or, if you edited its mocks, remap it with --disable-mapping --update-test-mapping."
 	}
 }
 
@@ -293,4 +468,112 @@ func QueryParamDiffs(recorded, live map[string][]string) []models.MockFieldDiff 
 
 func sortDiffs(d []models.MockFieldDiff) {
 	sort.Slice(d, func(i, j int) bool { return d[i].Path < d[j].Path })
+}
+
+// destinationScope decides whether `dest` is absent from, present in, or
+// simply unjudgeable against the destinations of the mocks this miss was
+// compared against. It returns one of the models.DestinationScope* constants.
+//
+// A wrong verdict would be exactly the same class of misdirection this check
+// exists to remove, so it is deliberately biased toward silence:
+// models.DestinationScopeNotInComparedSet is returned only when all three
+// hold:
+//
+//   - the live destination is known. Parsers pass "" when they cannot tell
+//     which upstream a call targeted; "" is undecidable, never "absent".
+//   - the compared set is non-empty. An empty set means either no mocks at
+//     all (models.MatchPhaseNoMocks owns that case) or mocks whose
+//     destination could not be read — neither is evidence of anything.
+//   - no compared entry matches on the bare host (port stripped, case and
+//     trailing DNS root normalised).
+//
+// Anything else that leaves the question open returns
+// models.DestinationScopeUnknown, which is distinct from
+// models.DestinationScopeInComparedSet on purpose: "we checked and the host
+// was among the compared mocks" and "we could not check" are different facts,
+// and reporting the second as the first is an unchecked negative asserted as
+// evidence.
+//
+// Host vs host:port: recorded HTTP mocks store the authority exactly as the
+// app put it in the Host header, which is inconsistent by construction — mock
+// sets in the field carry both "192.0.2.10" (default port elided) and
+// "192.0.2.30:9090" (explicit) — and the live Host header for that same
+// upstream may or may not carry the port. So a port-only difference must never
+// produce the claim, and comparison is on the BARE HOST alone: a call to a
+// compared host on a new port is reported as in-set rather than out. (An
+// authority-equality arm would be dead code next to it — normalizeDestination
+// derives the host from the authority by stripping the port, so two equal
+// authorities always have equal hosts.) The asymmetry is intentional; the cost
+// of staying quiet is a slightly vaguer message, the cost of over-claiming is
+// sending an operator after an upstream difference that is not there.
+func destinationScope(dest string, compared []string) string {
+	liveHost, ok := normalizeDestination(dest)
+	if !ok || len(compared) == 0 {
+		return models.DestinationScopeUnknown
+	}
+	for _, c := range compared {
+		cHost, ok := normalizeDestination(c)
+		if !ok {
+			// An unreadable compared entry could be the live destination, so
+			// nothing can be concluded. Callers are expected to pass nil
+			// rather than a partial set; this is the belt-and-braces.
+			return models.DestinationScopeUnknown
+		}
+		if cHost == liveHost {
+			return models.DestinationScopeInComparedSet
+		}
+	}
+	return models.DestinationScopeNotInComparedSet
+}
+
+// normalizeDestination reduces a destination to the one comparable form the
+// verdict is decided on: the bare host, lowercased, with any port stripped.
+// ok is false for anything that carries no usable host identity — blank,
+// whitespace, a bare port like ":8080", or a scheme-carrying string — which
+// the caller must treat as undecidable.
+func normalizeDestination(dest string) (host string, ok bool) {
+	authority := strings.ToLower(strings.TrimSpace(dest))
+	if authority == "" {
+		return "", false
+	}
+	// A scheme-prefixed value is not an authority and must not be parsed as
+	// one: net.SplitHostPort("http://example.com") SUCCEEDS, yielding host
+	// "http", which would make every scheme-carrying destination compare
+	// equal to every other and produce a confident, wrong verdict. No
+	// in-tree producer emits one today — models.RecordedDestination returns
+	// url.Parse's Host, and the live side reads request.Host /
+	// request.URL.Host, all scheme-free — but this is the exact failure
+	// class the feature exists to prevent, so it is refused rather than
+	// guessed at.
+	if strings.Contains(authority, "://") {
+		return "", false
+	}
+	// net.SplitHostPort is used rather than a LastIndex(":") so bracketed IPv6
+	// literals ("[::1]:8080") split correctly and unbracketed ones
+	// ("fd00::1", which has many colons and no port) fall through unsplit.
+	host = authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		// A successful split with an empty host means the caller handed us a
+		// bare port (":8080") — there is no upstream identity in that, so it
+		// falls through to the "not ok" check below rather than comparing as
+		// the literal ":8080".
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	// Strip the root label of a rooted FQDN. A Go client that resolves through a
+	// search-domain-qualified name can present "svc.ns.svc.cluster.local." while
+	// the recorded mock's Host header carries the same name unrooted — they are
+	// the SAME upstream, and DNS says so, but a byte comparison does not. Without
+	// this the verdict is FALSE for exactly the in-cluster names this diagnostic
+	// exists to explain: it would report "no compared mock targets this
+	// destination" about an upstream sitting in the compared set. A lone "." is
+	// the DNS root and carries no upstream identity, so it falls through to the
+	// empty check below.
+	if len(host) > 1 {
+		host = strings.TrimSuffix(host, ".")
+	}
+	if host == "" || host == "." {
+		return "", false
+	}
+	return host, true
 }

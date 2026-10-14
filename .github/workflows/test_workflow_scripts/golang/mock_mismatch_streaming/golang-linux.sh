@@ -1,4 +1,7 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # E2E for STREAMING mock-mismatch reporting. Uses the sse-redis sample, whose
 # streaming endpoints (SSE / NDJSON / multipart / plain-text) are served from
@@ -38,6 +41,7 @@ rm -rf keploy/
 rm -f record_logs.txt test_logs.txt
 
 # Redis backing store for the sample's streaming endpoints.
+docker_compose_pull_retry
 docker compose up -d
 echo "waiting for redis..."
 for i in $(seq 1 30); do
@@ -48,28 +52,12 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-build_go_app() {
-  local attempt=1
-  local max_attempts=4
-  local sleep_sec=5
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if GOPROXY="proxy.golang.org,direct" go build -o sse-redis-app; then
-      return 0
-    fi
-    if [ "$attempt" -ge "$max_attempts" ]; then
-      echo "::error::go build for sse-redis-app failed after ${max_attempts} attempts"
-      return 1
-    fi
-    echo "go build attempt ${attempt} failed; retrying in ${sleep_sec}s…"
-    sleep "$sleep_sec"
-    sleep_sec=$((sleep_sec * 2))
-    attempt=$((attempt + 1))
-  done
-}
-build_go_app
+go_retry build -o sse-redis-app
 echo "go binary built"
 
-sudo "$RECORD_BIN" config --generate
+# The step above removed any config, so this always generates; the guard is
+# here so the line stays correct if that removal is ever dropped.
+[ -f keploy.yml ] || sudo "$RECORD_BIN" config --generate
 
 send_request() {
     sleep 6
@@ -165,9 +153,10 @@ if [ ${#reports[@]} -eq 0 ]; then
     tail -40 test_logs.txt
     exit 1
 fi
-streaming_reported=false
-for rf in "${reports[@]}"; do
-    if python3 - "$rf" <<'PY'
+# report_has_streaming_miss says whether a report holds a streaming test with
+# an unmatched_calls entry.
+report_has_streaming_miss() {
+    python3 - "$1" <<'PY'
 import sys, re
 txt = open(sys.argv[1]).read()
 # Each per-test block starts with "    - " at the test-results list level.
@@ -184,6 +173,10 @@ for b in blocks:
         print("streaming test reported a mismatch:", tid)
 sys.exit(0 if ok else 1)
 PY
+}
+streaming_reported=false
+for rf in "${reports[@]}"; do
+    if report_has_streaming_miss "$rf"
     then
         echo "✓ $(basename "$rf") has a streaming test with an unmatched_calls entry"
         streaming_reported=true
@@ -199,6 +192,51 @@ if [ "$streaming_reported" != true ]; then
     docker compose down 2>/dev/null || true
     exit 1
 fi
+
+# The same replay under the proven switch (KEPLOY_PROVEN=1, the proven model's
+# staging gate). The agent then waits for its error drain on events instead of
+# a 2 s deadline, never drops a miss for want of room in its error channel, and
+# says when a read of a test's misses is incomplete (models.
+# ErrUnmatchedCallsUnread), which leaves the test's set unjudged. Here nothing
+# is lost: the forced misses must still reach their streaming tests, no test may
+# be marked unmatched_calls_unread, and no set INTERNAL_ERR. The agent is
+# started through sudo, which drops KEPLOY_PROVEN, so its own debug line is the
+# proof the switch reached it as --proven.
+rm -rf ./keploy/reports
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./sse-redis-app" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_proven.txt
+if grep "WARNING: DATA RACE" test_logs_proven.txt; then
+    echo "::error::Race condition detected in the proven-switch replay"
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+if ! grep -q "staging switch is on in this agent" test_logs_proven.txt; then
+    echo "::error::the agent never said the proven switch is on: KEPLOY_PROVEN=1 did not reach it as --proven"
+    grep -n "agent" test_logs_proven.txt | head -20
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+shopt -s nullglob
+proven_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+proven_streaming_reported=false
+for rf in "${proven_reports[@]}"; do
+    if grep -q 'unmatched_calls_unread: true' "$rf" || grep -q '^status: INTERNAL_ERR' "$rf"; then
+        echo "::error::$(basename "$rf"): a read of a test's misses was incomplete under the proven switch, though nothing was lost"
+        grep -n 'unmatched_calls_unread\|^status\|failure_reason' "$rf" | head -20
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    if report_has_streaming_miss "$rf"; then
+        proven_streaming_reported=true
+    fi
+done
+if [ "$proven_streaming_reported" != true ]; then
+    echo "::error::under the proven switch the forced misses never reached a streaming test"
+    tail -40 test_logs_proven.txt
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+echo "✓ under KEPLOY_PROVEN=1 the agent got the switch, every forced miss reached its test, and no read was incomplete"
 
 echo "streaming mock-mismatch e2e passed: a streaming test reported the forced unmatched Redis read"
 docker compose down 2>/dev/null || true

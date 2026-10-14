@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.uber.org/zap"
 )
 
@@ -85,24 +86,45 @@ func ShouldReexecWithSudo() bool {
 	// `--cmd-type docker-compose -c "make up"` would take the native path
 	// here, start unprivileged, and then fail deep inside the docker branch
 	// trying to write /proc/sys/kernel/perf_event_paranoid (#4399).
+	// --from-container runs the app as a container, so it needs root for the
+	// same reason every other docker kind does. It is checked before --cmd-type
+	// because it does not require one: the flag alone settles the kind.
+	if ExtractFromContainerFromArgs(os.Args) != "" {
+		return true
+	}
+
+	// Extract the command from arguments
+	cmd := ExtractCommandFromArgs(os.Args)
+
+	// A container engine this build cannot drive is refused by ValidateFlags
+	// with a message saying so. Asking for a sudo password first, only to be
+	// refused after it, would be the worse experience.
+	if cmd != "" && !engine.Supported(engine.Detect(cmd)) {
+		return false
+	}
+
 	if explicit := ExtractCmdTypeFromArgs(os.Args); explicit != "" {
 		switch kind := CmdType(explicit); kind {
-		case Native, DockerRun, DockerStart, DockerCompose:
-			return IsDockerCmd(kind)
+		case Native, DockerRun, DockerStart, DockerCompose, FromContainer:
+			return needsRoot(kind)
 		}
 		// Anything else is rejected later by ValidateFlags with a proper
 		// message; fall through to sniffing rather than guessing here.
 	}
 
-	// Extract the command from arguments
-	cmd := ExtractCommandFromArgs(os.Args)
 	if cmd == "" {
 		return false
 	}
 
 	// Check if it's a Docker command
-	cmdType := FindDockerCmd(cmd)
-	return IsDockerCmd(cmdType)
+	return needsRoot(FindDockerCmd(cmd))
+}
+
+// needsRoot reports whether a command of this kind re-executes keploy under
+// sudo: the container kinds, except docker-start, which ValidateFlags refuses
+// (it cannot work) and which must not ask for a password first.
+func needsRoot(kind CmdType) bool {
+	return IsDockerCmd(kind) && kind != DockerStart
 }
 
 // isCloudReplayCmd checks if the args represent the "keploy cloud replay" subcommand.

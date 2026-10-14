@@ -25,6 +25,12 @@ type DecodeContext struct {
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+	// FramingAssumed is set while ClientCaps is assumed rather than read off
+	// the client's HandshakeResponse41 or SSLRequest (a connection joined
+	// mid-stream, with no SSLRequest of its own captured): the recorder
+	// settles whether CLIENT_DEPRECATE_EOF holds from the first packet that
+	// tells, and clears it.
+	FramingAssumed bool
 
 	// LongDataParams records which parameters of a prepared statement had
 	// their value streamed ahead of time with COM_STMT_SEND_LONG_DATA

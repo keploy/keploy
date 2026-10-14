@@ -2,15 +2,19 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -122,7 +126,7 @@ func TestProbeDetectsMysqlOnUnconfiguredPort(t *testing.T) {
 
 	_, srcConn := clientPair(t) // app end stays silent, like a MySQL client
 
-	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, port,
+	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, nil, port,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -161,7 +165,7 @@ func TestProbeFastPathAfterLearning(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 	start := time.Now()
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:7777", 7777,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:7777", nil, 7777,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
@@ -184,7 +188,7 @@ func TestProbeConfiguredPortsUnchanged(t *testing.T) {
 	p := testProxy(t)
 	_, srcConn := clientPair(t)
 
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:3306", 3306,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:3306", nil, 3306,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -205,7 +209,7 @@ func TestProbeClientSpeaksFirstPreservesBytes(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9999", 9999,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9999", nil, 9999,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -238,7 +242,7 @@ func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 
-	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, port,
+	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, nil, port,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -297,7 +301,7 @@ func TestProbeClosesUpstreamOnNegativeVerdict(t *testing.T) {
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 	_, srcConn := clientPair(t)
 
-	probe, err := p.probeMysql(context.Background(), srcConn, ln.Addr().String(),
+	probe, err := p.probeMysql(context.Background(), srcConn, ln.Addr().String(), nil,
 		uint32(tcpAddr.Port), models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -322,7 +326,7 @@ func TestProbeSkipsKnownNegativePort(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 	start := time.Now()
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:8443", 8443,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:8443", nil, 8443,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
@@ -370,7 +374,7 @@ func TestProbeDetectsFragmentedGreeting(t *testing.T) {
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 	_, srcConn := clientPair(t)
 
-	probe, err := p.probeMysql(context.Background(), srcConn, ln.Addr().String(),
+	probe, err := p.probeMysql(context.Background(), srcConn, ln.Addr().String(), nil,
 		uint32(tcpAddr.Port), models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -399,7 +403,7 @@ func TestProbeCachesClientSpokeFirstAsNegative(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9443", 9443,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9443", nil, 9443,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -447,7 +451,7 @@ func TestProbeAutoDetectDisabled(t *testing.T) {
 	dstAddr, port := serverThatGreets(t, mysqlGreeting())
 	_, srcConn := clientPair(t)
 
-	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, port,
+	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, nil, port,
 		models.MODE_RECORD, models.OutgoingOptions{DisableMysqlAutoDetect: true}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -478,7 +482,7 @@ func TestReplayRecallsPortFromMocks(t *testing.T) {
 	}
 
 	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.19.0.9:6033", 6033,
+	probe, err := p.probeMysql(context.Background(), srcConn, "172.19.0.9:6033", nil, 6033,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -497,7 +501,7 @@ func TestReplayNeverDials(t *testing.T) {
 	p.deriveMysqlPorts(nil) // signal derivation with no MySQL mocks
 
 	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:1", 1,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:1", nil, 1,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -526,7 +530,7 @@ func TestReplayWaitsForMockDerivation(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 	start := time.Now()
-	probe, err := p.probeMysql(context.Background(), srcConn, "db:15306", 15306,
+	probe, err := p.probeMysql(context.Background(), srcConn, "db:15306", nil, 15306,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
@@ -551,7 +555,7 @@ func TestReplayDeriveWaitIsBounded(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 	start := time.Now()
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9", 9,
+	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9", nil, 9,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
@@ -640,7 +644,7 @@ func TestReplayServesMocksWhenAppEndpointPortDrifted(t *testing.T) {
 	})
 
 	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", 283,
+	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -665,7 +669,7 @@ func TestInferredPortDoesNotHijackLaterClientSpeaksFirst(t *testing.T) {
 	})
 
 	_, silent := clientPair(t)
-	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:8288", 8288,
+	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:8288", nil, 8288,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil || !first.IsMySQL {
 		t.Fatalf("first probe: err=%v IsMySQL=%v", err, first.IsMySQL)
@@ -679,7 +683,7 @@ func TestInferredPortDoesNotHijackLaterClientSpeaksFirst(t *testing.T) {
 	if _, err := client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	second, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:8288", 8288,
+	second, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:8288", nil, 8288,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("second probe: %v", err)
@@ -700,7 +704,7 @@ func TestInferredPortDoesNotLeakIntoRecordMode(t *testing.T) {
 	})
 
 	_, silent := clientPair(t)
-	if _, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", 283,
+	if _, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop()); err != nil {
 		t.Fatalf("replay probe: %v", err)
 	}
@@ -725,7 +729,7 @@ func TestClientSpeakingLateIsNotInferredAsMysql(t *testing.T) {
 		time.Sleep(150 * time.Millisecond) // past the silence window (50ms), inside the confirm window (1s)
 		_, _ = client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f})
 	}()
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", 283,
+	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -769,7 +773,7 @@ func TestReplayDoesNotInventMysqlWithoutMocks(t *testing.T) {
 			tc.arrange(p)
 
 			_, srcConn := clientPair(t)
-			probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", 283,
+			probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
 				models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 			if err != nil {
 				t.Fatalf("probe: %v", err)
@@ -797,7 +801,7 @@ func TestInferredPortConfirmsOnlyOnce(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		_, srcConn := clientPair(t)
 		start := time.Now()
-		probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", 283,
+		probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
 			models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 		elapsed = append(elapsed, time.Since(start))
 		if err != nil || !probe.IsMySQL {
@@ -822,7 +826,7 @@ func TestEndpointDriftCanBeDisabled(t *testing.T) {
 	})
 
 	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", 283,
+	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{DisableMysqlEndpointDrift: true}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -853,7 +857,7 @@ func TestProbeUnblocksOnContextCancel(t *testing.T) {
 
 	_, srcConn := clientPair(t)
 	start := time.Now()
-	probe, err := p.probeMysql(ctx, srcConn, "172.20.0.2:283", 283,
+	probe, err := p.probeMysql(ctx, srcConn, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	took := time.Since(start)
 	if err != nil {
@@ -915,7 +919,7 @@ func TestDriftGateIsScopedToTheCurrentRecording(t *testing.T) {
 	}
 
 	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "10.0.0.9:5671", 5671,
+	probe, err := p.probeMysql(context.Background(), srcConn, "10.0.0.9:5671", nil, 5671,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -951,7 +955,7 @@ func TestInferredShortcutIsPerEndpoint(t *testing.T) {
 
 	// First endpoint: silent client, inferred.
 	_, silent := clientPair(t)
-	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", 283,
+	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil || !first.IsMySQL {
 		t.Fatalf("first probe: err=%v IsMySQL=%v reason=%q", err, first.IsMySQL, first.Reason)
@@ -964,7 +968,7 @@ func TestInferredShortcutIsPerEndpoint(t *testing.T) {
 		time.Sleep(clientSilenceWindow() * 3)
 		_, _ = client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f})
 	}()
-	second, err := p.probeMysql(context.Background(), srcConn, "10.9.9.9:283", 283,
+	second, err := p.probeMysql(context.Background(), srcConn, "10.9.9.9:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("second probe: %v", err)
@@ -1017,7 +1021,7 @@ func TestSessionSwapClearsInferredEndpoints(t *testing.T) {
 	})
 
 	_, silent := clientPair(t)
-	if probe, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", 283,
+	if probe, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
 		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop()); err != nil || !probe.IsMySQL {
 		t.Fatalf("setup probe: err=%v IsMySQL=%v", err, probe.IsMySQL)
 	}
@@ -1059,5 +1063,116 @@ func TestSessionSwapDoesNotStrandDerivedWaiters(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiter stranded across the session boundary: it is still parked on a channel nothing will close")
+	}
+}
+
+// predialProbeServer accepts upstream connections, counting them, and does
+// with each what serve says.
+func predialProbeServer(t *testing.T, serve func(c net.Conn)) (addr string, conns *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var n atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			go serve(c)
+		}
+	}()
+	return ln.Addr().String(), &n
+}
+
+// TestProbeHandsTheApplicationsOwnUpstreamBack: when the probe takes the
+// connection dialled while the application's handshake was held, it is the
+// application's own connection, not a probe's. A negative verdict hands it
+// back — with any greeting it read — for generic dispatch's dial, so the
+// destination sees one connection; and a destination that closed it while
+// the application was still silent closes the application's end too.
+func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_CLIENT_SILENCE_WINDOW", "50ms")
+	t.Setenv("KEPLOY_MYSQL_SERVER_GREETING_WINDOW", "200ms")
+
+	type outcome struct {
+		greeting     string // what the next dial reads first
+		appEndClosed bool
+	}
+	for _, tc := range []struct {
+		name  string
+		serve func(c net.Conn)
+		want  outcome
+	}{
+		{"silent upstream", func(c net.Conn) {
+			defer c.Close()
+			_, _ = io.Copy(io.Discard, c)
+		}, outcome{}},
+		{"a greeting that is not MySQL", func(c net.Conn) {
+			defer c.Close()
+			_, _ = c.Write([]byte("220 smtp.example.com ESMTP\r\n"))
+			_, _ = io.Copy(io.Discard, c)
+		}, outcome{greeting: "220 smtp.example.com ESMTP\r\n"}},
+		{"upstream closes first", func(c net.Conn) {
+			_ = c.Close()
+		}, outcome{appEndClosed: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, conns := predialProbeServer(t, tc.serve)
+			p := testProxy(t)
+			upstream, err := util.DialUpstream(context.Background(), nil, "tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pre := util.NewPredialed(addr, upstream)
+			defer pre.CloseIfUnused()
+			app, srcConn := clientPair(t)
+			defer app.Close()
+			// As handleConnection arms it.
+			pre.WatchUntilTaken(func() {
+				if util.ReceivedNothing(srcConn) {
+					_ = srcConn.Close()
+				}
+			})
+			port := uint32(upstream.RemoteAddr().(*net.TCPAddr).Port)
+
+			probe, err := p.probeMysql(context.Background(), srcConn, addr, pre, port,
+				models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
+			if err != nil {
+				t.Fatalf("probe: %v", err)
+			}
+			if probe.IsMySQL {
+				t.Fatal("classified as MySQL")
+			}
+
+			if tc.want.appEndClosed {
+				_ = app.SetReadDeadline(time.Now().Add(2 * time.Second))
+				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+					t.Fatalf("read %v; the destination closed the application's connection while it was silent, and its end must close too", err)
+				}
+				return
+			}
+
+			next, err := util.DialRaw(context.Background(), nil, "tcp", addr, pre)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer next.Close()
+			if tc.want.greeting != "" {
+				_ = next.SetReadDeadline(time.Now().Add(2 * time.Second))
+				buf := make([]byte, len(tc.want.greeting))
+				if _, err := io.ReadFull(next, buf); err != nil || string(buf) != tc.want.greeting {
+					t.Fatalf("the next dial read %q, %v; want the greeting the probe already read", buf, err)
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			if n := conns.Load(); n != 1 {
+				t.Fatalf("the destination saw %d connections for the application's one", n)
+			}
+		})
 	}
 }

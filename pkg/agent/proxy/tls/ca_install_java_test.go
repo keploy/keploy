@@ -76,7 +76,7 @@ func TestInstallJavaCAForHome_UsesResolvedKeytool(t *testing.T) {
 	}
 
 	logger := zaptest.NewLogger(t)
-	if err := installJavaCAForHome(context.Background(), logger, caPath, fakeJavaHome); err != nil {
+	if err := installJavaCAForHome(context.Background(), logger, caPath, fakeJavaHome, "keployCA"); err != nil {
 		t.Fatalf("installJavaCAForHome returned error: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestInstallJavaCAForHome_MissingKeytoolFallsBack(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent-path-for-test")
 
 	logger := zaptest.NewLogger(t)
-	err := installJavaCAForHome(context.Background(), logger, caPath, bogusJavaHome)
+	err := installJavaCAForHome(context.Background(), logger, caPath, bogusJavaHome, "keployCA")
 	// We EXPECT an error here because PATH has no keytool either.
 	// The assertion is that the error comes from exec (ENOENT on
 	// keytool itself), not from a pre-check in our code about the

@@ -58,9 +58,14 @@ type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.Te
 var CaptureHook CaptureFunc = Capture
 
 // GRPCCaptureHook is called in CaptureGRPC before a test case is built.
-// Returns true if the request is a duplicate and should be dropped.
-// Enterprise sets this when --static-dedup is enabled; nil means no dedup.
-var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) bool
+// isDuplicate reports whether the pair repeats an already-captured schema and
+// should be dropped; schemaKey is the canonical static-dedup fingerprint of
+// the pair, stamped onto the kept test case (TestCase.SchemaKey) so the
+// control plane can additionally mark duplicates across pods of a recording.
+// An empty schemaKey means "no fingerprint" and disables cross-pod judgement
+// for this test case. Enterprise sets this when --static-dedup is enabled;
+// nil means no dedup.
+var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
@@ -127,6 +132,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		return
 	}
 	var formData []models.FormData
+	sent := false // the test case was handed on t
 	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
 		parts := strings.Split(contentType, ";")
 		if len(parts) > 1 {
@@ -134,6 +140,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 		formData = ExtractFormData(logger, reqBody, contentType)
 		reqBody = []byte{}
+		// The files the parts were written to are the test case's: the
+		// stream it is sent on deletes them (routes/record.go). One left out
+		// below is sent nowhere, and nothing else knows of its files.
+		defer func() {
+			if !sent {
+				RemoveFormFiles(logger, formData)
+			}
+		}()
 	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
 		decodedBody, err := url.QueryUnescape(string(reqBody))
 		if err != nil {
@@ -208,6 +222,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Body:       string(reqBody),
 			URLParams:  pkg.URLParams(req),
 			Timestamp:  reqTimeTest,
+
+			// Replay sends this request again: keep what it takes to
+			// send a repeated header on its own lines.
+			HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(req.Header),
 		},
 		HTTPResp: models.HTTPResp{
 			StatusCode:    resp.StatusCode,
@@ -224,10 +242,37 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if synchronous {
+		// The request's open window (the ingress opened it at the request's
+		// first byte: syncMock.OpenWindow) kept every mock it may own from the
+		// reapers while it was in flight. Claim it for this resolve. The
+		// manager gives a window up only when a request stays in flight while
+		// more traffic is captured than it holds, or when memory pressure lets
+		// go of mocks it may own; they are gone then, so its test case is left
+		// out, not recorded without them.
+		//
+		// A left-out request's verdict prunes nothing. It is not a duplicate:
+		// it ran for long, and a keep=false resolve over its whole span would
+		// drop the mocks of every call that ran beside it and is not decided
+		// yet (a gRPC call opens no window to hold them). What is left of its
+		// window is claimed by whoever's it is, or goes at the stale cutoff.
+		//
+		// The window is on the manager its ingress opened it on, the one the
+		// ctx carries (or the global one): the test-id counter's, and the one
+		// resolved here.
+		mgr := syncMock.FromContextOrGlobal(ctx)
+		win := syncMock.WindowFromContext(ctx)
+		if !win.Keep() {
+			// The manager warned of it as Keep found the window given up; the
+			// ingress ends the window.
+			logger.Debug("Test case left out: its request's window was given up while it was in flight",
+				zap.String("method", req.Method),
+				zap.Time("in_flight_since", reqTimeTest))
+			return
+		}
 		// Per-session counter: resolves to the ctx-carried manager for
 		// multi-app callers, or the package-global manager otherwise —
 		// the latter reproduces the old GlobalTestCounter sequence.
-		currentID := syncMock.FromContextOrGlobal(ctx).NextTestID()
+		currentID := mgr.NextTestID()
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
 		// Pass testName (the locally-synthesised "test-N" identifier),
@@ -238,15 +283,16 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// the taint flow and stops the go/clear-text-logging false
 		// positives that fire downstream (syncMock.go diag/Info
 		// logs include test_name for ResolveRange traceability).
-		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testName, true, mapping)
-		}
+		// Dumping the test case from the mock manager in synchronous mode:
+		// takes what was held for the request and ends its window before
+		// handing the mocks on.
+		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
 	}
 	select {
 	case <-ctx.Done():
 		return
 	case t <- testCase:
-		// Successfully sent test case
+		sent = true
 	}
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
@@ -367,6 +413,22 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	return false
 }
 
+// RemoveFormFiles deletes the files ExtractFormData wrote the file parts of a
+// form to. They belong to the test case whose Form carries them: whoever ends
+// up with it deletes them, once it has streamed them or left it out.
+func RemoveFormFiles(logger *zap.Logger, forms []models.FormData) {
+	for _, form := range forms {
+		for _, path := range form.Paths {
+			if path == "" {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				utils.LogError(logger, err, "failed to remove the file a form's file part was written to", zap.String("path", path))
+			}
+		}
+	}
+}
+
 func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
 	boundary := ""
 	if strings.HasPrefix(contentType, "multipart/form-data") {
@@ -451,8 +513,9 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
 // Mirrors NewCapture (HTTP) exactly:
-//   - GRPCCaptureHook is evaluated as a boolean so ResolveRange always runs,
-//     even for duplicates (with keep=false to flush their mocks cleanly).
+//   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
+//     ResolveRange always runs — even for duplicates (with keep=false to flush
+//     their mocks cleanly).
 //   - Counter is always incremented so concurrent duplicate streams each get a
 //     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
@@ -472,7 +535,11 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
-	isDuplicate := GRPCCaptureHook != nil && GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+	var isDuplicate bool
+	var schemaKey string
+	if GRPCCaptureHook != nil {
+		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+	}
 
 	// Bin buffered outgoing mocks into this stream's window before any early
 	// return. For non-duplicates keep=true attributes the mocks; for duplicates
@@ -516,6 +583,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
+		SchemaKey: schemaKey,
 		GrpcReq:   *http2Stream.GRPCReq,
 		GrpcResp:  *http2Stream.GRPCResp,
 		Noise:     map[string][]string{},

@@ -5,7 +5,10 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -24,7 +27,16 @@ type captureTeeWriter struct {
 	ch        chan []byte
 	stopped   bool
 	closeOnce *sync.Once // shared with the forwarding goroutine's defer close
+
+	// n counts bytes that actually reached dest. The drain polls it from
+	// the caller's goroutine while this tee is still being written by its
+	// own copy goroutine, so it has to be atomic; stopped stays a plain
+	// bool because only the copy goroutine ever touches it.
+	n atomic.Int64
 }
+
+// delivered reports how many bytes this direction has handed on.
+func (w *captureTeeWriter) delivered() int64 { return w.n.Load() }
 
 func (w *captureTeeWriter) stop() {
 	w.stopped = true
@@ -36,6 +48,7 @@ func (w *captureTeeWriter) stop() {
 func (w *captureTeeWriter) Write(p []byte) (int, error) {
 	// Forward to destination first — this is the critical path.
 	n, err := w.dest.Write(p)
+	w.n.Add(int64(n))
 	if err != nil {
 		return n, err
 	}
@@ -57,6 +70,14 @@ func (w *captureTeeWriter) Write(p []byte) (int, error) {
 }
 
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	return encodeGenericWithDrain(ctx, logger, reqBuf, clientConn, destConn, mocks, opts, proxyutil.RelayDrainIdle)
+}
+
+// encodeGenericWithDrain is encodeGeneric with the survivor drain's idle
+// window as a parameter, so tests can drive the drain without waiting out
+// the production window. Production has exactly one caller, above, and it
+// always passes proxyutil.RelayDrainIdle.
+func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, drainIdle time.Duration) error {
 
 	// Forward initial request buffer to destination immediately.
 	_, err := destConn.Write(reqBuf)
@@ -90,36 +111,110 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientCloseOnce := &sync.Once{}
 	destCloseOnce := &sync.Once{}
 
-	done := make(chan struct{}, 2)
+	// Buffered and error-carrying: a broken direction must not strand the
+	// other. The two directions do NOT necessarily fail together — these are
+	// SafeConns over *tls.Conn on TLS-intercepted paths, and tls.Conn keeps
+	// its read and write halves' errors separate — so the survivor may still
+	// have decrypted bytes to deliver. Give it an idle window rather than
+	// waiting forever or cutting it off at once.
+	//
+	// The result carries the direction's index, not just its error. The
+	// survivor to drain is whichever direction did NOT report, and a bare
+	// error cannot say which that is — guessing watches the byte counter
+	// of the direction that just died, which never moves again, and
+	// collapses the idle drain back into a single fixed wait.
+	done := make(chan copyOutcome, 2)
+	// Built before either goroutine starts: the drain reads whichever tee
+	// belongs to the survivor.
+	tees := [2]*captureTeeWriter{
+		{dest: destConn, ch: clientCapChan, closeOnce: clientCloseOnce},
+		{dest: clientConn, ch: destCapChan, closeOnce: destCloseOnce},
+	}
 	go func() {
 		defer clientCloseOnce.Do(func() { close(clientCapChan) })
-		tee := &captureTeeWriter{dest: destConn, ch: clientCapChan, closeOnce: clientCloseOnce}
-		_, _ = io.Copy(tee, clientConn)
-		done <- struct{}{}
+		_, err := io.Copy(tees[0], clientConn)
+		// Close the capture channel BEFORE the FIN: forwardFIN can write
+		// a close_notify on a TLS conn, and SafeConn's write deadline is
+		// a no-op, so a stalled peer would otherwise hold
+		// createGenericMocksAsync open behind it. The deferred Do is a
+		// sync.Once, so this is the early half of the same close.
+		clientCloseOnce.Do(func() { close(clientCapChan) })
+		forwardFIN(destConn, err)
+		done <- copyOutcome{idx: 0, err: err}
 	}()
 	go func() {
 		defer destCloseOnce.Do(func() { close(destCapChan) })
-		tee := &captureTeeWriter{dest: clientConn, ch: destCapChan, closeOnce: destCloseOnce}
-		_, _ = io.Copy(tee, destConn)
-		done <- struct{}{}
+		_, err := io.Copy(tees[1], destConn)
+		destCloseOnce.Do(func() { close(destCapChan) })
+		forwardFIN(clientConn, err)
+		done <- copyOutcome{idx: 1, err: err}
 	}()
-	<-done
-	<-done
+
+	for i := 0; i < 2; i++ {
+		res := <-done
+		if res.err == nil {
+			continue
+		}
+		// Both results are already in hand on the second iteration — there
+		// is nothing left to drain, and waiting would hold the caller for a
+		// full idle window on the very common "one side ends cleanly, the
+		// other resets".
+		if i == 1 {
+			return nil
+		}
+		// Give the surviving direction a chance to finish. Returning at once
+		// would let the caller's deferred close truncate it, and on this
+		// path that costs the user's bytes AND the mocks the tee captured.
+		// Waiting a fixed grace instead is the same bug wearing a longer
+		// coat: it cuts off a response that is still arriving, just later.
+		// Wait while it is delivering, and stop when it stalls.
+		//
+		// A copy error is a peer/socket condition, not a parser fault, so
+		// the dispatcher still sees nil.
+		proxyutil.WaitForSurvivor(done, tees[1-res.idx].delivered, drainIdle)
+		return nil
+	}
 
 	return nil
 }
 
+// copyOutcome reports which forwarding direction ended, and how.
+type copyOutcome struct {
+	idx int
+	err error
+}
+
+// forwardFIN half-closes dst when the copy that fed it ended cleanly.
+//
+// A finished io.Copy means this side sent shutdown(SHUT_WR) — it has no
+// more to say — not that the connection is over. An EOF-delimited
+// protocol only learns the request ended when the FIN arrives, so
+// without this the peer waits for bytes that will never come while the
+// client waits for a reply it will never send, and the exchange
+// deadlocks until something external tears it down.
+//
+// copyErr is the gate, and it is not decoration. io.Copy returns nil
+// only on a clean EOF; a read error, a reset, or a failed write to the
+// real peer all exit the same loop. Forwarding a FIN for those would
+// tell the peer "the request is complete" about a message that was
+// truncated — and generic is the catch-all for mongo wire and arbitrary
+// binary RPC, where acting on a partial message can mean committing a
+// partial operation. A broken copy falls through to the ordinary
+// teardown instead.
+func forwardFIN(dst net.Conn, copyErr error) {
+	if copyErr != nil {
+		return
+	}
+	_ = proxyutil.CloseWriteIfPossible(dst)
+}
+
 // forwardBidirectional does raw TCP passthrough without any capture.
 func forwardBidirectional(clientConn, destConn net.Conn) error {
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		done <- struct{}{}
-	}
-	go cp(destConn, clientConn)
-	go cp(clientConn, destConn)
-	<-done
-	<-done
+	// This is generic's memory-pressure fallback and was a verbatim copy of
+	// http's and mysql's. It gets the shared implementation — including the
+	// bounded drain, without which a broken direction either wedges the
+	// caller or truncates the surviving one.
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
 	return nil
 }
 

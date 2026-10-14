@@ -995,3 +995,30 @@ func TestUnmatchableBodyNoise_IsCaseInsensitive(t *testing.T) {
 		t.Errorf("got %v, want the indexed entry reported dead", got)
 	}
 }
+
+// Known global keys that differ only in case ("CreatedAt", "createdAt") lower
+// to one entry. The smallest configured key applies, as in the matcher, so
+// what the test case already excuses, and with it what is derived, is the same
+// every call.
+func TestBodyNoiseFromJSONDiff_KnownGlobalKeysDifferingOnlyInCase(t *testing.T) {
+	exp, act := `{"a":{"createdAt":"z"}}`, `{"a":{"createdAt":"y"}}`
+	for _, tc := range []struct {
+		name  string
+		known map[string][]string
+		want  []string
+	}{
+		// The unconditional entry applies: the drift is already excused.
+		{"unconditional smallest", map[string][]string{"CreatedAt": {}, "createdAt": {"^v$"}}, nil},
+		// The guarded entry applies and does not match "y": the drift is live.
+		{"guarded smallest", map[string][]string{"CreatedAt": {"^v$"}, "createdAt": {}}, []string{"a.createdAt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < 500; i++ {
+				paths, skipped := BodyNoiseFromJSONDiff(exp, act, tc.known, false)
+				if len(skipped) != 0 || !reflect.DeepEqual(paths, tc.want) {
+					t.Fatalf("call %d: paths %q skipped %v, want %q and none skipped", i, paths, skipped, tc.want)
+				}
+			}
+		})
+	}
+}

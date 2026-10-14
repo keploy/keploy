@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+
 # E2E test for MySQL dual-connection handshake matching.
 #
 # Validates that Keploy correctly matches HandshakeResponse41 packets when
@@ -130,6 +132,7 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 sudo rm -rf keploy/ keploy.yml
 
 section "Start MySQL"
+docker_compose_pull_retry
 docker compose up -d
 wait_for_mysql
 endsec

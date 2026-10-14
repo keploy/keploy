@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"time"
 )
 
 type TestReport struct {
@@ -57,6 +58,11 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	// SkipReason says why keploy skipped this test: set on an IGNORED result
+	// whose skip carried a reason (a quarantine, with its class and why), and
+	// rendered into the JUnit <skipped> message and the text report. Empty for
+	// every other result, and for a test skipped without one.
+	SkipReason string `json:"skip_reason,omitempty" yaml:"skip_reason,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for
@@ -80,6 +86,54 @@ type TestResult struct {
 	// Consumers should treat an absent value as "data not available for
 	// this test / run mode", NOT "no mocks were consumed".
 	MockMismatches *MockMismatchInfo `json:"mock_mismatches,omitempty" yaml:"mock_mismatches,omitempty"`
+	// Captured is what this test case's {{capture ...}} placeholders took
+	// from the app's answer, in order: each key's value for the rest of the
+	// run. Absent when the expected response captures nothing.
+	Captured []TemplateCapture `json:"captured,omitempty" yaml:"captured,omitempty"`
+	// TemplateFailures are the template variable places the app's answer
+	// did not satisfy: a capture that found no value of its type, a use that
+	// did not hold its key's value; or, for a test case refused when its set
+	// loaded (never sent), each placeholder refused (Refused). Each fails
+	// the test case on its own, noise or not, unless the mock set's
+	// divergence demotes the test case to OBSOLETE (as it demotes any
+	// failure without --strict-failure); the report still names the places.
+	// Absent when there is none.
+	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Variables are the test variables bound while the test case ran (proven
+	// switch): the values its request sent, and each value a dependency call
+	// carried where the learn step found it first, with where it was taken.
+	// A later call that sent another value failed the test case as a miss.
+	// Absent when none was bound.
+	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
+}
+
+// TemplateFailure is one template variable place a test case failed on, or
+// one placeholder it was refused for when its test set loaded.
+type TemplateFailure struct {
+	// Where is the place: in the answer for a failure ("body.id", "header
+	// Set-Cookie.sid"), in the test case for a refusal ("request body",
+	// "response body.items[0].id").
+	Where string `json:"where" yaml:"where"`
+	// Placeholder is the placeholder as the test case writes it.
+	Placeholder string `json:"placeholder" yaml:"placeholder"`
+	// Why says what the place needed and what the answer held; for a
+	// refusal, why the placeholder cannot run and the edit to make.
+	Why string `json:"why" yaml:"why"`
+	// Refused marks a placeholder refused when the test set loaded: the test
+	// case was never sent, and there is no answer to accept. A refusal with
+	// no Placeholder refuses the test case's whole test set (one an
+	// interrupted keploy templatize left half-written; category
+	// TEST_SET_REFUSED), not a placeholder of it.
+	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
+}
+
+// TemplateCapture is one value a test case's expected response took from the
+// app's answer through a {{capture ...}} placeholder.
+type TemplateCapture struct {
+	Key   string `json:"key" yaml:"key"`
+	Value string `json:"value" yaml:"value"`
+	// Where is the place in the answer: "body.items[0].id", "header Set-Cookie.sid".
+	Where string `json:"where" yaml:"where"`
 }
 
 // FailureInfo captures structured diagnostic data about why a test case failed or became obsolete.
@@ -92,6 +146,43 @@ type FailureInfo struct {
 	MockMismatch   *MockMismatchInfo  `json:"mock_mismatch,omitempty" yaml:"mock_mismatch,omitempty"`
 	MatchedCalls   []MatchedCall      `json:"matched_calls,omitempty" yaml:"matched_calls,omitempty"`
 	UnmatchedCalls []UnmatchedCall    `json:"unmatched_calls,omitempty" yaml:"unmatched_calls,omitempty"`
+	// UnmatchedCallsUnread says UnmatchedCalls may be missing calls: the
+	// agent's record of the calls no mock answered during this test could not
+	// all be read (models.ErrUnmatchedCallsUnread, or the read failed). The
+	// test's evidence is unknown, so its test set is not judged. Set only under
+	// the proven switch.
+	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// TestMocksUnread says the mocks this test consumed could not be read
+	// from keploy's agent, so whether it made every call it recorded is
+	// unknown: it has no verdict, and its test set is not judged. Set only
+	// under the proven switch, before any hook reads the result.
+	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// VariablesUnchecked says why what this test captured could not be
+	// checked against what its dependency calls carried (a keploy-side
+	// fault): it has no verdict, and its test set is not judged. Set only
+	// under the proven switch.
+	VariablesUnchecked string `json:"variables_unchecked,omitempty" yaml:"variables_unchecked,omitempty"`
+	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
+	// did not consume: the mocks of its recorded mapping its per-test
+	// assertion owns (data-plane mocks; connection failures and
+	// protocol-phase mocks are not owned) that it made no call for, each of
+	// which fails it (a recorded call was not made). In recorded order, every
+	// one: Result.DepResult caps its rows and names a target, not the mock.
+	// Empty with the switch off, and for a test that owned none or whose
+	// consumption was not read (TestMocksUnread).
+	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+}
+
+// UnconsumedMock is a test mock a test did not consume
+// (FailureInfo.UnconsumedMocks).
+type UnconsumedMock struct {
+	Name string `json:"name" yaml:"name"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// ConsumedBy names another test of the set that consumed this mock, when
+	// one did: the call was made, by a sibling, and the order in which the
+	// shared mock pool served the two can decide which test it counts for,
+	// until each test's consumption is exact. Empty when no test consumed it.
+	ConsumedBy string `json:"consumed_by,omitempty" yaml:"consumed_by,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -138,13 +229,49 @@ type UnmatchedCall struct {
 	// render structured field-level drift instead of an opaque string. Paths
 	// in FieldDiffs use the noise-config vocabulary and can be copied
 	// verbatim into test.globalNoise / spec.assertions.noise.
-	MatchPhase     string          `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
-	CandidateCount int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
-	FieldDiffs     []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
+	MatchPhase string `json:"match_phase,omitempty" yaml:"match_phase,omitempty"`
+	// DestinationScope mirrors MockMismatchReport.DestinationScope
+	// (DestinationScope* constants). It is a separate axis from MatchPhase:
+	// "not_in_compared_set" says no mock this miss was compared against
+	// targeted the call's upstream, while MatchPhase still reports where the
+	// cascade stopped. Omitted when empty — the protocol supplied no
+	// destination evidence, and an absent field is the only honest rendering
+	// of "we did not check".
+	DestinationScope string          `json:"destination_scope,omitempty" yaml:"destination_scope,omitempty"`
+	CandidateCount   int             `json:"candidate_count,omitempty" yaml:"candidate_count,omitempty"`
+	FieldDiffs       []MockFieldDiff `json:"field_diffs,omitempty" yaml:"field_diffs,omitempty"`
 	// ClosestMockReq / ReceivedReq carry the FULL rendered requests for the CLI
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// At is when the call missed, so a client can tell which test made it.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
+	// which the call differs from its closest recording, without values.
+	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+}
+
+// MockOutcome is the end of a mock replay as the agent saw it: the mocks it
+// served and the outgoing calls that matched none of them -- what
+// /consumedmocks and /mockerrors answer, in one document. A containerised
+// agent writes it as it stops (pkg/platform/docker AgentOutcomeFile), for the
+// one caller that cannot ask it over HTTP: a docker compose run, where the
+// agent is stopped along with the app.
+type MockOutcome struct {
+	Consumed []MockState     `json:"consumed"`
+	Missed   []UnmatchedCall `json:"missed"`
+	// Windows are the per-test scopes the runner reported (with their
+	// verdicts), which a CLI that can no longer reach the agent — under
+	// compose it is stopped with the runner — reads from here instead. A
+	// window is a few hundred bytes, so they share the account's read bound
+	// with the served and missed calls comfortably up to suites of tens of
+	// thousands of tests.
+	Windows []ScopeWindow `json:"windows,omitempty"`
+	// MissedUnread is why Missed may be missing calls, empty when it is
+	// complete: the agent's read of the calls no mock answered was
+	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
+	// holds what was read.
+	MissedUnread string `json:"missed_unread,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -251,6 +378,29 @@ const (
 	// a content regression. The synthetic status_code=0 such a failure records
 	// must not be read as a STATUS_CODE_CHANGED regression.
 	AppConnectionError FailureCategory = "APP_CONNECTION_ERROR"
+	// DependencyMissing means a per-test dependency the recording says this
+	// test exercised (a mapped, non-reusable-tier mock) went unconsumed during
+	// replay — the app stopped making an outgoing call it used to make. Set by
+	// the replayer's DepResult writer alongside the DepResult rows themselves
+	// (keploy-consumer-design-v2.md §5, false-pass row 0). Attached only to
+	// FAILED/OBSOLETE tests so a passing test never grows a failure label.
+	DependencyMissing FailureCategory = "DEPENDENCY_MISSING"
+	// CallUnmatched: a call the test made got no recorded answer (a miss),
+	// which fails it under KEPLOY_PROVEN=1. The calls are in
+	// FailureInfo.UnmatchedCalls.
+	CallUnmatched FailureCategory = "UNMATCHED_CALL"
+	// TemplateVariable means a template variable place of the expected
+	// response was not satisfied by the answer (a {{capture ...}} that found
+	// no value of its type, or a use that did not hold its key's value), or
+	// that the test case was refused when its test set loaded, for a
+	// placeholder it cannot run with, and never sent.
+	// TestResult.TemplateFailures names each place and why.
+	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
+	// TestSetRefused means keploy refused the test case's whole test set and
+	// ran none of it: an interrupted keploy templatize left the set
+	// half-written. The set's failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files and what to do.
+	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
@@ -262,6 +412,13 @@ const (
 	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE" // response structure changed (status code, schema, headers)
 	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
 )
+
+// ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
+// call through to a listener owned by the run's own process tree (a self-call)
+// instead of serving it from a mock — so the log shows that a self-call reached
+// the real handler, not a recording; a broken self-handler fails the run rather
+// than passing on a stale mock.
+const ReasonLoopbackOutsideRun = "loopback_outside_run"
 
 // NoiseFailureReason explains why automatic noise extraction failed for a LOW_RISK_NO_NOISE test case.
 type NoiseFailureReason string
@@ -295,6 +452,11 @@ const (
 	// modelled, so a difference can never be reported as handled when the next
 	// replay would fail on it again.
 	NoiseFailureUnresolved NoiseFailureReason = "UNRESOLVED"
+	// NoiseFailureUnstableOrder — an array came back in another order (the order
+	// rule, matcher.ArrayReordered), and carries matcher.NoiseSkipUnstableOrder
+	// through. A refusal: noise on the array's fields would only hide the
+	// reorder, so the case stays failed and is judged as unstable order.
+	NoiseFailureUnstableOrder NoiseFailureReason = "UNSTABLE_ORDER"
 )
 
 // FailureAssessment contains JSON structural analysis of response body differences.
@@ -315,8 +477,88 @@ type Result struct {
 	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
-	DepResult      []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
-	TrailerResult  []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
+	// DepResult carries per-test DEPENDENCY assertions: ONE ROW PER OUTGOING
+	// DEPENDENCY THAT WENT MISSING — a call the recording says this test
+	// exercised that was NOT observed during the test's window
+	// (Meta[i].Normal == false). Written by the replayer's standard
+	// (non-streaming) per-test result block for every test — passed, failed or
+	// obsolete — from the existing expected-vs-consumed mock bookkeeping.
+	//
+	// EMPTY IS NOT "NOT CHECKED": it means nothing went missing OR the
+	// assertion never ran, and the two are told apart by DepsChecked below,
+	// never by len(DepResult). Read it through Result.DependenciesChecked().
+	//
+	// SCOPE, so an absent row is not misread as coverage: only mocks recorded
+	// as PER-TEST tier are asserted. Session/connection-tier mocks and DNS are
+	// excluded, and an untagged HTTP / HTTP2 / Postgres / MySQL / Generic mock
+	// is classified session-tier by Mock.DeriveLifetime — so an ordinary
+	// recorded outgoing call is NOT necessarily covered, and a recording whose
+	// mocks carry no tier tag produces no rows and DepsChecked=false for every
+	// test.
+	//
+	// The dependencies that WERE exercised are NOT persisted here, in any
+	// mode: they collapse into the DepsConsumed count. Measured through
+	// reportdb.InsertReport, one row per consumed dependency costs ~190 bytes
+	// of YAML each, and a Postgres-chatty suite consumes 50-200 mocks per
+	// test — 3-11 MB per test-set report of `consumed/consumed` boilerplate no
+	// consumer reads. The identities are already persisted by
+	// TestResult.MatchedCalls.
+	//
+	// COMPATIBILITY: statuses, exit codes and every other field are unchanged
+	// when nothing is missing and --assert-dependencies is off, and a test
+	// that loses nothing serializes `dep_result: []` exactly as it did before
+	// this field had a writer — the only added bytes are the two scalars
+	// below.
+	//
+	// Deliberately carries NO omitempty — every report written before this
+	// field had a writer already serializes `dep_result: []`, and adding
+	// omitempty would change every existing report on disk.
+	//
+	// See keploy-consumer-design-v2.md §2 and §7 slice 4.
+	DepResult []DepResult `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
+
+	// DepsChecked is the persisted proof that the per-test dependency
+	// assertion RAN for this test, over AT LEAST ONE ELIGIBLE DEPENDENCY. It
+	// is the ONE BIT that makes `dep_result: []` unambiguous: without it a
+	// test that lost nothing and a test whose assertion never executed (a
+	// --base-path / remote-agent run, --disable-mapping, a test set with no
+	// usable mappings.yaml, a failed per-test consumed-mock fetch, the
+	// deferred streaming path, a test the mapping records no dependency for, a
+	// test whose every mapped dependency was ineligible, or any report written
+	// before this field had a writer) are byte-identical on disk — and a
+	// consumer applying the documented "any(matched == false)" rule reports
+	// "no dependency regressions" for a run in which the question was never
+	// asked.
+	//
+	// ELIGIBLE means recorded as PER-TEST tier. Session/connection-tier mocks
+	// are excluded from the assertion (shared across every test, so not
+	// attributable to one test's window) and so is DNS. Because
+	// Mock.DeriveLifetime classifies an untagged HTTP / HTTP2 / Postgres /
+	// MySQL / Generic mock as session-tier, a recording whose mocks carry no
+	// per-test tier tag has nothing eligible and this bit is false for every
+	// one of its tests — which is the honest answer, not a clean one.
+	//
+	// omitempty on purpose: false is the pre-slice-4 value, so an unchecked
+	// test and every report already on disk serialize exactly as before. A
+	// checked test costs one short key instead of the ~224-byte aggregate
+	// DepResult row an earlier revision of this slice wrote for the same bit.
+	//
+	// Read it through Result.DependenciesChecked().
+	DepsChecked bool `json:"deps_checked,omitempty" bson:"deps_checked,omitempty" yaml:"deps_checked,omitempty"`
+
+	// DepsConsumed is how many recorded per-test dependencies WERE observed
+	// during this test's window. Meaningful only when DepsChecked is true;
+	// omitempty keeps it off the wire for an unchecked test and for a checked
+	// test that consumed nothing.
+	//
+	// It replaces the per-dependency matched rows (see DepResult above): the
+	// magnitude is what a report consumer uses — "12 of 12 exercised" versus
+	// "0 of 12" is the difference between a healthy test and an app that never
+	// reached its database — while the identities live in
+	// TestResult.MatchedCalls.
+	DepsConsumed int `json:"deps_consumed,omitempty" bson:"deps_consumed,omitempty" yaml:"deps_consumed,omitempty"`
+
+	TrailerResult []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
 }
 
 type DepResult struct {

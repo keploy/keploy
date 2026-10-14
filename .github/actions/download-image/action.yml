@@ -20,6 +20,95 @@ runs:
         name: ${{ inputs.artifact_name }}
         path: ${{ runner.temp }}/keploy-image
 
+    # An artifact download can end "successfully" with a truncated file: the
+    # blob store closes the connection early and download-artifact reports
+    # success on a short read. `docker load` then fails on a tarball it cannot
+    # parse --
+    #   short read: expected 40205004 bytes but got 22221063: unexpected EOF
+    # -- which reads like a corrupt image and fails the job, three steps away
+    # from the download that actually went wrong. Seen on the self-hosted macOS
+    # runners, where the artifact takes over a minute to pull.
+    #
+    # So: check the archive is complete, and if it is not, pull it once more
+    # before blaming the image. A second short read fails the job, loudly, at
+    # the step that owns the problem.
+    - name: Check the image tarball is complete (Unix)
+      id: check
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        TAR="${{ runner.temp }}/keploy-image/image.tar"
+        if [ -f "$TAR" ] && tar -tf "$TAR" >/dev/null 2>&1; then
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "::warning::the downloaded image tarball is incomplete or unreadable; downloading it again"
+        ls -la "${{ runner.temp }}/keploy-image" 2>/dev/null || true
+        rm -rf "${{ runner.temp }}/keploy-image"
+        echo "complete=false" >> "$GITHUB_OUTPUT"
+
+    # Same check on Windows, in PowerShell: a composite `shell: bash` step
+    # needs Git Bash, which not every self-hosted Windows runner in the fleet
+    # has (see the Load image (Windows) step's note on pwsh).
+    - name: Check the image tarball is complete (Windows)
+      id: checkwin
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        # Statements, not an expression: `(cmd; $LASTEXITCODE -eq 0)` inside an
+        # `if (...)` is a PowerShell parse error, not a test.
+        $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
+        $complete = $false
+        if (Test-Path $tar) {
+          tar -tf $tar *> $null
+          $complete = ($LASTEXITCODE -eq 0)
+        }
+        if ($complete) {
+          "complete=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit 0
+        }
+        Write-Host "::warning::the downloaded image tarball is incomplete or unreadable; downloading it again"
+        Remove-Item -Recurse -Force (Join-Path "${{ runner.temp }}" "keploy-image") -ErrorAction SilentlyContinue
+        "complete=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+    - name: Download image artifact (second attempt)
+      if: steps.check.outputs.complete == 'false' || steps.checkwin.outputs.complete == 'false'
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ runner.temp }}/keploy-image
+
+    - name: Check the image tarball is complete (second attempt, Unix)
+      if: steps.check.outputs.complete == 'false'
+      shell: bash
+      run: |
+        TAR="${{ runner.temp }}/keploy-image/image.tar"
+        if [ -f "$TAR" ] && tar -tf "$TAR" >/dev/null 2>&1; then
+          echo "The second download is complete."
+          exit 0
+        fi
+        echo "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice"
+        ls -la "${{ runner.temp }}/keploy-image" 2>/dev/null || true
+        exit 1
+
+    - name: Check the image tarball is complete (second attempt, Windows)
+      if: steps.checkwin.outputs.complete == 'false'
+      shell: powershell
+      run: |
+        $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
+        $complete = $false
+        if (Test-Path $tar) {
+          tar -tf $tar *> $null
+          $complete = ($LASTEXITCODE -eq 0)
+        }
+        if ($complete) {
+          Write-Host "The second download is complete."
+          exit 0
+        }
+        Write-Host "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice"
+        Get-ChildItem (Join-Path "${{ runner.temp }}" "keploy-image") -Force -ErrorAction SilentlyContinue
+        exit 1
+
     # The image is loaded into the LOCAL docker daemon below. On Docker Desktop
     # runners (Windows / macOS) the daemon may still be starting when this action
     # runs, so `docker load` fails with "failed to connect to the docker API ...

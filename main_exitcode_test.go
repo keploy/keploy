@@ -5,6 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // TestExitCodeForCmdErr pins the CLI's exit-code contract: any error out of
@@ -12,12 +16,18 @@ import (
 // centralised, only "unknown command"/"unknown shorthand" did, so every
 // flag-parsing error left utils.ErrCode at 0 and `keploy test --typo`
 // reported success to the shell and to CI while printing a red error.
+// An unknown command/verb is further distinguished as a usage error
+// (utils.ExitUsageError, 8) so CI can tell a mistyped invocation from a real failure
+// (1) — this is what stops `keploy mock bogus` exiting 0 (design §P0b).
 func TestExitCodeForCmdErr(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
 		wantCode int
 		wantHint bool
+		// wantSaid: the error itself is printed here, as nothing printed it
+		// where it was raised (a flag error's flag-error func prints its own).
+		wantSaid bool
 	}{
 		{
 			name:     "success",
@@ -25,25 +35,36 @@ func TestExitCodeForCmdErr(t *testing.T) {
 			wantCode: 0,
 		},
 		{
-			name:     "unknown command still exits non-zero and hints",
+			name:     "unknown top-level command is a usage error (8) and hints",
 			err:      errors.New(`unknown command "recrd" for "keploy"`),
-			wantCode: 1,
+			wantCode: utils.ExitUsageError,
+			wantHint: true,
+			wantSaid: true,
+		},
+		{
+			name:     "unknown mock verb is a usage error (8) and hints",
+			err:      errors.New(`unknown command "bogus" for "keploy mock"`),
+			wantCode: utils.ExitUsageError,
+			wantHint: true,
+			wantSaid: true,
+		},
+		{
+			name:     "a flag error tagged where it was parsed is a usage error and hints",
+			err:      utils.UsageError(&pflag.NotExistError{}),
+			wantCode: utils.ExitUsageError,
 			wantHint: true,
 		},
 		{
-			name:     "unknown shorthand still exits non-zero and hints",
-			err:      errors.New(`unknown shorthand flag: 'z' in -z`),
-			wantCode: 1,
+			name:     "an argument-count error tagged where it was raised is a usage error, said and hinted",
+			err:      utils.UsageError(errors.New("accepts at most 2 arg(s), received 3")),
+			wantCode: utils.ExitUsageError,
 			wantHint: true,
+			wantSaid: true,
 		},
 		{
-			name:     "unknown flag exits non-zero",
-			err:      errors.New(`unknown flag: --nope`),
-			wantCode: 1,
-		},
-		{
-			name:     "invalid flag value exits non-zero",
-			err:      errors.New(`invalid argument "abc" for "--delay" flag: strconv.ParseUint: parsing "abc": invalid syntax`),
+			// keploy reading a flag it never defined: pflag's type, not tagged.
+			name:     "an untagged flag error is keploy's own failure",
+			err:      &pflag.NotExistError{},
 			wantCode: 1,
 		},
 		{
@@ -63,6 +84,36 @@ func TestExitCodeForCmdErr(t *testing.T) {
 			hinted := strings.Contains(out.String(), "Run 'keploy --help' for usage.")
 			if hinted != tt.wantHint {
 				t.Errorf("usage hint printed = %v, want %v (output: %q)", hinted, tt.wantHint, out.String())
+			}
+			said := strings.Contains(out.String(), "Error: ")
+			if said != tt.wantSaid {
+				t.Errorf("error printed = %v, want %v (output: %q)", said, tt.wantSaid, out.String())
+			}
+		})
+	}
+}
+
+// A command that mirrors the wrapped runner's exit code AND returns an error
+// keeps the runner's code: it is already non-zero, and it says more than 1.
+// The two used to race -- a compose project that crashed reported 7 or 1
+// depending on which path noticed first.
+func TestFinalExitCodeKeepsAMirroredRunnerCode(t *testing.T) {
+	var out bytes.Buffer
+	for _, tc := range []struct {
+		name    string
+		err     error
+		current int
+		want    int
+	}{
+		{"no error, nothing mirrored", nil, 0, 0},
+		{"no error, runner mirrored", nil, 7, 7},
+		{"error, nothing mirrored", errors.New("failed to bring up the compose project"), 0, 1},
+		{"error, runner mirrored", errors.New("failed to bring up the compose project"), 7, 7},
+		{"error, runner mirrored 1", errors.New("boom"), 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := finalExitCode(tc.err, tc.current, &out); got != tc.want {
+				t.Fatalf("finalExitCode(%v, %d) = %d, want %d", tc.err, tc.current, got, tc.want)
 			}
 		})
 	}

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for DNS mock deduplication.
 #
@@ -113,8 +114,8 @@ sudo rm -f /tmp/keploy-logs.txt
 
 section "Build App"
 echo "Building app..."
-go mod tidy
-go build -o dns-dedup
+go_retry mod tidy
+go_retry build -o dns-dedup
 endsec
 
 # Generate keploy config with noise for DNS-dependent fields.
@@ -122,8 +123,16 @@ endsec
 # counts that depend on which IPs the DNS returns — these differ between
 # live recording and mocked replay.
 section "Generate Config"
-sudo -E env PATH=$PATH "$RECORD_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"unique_ip_sets":[],"results":[]}}/' ./keploy.yml
+# Keploy's config now carries only the settings that DIFFER from its
+# defaults, so patching a default value out of the generated file with
+# `sed` silently patched nothing: the noise rule vanished and every
+# replay diffed on the fields it was meant to mask. Write what this
+# test needs instead of editing what the generator happened to print.
+cat > ./keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"body": {"unique_ip_sets":[],"results":[]}}
+KEPLOY_CFG
 endsec
 
 # Record

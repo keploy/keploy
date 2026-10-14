@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -63,6 +65,73 @@ func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("unknown redirected port should skip immediately, took %s", elapsed)
+	}
+}
+
+func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	listening := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		l, err := net.Listen("tcp4", addr)
+		if err != nil {
+			listening <- nil
+			return
+		}
+		listening <- l
+	}()
+
+	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget returned error: %v", err)
+	}
+	_ = conn.Close()
+	if l := <-listening; l == nil {
+		t.Fatal("app listener could not rebind the port")
+	} else {
+		_ = l.Close()
+	}
+}
+
+func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	start := time.Now()
+	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("expected to retry for the timeout then give up, took %s", elapsed)
+	}
+}
+
+func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if _, err := dialIngressTarget(ctx, addr, 5*time.Second); err == nil {
+		t.Fatal("expected an error dialing a port nothing listens on")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("canceled context should stop retries immediately, took %s", elapsed)
 	}
 }
 
@@ -197,5 +266,94 @@ func TestStartIngressReleasesPortWhenAcceptLoopExits(t *testing.T) {
 			t.Fatalf("port %d not released within 5s after context cancel without StopIngress", port)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestDialIngressTargetReachesAnIPv6App(t *testing.T) {
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	defer ln.Close()
+	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dialIngressTarget(%s): %v", ln.Addr(), err)
+	}
+	_ = conn.Close()
+}
+
+// nopIngressHook starts and stops forwarders without binding anything.
+type nopIngressHook struct{}
+
+func (nopIngressHook) StartIngress(context.Context, uint16, uint16) error { return nil }
+func (nopIngressHook) StopIngress(uint16) error                           { return nil }
+
+// While recording, keploy's forwarder holds the app's port and the app listens
+// on the port its bind was moved to. Asked where the app listens, the agent has
+// to look there: the socket on the app's own port is keploy's.
+func TestAppListenPortFollowsTheMovedBind(t *testing.T) {
+	pm := &IngressProxyManager{logger: zap.NewNop(), active: make(map[uint16]proxyStop)}
+	pm.ingressHook = nopIngressHook{}
+
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("no forwarder: got %d, %v; want the app's own port", port, ok)
+	}
+	pm.StartIngressProxy(context.Background(), 8097, 41541)
+	if port, ok := pm.AppListenPort(8097); !ok || port != 41541 {
+		t.Fatalf("forwarded: got %d, %v; want the moved bind 41541", port, ok)
+	}
+	// A bind event without the new port: the forwarder holds 8097 and where
+	// the app went is not known.
+	pm.StartIngressProxy(context.Background(), 8098, 0)
+	if port, ok := pm.AppListenPort(8098); ok {
+		t.Fatalf("forwarded to an unknown port: got %d, ok; want not ok", port)
+	}
+	pm.StopAll()
+	if port, ok := pm.AppListenPort(8097); !ok || port != 8097 {
+		t.Fatalf("after StopAll: got %d, %v; want the app's own port", port, ok)
+	}
+}
+
+// The HTTP/1 ingress is handed its client's connection wrapped (replayConn),
+// and a half-close of it reaches the connection underneath: lingerClose ends
+// what the ingress sends with one, so a client still sending a body the
+// ingress cut off knows the response is all. The wrapper, embedding net.Conn
+// as an interface, did not promote CloseWrite, and the half-close did
+// nothing. The connection still reads after it, from what was read ahead on.
+func TestReplayConnHalfClosesTheConnectionUnderneath(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	client, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server := <-accepted
+	defer server.Close()
+
+	conn := newReplayConn([]byte("GE"), server)
+	if err := util.CloseWriteIfPossible(conn); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := client.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("the client read (%d, %v), want the end of what the ingress sends", n, err)
+	}
+	if _, err := io.WriteString(client, "T /"); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got := make([]byte, 5)
+	if _, err := io.ReadFull(conn, got); err != nil || string(got) != "GET /" {
+		t.Fatalf("read %q (%v) after the half-close, want what was read ahead, then what the client sent", got, err)
 	}
 }

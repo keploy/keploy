@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 )
 
@@ -45,10 +46,11 @@ const (
 	//
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
-	// receives every chunk. It only elapses when the parser frees nothing at
-	// all for this long, which is taken as "gone" — the whole remaining
-	// queue is then abandoned at once and reported, rather than the wait
-	// being re-entered per chunk.
+	// receives every chunk. And it is time the process could RUN, not wall
+	// time (see stallMeter): a starved process's parser cannot read either.
+	// It only elapses when the parser frees nothing at all for this long,
+	// which is taken as "gone" — the whole remaining queue is then abandoned
+	// at once and reported, rather than the wait being re-entered per chunk.
 	//
 	// Exposed as [Config.ConsumerStallGrace] rather than fixed in the tee so
 	// the owner picks the policy, the way net/http's Server.Shutdown takes
@@ -58,6 +60,33 @@ const (
 	// DefaultForwardBuf is the size of the per-iteration Read/Write
 	// scratch buffer used by the forwarder goroutines.
 	DefaultForwardBuf = 32 * 1024 // 32 KiB
+
+	// DefaultHalfCloseGrace bounds how long the surviving direction may
+	// sit IDLE after its peer half-closed. See [Config.HalfCloseGrace].
+	//
+	// Because the bound is on idle time and not on total time, it only
+	// has to cover the gap before a peer STARTS answering, never the
+	// length of the answer: a response that streams for ten minutes
+	// re-arms the window on every chunk. 10s is generous for
+	// "connection accepted, request complete, first byte not yet sent"
+	// while keeping the worst case — a peer that goes silent and never
+	// closes — short enough that a busy proxy is not holding file
+	// descriptors and tee buffers for half a minute per connection.
+	DefaultHalfCloseGrace = 10 * time.Second
+
+	// DefaultClientHoldCap bounds how many client bytes a
+	// [Config.HoldClientWrites] hold may accumulate before the relay
+	// gives up on the hold and releases it — see [Config.ClientHoldCap]
+	// for why the breach is handled by releasing rather than by
+	// dropping the connection.
+	//
+	// The window a hold covers is one client message: the parser is
+	// deciding, off the first chunk, whether this connection upgrades
+	// to TLS. MySQL's SSLRequest is 36 bytes and its plaintext
+	// HandshakeResponse is a few hundred, so 256 KiB is roughly three
+	// orders of magnitude of headroom over the real traffic while
+	// still bounding what one connection can pin in memory.
+	DefaultClientHoldCap int64 = 256 * 1024 // 256 KiB
 )
 
 // TLSUpgradeFn performs a TLS handshake on a real net.Conn and returns
@@ -119,6 +148,21 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
+	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
+	// process's own clocks. Tests set it to drive the window.
+	stallClock stallClock
+	// beforeTee, when set, runs on a forwarder after it has written a chunk
+	// on and before it tees it. Tests set it to hold one direction's tee
+	// back, so the other direction's later capture is teed first.
+	beforeTee func(fakeconn.Direction)
+
+	// ReaderLag, when positive, delivers each captured chunk to its parser
+	// no earlier than this long after the relay read it: the parser then runs
+	// that far behind the traffic, as a starved agent's does, while the
+	// application's bytes are forwarded as fast as ever. It exists to make
+	// capture lag deterministic in end-to-end tests (the proxy sets it from
+	// KEPLOY_DEBUG_PARSER_LAG); zero, the default, adds nothing.
+	ReaderLag time.Duration
 
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
@@ -193,6 +237,22 @@ type Config struct {
 	// idle". Nil is safe.
 	BumpActivity func()
 
+	// OnCarried is told of each chunk the forwarder hands to the tee, on
+	// that forwarder: its direction, when it was read (Chunk.ReadAt), and
+	// whether the tee took it. through is the position just past the chunk
+	// in its direction's stream, in the offsets fakeconn.FakeConn counts
+	// what its reader is done with in (Consumed, ReadThrough): the reader
+	// has taken the whole chunk once those reach it. When the tee refused
+	// the chunk, through is where the stream already stood (the chunk moved
+	// nothing). That is what tells a chunk the parser read from one it never
+	// did, once the parser has stopped reading; the order in which the relay
+	// and the parser get to a chunk does not (the parser can read a chunk
+	// before the relay is done with it). A chunk the forwarder only stashes
+	// across a pause, with no push, is not told of. It runs on the
+	// forwarder, under the client hold's lock on that path, so it must not
+	// block or call back into the relay. Nil is safe.
+	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
+
 	// OnMarkMockIncomplete is invoked whenever the relay drops a
 	// tee chunk (memoryguard, cap, channel full) or processes a
 	// KindAbortMock directive. The reason string is the same value
@@ -200,10 +260,14 @@ type Config struct {
 	OnMarkMockIncomplete func(reason string)
 
 	// OnCaptureDesync is invoked at most once per direction, the first time
-	// a chunk is dropped on that tee. Nil is safe.
+	// a chunk is dropped on that tee. It returns whether the hole costs the
+	// owner's recording anything, and the tee warns of the hole only then. An
+	// owner whose recording is stopping loses nothing at a hole: the
+	// connection is torn down with the recording. Nil is safe, and every
+	// hole is warned of.
 	//
-	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and is
-	// cleared by Session.MarkMockComplete after each cycle; this one reports
+	// It is NOT a louder OnMarkMockIncomplete. That one is per-mock and the
+	// next mock emitted takes it (Session.EmitMock); this one reports
 	// that the connection's byte stream now has a hole, which no later mock
 	// recovers from. Downstream parsers frame by length prefix, so after a
 	// hole the next header is read mid-body and every subsequent frame on
@@ -211,12 +275,20 @@ type Config struct {
 	// perfectly while producing zero further mocks, and the test cases
 	// recorded against it replay as match_phase=no_mocks.
 	//
-	// The expected implementation is to record the start of the hole and,
-	// when the connection ends, mark that whole span so the test cases
-	// overlapping it are suppressed instead of shipped mock-less. That is
-	// the half that closes the failure by construction; retirement (below)
-	// is the best-effort half that gets capture going again.
-	OnCaptureDesync func(reason string)
+	// The expected implementation suppresses the test cases recorded while
+	// the connection carries traffic from here on, instead of shipping them
+	// mock-less (syncMock.UnrecordedConn). A parser that cannot re-align
+	// (ParserCanResyncAfterGap false) is no longer fed, so the connection has
+	// stopped being recorded; one that can re-aligns at some later message,
+	// but when is known only once it gets there, possibly a full queue behind
+	// the traffic, by when the test cases in between have been streamed.
+	//
+	// It is called first, on the forwarder's goroutine as the chunk is lost,
+	// before the tee refuses anything after the hole, logs it, or ends a
+	// stream at it (EndAtHole): an owner that stops the connection's
+	// recording here stops it at the hole, before its parser can learn of
+	// it. It must not block.
+	OnCaptureDesync func(reason string) bool
 
 	// OnClientChunkTeed is invoked after each successful tee of a
 	// client-to-dest chunk into the parser's FakeConn. Callers wire
@@ -263,6 +335,100 @@ type Config struct {
 	// this when the parser implements an opt-in capability method.
 	PreDispatchPause bool
 
+	// HalfCloseGrace bounds how long the relay keeps copying the
+	// surviving direction after one side has half-closed (sent FIN
+	// while still able to receive). Zero resolves to
+	// [DefaultHalfCloseGrace]; negative disables half-close entirely and
+	// restores the original behaviour of tearing both directions down
+	// on the first EOF.
+	//
+	// A clean EOF from one side means "I have finished writing", not
+	// "this connection is over". A client that does shutdown(SHUT_WR)
+	// and then reads the reply — Node's socket.end(data), Python's
+	// sock.shutdown(SHUT_WR), any request/EOF/response protocol — loses
+	// that reply if the relay closes the other direction, and the
+	// application sees its connection end before the answer arrives.
+	//
+	// The bound exists because the opposite risk is real too: a peer
+	// that answers with neither data nor a FIN would leave the
+	// surviving forwarder parked in Read forever. That is the ~60s hang
+	// the unconditional teardown originally prevented, and this keeps
+	// that protection while giving a well-behaved peer room to answer.
+	//
+	// It measures IDLE time, not total time. A total bound would cut a
+	// slow response off mid-body — and silently, since the caller closes
+	// the client socket once Run returns, so an EOF-delimited protocol
+	// reads a truncated body as a complete one. Every forwarded chunk
+	// re-arms the window.
+	//
+	// Operators reach it exactly like its siblings in
+	// config.RecordBuffer: record.recordBuffer.halfCloseGrace in
+	// keploy.yml or the hidden --half-close-grace flag.
+	HalfCloseGrace time.Duration
+
+	// HoldClientWrites, when true, stops the client→destination
+	// forwarder from writing to the real destination. Bytes are still
+	// read and still teed to the parser's FakeConn; only the
+	// destination Write is deferred. The hold stays up until the
+	// parser ends it with [directive.ReleaseClient] (which flushes
+	// everything held, in read order) or [directive.UpgradeTLS] (which
+	// flushes [directive.UpgradeTLSParams.ClientFlushBytes] and leaves
+	// the rest to the client-side handshake).
+	//
+	// This exists because [PreDispatchPause] cannot express MySQL's
+	// CLIENT_SSL upgrade, for two reasons:
+	//
+	//  1. It is all-or-nothing in TIME. The pre-dispatch pause parks
+	//     the forwarders at the first chunk and ends at dispatch; the
+	//     MySQL decision point is later, after the server's greeting
+	//     has already round-tripped through both directions.
+	//
+	//  2. It is all-or-nothing in BYTES. Its TLS flush is takeStashed,
+	//     the whole stash. MySQL needs a split: the 36-byte SSLRequest
+	//     must reach the server (or it never switches to TLS) and the
+	//     ClientHello immediately behind it must not (keploy terminates
+	//     that handshake itself). Those two routinely arrive in a
+	//     single read, so the split has to be by byte count.
+	//
+	// Without a hold, the C2D forwarder keeps running while the parser
+	// decides and forwards whatever the client wrote next. That is not
+	// a lost recording, it is a corrupted connection: the real server
+	// parses the ClientHello as MySQL protocol, and keploy's own
+	// destination handshake then runs against a desynchronised socket.
+	//
+	// The hold is directional. Destination→client forwarding is
+	// untouched, which is what lets a server-speaks-first protocol
+	// deliver its greeting while the client's reply is held.
+	//
+	// Default false. A parser that does not arm this sees today's
+	// behaviour exactly; a parser that arms it and then never sends a
+	// releasing directive wedges the connection until teardown, so the
+	// dispatcher only sets it for parsers that opt in via a capability
+	// method.
+	HoldClientWrites bool
+
+	// ClientHoldCap bounds the bytes a [HoldClientWrites] hold may
+	// accumulate. Zero resolves to [DefaultClientHoldCap]; negative
+	// disables the bound.
+	//
+	// On breach the relay releases the hold — flushing what it held
+	// and resuming normal forwarding — rather than dropping the
+	// connection, and reports "client_hold_cap" through
+	// [OnMarkMockIncomplete].
+	//
+	// Releasing is the right failure mode because of what a breach
+	// actually means. The hold covers one decision by the parser, over
+	// a message measured in hundreds of bytes; reaching 256 KiB means
+	// the parser is not going to answer. The client is by then blocked
+	// waiting for a server reply that cannot come, because its request
+	// is sitting in our stash. Flushing unwedges it: in the common
+	// no-TLS case the session simply proceeds, and the only casualty
+	// is the recording. Dropping the connection would take the user's
+	// application down to protect a mock, which inverts the priority
+	// the relay holds everywhere else — the forward path is not
+	// allowed to lose to the capture path.
+	ClientHoldCap int64
+
 	// ParserCanResyncAfterGap tells the tees whether the parser on the other
 	// end can re-anchor its framer after a HOLE in capture. Set by the
 	// dispatcher from the parser's optional
@@ -273,7 +439,7 @@ type Config struct {
 	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
 	// [DropMemoryPressure] — the connection's captured byte stream has a
 	// hole in it. The tee already says so in its own words: it logs "capture
-	// desynced; this connection can no longer be recorded" and fires
+	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
 	// length-prefix framer reading from the wrong offset does not merely
@@ -300,6 +466,27 @@ type Config struct {
 	// Either way the FORWARD path is untouched: the relay writes every byte
 	// to the real peer before it ever offers the chunk to a tee.
 	ParserCanResyncAfterGap bool
+
+	// EndAtHole, when set and ParserCanResyncAfterGap is false, ends a
+	// direction at its hole: once a tee has desynced and delivered every
+	// chunk it queued before the hole, it ends its FakeConn (io.EOF), and
+	// calls EndAtHole first, with the direction and the reason the chunk was
+	// lost ([DropPerConnCap] or [DropMemoryPressure]). The caller wires it to
+	// supervisor.Session.MarkEndedAtHole, so the parser that reaches the end
+	// learns it is the hole's and not the connection's. The tee then marks
+	// no mock incomplete (OnMarkMockIncomplete) for the lost chunk, nor for
+	// the chunks it refuses after it ([DropDesynced]): the parser learns of
+	// the hole where it is, and a mark would void whichever mock it emits
+	// next, one from before the hole. OnCaptureDesync fires as before.
+	//
+	// Nil (the default) keeps a desynced direction's FakeConn open, fed
+	// nothing, until the connection ends. Only a parser that reads each
+	// direction to its own end, and tells a hole's end from the
+	// connection's, may have it set ([integrations.EndAtHoleCapable]): one
+	// that does not would record what the hole cut as though the connection
+	// had closed there. The forward path is untouched either way, and so is
+	// the relay when the parser returns: a parser's return never ends it.
+	EndAtHole func(dir fakeconn.Direction, reason string)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields
@@ -318,14 +505,45 @@ func (c Config) withDefaults() Config {
 	if out.ForwardBuf <= 0 {
 		out.ForwardBuf = DefaultForwardBuf
 	}
+	// == 0, not <= 0: a negative HalfCloseGrace is the documented way to
+	// opt out of half-close, so it must survive default resolution.
+	if out.HalfCloseGrace == 0 {
+		out.HalfCloseGrace = DefaultHalfCloseGrace
+	}
+	// == 0, not <= 0: a negative ClientHoldCap is the documented way to
+	// disable the bound, so it must survive default resolution.
+	if out.ClientHoldCap == 0 {
+		out.ClientHoldCap = DefaultClientHoldCap
+	}
 	if out.ConsumerStallGrace <= 0 {
 		out.ConsumerStallGrace = DefaultConsumerStallGrace
+	}
+	// The two client-direction brakes are alternatives, not layers, and
+	// the conflict is resolved HERE rather than in run() because run()
+	// installs the pre-dispatch pause barrier before it could act on
+	// the flag — clearing preDispatchActive afterwards leaves that
+	// barrier up with nothing to release it, and both forwarders park
+	// forever on a connection whose greeting never reaches the client.
+	//
+	// The hold wins. Pre-dispatch routes the client's first chunk
+	// through the pause stash, which bypasses the hold's byte
+	// accounting entirely (ClientHoldCap silently stops being
+	// enforced), and its resume handler acks OK while leaving the hold
+	// armed. See [HoldClientWrites].
+	if out.HoldClientWrites && out.PreDispatchPause {
+		out.PreDispatchPause = false
+		out.Logger.Error("relay: HoldClientWrites and PreDispatchPause are mutually exclusive; ignoring PreDispatchPause",
+			zap.String("next_step", "a parser should implement WantsClientWriteHold or WantsPreDispatchPause, never both — the hold subsumes pre-dispatch for the client direction"),
+		)
 	}
 	if out.MemoryGuardCheck == nil {
 		out.MemoryGuardCheck = memoryguard.IsRecordingPaused
 	}
 	if out.BumpActivity == nil {
 		out.BumpActivity = func() {}
+	}
+	if out.OnCarried == nil {
+		out.OnCarried = func(fakeconn.Direction, time.Time, bool, int64) {}
 	}
 	if out.OnMarkMockIncomplete == nil {
 		out.OnMarkMockIncomplete = func(string) {}

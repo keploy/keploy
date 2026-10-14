@@ -1,0 +1,129 @@
+version: api.keploy.io/v1beta1
+name: test-set-0-report
+status: FAILED
+success: 1
+failure: 1
+obsolete: 1
+ignored: 0
+total: 3
+tests:
+    - kind: Http
+      name: test-set-0
+      status: PASSED
+      started: 1755861852
+      completed: 1755861853
+      test_case_path: /keploy/test-set-0
+      mock_path: /keploy/test-set-0/mocks.yaml
+      test_case_id: test-1
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/orders/1
+        header:
+            Accept: application/json
+        body: ""
+        timestamp: 2000-01-01T00:00:00Z
+      resp:
+        status_code: 200
+        header:
+            Content-Type: application/json
+        body: '{"id":1,"status":"CONFIRMED"}'
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2000-01-01T00:00:00Z
+      result:
+        status_code:
+            normal: true
+            expected: 200
+            actual: 200
+        headers_result: []
+        body_result:
+            - normal: true
+              type: JSON
+              expected: '{"id":1,"status":"CONFIRMED"}'
+              actual: '{"id":1,"status":"CONFIRMED"}'
+        dep_result: []
+        deps_checked: true
+        deps_consumed: 3
+      time_taken: 12.3ms
+    - kind: Http
+      name: test-set-0
+      status: FAILED
+      started: 1755861854
+      completed: 1755861855
+      test_case_path: /keploy/test-set-0
+      mock_path: /keploy/test-set-0/mocks.yaml
+      test_case_id: test-2
+      req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/orders
+        header:
+            Content-Type: application/json
+        body: '{"sku":"SKU-9","qty":3}'
+        timestamp: 2000-01-01T00:00:00Z
+      resp:
+        status_code: 500
+        header:
+            Content-Type: application/json
+        body: '{"error":"boom"}'
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2000-01-01T00:00:00Z
+      result:
+        status_code:
+            normal: false
+            expected: 201
+            actual: 500
+        headers_result: []
+        body_result:
+            - normal: false
+              type: JSON
+              expected: '{"id":2,"status":"CONFIRMED"}'
+              actual: '{"error":"boom"}'
+        dep_result: []
+        deps_checked: true
+        deps_consumed: 4
+      time_taken: 8.1ms
+    - kind: Http
+      name: test-set-0
+      status: OBSOLETE
+      started: 1755861856
+      completed: 1755861857
+      test_case_path: /keploy/test-set-0
+      mock_path: /keploy/test-set-0/mocks.yaml
+      test_case_id: test-3
+      req:
+        method: GET
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/orders/9
+        header: {}
+        body: ""
+        timestamp: 2000-01-01T00:00:00Z
+      resp:
+        status_code: 404
+        header: {}
+        body: '{"error":"not found"}'
+        status_message: ""
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2000-01-01T00:00:00Z
+      result:
+        status_code:
+            normal: false
+            expected: 200
+            actual: 404
+        headers_result: []
+        body_result: []
+        dep_result: []
+        deps_checked: true
+        deps_consumed: 5
+      time_taken: 5.0ms
+test_set: test-set-0
+created_at: 1755861860
+time_taken: 25.4ms

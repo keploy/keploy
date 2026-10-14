@@ -3,12 +3,74 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
+
+// ErrParserDeclined is returned by a parser that MATCHED a connection but
+// then decided not to handle it — a port outside its allowlist, a kill
+// switch, an unsupported sub-protocol.
+//
+// It exists because "return nil" cannot express that. The dispatcher reads
+// a nil error as "the parser handled this connection", logs success, and
+// falls through to handleConnection's deferred close — so a parser that
+// bailed politely had the user's connection torn down under it, which is
+// an I1 violation (keploy must never be what ends a connection). Parsers
+// documented that returning nil would "pass through"; it did not.
+//
+// Wrap it (fmt.Errorf("...: %w", integrations.ErrParserDeclined)) to carry
+// the reason.
+//
+// CONTRACT, and both clauses are load-bearing:
+//
+//  1. If the parser READ from a connection to make its decision, it must
+//     restore those bytes on the RecordSession conn it read from —
+//     RecordSession.Ingress and/or RecordSession.Egress. The dispatcher
+//     relays the SESSION's conns, not handleConnection's own, precisely so
+//     a consumed protocol preamble is not lost. Relaying a drained stream
+//     makes the peer reset the connection, which moves the user's break
+//     rather than removing it.
+//
+//     Note this is integrations.RecordSession, NOT supervisor.Session.
+//     supervisor.Session also has an Ingress field, but it is nil on the
+//     V2 path and ignored — bytes restored there vanish silently.
+//
+//     A parser that upgraded the connection to TLS before declining must
+//     not rely on this: util.ConnTLSUpgrader writes the upgraded conn back
+//     through handleConnection's pointers, not into RecordSession, so the
+//     session's Egress is the pre-upgrade socket.
+//
+//  2. The parser must not leave goroutines reading those conns. The relay
+//     becomes the sole reader; a surviving parser reader races it for
+//     bytes on the same socket.
+//
+// SCOPE: honoured on every legacy RECORD dispatch site — the
+// matched-parser branch, the generic catch-all, and the MySQL probe
+// branch. On the V2/supervisor path the sentinel is not consulted, but a
+// parser error there already becomes FallthroughToPassthrough with a
+// correctly activity-scoped orphan window, which is the better shape.
+//
+// Be aware that those legacy sites are no longer reachable for any parser
+// in tree. Every parser the dispatcher can route to record implements
+// IntegrationsV2, and the KEPLOY_NEW_RELAY knob that could force them onto
+// the legacy path has been removed — so in practice a decline is only
+// honoured for an out-of-tree parser that does not implement
+// IntegrationsV2, or for the not-registered guards at the MySQL and
+// generic sites. A V2 parser that returns this sentinel does NOT get the
+// relay-and-restore treatment above; it degrades to
+// FallthroughToPassthrough, which keeps user traffic alive but logs the
+// connection as a retired parser rather than a decline.
+//
+// On replay there is no upstream connection to relay to — every
+// destination dial in handleConnection is mode-gated — so a parser that
+// needs to decline during replay is not yet supported and must not rely
+// on this.
+var ErrParserDeclined = errors.New("parser declined to handle this connection")
 
 type Initializer func(logger *zap.Logger) Integrations
 
@@ -106,6 +168,48 @@ type GapResyncCapable interface {
 	CanResyncAfterGap() bool
 }
 
+// EndAtHoleCapable is the optional capability interface of a parser that
+// cannot re-align after a hole (GapResyncCapable not implemented, or answered
+// no) and reads each direction of its connection to that direction's own end.
+// Optional, like GapResyncCapable: the relay type-asserts for it.
+//
+// Such a parser is fed nothing of a direction after its hole, but without
+// this it is not told where the hole is: the direction is not ended, so the
+// parser waits for bytes that will not come. A parser that runs behind its
+// capture cannot place the hole from the incomplete-mock flag either: the
+// relay sets it when the chunk is lost, and the parser takes it when it reads
+// its next chunk, which can be a full queue of chunks teed before the hole
+// later. Everything the relay still delivers was teed before the hole.
+//
+// Returning true asks the relay to end a direction at its hole: once every
+// chunk teed before it is delivered, the direction's FakeConn returns io.EOF,
+// and the session says the stream ended at a hole, and why
+// (supervisor.Session.EndedAtHole), so the parser can tell it from the end of
+// the connection. The relay then marks no mock incomplete for the lost chunk,
+// nor for the chunks it refuses after it: a mark voids whichever mock is
+// emitted next, which is one from before the hole. The other direction is fed
+// as before, until the connection ends.
+//
+// It asserts that the parser reads each direction to its own end, and tells a
+// hole's end from the connection's (supervisor.Session.EndedAtHole): one that
+// does not would record what the hole cut as though the connection had closed
+// there. Mid-connection, only a parser that claims it sees one direction end
+// while the other goes on. Whenever the parser returns, at the end of both
+// directions or before, the relay goes on forwarding the application's bytes
+// until a peer closes: a parser's return never ends it.
+//
+// keploy/integrations' HTTP/2 recorder implements it, and asserts so at
+// compile time, so renaming the interface or its method breaks that build
+// rather than silently leaving the recorder waiting at its holes.
+type EndAtHoleCapable interface {
+	// CanEndAtHole reports whether this parser wants a direction that lost a
+	// chunk ended at the hole (see EndAtHoleCapable). It is consulted once
+	// per connection, before the relay starts, so it must not depend on
+	// per-connection state. A parser that can re-align after a hole keeps
+	// its feed whatever this answers.
+	CanEndAtHole() bool
+}
+
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }
@@ -165,6 +269,79 @@ type MockMemDb interface {
 	MockWriter
 	MockConsumer
 	WindowAware
+}
+
+// MockCursor is an optional MockMemDb capability that serves stateful
+// dependencies: repeated identical requests answered with successive recorded
+// responses in record order, then the last one again. MockCursorIndex returns
+// the position to serve for a request key given n recorded responses WITHOUT
+// advancing (a negative index means "no cursor": serve as if the capability
+// were absent); AdvanceMockCursor moves the key past servedIdx, saturating at
+// n, and is called only once the response is actually served, so a failed or
+// retried match does not skip a recording. The agent's MockManager implements
+// it, and every MockMemDb wrapper must forward it — a wrapper that drops it
+// silently turns stateful replay off for the calls it wraps.
+//
+// A peek and the commit after it must come from the same goroutine, with no
+// other peek of the same store in between: a wrapper may resolve per peek what
+// the commit then reuses (the proxy's per-connection views do). Parsers serve
+// one connection from one goroutine, one request at a time, which satisfies it.
+type MockCursor interface {
+	MockCursorIndex(key string, n int) int
+	AdvanceMockCursor(key string, servedIdx, n int)
+}
+
+// VariableStore is an optional MockMemDb capability: the table of the test
+// variables the replay has bound (package variables), which a matcher reads
+// to follow a mock's declared variable places under the proven switch. The
+// agent's MockManager implements it, and every MockMemDb wrapper must forward
+// it: a wrapper that drops it leaves the calls it wraps unable to match any
+// mock that declares a variable place.
+type VariableStore interface {
+	Variables() *variables.Table
+}
+
+// SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks recorded inside one test window, without
+// walking the rest of it.
+//
+// A replay re-stages every test's window but leaves the reusable pool whole,
+// and lax mode keeps a recording's per-test MySQL data mocks in that pool, so
+// it holds the traffic of every test in the set. A matcher that only wants the
+// current test's mocks would otherwise walk all of them on every command, and a
+// replay's total cost would grow with the square of its length.
+type SessionWindowReader interface {
+	// GetSessionMocksInWindow returns, in GetSessionMocks order, the mocks of
+	// that snapshot whose ReqTimestampMock lies in [start, end] (bounds
+	// included) or is unset: exactly GetSessionMocks filtered by that
+	// predicate.
+	GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error)
+}
+
+// MockIndex files mocks under the keys Keys gives them, so a matcher can find
+// its candidates in a large pool without walking it (see SessionKeyReader).
+//
+// Keys must depend only on what a mock recorded and how replay classified it
+// (its Lifetime and its "type" metadata), never on its place in a pool: a
+// store builds one index per MockIndex value and pool, and keeps it while the
+// pool lasts. So pass the same *MockIndex to every lookup, and declare it
+// once, at package level.
+type MockIndex struct {
+	Keys func(*models.Mock) []string
+}
+
+// SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
+// snapshot narrowed to the mocks an index files under one key, without
+// walking the rest of it. A replay's reusable pool holds every test's traffic
+// in lax mode, so a matcher that walked it for each command would cost more
+// with every test the set holds.
+type SessionKeyReader interface {
+	// RangeSessionMocksWithKey calls fn with each mock of the session tier
+	// that ix files under key, in GetSessionMocks order, until fn returns
+	// false. fn is called without the store's locks held, so it may call
+	// back into the store; the walk then sees the tier as it is by the time
+	// it gets there, as successive reads would.
+	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
 }
 
 // MockReader is the read-only facet of MockMemDb. Parsers that need
@@ -263,12 +440,13 @@ type MockReader interface {
 	// session / per-test pools.
 	GetConnectionMocks(connID string) ([]*models.Mock, error)
 
-	// SessionMockHitCounts returns per-mock atomic HitCount values for
-	// session- and connection-scoped mocks. Used by replay summary
-	// output and "which reusable mocks actually got reused?" telemetry.
-	// Key is mock.Name; value is the atomic counter's current read.
-	// Inherently racy as a snapshot — counters may increment during
-	// iteration — but that's tolerable for observability.
+	// SessionMockHitCounts returns the match counts of the session- and
+	// connection-scoped mocks in the pool, counted by MarkMockAsUsed over
+	// the current test set. Used by replay summary output and "which
+	// reusable mocks actually got reused?" telemetry. Key is mock.Name
+	// (mocks sharing a name share a count). Inherently racy as a
+	// snapshot — counters may increment during iteration — but that's
+	// tolerable for observability.
 	SessionMockHitCounts() map[string]uint64
 }
 
@@ -312,6 +490,64 @@ type MockConsumer interface {
 	MarkMockAsUsed(mock models.Mock) bool
 }
 
+// RecordedWindowsReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it). It exposes the recorded window of every
+// test of the set being replayed, selected or not, as the replayer seeded it at
+// staging (models.MockFilterParams.RecordedWindows).
+//
+// A parser whose protocol has traffic the test windows do not pace by
+// themselves — a broker's server push — uses it to hold that traffic until the
+// replay reaches the recorded window it belongs to:
+//
+//	sched := db.RecordedWindows()                 // nil: release everything
+//	start, _ := db.CurrentTestWindow()
+//	due := sched.Released(msg.Spec.ReqTimestampMock, start)
+//
+// The schedule is immutable; it is replaced (never mutated) at each set's
+// staging call, which also changes WindowPacer.StagingEpoch.
+//
+// The agent keeps the windows only while some kind has registered a carry-over
+// predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
+// parser that paces by them registers its kind, as the traffic it paces is
+// what carry-over exists for.
+type RecordedWindowsReader interface {
+	RecordedWindows() *models.WindowSchedule
+}
+
+// WindowPacer is an OPTIONAL MockMemDb facet (type-assert for it; the agent's
+// MockManager implements it) for a parser that holds traffic until the replay
+// reaches a recorded window — FLOW permits that find nothing due yet — and must
+// serve it when the window moves, with no request of its own to wake it.
+//
+//   - WindowChanged returns a channel closed at the next test-window change,
+//     after the new window and trees are visible. Take it BEFORE reading the
+//     state it guards; each change hands out a fresh channel. It is also closed
+//     once when the manager is closed.
+//   - StagingEpoch changes at every staging call (a new set, or the set staged
+//     again for a replacement agent). State built from one staging snapshot,
+//     such as per-set delivery queues, is rebuilt when it changes.
+//
+// A MockMemDb without it gives no signal: serve held work at the connection's
+// next request instead.
+type WindowPacer interface {
+	WindowChanged() <-chan struct{}
+	StagingEpoch() uint64
+}
+
+// CarryOverReader is an OPTIONAL MockMemDb facet (type-assert for it; the
+// agent's MockManager implements it) for a parser whose kind registered a
+// carry-over predicate (models.RegisterCarryOver). It returns, in recorded
+// order, the registered per-test mocks that are reachable outside their own
+// test window: loaded up to models.CarryOverLookahead ahead of their release
+// window, and kept after their window closes until consumed. Serve them after
+// the running test's own mocks (GetPerTestMocksInWindow), and consume them
+// through DeleteFilteredMock, which falls back per-test, then startup, then
+// carry-over, and reports a carry-over consume with MockState.CarryOver.
+type CarryOverReader interface {
+	GetCarryOverMocks() ([]*models.Mock, error)
+	GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error)
+}
+
 // WindowAware is the test-window facet of MockMemDb. Parsers that
 // partition their index into per-test / session / startup tiers
 // consult these accessors at dispatch time to pick the right tier
@@ -344,7 +580,11 @@ type WindowAware interface {
 	// HasFirstTestFired reports whether at least one real test window
 	// has been set on the underlying MockManager via SetMocksWithWindow
 	// (non-zero start that is not the BaseTime staging sentinel).
-	// Sticky — once true, stays true.
+	// Sticky within a test-set; ResetForReplaySession clears it at each
+	// set boundary, so a set being staged reads false again. This is the
+	// same underlying value FirstTestWindowStart below exposes as a
+	// timestamp — "has this set's first test fired" and "when did it fire"
+	// are one field, so they share that per-set lifetime.
 	//
 	// Parsers use this alongside IsTestWindowActive to distinguish
 	// "app bootstrap" (before first test) from "between tests" (after
@@ -365,9 +605,11 @@ type WindowAware interface {
 	HasFirstTestFired() bool
 
 	// FirstTestWindowStart returns the earliest test window start observed
-	// by the MockManager, or zero if no real test has fired yet (i.e. every
-	// SetMocksWithWindow call so far was either absent or fired with the
-	// models.BaseTime staging sentinel). Used by filter / strict-gate
+	// by the MockManager FOR THE TEST SET BEING REPLAYED, or zero if no real
+	// test has fired in it yet (i.e. every SetMocksWithWindow call so far was
+	// either absent or fired with the models.BaseTime staging sentinel).
+	// ResetForReplaySession clears it at each set boundary, so each set
+	// classifies against its own first test. Used by filter / strict-gate
 	// callers to distinguish startup-init mocks (req_ts < firstWindowStart)
 	// from stale previous-test mocks (firstWindowStart <= req_ts <
 	// currentStart): the former are legitimate app-bootstrap traffic that

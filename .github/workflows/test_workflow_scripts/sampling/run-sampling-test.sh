@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../go-retry.sh"
 # Drives the --enable-sampling end-to-end test:
 #
 #   1. Build the sample HTTP app (./sampling-test/main.go).
@@ -49,7 +50,7 @@ rm -rf keploy/ curl-results/ record.log sampling-test
 endsec
 
 section "Build sample app"
-go build -o sampling-test .
+go_retry build -o sampling-test .
 ls -lh sampling-test
 endsec
 

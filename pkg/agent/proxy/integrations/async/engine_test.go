@@ -3,6 +3,7 @@ package async
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -196,5 +197,116 @@ func TestNonPollServesReselectableCurrentEpoch(t *testing.T) {
 		if rec == nil || rec.Spec.HTTPResp.Body != "B" {
 			t.Fatalf("req %d @completed=1: want re-selectable B, got %v", i, rec)
 		}
+	}
+}
+
+// One Engine serves a whole replay run, but StoreMocks — the only thing that
+// feeds it — runs once per TEST-SET. Load therefore has to REPLACE.
+//
+// The corpus must be replaced, not merged: a surviving set-A epoch stays in the
+// same lane timeline and, because currentEpoch takes the last entry effective
+// at the cursor, can silently answer for set B. Set B here deliberately has NO
+// epoch effective at boot, so an inherited set-A epoch is observable.
+func TestLoadReplacesThePreviousTestSetsCorpus(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}
+
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "SET-A")})
+	if rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{}); rec == nil || rec.Spec.HTTPResp.Body != "SET-A" {
+		t.Fatalf("precondition: set A must serve SET-A, got %v", rec)
+	}
+
+	// Set B's timeline starts at position 2 — nothing is effective at boot.
+	e.Load([]*models.Mock{asyncMock("L", 2, 2, "SET-B")})
+
+	rec, keepAlive, err := e.Decide(context.Background(), lane, &models.Mock{})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if rec != nil {
+		t.Fatalf("set B boot served %q, want a keep-alive: set A's corpus survived "+
+			"the new set's Load and is answering for it", rec.Spec.HTTPResp.Body)
+	}
+	if string(keepAlive) != "KA" {
+		t.Fatalf("want the parser's keep-alive, got %q", keepAlive)
+	}
+}
+
+// AnchorPos is recorded per test-set and always starts at 0, but `completed`
+// counts test windows for the WHOLE RUN. Entering set B with a carried count
+// makes currentEpoch open mid-timeline, so set B's boot value is never served.
+func TestLoadRewindsTheEpochCursor(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	lane := models.AsyncLane{Name: "L", Type: "fake", ThrottleMs: 10}
+
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "A0")})
+	e.AdvanceWindow() // first window: windowSeen, completed stays 0
+	e.AdvanceWindow() // completed=1
+	e.AdvanceWindow() // completed=2
+
+	e.Load([]*models.Mock{
+		asyncMock("L", 1, 0, "B0"),
+		asyncMock("L", 2, 1, "B1"),
+	})
+	e.AdvanceWindow() // set B's FIRST window must not count as a completed test
+
+	rec, _, _ := e.Decide(context.Background(), lane, &models.Mock{})
+	if rec == nil {
+		t.Fatal("set B: nothing served at boot")
+	}
+	if got := rec.Spec.HTTPResp.Body; got != "B0" {
+		// B1 sits at pos 1, so an off-by-one is observable here: carrying
+		// windowSeen makes set B's first window count as a completed test and
+		// every epoch in the set fires one test early.
+		t.Fatalf("set B boot served %q, want B0: the completed counter carried %d "+
+			"tests over from the previous set, so the cursor started mid-timeline",
+			got, e.CompletedForTest())
+	}
+}
+
+// A poll parked in holdThrottle captured its *laneStream before releasing e.mu.
+// The next test-set's Load replaces e.streams and broadcasts, waking it — and
+// the captured pointer would serve the PREVIOUS set's boot value against the
+// rewound cursor. Decide must re-read the stream after the hold.
+func TestPollParkedAcrossLoadDoesNotServeThePreviousCorpus(t *testing.T) {
+	e := newTestEngine(&fakeParser{matches: true, shapeOK: true, empty: []byte("KA")})
+	// A long throttle so the poll is genuinely parked when Load lands.
+	lane := models.AsyncLane{Name: "L", Type: "fakePoll", ThrottleMs: 5000}
+
+	e.Load([]*models.Mock{asyncMock("L", 1, 0, "SET-A-BOOT")})
+
+	type res struct {
+		rec *models.Mock
+		ka  []byte
+	}
+	done := make(chan res, 1)
+	go func() {
+		rec, ka, _ := e.Decide(context.Background(), lane, &models.Mock{})
+		done <- res{rec, ka}
+	}()
+
+	// Let the poll reach the hold, then swap in a set with nothing at boot.
+	time.Sleep(50 * time.Millisecond)
+	swapped := time.Now()
+	e.Load([]*models.Mock{asyncMock("L", 2, 2, "SET-B")})
+
+	select {
+	case r := <-done:
+		// The poll must be woken BY the Load, not merely outlive the 5s
+		// throttle — otherwise this test passes even with Load's Broadcast
+		// removed, and equally if the goroutine parked after the swap.
+		if waited := time.Since(swapped); waited > time.Second {
+			t.Fatalf("poll took %v to return: it timed out on the throttle rather than "+
+				"being woken by Load's broadcast, so this test proved nothing", waited)
+		}
+		if r.rec != nil {
+			t.Fatalf("parked poll served %q from the previous test-set's stream after "+
+				"Load replaced it; want a keep-alive", r.rec.Spec.HTTPResp.Body)
+		}
+		if string(r.ka) != "KA" {
+			t.Fatalf("want the parser's keep-alive, got %q", r.ka)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("parked poll never returned; the Load broadcast did not wake it")
 	}
 }

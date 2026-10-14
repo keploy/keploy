@@ -64,11 +64,13 @@ type sniffResult struct {
 // opts carries the session's resolved upstream-TLS trust material
 // (see Proxy.applyUpstreamTLSOptions); it is threaded down to
 // hijackAndMITM, which owns the only upstream tls.Config on this path.
-func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, backdate time.Time, opts models.OutgoingOptions) error {
+func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn, dstAddr string, pre *util.Predialed, backdate time.Time, opts models.OutgoingOptions) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer dialCancel()
-	var dialer net.Dialer
-	dstConn, err := dialer.DialContext(dialCtx, "tcp", dstAddr)
+	dstConn, err := util.DialDestinationWith(dialCtx, p.logger, util.DialTarget{Addr: dstAddr},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			return util.DialRaw(ctx, nil, "tcp", a, pre)
+		})
 	if err != nil {
 		return fmt.Errorf("dial upstream %s: %w", dstAddr, err)
 	}
@@ -587,11 +589,11 @@ func relayPlaintext(ctx context.Context, a, b net.Conn) error {
 // the peer's read returns EOF. Falls back to a no-op when the conn
 // type doesn't support half-close.
 func closeWriteIfPossible(c net.Conn) error {
-	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	// Thin alias kept for the call sites in this file; the
+	// implementation lives in util because that is the only package
+	// able to see through SafeConn, which wraps essentially every conn
+	// a parser touches.
+	return util.CloseWriteIfPossible(c)
 }
 
 // pushSignal publishes a goroutine's verdict. The send is unguarded on

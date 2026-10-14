@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 )
@@ -489,26 +490,29 @@ func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
 // actually stopped costs grace × queue-depth — hundreds of queued chunks turn
 // teardown into minutes, which is exactly why bounding the whole flush was
 // tempting. Deciding once and abandoning the remainder gets both: this must
-// finish in about ONE grace regardless of how much is queued.
+// finish in ONE window regardless of how much is queued.
+//
+// The window is time the process could run (stallMeter), so it is measured
+// on an injected clock, not in wall time: on a starved host one window of run
+// time is many of wall time, and a wall-clock bound here would fail there
+// for the behaviour the window exists to have.
 func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	t.Parallel()
 	const queued = 200
-	tt, rec, _ := newTestTeeWithConsumer(t, 1<<30, 1) // consumer never reads
+	clk := newFakeStallClock(onTime)
+	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
 
 	for i := 0; i < queued; i++ {
 		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
 	}
 
-	start := time.Now()
 	tt.close()
 	tt.waitDone()
-	elapsed := time.Since(start)
 
-	// Per-chunk re-decision would be ~queued × grace; allow generous slack
-	// for scheduling while still failing that shape by orders of magnitude.
-	if limit := 4 * testStallGrace; elapsed > limit {
-		t.Errorf("teardown took %v with %d chunks queued (limit %v): the stall verdict is being "+
-			"re-taken per chunk instead of once for the connection", elapsed, queued, limit)
+	// Per-chunk re-decision would take queued windows of samples.
+	if got, want := clk.waits(), int(testStallGrace/stallTick); got != want {
+		t.Errorf("teardown sampled %d ticks with %d chunks queued, want one window of %d: the stall verdict is being "+
+			"re-taken per chunk instead of once for the connection", got, queued, want)
 	}
 	if n := rec.count(DropConsumerGone); n != 1 {
 		t.Errorf("consumer_gone reported %d times, want exactly 1", n)
@@ -750,7 +754,7 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 	d1, d2 := net.Pipe()
 	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close(); _ = d1.Close(); _ = d2.Close() })
 
-	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, d1)
+	r := New(Config{ConsumerStallGrace: want, Logger: zap.NewNop()}, c1, connseq.NewUpstream(d1))
 	t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() })
 
 	if got := r.teeC2D.stallGrace; got != want {
@@ -762,7 +766,7 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 	}
 
 	// And the zero-config path must land on the default, not on zero.
-	r2 := New(Config{Logger: zap.NewNop()}, c2, d2)
+	r2 := New(Config{Logger: zap.NewNop()}, c2, connseq.NewUpstream(d2))
 	t.Cleanup(func() { r2.teeC2D.close(); r2.teeD2C.close() })
 	if got := r2.teeC2D.stallGrace; got != DefaultConsumerStallGrace {
 		t.Errorf("zero-config stallGrace = %v, want %v", got, DefaultConsumerStallGrace)
@@ -789,7 +793,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		var desyncs []string
 		pressure := false
 		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, func() bool { return pressure }, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		// Capture is underway: this is the connection a reconnect can rescue.
@@ -820,7 +824,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		var desyncs []string
 		// Cap admits the first chunk and refuses the second.
 		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		if !tt.push(fakeconn.Chunk{Bytes: []byte("abcd")}) {
@@ -839,7 +843,7 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		t.Parallel()
 		var desyncs []string
 		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
-		tt.onDesync = func(reason string) { desyncs = append(desyncs, reason) }
+		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
 		tt.setPaused(true)
@@ -884,7 +888,7 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 		desyncs := 0
 		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, rec.record, nil)
 		tt.parserCanResync = canResync
-		tt.onDesync = func(string) { desyncs++ }
+		tt.onDesync = func(string) bool { desyncs++; return true }
 		t.Cleanup(tt.close)
 
 		if !tt.push(mkChunk("abcd")) {
@@ -1054,7 +1058,7 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 		_ = destSvc.Close()
 	})
 
-	def := New(Config{Logger: zap.NewNop()}, srcProxy, dstProxy)
+	def := New(Config{Logger: zap.NewNop()}, srcProxy, connseq.NewUpstream(dstProxy))
 	if def.teeC2D.parserCanResync || def.teeD2C.parserCanResync {
 		t.Fatalf("default parserCanResync = (c2d=%v, d2c=%v), want both false: a parser that "+
 			"never heard of the capability is the one least likely to have a resync path, "+
@@ -1062,7 +1066,7 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 			def.teeC2D.parserCanResync, def.teeD2C.parserCanResync)
 	}
 
-	on := New(Config{Logger: zap.NewNop(), ParserCanResyncAfterGap: true}, srcProxy, dstProxy)
+	on := New(Config{Logger: zap.NewNop(), ParserCanResyncAfterGap: true}, srcProxy, connseq.NewUpstream(dstProxy))
 	if !on.teeC2D.parserCanResync || !on.teeD2C.parserCanResync {
 		t.Fatalf("with ParserCanResyncAfterGap=true, got (c2d=%v, d2c=%v), want both true",
 			on.teeC2D.parserCanResync, on.teeD2C.parserCanResync)

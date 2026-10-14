@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
 )
 
@@ -41,6 +43,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
+	var existingStartup []models.MockEntry
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -68,6 +71,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		for _, t := range existingConfig.TestCases {
 			finalMappings[t.ID] = t.Mocks
 		}
+		existingStartup = existingConfig.Startup
 	}
 
 	for _, t := range mapping.TestCases {
@@ -75,6 +79,36 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
+
+	// Carry the startup section across the flatten-and-rebuild above.
+	//
+	// finalMappings is a per-test map, so everything that is NOT a test entry
+	// is invisible to it and CreateMappingStructure cannot reconstruct what it
+	// never saw. Without this the section is written once by the caller and
+	// silently dropped on the very next Insert — the same class of bug as the
+	// mock_entries/mocks mismatch on the api-server boundary.
+	//
+	// Replace-or-keep, mirroring how test entries merge: a caller that supplies
+	// startup mocks is the fresh authority for this test set (replay captures
+	// them anew on every run), while a caller that supplies none must not wipe
+	// what is already on disk.
+	//
+	// UpsertBatch needs no equivalent — it decodes into *models.Mapping and
+	// mutates TestCases in place, so the section survives untouched.
+	//
+	// KNOWN LIMITATION: this can never CLEAR a stale section. After a re-record
+	// where the app no longer makes some boot call, a run capturing zero startup
+	// mocks takes the second branch and the old names persist indefinitely.
+	// Benign — DiskMocks.LoadByNames silently skips names it cannot find — but it
+	// means the section only ever grows stale, never shrinks. Clearing it would
+	// need a way to distinguish "captured nothing" from "did not look", which
+	// this signature does not carry.
+	switch {
+	case len(mapping.Startup) > 0:
+		newMapping.Startup = mapping.Startup
+	case len(existingStartup) > 0:
+		newMapping.Startup = existingStartup
+	}
 
 	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
 	if err != nil {
@@ -242,25 +276,180 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	return nil
 }
 
-// Exists reports whether mappings.yaml is on disk for the given
-// test-set. Used by the test-mode create-if-not-present write path —
-// distinct from Get's second return (which is "has at least one
-// non-empty test entry"). A file with only empty entries should still
-// count as "exists" so we don't overwrite the operator's intentional
-// empty mapping.
+func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	mapping.Boots = boots
+	mapping.Startup = nil
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
+func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
+	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
+		return nil
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	at := make(map[string]int, len(mapping.TestCases))
+	for i, t := range mapping.TestCases {
+		at[t.ID] = i
+	}
+	testIDs := make([]string, 0, len(byTest))
+	for testID := range byTest {
+		testIDs = append(testIDs, testID)
+	}
+	sort.Strings(testIDs)
+	for _, testID := range testIDs {
+		in := byTest[testID]
+		i, ok := at[testID]
+		if !ok {
+			mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{ID: testID})
+			i = len(mapping.TestCases) - 1
+		}
+		tc := &mapping.TestCases[i]
+		tc.Cases = mergeNames(tc.Cases, in.Cases)
+		tc.CaseMocks = mergeMaps(tc.CaseMocks, in.CaseMocks)
+		tc.CaseSteps = mergeMaps(tc.CaseSteps, in.CaseSteps)
+		if in.Dir != "" {
+			tc.Dir = in.Dir
+		}
+		if in.Starts > 0 {
+			tc.Starts = in.Starts
+		}
+		if !in.At.IsZero() {
+			tc.At = in.At
+		}
+	}
+	if len(suites) > 0 {
+		mapping.Suites = suites
+	}
+	if len(startup) > 0 {
+		mapping.Startup = startup
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+func mergeMaps[V any](existing, incoming map[string]V) map[string]V {
+	if len(incoming) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]V, len(incoming))
+	}
+	for k, v := range incoming {
+		existing[k] = v
+	}
+	return existing
+}
+
+// mergeNames unions incoming names into existing ones, keeping order and dropping repeats.
+func mergeNames(existing, incoming []string) []string {
+	seen := make(map[string]struct{}, len(existing))
+	for _, n := range existing {
+		seen[n] = struct{}{}
+	}
+	merged := existing
+	for _, n := range incoming {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		merged = append(merged, n)
+	}
+	return merged
+}
+
+// Exists reports whether the given test-set has a mappings file on disk, in
+// either format, as Get, GetStartup, Insert and UpsertBatch find it. Used by
+// the test-mode create-if-not-present write path — distinct from Get's second
+// return (which is "has at least one non-empty test entry"). A file with only
+// empty entries should still count as "exists" so we don't overwrite the
+// operator's intentional empty mapping.
 func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error) {
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
 	}
-	return yaml.FileExists(ctx, db.logger, mappingPath, fileName)
+	exists, _, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	return exists, err
 }
 
-// Get reads test-mock mappings from a YAML file
-// Returns: testMockMappings, mappingFilePresent, error
-func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {
-	// Create the file path
+// Delete removes the set's mappings file in every format; a missing file is not an error.
+func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
+		return fmt.Errorf("rejecting Delete: testSetID %q must be a single-segment name under the mappings directory: %w", testSetID, err)
+	}
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		path, err := yaml.ValidatePath(filepath.Join(db.path, testSetID, fileName+"."+format.FileExtension()))
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			utils.LogError(db.logger, err, "failed to delete the mapping file", zap.String("path", path))
+			return err
+		}
+	}
+	return nil
+}
+
+// decodeMapping reads and decodes a test-set's mappings file.
+//
+// Shared by Get and GetStartup so the filename-defaulting, format detection and
+// decode live in one place. Returns (nil, false, nil) when the file is absent —
+// callers distinguish "no file" from "decoded" via the bool rather than by
+// inspecting the error, so a missing mapping is never an error path.
+func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*models.Mapping, string, bool, error) {
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -270,23 +459,102 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
 	if err != nil {
 		if os.IsNotExist(err) {
-			db.logger.Debug("Mapping file does not exist, returning empty mappings",
+			db.logger.Debug("Mapping file does not exist",
 				zap.String("testSetID", testSetID),
 				zap.String("path", mappingPath))
-			return make(map[string][]models.MockEntry), false, nil
+			return nil, "", false, nil
 		}
 		utils.LogError(db.logger, err, "failed to read mapping file",
 			zap.String("testSetID", testSetID),
 			zap.String("path", mappingPath),
 			zap.String("fileName", fileName))
-		return nil, false, err
+		return nil, "", false, err
 	}
 
 	mapping, err := DecodeMappingF(fileData, db.logger, detected)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to decode mapping",
 			zap.String("testSetID", testSetID))
+		return nil, "", false, err
+	}
+	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
+}
+
+func (db *MappingDb) GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error) {
+	m, _, _, err := db.decodeMapping(ctx, testSetID)
+	return m, err
+}
+
+// GetCases lists the test cases each flow recorded, keyed by flow.
+func (db *MappingDb) GetCases(ctx context.Context, testSetID string) (map[string][]string, error) {
+	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
+	if err != nil || !present {
+		return map[string][]string{}, err
+	}
+	out := make(map[string][]string, len(mapping.TestCases))
+	for _, tc := range mapping.TestCases {
+		if len(tc.Cases) > 0 {
+			out[tc.ID] = append([]string(nil), tc.Cases...)
+		}
+	}
+	return out, nil
+}
+
+// GetStartup reads the test-set-scoped startup section from mappings.yaml.
+//
+// Startup mocks are the traffic the app produced while booting — driver
+// handshakes, connection-pool warm-up, config/secret fetches — recorded before
+// the first test request fired. They belong to no single test, so they have no
+// entry under `tests:` and Get() never returns them.
+//
+// This matters only on the MAPPING-BASED path. Agent.loadPerTestMocks picks its
+// loader by mode:
+//
+//	UseMappingBased && len(MockMapping) > 0 -> disk.LoadByNames(MockMapping)
+//	strict window                           -> disk.LoadWindow(...) + disk.LoadBefore(firstWindowStart)
+//	otherwise                               -> disk.LoadAll()
+//
+// The window path loads startup mocks explicitly via LoadBefore. The mapping
+// path loads ONLY the names it is handed, so a startup mock that appears in no
+// test's list is absent from the pool for every test. Callers merge these names
+// into the per-test list to close that gap.
+//
+// A missing file, or a file with no startup section, is not an error — it
+// returns nil, which is the correct answer for every mapping written before the
+// section existed.
+func (db *MappingDb) GetStartup(ctx context.Context, testSetID string) ([]models.MockEntry, error) {
+	mapping, _, present, err := db.decodeMapping(ctx, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	if !present || mapping == nil || len(mapping.Startup) == 0 {
+		return nil, nil
+	}
+
+	out := make([]models.MockEntry, 0, len(mapping.Startup))
+	for _, e := range mapping.Startup {
+		if e.Name == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+
+	db.logger.Debug("loaded test-set startup mocks from mappings",
+		zap.String("testSetID", testSetID),
+		zap.Int("startupMocks", len(out)))
+
+	return out, nil
+}
+
+// Get reads test-mock mappings from a YAML file
+// Returns: testMockMappings, mappingFilePresent, error
+func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {
+	mapping, filePath, present, err := db.decodeMapping(ctx, testSetID)
+	if err != nil {
 		return nil, false, err
+	}
+	if !present {
+		return make(map[string][]models.MockEntry), false, nil
 	}
 
 	testMockMappings := GetMappings(mapping, db.logger)
@@ -301,7 +569,7 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 
 	db.logger.Info("Successfully loaded test-mock mappings",
 		zap.String("testSetID", testSetID),
-		zap.String("filePath", filepath.Join(mappingPath, fileName+"."+detected.FileExtension())),
+		zap.String("filePath", filePath),
 		zap.Int("numTests", len(testMockMappings)),
 		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 

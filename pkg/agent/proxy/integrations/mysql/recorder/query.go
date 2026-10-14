@@ -9,10 +9,13 @@ import (
 	"strings"
 	"time"
 
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -56,15 +59,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	// If recording is already paused, pure passthrough.
 	if memoryguard.IsRecordingPaused() {
 		logger.Debug("memory pressure detected, stopping MySQL recording and falling back to passthrough")
-		done := make(chan struct{}, 2)
-		cp := func(dst, src net.Conn) {
-			_, _ = io.Copy(dst, src)
-			done <- struct{}{}
-		}
-		go cp(destConn, clientConn)
-		go cp(clientConn, destConn)
-		<-done
-		<-done
+		relayRawPassthrough(clientConn, destConn)
 		return nil
 	}
 
@@ -551,6 +546,23 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		lastOp            byte                // the MySQL command type
 		remainingCols     uint64              // columns left to read
 		remainingParams   uint16              // params left to read (stmt prepare)
+		// undecodable is the first part of the active exchange's response
+		// that did not decode, or nil. Such an exchange is dropped, never
+		// recorded short: a mock missing a column or a row replays a
+		// different answer than the server gave. Once the first packet has
+		// given the response's shape, the state machine walks the rest of it
+		// by its counts and terminator, so those packets are not taken for
+		// the next command's response. (Packets that reach the decoder after
+		// the next command, the race described at flushMock, are unowned
+		// either way.)
+		undecodable error
+		// dropped counts the exchanges dropped for it; the first is logged
+		// at Warn, and the count once the connection ends.
+		dropped int
+		// lostStatements are the statements whose COM_STMT_PREPARE was
+		// dropped. An exchange that runs one cannot replay without it, so it
+		// is dropped too, and the test cases over it are left out.
+		lostStatements map[uint32]struct{}
 	)
 
 	// Temporary storage for result set assembly.
@@ -563,6 +575,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 	resetActiveExchange := func() {
 		pendingCommand = nil
 		pendingRespBundle = nil
+		undecodable = nil
 		textResultSet = nil
 		binaryResultSet = nil
 		stmtPrepareOk = nil
@@ -601,9 +614,46 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		return true
 	}
 
+	markUndecodable := func(err error) {
+		if undecodable == nil {
+			undecodable = err
+		}
+	}
+
 	flushMock := func() {
 		if pendingCommand == nil || pendingRespBundle == nil {
 			return
+		}
+		if id, ok := statementOf(pendingCommand.Message); ok {
+			if _, lost := lostStatements[id]; lost {
+				markUndecodable(fmt.Errorf("statement %d: its COM_STMT_PREPARE was not recorded", id))
+			}
+		}
+		if undecodable != nil {
+			// Leave out the test cases recorded over the exchange rather
+			// than save them without its mock (routes/record.go checks
+			// WasMockOrphanedInWindow).
+			if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
+				mgr.RecordOrphanWindow(reqTimestamp, resTimestamp)
+			}
+			if stmtPrepareOk != nil && pendingCommand.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
+				if lostStatements == nil {
+					lostStatements = make(map[uint32]struct{})
+				}
+				lostStatements[stmtPrepareOk.StatementID] = struct{}{}
+			}
+			dropped++
+			fields := []zap.Field{zap.String("command", pendingCommand.Header.Type), zap.Error(undecodable)}
+			if dropped == 1 {
+				logger.Warn("dropping a MySQL response that could not be decoded: its mock is not recorded, and the test cases recorded over it are left out", fields...)
+			} else {
+				logger.Debug("dropping a MySQL response that could not be decoded", fields...)
+			}
+			resetActiveExchange()
+			return
+		}
+		if stmtPrepareOk != nil {
+			delete(lostStatements, stmtPrepareOk.StatementID)
 		}
 		// If the recorder is force-flushing mid-result-set (i.e., a new client
 		// command arrived, or the connection closed, before we observed the
@@ -879,14 +929,12 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				case stateExpectColumns:
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
-					if err != nil {
-						logger.Debug("failed to decode column definition in async decoder", zap.Error(err))
-						resetActiveExchange()
-						continue
-					}
-					if textResultSet != nil {
+					switch {
+					case err != nil:
+						markUndecodable(fmt.Errorf("column definition: %w", err))
+					case textResultSet != nil:
 						textResultSet.Columns = append(textResultSet.Columns, col)
-					} else if binaryResultSet != nil {
+					case binaryResultSet != nil:
 						binaryResultSet.Columns = append(binaryResultSet.Columns, col)
 					}
 					remainingCols--
@@ -940,19 +988,20 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 						}
 						resTimestamp = item.ts
 						flushMock()
-					} else {
-						// Row data.
+					} else if undecodable == nil {
+						// Row data. Once part of the result set failed to
+						// decode, its rows are only consumed.
 						if textResultSet != nil {
 							row, _, err := rowscols.DecodeTextRow(ctx, logger, pkt, textResultSet.Columns)
 							if err != nil {
-								logger.Debug("failed to decode text row in async decoder", zap.Error(err))
+								markUndecodable(fmt.Errorf("text row %d: %w", len(textResultSet.Rows), err))
 							} else {
 								textResultSet.Rows = append(textResultSet.Rows, row)
 							}
 						} else if binaryResultSet != nil {
 							row, _, err := rowscols.DecodeBinaryRow(ctx, logger, pkt, binaryResultSet.Columns)
 							if err != nil {
-								logger.Debug("failed to decode binary row in async decoder", zap.Error(err))
+								markUndecodable(fmt.Errorf("binary row %d: %w", len(binaryResultSet.Rows), err))
 							} else {
 								binaryResultSet.Rows = append(binaryResultSet.Rows, row)
 							}
@@ -961,12 +1010,10 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				case stateExpectStmtParams:
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
-					if err != nil {
-						logger.Debug("failed to decode param definition in async decoder", zap.Error(err))
-						resetActiveExchange()
-						continue
-					}
-					if stmtPrepareOk != nil {
+					switch {
+					case err != nil:
+						markUndecodable(fmt.Errorf("parameter definition: %w", err))
+					case stmtPrepareOk != nil:
 						stmtPrepareOk.ParamDefs = append(stmtPrepareOk.ParamDefs, col)
 					}
 					remainingParams--
@@ -1000,12 +1047,10 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 				case stateExpectStmtColumns:
 					col, _, err := rowscols.DecodeColumn(ctx, logger, pkt)
-					if err != nil {
-						logger.Debug("failed to decode stmt column definition in async decoder", zap.Error(err))
-						resetActiveExchange()
-						continue
-					}
-					if stmtPrepareOk != nil {
+					switch {
+					case err != nil:
+						markUndecodable(fmt.Errorf("column definition: %w", err))
+					case stmtPrepareOk != nil:
 						stmtPrepareOk.ColumnDefs = append(stmtPrepareOk.ColumnDefs, col)
 					}
 					remainingCols--
@@ -1033,6 +1078,9 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 
 	// Channel closed — flush any remaining exchange.
 	flushMock()
+	if dropped > 1 {
+		logger.Warn("dropped MySQL responses that could not be decoded on this connection", zap.Int("dropped", dropped))
+	}
 }
 
 // processFirstResponse handles the first response packet of a MySQL
@@ -1368,4 +1416,31 @@ func binaryRowHeadersOf(rows []*mysql.BinaryRow) []mysql.Header {
 		out = append(out, r.Header)
 	}
 	return out
+}
+
+// relayRawPassthrough is the memory-pressure fallback: nothing is
+// captured, bytes are just relayed.
+//
+// It delegates to proxyutil.RelayRawPassthrough. http and mysql shared
+// this verbatim; generic had the same logic with the FIN factored into a
+// forwardFIN helper. See that function for the two rules
+// it enforces — forward the FIN only on a clean EOF, and give a surviving
+// direction a bounded drain when the other breaks rather than waiting for
+// it forever or abandoning it at once.
+
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
+}
+
+// statementOf returns the prepared statement a response-bearing command runs.
+func statementOf(msg interface{}) (uint32, bool) {
+	switch m := msg.(type) {
+	case *mysql.StmtExecutePacket:
+		return m.StatementID, true
+	case *mysql.StmtFetchPacket:
+		return m.StatementID, true
+	case *mysql.StmtResetPacket:
+		return m.StatementID, true
+	}
+	return 0, false
 }

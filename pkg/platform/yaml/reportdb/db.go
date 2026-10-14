@@ -19,6 +19,15 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// reportBytes bounds the size of a test-set report keploy reads back: a
+// regular file past it is refused ("larger than the 512 MiB keploy reads"), as
+// a report that is not a regular file is whatever its size. keploy's writer
+// does not keep this bound -- a report holds every test's bodies, with no cap
+// on how many tests a set has -- so a large enough run can write a report its
+// own reads refuse. The largest report keploy wrote on the development
+// machine is 19 MB.
+const reportBytes = 512 << 20
+
 type TestReport struct {
 	tests  map[string]map[string][]models.TestResult
 	m      sync.Mutex
@@ -81,11 +90,19 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
+	return fe.readReport(ctx, testRunID, testSetID, reportBytes)
+}
+
+// readReport is GetReport, reading a report of at most limit bytes.
+func (fe *TestReport) readReport(ctx context.Context, testRunID string, testSetID string, limit int64) (*models.TestReport, error) {
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
 	// Auto-detect the report format — `keploy report` keeps working for
-	// reports written by a differently-configured prior run.
-	data, detected, err := yaml.ReadFileAny(ctx, fe.Logger, path, reportName, fe.Format)
+	// reports written by a differently-configured prior run. The report is a
+	// file of the repository keploy runs in, so it is read as a regular file
+	// of at most limit bytes: a cloned repo could otherwise point it at
+	// /dev/zero or a FIFO.
+	data, detected, err := yaml.ReadFileAnyBounded(ctx, path, reportName, fe.Format, limit)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
@@ -99,7 +116,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 		err = decoder.Decode(&doc)
 	}
 	if err != nil {
-		return &models.TestReport{}, fmt.Errorf("%s failed to decode the report file. error: %v", utils.Emoji, err.Error())
+		return &models.TestReport{}, fmt.Errorf("%s failed to decode the report file. error: %w", utils.Emoji, err)
 	}
 	return &doc, nil
 }

@@ -13,10 +13,19 @@ on:
         default: 'main'
   pull_request:
     branches: [ main ]
+  # A cache a pull_request run saves is scoped to that PR's merge ref and no
+  # other PR can restore it; only a cache saved on the default branch is
+  # shared. Running on main is what seeds the PetClinic Maven cache below for
+  # every PR, and also gives a post-merge performance signal.
+  push:
+    branches: [ main ]
 
 concurrency:
-  group: keploy-performance-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # One group per PR, per pushed commit and per manual run's ref, and only a
+  # PR's newer push cancels its older run: a merge never cancels a manual run
+  # or the previous merge's post-merge signal.
+  group: keploy-performance-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   performance-test:
@@ -51,6 +60,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: spring-projects/spring-petclinic
+          # Pinned: the fixture app, its dependency set and the Maven version
+          # its wrapper downloads must not change under this job when upstream
+          # main moves; the latency thresholds below are baselines of this
+          # exact app. Bump it deliberately.
+          ref: 818c4136ea971c21674525f9053de0d9c7ad8cfe
           path: petclinic
 
       - name: Setup Java 17
@@ -75,13 +89,20 @@ jobs:
             keploy/go.sum
             keploy-to-test/go.sum
 
-      - name: Cache Maven packages
-        uses: actions/cache@v4
+      # ~/.m2/wrapper holds the Maven distribution ./mvnw would otherwise
+      # fetch with a single, unretried wget from Maven Central on every run;
+      # ~/.m2/repository holds every dependency. With both restored the build
+      # needs no network at all.
+      - name: Restore Maven wrapper and repository
+        id: maven-cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          path: |
+            ~/.m2/wrapper
+            ~/.m2/repository
+          key: ${{ runner.os }}-petclinic-maven-${{ hashFiles('petclinic/.mvn/**', 'petclinic/pom.xml') }}
           restore-keys: |
-            ${{ runner.os }}-maven-
+            ${{ runner.os }}-petclinic-maven-
 
       - name: Setup k6
         uses: grafana/setup-k6-action@v1
@@ -89,6 +110,18 @@ jobs:
       - name: Build Spring PetClinic
         working-directory: petclinic
         run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
+
+      # Saved as soon as the build succeeds rather than in a post step, which
+      # only saves when the whole job passes: a later performance failure must
+      # not keep the cache from being seeded.
+      - name: Save Maven wrapper and repository
+        if: steps.maven-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.m2/wrapper
+            ~/.m2/repository
+          key: ${{ steps.maven-cache.outputs.cache-primary-key }}
 
       - name: Build Keploy
         run: |
@@ -117,10 +150,6 @@ jobs:
           ls -lh keploy
           ./keploy --version || echo "Version check failed (might be expected)"
 
-      - name: Make scripts executable
-        working-directory: keploy
-        run: chmod +x .github/workflows/test_workflow_scripts/performance/*.sh
-
       - name: Start PetClinic with Keploy recording
         working-directory: keploy
         run: ./.github/workflows/test_workflow_scripts/performance/start-petclinic-with-keploy.sh
@@ -131,9 +160,7 @@ jobs:
 
       - name: Run k6 performance tests (3 runs with validation)
         working-directory: keploy
-        run: |
-          chmod +x ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
-          ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
+        run: ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
         env:
           NUM_RUNS: 3
           REQUIRED_FAILURES: 2

@@ -71,7 +71,9 @@ python -m pip install -r requirements.txt
 rm -rf keploy.yml
 
 # Database migrations
-$RECORD_BIN config --generate
+# The step above removed any config, so this always generates; the guard is
+# here so the line stays correct if that removal is ever dropped.
+[ -f keploy.yml ] || $RECORD_BIN config --generate
 rm -rf keploy/  # Clean old test data
 sleep 5  # Allow time for configuration changes
 

@@ -84,15 +84,15 @@ func TestBuildHTTPMismatchReport_RecordsDestination(t *testing.T) {
 
 	// Host header wins.
 	req := makeReqWithQuery("GET", "/api/orders", "")
-	req.Host = "api.payments.svc:8443"
-	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "api.payments.svc:8443" {
+	req.Host = "api.example.com:8443"
+	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "api.example.com:8443" {
 		t.Fatalf("expected destination from Host header, got %q", got)
 	}
 
 	// Falls back to the URL authority when Host is unset.
 	req = makeReqWithQuery("GET", "/api/orders", "")
-	req.URL.Host = "inventory.internal:9000"
-	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.internal:9000" {
+	req.URL.Host = "inventory.example.com:9000"
+	if got := h.buildHTTPMismatchReport(req, nil, db, nil, nil, nil, diag).Destination; got != "inventory.example.com:9000" {
 		t.Fatalf("expected destination from URL authority fallback, got %q", got)
 	}
 

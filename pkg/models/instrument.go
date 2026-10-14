@@ -92,6 +92,13 @@ type IngressEvent struct {
 	_           uint16 // Padding
 }
 
+// AppListenAddrs is the agent's answer to where the app's sockets listen on one
+// of its ports (GET /agent/app/listen-addrs): each address as net/netip prints
+// it, "0.0.0.0" and "::" for a wildcard. Empty when nothing listens there yet.
+type AppListenAddrs struct {
+	Addrs []string `json:"addrs"`
+}
+
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
@@ -100,6 +107,7 @@ type OutgoingOptions struct {
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
 	Mocking  bool          // used to enable/disable mocking
+	SwapIDs  bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -111,10 +119,65 @@ type OutgoingOptions struct {
 	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
 	DisableAutoURLDynamic  bool                           // when true, do NOT auto-wildcard machine-id-looking URL path segments (numeric/uuid/hex/token) on the no-exact-match fallback; URL matching stays exact + url-noise only
-	SchemaNoiseDetection   bool                           // when true, detect request-body field drift vs the recorded mock and record it as field-path noise (req_body_noise) on the matched mock
-	SchemaNoiseStrict      bool                           // when true (replay/enforcement path), a mock (any parser) that carries learned req_body_noise must match strictly: every request-body field must match except the learned-noise paths, so a non-noise drift rejects the mock
-	SkipTLSMITM            bool
-	ConnKey                string // connection-level key for TLSHandshakeStore correlation
+	// DisableStatefulMocks turns OFF cursor-consumption of stateful data-plane
+	// mocks. Default (false) = ON: repeated identical dependency requests are
+	// served successive recorded responses in record order (then saturate on the
+	// last), so a stateful sequence (a counter, a created-then-read row) replays
+	// as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first
+	// recorded response every time" behaviour. Only affects mocks classified
+	// ConsumeCursorSaturate (DeriveLifetime rules #4/#5); at one recorded
+	// response it is a no-op.
+	DisableStatefulMocks bool
+	// DisableMockCorrelation turns OFF request→response echo correlation: when
+	// the app sends an app-minted random value (UUID / nonce / idempotency key)
+	// that the dependency reflects back, replay captures the live request value
+	// and renders it into the served response instead of replaying the stale
+	// recorded one. Default (false) = ON. Set true to fall back to serving the
+	// recorded value. Only affects mocks carrying Spec.Correlations.
+	DisableMockCorrelation bool
+	// MockNoiseDetection / MockNoiseStrict are the canonical spelling.
+	//
+	// MockNoiseDetection: detect request-body field drift vs the recorded mock
+	// and record it as field-path noise (req_body_noise) on the matched mock.
+	//
+	// MockNoiseStrict (replay/enforcement path): a mock (any parser) that
+	// carries learned req_body_noise must match strictly — every request-body
+	// field must match except the learned-noise paths, so a non-noise drift
+	// rejects the mock.
+	MockNoiseDetection bool
+	MockNoiseStrict    bool
+
+	// SchemaNoiseDetection / SchemaNoiseStrict are the previous spelling, kept
+	// as a mirror rather than removed.
+	//
+	// Go has no field aliases, so unlike the package rename (see
+	// integrations/schemanoise) this cannot be solved with `=`. Both fields are
+	// therefore carried and NormalizeMockNoise reconciles them. An unmigrated
+	// producer — a k8s-proxy or enterprise build from before the rename, or a
+	// stored config written by one — sets only these, and its intent must
+	// survive: JSON/YAML decoding silently drops unknown keys, so a mismatch
+	// here is not an error anywhere, it is a toggle that quietly does nothing.
+	//
+	// Deprecated: set MockNoiseDetection / MockNoiseStrict. Read through
+	// NoiseDetection() / NoiseStrict(), never directly.
+	SchemaNoiseDetection bool
+	SchemaNoiseStrict    bool
+	// ConnKey names THIS connection's socket, as an opaque token on which the
+	// connection's two capture legs agree: the raw leg that carries its
+	// cleartext prelude (a MySQL greeting and SSLRequest) and the decrypted leg
+	// that carries what follows the TLS handshake. The TLSHandshakeStore pairs
+	// the two by it (HandshakeOwner), so a decrypted stream is stitched with its
+	// OWN connection's greeting, salt and timestamp, and never with another's.
+	// The enterprise proxyless capture sets it to the kernel socket cookie on
+	// both legs. Empty means unknown; the legs then pair by ConnProc, and
+	// without that by arrival order on the destination port.
+	ConnKey string
+	// ConnProc names the process that made THIS connection, as an opaque token
+	// both capture legs agree on. It is the fallback pairing identity when
+	// ConnKey is unknown on either leg: a stream is then only ever stitched with
+	// a greeting captured from its own process, never another app's. Runtime,
+	// per-connection: json:"-" like SrcPid.
+	ConnProc string `json:"-"`
 	// PreferH2, on the REPLAY path, tells the TLS MITM to advertise h2 in ALPN
 	// (instead of the default http/1.1 downgrade) so a dual-protocol client
 	// stays on HTTP/2 and its request matches a recorded kind:Http2 mock.
@@ -140,6 +203,11 @@ type OutgoingOptions struct {
 	// Surfaced via --opportunistic-tls-intercept so the agent can
 	// pick the right per-connection branch in handleConnection.
 	OpportunisticTLSIntercept bool
+	// SkipTLSMITM sits with the other TLS switches, in the padding after them.
+	// OutgoingOptions is held by value in each connection's supervisor.Session,
+	// so a field placed where it takes a word of its own grows the Session of
+	// every connection.
+	SkipTLSMITM bool
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -221,12 +289,46 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// NetNS names the network namespace THIS connection was made from, as an
+	// opaque token. It exists because some destination addresses name a
+	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
+	// addresses and unresolved hostnames (see AddrIsNetnsLocal). A long-lived
+	// capture layer that records many pods in one agent (the enterprise
+	// DaemonSet) sees "127.0.0.1:3306" from every pod with a MySQL sidecar, and
+	// each is a different server. Anything that keys per-server state on such an
+	// address must qualify it by this token (see HandshakeServerKey).
+	//
+	// Two connections with EQUAL tokens must have been made from the same live
+	// network namespace. A token may be finer than that (one per process, say):
+	// that only costs extra per-server work. It must never be coarser, and in
+	// particular must not be a bare netns inode number, which the kernel reuses
+	// as soon as a namespace is freed.
+	//
+	// Empty means unknown, and per-server state for a namespace-local address is
+	// then not shared with any other connection at all (HandshakeServerKey
+	// returns ""): an app/session scope does not name a namespace, since every
+	// replica of a deployment shares it. A capture layer may leave it empty for
+	// a connection whose destination is routable, since nothing keys a routable
+	// address by namespace. Runtime, per-connection: json:"-" like SrcPid.
+	NetNS string `json:"-"`
 }
 
 type ConditionalDstCfg struct {
 	Addr   string // Destination Addr (ip:port)
 	Port   uint
 	TLSCfg *tls.Config
+	// AddrFabricated marks Addr/Port as a stand-in the capture layer
+	// synthesized because it could not resolve the connection's REAL
+	// destination (e.g. the proxyless SSL-uprobe path substitutes
+	// 127.0.0.1:0 when the pid→dest cache is ambiguous, and content
+	// matching later forces the well-known port, yielding
+	// "127.0.0.1:3306"). Such an address is good enough for parser
+	// selection and mock metadata (grouping), but it does NOT point at
+	// the server this connection actually talked to — consumers MUST
+	// NOT dial it (the MySQL recorder's fetchServerGreeting fallback
+	// would otherwise connect to an unrelated local server, or fail
+	// instantly with ECONNREFUSED and abort the capture).
+	AddrFabricated bool
 }
 
 type IncomingOptions struct {
@@ -235,11 +337,20 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientNSPID     uint32
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	Synchronous     bool
+	ClientNSPID uint32
+	Container   string
+	// FromContainer is the already-running container to re-create under
+	// keploy's namespaces. Set only for utils.FromContainer runs.
+	FromContainer string
+	// FromContainerWasRunning records whether that container was up when
+	// keploy stopped it, so teardown knows whether to start it again. The stop
+	// happens before the agent starts - the agent publishes the app's ports and
+	// cannot bind them while the original still holds them - so it is decided
+	// there rather than in App.
+	FromContainerWasRunning bool
+	KeployContainer         string
+	DockerDelay             uint64
+	Synchronous             bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool
@@ -254,8 +365,15 @@ type SetupOptions struct {
 	// because the wrapped process is a test runner, not a server whose
 	// incoming traffic becomes test cases. Only outgoing calls are captured
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
-	MockMode                  bool
-	GlobalPassthrough         bool
+	MockMode bool
+	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
+	RecordRequests    bool
+	GlobalPassthrough bool
+	// DisableHandshakeHold turns off holding each redirected connection's
+	// handshake until its destination answers (pkg/agent/proxy/synhold), so
+	// the proxy accepts every connection at once as it used to. Forwarded to
+	// the agent via --disable-handshake-hold.
+	DisableHandshakeHold      bool
 	CapturePackets            bool
 	OpportunisticTLSIntercept bool
 	// ChannelBindingShim mirrors config.Record.ChannelBindingShim. Forwarded
@@ -300,8 +418,14 @@ type SetupOptions struct {
 	// config.Record.RecordBuffer.ConsumerStallGrace. See
 	// RecordBufferMaxMemoryPerConn for the propagation rationale.
 	RecordBufferConsumerStallGrace time.Duration
-	ExtraArgs                      []string
-	EnableSampling                 int
+
+	// RecordBufferHalfCloseGrace mirrors
+	// config.RecordBuffer.HalfCloseGrace. Zero means "unset, use the
+	// relay default"; NEGATIVE means "disable half-close", so the value
+	// must be forwarded on != 0 rather than > 0.
+	RecordBufferHalfCloseGrace time.Duration
+	ExtraArgs                  []string
+	EnableSampling             int
 	// EnableIPv6Redirect controls whether the non-docker BPF cgroup program
 	// redirects IPv6 traffic (connect6/bind6/udp6) to the proxy. When true
 	// (the default), GetProxyInfo publishes ::ffff:127.0.0.1 so the BPF
@@ -328,6 +452,12 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
+	// bring-up. A retry after a stalled agent sets a shorter window than the
+	// generous first-attempt slow-start budget: a fresh agent reports healthy in
+	// a second or two, so a wedged retry should be cut short rather than re-wait
+	// minutes.
+	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {

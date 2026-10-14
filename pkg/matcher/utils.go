@@ -28,6 +28,7 @@ import (
 	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -125,7 +126,13 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 
 type noiseEntry struct {
 	keyLower string
+	key      string           // as configured; orders entries whose keyLower is the same
 	regexps  []*regexp.Regexp // empty => ignore subtree
+	// typeStrict marks a LEARNED-dynamic entry: its VALUE is ignored but its TYPE
+	// must still match (vs an ordinary entry, which ignores value and type). The
+	// flag rides on the entry so it is resolved by the SAME most-specific-first
+	// ordering as everything else — a more-specific user/regex entry still wins.
+	typeStrict bool
 }
 type noiseIndex struct {
 	entries []noiseEntry
@@ -139,6 +146,7 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	for k, arr := range mp {
 		out.entries = append(out.entries, noiseEntry{
 			keyLower: strings.ToLower(k),
+			key:      k,
 			regexps:  compilePatterns(arr, logger),
 		})
 	}
@@ -150,22 +158,70 @@ func buildNoiseIndex(mp map[string][]string, logger *zap.Logger) noiseIndex {
 	// test pass or fail depending on the run. Order most-specific first so the
 	// winner is both deterministic and the one a user writing "user.id" and
 	// "order.user.id" would expect.
+	// Two keys that differ only in case ("createdAt", "CreatedAt") lower to the
+	// same entry key; the smaller configured key wins that tie, as it does for
+	// global keys (globalNoiseKeys), or the entry that wins, and with it the
+	// verdict, would change from call to call.
 	sort.Slice(out.entries, func(i, j int) bool {
 		if len(out.entries[i].keyLower) != len(out.entries[j].keyLower) {
 			return len(out.entries[i].keyLower) > len(out.entries[j].keyLower)
 		}
-		return out.entries[i].keyLower < out.entries[j].keyLower
+		if out.entries[i].keyLower != out.entries[j].keyLower {
+			return out.entries[i].keyLower < out.entries[j].keyLower
+		}
+		return out.entries[i].key < out.entries[j].key
 	})
 	return out
 }
 
 func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	regs, isNoisy, _ = ni.matchKind(keyLower)
+	return regs, isNoisy
+}
+
+// matchKind is match() plus the winning entry's typeStrict flag. The first
+// (most-specific-first) entry whose keyLower is a substring of keyLower wins, so a
+// learned type-strict entry never overrides a more-specific user/regex entry — it
+// only applies when it is itself the most specific match. collectJSON uses this;
+// every other caller uses match() and ignores the flag.
+func (ni noiseIndex) matchKind(keyLower string) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
 	for _, e := range ni.entries {
+		if e.typeStrict && provenswitch.On() {
+			// Under the proven switch a learned entry names exactly the field
+			// that drifted and its subtree (the learn step writes it so,
+			// package matcher/learn). As a substring it would also excuse a
+			// field whose name it happens to contain: "items[].id" in
+			// "items[].identifier".
+			if keyLower == e.keyLower || strings.HasPrefix(keyLower, e.keyLower+".") || strings.HasPrefix(keyLower, e.keyLower+"[]") {
+				return e.regexps, true, true
+			}
+			continue
+		}
 		if strings.Contains(keyLower, e.keyLower) {
-			return e.regexps, true
+			return e.regexps, true, e.typeStrict
 		}
 	}
-	return nil, false
+	return nil, false, false
+}
+
+// markTypeStrict flags the entries whose key is in typeStrict as learned-dynamic
+// (value ignored, type enforced). The entry must already exist — in practice the
+// learned path is also in the known-noise set the index was built from, so
+// non-JSON parsers (which don't consult the flag) still fully exclude it. Marking
+// after the build does not change ordering, so most-specific-first still holds.
+func (ni *noiseIndex) markTypeStrict(typeStrict map[string]struct{}) {
+	if len(typeStrict) == 0 {
+		return
+	}
+	ts := make(map[string]struct{}, len(typeStrict))
+	for k := range typeStrict {
+		ts[strings.ToLower(k)] = struct{}{}
+	}
+	for i := range ni.entries {
+		if _, ok := ts[ni.entries[i].keyLower]; ok {
+			ni.entries[i].typeStrict = true
+		}
+	}
 }
 
 // CloneNoiseMap returns a copy of a noise map, so that merging a test case's
@@ -251,20 +307,34 @@ func SplitNoise(noise map[string][]string, logger *zap.Logger) (bodyNoise map[st
 		}
 	}
 
+	// Dotted keys whose paths differ only in case ("body.createdAt",
+	// "body.CreatedAt") name one entry once lowered. The smallest configured key
+	// wins, as it does in the matcher (globalNoiseKeys, buildNoiseIndex); in map
+	// order the entry kept, and with it the verdict, changed from call to call.
+	bodyFrom, headerFrom := map[string]string{}, map[string]string{}
 	for field, regexArr := range noise {
 		parts := strings.Split(field, ".")
 		if len(parts) < 2 {
 			continue
 		}
-		// Copy the value slice: the destination map is a clone the caller is
-		// free to mutate, so it must not alias the test case's own noise.
-		regexes := append([]string(nil), regexArr...)
+		var dst string
+		var from map[string]string
+		var out map[string][]string
 		switch strings.ToLower(parts[0]) {
 		case "body":
-			bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = regexes
+			dst, from, out = strings.ToLower(strings.Join(parts[1:], ".")), bodyFrom, bodyNoise
 		case "header":
-			headerNoise[strings.ToLower(parts[len(parts)-1])] = regexes
+			dst, from, out = strings.ToLower(parts[len(parts)-1]), headerFrom, headerNoise
+		default:
+			continue
 		}
+		if won, ok := from[dst]; ok && won < field {
+			continue
+		}
+		from[dst] = field
+		// Copy the value slice: the destination map is a clone the caller is
+		// free to mutate, so it must not alias the test case's own noise.
+		out[dst] = append([]string(nil), regexArr...)
 	}
 
 	return bodyNoise, headerNoise, skipBody
@@ -326,30 +396,166 @@ func looksLikeRegex(value string) bool {
 // JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
 // and Global noise (e.g. "timestamp") to be ignored everywhere.
 func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool, logger *zap.Logger) (JSONComparisonResult, error) {
+	idx, globalKeys := splitJSONNoise(noise, logger)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, false, nil)
+}
+
+// containmentBudget is how many element pairs JSONContainsWithNoiseControl
+// may compare across the unordered arrays of one document. Pairing the
+// elements of an array in the same order costs one comparison per element;
+// only a reordered array needs more. A variable so a test can spend it.
+var containmentBudget = 1 << 20
+
+// JSONContainsWithNoiseControl reports whether actual holds everything
+// expected holds, compared exactly as JSONDiffWithNoiseControl compares the
+// two, except that an object of actual may have members expected's does not:
+// every member expected has is present and contains its expected value, and
+// every array has as many elements as expected's, each expected element
+// paired with a distinct element that contains it, by index, or, with
+// ignoreOrdering, by a matching of the elements (an element no other pairing
+// can take is never given away). This is "only new fields were added": a
+// value, a type or a field that changed in any element, and an element added
+// or removed, are not contained.
+//
+// decided is false when the unordered arrays held more element pairs than
+// containmentBudget lets it compare; contains is then false too, so a caller
+// never takes an undecided answer for containment.
+func JSONContainsWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool, logger *zap.Logger) (contains, decided bool, err error) {
+	idx, globalKeys := splitJSONNoise(noise, logger)
+	c := &containment{budget: containmentBudget}
+	res, err := matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, false, c)
+	if c.budget < 0 {
+		return false, false, nil
+	}
+	if err != nil {
+		// A type that differs at the root is no containment.
+		return false, true, nil
+	}
+	return res.matches, true, nil
+}
+
+// splitJSONNoise splits body noise as JSONDiffWithNoiseControl applies it.
+func splitJSONNoise(noise map[string][]string, logger *zap.Logger) (noiseIndex, map[string][]*regexp.Regexp) {
 	// Split noise into Path-based (contains dots) and Global (no dots)
 	pathNoise := make(map[string][]string)
 	globalKeys := make(map[string][]*regexp.Regexp)
 
+	// A key with no dots is a Global Key, ignored everywhere. Its patterns are
+	// carried through: a global key is by far the most common shape
+	// (http.Match strips the "body." prefix, so "body.status" arrives here as
+	// the dot-free "status"), and dropping them here would leave every such
+	// entry an unconditional skip no matter what the caller wrote.
+	for lk, k := range globalNoiseKeys(noise) {
+		globalKeys[lk] = compilePatterns(noise[k], logger)
+	}
+	// A key with a dot is path-specific noise (e.g. "body.data.timestamp").
 	for k, v := range noise {
-		// If a key has no dots, treat it as a Global Key to be ignored everywhere.
-		// Its patterns are carried through: a global key is by far the most common
-		// shape (http.Match strips the "body." prefix, so "body.status" arrives
-		// here as the dot-free "status"), and dropping them here would leave every
-		// such entry an unconditional skip no matter what the caller wrote.
-		if !strings.Contains(k, ".") {
-			globalKeys[strings.ToLower(k)] = compilePatterns(v, logger)
-		} else {
-			// Otherwise, it's a path-specific noise (e.g. "body.data.timestamp")
+		if strings.Contains(k, ".") {
 			pathNoise[k] = v
 		}
 	}
 
-	idx := buildNoiseIndex(pathNoise, logger)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, false)
+	return buildNoiseIndex(pathNoise, logger), globalKeys
+}
+
+// containment asks matchJSONWithNoiseHandlingIndexed whether actual CONTAINS
+// expected (JSONContainsWithNoiseControl) instead of whether it is equal to
+// it. budget is the element pairs unordered arrays may still compare; below
+// zero the walk gave up.
+type containment struct {
+	budget int
+}
+
+// pairAll reports whether each of n expected elements pairs with a distinct
+// one of n actual elements that fits it, by augmenting paths (Kuhn): an
+// element is moved to another fit when that frees one for an element that
+// has no other, so a pairing is found whenever one exists, whatever the
+// order. fits is asked each pair at most once, first the pair at the same
+// index, so elements in the same order cost one comparison each. It gives up
+// (false) once the budget is spent.
+func (c *containment) pairAll(n int, fits func(i, j int) bool) bool {
+	const unknown, yes, no = 0, 1, 2
+	known := make(map[int]uint8)
+	fit := func(i, j int) bool {
+		switch known[i*n+j] {
+		case yes:
+			return true
+		case no:
+			return false
+		}
+		if c.budget--; c.budget < 0 {
+			return false
+		}
+		ok := fits(i, j)
+		known[i*n+j] = no
+		if ok {
+			known[i*n+j] = yes
+		}
+		return ok
+	}
+	owner := make([]int, n) // owner[j] is the expected element paired with j, or -1
+	for j := range owner {
+		owner[j] = -1
+	}
+	seen := make([]int, n) // seen[j] == round: j was tried in this round
+	var try func(i, round int) bool
+	try = func(i, round int) bool {
+		for k := 0; k < n; k++ {
+			j := (i + k) % n
+			if seen[j] == round || !fit(i, j) {
+				if c.budget < 0 {
+					return false
+				}
+				continue
+			}
+			seen[j] = round
+			if owner[j] < 0 || try(owner[j], round) {
+				owner[j] = i
+				return true
+			}
+			if c.budget < 0 {
+				return false
+			}
+		}
+		return false
+	}
+	for i := 0; i < n; i++ {
+		if !try(i, i+1) {
+			return false
+		}
+	}
+	return true
+}
+
+// globalNoiseKeys maps each global (dot-free) noise key, lowercased, to the
+// configured key whose entry applies to it. Keys that differ only in case
+// ("CreatedAt", "createdAt") lower to one entry; the smallest configured key
+// wins, as buildNoiseIndex orders path keys. Taking whichever came last in Go's
+// map order made the same pair pass in one call and fail in the next when the
+// two carried different patterns.
+func globalNoiseKeys(noise map[string][]string) map[string]string {
+	var out map[string]string
+	for k := range noise {
+		if strings.Contains(k, ".") {
+			continue
+		}
+		lk := strings.ToLower(k)
+		if won, ok := out[lk]; ok && won < k {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(noise))
+		}
+		out[lk] = k
+	}
+	return out
 }
 
 // matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string][]*regexp.Regexp, ignoreOrdering bool, ancestorNoisy bool) (JSONComparisonResult, error) {
+// contain, when non-nil, asks whether actual contains expected instead
+// (JSONContainsWithNoiseControl): members only actual has are allowed, and
+// unordered elements pair by a matching rather than first come.
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string][]*regexp.Regexp, ignoreOrdering bool, ancestorNoisy bool, contain *containment) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
@@ -467,7 +673,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering, ancestorNoisy)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering, ancestorNoisy, contain)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -478,8 +684,12 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			}
 		}
 
-		// 2) No unexpected non-noisy keys in actual.
+		// 2) No unexpected non-noisy keys in actual. Containment allows them:
+		// a member only actual has is a field added.
 		for k := range a {
+			if contain != nil {
+				break
+			}
 			if _, ok := e[k]; ok {
 				continue
 			}
@@ -524,7 +734,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering, ancestorNoisy)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering, ancestorNoisy, contain)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -533,6 +743,20 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				}
 			}
 			out.matches, out.isExact = true, isExact
+			return out, nil
+		}
+
+		// Containment pairs the elements by a matching: an element may contain
+		// more than one expected element, so the first that fits is not
+		// always the one to take.
+		if contain != nil {
+			if !contain.pairAll(len(e), func(i, j int) bool {
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[j], ni, globalKeys, ignoreOrdering, ancestorNoisy, contain)
+				return err == nil && res.matches
+			}) {
+				return out, nil
+			}
+			out.matches, out.isExact = true, true
 			return out, nil
 		}
 
@@ -553,7 +777,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering, ancestorNoisy)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering, ancestorNoisy, contain)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false
@@ -896,215 +1120,6 @@ func ParseIntoJSON(response string) (interface{}, error) {
 		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
 	}
 	return result, nil
-}
-
-// CompareResponses compares response1 (expected) and response2 (actual),
-// updating utils.TemplatizedValues and mutating response1 where appropriate.
-func CompareResponses(response1, response2 *interface{}, key string) {
-	rev := reverseMap(utils.TemplatizedValues) // build once
-	compareZip(response1, response2, key, rev)
-}
-
-// compareZip walks expected & actual in lock-step, updating expected in place.
-func compareZip(exp *interface{}, act *interface{}, key string, rev map[interface{}]string) {
-	if exp == nil || act == nil {
-		return
-	}
-
-	switch ev := (*exp).(type) {
-
-	case geko.ObjectItems:
-		// Build index for actual object once
-		av, ok := (*act).(geko.ObjectItems)
-		if !ok {
-			// type mismatch; nothing to normalize here
-			return
-		}
-		actIdx := buildGekoIndex(av)
-		ekeys := ev.Keys()
-		evals := ev.Values()
-		for i := range ekeys {
-			k := ekeys[i]
-			childKey := k
-			// find actual by key
-			j, ok := actIdx[k]
-			if ok {
-				// recurse into pair
-				compareZip(&evals[i], &av.List[j].Value, childKey, rev)
-				ev.SetValueByIndex(i, evals[i])
-			}
-		}
-
-	case map[string]interface{}:
-		am, ok := (*act).(map[string]interface{})
-		if !ok {
-			return
-		}
-		for k, v := range ev {
-			av, ok := am[k]
-			if ok {
-				child := v
-				compareZip(&child, &av, k, rev)
-				ev[k] = child
-			}
-		}
-
-	case geko.Array:
-		aa, ok := (*act).(geko.Array)
-		if !ok {
-			return
-		}
-		// Walk by index. We only normalize where both sides have an element.
-		n := min(len(aa.List), len(ev.List))
-		for i := 0; i < n; i++ {
-			child := ev.List[i]
-			compareZip(&child, &aa.List[i], "", rev)
-			ev.List[i] = child
-		}
-
-	case []interface{}:
-		aarr, ok := (*act).([]interface{})
-		if !ok {
-			return
-		}
-		n := min(len(aarr), len(ev))
-		for i := 0; i < n; i++ {
-			child := ev[i]
-			compareZip(&child, &aarr[i], "", rev)
-			ev[i] = child
-		}
-
-	case string:
-		normalizeLeaf(&ev, act, key, rev)
-		*exp = ev
-
-	case float64, int64, int, float32, bool:
-		// Convert expected to string for matching with template map,
-		// then restore original type if we change it.
-		orig := *exp
-		s := utils.ToString(ev)
-		if normalizeLeaf(&s, act, key, rev) {
-			// restore original numeric/bool type if possible
-			switch orig.(type) {
-			case float64:
-				*exp = utils.ToFloat(s)
-			case float32:
-				f := utils.ToFloat(s)
-				*exp = float32(f)
-			case int, int64:
-				*exp = utils.ToInt(s)
-			case bool:
-				// utils.ToString(true/false) -> "true"/"false"; try parse back
-				if s == "true" || s == "false" {
-					*exp = (s == "true")
-				} else {
-					*exp = s // fallback
-				}
-			default:
-				*exp = s
-			}
-		}
-		// else unchanged
-
-	default:
-		// Unknown leaf type; nothing to do.
-	}
-}
-
-// normalizeLeaf tries to update a single expected leaf (as string) from actual.
-// Returns true if it mutated the expected leaf string.
-func normalizeLeaf(expStr *string, act *interface{}, key string, rev map[interface{}]string) bool {
-	switch av := (*act).(type) {
-	case geko.ObjectItems:
-		// find same field in actual by key
-		if key == "" {
-			return false
-		}
-		idx, ok := buildGekoIndex(av)[key]
-		if ok {
-			val := av.List[idx].Value
-			return assignFromActual(expStr, &val, key, rev)
-		}
-	case map[string]interface{}:
-		if key == "" {
-			return false
-		}
-		v, ok := av[key]
-		if ok {
-			return assignFromActual(expStr, &v, key, rev)
-		}
-	case geko.Array:
-		// arrays don’t have keyed fields; keep behavior: do nothing here
-		return false
-	case []interface{}:
-		return false
-	default:
-		// actual itself is a primitive at the same path
-		return assignFromActual(expStr, act, key, rev)
-	}
-	return false
-}
-
-// assignFromActual updates expStr (expected) from actual if expStr corresponds
-// to a template placeholder in utils.TemplatizedValues (via rev map).
-func assignFromActual(expStr *string, act *interface{}, key string, rev map[interface{}]string) bool {
-	// direct string
-	k, ok := rev[*expStr]
-	if ok {
-		utils.TemplatizedValues[k] = *act
-		*expStr = utils.ToString(*act)
-		return true
-	}
-
-	// Try integer form
-	i, err := strconv.Atoi(*expStr)
-	if err == nil {
-		k, ok := rev[i]
-		if ok {
-			utils.TemplatizedValues[k] = *act
-			*expStr = utils.ToString(*act)
-			return true
-		}
-	}
-	// Try float32
-	f, err := strconv.ParseFloat(*expStr, 32)
-	if err == nil {
-		k, ok := rev[float32(f)]
-		if ok {
-			utils.TemplatizedValues[k] = *act
-			*expStr = utils.ToString(*act)
-			return true
-		}
-	}
-	// Try float64
-	f64, err := strconv.ParseFloat(*expStr, 64)
-	if err == nil {
-		k, ok := rev[f64]
-		if ok {
-			utils.TemplatizedValues[k] = *act
-			*expStr = utils.ToString(*act)
-			return true
-		}
-	}
-	return false
-}
-
-// buildGekoIndex builds key->index for a geko.ObjectItems once.
-func buildGekoIndex(obj geko.ObjectItems) map[string]int {
-	idx := make(map[string]int, len(obj.List))
-	keys := obj.Keys()
-	for i := range keys {
-		idx[keys[i]] = i
-	}
-	return idx
-}
-
-func reverseMap(m map[string]interface{}) map[interface{}]string {
-	var reverseMap = make(map[interface{}]string)
-	for key, val := range m {
-		reverseMap[val] = key
-	}
-	return reverseMap
 }
 
 func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, error) {

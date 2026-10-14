@@ -2,19 +2,23 @@ package replay
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"sort"
+	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
@@ -181,7 +185,7 @@ func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
 // recognises -p/--publish on the command line, and `docker compose up` carries
 // none, so the fixed --delay is the entire protection. That is not a
 // theoretical gap — keploy's own generated compose holds the application behind
-// the agent's healthcheck (start_period 10s, interval 5s), so on a contended
+// the agent's ready-file healthcheck, so on a contended
 // machine the app starts as the delay expires, the first test window opens
 // while the app is still booting, and its bootstrap queries are scored against
 // a per-test pool that has nothing in it. The app then dies on a refused
@@ -245,7 +249,7 @@ func composeFileFromCommand(cmd string) (string, bool) {
 	fields := strings.Fields(cmd)
 	isCompose := false
 	for i, f := range fields {
-		if f == "compose" || strings.HasPrefix(f, "docker-compose") {
+		if f == "compose" || strings.HasPrefix(f, "docker-compose") || strings.HasPrefix(f, "podman-compose") {
 			isCompose = true
 		}
 		if (f == "-f" || f == "--file") && i+1 < len(fields) {
@@ -345,9 +349,24 @@ const resetProbeInterval = 200 * time.Millisecond
 //
 // It resolves from the pre-template-render URL, so a {{ }} placeholder in the
 // host/port (as opposed to the path/query/body, where they actually live) would
-// make the probe target diverge from the dial. That is best-effort only: a wrong
-// target just times out within resetResendReadyTimeout and the bounded re-send
-// still runs, so it never affects correctness.
+// make the probe target diverge from the dial. That is best-effort only and never
+// affects correctness, but MIND THE BUDGET, because it differs by caller:
+//
+//   - waitForResetResendReady bounds a wrong target by resetResendReadyTimeout
+//     (5s) and the re-send still runs.
+//   - gateOnAppAddress's HTTP stage, via resolveTestSetProbeTarget, is bounded by
+//     test.healthPollTimeout instead — 3 minutes by default and operator-
+//     configurable. So a target that is resolvable but DEAD (an un-rendered
+//     template in the host, or a --host override pointing nowhere) makes the
+//     pre-test gate retry until that budget expires before warning and firing
+//     anyway, on every test-set.
+//
+// That residual is deliberate rather than overlooked. Shortening it would take
+// the budget away from the case the gate exists for — a cold application start
+// measured at ~55s to first serve — and a target this resolver gets wrong is
+// almost always one the real dispatch will get wrong too, so the run was going
+// to fail regardless. It is bounded, warn-and-proceed, and never turns a passing
+// run into a failing one.
 func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
 	if tc == nil || tc.Kind != models.HTTP {
 		return "", "", "", false
@@ -386,6 +405,32 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 	return scheme, host, port, true
 }
 
+// isTLSVerificationError reports whether err is the TLS handshake failing on
+// certificate VERIFICATION, as opposed to the connection never getting that far.
+//
+// The distinction is the whole point: an untrusted or mismatched certificate
+// means the peer is up, listening, and speaking TLS. A refusal, reset or timeout
+// means it is not. A readiness probe cares only about the latter.
+func isTLSVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cve *tls.CertificateVerificationError
+	if errors.As(err, &cve) {
+		return true
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return true
+	}
+	var hostname x509.HostnameError
+	if errors.As(err, &hostname) {
+		return true
+	}
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &invalid)
+}
+
 // waitForHTTPServing polls until an HTTP round-trip to host:port completes with
 // ANY status — proving the proxy→app path actually serves — or ctx expires. A
 // transport reset / refusal / timeout counts as not-ready and keeps waiting.
@@ -400,7 +445,38 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 // invoking a handler; and in the reset (failure) state the userland-proxy resets
 // the probe before the app ever sees it, so it never reaches application code.
 func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
-	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), keployReadinessProbePath)
+	return waitForHTTPServingPath(ctx, scheme, host, port, keployReadinessProbePath)
+}
+
+// waitForHTTPServingPath is waitForHTTPServing with an explicit request path, so
+// an operator-supplied health path (test.healthPath) can be probed instead of the
+// keploy-reserved one. An empty path falls back to the reserved probe path.
+//
+// The contract is identical either way: ANY completed HTTP response — including
+// 404 or 503 — proves the proxy→app path serves, which is the only thing a
+// readiness gate needs to know. We deliberately do NOT require 2xx here: a health
+// endpoint that reports "unhealthy" has still proved the app is listening and
+// answering, and holding replay back for application-level health would turn a
+// readiness gate into a liveness policy.
+func waitForHTTPServingPath(ctx context.Context, scheme, host, port, path string) error {
+	return waitForHTTPServingPathOr(ctx, scheme, host, port, path, nil)
+}
+
+// errProbeTargetUnreachable is waitForHTTPServingPathOr giving up on its target
+// because giveUp said the host cannot reach it.
+var errProbeTargetUnreachable = errors.New("the host cannot reach the probed address")
+
+// waitForHTTPServingPathOr is waitForHTTPServingPath that also stops, with
+// errProbeTargetUnreachable, when giveUp (if set) returns true after a failed
+// probe.
+func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path string, giveUp func() bool) error {
+	if path == "" {
+		path = keployReadinessProbePath
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), path)
 	client := &http.Client{
 		Timeout: resetProbeRequestTimeout,
 		// Don't follow redirects — any 3xx already proves the app serves.
@@ -422,6 +498,20 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			// A certificate we do not trust still answers the only question this
+			// gate asks. Verification failing means the server completed a TLS
+			// handshake and presented a certificate — it is listening and
+			// serving; we simply do not vouch for who it is. A self-signed cert
+			// is the norm for a local or CI HTTPS fixture, so treating that as
+			// "not ready" would burn the whole ceiling on every run.
+			//
+			// Deliberately NOT solved with InsecureSkipVerify: that disables the
+			// check everywhere in this client and is a real finding for scanners
+			// to flag. Reading the specific error keeps verification on and only
+			// reinterprets its meaning for a readiness decision.
+			if isTLSVerificationError(err) {
+				return true
+			}
 			return false // transport reset / refused / timeout → not ready yet
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -435,6 +525,9 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 	ticker := time.NewTicker(resetProbeInterval)
 	defer ticker.Stop()
 	for {
+		if giveUp != nil && giveUp() {
+			return errProbeTargetUnreachable
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -446,7 +539,274 @@ func waitForHTTPServing(ctx context.Context, scheme, host, port string) error {
 	}
 }
 
-func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config) bool {
+// gateOnAppAddress blocks until host:port looks ready, then returns. It is the
+// single implementation behind every pre-test readiness gate.
+//
+// Two stages, because one is not enough:
+//
+//  1. TCP accept. Proves something is bound. Works for any protocol, so it is
+//     all we can do for a non-HTTP app.
+//  2. A real HTTP round-trip, but ONLY when the app is known to serve HTTP.
+//
+// Stage 2 exists because stage 1 is not sufficient for the case this gate was
+// built for. Docker's userland proxy binds and ACCEPTS on the published host
+// port as soon as the container is created — before anything inside the
+// container is listening — and then RESETS the connection when it cannot reach
+// the app. A TCP-accept gate therefore passes instantly and hands replay a port
+// that will reset its first request, which is exactly the status_code=0 flake on
+// the first test of a set. Only a completed HTTP exchange proves the whole
+// proxy→app path carries a request.
+//
+// "Known to serve HTTP" is not a guess: it is derived from the recorded test set
+// (see testSetServesHTTP). If we recorded HTTP requests against this app, the app
+// serves HTTP. For a non-HTTP app (MySQL, Redis, a gRPC-only service) stage 2 is
+// skipped entirely rather than burning the ceiling on a probe that can never
+// parse a response.
+//
+// Best-effort throughout, preserving the pre-existing contract: it can only ever
+// wait LONGER than --delay, never shorter; a timeout WARNS and proceeds rather
+// than failing the run; and it never weakens an assertion. Returns false only on
+// context cancellation (user abort).
+func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Config, host, port, label string, probe httpProbeTarget) bool {
+	ceiling := cfg.Test.HealthPollTimeout
+	if ceiling <= 0 {
+		ceiling = config.DefaultHealthPollTimeout
+	}
+	deadline := time.Now().Add(ceiling)
+
+	if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
+			zap.String("gate", label),
+			zap.String("host", host),
+			zap.String("port", port),
+			zap.Duration("ceiling", ceiling),
+			zap.Error(err))
+		return true
+	}
+
+	if !probe.ok {
+		return true
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return true
+	}
+	hctx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+
+	for {
+		// Scheme comes from the resolved target; healthScheme is an explicit
+		// override for the rare case an operator needs to force it.
+		scheme := probe.scheme
+		if forced := strings.TrimSpace(cfg.Test.HealthScheme); forced != "" && !strings.EqualFold(forced, scheme) {
+			if strings.EqualFold(forced, "http") || strings.EqualFold(forced, "https") {
+				scheme = strings.ToLower(forced)
+			}
+		}
+		err := waitForHTTPServingPathOr(hctx, scheme, probe.host, probe.port, cfg.Test.HealthPath, probe.lostReach(hctx))
+		if !errors.Is(err, errProbeTargetUnreachable) {
+			return reportHTTPGate(ctx, logger, label, cfg, ceiling, probe, err)
+		}
+		// Chosen before the app listened, and it turns out to listen where the
+		// host cannot reach it (only on 127.0.0.1 behind a published port):
+		// it would never answer, so probe the set's next test instead.
+		logger.Debug("readiness gate: the host cannot reach the probed test's address; probing the next test",
+			zap.String("gate", label), zap.String("probeHost", probe.host), zap.String("probePort", probe.port))
+		if probe = probe.src.nextTarget(hctx); !probe.ok {
+			logger.Debug("readiness gate: no HTTP test the host can reach; the TCP-accept stage stands", zap.String("gate", label))
+			return ctx.Err() == nil
+		}
+	}
+}
+
+// reportHTTPGate logs the outcome of gateOnAppAddress's HTTP stage against
+// probe and returns what the gate returns.
+func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *config.Config, ceiling time.Duration, probe httpProbeTarget, err error) bool {
+	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		logger.Warn("app accepted TCP but never completed an HTTP round-trip within the ceiling; firing tests anyway (replay may see status_code got=0)",
+			zap.String("gate", label),
+			zap.String("probeHost", probe.host),
+			zap.String("probePort", probe.port),
+			zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)),
+			zap.Duration("ceiling", ceiling),
+			zap.Error(err))
+		return true
+	}
+	logger.Debug("app readiness confirmed by a completed HTTP round-trip",
+		zap.String("gate", label),
+		zap.String("probeHost", probe.host),
+		zap.String("probePort", probe.port),
+		zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)))
+	return true
+}
+
+// healthProbePathForLog reports the path gateOnAppAddress actually requests.
+func healthProbePathForLog(configured string) string {
+	if configured == "" {
+		return keployReadinessProbePath
+	}
+	if !strings.HasPrefix(configured, "/") {
+		return "/" + configured
+	}
+	return configured
+}
+
+// httpProbeTarget is the address a recorded HTTP test case actually dials, used
+// as the target of the readiness gate's HTTP stage.
+type httpProbeTarget struct {
+	scheme, host, port string
+	// appPort is the app's port the test was recorded on, which port leads
+	// to; 0 when not known.
+	appPort uint16
+	ok      bool
+	// src, when set, is where the target came from: the gate asks it again
+	// while probing, and takes the set's next target from it when the host
+	// turns out unable to reach this one.
+	src *probeTargetSource
+}
+
+// resolveTestSetProbeTarget returns the address the readiness gate should complete
+// an HTTP round-trip against, derived from the recorded test set.
+//
+// This is EVIDENCE, not a guess, and the distinction is the whole point. An
+// earlier revision decided only WHETHER to escalate from the test set and then
+// escalated against whatever address the docker/compose heuristic produced —
+// dockerPublishedHostPort returns the FIRST -p flag it finds, with no check that
+// it is the HTTP port. For `-p 5432:5432 -p 8080:8080` that is the database, and
+// an HTTP probe against it can never succeed: stage 1 passes instantly because
+// the port is bound, then stage 2 burns the entire ceiling on EVERY run before
+// warning and proceeding. Same for an operator who points appReadyProbeAddr at a
+// non-HTTP service, which its own documentation invites.
+//
+// resolveProbeTarget mirrors the simulation's own ResolveTestTarget (ConfigHost /
+// --host override, replaceWith, port precedence) so the probe hits exactly what
+// the test will dial, and is address-family-correct — an IPv6 "localhost" dial is
+// gated on the IPv6 path, not a mismatched 127.0.0.1. It is the same resolver the
+// reset re-send gate already uses.
+//
+// A test whose address reach says the host can never reach (in Docker mode, a
+// port the run command does not publish) is not evidence of anything: probing it
+// spends the whole ceiling on every set. It is skipped for the next test, and
+// each address is asked about once here for each app port its tests were
+// recorded on: whether an address reaches the app depends on the app port it
+// has to lead to, so one test's verdict is not another's when --port sends
+// tests recorded on different app ports to one host port. Whether the app
+// listens where a published port reaches it is often unknown this early (the
+// app is still starting), so the gate asks again while it probes; see
+// lostReach.
+//
+// Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
+// unresolvable or unreachable target); the caller then keeps the TCP-accept stage
+// only, which is exactly the pre-existing behaviour.
+func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability) httpProbeTarget {
+	src := &probeTargetSource{
+		testCfg: testCfg, testCases: testCases, testSetID: testSetID, logger: logger,
+		reach: reach, seen: map[string]bool{},
+	}
+	return src.nextTarget(ctx)
+}
+
+// probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
+// probe targets: each distinct address once for each app port, skipping those
+// reach says the host cannot reach.
+type probeTargetSource struct {
+	testCfg   config.Test
+	testCases []*models.TestCase
+	testSetID string
+	logger    *zap.Logger
+	reach     pkg.AppPortReachability
+	next      int             // the next test case to look at
+	seen      map[string]bool // addresses, for an app port, already returned or skipped
+}
+
+// nextTarget is the next address the set's tests dial that the host may reach,
+// or ok=false when there is none left.
+func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
+	for s.next < len(s.testCases) {
+		tc := s.testCases[s.next]
+		s.next++
+		if tc == nil || tc.Kind != models.HTTP {
+			continue
+		}
+		scheme, host, port, ok := resolveProbeTarget(s.testCfg, tc, s.testSetID, s.logger)
+		if !ok {
+			continue
+		}
+		addr := net.JoinHostPort(host, port)
+		key := addr + " for " + strconv.Itoa(int(tc.AppPort))
+		if s.seen[key] {
+			continue
+		}
+		s.seen[key] = true
+		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port, tc.AppPort) {
+			s.logger.Debug("readiness gate: not probing a test the host cannot reach",
+				zap.String("testcase", tc.Name), zap.String("address", addr), zap.Uint16("appPort", tc.AppPort))
+			continue
+		}
+		return httpProbeTarget{scheme: scheme, host: host, port: port, appPort: tc.AppPort, ok: true, src: s}
+	}
+	return httpProbeTarget{}
+}
+
+// The gate re-asks whether the host can reach its probe target first after
+// probeReachRecheckFirst of failed probes, then at doubling intervals up to
+// probeReachRecheckMax: a slow start costs a handful of questions, not one per
+// probe. Vars only so tests can shorten them.
+var (
+	probeReachRecheckFirst = time.Second
+	probeReachRecheckMax   = 16 * time.Second
+)
+
+// lostReach is the check the gate runs after each failed probe of t: whether
+// the host has turned out unable to reach it. It was chosen when the app may
+// not have been listening yet; once it is, reach can see that it listens only
+// where no published port leads (127.0.0.1 in its container), and a probe
+// there would fail until the ceiling. nil when there is nothing to ask.
+func (t httpProbeTarget) lostReach(ctx context.Context) func() bool {
+	if t.src == nil || t.src.reach == nil {
+		return nil
+	}
+	interval := probeReachRecheckFirst
+	due := time.Now().Add(interval)
+	return func() bool {
+		if time.Now().Before(due) {
+			return false
+		}
+		if interval < probeReachRecheckMax {
+			interval = min(2*interval, probeReachRecheckMax)
+		}
+		due = time.Now().Add(interval)
+		return probeTargetUnreachable(ctx, t.src.reach, t.host, t.port, t.appPort)
+	}
+}
+
+// probeTargetUnreachable asks reach about host:port, for the app's server on
+// appPort (0: not known). reach bounds its own wait.
+func probeTargetUnreachable(ctx context.Context, reach pkg.AppPortReachability, host, port string, appPort uint16) bool {
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return false
+	}
+	return reach.UnreachableAppPort(ctx, host, uint16(n), appPort) != ""
+}
+
+// appPortReachabilityOf is the instrumentation's AppPortReachability when it
+// has one (Docker mode), else nil.
+func appPortReachabilityOf(instrumentation Instrumentation) pkg.AppPortReachability {
+	if reach, ok := instrumentation.(pkg.AppPortReachability); ok {
+		return reach
+	}
+	return nil
+}
+
+func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
 	healthURL := cfg.Test.HealthURL
@@ -501,20 +861,43 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// --delay behavior. This can only ever wait LONGER than --delay, never
 		// shorter, and never weakens an assertion — a fast-ready port returns
 		// instantly.
-		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
-			ceiling := cfg.Test.HealthPollTimeout
-			if ceiling <= 0 {
-				ceiling = 60 * time.Second
+
+		// An embedder can state that probing is unsafe here. Honoured
+		// for every address-based gate below, not just the fallback,
+		// and for the reset-resend readiness re-gate in replay.go:
+		// the hazard is the connect-then-close itself, and all of these
+		// perform one. --health-url is untouched — that is an explicit
+		// operator request rather than an inferred probe.
+		//
+		// This is a stated intent, not an inferred one, because the
+		// inference is unreliable: a caller in this position still sets
+		// test.host (it rewrites recorded request URLs), so "no gate
+		// input was supplied" is simply false for it, and the
+		// resolved-test-target fallback would reach for that address
+		// and probe it anyway. See config.Test.DisableAppReadyProbe.
+		if cfg.Test.DisableAppReadyProbe {
+			// Info, not Debug: a safety gate being switched off should
+			// be visible at default verbosity, the way the health poll
+			// announces itself below.
+			logger.Info("app-readiness probing disabled by configuration; using the delay floor only",
+				zap.Duration("delay", delay),
+			)
+			// The delay select above can take its timer branch even when
+			// ctx is already cancelled. Every other exit from here goes
+			// through gateOnAppAddress, which checks; this one must too,
+			// or a cancelled run reports ready and fires tests instead
+			// of reporting the abort.
+			if ctx.Err() != nil {
+				return false
 			}
-			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				logger.Warn("app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
-					zap.String("host", host),
-					zap.String("port", port),
-					zap.Duration("ceiling", ceiling),
-					zap.Error(err))
+			return true
+		}
+
+		gated := false
+		if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
+			gated = true
+			if !gateOnAppAddress(ctx, logger, cfg, host, port, "docker-published-port", probe) {
+				return false
 			}
 		}
 
@@ -522,19 +905,9 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 		// compose file instead of the command line. Identical contract to the
 		// -p gate above — best-effort, bounded, can only ever wait longer.
 		if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
-			ceiling := cfg.Test.HealthPollTimeout
-			if ceiling <= 0 {
-				ceiling = 60 * time.Second
-			}
-			if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				logger.Warn("compose app host port did not become ready within the ceiling; firing tests anyway (replay may see status_code got=0)",
-					zap.String("host", host),
-					zap.String("port", port),
-					zap.Duration("ceiling", ceiling),
-					zap.Error(err))
+			gated = true
+			if !gateOnAppAddress(ctx, logger, cfg, host, port, "compose-published-port", probe) {
+				return false
 			}
 		}
 
@@ -559,19 +932,31 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 				if host == "" {
 					host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate
 				}
-				ceiling := cfg.Test.HealthPollTimeout
-				if ceiling <= 0 {
-					ceiling = 60 * time.Second
+				gated = true
+				if !gateOnAppAddress(ctx, logger, cfg, host, port, "app-ready-probe-addr", probe) {
+					return false
 				}
-				if err := pkg.WaitForPort(ctx, host, port, ceiling); err != nil {
-					if ctx.Err() != nil {
-						return false
-					}
-					logger.Warn("app ready-probe address did not accept a connection within the ceiling; firing tests anyway (replay may see connection refused)",
-						zap.String("addr", addr),
-						zap.Duration("ceiling", ceiling),
-						zap.Error(err))
-				}
+			}
+		}
+
+		// Nothing above could name the app's address — a NATIVE app, the common
+		// case: no docker -p publish, no compose file, no operator-supplied
+		// appReadyProbeAddr. Until now that meant no readiness gate at all beyond
+		// the fixed --delay, so a native app slower than that delay had its first
+		// test fired into a socket nothing was listening on yet, producing exactly
+		// the status_code=0 this whole gate exists to prevent. Observed on the
+		// python-cred-expiry lane (`python3 recorded_app.py`, --delay 5): 2 of 4
+		// tests failed with expected=200 got=0.
+		//
+		// The recorded test set already told us where it dials, so use it. There
+		// is nothing to guess: probe.host/probe.port IS the app's address for the
+		// purposes of these tests, and the same best-effort contract holds —
+		// bounded by the ceiling, warn-and-proceed on timeout, only ever waits
+		// longer than --delay. Guarded on `gated` purely to avoid probing twice
+		// when a published address already covered it.
+		if !gated && probe.ok {
+			if !gateOnAppAddress(ctx, logger, cfg, probe.host, probe.port, "resolved-test-target", probe) {
+				return false
 			}
 		}
 		return true
@@ -579,7 +964,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 
 	pollCeiling := cfg.Test.HealthPollTimeout
 	if pollCeiling <= 0 {
-		pollCeiling = 60 * time.Second
+		pollCeiling = config.DefaultHealthPollTimeout
 	}
 
 	logger.Info("polling application health endpoint before firing tests",
@@ -760,38 +1145,110 @@ func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise confi
 	return headerOnly
 }
 
-// ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
-func ReplaceBaseURL(newURL, oldURL string) (string, error) {
-	parsedOldURL, err := url.Parse(oldURL)
+// parseBasePath reads test.basePath, which takes one of two shapes: an http or
+// https URL with a host, as in "http://staging:8080/api", which names where
+// the app is and may add a prefix to every path; or a path prefix alone, as in
+// "/api", for the app at its usual address. Every other shape is an error.
+//
+// A scheme with no host ("http:staging:8080", "http:/staging", "http://") and
+// a host with no scheme ("staging/api", "localhost:8080") name no address a
+// test can be sent to: taken for either shape, they would send the tests to
+// test.host, which is localhost unless set. A user, a query or a fragment has
+// nowhere to go, since each test sends its own.
+func parseBasePath(basePath string) (*url.URL, error) {
+	shown := withoutUserinfo(basePath)
+	parsed, err := url.Parse(basePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse the old URL: %v", err)
+		// url.Parse's own error quotes what it was given, user and all.
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			err = parseErr.Err
+		}
+		return nil, fmt.Errorf("%q is not a URL: %w", shown, err)
 	}
+	switch {
+	case parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "":
+		return nil, fmt.Errorf("%q has a user, a query or a fragment, which a base path cannot carry: each test sends its own", shown)
+	case parsed.Scheme == "" && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/"):
+		return parsed, nil
+	case parsed.Scheme != "http" && parsed.Scheme != "https":
+		return nil, fmt.Errorf("%q is neither an http or https URL nor a path prefix that starts with /", shown)
+	case parsed.Hostname() == "":
+		// An opaque URL ("http:staging:8080") has no host either.
+		return nil, fmt.Errorf("%q names no host: write it as scheme://host", shown)
+	}
+	return parsed, nil
+}
 
-	parsedNewURL, err := url.Parse(newURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse the new URL: %v", err)
+// withoutUserinfo is a base path as a log line or an error shows it: with any
+// user and password taken out, whether or not it parses as a URL. The part it
+// reads as the host is the one url.Parse would: from "://" up to the first
+// "/", "?" or "#".
+func withoutUserinfo(basePath string) string {
+	scheme, rest, ok := strings.Cut(basePath, "://")
+	if !ok {
+		return basePath
 	}
-	// if scheme is empty, then add the scheme from the old URL in order to parse it correctly
-	if parsedNewURL.Scheme == "" {
-		parsedNewURL.Scheme = parsedOldURL.Scheme
-		parsedNewURL, err = url.Parse(parsedNewURL.String())
-		if err != nil {
-			return "", fmt.Errorf("failed to parse the scheme added new URL: %v", err)
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	at := strings.LastIndex(rest[:end], "@")
+	if at < 0 {
+		return basePath
+	}
+	return scheme + "://" + rest[at+1:]
+}
+
+// splitURLOrigin cuts a URL after its host: "http://localhost:8080/orders?id=1"
+// is the scheme "http" and, after the host, the rest "/orders?id=1". It reads
+// nothing after the host, and reports false for a URL that does not start
+// with a scheme and a host.
+func splitURLOrigin(rawURL string) (scheme, rest string, ok bool) {
+	scheme, after, found := strings.Cut(rawURL, "://")
+	if !found || scheme == "" {
+		return "", "", false
+	}
+	for i, c := range scheme {
+		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !letter && (i == 0 || !strings.ContainsRune("0123456789+-.", c)) {
+			return "", "", false
 		}
 	}
-
-	parsedOldURL.Scheme = parsedNewURL.Scheme
-	parsedOldURL.Host = parsedNewURL.Host
-	apiPath := path.Join(parsedNewURL.Path, parsedOldURL.Path)
-
-	parsedOldURL.Path = apiPath
-	parsedOldURL.RawPath = apiPath
-	replacedURL := parsedOldURL.String()
-	decodedURL, err := url.PathUnescape(replacedURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode the URL: %v", err)
+	end := strings.IndexAny(after, "/?#")
+	if end < 0 {
+		end = len(after)
 	}
-	return decodedURL, nil
+	return scheme, after[end:], true
+}
+
+// ReplaceBaseURL points a recorded request URL at a base path: the base path's
+// scheme and host replace the URL's, and its path goes in front of the URL's.
+// A base path that is only a path ("/api") keeps the URL's scheme and leaves
+// the host empty, for the caller's usual host (test.host) to fill.
+//
+// Nothing after the URL's host is read or changed. Its path, query and
+// fragment are the bytes the app was sent when the test was recorded. Decoded
+// and written back they would be another request: %20 would become a space,
+// %2F a path separator, %23 the start of a fragment and %26 a second
+// parameter, a trailing slash would go, and so would a {{template}} as
+// written.
+func ReplaceBaseURL(newURL, oldURL string) (string, error) {
+	scheme, rest, ok := splitURLOrigin(oldURL)
+	if !ok {
+		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", oldURL)
+	}
+	base, err := parseBasePath(newURL)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme != "" {
+		scheme = base.Scheme
+	}
+	// The host as a URL writes it, escaped: an IPv6 zone's % is %25 there,
+	// and the URL has to parse again.
+	host := strings.TrimPrefix((&url.URL{Host: base.Host}).String(), "//")
+	return scheme + "://" + host + strings.TrimRight(base.EscapedPath(), "/") + rest, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
@@ -906,9 +1363,10 @@ func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mappi
 // the expected set flags a mismatch — UNLESS it is a mock that doesn't
 // participate in the per-test comparison. Only PER-TEST mocks are compared;
 // reusable/startup-tier mocks (session / connection / config, recorded once at
-// app boot and reused) and DNS (non-deterministic resolution order) are
-// ignored, mirroring the non-streaming path's filtering. They belong in the
-// mapping but must not, by their reuse, falsely demote a test to OBSOLETE.
+// app boot and reused), DNS (non-deterministic resolution order) and connection
+// failures are ignored through consumedOutsideAssertion, the filter the
+// non-streaming path uses. They belong in the mapping but must not falsely
+// demote a test to OBSOLETE.
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
@@ -918,10 +1376,8 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 	for _, m := range consumedMocks {
 		if !expectedMap[m.Name] {
 			// An extra consumed mock that wasn't in the mapping is a mismatch
-			// ONLY if it's a per-test mock. Reusable/startup-tier mocks
-			// (session/connection/config) and DNS are excluded from the
-			// comparison — they are reused / non-deterministically attributed.
-			if m.Kind != models.DNS && !isReusableTierState(m) {
+			// ONLY if it takes part in the per-test comparison.
+			if !consumedOutsideAssertion(m) {
 				return false
 			}
 		}
@@ -1068,6 +1524,60 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 	})
 }
 
+// keepConnFailureMappings adds to the mapping write the connection-failure
+// entries the mapping on disk holds for what the write is about to replace:
+// mapdb.Insert replaces a written test's entries, and the startup section when
+// the write has one. The written entries come from what this run consumed, and
+// this keploy never consumes a connection failure, so without this a
+// --update-test-mapping run would strip them from the recording for good, and
+// a keploy that replays them would no longer serve one to its test (or at
+// boot). An entry is a connection failure by its own kind or, for an entry
+// recorded without one, by mockKindByName.
+func keepConnFailureMappings(write *models.Mapping, onDisk map[string][]models.MockEntry, onDiskStartup []models.MockEntry, mockKindByName map[string]models.Kind) {
+	if write == nil {
+		return
+	}
+	keep := func(written, disk []models.MockEntry) []models.MockEntry {
+		have := make(map[string]bool, len(written))
+		for _, m := range written {
+			have[m.Name] = true
+		}
+		for _, e := range disk {
+			if have[e.Name] || !isConnFailureEntry(e, mockKindByName) {
+				continue
+			}
+			written = append(written, e)
+			have[e.Name] = true
+		}
+		return written
+	}
+	for i := range write.TestCases {
+		write.TestCases[i].Mocks = keep(write.TestCases[i].Mocks, onDisk[write.TestCases[i].ID])
+	}
+	if len(write.Startup) > 0 {
+		write.Startup = keep(write.Startup, onDiskStartup)
+	}
+}
+
+// holdsConnFailures reports whether a test set's mocks (mockKindByName, which
+// lists the ones the decoders skipped too) include a connection failure: only
+// then can its mapping hold entries keepConnFailureMappings keeps.
+func holdsConnFailures(mockKindByName map[string]models.Kind) bool {
+	for _, k := range mockKindByName {
+		if k == models.ConnectionFailure {
+			return true
+		}
+	}
+	return false
+}
+
+func isConnFailureEntry(e models.MockEntry, mockKindByName map[string]models.Kind) bool {
+	if e.Kind != "" {
+		return models.Kind(e.Kind) == models.ConnectionFailure
+	}
+	return mockKindByName[e.Name] == models.ConnectionFailure
+}
+
 type TestFailure struct {
 	TestSetID      string
 	TestID         string
@@ -1116,17 +1626,23 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		ActualMocks:   []string{},
 		FailureReason: models.ErrMockNotFound,
 		MismatchReport: &models.MockMismatchReport{
-			Protocol:       call.Protocol,
-			ActualSummary:  call.ActualSummary,
-			Destination:    call.Destination,
-			ClosestMock:    call.ClosestMock,
-			Diff:           call.Diff,
-			NextSteps:      call.NextSteps,
-			MatchPhase:     call.MatchPhase,
-			CandidateCount: call.CandidateCount,
-			FieldDiffs:     call.FieldDiffs,
-			ClosestMockReq: call.ClosestMockReq,
-			ReceivedReq:    call.ReceivedReq,
+			At:            call.At,
+			Protocol:      call.Protocol,
+			ActualSummary: call.ActualSummary,
+			Destination:   call.Destination,
+			ClosestMock:   call.ClosestMock,
+			Diff:          call.Diff,
+			NextSteps:     call.NextSteps,
+			MatchPhase:    call.MatchPhase,
+			// Carried across so the CLI rendering can tell an out-of-scope
+			// destination from a drifted request; the two need different
+			// artifacts, not just different hints.
+			DestinationScope: call.DestinationScope,
+			CandidateCount:   call.CandidateCount,
+			FieldDiffs:       call.FieldDiffs,
+			ClosestMockReq:   call.ClosestMockReq,
+			ReceivedReq:      call.ReceivedReq,
+			Differs:          call.Differs,
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
@@ -1243,9 +1759,14 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			fmt.Printf("\nTest: %s / %s\n", testSetID, testID)
 
 			var mappingNotes []string
+			var anyOutOfScope bool
 			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
 					printMismatchReport(failure.MismatchReport)
+					if failure.MismatchReport != nil &&
+						failure.MismatchReport.DestinationScope == models.DestinationScopeNotInComparedSet {
+						anyOutOfScope = true
+					}
 				}
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {
 					differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
@@ -1269,6 +1790,14 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			for _, note := range mappingNotes {
 				fmt.Printf("  %s\n", note)
 			}
+			// ONCE PER TEST, not once per missed call. The likely causes are
+			// static text that is identical for every out-of-scope miss, and
+			// one out-of-scope container produces one miss per outgoing call
+			// it makes — inlining them in each call's hint put the same ~1 KB
+			// paragraph on screen dozens of times per test.
+			if anyOutOfScope {
+				fmt.Println(models.RenderOutOfScopeDestinationCauses("  "))
+			}
 		}
 	}
 	fmt.Println()
@@ -1283,11 +1812,22 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		fmt.Println("  Outgoing call mock was not matched")
 		return
 	}
+	// When nothing in the compared set targets this destination there is no
+	// meaningful "closest mock": the matcher picked the least-distant mock in
+	// the pool, which belongs to a DIFFERENT upstream. Naming it in the
+	// heading and rendering a side-by-side diff against it invites the reader
+	// to reconcile two requests that were never related — the first cut of
+	// this diagnostic fixed only the hint and left that diff leading the
+	// output. The structured evidence (ClosestMock, FieldDiffs, both rendered
+	// requests) stays on the report object for the yaml/platform consumers;
+	// only this human rendering suppresses it.
+	outOfScope := r.DestinationScope == models.DestinationScopeNotInComparedSet
+
 	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
 	if r.Destination != "" {
 		heading += fmt.Sprintf("  →  %s", r.Destination)
 	}
-	if r.ClosestMock != "" {
+	if r.ClosestMock != "" && !outOfScope {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
 	}
 	if r.MatchPhase != "" {
@@ -1300,6 +1840,20 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	fmt.Println(heading)
 
 	switch {
+	case outOfScope:
+		// Say why the diff is missing, so its absence reads as a deliberate
+		// answer rather than a renderer that gave up — but say it in six
+		// words: the hint printed immediately below already opens with "No
+		// recorded <protocol> mock in the compared set targets <host>." and a
+		// full second copy of that sentence, once per missed call, was pure
+		// duplication.
+		fmt.Println("  (closest-mock diff omitted — see hint)")
+	case r.MatchPhase == models.MatchPhaseVariable && r.Diff != "":
+		// A test variable did not hold: the recording is not what the call
+		// should have sent (it holds the recorded value, not this run's), so
+		// a request diff against it would mislead. The diff names the
+		// variable, the value it has in this test and the one the call sent.
+		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
 		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:
@@ -1422,4 +1976,86 @@ func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
 		table.Append([]string{d.Path, exp, rec})
 	}
 	table.Render()
+}
+
+// setStartupMocks records the test-set-scoped startup section on a mapping
+// being built during replay.
+//
+// consumed is the mock set captured by GetConsumedMocks immediately after the
+// application became ready and before the first test case ran, so every entry
+// is boot traffic by construction — there is no need to infer membership from
+// per-test window arithmetic.
+//
+// Deduped by name and order-stable, so re-running a test set produces a
+// byte-identical section rather than churning mappings.yaml.
+//
+// A mock may legitimately appear BOTH here and under a test's list: session-
+// and connection-tier mocks are consumed at boot and again by tests that
+// re-handshake, and upsertActualTestMockMapping deliberately keeps those in the
+// per-test list ("always keep" carve-out). Both sides only ever ADD names to
+// the pool the agent loads, so the overlap is harmless — and removing it would
+// reintroduce the empty-mapping bug that carve-out exists to prevent.
+func setStartupMocks(mapping *models.Mapping, consumed []models.MockState) {
+	if mapping == nil || len(consumed) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(consumed))
+	entries := make([]models.MockEntry, 0, len(consumed))
+	for _, m := range consumed {
+		if m.Name == "" {
+			continue
+		}
+		if _, dup := seen[m.Name]; dup {
+			continue
+		}
+		seen[m.Name] = struct{}{}
+
+		timestamp := m.Timestamp
+		if m.ReqTimestampMock != "" {
+			if t, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+				timestamp = t.Unix()
+			}
+		}
+		entries = append(entries, models.MockEntry{
+			Name:             m.Name,
+			Kind:             string(m.Kind),
+			Timestamp:        timestamp,
+			ReqTimestampMock: m.ReqTimestampMock,
+			ResTimestampMock: m.ResTimestampMock,
+		})
+	}
+
+	mapping.Startup = entries
+}
+
+// dropStartupMockInfos removes test-set-scoped startup mocks from a
+// MockMismatch side.
+//
+// Applied to expected AND actual, mirroring pkg/service/runner's
+// checkMockMismatches and the DNS carve-out beside it. Startup mocks belong to
+// the test set, not to any one test, so neither their presence nor their
+// absence in a given test is a mismatch worth reporting — and because a
+// session- or connection-tier mock legitimately appears in both the startup
+// section and a per-test list, filtering only one side would turn every such
+// name into a phantom on the other.
+//
+// Report-only: MockMismatches does not feed the pass/fail or obsolescence
+// decision, which is why this cannot mask a real failure.
+func dropStartupMockInfos(infos []models.MockMismatchMock, startupNames []string) []models.MockMismatchMock {
+	if len(infos) == 0 || len(startupNames) == 0 {
+		return infos
+	}
+	startup := make(map[string]struct{}, len(startupNames))
+	for _, n := range startupNames {
+		startup[n] = struct{}{}
+	}
+	out := make([]models.MockMismatchMock, 0, len(infos))
+	for _, i := range infos {
+		if _, isStartup := startup[i.Name]; isStartup {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
 }

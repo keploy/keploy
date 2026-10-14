@@ -153,10 +153,24 @@ replaces any existing chain).
    relies on this mapping at replay time.
 4. `ConnectionID` consistent within a session — carried from
    `Session.ClientConnID`.
-5. Partial mocks are never emitted. If `Session.IsMockIncomplete()`
-   returns true, `EmitMock` silently drops. Parsers that do their own
-   batching should consult `IsMockIncomplete` before expensive
-   mock-construction work.
+5. Partial mocks are never emitted. If the session's incomplete-mock
+   flag is set (`Session.IsMockIncomplete()` returns true), `EmitMock`
+   leaves the mock out and reports its exchange as one the connection
+   could not record (`RecordOrphanWindow`), which leaves out the test
+   cases recorded over it that are not saved yet. The parser reports it
+   when it gets to the exchange, behind the traffic, so a test case
+   saved before then lacks the mock and fails replay with `no_mocks`;
+   the WARN says so. Parsers that do their own batching should
+   consult `IsMockIncomplete` before expensive mock-construction work,
+   and drop the mock with `LeaveOutIfIncomplete`, which reports it.
+   A parser that takes the flag itself (`TakeMockIncomplete`) reports
+   each exchange it leaves out with `ReportLeftOut`, which counts and
+   logs it too; `RecordOrphanWindow` alone does neither. A parser that
+   knows which exchange it cannot record reports it with
+   `ReportLeftOut` instead of setting the flag, which would leave out
+   the next mock it emits, and one that returns on such an exchange
+   reports it with `ReportStoppedOn`. Clearing the flag with
+   `MarkMockComplete` instead loses the mock with nothing reporting it.
 
 ## Violating the contract
 

@@ -7,10 +7,11 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"golang.org/x/sync/errgroup"
 
@@ -152,28 +153,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		for {
 			if memoryguard.IsRecordingPaused() {
 				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				done := make(chan struct{}, 2)
-				cp := func(dst, src net.Conn) {
-					_, _ = io.Copy(dst, src)
-					done <- struct{}{}
-				}
-				go cp(destConn, clientConn)
-				go cp(clientConn, destConn)
-				<-done
-				<-done
+				relayRawPassthrough(clientConn, destConn)
 				return nil
 			}
 
-			// Check if expect: 100-continue header is present.
-			lines := strings.Split(string(finalReq), "\n")
-			var expectHeader string
-			for _, line := range lines {
-				if strings.HasPrefix(line, "Expect:") {
-					expectHeader = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
-					break
-				}
+			// The whole header section first (relayed as it is read): only
+			// then is it known whether the client is waiting for a 100
+			// (Continue) before its body.
+			if _, _, err := h.readRequestHead(ctx, &finalReq, clientConn, destConn); err != nil {
+				errCh <- err
+				return nil
 			}
-			if expectHeader == "100-continue" {
+			if awaitsContinue(finalReq) {
 				resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to read the response message from the server after 100-continue request")
@@ -198,22 +189,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- err
 					return nil
 				}
-				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to read the request buffer from the user client")
-					errCh <- err
-					return nil
-				}
-				_, err = destConn.Write(reqBuf)
-				if err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					utils.LogError(h.Logger, err, "failed to write request message to the destination server")
-					errCh <- err
-					return nil
-				}
-				finalReq = append(finalReq, reqBuf...)
+				// HandleChunkedRequests relays and records the body the
+				// client now sends, by its framing.
 			}
 
 			// Capture the request timestamp.
@@ -362,11 +339,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			h.Logger.Debug("This is the initial response: " + string(resp))
 
 			chunkedRespStart := time.Now()
-			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
+			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, requestMethod(finalReq))
 			probeHTTP(ctx, h.Logger, "encode-chunked-resp-done",
 				zap.Int64("dur_ns", time.Since(chunkedRespStart).Nanoseconds()),
 				zap.Int("finalRespLen", len(finalResp)),
 				zap.Error(err))
+			if startsWithInterimResponse(resp) {
+				// The mock is the FINAL response (parseFinalHTTP skips the
+				// interim 1xx this first read began with): time it by the
+				// final response's bytes, as the V2 record path does, not by
+				// a 100 Continue that came long before it.
+				resTimestampMock = models.CapturedRespTime(ctx)
+			}
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))
@@ -443,4 +427,18 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+}
+
+// relayRawPassthrough is the memory-pressure fallback: nothing is
+// captured, bytes are just relayed.
+//
+// It delegates to proxyutil.RelayRawPassthrough. http and mysql shared
+// this verbatim; generic had the same logic with the FIN factored into a
+// forwardFIN helper. See that function for the two rules
+// it enforces — forward the FIN only on a clean EOF, and give a surviving
+// direction a bounded drain when the other breaks rather than waiting for
+// it forever or abandoning it at once.
+
+func relayRawPassthrough(clientConn, destConn net.Conn) {
+	proxyutil.RelayRawPassthrough(clientConn, destConn)
 }

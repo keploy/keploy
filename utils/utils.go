@@ -2,8 +2,8 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/binary"
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -36,14 +36,12 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
-
-var TemplatizedValues = map[string]interface{}{}
-var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -315,20 +313,6 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
-// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
-// For example:
-// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
-// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
-func RemoveDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
-	}
-}
-
 func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
@@ -350,8 +334,16 @@ func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 }
 
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
+	TagName string               `json:"tag_name"`
+	Body    string               `json:"body"`
+	Assets  []GitHubReleaseAsset `json:"assets"`
+}
+
+// GitHubReleaseAsset is one file of a release. Digest is GitHub's own
+// "sha256:<hex>" of it, which `keploy update` checks the download against.
+type GitHubReleaseAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -361,9 +353,21 @@ var ConfigGuide = `
 # Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
 `
 
+// ErrNoAnswer is returned when there was nobody to answer the question: stdin
+// reached EOF without a line. It is NOT the same as a "no", and a caller that
+// conflates them reports a decision nobody made -- which is how `keploy config
+// --generate` came to write nothing in CI and exit 0. Callers that only need a
+// safe default may still treat it as false; callers about to skip work on the
+// strength of the answer must not.
+//
+// A TTY check is not a substitute: CI runners that allocate a pty (docker -t,
+// Jenkins, GitLab) look interactive and still deliver EOF.
+var ErrNoAnswer = errors.New("no answer: stdin ended without one")
+
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized or interrupted, exit gracefully as "no".
+// confirmations. An unrecognized answer or a Ctrl+C is a graceful "no"; an
+// EOF is ErrNoAnswer, because nobody declined -- nobody was there.
 func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -374,11 +378,18 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 
 	go func() {
 		response, err := reader.ReadString('\n')
-		if err != nil {
+		// ReadString hands back what it read AND io.EOF when the input ends
+		// without a newline -- which is what `printf yes | keploy ...` and a
+		// heredoc with no final newline both look like. Discarding the line
+		// and reporting only the error turned a plain "yes" into "there was
+		// nobody to answer": first a silent wrong "no", and then, once EOF
+		// became ErrNoAnswer, a refusal asserting that nobody had replied to
+		// a question somebody had just answered.
+		if err != nil && !(errors.Is(err, io.EOF) && strings.TrimSpace(response) != "") {
 			errCh <- err
-		} else {
-			respCh <- response
+			return
 		}
+		respCh <- response
 	}()
 
 	select {
@@ -386,12 +397,12 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
 		return false, nil
 	case err := <-errCh:
-		// A closed / non-TTY stdin (io.EOF) is not a failure: there is simply
-		// nobody to answer. Decline, exactly as the ctx.Done() branch above
-		// does for Ctrl+C, so non-interactive callers get the safe default
-		// instead of a hard error.
+		// A closed / non-TTY stdin (io.EOF) is not a failure and not a
+		// decline: there is simply nobody to answer. Say which it was, so a
+		// caller can refuse out loud instead of recording a decision that was
+		// never made.
 		if errors.Is(err, io.EOF) {
-			return false, nil
+			return false, ErrNoAnswer
 		}
 		return false, err
 	case response := <-respCh:
@@ -403,8 +414,14 @@ func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	}
 }
 
+// CheckFileExists reports whether anything is at this path -- including a
+// symlink whose target does not exist.
+//
+// Lstat, not Stat. Stat follows the link, so a DANGLING keploy.yml symlink
+// read as "no file here": `keploy config --generate` never asked before
+// overwriting, and wrote through the link to a path the user never named.
 func CheckFileExists(path string) bool {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return false
 	}
 	return true
@@ -418,18 +435,24 @@ func GetVersionAsComment() string {
 	return fmt.Sprintf("# Generated by Keploy (%s)\n", Version)
 }
 
-func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		return fmt.Errorf("error opening log file: %s", err.Error())
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "Error closing log file")
-		}
-	}()
+// ConfigHeader tops a generated keploy.yml. It says what the file holds --
+// only what differs from the defaults -- because a developer opening a short
+// file is otherwise entitled to think Keploy forgot the rest, and names the
+// command that prints the rest so nobody has to go looking for it.
+func ConfigHeader() string {
+	return GetVersionAsComment() +
+		"# Only the settings that differ from Keploy's defaults are written here;\n" +
+		"# everything else uses its default. To read or save the full set:\n" +
+		"#   keploy config defaults            # print them\n" +
+		"#   keploy config defaults -o FILE    # save them\n"
+}
 
-	content, err := io.ReadAll(file)
+// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
+// read through its name only while that is still this run's log, never
+// whatever a symlink there points at (a root run's crash would otherwise send
+// the link's target).
+func attachLogFileToSentry(logFile *os.File) error {
+	content, err := keployLog.ReadLogFile(logFile)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -443,7 +466,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	err := attachLogFileToSentry(LogFile)
 	if err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
@@ -460,14 +483,17 @@ func Recover(logger *zap.Logger) {
 		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
 		return
 	}
-	sentry.Flush(2 * time.Second)
+	// No flush on a clean return: Recover is deferred on hot goroutines, and a
+	// flush waits on the process's one Sentry transport worker. Only a
+	// recovered panic has an event to flush (below).
 	if r := recover(); r != nil {
 		HandleRecovery(logger, r, "Recovered from panic")
+		// Before Stop: the process may exit as soon as the global context ends.
+		sentry.Flush(2 * time.Second)
 		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
 		}
-		sentry.Flush(2 * time.Second)
 	}
 }
 
@@ -520,8 +546,13 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	repoOwner := "keploy"
 	repoName := "keploy"
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	return getGitHubRelease(ctx, logger, fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName))
+}
 
+// getGitHubRelease reads the release at apiURL. Anything but a 200 carrying a
+// tag is an error: a rate-limited answer decodes to an empty release, which
+// read as a version other than the running one -- an update to "".
+func getGitHubRelease(ctx context.Context, logger *zap.Logger, apiURL string) (GitHubRelease, error) {
 	client := http.Client{
 		Timeout: 4 * time.Second,
 	}
@@ -545,9 +576,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return GitHubRelease{}, fmt.Errorf("GitHub answered %s for %s", resp.Status, apiURL)
+	}
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
+	}
+	if release.TagName == "" {
+		return GitHubRelease{}, fmt.Errorf("GitHub's answer for %s names no release", apiURL)
 	}
 	return release, nil
 }
@@ -564,7 +601,26 @@ func ExtractCmdTypeFromArgs(args []string) string {
 	// for it. Matching only the kebab form would let the camelCase spelling
 	// silently skip this privilege decision — and the repo's own CI scripts
 	// use camelCase aliases throughout.
-	names := []string{"--cmd-type", "--cmdType"}
+	return strings.ToLower(strings.TrimSpace(extractFlagFromArgs(args, "--cmd-type", "--cmdType")))
+}
+
+// ExtractFromContainerFromArgs pulls an explicit --from-container out of raw
+// argv, for the same reason ExtractCmdTypeFromArgs exists: the flag implies a
+// docker run, and therefore root, and that has to be known before cobra parses.
+//
+// Without this, `keploy mock record --from-container app` with no --cmd-type
+// starts unprivileged and dies later writing /proc/sys/kernel/perf_event_paranoid.
+func ExtractFromContainerFromArgs(args []string) string {
+	// NOT lowercased: this is a container name, and docker names are
+	// case-sensitive. ExtractCmdTypeFromArgs lowercases because kind names are
+	// lowercase by definition.
+	return strings.TrimSpace(extractFlagFromArgs(args, "--from-container", "--fromContainer"))
+}
+
+// extractFlagFromArgs returns the value of the last occurrence of any of the
+// given flag names in raw argv, in either `--flag value` or `--flag=value`
+// form. Returns "" when absent.
+func extractFlagFromArgs(args []string, names ...string) string {
 	// Last occurrence wins, matching how cobra resolves a repeated flag.
 	found := ""
 	for i := 0; i < len(args); i++ {
@@ -588,7 +644,7 @@ func ExtractCmdTypeFromArgs(args []string) string {
 			}
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(found))
+	return found
 }
 
 // ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
@@ -617,18 +673,28 @@ func ExtractCommandFromArgs(args []string) string {
 	return ""
 }
 
-// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
+//
+// Podman's spellings are the same kinds: its CLI takes Docker's run and start
+// flags, and `podman compose` runs a compose provider. Which engine a command
+// runs on is engine.Detect's to say; a build that cannot drive Podman refuses
+// the command (engine.Supported), rather than running it as a native process
+// that keploy would capture nothing from.
 func FindDockerCmd(cmd string) CmdType {
 	if cmd == "" {
 		return Empty
 	}
-	// Convert command to lowercase for case-insensitive comparison
-	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
+	// Lowercased, and with its words joined by one space: `docker  run` and
+	// `docker<TAB>run` are `docker run` to the shell, and so to keploy.
+	cmdLower := strings.Join(strings.Fields(strings.ToLower(cmd)), " ")
 
 	// Define patterns for Docker and Docker Compose
-	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
-	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
-	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run",
+		"podman run", "sudo podman run", "podman container run", "sudo podman container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start",
+		"podman start", "sudo podman start", "podman container start", "sudo podman container start"}
+	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose",
+		"podman-compose", "sudo podman-compose", "podman compose", "sudo podman compose"}
 
 	// Check for Docker Compose command patterns and file extensions
 	for _, pattern := range dockerComposePatterns {
@@ -651,6 +717,46 @@ func FindDockerCmd(cmd string) CmdType {
 	return Native
 }
 
+// RunSubcommandEnd is the offset in cmd just past the run subcommand of a
+// docker or podman (by base name), taken as `run` or `container run` right
+// after the engine word, where the flags for the container it starts go; -1
+// when there is none. A docker-named word without that after it (the value of
+// sudo's -u, a directory) is passed over.
+func RunSubcommandEnd(cmd string) int {
+	type word struct {
+		text string
+		end  int
+	}
+	var words []word
+	isSpace := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+	for i := 0; i < len(cmd); {
+		for i < len(cmd) && isSpace(cmd[i]) {
+			i++
+		}
+		from := i
+		for i < len(cmd) && !isSpace(cmd[i]) {
+			i++
+		}
+		if i > from {
+			words = append(words, word{cmd[from:i], i})
+		}
+	}
+	for i, w := range words {
+		base := strings.ToLower(w.text[strings.LastIndexAny(w.text, `/\`)+1:])
+		if base = strings.TrimSuffix(base, ".exe"); base != "docker" && base != "podman" {
+			continue
+		}
+		next := i + 1
+		if next < len(words) && strings.EqualFold(words[next].text, "container") {
+			next++
+		}
+		if next < len(words) && strings.EqualFold(words[next].text, "run") {
+			return words[next].end
+		}
+	}
+	return -1
+}
+
 type CmdType string
 
 // CmdType constants
@@ -658,77 +764,14 @@ const (
 	DockerRun     CmdType = "docker-run"
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
+	// FromContainer takes an ALREADY RUNNING container and re-creates it under
+	// keploy's namespaces through the Docker Engine API, rather than being
+	// handed a command string to splice flags into and shell out. It is the
+	// only kind with no user command at all - see HasUserCommand.
+	FromContainer CmdType = "from-container"
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
-
-func ToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			fmt.Printf("failed to convert string to int: %v", err)
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-	case json.Number:
-		// Try int64 first
-		if i, err := v.Int64(); err == nil {
-			return int(i)
-		}
-		if f, err := v.Float64(); err == nil {
-			return int(f)
-		}
-
-	}
-	return 0
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
-}
-
-func ToFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			fmt.Printf("failed to convert string to float: %v", err)
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
 
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
@@ -958,7 +1001,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, err := findChildPIDs(ppid)
+	children, groupOf, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
@@ -967,7 +1010,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	uniqueProcess, err := uniqueProcessGroups(children)
+	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
@@ -1077,12 +1120,14 @@ func isProcessRunning(pid int) (bool, error) {
 	return true, nil
 }
 
-func uniqueProcessGroups(pids []int) ([]int, error) {
+// uniqueProcessGroups returns the process group of each of pids, as groupOf
+// reads it, each group once.
+func uniqueProcessGroups(pids []int, groupOf func(pid int) (int, error)) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
 
 	for _, pid := range pids {
-		pgid, err := getProcessGroupID(pid)
+		pgid, err := groupOf(pid)
 		if err != nil {
 			return nil, err
 		}
@@ -1095,99 +1140,115 @@ func uniqueProcessGroups(pids []int) ([]int, error) {
 	return uniqueGPIDs, nil
 }
 
-func getProcessGroupID(pid int) (int, error) {
-	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
-	statusBytes, err := os.ReadFile(statusPath)
+// ephemeralPortRange reports the kernel's local port range and whether it could
+// actually be determined.
+//
+// known=false means "this platform's range is unknown to us", NOT "assume
+// Linux". Guessing is worse than not acting: macOS and Windows both default to
+// 49152-65535, so assuming the Linux 32768-60999 would make GetAvailablePort
+// allocate from 61000-65534 — entirely INSIDE the real ephemeral range on those
+// platforms — while shrinking the pool from 16384 to 4535 and making collisions
+// materially more likely than plain :0.
+func ephemeralPortRange() (lo, hi uint32, known bool) {
+	return ephemeralPortRangeFrom(os.ReadFile)
+}
+
+// ephemeralPortRangeFrom takes the file reader as a parameter so the
+// unknown-platform path is testable. On Linux the read always succeeds, which
+// would otherwise leave that branch dead code no test can reach — and it is the
+// branch that decides whether the allocator acts at all.
+func ephemeralPortRangeFrom(readFile func(string) ([]byte, error)) (lo, hi uint32, known bool) {
+	b, err := readFile("/proc/sys/net/ipv4/ip_local_port_range")
 	if err != nil {
-		return 0, err
+		return 0, 0, false
 	}
-
-	status := string(statusBytes)
-	for _, line := range strings.Split(status, "\n") {
-		if strings.HasPrefix(line, "NSpgid:") {
-			return extractIDFromStatusLine(line), nil
-		}
-	}
-
-	return 0, nil
+	return parseEphemeralPortRange(string(b))
 }
 
-// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
-func extractIDFromStatusLine(line string) int {
-	fields := strings.Fields(line)
-	if len(fields) == 2 {
-		id, err := strconv.Atoi(fields[1])
-		if err == nil {
-			return id
-		}
+// Linux's documented default, used when ip_local_port_range exists but its
+// contents are malformed.
+const (
+	defaultEphemeralLo uint32 = 32768
+	defaultEphemeralHi uint32 = 60999
+)
+
+// parseEphemeralPortRange parses the two-field content of ip_local_port_range.
+// Split out from the file read so its fallbacks are testable: on a normal Linux
+// box the read always succeeds, which would leave every fallback branch dead
+// code no test could reach.
+func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
+	f := strings.Fields(content)
+	if len(f) != 2 {
+		return defaultEphemeralLo, defaultEphemeralHi, true
 	}
-	return -1
+	l, err1 := strconv.ParseUint(f[0], 10, 32)
+	h, err2 := strconv.ParseUint(f[1], 10, 32)
+	if err1 != nil || err2 != nil || l == 0 || h < l || h > 65535 {
+		return defaultEphemeralLo, defaultEphemeralHi, true
+	}
+	return uint32(l), uint32(h), true
 }
 
-// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
-func findChildPIDs(parentPID int) ([]int, error) {
-	var childPIDs []int
-
-	// Recursive helper function to find all descendants of a given PID.
-	var findDescendants func(int)
-	findDescendants = func(pid int) {
-		procDirs, err := os.ReadDir("/proc")
-		if err != nil {
-			return
-		}
-
-		for _, procDir := range procDirs {
-			if !procDir.IsDir() {
-				continue
-			}
-
-			childPid, err := strconv.Atoi(procDir.Name())
-			if err != nil {
-				continue
-			}
-
-			statusPath := filepath.Join("/proc", procDir.Name(), "status")
-			statusBytes, err := os.ReadFile(statusPath)
-			if err != nil {
-				continue
-			}
-
-			status := string(statusBytes)
-			for _, line := range strings.Split(status, "\n") {
-				if strings.HasPrefix(line, "PPid:") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 {
-						ppid, err := strconv.Atoi(fields[1])
-						if err != nil {
-							break
-						}
-						if ppid == pid {
-							childPIDs = append(childPIDs, childPid)
-							findDescendants(childPid)
-						}
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// Start the recursion with the initial parent PID.
-	findDescendants(parentPID)
-
-	return childPIDs, nil
-}
-
-// GetAvailablePort finds and returns an available port on the system
+// GetAvailablePort finds and returns an available port on the system.
+//
+// It deliberately avoids the kernel's local port range, because that range is
+// where EVERY bind(0) allocator on the machine draws from — including a second
+// keploy process doing exactly this, and Docker's dynamic host-port publisher.
+// The probe listener must be CLOSED before the number can be handed to whoever
+// will actually bind it, so anything drawing from the same range can take it in
+// between, and the eventual holder is a LIVE process that never releases it —
+// which is why the agent's bind retry cannot recover and the run dies with
+// "keploy-agent did not become ready in time".
+//
+// Measured on Linux 6.12 with the default range 32768-60999: 3000/3000
+// bind(":0") allocations landed inside it, none above. (Outbound connections
+// are NOT the thief — the kernel partitions the two, handing bind(0) odd ports
+// and connect() even ones: 1500/1500 vs 1000/1000 in the same measurement. The
+// port that failed in CI, 34467, is odd, i.e. it came from a bind(0)-class
+// allocator, not from an outbound socket.)
+//
+// So candidates come from ABOVE the range's high-water mark. This NARROWS the
+// window rather than closing it — nothing short of passing the listener itself
+// closes it — but the port no longer competes with every other bind(0) on the
+// host.
 func GetAvailablePort() (uint32, error) {
-	// Use port 0 to let the OS assign an available port
+	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
+		lo := ephemeralHi + 1
+		span := 65536 - lo // inclusive of 65535
+		// A random start, not a scan from the bottom. Scanning upward returns
+		// the LOWEST free port every time, so two keploy processes started
+		// moments apart — the ordinary CI pattern — are handed an identical
+		// number, each having verified it free; whichever binds second loses.
+		start := lo
+		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
+			start = lo + uint32(n.Int64())
+		}
+		for i := uint32(0); i < span; i++ {
+			port := lo + ((start - lo + i) % span)
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				continue
+			}
+			// A failed Close leaves this process holding the port for its
+			// lifetime, so the candidate is unusable AND leaked — return the
+			// error rather than continuing and leaking one fd per candidate.
+			if err := ln.Close(); err != nil {
+				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			}
+			return port, nil
+		}
+	}
+
+	// Either the platform's ephemeral range is unknown, or every port above it
+	// is taken, or the range reaches 65535 leaving no space. Fall back to the
+	// OS assignment rather than failing: a port that may race is strictly
+	// better than no port at all, and this is the historical behaviour.
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
 	defer listener.Close()
 
-	// Extract the port from the listener's address
 	addr := listener.Addr().(*net.TCPAddr)
 	return uint32(addr.Port), nil
 }
@@ -1205,17 +1266,39 @@ func isPortAvailable(port uint32) bool {
 // EnsureAvailablePorts checks if the proxy and DNS ports are available.
 // If they are available, it returns them unchanged.
 // If not, it allocates new available ports for them.
-func EnsureAvailablePorts(port uint32) (uint32, error) {
-	var newPort uint32
-	var err error
-	if isPortAvailable(port) {
+//
+// exclude lists ports already handed out in this same setup. Nothing binds
+// them yet — the agent, proxy and DNS ports are all allocated before any of
+// them is used — so without this the second and third draws can legitimately
+// return a port the first already claimed, and two subsystems then race for
+// it. Narrowing allocation to above the ephemeral range makes the pool smaller
+// and that coincidence correspondingly more likely, so the exclusion is not
+// optional bookkeeping.
+func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
+	taken := make(map[uint32]struct{}, len(exclude))
+	for _, p := range exclude {
+		taken[p] = struct{}{}
+	}
+	if _, clash := taken[port]; !clash && isPortAvailable(port) {
 		return port, nil
 	}
-	newPort, err = GetAvailablePort()
-	if err != nil {
-		return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+	var newPort uint32
+	var err error
+	// Bounded: a handful of draws is plenty to miss a set this small, and a
+	// bound means an exhausted pool surfaces as an error rather than a hang.
+	for i := 0; i < 16; i++ {
+		newPort, err = GetAvailablePort()
+		if err != nil {
+			break
+		}
+		if _, clash := taken[newPort]; !clash {
+			return newPort, nil
+		}
 	}
-	return newPort, nil
+	if err == nil {
+		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
+	}
+	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
 func EnsureRmBeforeName(cmd string) string {
@@ -1238,21 +1321,41 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// ContainerNameFromDockerRun extracts the value of the --name flag from a
-// `docker run` command, supporting both "--name foo" and "--name=foo". It
-// returns "" when no --name is present. Used to free a leftover container name
-// before a re-run when the --container-name flag wasn't supplied.
-func ContainerNameFromDockerRun(cmd string) string {
+// dockerLongFlagValue returns the value of the first occurrence of any of
+// names in cmd, accepting both "--flag value" and "--flag=value". Docker
+// accepts either spelling for every long flag, so a parser that understands
+// only one of them silently reads nothing from perfectly valid commands.
+func dockerLongFlagValue(cmd string, names ...string) string {
 	parts := strings.Fields(cmd)
 	for i, part := range parts {
-		if part == "--name" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-		if name, ok := strings.CutPrefix(part, "--name="); ok {
-			return name
+		for _, name := range names {
+			if part == name && i+1 < len(parts) {
+				return parts[i+1]
+			}
+			// An empty "--flag=" is not a value: keep scanning, so it cannot
+			// swallow a real occurrence later in the command.
+			if value, ok := strings.CutPrefix(part, name+"="); ok && value != "" {
+				return value
+			}
 		}
 	}
 	return ""
+}
+
+// ContainerNameFromDockerRun extracts the value of the --name flag from a
+// `docker run` command, supporting both "--name foo" and "--name=foo". It
+// returns "" when no --name is present. Used to free a leftover container name
+// before a re-run when the --container-name flag wasn't supplied, and to
+// resolve the container keploy must instrument.
+func ContainerNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--name")
+}
+
+// NetworkNameFromDockerRun extracts the value of --network or --net from a
+// `docker run` command, in either spelling. It returns "" when neither is
+// present.
+func NetworkNameFromDockerRun(cmd string) string {
+	return dockerLongFlagValue(cmd, "--network", "--net")
 }
 
 func isGoBinary(logger *zap.Logger, filePath string) bool {
@@ -1364,7 +1467,17 @@ func getHomeDir() (string, error) {
 }
 
 func IsDockerCmd(kind CmdType) bool {
-	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
+	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose || kind == FromContainer)
+}
+
+// HasUserCommand reports whether this kind carries a command string that keploy
+// runs through a shell. Every kind did until FromContainer, which launches the
+// app through the Docker Engine API instead - so the checks written against
+// "there is a command here" (detach-mode scanning, name extraction, the
+// wrapped-command exec itself) have nothing to act on and must be skipped
+// rather than run against an empty string.
+func HasUserCommand(kind CmdType) bool {
+	return kind != FromContainer && kind != Empty
 }
 
 // PermissionError holds information about files/directories with permission issues
@@ -1500,90 +1613,6 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
-}
-
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
-// executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces by using a strict regex.
-func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	// This regex is specifically designed to match valid Keploy templates:
-	// - It must start with {{ and optional whitespace.
-	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
-	// - It MUST contain a dot (.) to indicate a field access.
-	// - It non-greedily matches characters until the closing braces.
-	// This prevents it from matching invalid syntax like {{u^2}}.
-	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
-
-	funcMap := template.FuncMap{
-		"int":    ToInt,
-		"string": ToString,
-		"float":  ToFloat,
-	}
-
-	var firstErr error
-
-	// Check if the entire input string is a single template placeholder.
-	// This is more efficient than using MatchString and FindString separately.
-	matchIndexes := re.FindStringIndex(input)
-	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
-
-	result := re.ReplaceAllStringFunc(input, func(match string) string {
-		// Only parse and execute the matched placeholder, not the entire string.
-		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
-		if err != nil {
-
-			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
-			return match
-		}
-
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, templateData)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
-			}
-			return match
-		}
-
-		if isExactPlaceholderMatch {
-			return output.String()
-		}
-
-		// Ensure the placeholder result is safe to embed inside JSON strings by
-		// escaping control characters like newlines, quotes, and backslashes.
-		// This prevents errors such as `invalid character '\n' in string literal`
-		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(logger, output.String())
-	})
-
-	return result, firstErr
-}
-
-// jsonEscapeString returns a JSON-safe representation of s suitable for
-// embedding directly inside a JSON string literal. It escapes characters
-// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
-// but does not add surrounding quotes.
-func jsonEscapeString(logger *zap.Logger, s string) string {
-	if s == "" {
-		return ""
-	}
-	b, err := json.Marshal(s)
-	// json.Marshal on a string should rarely fail, but if it does, log it
-	// and return the original string to avoid breaking the flow.
-	if err != nil {
-		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
-		return s
-	}
-
-	// The result of marshaling a string is a JSON string literal, which includes
-	// surrounding quotes. We need to strip them.
-	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
-		// This case is highly unlikely if json.Marshal succeeded without error.
-		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
-		return s
-	}
-	// Strip the surrounding quotes added by json.Marshal.
-	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
@@ -1734,7 +1763,14 @@ func GetContainerIPv4() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+	// Tagged, so the agent that cannot start without it says so in its exit
+	// status: a container with no IPv4 address but loopback's (docker
+	// --network none, an IPv6-only network) is the environment to change, not
+	// a privilege to grant. Only an agent started with --is-docker asks (its
+	// hooks, as they load): they send the connections of the applications it
+	// serves to this address. A native one is reached over loopback and needs
+	// no address of its own.
+	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 
 // GetFullCommandUsed returns the full command-line used to run the current process.

@@ -9,16 +9,19 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+// simulateCommandPhase serves the client's commands from the mocks until the
+// client leaves, or a command misses. dst is the upstream the client dialled,
+// named in a miss's report ("" when unknown).
+func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 
 	// Log initial mock state at the start of command phase
 	total, cfg, data := mockDb.GetMySQLCounts()
@@ -30,7 +33,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// Shared schema-noise engine for this connection's command phase. MySQL is
 	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
 	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
-	noiseEngine := schemanoise.New(mysqlNoiseAdapter{}, opts.SchemaNoiseDetection, opts.SchemaNoiseStrict)
+	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.NoiseDetection(), opts.NoiseStrict())
 
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
@@ -188,8 +191,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
+					At:            time.Now(),
 					Protocol:      "MySQL",
 					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
+					Destination:   dst,
 					ClosestMock:   miss.closestMock,
 					Diff:          diff,
 					FieldDiffs:    miss.fieldDiffs,
@@ -203,9 +208,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				}
 				if miss.matchPhase == models.MatchPhaseNoMocks {
 					// The pool held no data mock for the command phase to compare
-					// against — only handshake/config mocks survived the lifetime
-					// filter. That is a recording-side shortfall, not a content
-					// mismatch.
+					// against — at most handshake/config mocks survived the
+					// lifetime filter, or the pool was empty. That is a
+					// recording-side shortfall, not a content mismatch.
 					//
 					// This is asserted on the MEASURED phase, never on an empty
 					// closest_mock: nothing scoring is the NORMAL shape of a query

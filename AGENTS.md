@@ -42,20 +42,31 @@ intercept traffic on each OS:
 | Platform                  | Native binary (app runs on host)                                                                             | Keploy-in-Docker (app runs in Docker) |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
 | **Linux** (x86_64, arm64) | ✅ Supported — uses eBPF (`pkg/agent/hooks/linux/`). Requires root.                                          | ✅ Supported                          |
-| **Windows** (amd64)       | ✅ Supported — userspace interception (`pkg/agent/hooks/winshim/`). No driver and no Administrator; pure Go plus a committed shim DLL, so a windows build needs no extra fetch step.                                     | ✅ Supported                          |
-| **Windows** (arm64)       | ❌ Falls through to the `others` stub — `Load()` / `Record()` return "not supported on non-Linux platforms". | ✅ Supported                          |
-| **macOS** (amd64, arm64)  | ❌ Same `others` stub — there is **no** native interception path on macOS.                                   | ✅ Supported (only option)            |
+| **Windows** (x86-64)      | ❌ Falls through to the `others` stub in THIS build. Native Windows interception is userspace (no driver, no Administrator) and ships in the Community/Enterprise build, not here. | ✅ Supported                          |
+| **Windows** (arm64)       | ❌ Same `others` stub, in every build — there is no native Windows/arm64 backend anywhere. | ✅ Supported                          |
+| **macOS** (arm64 only — Apple Silicon) | ❌ Same `others` stub in THIS build. Native macOS interception is userspace and ships in the Community/Enterprise build. The CLI is not built for Intel Macs at all; use Docker or Lima there. | ✅ Supported (only option)            |
 
-- On **macOS** you _cannot_ use keploy natively. You must:
+- This table is about **this repository's build**, which intercepts with eBPF
+  and therefore records a natively-running app on Linux only.
+  `DefaultNativeCommandSupported` in `cli/provider/hooks.go` encodes exactly
+  that: `goos == "linux"`.
+- Keploy as a **product** does record natively on macOS and Windows. Those
+  userspace backends live in the Community/Enterprise build
+  (`keploy/enterprise`), which widens the predicate above from its own
+  `init()` via `RegisterNativeCommandSupport`. `keploy.sh` installs that build
+  by default and `--oss` selects this one, so "keploy cannot run natively on
+  macOS" is wrong — "this build cannot" is right. The refusal in
+  `cli/provider/cmd.go` says it that way, naming the editions that can.
+- With **this** build on **macOS** you must therefore:
   1. Build the keploy Docker image: `sudo docker image build -t ghcr.io/keploy/keploy:v3-dev .`
   2. Run your application inside Docker (usually via `docker compose`).
   3. Run keploy as that Docker image, which attaches to the app container.
-     If the app isn't in Docker, keploy can't intercept its traffic on macOS.
      This is why `prepare_and_run_macos.yml` only calls `golang_docker_macos.yml`
-     — there's no macOS-native equivalent.
+     — there's no macOS-native equivalent here.
 - On **Linux** you can pick either — native (with `sudo`) or via the
   Docker image. CI exercises both (`golang_linux.yml` + `golang_docker.yml`).
-- On **Windows** (amd64) native works without sudo; Docker mode also works.
+- The macOS binary this repo releases is **arm64 only** (Apple Silicon):
+  macOS 27 drops Intel support, so no darwin/amd64 build is produced.
 
 **Native Linux run:**
 
@@ -121,12 +132,14 @@ committed fixtures.
 | `keploy normalize`           | `pkg/service/tools`              | Accepts newly-observed responses into the golden test cases                      |
 | `keploy sanitize`            | `pkg/service/tools`              | Scrubs secrets using `custom_gitleaks_rules.toml` + built-in rules               |
 | `keploy templatize`          | `pkg/service/tools`              | Replaces dynamic values with templates in test sets                              |
-| `keploy config --generate`   | `cli/config.go`                  | Writes a default `keploy.yml`                                                    |
+| `keploy config --generate`   | `cli/config.go`                  | Writes `keploy.yml` with only the settings that DIFFER from the defaults          |
+| `keploy config defaults`     | `cli/config.go`                  | Prints every setting and its default (`-o FILE` saves them)                      |
 | `keploy contract ...`        | `pkg/service/contract`           | OpenAPI contract generation / testing                                            |
 | `keploy diff <r1> <r2>`      | `pkg/service/diff`               | Diff two test runs                                                               |
 | `keploy report`              | `pkg/service/report`             | Summarize a previous test run                                                    |
 | `keploy export` / `import`   | `cli/export.go`, `cli/import.go` | Move test-sets between repos                                                     |
 | `keploy update`              | `cli/update.go`                  | Self-update the binary                                                           |
+| `keploy ca clean`            | `cli/ca.go`                      | Remove the retired static MITM CA (matched by fingerprint) from this host's trust store |
 | `keploy agent`               | `cli/agent.go`                   | Internal — used by the Docker image entrypoint                                   |
 
 Note: `keploy gen` (`pkg/service/utgen`, LLM unit-test generation) has its CLI
@@ -273,7 +286,12 @@ All of them:
 
 1. `source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh` — writes a fake `~/.keploy/installation-id.yaml` so telemetry init doesn't prompt.
 2. Clean `keploy/` and `keploy.yml` from any prior run.
-3. `$RECORD_BIN config --generate` and optionally `sed` noise rules into `keploy.yml` (e.g. `global: {"body": {"updated_at":[]}}`).
+3. Write the `keploy.yml` the test needs with a heredoc -- do NOT `sed` a
+   generated one. `keploy config --generate` writes only the settings that
+   DIFFER from Keploy's defaults, so a `sed` looking for a default value
+   (`global: {}`, `selectedTests: {}`) matches nothing and silently patches
+   nothing. `keploy config defaults` prints the full set if you need to look
+   one up.
 4. Bring up any dependency containers (MySQL, Postgres, Mongo, Redis) and wait for readiness.
 5. Build the sample app (`go build`, `mvn package`, `npm ci`, `pip install`, …).
 6. Define `send_request()` — waits for app health, drives traffic, sleeps, kills keploy by PID (`pgrep keploy`).

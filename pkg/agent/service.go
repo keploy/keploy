@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -26,8 +28,41 @@ type HookCfg struct {
 	Port     uint32
 }
 
+// ProxyAddressReporter is the optional extension implemented by hooks that
+// know the IPv4 address the application reaches the proxy at. The agent hands
+// it to the proxy's DNS server, which answers with it for a name it has no
+// recorded answer for.
+//
+// Optional in the same style as WindowedProxy: the agent type-asserts for it,
+// and hooks that do not implement it keep the proxy's loopback default.
+type ProxyAddressReporter interface {
+	// ProxyIPv4 is only meaningful once Load has returned.
+	ProxyIPv4() string
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
+}
+
+// TeardownableProxyHook is an optional extension of AuxiliaryProxyHook. When
+// the registered hook implements it, the proxy calls BeforeTeardown
+// synchronously during shutdown — after the listeners/handlers have stopped
+// and BEFORE the OS trust store is touched (TeardownNativeCA, which may fork
+// update-ca-certificates). It runs inside the proxy's awaited start()
+// goroutine, so it completes before the process exits.
+//
+// A hook that attaches uprobes in AfterStart MUST remove them here: an unjoined
+// teardown that races process exit (or the update-ca-certificates fork) can be
+// caught with a fatal signal pending, which makes the kernel's breakpoint
+// removal return -EINTR and leak the uprobe (and the int3) into every process
+// mapping the probed file. Running the teardown here removes that race.
+//
+// ctx is the proxy context and is already cancelled when this is called
+// (shutdown is what triggers it), so an implementation that needs to make a
+// context-bound call during teardown should derive a fresh one with
+// context.WithoutCancel.
+type TeardownableProxyHook interface {
+	BeforeTeardown(ctx context.Context) error
 }
 
 // Proxy listens on all available interfaces and forwards traffic to the destination.
@@ -65,9 +100,10 @@ type Proxy interface {
 	// Per-PID (worker-keyed) mock scoping for parallel test runners (Design A).
 	// SetWorkerScope registers the per-test mock-name allowlist for a worker
 	// PID; ClearWorkerScope drops it (on scope end / no mapping);
-	// ClearAllWorkerScopes wipes every entry at session teardown. An outgoing
-	// call is attributed to a worker by walking its origin PID up the /proc
-	// tree to the nearest registered ancestor.
+	// ClearAllWorkerScopes wipes every entry when a replay session starts. A
+	// connection is attributed to a worker by walking its opener's PID up the
+	// /proc tree, once, when it opens; what it sees then follows the nearest
+	// registered worker on that chain, read by read.
 	SetWorkerScope(pid uint32, names []string)
 	ClearWorkerScope(pid uint32)
 	ClearAllWorkerScopes()
@@ -110,6 +146,68 @@ type PcapStreamer interface {
 //	} else {
 //	    _ = p.SetMocks(ctx, f, u)
 //	}
+//
+// StartupCutoffSeeder is the optional extension implemented by proxies whose
+// mock manager can be told the earliest RECORDED test start of the set being
+// staged, before any test of that set has run.
+//
+// Optional in the same style as WindowedProxy: the agent type-asserts for it and
+// simply does not seed when the assertion fails, so no existing proxy breaks and
+// third-party proxies keep compiling. Not seeding leaves the cutoff derived from
+// the fired windows, which is the pre-existing behaviour.
+type StartupCutoffSeeder interface {
+	SeedStartupCutoff(start time.Time)
+}
+
+// RecordedWindowsSeeder is the optional extension implemented by proxies whose
+// mock manager can be told the recorded window of every test of the set being
+// staged (models.MockFilterParams.RecordedWindows). Optional in the same style
+// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and
+// consumers then release everything at once, the pre-existing behaviour.
+type RecordedWindowsSeeder interface {
+	SeedRecordedWindows(ws []models.TestWindow)
+}
+
+// StatefulCursorResetter is the optional extension implemented by proxies whose
+// mock manager keeps per-request cursors for stateful dependency replay (serving
+// successive recorded responses in record order). The agent calls it once per
+// test-set, on the staging call, so a stateful sequence replays from its first
+// recorded response in each test-set rather than carrying a cursor across sets.
+// Optional in the same style as StartupCutoffSeeder: a proxy that lacks it is a
+// no-op (a proxy without stateful cursors has nothing to reset).
+type StatefulCursorResetter interface {
+	ResetStatefulCursors()
+}
+
+// VariableResetter is the optional extension implemented by proxies whose mock
+// manager keeps the test variables a replay binds (package variables). Under
+// the proven switch the agent calls it when a scope begins: on the staging call
+// of a test-set, and at the begin of each test of keploy mock replay. A proxy
+// that lacks it follows no variables, so it has none to forget.
+type VariableResetter interface {
+	ResetVariables()
+}
+
+// VariableBinder is the optional extension implemented by proxies that keep
+// the test variables a replay binds: it begins a test's variables with the
+// values its own request gave (false when it holds no table), and reads back
+// what the test has bound.
+type VariableBinder interface {
+	StartVariables(given []models.VariableBinding) bool
+	BoundVariables() ([]models.VariableBinding, bool)
+}
+
+// CarryOverPlanner is the optional extension implemented by proxies with a
+// carry-over tier (models.RegisterCarryOver). For the window that starts at
+// start it names the recorded-time range of registered per-test mocks the agent
+// loads from its on-disk store beside the window's own mocks and passes in the
+// filtered slice of the same SetMocksWithWindow call. ok is false when there is
+// nothing to load. A proxy without it gets no lookahead load, the pre-existing
+// behaviour.
+type CarryOverPlanner interface {
+	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.
@@ -140,8 +238,24 @@ type FirstWindowStartReader interface {
 	FirstTestWindowStart() time.Time
 }
 
+// ConsumedStateReader is implemented by proxies whose mock manager keeps a
+// persistent (never-drained) per-name consumption map. It lets the agent apply
+// filterOutDeleted from its OWN history instead of a copy the client re-sends
+// every testcase — see models.MockFilterParams.AgentOwnsConsumed.
+type ConsumedStateReader interface {
+	GetPersistentConsumed() map[string]models.MockState
+}
+
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
+}
+
+// AppListenPorter is the optional extension of an IncomingProxy that knows
+// which port the app's own socket listens on for one of the app's ports. While
+// recording, keploy's ingress forwarder holds the app's port and the app
+// listens on the port its bind was moved to.
+type AppListenPorter interface {
+	AppListenPort(orig uint16) (port uint16, ok bool)
 }
 
 type ProxyOptions struct {
@@ -154,6 +268,22 @@ type ProxyOptions struct {
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
+}
+
+// ErrConnectingSocketGone is GetForHandshake's error when the application's
+// connecting socket no longer exists: it gave up on the connection.
+var ErrConnectingSocketGone = errors.New("the application's connecting socket is gone")
+
+// HandshakeDestInfo is a DestInfo that can name a redirected connection's
+// original destination while its handshake with the proxy is still in flight:
+// client is the application's end of the connection and proxy the proxy's,
+// as the SYN carries them. Get can only answer once the handshake completes,
+// which is too late for the proxy to make connect itself fail the way the
+// destination failed it (see synhold).
+type HandshakeDestInfo interface {
+	// CheckHandshakeLookup reports whether GetForHandshake can work here.
+	CheckHandshakeLookup(ctx context.Context) error
+	GetForHandshake(ctx context.Context, client, proxy netip.AddrPort) (*NetworkAddress, error)
 }
 
 type TestBenchInfo interface {

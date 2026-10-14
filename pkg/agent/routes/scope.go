@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
 
@@ -22,14 +28,64 @@ type scopeBeginner interface {
 type scopeEnder interface {
 	EndScope(ctx context.Context, name string, pid int) error
 }
+type scopeBeginnerAt interface {
+	BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+type scopeEnderAt interface {
+	EndScopeAt(ctx context.Context, name string, pid int, at time.Time) error
+}
+
+// beginScope hands the runner's time to a service that takes it and falls back to the old call.
+func beginScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeBeginnerAt); ok {
+		return s.BeginScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeBeginner); ok {
+		return s.BeginScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
+// endScope is beginScope for the end of a scope.
+func endScope(ctx context.Context, svc any, req models.ScopeReq) error {
+	if s, ok := svc.(scopeEnderAt); ok {
+		return s.EndScopeAt(ctx, req.Name, req.Pid, req.At)
+	}
+	if s, ok := svc.(scopeEnder); ok {
+		return s.EndScope(ctx, req.Name, req.Pid)
+	}
+	return nil
+}
+
+type scopeNoter interface {
+	NoteScope(name string, pid int, dir string, suite bool)
+}
+type scopeOutcomeNoter interface {
+	NoteScopeOutcome(name string, pid int, outcome string)
+}
+type scopeGate interface {
+	SetScopeGate(ctx context.Context, run []string, reason string) error
+	ScopeRun(name string) (bool, string)
+	NoteScopeGated(name string, pid int, at time.Time)
+	NoteUngatable(name string)
+}
+
 type scopeWindowReader interface {
 	GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
+}
+
+// finalWindowReader reads the windows at the run's end, closing the run.
+type finalWindowReader interface {
+	FinalScopeWindows(ctx context.Context) ([]models.ScopeWindow, error)
 }
 type scopeTableSetter interface {
 	SetScopeTable(ctx context.Context, table map[string][]string) error
 }
 type mockStatsReader interface {
 	MockStats(ctx context.Context) (models.MockStats, error)
+}
+type servedMockReader interface {
+	ServedMocks(ctx context.Context) (map[string]models.MockState, error)
 }
 type capturedMockDrainer interface {
 	DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error)
@@ -38,34 +94,94 @@ type capturedMockDrainer interface {
 // HandleScopeBegin marks the start of a named per-test scope.
 func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+	p, proven := a.proven()
+	if proven {
+		r.Body = http.MaxBytesReader(w, r.Body, maxScopeBody)
 	}
-	if s, ok := a.svc.(scopeBeginner); ok {
-		if err := s.BeginScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if proven {
+			// The run's to name: its harness cannot speak the wire.
+			a.refuse(w, r, scopeBodyErr("scope-begin", err))
 			return
 		}
+		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if proven {
+		// The proven wire (release1-cut §2.1) carries no pid, runner clock
+		// or folder: the claim names the test process, and the agent stamps
+		// each boundary itself. Nothing below reads them for it.
+		a.provenBegin(w, r, p, req)
+		return
+	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
+	// A test the replay gated out is told to skip before anything else: it
+	// opens no window and narrows no pool, so skipping it leaves the replay
+	// exactly as if it had never been begun — except for the record that it
+	// was gated.
+	if g, ok := a.svc.(scopeGate); ok && !req.Suite {
+		if run, reason := g.ScopeRun(req.Name); !run {
+			if req.CanSkip {
+				g.NoteScopeGated(req.Name, req.Pid, markTime(req.At))
+				render.Status(r, http.StatusOK)
+				render.JSON(w, r, models.ScopeBeginResp{Status: "ok", Action: models.ScopeActionSkip, Reason: reason})
+				return
+			}
+			// A harness that cannot skip runs the test anyway: begin it as
+			// usual, so it is served its own mocks and its verdict counts.
+			g.NoteUngatable(req.Name)
+		}
+	}
+	if s, ok := a.svc.(scopeNoter); ok {
+		s.NoteScope(req.Name, req.Pid, req.Dir, req.Suite)
+	}
+	starts.Default.Begin(uint32(req.Pid), req.Name, req.Dir, req.Suite, markTime(req.At))
+	if err := beginScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope begin failed", zap.String("name", req.Name), zap.Error(err))
+		code := http.StatusInternalServerError
+		if errors.Is(err, agent.ErrOneTestAtATime) {
+			// release1-cut §2.1: 422 one_test_at_a_time.
+			code = http.StatusUnprocessableEntity
+		}
+		http.Error(w, err.Error(), code)
+		return
 	}
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "ok"})
+	render.JSON(w, r, models.ScopeBeginResp{Status: "ok"})
 }
 
 // HandleScopeEnd marks the end of a named per-test scope.
 func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
+	p, proven := a.proven()
+	if proven {
+		r.Body = http.MaxBytesReader(w, r.Body, maxScopeBody)
 	}
-	if s, ok := a.svc.(scopeEnder); ok {
-		if err := s.EndScope(r.Context(), req.Name, req.Pid); err != nil {
-			a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if proven {
+			a.refuse(w, r, scopeBodyErr("scope-end", err))
 			return
 		}
+		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if proven {
+		a.provenEnd(w, r, p, req)
+		return
+	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
+	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
+	if s, ok := a.svc.(scopeOutcomeNoter); ok {
+		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
+			s.NoteScopeOutcome(req.Name, req.Pid, outcome)
+		}
+	}
+	if err := endScope(r.Context(), a.svc, req); err != nil {
+		a.logger.Debug("scope end failed", zap.String("name", req.Name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
@@ -77,7 +193,23 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	windows := []models.ScopeWindow{}
 	if s, ok := a.svc.(scopeWindowReader); ok {
-		got, err := s.GetScopeWindows(r.Context())
+		read := s.GetScopeWindows
+		// The run's last read (?final=1, the CLI's once its command has
+		// exited) closes it: a test still open is failed. Under the proven
+		// switch any other value is refused, so a client that means the
+		// last read never gets a plain one, which would leave an open test
+		// out instead of failing it.
+		switch final := r.URL.Query().Get("final"); {
+		case final == "1":
+			if f, ok := a.svc.(finalWindowReader); ok {
+				read = f.FinalScopeWindows
+			}
+		case final != "" && provenswitch.On():
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, map[string]string{"error": fmt.Sprintf("final=%q: the run's last read is final=1", final)})
+			return
+		}
+		got, err := read(r.Context())
 		if err != nil {
 			render.Status(r, http.StatusInternalServerError)
 			render.JSON(w, r, map[string]string{"error": err.Error()})
@@ -93,14 +225,119 @@ func (a *Agent) HandleScopeWindows(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
 	}
-	if s, ok := a.svc.(scopeTableSetter); ok {
+	if req.Sets != nil {
+		starts.Default.SetTable(req.Root, req.Sets)
+		var first time.Time
+		for _, st := range req.Sets {
+			if !st.Start.IsZero() && (first.IsZero() || st.Start.Before(first)) {
+				first = st.Start
+			}
+		}
+		if !first.IsZero() {
+			if err := agent.ActiveHooks.SetFreezeAnchor(r.Context(), first); err != nil {
+				a.logger.Debug("could not anchor the clock at the first recorded suite start", zap.Error(err))
+			}
+		}
+	}
+	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	if provenswitch.On() && req.Sets == nil {
+		// Under the switch a table without pool slices serves no pool mock
+		// between tests: an older CLI's push fails closed.
+		if req.Pool == nil {
+			req.Pool = map[string][]string{}
+		}
+		// Each key's pool slice (design v14 §5.2). An agent that cannot
+		// serve them says so: a CLI that sent them judges on them.
+		s, ok := a.svc.(scopePoolSetter)
+		if !ok {
+			http.Error(w, "this keploy agent cannot serve a pool slice per key", http.StatusNotImplemented)
+			return
+		}
+		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// scopePoolSetter installs each key's pool slice (proven wire).
+type scopePoolSetter interface {
+	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// HandleScopeGate installs the replay's gate: the only tests that should run
+// (models.ScopeGateReq). /agent/scope/begin answers every other test with
+// ScopeActionSkip so its harness skips it. It is mounted outside /agent/scope/,
+// the API a test runner's harness calls: which tests run is the replay CLI's
+// decision, not the harness's.
+func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
+	var req models.ScopeGateReq
+	p, proven := a.proven()
+	if proven {
+		r.Body = http.MaxBytesReader(w, r.Body, maxGateBody)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if proven {
+			badScopeBody(w, r, "scope-gate", err)
+			return
+		}
+		http.Error(w, fmt.Sprintf("invalid scope-gate request: %v", err), http.StatusBadRequest)
+		return
+	}
+	// Under the proven switch the skip map is the gate, and every push
+	// replaces it: one without a map skips nothing. The answer acknowledges
+	// it with the wire's version, so a CLI never takes an agent that ignored
+	// the list for one that applies it. A run list is not part of it.
+	switch {
+	case proven && req.Run != nil:
+		writeScopeError(w, r, &models.ScopeError{
+			Status:  http.StatusUnprocessableEntity,
+			Code:    models.ScopeErrBadRequest,
+			Message: "a run list is not used with KEPLOY_PROVEN: keploy skips only the tests verdicts.yaml quarantines",
+			Remedy:  "send the skip map, or nothing",
+		})
+		return
+	case proven:
+		if err := p.SetScopeSkips(r.Context(), req.Skip); err != nil {
+			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
+			return
+		}
+		if g, ok := a.svc.(scopeGate); ok {
+			if err := g.SetScopeGate(r.Context(), nil, ""); err != nil {
+				writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
+				return
+			}
+		}
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip)})
+		return
+	case len(req.Skip) > 0:
+		writeScopeError(w, r, &models.ScopeError{
+			Status:  http.StatusUnprocessableEntity,
+			Code:    models.ScopeErrUpgradeIntegration,
+			Message: "this keploy agent does not run the proven model, so it cannot skip the tests verdicts.yaml lists",
+			Remedy:  "start keploy with KEPLOY_PROVEN=1",
+		})
+		return
+	}
+	g, ok := a.svc.(scopeGate)
+	if !ok {
+		http.Error(w, "this agent cannot gate which tests run", http.StatusNotImplemented)
+		return
+	}
+	if err := g.SetScopeGate(r.Context(), req.Run, req.Reason); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
@@ -128,16 +365,104 @@ func (a *Agent) HandleCapturedMocks(w http.ResponseWriter, r *http.Request) {
 // HandleMockStats returns a non-draining snapshot of the mock session.
 func (a *Agent) HandleMockStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	stats := models.MockStats{}
-	if s, ok := a.svc.(mockStatsReader); ok {
-		got, err := s.MockStats(r.Context())
-		if err != nil {
-			render.Status(r, http.StatusInternalServerError)
-			render.JSON(w, r, map[string]string{"error": err.Error()})
-			return
-		}
-		stats = got
+	s, ok := a.svc.(mockStatsReader)
+	if !ok {
+		// 501, not 200 with a zero count — the same reason HandleServedMocks
+		// gives below. A caller that treats "this agent cannot report" as
+		// "nothing is stored" reads an unreportable agent as a replaced one,
+		// and a caller that FAILS on a zero count then fails every run against
+		// an agent build without the reader.
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report mock stats"})
+		return
+	}
+	stats, err := s.MockStats(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, stats)
+}
+
+// HandleServedMocks reports which mocks have been served so far this session,
+// keyed by mock name. Safe to poll: it reads the agent's never-drained
+// persistent map, so unlike /consumedmocks it takes nothing away from the
+// end-of-run outcome report or the --strict verdict.
+func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(servedMockReader)
+	if !ok {
+		// 501, not 200 with an empty map: a caller polling for progress has to
+		// be able to tell "this agent cannot report served mocks" from
+		// "nothing has been served yet", or it renders the first as the
+		// second and quietly reports every mock as unserved.
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": "this agent cannot report served mocks"})
+		return
+	}
+	served, err := s.ServedMocks(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, served)
+}
+
+func (a *Agent) HandleAppStart(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.proven(); ok {
+		provenAppStart(w, r)
+		return
+	}
+	var req models.AppStartReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid app-start request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Port < 0 || req.Port > 65535 {
+		http.Error(w, "invalid app-start request: port must be the port the app listens on, or left out right after the app is started", http.StatusBadRequest)
+		return
+	}
+	if req.Pid <= 0 {
+		http.Error(w, "invalid app-start request: pid must be the app's pid", http.StatusBadRequest)
+		return
+	}
+	req.At = runnerAt(req.Pid, "", time.Time{}, req.At)
+	var placed bool
+	if req.Port == 0 {
+		placed = starts.Default.Mark(uint32(req.Pid), markTime(req.At))
+	} else {
+		placed = starts.Default.Ready(uint32(req.Pid), uint16(req.Port), markTime(req.At))
+	}
+	if !placed {
+		a.logger.Warn("the app could not be placed under a test process; mark the suite or test before starting the app, and start the app as a child process, or its calls are treated as a dependency's", zap.Int("pid", req.Pid))
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+var OnMark func(pid int, set string, start time.Time, live []string) time.Duration
+
+func runnerAt(pid int, set string, start, at time.Time) time.Time {
+	if OnMark == nil {
+		return at
+	}
+	off := OnMark(pid, set, start, starts.Default.Live())
+	if off == 0 || at.IsZero() {
+		return at
+	}
+	if s := at.Add(off); time.Since(s).Abs() < time.Since(at).Abs() {
+		return s
+	}
+	return at
+}
+
+func markTime(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
 }

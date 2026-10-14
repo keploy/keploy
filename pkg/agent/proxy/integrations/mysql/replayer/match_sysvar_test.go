@@ -215,9 +215,9 @@ func TestBuildSessionVarResponse_UnknownVar_ReturnsNil(t *testing.T) {
 }
 
 // TestRejectsCrossVariableRead pins the blast radius of the pure-system-variable
-// rejection in matchQuery.
+// rejection in matchQueryLive.
 //
-// matchQuery is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
+// matchQueryLive is the SHARED MySQL replay path: proxy (MITM) and DaemonSet recordings
 // run through it too, not only the proxyless capture this work targets. The
 // rejection is subtractive, so it must fire ONLY when the candidate reads a
 // DIFFERENT variable. Rejecting on any textual difference would make a recorded
@@ -230,10 +230,10 @@ func TestRejectsCrossVariableRead(t *testing.T) {
 		// The original defect: an unrecorded @@transaction_isolation read was
 		// cross-served the recorded @@transaction_read_only mock because both are
 		// equal-length non-DML SELECTs.
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT @@session.transaction_read_only",
 			"SELECT @@session.transaction_isolation"))
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT @@autocommit", "SELECT @@sql_mode"))
 	})
 
@@ -248,26 +248,33 @@ func TestRejectsCrossVariableRead(t *testing.T) {
 			{"SELECT @@AUTOCOMMIT", "SELECT @@autocommit"},
 			{"SELECT @@sql_mode", "SELECT @@sql_mode\r\n"},
 		} {
-			assert.False(t, rejectsCrossVariableRead(c.expected, c.actual),
+			assert.False(t, crossVariableRead(c.expected, c.actual),
 				"same variable must stay eligible: expected=%q actual=%q", c.expected, c.actual)
 		}
 	})
 
 	t.Run("a var read may not be answered by an unrelated query", func(t *testing.T) {
-		assert.True(t, rejectsCrossVariableRead(
+		assert.True(t, crossVariableRead(
 			"SELECT id FROM users WHERE id = 1", "SELECT @@transaction_isolation"))
 	})
 
 	t.Run("non-var actual is never rejected here", func(t *testing.T) {
 		// Ordinary DML keeps its normal fuzzy matching; this guard must not touch it.
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT id FROM users WHERE id = 1", "SELECT id FROM users WHERE id = 2"))
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT @@version, u.name FROM users u", "SELECT @@version, u.email FROM users u"))
 	})
 
 	t.Run("identical text is never rejected", func(t *testing.T) {
-		assert.False(t, rejectsCrossVariableRead(
+		assert.False(t, crossVariableRead(
 			"SELECT @@transaction_isolation", "SELECT @@transaction_isolation"))
 	})
+}
+
+// crossVariableRead runs rejectsCrossVariableRead the way matchQueryLive does,
+// with the live query's system-variable parse derived up front.
+func crossVariableRead(expectedQuery, actualQuery string) bool {
+	actualVar, isPureVarRead := parseSingleSystemVarRead(actualQuery)
+	return rejectsCrossVariableRead(expectedQuery, actualQuery, actualVar, isPureVarRead)
 }

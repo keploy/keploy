@@ -2,6 +2,8 @@ package models
 
 import (
 	"encoding/gob"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -10,12 +12,24 @@ import (
 )
 
 func init() {
-	gob.Register(bson.D{})
-	gob.Register(bson.E{})
-	gob.Register(bson.A{})
-	gob.Register(bson.Binary{})
-	gob.Register(bson.M{})
-	gob.Register(bson.ObjectID{})
+	// gob.RegisterName with an EXPLICIT wire name, not gob.Register, so the name
+	// gob writes into every mocks.gob (and the interface payloads streamed
+	// between the keploy binaries) is fixed here rather than derived from the Go
+	// package path and type name. gob.Register(&T{}) keys the wire on the live
+	// identifier, so renaming or moving one of these types silently changes the
+	// on-disk format and makes previously recorded mocks fail to decode — the
+	// stability gap env-vars.md flags for the gob format. Each literal below is
+	// exactly the name gob.Register produced before, so this is byte-identical on
+	// the wire (verified by the round-trip + golden tests in gob_register_test.go)
+	// and existing mocks keep decoding; the difference is only that a future
+	// rename can no longer move it. Frozen: change a literal only with intent, and
+	// update the golden test.
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.D", bson.D{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.E", bson.E{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.A", bson.A{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.Binary", bson.Binary{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.M", bson.M{})
+	gob.RegisterName("go.mongodb.org/mongo-driver/v2/bson.ObjectID", bson.ObjectID{})
 }
 
 type Kind string
@@ -48,6 +62,29 @@ const (
 	// GenericResponses payload slices and owns the typed frame model +
 	// the YAML mapper, so no Aerospike-specific type lives in OSS core.
 	Aerospike Kind = "Aerospike"
+
+	// ConnectionFailure records that the application's attempt to open a
+	// connection to a dependency failed in a way it could see (refused,
+	// unreachable, timed out, closed before any data came back). The details
+	// are in Spec.ConnFailure; see connfailure.go.
+	//
+	// The name has NO HYPHEN, on purpose. Every keploy since 2023 skips a mock
+	// kind containing "-" at Debug level as "does not belong to open source
+	// version", BEFORE it reaches the unknown-kind branch that logs an ERROR
+	// naming the kind. A hyphenated name would make a keploy too old to replay
+	// these mocks drop them in silence; without the hyphen its YAML reader
+	// says, once per document, which kind it cannot read (its JSON reader
+	// skips an unknown kind at Debug either way). Pinned by
+	// TestConnectionFailureKindReachesTheUnknownKindError.
+	//
+	// For the keploy that records and replays the kind: never write it to a
+	// gob mock file, and send it to the agent only when the agent says it
+	// supports it. A gob reader up to v3.6.107, and an agent that predates the
+	// kind, read it as a mock of no kind and no metadata.destAddr, so its port
+	// is unknown and recorded.unknown is set: every port then counts as
+	// recorded, which turns loopback refusal off for the whole test set. This
+	// keploy never sends one to the agent (see AgentClient.StoreMocks).
+	ConnectionFailure Kind = "ConnectionFailure"
 
 	// RevokedTests is a RESERVED control Kind — it is NOT a real mock and no
 	// traffic parser ever produces it. The recorder emits a Mock with this Kind
@@ -103,6 +140,22 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
+	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef  string `json:"-" yaml:"-" bson:"-"`
+
+	// pooled is set when the replay mock manager takes the mock into a staging,
+	// or stores it in a pool that matchers read, and is never cleared. The
+	// staging that takes it stamps it before any matcher can reach it; from then
+	// on matchers may hold the mock and copy it, so nothing may write it again:
+	// the manager copies a pooled mock that it is handed to stage again instead
+	// of stamping it, and the matchers in this repository store an updated copy
+	// rather than edit the mock. (keploy/integrations' HTTP/2 parser still
+	// re-stamps the pooled mock it updates in place.) Runtime only: unexported,
+	// so no encoder carries it, and DeepCopy and ShallowCopy start their copies
+	// unpooled. It sits after SourcePID, in that field's padding, so a Mock is
+	// no bigger for it.
+	pooled bool
+
 	// Noise holds exact-match regex patterns for obfuscated values.
 	// During mock matching, any stored value matching a pattern in this
 	// list is skipped (treated as noise). Written by the enterprise
@@ -113,6 +166,19 @@ type Mock struct {
 	// at serve time; set only for spilled per-test mocks by the agent disk store.
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+}
+
+// Pooled reports whether the replay mock manager has stored m in a pool that
+// matchers read (see MarkPooled).
+func (m *Mock) Pooled() bool { return m.pooled }
+
+// MarkPooled records that m is being stored in a pool that matchers read. Only
+// the mock manager calls it, as it takes or stores the mock and before any
+// matcher can reach it; a mock that is already pooled is left unwritten.
+func (m *Mock) MarkPooled() {
+	if !m.pooled {
+		m.pooled = true
+	}
 }
 
 // SetResponseHydrator installs the lazy response loader (agent disk-residency).
@@ -157,12 +223,11 @@ func (m *Mock) HydrateResponse() error {
 // struct is the right home for cached derived state that must not bleed
 // into recordings.
 //
-// Lifetime and HitCount were added by the unification plan: Lifetime is
-// the typed, cached form of the on-disk Spec.Metadata["type"] tag so
-// hot-path matchers never probe the metadata map; HitCount is an atomic
-// reuse counter used for telemetry of session/connection-scoped mocks
-// (how many times was this reusable mock actually matched across the
-// test run).
+// Lifetime was added by the unification plan: it is the typed, cached form
+// of the on-disk Spec.Metadata["type"] tag so hot-path matchers never probe
+// the metadata map. Match counts are not kept here: matchers copy pooled mocks
+// whole while other connections count matches against them, so the replay
+// mock manager keeps the counts itself.
 type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
@@ -185,14 +250,14 @@ type TestModeInfo struct {
 	// Runtime-only, untagged; re-derived fresh on each reload.
 	LifetimeDerived bool `json:"-" bson:"-"`
 
-	// HitCount is incremented atomically on every successful match of
-	// session- or connection-scoped mocks (per-test mocks are consumed
-	// on match so their count is always 0 or 1). Zero-cost when idle
-	// (single LOCK XADD on x86, ~1 ns). Surfaced via MockMemDb's
-	// SessionMockHitCounts for "which reusable mocks actually got
-	// used?" observability — non-zero helps confirm tagging; zero for
-	// a long-lived mock hints at dead recordings worth re-capturing.
-	HitCount uint64 `json:"-" bson:"-"`
+	// Consume classifies how the matcher consumes this mock across repeated
+	// identical requests — ConsumeReuse (serve the same response every time;
+	// the default for session/config/connection mocks) or ConsumeCursorSaturate
+	// (serve successive recorded responses in record order, then saturate on
+	// the last; for stateful data-plane mocks). Derived at ingest by
+	// DeriveLifetime alongside Lifetime; runtime-only, untagged, re-derived on
+	// each load for the same reason Lifetime is.
+	Consume ConsumeMode `json:"-" bson:"-"`
 
 	// IsStartup marks startup-window traffic: a mock captured either before
 	// the first inbound request (classic app-bootstrap, e.g. an AWS Secret
@@ -223,6 +288,54 @@ func (m *Mock) GetKind() string {
 	return string(m.Kind)
 }
 
+// RecordedDestination reads the upstream authority a recorded mock was
+// captured against — "which host did this mock's call go to?" — for the
+// destination-scope diagnostic (see pkg/agent/proxy/integrations/mismatch).
+//
+// ok is false when the answer is UNKNOWN, and the caller must treat that as
+// "undecidable", never as "no destination": one mock whose host cannot be
+// read could be the very mock that targeted the live call, so it has to veto
+// the verdict rather than count as evidence. Today only HTTP mocks carry a
+// readable destination — the other protocols' recorded specs keep no
+// authority at all (Mongo/MySQL/Postgres store wire payloads, Generic stores
+// opaque buffers) — so every non-HTTP kind answers "unknown".
+//
+// Header Host first, URL authority second: the recorder stores an HTTP
+// request path-only ("/api/orders?id=90") with the authority in the
+// Host header, but a mock captured through a forward proxy carries an
+// absolute URL instead.
+func (m *Mock) RecordedDestination() (string, bool) {
+	if m == nil || m.Kind != Kind(HTTP) || m.Spec.HTTPReq == nil {
+		return "", false
+	}
+	// Case-insensitive lookup: recorded mock headers are a plain map (no
+	// textproto canonicalisation), so the key's case depends on whichever
+	// recorder wrote it.
+	//
+	// The two conventional spellings are probed directly first: the fallback
+	// scan below is O(headers) with a strings.EqualFold per key, and a real
+	// recorded request carries far more headers than a test fixture does, so
+	// the scan's cost grows with them while these two lookups do not. The
+	// scan still runs for anything else ("HOST", "hOst"), so no recording
+	// stops being readable.
+	h := m.Spec.HTTPReq.Header
+	if v := h["Host"]; v != "" {
+		return v, true
+	}
+	if v := h["host"]; v != "" {
+		return v, true
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, "Host") && v != "" {
+			return v, true
+		}
+	}
+	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+		return u.Host, true
+	}
+	return "", false
+}
+
 type MockSpec struct {
 	Metadata            map[string]string   `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	GenericRequests     []Payload           `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
@@ -251,6 +364,11 @@ type MockSpec struct {
 	// Exactly one sub-pointer is populated; Type names which. See PostgresV3Spec.
 	PostgresV3 *PostgresV3Spec `yaml:"postgresV3,omitempty" json:"postgresV3,omitempty" bson:"postgres_v3,omitempty"`
 
+	// ConnFailure is the body of a ConnectionFailure mock (see connfailure.go);
+	// nil for every other kind. An older keploy's gob decoder drops it, as
+	// encoding/gob drops any field the receiving struct lacks.
+	ConnFailure *ConnFailureSpec `yaml:"connFailure,omitempty" json:"connFailure,omitempty" bson:"conn_failure,omitempty"`
+
 	// Aerospike (enterprise-only) stores its captured frames in the
 	// generic GenericRequests / GenericResponses payload slices above,
 	// like Redis/Kafka — so OSS core needs no Aerospike-specific field.
@@ -266,11 +384,43 @@ type MockSpec struct {
 	// fields drift between recording and replay.
 	ReqBodyNoise map[string][]string `json:"ReqBodyNoise,omitempty" yaml:"req_body_noise,omitempty" bson:"req_body_noise,omitempty"`
 
+	// Correlations records request→response value echoes on this dependency mock
+	// (see FieldCorrelation): a value the application mints and sends in the
+	// request that the dependency reflects back in its response (a UUID, nonce,
+	// idempotency key). Learned on the auto-replay pass and honored at serve
+	// time — the matcher captures the live request value and renders it into the
+	// served response, instead of replaying the recorded value (a mismatch) or
+	// masking it as noise (which hides real regressions). Kind-agnostic, same
+	// home as ReqBodyNoise. Additive / omitempty: an older replayer ignores it.
+	Correlations []FieldCorrelation `json:"Correlations,omitempty" yaml:"correlations,omitempty" bson:"correlations,omitempty"`
+
+	// Variables names the places of this call that hold a test variable's
+	// value (see MockVariables). Kind-agnostic, carried on the doc envelope as
+	// a top-level `variables:` block like noise; nil for a call that holds
+	// none. Additive / omitempty: an older keploy ignores it.
+	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
 	// block — kept OUT of the flat parser Metadata above. Serialized as a
 	// top-level `async:` block on the recorded doc. See AsyncMeta.
 	Async *AsyncMeta `json:"Async,omitempty" yaml:"async,omitempty" bson:"async,omitempty"`
+}
+
+// FieldCorrelation ties a value in a dependency mock's REQUEST to where it is
+// echoed in that mock's RESPONSE, so replay can reproduce an app-minted value
+// (UUID / nonce / idempotency key) the dependency reflects back. On replay the
+// matcher matches the request field by presence + ValueClass (not value),
+// binds the live value, and renders it into each ResponsePath of the served
+// response. Paths use the kind-agnostic dotted vocabulary of ReqBodyNoise
+// (body.<path>, header.<name>, url.query.<name>). RecordedValue is the value as
+// recorded (never a live/secret value) and ValueClass names its shape
+// (e.g. "uuid", "hex", "nonce") for the presence/type match.
+type FieldCorrelation struct {
+	RequestPath   string   `json:"requestPath" yaml:"request_path" bson:"request_path"`
+	ResponsePaths []string `json:"responsePaths" yaml:"response_paths" bson:"response_paths"`
+	RecordedValue string   `json:"recordedValue,omitempty" yaml:"recorded_value,omitempty" bson:"recorded_value,omitempty"`
+	ValueClass    string   `json:"valueClass,omitempty" yaml:"value_class,omitempty" bson:"value_class,omitempty"`
 }
 
 // PostgresV3Spec is the single discriminated Spec for the five v3
@@ -851,6 +1001,27 @@ type MockState struct {
 	// store it on the kind-agnostic MockSpec.ReqBodyNoise field. fieldpath
 	// ("body.user.id") -> regex list; empty list means "ignore the whole field".
 	ReqBodyNoise map[string][]string `json:"reqBodyNoise,omitempty"`
+	// CarryOver marks a mock consumed outside the running test's window through
+	// a path that exists for exactly that (see RegisterCarryOver): taken from
+	// the carry-over tier, or a registered kind's per-test mock consumed out of
+	// window through MarkMockAsUsed (a server push delivered late). The replay
+	// attributes such a mock to its own recorded window — mapped to that
+	// window's test, and kept from the prune whatever the running test's
+	// verdict — instead of to the test that happened to be running.
+	CarryOver bool `json:"carryOver,omitempty"`
+}
+
+// ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
+// (requests, responses and maps are shared, not copied) and its own
+// TestModeInfo, so the copy's tree ID and sort order can be set without
+// touching m.
+func (m *Mock) ShallowCopy() *Mock {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.pooled = false
+	return &c
 }
 
 func (m *Mock) DeepCopy() *Mock {
@@ -859,34 +1030,16 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	// HitCount is intentionally NOT carried over: the counter is bound to
-	// the live mock pool instance (it tracks matches against *this*
-	// agent's in-memory pool), so a deep copy starts with a fresh counter.
-	// Callers who want cumulative counts across copies should aggregate at
-	// the MockMemDb level, not via clones. Lifetime + LifetimeDerived ARE
-	// carried over — they're classification state, not runtime counters;
-	// skipping LifetimeDerived would cause DeriveLifetime to re-run on
-	// the copy and double-increment LegacyKindFallbackFires for untagged
-	// kinds.
-	id := m.TestModeInfo.ID
-	isFiltered := m.TestModeInfo.IsFiltered
-	sortOrder := m.TestModeInfo.SortOrder
-	lifetime := m.TestModeInfo.Lifetime
-	lifetimeDerived := m.TestModeInfo.LifetimeDerived
-	isStartup := m.TestModeInfo.IsStartup
+	// TestModeInfo is carried over whole: Lifetime + LifetimeDerived are
+	// classification state, and skipping LifetimeDerived would cause
+	// DeriveLifetime to re-run on the copy and double-increment
+	// LegacyKindFallbackFires for untagged kinds.
 	c := Mock{
-		Version: m.Version,
-		Name:    m.Name,
-		Kind:    m.Kind,
-		Spec:    m.Spec,
-		TestModeInfo: TestModeInfo{
-			ID:              id,
-			IsFiltered:      isFiltered,
-			SortOrder:       sortOrder,
-			Lifetime:        lifetime,
-			LifetimeDerived: lifetimeDerived,
-			IsStartup:       isStartup,
-		},
+		Version:      m.Version,
+		Name:         m.Name,
+		Kind:         m.Kind,
+		Spec:         m.Spec,
+		TestModeInfo: m.TestModeInfo,
 		ConnectionID: m.ConnectionID,
 	}
 
@@ -921,6 +1074,20 @@ func (m *Mock) DeepCopy() *Mock {
 			c.Spec.ReqBodyNoise[k] = vc
 		}
 	}
+
+	// Deep copy the request→response correlations (and each ResponsePaths slice)
+	// for the same reason as ReqBodyNoise: the clone must not share the slices.
+	if len(m.Spec.Correlations) > 0 {
+		c.Spec.Correlations = make([]FieldCorrelation, len(m.Spec.Correlations))
+		copy(c.Spec.Correlations, m.Spec.Correlations)
+		for i := range c.Spec.Correlations {
+			if rp := m.Spec.Correlations[i].ResponsePaths; len(rp) > 0 {
+				c.Spec.Correlations[i].ResponsePaths = append([]string(nil), rp...)
+			}
+		}
+	}
+
+	c.Spec.Variables = m.Spec.Variables.Clone()
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
@@ -968,6 +1135,10 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.GRPCResp != nil {
 		grpcRespCopy := *m.Spec.GRPCResp
 		c.Spec.GRPCResp = &grpcRespCopy
+	}
+	if m.Spec.ConnFailure != nil {
+		connFailureCopy := *m.Spec.ConnFailure
+		c.Spec.ConnFailure = &connFailureCopy
 	}
 	if m.Spec.DNSReq != nil {
 		dnsReqCopy := *m.Spec.DNSReq

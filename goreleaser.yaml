@@ -15,7 +15,6 @@ archives:
     builds:
       - keploy
       - keploy-windows
-      - keploy-mac-universal
     format_overrides:
       - goos: windows
         format: binary
@@ -48,8 +47,14 @@ builds:
     goarch:
       - amd64
       - arm64
+    # macOS ships as darwin/arm64 only (Apple silicon); the amd64 leg is
+    # not built anywhere. Signing/notarization of the darwin binary is
+    # done by gon in .github/workflows/release.yml, not here — this
+    # config has no universal_binaries block and no darwin post hook.
     ignore:
       - goos: windows
+        goarch: amd64
+      - goos: darwin
         goarch: amd64
     tags:
       - viper_bind_struct
@@ -104,38 +109,3 @@ builds:
       - amd64
     tags:
       - viper_bind_struct
-
-  # - binary: keploy
-  #   id: keploy-macos
-  #   main: ./cli/server/main.go
-  #   env:
-  #     - CGO_ENABLED=0
-  #   goos:
-  #     - darwin
-  #   goarch:
-  #     - amd64
-  #     - arm64
-
-universal_binaries:
--
-  # ID of resulting universal binary.
-  #
-  # Defaults to the project name.
-  id: keploy-mac-universal
-
-  # IDs to use to filter the built binaries.
-  #
-  # Defaults to the `id` field.
-  # Since: v1.3.
-  ids:
-    - keploy
-
-  # Whether to remove the previous single-arch binaries from the artifact list.
-  # If left as false, your end release might have both several macOS archives:
-  # amd64, arm64 and all.
-  #
-  # Defaults to false.
-  replace: true
-  hooks:
-    post: gon -log-level=info -log-json ./gon.json
-

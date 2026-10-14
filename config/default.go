@@ -12,6 +12,9 @@ import (
 
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = fmt.Sprintf(`
+# path is where Keploy keeps the keploy/ directory -- your recordings, mocks
+# and reports. Empty means the directory you run in, which is also what -p
+# defaults to. Set it to move the whole keploy/ tree somewhere else.
 path: ""
 storageFormat: "yaml"
 appId: 0
@@ -41,7 +44,10 @@ test:
     test-sets: {}
   delay: 5
   healthUrl: ""
-  healthPollTimeout: 60s
+  healthPath: ""
+  healthScheme: ""
+  healthPollTimeout: 3m
+  disableAppReadyProbe: false
   host: "localhost"
   port: 0
   grpcPort: 0
@@ -114,7 +120,8 @@ record:
   # recordBuffer tunes the per-connection recording queue. Touch only
   # if you see "mock incomplete" warnings (reason: per_conn_cap) in
   # the agent logs. Env vars KEPLOY_RECORD_MAX_MEMORY_PER_CONN,
-  # KEPLOY_RECORD_QUEUE_SIZE and KEPLOY_RECORD_CONSUMER_STALL_GRACE
+  # KEPLOY_RECORD_QUEUE_SIZE, KEPLOY_RECORD_CONSUMER_STALL_GRACE and
+  # KEPLOY_RECORD_HALF_CLOSE_GRACE
   # override these values.
   recordBuffer:
     # Bytes. 67108864 = 64 MiB. Zero falls through to the built-in
@@ -132,6 +139,7 @@ record:
     # a healthy connection never pays it. Zero falls through to the
     # built-in default (2s).
     consumerStallGrace: 2s
+    halfCloseGrace: 10s
 async:
     lanes: []
 configPath: ""
@@ -160,9 +168,25 @@ disableMapping: false
 mock:
   name: "default"
   onMiss: "fail"
+  # Record the app's incoming requests and responses as test cases alongside the mocks, once the app's
+  # port is given with --pass-through-ports <app port>; without it none are recorded. Turn off with --record-requests=false.
+  recordRequests: true
   strict: false
   local: false
   recordTimer: 0s
+  # Log one line per mock the first time it is served, so a client driving
+  # keploy can show which dependency calls were answered from the set while the
+  # run is still going. Off by default: the lines are for a machine reading the
+  # output, not a human watching a terminal.
+  emitMockEvents: false
+  # Fail a replay whose test run covered less than this percentage of the
+  # code, read from the coverage report the test command writes (go test
+  # -coverprofile, lcov, Cobertura, JaCoCo). A run that writes no report fails
+  # the floor rather than passing it unmeasured. 0 turns it off.
+  minCoverage: 0
+  # The coverage report the test command writes, when it is not a default
+  # location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...).
+  coverageReport: ""
 contract:
   driven: "consumer"
   mappings:
@@ -174,6 +198,10 @@ contract:
   download: false
   generate: false
 inCi: false
+report:
+  # format is how "keploy report" prints a test report: "text", or "junit" for
+  # a CI system that consumes JUnit XML. --format overrides it per run.
+  format: "text"
 `, models.DefaultIncomingProxyPort)
 
 func GetDefaultConfig() string {

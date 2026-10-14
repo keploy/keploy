@@ -156,6 +156,13 @@ func newAgentCmdForTest(t *testing.T, cfg *config.Config) (*cobra.Command, *zap.
 	if err := c.AddFlags(cmd); err != nil {
 		t.Fatalf("AddFlags: %v", err)
 	}
+	// ValidateFlags for the agent pins the proven switch, and a pin lasts for
+	// the rest of the process: keep the real one out of every agent test, so
+	// none decides On() for the tests after it. A test that wants to see the
+	// pin swaps in its own seam after this.
+	prev := pinProvenSwitch
+	pinProvenSwitch = func(bool) {}
+	t.Cleanup(func() { pinProvenSwitch = prev })
 	return cmd, logger
 }
 
@@ -235,5 +242,43 @@ func TestAgentMarkersStayUnsetWithoutArgv(t *testing.T) {
 
 	if cfg.Agent.UpstreamTLSVerifySet || cfg.Agent.UpstreamTLSCACertSet {
 		t.Fatal("the markers were set without the flags appearing on argv; the agent would ignore its own keploy.yml")
+	}
+}
+
+// TestDisableAppReadyProbeFlagIsRegistered pins the operator escape
+// hatch for a destructive readiness probe.
+//
+// The field is reachable from keploy.yml and programmatically, but the
+// CLI user who hits the hazard most directly — `keploy test` against an
+// app behind their own `kubectl port-forward`, where a
+// connect-then-close probe can tear the forward down — needs a
+// discoverable switch. A struct field alone is not one.
+//
+// Registration and the camelCase->kebab mapping are pinned separately
+// because either half missing leaves the flag unusable: no
+// registration and `--disable-app-ready-probe` is rejected outright; no
+// mapping and `disableAppReadyProbe` in a config file never binds to it.
+func TestDisableAppReadyProbeFlagIsRegistered(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cfg := &config.Config{}
+	c := &CmdConfigurator{cfg: cfg, logger: zap.NewNop()}
+	if err := c.AddFlags(cmd); err != nil {
+		t.Fatalf("AddFlags: %v", err)
+	}
+
+	f := cmd.Flags().Lookup("disable-app-ready-probe")
+	if f == nil {
+		t.Fatal("--disable-app-ready-probe is not registered: a CLI user behind a port-forward " +
+			"has no way to turn off a probe that breaks their connection")
+	}
+	if f.Value.Type() != "bool" {
+		t.Errorf("flag type = %q, want bool", f.Value.Type())
+	}
+
+	if err := cmd.Flags().Set("disable-app-ready-probe", "true"); err != nil {
+		t.Fatalf("set flag: %v", err)
+	}
+	if got := cmd.Flags().Lookup("disable-app-ready-probe").Value.String(); got != "true" {
+		t.Errorf("flag value = %q, want true", got)
 	}
 }

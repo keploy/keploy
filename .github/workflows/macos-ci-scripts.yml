@@ -1,0 +1,111 @@
+name: macOS CI scripts
+
+# The self-hosted macOS runners share ONE Docker daemon, so a wrong decision in
+# the script that sweeps it (.github/scripts/macos/reap-stale-containers.sh)
+# does not fail its own job - it removes a sibling job's containers. It did
+# exactly that as a loop in prepare_and_run.yml, removing application
+# containers compose had created and not yet started.
+#
+# Two sets of tests run here, on every change to the script or to a workflow:
+# - reap-stale-containers.tests.sh, the script's cases against a fake docker.
+#   prepare_and_run's precheck-macos runs them on the runners themselves too,
+#   but not for a pull request from a fork.
+# - reap-stale-containers.workflows.tests.sh, the checks of the workflows
+#   around it: every job that can land on those runners has a timeout-minutes
+#   below the script's threshold, and clean_up_docker_macos runs the sweep the
+#   way it must. They read every workflow file, so they run only here: in
+#   precheck-macos, a mistake in an unrelated workflow would skip the macOS
+#   test jobs.
+# Both run on GitHub's macOS image, for the bash 3.2 and BSD tools the
+# self-hosted runners have, and on Linux, where they are also run by hand and
+# where the script then sweeps a real Docker daemon.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/scripts/macos/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/scripts/macos/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  reaper-macos:
+    timeout-minutes: 10
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # /bin/bash, not the newer bash Homebrew may have put first on PATH: it
+      # is the one the self-hosted runners run steps with.
+      - name: Test the macOS Docker cleanup script (bash 3.2, BSD tools)
+        run: /bin/bash .github/scripts/macos/reap-stale-containers.tests.sh
+
+      - name: Check the workflows around it (bash 3.2, BSD tools)
+        run: /bin/bash .github/scripts/macos/reap-stale-containers.workflows.tests.sh
+
+  reaper-linux:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the macOS Docker cleanup script (GNU tools)
+        run: bash .github/scripts/macos/reap-stale-containers.tests.sh
+
+      - name: Check the workflows around it (GNU tools)
+        run: bash .github/scripts/macos/reap-stale-containers.workflows.tests.sh
+
+      # The cases trust a fake docker to answer as a real daemon does, and a
+      # wrong belief about that was the bug: a container that was never
+      # started reports StartedAt as year 1. So the script also sweeps a real
+      # daemon here: a container created and never started has to be left,
+      # and has to go once the daemon's clock reads past the threshold. Its
+      # image is an empty one made here, so nothing is pulled.
+      #
+      # The second sweep is told a clock past the threshold, so on any daemon
+      # other jobs use it would remove their containers. Two things stop that:
+      # the step runs only on a GitHub-hosted runner, whose daemon is this
+      # job's alone, and every docker call goes through a wrapper that lists
+      # no container but this step's own.
+      - name: Sweep a real Docker daemon (this runner's own)
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          script=.github/scripts/macos/reap-stale-containers.sh
+          scoped="$RUNNER_TEMP/docker-scoped"
+          cat >"$scoped" <<'EOF'
+          #!/usr/bin/env bash
+          # docker, listing only reap-e2e-created; with AHEAD_MINUTES set, the
+          # daemon's clock reads that many minutes ahead.
+          if [ "$1" = ps ]; then shift; exec docker ps --filter 'name=^/?reap-e2e-created$' "$@"; fi
+          if [ "$1" = info ] && [ -n "${AHEAD_MINUTES:-}" ]; then
+            exec date -u -d "+$AHEAD_MINUTES minutes" +%Y-%m-%dT%H:%M:%S.%NZ
+          fi
+          exec docker "$@"
+          EOF
+          chmod +x "$scoped"
+
+          tar -cf - --files-from /dev/null | docker import - reap-e2e:empty >/dev/null
+          docker create --name reap-e2e-created reap-e2e:empty /none >/dev/null
+          docker inspect --format 'never started: Created={{.Created}} StartedAt={{.State.StartedAt}}' reap-e2e-created
+
+          out="$(REAP_DOCKER="$scoped" bash "$script")"
+          echo "$out"
+          grep -qF 'leaving reap-e2e-created - last active 0 minute(s) ago' <<<"$out"
+          docker container inspect reap-e2e-created >/dev/null
+
+          minutes=$(($(sed -n 's/^MIN_AGE_MINUTES=\([0-9][0-9]*\)$/\1/p' "$script") + 1))
+          out="$(AHEAD_MINUTES="$minutes" REAP_DOCKER="$scoped" bash "$script")"
+          echo "$out"
+          grep -qF "removed reap-e2e-created (last active $minutes minute(s) ago)" <<<"$out"
+          if docker container inspect reap-e2e-created >/dev/null 2>&1; then
+            echo "::error::reap-e2e-created is still there after a sweep that said it removed it"
+            exit 1
+          fi

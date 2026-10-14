@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -18,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -43,6 +49,37 @@ type matchDiag struct {
 	phase         string         // models.MatchPhase* constant
 	candidates    int            // HTTP mocks considered
 	schemaMatched []*models.Mock // candidates alive after schema match (nil if none)
+	// pool is the FULL set match() walked for this attempt (per-test mocks in
+	// window + session mocks, filtered to HTTP) — the literal "compared set".
+	// len(pool) == candidates by construction.
+	//
+	// It exists so the destination-scope diagnostic can answer "did anything
+	// we compared even target this upstream?" on EVERY miss, including the
+	// schema-survivor paths where buildHTTPMismatchReport deliberately does
+	// not reload the pool (it diffs against the survivors instead). Without
+	// it, an out-of-scope call whose method+path happens to schema-match an
+	// application mock — the shared paths, /health, /metrics, /oauth/token,
+	// on a different host — was the ONE case the diagnostic could not see,
+	// and precisely the case where a closest-mock diff against another
+	// upstream is most confusing.
+	//
+	// Carrying the slice out costs one pointer copy on the miss path and
+	// changes nothing about matching: it is a reference to a set match() has
+	// already finished with, attached to a struct only ever built on the
+	// no-match return.
+	pool []*models.Mock
+	// variable is the evidence of a mock that fits the call but whose
+	// variables do not hold (proven switch; see variables.go): the miss is
+	// reported as that, whatever else the cascade found.
+	variable *varProblem
+	// live is where the live request went, set under the proven switch
+	// (strict.go), so the report can name a destination that differs.
+	live *destination
+	// closest and differs are, under the proven switch, the recording the
+	// strict comparison found closest to the call and the fields in which
+	// it differs (strictServe): the report diffs against that, with those.
+	closest *models.Mock
+	differs []strictField
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -50,16 +87,48 @@ type matchDiag struct {
 // test.globalNoise body bucket (root-relative dotted paths, lowercased) so
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if diag != nil && provenswitch.On() {
+		// Under the proven switch a miss names where the call went too
+		// (strict.go), so its report can name a destination that differs.
+		live := liveDestination(input)
+		diag.live = &live
+	}
+	return ok, stub, diag, err
+}
+
+// matchCascade is match without its proven-switch report additions.
+func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
 	// only the HTTP-specific bits (body extraction, JSON/form diff).
 	noiseEngine := schemanoise.New(httpNoiseAdapter{}, schemaNoiseDetection, schemaNoiseStrict)
 
+	// Under the proven switch no path segment or query value is relaxed for
+	// its shape (design v14 row S1): what may differ between record and
+	// replay is declared or learned, never guessed from how it looks. (The
+	// variable and strict passes answer every call before the passes below;
+	// this holds if one is ever reached under the switch.)
+	if provenswitch.On() {
+		autoURLDynamic = false
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
+		}
+
+		// The variables' scope this attempt checks against is read before
+		// the pool: a test that begins after this read (its pool swapped in,
+		// then its scope begun) makes this attempt's binds stale, so a call
+		// checked against the previous test's mocks never binds in the next
+		// test (variables.Table.BindAll).
+		var varGen uint64
+		varTable := variableTable(mockDb)
+		if varTable != nil && provenswitch.On() {
+			varGen = varTable.Gen()
 		}
 
 		// Fetch HTTP mocks from BOTH pools:
@@ -113,6 +182,85 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
+		// Under the proven switch a mock that declares variable places is
+		// served by the variable pass alone (variables.go): no later pass
+		// sees it, so it is never served on a call whose variables do not
+		// hold. With the switch off nothing here runs.
+		comparedPool := unfilteredMocks
+		var vp *varProblem
+		if provenswitch.On() {
+			withVars, rest := splitVariableMocks(unfilteredMocks)
+			if len(withVars) > 0 {
+				table := varTable
+				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
+				if err != nil {
+					return false, nil, nil, err
+				}
+				if len(hits) > 0 {
+					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if problem != nil {
+						if table.Gen() != varGen {
+							continue // a test began meanwhile: check the call against it
+						}
+						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
+					}
+					if commitCursor != nil {
+						commitCursor()
+					}
+					return true, served, nil, nil
+				}
+				vp = problem
+				unfilteredMocks = rest
+				if vp != nil {
+					// A recording fit this call but its variables did not
+					// hold: only an exact recording of this very call may
+					// still answer it, never a lenient pass.
+					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if ok {
+						return true, served, nil, nil
+					}
+					if table != nil && table.Gen() != varGen {
+						continue // a test began meanwhile: check the call against it
+					}
+					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
+				}
+				if len(unfilteredMocks) == 0 {
+					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
+				}
+			}
+		}
+
+		// Under the proven switch the rest are answered only by a recording
+		// of this very call, outside known noise (strict.go,
+		// strict_compare.go): no lenient pass, no closest match and no fuzzy
+		// fallback below (design v14 row S1).
+		if provenswitch.On() {
+			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if retry {
+				continue
+			}
+			if served == nil {
+				return false, nil, diag, nil
+			}
+			return true, served, nil, nil
+		}
+
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
@@ -136,7 +284,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		if len(schemaMatched) == 0 {
-			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks)}, nil
+			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
 		}
 
 		h.Logger.Debug("http mock schema match results",
@@ -146,12 +294,46 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
+			// Stateful dependency: when several recorded responses share this
+			// exact request (a counter, a created-then-read row), serve them in
+			// record order via a per-request cursor instead of always the first,
+			// then saturate on the last. No-op for a single recording.
+			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, mockDb, statefulMocks)
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
-			if !h.updateMock(ctx, bestMatch, mockDb, nil) {
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, nil, nil)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
 				continue
 			}
-			return true, bestMatch, nil, nil
+			// Advance the cursor only now the response is actually served, so a
+			// failed claim + retry does not skip a recorded response.
+			if commitCursor != nil {
+				commitCursor()
+			}
+			return true, served, nil, nil
+		}
+
+		// App-random → dependency-echo correlation: a mock whose request carries
+		// an app-minted random value the dependency reflects back won't byte-match
+		// (the live value differs). Select it by matching every non-correlated
+		// field, capture the live value, and render it into the served response —
+		// run BEFORE the lenient key-schema / fuzzy passes so a correlated mock is
+		// not served stale or rejected by strict noise.
+		// Under the proven switch an echo is a variable of its call, followed
+		// by the variable pass; shape-detected correlations are not honoured.
+		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation && !provenswitch.On()); okC {
+			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
+			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
+				continue
+			}
+			return true, served, nil, nil
 		}
 
 		shortListed := schemaMatched
@@ -180,16 +362,20 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				if beforeStrict > 0 {
 					phase = models.MatchPhaseStrict
 				}
-				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched}, nil
+				return false, nil, &matchDiag{phase: phase, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
 			}
 
 			if len(bodyMatched) == 1 {
 				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
-				if !h.updateMock(ctx, bodyMatched[0], mockDb, detected) {
+				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, nil)
+				if err != nil {
+					return false, nil, nil, err
+				}
+				if !claimed {
 					continue
 				}
-				return true, bodyMatched[0], nil, nil
+				return true, served, nil, nil
 			}
 
 			// More than one match, perform fuzzy match
@@ -202,13 +388,144 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		if isMatched {
 			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
-			if !h.updateMock(ctx, bestMatch, mockDb, detected) {
+			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, nil)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if !claimed {
 				continue
 			}
-			return true, bestMatch, nil, nil
+			return true, served, nil, nil
 		}
-		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed}, nil
+		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
 	}
+}
+
+// cursorPick advances a stateful dependency through its recorded responses. When
+// stateful mocks are enabled and bestMatch is a cursor-consumption mock
+// (ConsumeCursorSaturate), it gathers every schema-matched mock carrying the
+// SAME request (method + URL + body), orders them by record time, and returns
+// the cursor-th one so repeated identical requests get served 1,2,3,… and then
+// saturate on the last. It returns a commit closure the caller must call once
+// the response is actually served (after a successful claim), so a failed/
+// retried match does not skip a recording; commit is nil when no cursoring
+// applies. Returns bestMatch unchanged (commit nil) when stateful mocks are off,
+// the store exposes no cursor, or there is only one recorded response for the
+// request (the common case, where cursor == reuse — byte-identical to legacy).
+//
+// Scope: the group is gathered by BYTE-EXACT request body, which covers stateful
+// dependencies whose repeated requests are identical (a counter, a created-then-
+// read row). A stateful request that carries a noisy/rotating field in its body
+// (so the recordings are NOT byte-equal) is not grouped here and replays as the
+// first recording; that case is handled by request→response correlation (masked
+// grouping), tracked separately — see correlation-auto-replay. This is a known,
+// documented limit, not a silent catch-all.
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		return bestMatch, nil
+	}
+	if bestMatch.Spec.HTTPReq == nil {
+		return bestMatch, nil
+	}
+	cs, ok := mockDb.(integrations.MockCursor)
+	if !ok {
+		return bestMatch, nil
+	}
+	group, key := cursorGroup(bestMatch, schemaMatched)
+	if len(group) <= 1 {
+		return bestMatch, nil // single recording: nothing to advance through
+	}
+	idx := cs.MockCursorIndex(key, len(group))
+	if idx < 0 || idx >= len(group) {
+		return bestMatch, nil
+	}
+	n := len(group)
+	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+}
+
+// servedPick picks, among a call's reusable recordings (in record order), the
+// first not yet served, else the last (a call past them stays on it), and
+// returns its index with the commit that marks it served once the call is
+// answered (nil when it already is, or when the store keeps no cursor: then
+// the first answers, as without the capability). A recording's mark is kept
+// in the stateful cursor's store under its own key, so it is reset with the
+// cursors and holds whichever other recordings a later call fits. The commit
+// follows the peek of its own key, the last peek made (MockCursor).
+func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) {
+	for i, m := range group {
+		key := servedKey(m)
+		switch idx := cs.MockCursorIndex(key, 2); {
+		case idx < 0:
+			return 0, nil
+		case idx == 0:
+			return i, func() { cs.AdvanceMockCursor(key, 0, 2) }
+		}
+	}
+	return len(group) - 1, nil
+}
+
+// servedKey is the stateful cursor store's key of m's served mark, apart from
+// every request's cursor key (cursorKey). A recording's name is unique in its
+// test set, whose staging resets the store; its recorded time breaks a tie.
+func servedKey(m *models.Mock) string {
+	return "served\x00" + m.Name + "\x00" + m.Spec.ReqTimestampMock.UTC().Format(time.RFC3339Nano)
+}
+
+// cursorGroup returns the recordings of schemaMatched that are bestMatch's
+// request for the stateful cursor, in record order, and the cursor's key.
+func cursorGroup(bestMatch *models.Mock, schemaMatched []*models.Mock) ([]*models.Mock, string) {
+	group := make([]*models.Mock, 0, 4)
+	for _, m := range schemaMatched {
+		if sameCursorRequest(m, bestMatch) {
+			group = append(group, m)
+		}
+	}
+	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i], group[j]) })
+	return group, cursorKey(string(bestMatch.Spec.HTTPReq.Method), bestMatch.Spec.HTTPReq.URL, bestMatch.Spec.HTTPReq.Body)
+}
+
+// sameCursorRequest reports whether m is a recording of want's request for the
+// stateful cursor: both ConsumeCursorSaturate, with the same method, URL and
+// body. Method+URL matter because the auto-dynamic URL pass can schema-match
+// recordings of DIFFERENT endpoints that share a body; grouping those would
+// cursor across unrelated resources.
+func sameCursorRequest(m, want *models.Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil || want == nil || want.Spec.HTTPReq == nil {
+		return false
+	}
+	return m.TestModeInfo.Consume == models.ConsumeCursorSaturate &&
+		m.TestModeInfo.Consume == want.TestModeInfo.Consume &&
+		m.Spec.HTTPReq.Method == want.Spec.HTTPReq.Method &&
+		m.Spec.HTTPReq.URL == want.Spec.HTTPReq.URL &&
+		m.Spec.HTTPReq.Body == want.Spec.HTTPReq.Body
+}
+
+// recordedBefore orders recordings as they were recorded: the request
+// timestamp is stable across replay (SortOrder is mutated on every match, so
+// it cannot be used); ID then Name break ties.
+func recordedBefore(a, b *models.Mock) bool {
+	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
+	if !ta.Equal(tb) {
+		return ta.Before(tb)
+	}
+	if a.TestModeInfo.ID != b.TestModeInfo.ID {
+		return a.TestModeInfo.ID < b.TestModeInfo.ID
+	}
+	return a.Name < b.Name
+}
+
+// cursorKey builds a stable per-request key so repeated identical requests share
+// one cursor. Method + URL + a hash of the request body is enough: the group is
+// gathered by the same method/URL/body, so the key must agree with it.
+func cursorKey(method, url, body string) string {
+	var b strings.Builder
+	b.WriteString(method)
+	b.WriteByte(' ')
+	b.WriteString(url)
+	b.WriteByte('\x00')
+	sum := sha256.Sum256([]byte(body))
+	b.WriteString(hex.EncodeToString(sum[:]))
+	return b.String()
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
@@ -268,18 +585,8 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	// "<uuid>.txt" match; the trade-off is that bare value patterns need
 	// anchoring (see TestMatchURLPath_NumericIDScoping).
 	if len(urlNoise) > 0 {
-		const ph = "{{keploy.urlnoise}}"
-		np, rp := mockPath, reqPath
-		for _, pat := range urlNoise {
-			re, cerr := regexp.Compile(pat)
-			if cerr != nil {
-				h.Logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(cerr))
-				continue
-			}
-			np = re.ReplaceAllString(np, ph)
-			rp = re.ReplaceAllString(rp, ph)
-		}
-		if np == rp {
+		noiseRes := compileURLNoise(h.Logger, urlNoise)
+		if maskURLNoise(mockPath, noiseRes) == maskURLNoise(reqPath, noiseRes) {
 			return true
 		}
 	}
@@ -314,13 +621,76 @@ func pathMatchesModuloDynamicSegments(mockPath, reqPath string) bool {
 		if ms[i] == rs[i] {
 			continue
 		}
-		if looksDynamicSegment(ms[i]) && looksDynamicSegment(rs[i]) {
+		// Relax a differing segment only when BOTH sides are the SAME dynamic
+		// type-class — so /users/123 matches /users/456 (digits) but NOT
+		// /users/<uuid>: a segment that changed TYPE is a different resource, not
+		// the same id drifting. Was "both look dynamic (any shape)", which let a
+		// numeric id match a uuid/hash and collapse distinct calls onto one mock.
+		//
+		// The class is derived from each value's characters, so it is a proxy for
+		// "same id type", not a guarantee: a short (~16-char) hex-alphabet id that
+		// is coincidentally all-decimal on one side can class differently (digits
+		// vs hex) and false-reject. That is the loud, safe direction (a replay
+		// "mock missed" you can see), traded against the silent false-accept — the
+		// wrong mock served — that the old any-shape relax allowed. Longer
+		// hashes/uuids/nanoids are not realistically affected.
+		if c := urlSegmentTypeClass(ms[i]); c != "" && c == urlSegmentTypeClass(rs[i]) {
 			differed = true
 			continue
 		}
-		return false // a non-id segment differs -> genuinely different path
+		return false // a non-id segment, or a type change, -> genuinely different path
 	}
 	return differed
+}
+
+// urlNoisePlaceholder is what a url-noise match is replaced with on BOTH the
+// recorded and the live side before they are compared, so a covered substring
+// stops distinguishing the two.
+const urlNoisePlaceholder = "{{keploy.urlnoise}}"
+
+// urlNoiseCache memoizes compiled url-noise patterns. MatchURLPath and
+// QueryParamsMatch both run once per CANDIDATE MOCK per proxied request, so
+// compiling the configured patterns inline cost O(mocks x patterns)
+// regexp.Compile calls on every request — measured at ~12us and ~18KB of
+// garbage per QueryParamsMatch call with five patterns configured, against
+// ~240ns with none. The patterns come from config (test.globalNoise.url) and
+// are fixed for the process lifetime, so compile each one once and share it.
+// An invalid pattern is cached as a nil entry: it is logged once and never
+// re-attempted.
+var urlNoiseCache sync.Map // pattern string -> *regexp.Regexp (nil = invalid)
+
+// compileURLNoise returns the compiled form of the configured url-noise
+// patterns, skipping (and logging once) any that do not compile.
+func compileURLNoise(logger *zap.Logger, urlNoise []string) []*regexp.Regexp {
+	if len(urlNoise) == 0 {
+		return nil
+	}
+	res := make([]*regexp.Regexp, 0, len(urlNoise))
+	for _, pat := range urlNoise {
+		if cached, ok := urlNoiseCache.Load(pat); ok {
+			if re, _ := cached.(*regexp.Regexp); re != nil {
+				res = append(res, re)
+			}
+			continue
+		}
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			logger.Debug("skipping invalid url-noise regex", zap.String("pattern", pat), zap.Error(err))
+			urlNoiseCache.Store(pat, (*regexp.Regexp)(nil))
+			continue
+		}
+		urlNoiseCache.Store(pat, re)
+		res = append(res, re)
+	}
+	return res
+}
+
+// maskURLNoise replaces every url-noise match in s with the placeholder.
+func maskURLNoise(s string, noiseRes []*regexp.Regexp) string {
+	for _, re := range noiseRes {
+		s = re.ReplaceAllString(s, urlNoisePlaceholder)
+	}
+	return s
 }
 
 var (
@@ -339,11 +709,26 @@ var (
 // ("v1alpha1", "oauth2"), or word-like slugs — all ambiguous with static path
 // components and left to explicit url-noise config (test.globalNoise.url).
 func looksDynamicSegment(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	if reSegAllDigits.MatchString(s) || reSegUUID.MatchString(s) || reSegLongHex.MatchString(s) {
-		return true
+	return urlSegmentTypeClass(s) != ""
+}
+
+// urlSegmentTypeClass classifies a dynamic-looking URL path segment into a stable
+// type-class, or "" when the segment is not dynamic-looking. The classes mirror
+// looksDynamicSegment's recognized shapes so a LEARNED-dynamic segment can be
+// matched on TYPE (its value ignored, its class required to match) instead of the
+// value being re-guessed per request. Returning "" for every non-dynamic shape
+// keeps looksDynamicSegment byte-for-byte equivalent. See looksDynamicSegment for
+// why each shape is (or isn't) treated as dynamic.
+func urlSegmentTypeClass(s string) string {
+	switch {
+	case s == "":
+		return ""
+	case reSegAllDigits.MatchString(s):
+		return "digits"
+	case reSegUUID.MatchString(s):
+		return "uuid"
+	case reSegLongHex.MatchString(s):
+		return "hex"
 	}
 	if len(s) >= 16 {
 		hasDigit, hasAlpha := false, false
@@ -355,9 +740,11 @@ func looksDynamicSegment(s string) bool {
 				hasAlpha = true
 			}
 		}
-		return hasDigit && hasAlpha
+		if hasDigit && hasAlpha {
+			return "token"
+		}
 	}
-	return false
+	return ""
 }
 
 // relaxed header key matcher (presence-only)
@@ -396,50 +783,190 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	// Helper function to check if a header should be ignored
-	shouldIgnoreHeader := func(key string) bool {
-		lkey := strings.ToLower(key)
-		return strings.HasPrefix(lkey, "keploy")
+// queryValueTypeClass classifies a query-param VALUE into the dynamic
+// type-class it belongs to ("digits" / "uuid" / "hex" / "token"), or "" when it
+// is not machine-generated enough to treat as dynamic. It mirrors the path
+// classifier urlSegmentTypeClass but is deliberately STRICTER about bare
+// integers: in a path, position gives a number its meaning (/users/55 is
+// unmistakably an id), whereas a bare small integer in a query is overwhelmingly
+// a page / limit / offset / count, and collapsing ?page=2 onto ?page=3 would
+// re-open the very "wrong recorded response" bug this gate exists to close. So a
+// digit run counts as dynamic ("digits") only when it is LONG (epoch
+// seconds/millis, snowflake ids and the like); a short one is static ("").
+//
+// The class is what makes the auto-dynamic query relaxation TYPE-AWARE: a
+// differing value is tolerated only when both sides share the same class, so a
+// rotating ?id=<uuid> no longer collapses onto a numeric ?id=<10-digit> (a
+// different value space, hence a different resource).
+const minDynamicQueryDigits = 10
+
+func queryValueTypeClass(s string) string {
+	if reSegAllDigits.MatchString(s) {
+		if len(s) >= minDynamicQueryDigits {
+			return "digits"
+		}
+		return "" // short bare integer: page / limit / offset — never dynamic
+	}
+	return urlSegmentTypeClass(s)
+}
+
+// looksDynamicQueryValue reports whether a query-param VALUE looks like a
+// machine-generated token that legitimately varies between record and replay.
+// It is the boolean view of queryValueTypeClass and stays byte-for-byte
+// equivalent to "class != \"\"".
+func looksDynamicQueryValue(s string) bool {
+	return queryValueTypeClass(s) != ""
+}
+
+// maskAndSort applies url noise to every member and sorts the result, so two
+// value sets can be compared order-independently.
+func maskAndSort(vals []string, noiseRes []*regexp.Regexp) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = maskURLNoise(v, noiseRes)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// QueryParamsMatch reports whether the recorded query params (mockParams) and the
+// live request's query (reqQuery) match on BOTH key set AND value.
+//
+// MapsHaveSameKeys — the previous gate here — compared only key presence/counts,
+// never VALUES: a mock recorded for /search?id=A would satisfy a live request for
+// /search?id=B, so a distinct query could be served the wrong recorded response.
+// QueryParamsMatch keeps the exact same bidirectional key-set contract (ignoring
+// keploy-prefixed keys) and additionally compares each shared key's value.
+//
+// Values are compared in the recorded form: pkg.URLParams stores a recorded param
+// as ", "-joined (map[string]string), so the live side is joined the same way
+// (strings.Join(reqQuery[key], ", ")). Note this join is lossy — ?q=a,%20b (one
+// value) and ?q=a&q=b (two values) both record as "a, b" and therefore compare
+// equal. That ambiguity predates this gate (it is inherent to pkg.URLParams) and
+// only bounds how strict the value check can be; it never makes a genuinely
+// different value match.
+//
+// urlNoise is applied to BOTH sides before comparison using the same
+// compile-and-replace-with-placeholder approach MatchURLPath uses, so a param
+// value covered by url noise still matches while a genuinely different value does
+// not. The patterns are compiled lazily and memoized (see compileURLNoise): the
+// exact fast path settles every param of a request that did not drift, so a
+// configured noise list costs nothing until a value actually differs.
+//
+// A REPEATED param (same key more than once) is compared ORDER-INDEPENDENTLY:
+// the recorded ", "-joined value is split back into its members, each side is
+// url-noise-masked per member and sorted before comparison. This
+// mirrors pkg.CompareMultiValueHeaders so repeated query params and repeated
+// headers agree — a reorder of the same values (e.g. ?tag=a&tag=b vs
+// ?tag=b&tag=a, which are the same request per HTTP) still matches, while a
+// genuinely different value does not. Single-value params (the common case) take
+// the exact fast path and are unaffected.
+//
+// autoDynamic mirrors MatchURLPath's auto-detected dynamic path segments and is
+// the zero-config DEFAULT for values, set only on SchemaMatch's SECOND pass —
+// after an exact + url-noise pass over every mock found nothing, i.e. when the
+// alternative is a "no matching mock" 502. Without it a rotating value that
+// needs no config in the path (/items/<uuid>) would hard-fail in the query
+// (?id=<uuid>), which is the same non-deterministic-id 502 that pass 2 exists to
+// prevent. A differing member is tolerated only when it looks machine-generated
+// AND shares the same dynamic type-class on BOTH sides (see
+// queryValueTypeClass), so deterministic queries, genuinely-distinct values, and
+// cross-type drift (a uuid vs a number) are never relaxed. Disable via
+// OutgoingOptions.DisableAutoURLDynamic.
+func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Values, urlNoise []string, autoDynamic bool) bool {
+	shouldIgnore := func(key string) bool {
+		return strings.HasPrefix(strings.ToLower(key), "keploy")
 	}
 
-	// Count non-ignored keys in map1
-	map1Count := 0
-	for key := range map1 {
-		if !shouldIgnoreHeader(key) {
-			map1Count++
+	// Enforce the same bidirectional key-set contract as MapsHaveSameKeys.
+	mockCount := 0
+	for key := range mockParams {
+		if !shouldIgnore(key) {
+			mockCount++
 		}
 	}
-
-	// Count non-ignored keys in map2
-	map2Count := 0
-	for key := range map2 {
-		if !shouldIgnoreHeader(key) {
-			map2Count++
+	reqCount := 0
+	for key := range reqQuery {
+		if !shouldIgnore(key) {
+			reqCount++
 		}
 	}
-
-	// Check if counts match
-	if map1Count != map2Count {
+	if mockCount != reqCount {
 		return false
 	}
-
-	// Check if all non-ignored keys in map1 exist in map2
-	for key := range map1 {
-		if shouldIgnoreHeader(key) {
+	for key := range mockParams {
+		if shouldIgnore(key) {
 			continue
 		}
-		if _, exists := map2[key]; !exists {
+		if _, exists := reqQuery[key]; !exists {
+			return false
+		}
+	}
+	for key := range reqQuery {
+		if shouldIgnore(key) {
+			continue
+		}
+		if _, exists := mockParams[key]; !exists {
 			return false
 		}
 	}
 
-	// Check if all non-ignored keys in map2 exist in map1
-	for key := range map2 {
-		if shouldIgnoreHeader(key) {
+	// Value compare for each shared, non-keploy key.
+	var (
+		noiseRes      []*regexp.Regexp
+		noiseCompiled bool
+	)
+	for key, recorded := range mockParams {
+		if shouldIgnore(key) {
 			continue
 		}
-		if _, exists := map1[key]; !exists {
+		actual := strings.Join(reqQuery[key], ", ")
+		if recorded == actual {
+			continue // exact match — covers every single-value param
+		}
+		// Something drifted on this key: compile the noise patterns now (once
+		// per call, memoized process-wide) rather than on every candidate mock.
+		if !noiseCompiled {
+			noiseRes, noiseCompiled = compileURLNoise(h.Logger, urlNoise), true
+		}
+		// Values differ as-joined. Compare order-independently: split the
+		// recorded value back into members, mask each side with url noise, and
+		// sort before comparing (mirrors CompareMultiValueHeaders). A reorder
+		// of the same values matches; a real difference still fails.
+		recVals := strings.Split(recorded, ", ")
+		liveVals := reqQuery[key]
+		if len(recVals) != len(liveVals) {
+			return false
+		}
+		rv, av := maskAndSort(recVals, noiseRes), maskAndSort(liveVals, noiseRes)
+		for i := range rv {
+			if rv[i] == av[i] {
+				continue
+			}
+			// Fallback only (pass 2): tolerate a member that looks
+			// machine-generated on BOTH sides AND shares the SAME dynamic
+			// type-class — so a rotating ?id=<uuid> matches another uuid but NOT a
+			// numeric ?id=<10-digit>: a value that changed TYPE is a different
+			// resource, not the same id drifting (mirrors MatchURLPath's
+			// type-aware path relax). Was "both look dynamic (any shape)", which
+			// let a uuid collapse onto a long int / hash and serve the wrong
+			// recorded response. Sorting can misalign two multi-value sets that
+			// each carry a dynamic member, so this is a best-effort relaxation for
+			// repeated params; the single-value case (len 1, the one that matters)
+			// is exact.
+			//
+			// Same proxy-not-guarantee trade-off as the path classifier: a
+			// ~16-char hex id coincidentally all-decimal on one side can class
+			// differently and false-reject (~1/900, negligible for longer ids) —
+			// the loud, safe direction versus the silent wrong-mock this replaces.
+			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
+				h.Logger.Debug("http query: value treated as auto-detected dynamic",
+					zap.String("param", key),
+					zap.String("mock value", rv[i]),
+					zap.String("request value", av[i]),
+					zap.String("type class", c))
+				continue
+			}
 			return false
 		}
 	}
@@ -447,9 +974,21 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 	return true
 }
 
-// SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string, urlNoise []string, autoDynamic bool) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
+
+	// Parse the live query once, not once per candidate mock: url.Query()
+	// re-parses and re-allocates the whole query string on every call and this
+	// loop runs over the full mock set on every proxied request.
+	reqQuery := input.url.Query()
+
+	// Under the proven switch a recorded request answers only a request to
+	// the same place (strict.go): the same authority.
+	proven := provenswitch.On()
+	var live destination
+	if proven {
+		live = liveDestination(input)
+	}
 
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
@@ -493,6 +1032,11 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
+		if proven && !sameDestination(live, recordedDestination(mock)) {
+			h.Logger.Debug("the mock was recorded for another destination", zap.String("mock name", mock.Name))
+			continue
+		}
+
 		// Header key match (presence-only; extra request headers allowed)
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
 			h.Logger.Debug("headers missing required keys for mock name",
@@ -502,8 +1046,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
-		// Query parameter match
-		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
+		// Query parameter match (key set AND value; url noise aware)
+		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise, autoDynamic) {
 			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
@@ -999,6 +1543,26 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 	return true
 }
 
+// claim takes the matched mock m for this request: it loads m's response
+// (withResponse), then records the match (updateMock), which consumes a
+// per-test mock. Loading comes first so that a response that cannot be loaded
+// leaves the mock unconsumed rather than reported as served. It returns the
+// mock to serve, m or a copy of it with the response loaded, and claimed=false
+// when another connection took m first.
+func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
+	served, err = withResponse(m)
+	if err != nil {
+		return nil, false, err
+	}
+	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
+		return nil, false, nil
+	}
+	// Honor request→response correlations: render the live values captured from
+	// this request into the served response (on a copy; never the pooled mock).
+	served = renderCorrelations(served, bindings)
+	return served, true, nil
+}
+
 // updateMock processes the matched mock based on its Lifetime.
 // Per-test mocks are CONSUMED on match (DeleteFilteredMock); session /
 // connection mocks are RETAINED and updated in place (UpdateUnFilteredMock).
@@ -1259,6 +1823,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		httpMocks = FilterHTTPMocks(mocks)
 	}
 
+	if diag != nil && diag.variable != nil {
+		return variableMismatchReport(request, liveBody, dest, actualKey, diag, httpMocks)
+	}
+
 	phase := models.MatchPhaseExhausted
 	candidateCount := len(httpMocks)
 	var schemaSurvivors []*models.Mock
@@ -1278,25 +1846,69 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()
 	}
 
+	// Does anything the matcher just compared against even target this
+	// upstream? Answered from the compared set and nothing else — see
+	// comparedDestinations for why the wider "was it ever recorded?" question
+	// is not asked.
+	//
+	// diag.pool is the set match() literally walked, so it is preferred over
+	// httpMocks: on the schema-survivor path httpMocks is nil (the pool is
+	// deliberately not reloaded, the diff comes from the survivors), and on
+	// the other path httpMocks is a fresh re-read that a concurrent
+	// consumption on another connection can have shrunk since the match. Only
+	// the caller-supplied / re-read pool is used when the diag carries none —
+	// a hand-built diag in a test, or diag == nil.
+	comparedPool := httpMocks
+	if diag != nil && diag.pool != nil {
+		comparedPool = diag.pool
+	}
+	comparedDests := comparedDestinations(comparedPool, candidateCount)
+
 	// Pick the candidate to diff against. Preference order:
 	//  1. a schema-match survivor (method+path+keys already matched — the
 	//     interesting drift is in query values, headers, or the body)
 	//  2. the lowest-Levenshtein "METHOD path" mock from the pool.
-	closestMock := pickClosestCandidate(request, schemaSurvivors, httpMocks)
+	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
+		// Under the proven switch: the strict comparison's closest recording,
+		// and the fields it found differ.
+		return strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount)
+	}
+	closestPool := httpMocks
+	if diag != nil && diag.live != nil {
+		// Under the proven switch the closest recorded request is one to
+		// the same place, when there is one: a diff against another
+		// upstream's request explains nothing.
+		if same := sameDestinationMocks(*diag.live, httpMocks); len(same) > 0 {
+			closestPool = same
+		}
+	}
+	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
 		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
+			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
+	}
+	// The call the field diffs are computed from: under the proven switch a
+	// closest mock with variables is diffed with its recorded values at their
+	// places, so a variable's place is never named as the difference. The
+	// report still renders the call as it was received.
+	diffReq, diffBody := request, liveBody
+	if provenswitch.On() {
+		diffReq, diffBody = asRecordedForDiff(request, liveBody, closestMock)
 	}
 
 	mockReq := closestMock.Spec.HTTPReq
 	var fieldDiffs []models.MockFieldDiff
+	if diag != nil && diag.live != nil {
+		fieldDiffs = append(fieldDiffs, destinationDiff(*diag.live, closestMock)...)
+	}
 
 	// method / path pseudo-fields
-	if string(mockReq.Method) != request.Method {
+	if string(mockReq.Method) != diffReq.Method {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "method", Kind: models.DiffKindValueChanged,
-			Expected: string(mockReq.Method), Actual: request.Method,
+			Expected: string(mockReq.Method), Actual: diffReq.Method,
 		})
 	}
 	mockPath := mockReq.URL
@@ -1305,10 +1917,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		mockPath = parsed.Path
 		mockQuery = parsed.Query()
 	}
-	if mockPath != request.URL.Path {
+	if mockPath != diffReq.URL.Path {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "path", Kind: models.DiffKindValueChanged,
-			Expected: mockPath, Actual: request.URL.Path,
+			Expected: mockPath, Actual: diffReq.URL.Path,
 		})
 	}
 
@@ -1322,14 +1934,14 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	} else {
 		recordedQuery = mockQuery
 	}
-	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, request.URL.Query())...)
-	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, request.Header, headerNoise)...)
+	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, diffReq.URL.Query())...)
+	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
 	// matcher itself ignores (learned req_body_noise + user body noise).
-	if len(liveBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(liveBody) {
+	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
 		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
-		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(liveBody), ignore)...)
+		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they
@@ -1339,6 +1951,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 		WithDestination(dest).
+		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closestMock.Name, fieldDiffs).
 		// Whole-request renders for the CLI side-by-side diff. Mock.Noise is
@@ -1354,6 +1967,67 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
 	return b.Build()
+}
+
+// comparedDestinations returns the upstream authority of every mock in the
+// pool this report was built against, or nil when the "does anything here
+// target the live upstream?" question cannot be answered from it — nil means
+// undecidable, and an undecidable check leaves today's message exactly as it
+// was (mismatch.WithComparedDestinations carries the full WHY).
+//
+// The claim it feeds is strictly LOCAL: "no mock in the compared set targets
+// this host". It is deliberately NOT the stronger "this host was never
+// recorded". That stronger claim needs global, consumption-immune knowledge
+// of the whole test set, and keploy does not have it here: HTTP per-test
+// mocks are consumed on match (updateMock -> DeleteFilteredMock) and the
+// agent then strips every consumed mock from the pool it sends for all later
+// tests (pkg/service/agent/agent.go filterOutDeleted over TotalConsumedMocks).
+// Once a host's last mock has been served it is gone from every pool while
+// having been recorded all along — so an absence read off any pool, however
+// carefully assembled, eventually accuses the application's own upstream. The
+// weaker claim costs a sentence of precision and is always true.
+//
+// nil (undecidable) when:
+//   - the pool is empty — there is nothing to have compared against. In
+//     production this is the diag-less path (a caller that supplied no
+//     matchDiag) and the mockDb-read-failed path; on the schema-survivor path
+//     the builder does NOT reload the pool, but matchDiag.pool carries the
+//     compared set out of match() so that path is decidable too;
+//   - the pool holds fewer mocks than the matcher reported comparing, so what
+//     is in hand is a subset of the compared set and "none of them" would
+//     overreach. matchDiag.pool never trips this (len(pool) == candidates by
+//     construction); it fires for a caller that hands over a partial pool —
+//     a test, or a future parser reusing this builder — and for the re-read
+//     path if a concurrent consumption shrank the pool between the match and
+//     the report. Kept as the defence for those callers, not as a live
+//     production branch.
+//   - any mock in it carries no readable destination — that mock could be the
+//     one that targeted the live call, so the set proves nothing.
+//
+// This runs only on the miss path, where a report is already being rendered,
+// so the walk never touches the matching hot path.
+func comparedDestinations(pool []*models.Mock, candidateCount int) []string {
+	if len(pool) == 0 || len(pool) < candidateCount {
+		return nil
+	}
+	// Sized for distinct UPSTREAMS, not for mocks: a recorded test set has
+	// single-digit distinct hosts behind hundreds of mocks, so len(pool)
+	// would over-allocate by two orders of magnitude on every miss.
+	const typicalDistinctHosts = 8
+	seen := make(map[string]struct{}, typicalDistinctHosts)
+	dests := make([]string, 0, typicalDistinctHosts)
+	for _, mock := range pool {
+		dest, ok := mock.RecordedDestination()
+		if !ok {
+			return nil
+		}
+		if _, dup := seen[dest]; dup {
+			continue
+		}
+		seen[dest] = struct{}{}
+		dests = append(dests, dest)
+	}
+	return dests
 }
 
 // pickClosestCandidate prefers a schema-match survivor (already same

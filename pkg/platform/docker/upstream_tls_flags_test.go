@@ -3,7 +3,6 @@ package docker
 import (
 	"context"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"runtime"
 	"strings"
@@ -334,60 +333,16 @@ func TestGetAlias_LinuxForwardsUpstreamTLS(t *testing.T) {
 func TestGetAlias_EveryPlatformBranchForwardsUpstreamTLSFlags(t *testing.T) {
 	t.Parallel()
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "util.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse util.go: %v", err)
-	}
+	forEachAliasReturningBranch(t, func(t *testing.T, pos token.Position, list []ast.Stmt) {
+		t.Helper()
 
-	var fn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.FuncDecl)
-		if ok && d.Recv == nil && d.Name.Name == "getAlias" {
-			fn = d
-			break
-		}
-	}
-	if fn == nil {
-		t.Fatal("getAlias not found in util.go; this test needs updating alongside the move")
-	}
-
-	// Every statement list inside getAlias. A platform arm is either a
-	// switch case body ([]ast.Stmt) or the body of the colima `if`
-	// (*ast.BlockStmt), so both shapes have to be walked.
-	var lists [][]ast.Stmt
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch s := n.(type) {
-		case *ast.BlockStmt:
-			lists = append(lists, s.List)
-		case *ast.CaseClause:
-			lists = append(lists, s.Body)
-		}
-		return true
-	})
-
-	returns := 0
-	for _, list := range lists {
-		appended := false
 		for _, stmt := range list {
 			if isAliasAppendOf(stmt, "upstreamTLSFlags") {
-				appended = true
-			}
-			if !isReturnAliasNil(stmt) {
-				continue
-			}
-			returns++
-			if !appended {
-				t.Errorf("%s: this getAlias platform branch returns the alias without ever appending upstreamTLSFlags — the agent container on that platform would never receive --upstream-tls-verify/--upstream-tls-ca-cert and would silently fall back to its own defaults",
-					fset.Position(stmt.Pos()))
+				return
 			}
 		}
-	}
-
-	// linux, windows/colima, windows/default, darwin/colima, darwin/default.
-	if returns < 5 {
-		t.Fatalf("found only %d alias-returning branches in getAlias, expected at least 5 (linux, windows×2, darwin×2) — the walk is not seeing the switch and would pass vacuously", returns)
-	}
+		t.Errorf("%s: this getAlias platform branch returns the alias without ever appending upstreamTLSFlags — the agent container on that platform would never receive --upstream-tls-verify/--upstream-tls-ca-cert and would silently fall back to its own defaults", pos)
+	})
 }
 
 // isAliasAppendOf reports whether stmt is `alias += <ident>`.

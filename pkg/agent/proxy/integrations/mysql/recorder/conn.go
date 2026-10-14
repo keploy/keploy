@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
+	"sync"
 	"time"
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
@@ -20,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // Record mode
@@ -81,6 +84,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Store server capabilities for CLIENT_DEPRECATE_EOF handling during query phase
 	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
 		decodeCtx.ServerCaps = greeting.CapabilityFlags
+		// A live greeting is the freshest word on what this server is, for any
+		// later connection to it that has to borrow one (see
+		// fetchServerGreetingShared). No-op without a handshake store.
+		if hasHandshakeStore(ctx) {
+			rememberServerGreeting(ctx, opts, handshake, greetingServerIdentity(greeting))
+		}
 	}
 
 	// Get the initial Plugin Name
@@ -164,27 +173,28 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			if opts.DstCfg != nil {
 				dstPort = uint16(opts.DstCfg.Port)
 			}
-			storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
 			hsEntry := models.TLSHandshakeEntry{
 				RespPackets:  [][]byte{handshake},
 				ReqPackets:   [][]byte{handshakeResponse},
 				ReqTimestamp: res.reqTimestamp,
 			}
-			hsStore.Push(storeKey, hsEntry)
-			logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore",
-				zap.String("key", storeKey),
-				zap.String("connKey", opts.ConnKey),
-				zap.Uint16("dstPort", dstPort))
-			// Also push under the port-only fallback key. The proxy and uprobe
-			// see different TCP connections (different ephemeral ports), so
-			// conn-specific keys won't match.
-			// The port-only key ensures the post-TLS path can find the entry.
+			// Once, under the destination port's key, tagged with this
+			// connection: the decrypted leg of the same connection pops it by
+			// that identity (see models.HandshakeOwner).
 			portKey := models.HandshakeStoreKey("", dstPort)
-			if portKey != storeKey {
-				hsStore.Push(portKey, hsEntry)
-				logger.Debug("Also pushed to port-only fallback key",
-					zap.String("portKey", portKey))
-			}
+			hsStore.PushFor(portKey, models.HandshakeOwnerOf(opts), hsEntry)
+			logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore",
+				zap.String("key", portKey),
+				zap.String("connKey", opts.ConnKey),
+				zap.String("connProc", opts.ConnProc),
+				zap.Uint16("dstPort", dstPort))
+			// Record this greeting as the destination's last-resort fallback for
+			// a sibling connection whose own raw leg was dropped. Keyed by the
+			// resolved destination so it can only be reused for the SAME server.
+			// Note it is NOT skipped for a synthesized address: HandshakeLastKey
+			// combines the address with the app/session scope, so a placeholder
+			// bucket is still per-scope (see its doc).
+			hsStore.RememberLast(lastGreetingKey(opts.PassThroughScope, opts.NetNS, opts.DstCfg), hsEntry)
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true
@@ -834,11 +844,33 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 	return res, nil
 }
 
+// takeLegacyPostTLSGreeting takes the stashed pre-TLS greeting for the legacy
+// post-TLS reader, as resolvePreTLSGreeting does on V2: this connection's own
+// entry (models.HandshakeOwner) when the capture layer can tell which that is.
+// fromShared reports an entry that is not provably its own, only one it may
+// take; taker is the owner that entry was pushed with.
+//
+// A connection that joined mid-stream does not wait, and takes only its own
+// entry: the caller then falls back to the app-scoped cache and the per-server
+// memo (see resolvePreTLSGreeting). A fresh connection waits for its entry.
+func takeLegacyPostTLSGreeting(hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, joinedMidStream bool) (entry models.TLSHandshakeEntry, taker models.HandshakeOwner, ok, fromShared bool) {
+	portKey := models.HandshakeStoreKey("", dstPort)
+	if joinedMidStream {
+		if owner.Conn == "" {
+			return models.TLSHandshakeEntry{}, models.HandshakeOwner{}, false, false
+		}
+		entry, taker, ok = hsStore.PopWaitFor(portKey, owner, true, 0)
+		return entry, taker, ok, false
+	}
+	entry, taker, ok = hsStore.PopWaitFor(portKey, owner, false, 5*time.Second)
+	return entry, taker, ok, ok && !owner.Is(taker)
+}
+
 // handlePostTLSRecord handles MySQL recording for the post-TLS uprobe path.
 // In this mode, the SSL/GoTLS uprobes provide decrypted plaintext starting
 // from HandshakeResponse41 (the full auth after TLS handshake). The server
 // greeting was captured by the ringbuf path and stored in TLSHandshakeStore.
-func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (err error) {
 	// 1. Pop the server greeting from TLSHandshakeStore.
 	dstPort := uint16(0)
 	if opts.DstCfg != nil {
@@ -848,21 +880,117 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if hsStore == nil {
 		return fmt.Errorf("TLSHandshakeStore not available in context for post-TLS MySQL recording")
 	}
-	storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
+	// The raw leg pushed its greeting under the destination port's key, tagged
+	// with its connection (models.HandshakeOwner).
+	storeKey := models.HandshakeStoreKey("", dstPort)
+
+	// Read the first packet from the client BEFORE looking for a greeting: it
+	// decides whether waiting for one can achieve anything. The client's bytes
+	// are buffered, so reading them first costs nothing.
+	//
+	// HandshakeResponse41 has sequence number >= 1 (it follows the server
+	// greeting at seq 0 and the SSLRequest at seq 1). A command-phase packet has
+	// seq 0: every command starts a new sequence. So seq==0 on the FIRST
+	// decrypted packet means this TLS session was authenticated before capture
+	// of its decrypted bytes began: a pooled connection opened before the
+	// recording. Nothing this stream needs can arrive by waiting: it has no
+	// auth exchange of its own here, its config mock is synthesized from any
+	// SSLRequest of the same client, and any greeting OF ITS SERVER decodes its
+	// commands. So it takes what is already there and never waits (see
+	// resolvePreTLSGreeting for the full argument). Waiting cost every pooled
+	// connection 5s here, and 30s on the V2 path, at every recording start.
+	firstPkt, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	if err != nil {
+		return fmt.Errorf("failed to read first post-TLS client packet: %w", err)
+	}
+	if len(firstPkt) < 4 {
+		return fmt.Errorf("first post-TLS packet too short (%d bytes)", len(firstPkt))
+	}
+	joinedMidStream := firstPkt[3] == 0
+
 	logger.Debug("Post-TLS MySQL: popping from TLSHandshakeStore",
 		zap.String("key", storeKey),
 		zap.String("connKey", opts.ConnKey),
-		zap.Uint16("dstPort", dstPort))
-	entry, ok := hsStore.PopWait(storeKey, 5*time.Second)
-	// If conn-specific key missed, try the port-only fallback key.
-	// The proxy and uprobe see different TCP connections with different
-	// ephemeral ports, so conn-specific keys may not match.
-	if !ok && opts.ConnKey != "" {
-		portKey := models.HandshakeStoreKey("", dstPort)
-		logger.Debug("Conn-specific key missed, trying port-only fallback",
-			zap.String("portKey", portKey))
-		entry, ok = hsStore.PopWait(portKey, 2*time.Second)
+		zap.String("connProc", opts.ConnProc),
+		zap.Uint16("dstPort", dstPort),
+		zap.Bool("joinedMidStream", joinedMidStream))
+	entry, taker, ok, fromShared := takeLegacyPostTLSGreeting(hsStore, models.HandshakeOwnerOf(opts), dstPort, joinedMidStream)
+	// Taking an entry that is not provably this connection's is destructive: if
+	// this stream fails before recording anything, the greeting it consumed is
+	// gone and the connection that pushed it is starved, losing its whole
+	// command phase silently. Put an unused entry back, with the owner it was
+	// pushed with, so its connection can still find it. ReqTimestamp is stripped for the same reason the cached
+	// fallback below strips it — to the next consumer this is a BORROWED entry
+	// from another connection, and config mocks are identified and ordered by
+	// ReqTimestampMock. Mirrors handlePostTLSHandshakeV2 on the V2 path.
+	// Cleared at the greeting-decode failures below: an undecodable entry is
+	// garbage, and Push re-stamps its expiry, so recycling it would make it
+	// immortal and trip every later stream to this port.
+	restoreShared := true
+	if fromShared {
+		sharedEntry := entry
+		sharedEntry.ReqTimestamp = time.Time{}
+		defer func() {
+			if !restoreShared || err == nil {
+				return
+			}
+			hsStore.PushFor(storeKey, taker, sharedEntry)
+			logger.Debug("post-TLS MySQL: returned an unused shared greeting to the port FIFO",
+				zap.Uint16("dstPort", dstPort), zap.Error(err))
+		}()
 	}
+	// No stashed entry was taken. Before dialling the server, consult the
+	// last-greeting cache — the same fallback the V2 path uses, and the reason
+	// handleInitialHandshake seeds it above. Without this read that seeding is a
+	// write with no reader, and a POOLED connection (reused long after its
+	// handshake, so its own entry was already consumed) loses its whole command
+	// phase here exactly as it did on V2.
+	//
+	// Address-keyed only. The V2 path additionally bridges legs that disagree
+	// about the address via a port key, but that key names no server and is only
+	// safe with the identity latch that RememberLastForPort applies; this path
+	// writes no port key, so there is nothing here that could answer unsafely.
+	if !ok || len(entry.RespPackets) == 0 {
+		if lastKey := lastGreetingKey(opts.PassThroughScope, opts.NetNS, opts.DstCfg); lastKey != "" {
+			if c, found := hsStore.Last(lastKey); found && len(c.RespPackets) > 0 {
+				logger.Debug("Post-TLS MySQL: own handshake entry gone; reusing the last greeting recorded for this destination",
+					zap.String("lastKey", lastKey))
+				// Reuse the PACKETS, not the timing. The store's own contract
+				// says so (TLSHandshakeStore.Last: "reuse the server-stable
+				// parts ... but not per-connection metadata such as the request
+				// timestamp"), and this was the only in-tree violator: both
+				// config-mock emitters below pass entry.ReqTimestamp straight to
+				// recordMock, so adopting a borrowed one backdates this mock by
+				// up to lastGreetingTTL (30 min).
+				//
+				// That matters twice over. recordMock stamps a "config" mock as
+				// LifetimeSession, so it skips the per-test window entirely —
+				// but pkg/util.go still sorts the session pool by
+				// ReqTimestampMock, and treedb.sameMock IDENTIFIES a mock by
+				// Name+Kind+ReqTimestampMock. Every pooled connection borrowing
+				// the same cached entry would emit mutually indistinguishable
+				// config mocks, and the guard that stops UpdateUnFilteredMock
+				// touching the wrong entry silently abstains.
+				//
+				// The V2 path draws the same line (record_v2.go, staleEntry).
+				c.ReqTimestamp = models.CapturedReqTime(ctx)
+				entry, ok = c, true
+			}
+		}
+	}
+
+	// A zero ReqTimestamp is worse than a stale one: pkg/util.go routes any
+	// mock with a zero request OR response timestamp into filteredMocks with
+	// IsFiltered=true and stops there — ABOVE the lifetime-first routing — so
+	// a LifetimeSession config mock lands in the per-test pool. That happens
+	// whenever both PopWaits and the cache miss and the greeting comes from
+	// the direct fetch below, which never sets a timestamp. V2 handles the
+	// same case by re-sampling; normalise here so neither emitter can ship a
+	// zero.
+	if entry.ReqTimestamp.IsZero() {
+		entry.ReqTimestamp = models.CapturedReqTime(ctx)
+	}
+
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]
@@ -876,8 +1004,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 			zap.String("key", storeKey),
 			zap.String("connKey", opts.ConnKey),
 			zap.Uint16("dstPort", dstPort))
-		var err error
-		serverGreetingBuf, err = fetchServerGreeting(ctx, opts)
+		serverGreetingBuf, err = fetchServerGreetingShared(ctx, logger, hsStore, opts)
 		if err != nil {
 			return fmt.Errorf("no server greeting in TLSHandshakeStore for key %s and direct fetch failed: %w", storeKey, err)
 		}
@@ -886,10 +1013,17 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// 2. Decode the server greeting to initialize decode context.
 	greetingPkt, err := wire.DecodePayload(ctx, logger, serverGreetingBuf, clientConn, decodeCtx)
 	if err != nil {
+		restoreShared = false
 		return fmt.Errorf("failed to decode stored server greeting for post-TLS: %w", err)
 	}
 	pluginName, err := wire.GetPluginName(greetingPkt.Message)
 	if err != nil {
+		// Decodable but not a handshake (GetPluginName accepts only HandshakeV10
+		// / AuthSwitchRequest). This runs BEFORE the HandshakeV10 assertion
+		// below, so without clearing the flag here such an entry would be
+		// recycled — and Push re-stamps its expiry, making it immortal and
+		// tripping every later stream to this port.
+		restoreShared = false
 		return fmt.Errorf("failed to get plugin name from stored server greeting: %w", err)
 	}
 	decodeCtx.PluginName = pluginName
@@ -898,6 +1032,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Store the server greeting for the clientConn (needed by DecodePayload for command phase).
 	sg, ok := greetingPkt.Message.(*mysql.HandshakeV10Packet)
 	if !ok {
+		restoreShared = false
 		return fmt.Errorf("stored server greeting is not HandshakeV10Packet")
 	}
 	decodeCtx.ServerGreetings.Store(clientConn, sg)
@@ -917,25 +1052,10 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		zap.String("key", storeKey),
 		zap.String("pluginName", pluginName))
 
-	// 3. Read the first packet from the client to determine if this is
-	//    a fresh connection (HandshakeResponse41) or an existing connection
-	//    already in command phase (COM_QUERY, COM_STMT_*, etc.).
-	//
-	//    Distinction: HandshakeResponse41 has sequence number >= 1 (follows
-	//    server greeting at seq 0). Command phase packets have seq 0
-	//    (each command starts a new sequence).
-	firstPkt, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
-	if err != nil {
-		return fmt.Errorf("failed to read first post-TLS client packet: %w", err)
-	}
-
-	if len(firstPkt) < 4 {
-		return fmt.Errorf("first post-TLS packet too short (%d bytes)", len(firstPkt))
-	}
-
-	seqNum := firstPkt[3] // 4th byte of MySQL packet header is the sequence number
-
-	if seqNum == 0 {
+	// 3. The first client packet, read above, decides whether this is a fresh
+	//    connection (HandshakeResponse41) or an existing connection already in
+	//    command phase (COM_QUERY, COM_STMT_*, etc.).
+	if joinedMidStream {
 		// Sequence 0 = command phase packet. The connection was already
 		// authenticated before interception started. Skip auth exchange
 		// and go directly to command phase recording.
@@ -954,6 +1074,12 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Produce a synthetic config mock from pre-TLS data so test mode
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
+			// Spent: a mock is about to be built from this greeting. Past this
+			// point the entry must NOT go back — handleClientQueries below
+			// returns non-nil at ordinary teardown (ctx.Done), so the error
+			// alone cannot distinguish "never used" from "used and then the
+			// connection ended".
+			restoreShared = false
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
 				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
 			}
@@ -1066,6 +1192,8 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if len(requests) > 0 && requests[0].Header != nil {
 		reqOp = requests[0].Header.Type // Use SSLRequest type if present
 	}
+	// Spent, for the same reason as the synthetic-config path above.
+	restoreShared = false
 	recordMock(ctx, requests, responses, "config",
 		reqOp, authRes.responseOperation,
 		mocks, entry.ReqTimestamp, models.CapturedRespTime(ctx), opts)
@@ -1198,11 +1326,14 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	return nil
 }
 
+// fetchGreetingDialTimeout bounds each dial fetchServerGreeting makes.
+const fetchGreetingDialTimeout = 3 * time.Second
+
 // fetchServerGreeting connects to the MySQL server directly and reads the
 // initial HandshakeV10 greeting packet. This is used as a fallback when the
 // pre-TLS handshake was not captured by the proxy (e.g. the connection was
 // established before interception started).
-func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]byte, error) {
+func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.OutgoingOptions) ([]byte, error) {
 	addr := ""
 	if opts.DstCfg != nil {
 		addr = opts.DstCfg.Addr
@@ -1210,12 +1341,38 @@ func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]by
 	if addr == "" {
 		return nil, fmt.Errorf("no destination address available to fetch server greeting")
 	}
+	// Never dial an address the capture layer fabricated. When the proxyless
+	// SSL-uprobe path cannot resolve a decrypted stream's real destination it
+	// substitutes a loopback stand-in (and content matching later forces the
+	// well-known port), yielding e.g. "127.0.0.1:3306" — an address this
+	// connection never talked to. Dialing it either fails instantly
+	// (ECONNREFUSED, aborting the capture) or, worse, fetches a greeting from
+	// an unrelated local server. Fail here so callers fall through to their
+	// stash/cache fallbacks or abort cleanly.
+	if opts.DstCfg != nil && opts.DstCfg.AddrFabricated {
+		return nil, fmt.Errorf("destination address %s is a capture-layer stand-in (real destination unresolved), refusing to dial it to fetch the server greeting", addr)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	dialer := &net.Dialer{Timeout: fetchGreetingDialTimeout}
+	dial := func(ctx context.Context, a string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", a)
+	}
+	// A connection made from another network namespace to a namespace-local
+	// address (a pod's 127.0.0.1) is a different server from keploy's own
+	// namespace. The capture layer then supplies a dialer that connects from
+	// the connection's namespace; without one the address is dialled here as
+	// before.
+	if nsDial := models.DstDialerFrom(ctx); nsDial != nil {
+		dial = func(ctx context.Context, a string) (net.Conn, error) {
+			dctx, cancel := context.WithTimeout(ctx, fetchGreetingDialTimeout)
+			defer cancel()
+			return nsDial(dctx, a)
+		}
+	}
+	conn, err := pUtils.DialDestinationWith(ctx, logger, pUtils.DialTarget{Addr: addr}, dial)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -1259,4 +1416,288 @@ func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]by
 	copy(buf, header)
 	copy(buf[4:], payload)
 	return buf, nil
+}
+
+// greetingFetches coalesces concurrent direct greeting fetches for the same
+// store and destination key (see fetchServerGreetingShared).
+var greetingFetches singleflight.Group
+
+// greetingFetchFailureBackoff is how long a failed direct fetch is answered
+// from memory instead of dialled again. A variable so tests can shorten it.
+var greetingFetchFailureBackoff = 15 * time.Second
+
+// greetingFetchFailures remembers the most recent failed fetch per flight key
+// for greetingFetchFailureBackoff. Values are greetingFetchFailure.
+var greetingFetchFailures sync.Map
+
+type greetingFetchFailure struct {
+	err error
+	at  time.Time
+}
+
+// greetingFetchResult is what one flight hands every caller sharing it.
+type greetingFetchResult struct {
+	buf        []byte
+	fromCache  bool // served by an entry remembered before this flight started
+	remembered bool // this flight's fetch was remembered for later connections
+}
+
+// fetchServerGreetingShared is how the post-TLS paths fall back to dialling the
+// server for its greeting. Use it instead of calling fetchServerGreeting
+// directly: it dials at most ONCE per server (per greetingMemoKey), not once
+// per connection, per app or per recording session.
+//
+// Every dial reads the greeting and hangs up before authenticating, and MySQL
+// counts that as an aborted handshake from the dialling host. Enough of them
+// (max_connect_errors, default 100) blocks the host. When the dial comes from a
+// node's network (a DaemonSet agent), pods reaching the server through SNAT
+// share that host, so the whole node loses its database. Before the capture
+// layer reported real destinations, these dials hit the pod's own IP and failed
+// instantly. Now they reach the server, and a pool of pre-recording connections
+// with nothing captured dialled once per connection at every recording start,
+// each costing up to 3s dial + 2s loopback-fallback dial + 3s read when a
+// firewall drops it.
+//
+// So:
+//   - A greeting is remembered PER SERVER (models.HandshakeServerKey): a
+//     server's greeting belongs to the server, not to the app or the recording
+//     session that happened to need it. The key carries no app/session scope
+//     for a routable address, so the next session, or another app on the same
+//     node, reuses it. A namespace-local address (127.0.0.1, ::1, link-local)
+//     names a different server in every pod, so its key is qualified by the
+//     connection's network namespace (OutgoingOptions.NetNS). The entry holds
+//     the greeting bytes only: no SSLRequest (none was captured), no timing.
+//     It lives as long as a live greeting does (lastGreetingTTL), a greeting a
+//     raw leg captures replaces it (rememberServerGreeting), and a fetch never
+//     replaces one a raw leg recorded meanwhile.
+//   - Concurrent callers for the same store and key share ONE in-flight dial.
+//     The dial is detached from the calling connection's cancellation, so one
+//     stream's teardown does not fail the others waiting on it. It stays bounded
+//     by fetchServerGreeting's own dial and read limits. Each caller stops
+//     waiting when its own ctx ends, and a caller whose ctx has already ended
+//     never STARTS a dial: recording stop is not a reason to reach the server.
+//   - A failed fetch caches nothing as a success. Callers already waiting share
+//     its error, and callers arriving within greetingFetchFailureBackoff get
+//     that error without dialling again. After that the next caller dials. A
+//     reply that is not a HandshakeV10 greeting (for example the ERR packet
+//     MySQL sends a blocked host) counts as a failure. A dialer that could not
+//     reach its own connection's namespace (models.ErrDstDialerUnavailable)
+//     does not: that is about one caller, and the others still dial.
+//   - Nothing is remembered without an address: never under a port, and never
+//     for a fabricated destination, which fetchServerGreeting refuses to dial
+//     in the first place.
+//
+// The flight runs on its own goroutine, where singleflight re-panics any panic
+// out of reach of every recover, so it recovers its own and fails instead.
+// It also does not log; its callers do, with their own loggers.
+func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore *models.TLSHandshakeStore, opts models.OutgoingOptions) ([]byte, error) {
+	key := greetingMemoKey(opts)
+	if hsStore == nil || key == "" {
+		// Nothing to remember under and nothing to coalesce on: no store, no
+		// address, or a stand-in address (which fetchServerGreeting refuses).
+		return fetchServerGreeting(ctx, logger, opts)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The store pointer is part of the key: the server key alone is not unique
+	// across stores (each has its own cache), and a flight must remember into
+	// the store its callers read.
+	flight := fmt.Sprintf("%p|%s", hsStore, key)
+	// Same order as inside the flight: a remembered greeting (for instance one a
+	// raw leg recorded since the last failure) beats a remembered failure.
+	if g, ok := hsStore.ServerGreeting(key); ok {
+		logger.Debug("post-TLS MySQL: using the greeting remembered for this server; not dialling",
+			zap.String("serverKey", key))
+		return g, nil
+	}
+	if err := recentGreetingFetchFailure(flight); err != nil {
+		logger.Debug("post-TLS MySQL: not dialling the server for its greeting again; a fetch failed moments ago",
+			zap.String("serverKey", key), zap.Error(err))
+		return nil, err
+	}
+	dialLogger := logger
+	// A flight dials with its LEADER's dialer (its ctx). When that dialer could
+	// not reach its own connection's namespace (models.ErrDstDialerUnavailable),
+	// the failure is the leader's alone: it is not remembered for the server,
+	// and a caller that merely shared the flight tries once more, with a flight
+	// of its own if no one else has started one.
+	for attempt := 0; ; attempt++ {
+		led := false // set only if this caller's function runs the flight
+		ch := greetingFetches.DoChan(flight, func() (res interface{}, err error) {
+			led = true
+			dialled := false
+			defer func() {
+				if r := recover(); r != nil {
+					res, err = nil, fmt.Errorf("greeting fetch from %s panicked: %v\n%s", opts.DstCfg.Addr, r, debug.Stack())
+					dialled = true
+				}
+				if !dialled {
+					return
+				}
+				switch {
+				case err == nil:
+					greetingFetchFailures.Delete(flight)
+				case errors.Is(err, models.ErrDstDialerUnavailable):
+					// This caller's namespace, not the server: remember nothing.
+				default:
+					greetingFetchFailures.Store(flight, greetingFetchFailure{err: err, at: time.Now()})
+					pruneGreetingFetchFailures()
+				}
+			}()
+			// A flight that finished just before this one started may already have
+			// remembered the greeting (so may a raw leg), or may have failed: a
+			// caller can pass the check above just as that flight ends. Either way,
+			// no dial.
+			if g, ok := hsStore.ServerGreeting(key); ok {
+				return greetingFetchResult{buf: g, fromCache: true}, nil
+			}
+			if err := recentGreetingFetchFailure(flight); err != nil {
+				return nil, err
+			}
+			dialled = true
+			buf, err := fetchServerGreeting(context.WithoutCancel(ctx), dialLogger, opts)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateGreeting(buf); err != nil {
+				return nil, fmt.Errorf("server at %s: %w", opts.DstCfg.Addr, err)
+			}
+			remembered := hsStore.RememberServerGreetingIfAbsent(key, buf)
+			return greetingFetchResult{buf: buf, remembered: remembered}, nil
+		})
+		select {
+		case r := <-ch:
+			if r.Err != nil {
+				if !led && attempt == 0 && errors.Is(r.Err, models.ErrDstDialerUnavailable) {
+					logger.Debug("post-TLS MySQL: the shared greeting fetch could not dial from its own connection's namespace; trying with this connection's",
+						zap.String("serverKey", key), zap.Error(r.Err))
+					continue
+				}
+				return nil, r.Err
+			}
+			res, _ := r.Val.(greetingFetchResult)
+			switch {
+			case res.fromCache:
+				logger.Debug("post-TLS MySQL: greeting was remembered by an earlier connection; not dialling",
+					zap.String("serverKey", key))
+			case r.Shared:
+				logger.Debug("post-TLS MySQL: shared another connection's greeting fetch instead of dialling",
+					zap.String("serverKey", key))
+			case res.remembered:
+				logger.Debug("post-TLS MySQL: remembered a directly fetched greeting for later connections to this server",
+					zap.String("serverKey", key))
+			}
+			return res.buf, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// lastGreetingKey is the key of the app-scoped last-greeting cache
+// (models.HandshakeLastKey) for a connection, or "" for none.
+//
+// That key combines the app/session scope with the destination address, and
+// the scope is shared by every replica of a deployment. For a namespace-local
+// address the capture layer observed (not a stand-in), each replica reaches its
+// OWN server there (a sidecar on 127.0.0.1), so the key also carries the
+// connection's network namespace, and without one there is no key: nothing is
+// shared, as for the per-server memo (models.HandshakeServerKey). A stand-in
+// address (AddrFabricated) names no server at all; its per-scope bucket is
+// documented on models.HandshakeLastKey.
+func lastGreetingKey(scope, netNS string, dst *models.ConditionalDstCfg) string {
+	if dst != nil && !dst.AddrFabricated {
+		if host, _, err := net.SplitHostPort(dst.Addr); err == nil && models.AddrIsNetnsLocal(host) {
+			if netNS == "" {
+				return ""
+			}
+			scope += "|netns=" + netNS
+		}
+	}
+	return models.HandshakeLastKey(scope, dst)
+}
+
+// greetingMemoKey is the key a connection's server greeting is remembered
+// under: the server behind its destination (models.HandshakeServerKey). "" when
+// the destination names no server.
+func greetingMemoKey(opts models.OutgoingOptions) string {
+	return models.HandshakeServerKey(opts.NetNS, opts.DstCfg)
+}
+
+// rememberServerGreeting records a greeting a raw leg CAPTURED from the server
+// on a live connection, so a later connection to the same server that needs
+// one (a pooled connection whose own greeting predates the recording) is
+// served without dialling, and a greeting fetched earlier is refreshed.
+//
+// identity is greetingServerIdentity of the caller's decoding of greeting, and
+// the proof that it IS one: an ERR packet, or a mid-stream packet mistaken for a
+// greeting, never decodes as a HandshakeV10 (identity is then ""), and must
+// never be handed to another connection. Taking the caller's decoding spares
+// every recorded handshake a second decode and a second fingerprint.
+func rememberServerGreeting(ctx context.Context, opts models.OutgoingOptions, greeting []byte, identity string) {
+	if identity == "" || len(greeting) < 5 || greeting[4] != mysql.HandshakeV10 {
+		return
+	}
+	hsStore, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if hsStore == nil {
+		return
+	}
+	if key := greetingMemoKey(opts); key != "" {
+		hsStore.RememberServerGreeting(key, greeting, identity)
+	}
+}
+
+// hasHandshakeStore reports whether ctx carries a TLSHandshakeStore, so a
+// caller can skip work only a store would use.
+func hasHandshakeStore(ctx context.Context) bool {
+	s, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	return s != nil
+}
+
+// recentGreetingFetchFailure returns the failure recorded for flight within
+// greetingFetchFailureBackoff, or nil.
+func recentGreetingFetchFailure(flight string) error {
+	v, ok := greetingFetchFailures.Load(flight)
+	if !ok {
+		return nil
+	}
+	f, ok := v.(greetingFetchFailure)
+	if !ok {
+		return nil
+	}
+	ago := time.Since(f.at)
+	if ago >= greetingFetchFailureBackoff {
+		return nil
+	}
+	return fmt.Errorf("greeting fetch failed %s ago, not retrying for %s: %w",
+		ago.Truncate(time.Millisecond), greetingFetchFailureBackoff, f.err)
+}
+
+// pruneGreetingFetchFailures drops failure records past their backoff so the
+// map holds only live ones: one per destination that failed in the last
+// greetingFetchFailureBackoff.
+func pruneGreetingFetchFailures() {
+	greetingFetchFailures.Range(func(k, v interface{}) bool {
+		if f, ok := v.(greetingFetchFailure); !ok || time.Since(f.at) >= greetingFetchFailureBackoff {
+			greetingFetchFailures.Delete(k)
+		}
+		return true
+	})
+}
+
+// validateGreeting accepts only a HandshakeV10 greeting packet: protocol
+// version 10 and a payload that decodes. Anything else, such as the ERR packet
+// MySQL sends a blocked host or a truncated reply, must not be cached or reused.
+func validateGreeting(buf []byte) error {
+	if len(buf) < 5 {
+		return fmt.Errorf("greeting reply too short (%d bytes)", len(buf))
+	}
+	if buf[4] != mysql.HandshakeV10 {
+		return fmt.Errorf("reply is not a HandshakeV10 greeting (first payload byte 0x%02x)", buf[4])
+	}
+	if _, err := connPhase.DecodeHandshakeV10(context.Background(), zap.NewNop(), buf[4:]); err != nil {
+		return fmt.Errorf("undecodable HandshakeV10 greeting: %w", err)
+	}
+	return nil
 }

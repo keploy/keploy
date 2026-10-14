@@ -248,39 +248,52 @@ func TestHangResetOnActivity(t *testing.T) {
 		HangBudget: 80 * time.Millisecond,
 	}
 	s := New(cfg)
+	defer s.Close()
 	s.MarkPendingWork()
 
-	// Drive activity well faster than the budget so the parser's
-	// effective run time exceeds budget but the watchdog never fires.
-	runFor := 300 * time.Millisecond
-	stopBumping := make(chan struct{})
-	go func() {
-		tick := time.NewTicker(20 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-tick.C:
-				s.BumpActivity()
-			case <-stopBumping:
-				return
-			}
+	// Deterministic model of "activity faster than the budget keeps the
+	// watchdog disarmed, even though total runtime far exceeds the budget".
+	// The old version drove BumpActivity from a 20ms ticker goroutine and
+	// asserted a real 80ms-budget watchdog never fired — two independent
+	// wall-clock timers that, under -race on a loaded CI runner, could drift
+	// more than a budget apart, so the watchdog *correctly* fired while the
+	// test asserted OK (the flake). Here we step a synthetic clock through the
+	// exact decision the watchdog makes each tick (hangExceeded) and the exact
+	// progress write it resets against (bumpActivityAt), so the outcome depends
+	// only on the budget/interval arithmetic, never on scheduling.
+	//
+	// (New spawns a real watchdog goroutine; it only reads atomics, so -race
+	// stays clean, it never observes these assertions, and defer Close stops
+	// it.)
+	const (
+		interval = 20 * time.Millisecond  // activity cadence, well inside the budget
+		runFor   = 300 * time.Millisecond // total run, ~4x the 80ms budget
+	)
+	base := time.Unix(1_000_000, 0)
+	s.bumpActivityAt(base)
+	for elapsed := interval; elapsed <= runFor; elapsed += interval {
+		now := base.Add(elapsed)
+		// The previous bump was one interval ago, so a watchdog tick landing
+		// here sees only `interval` of no-progress — within the budget — and
+		// must not fire. Load-bearing: shrink HangBudget below `interval` and
+		// this assertion fails, proving it exercises the budget/interval
+		// relationship rather than a zero-elapsed tautology.
+		if s.hangExceeded(now) {
+			t.Fatalf("watchdog fired %s after activity with a %s budget (total elapsed %s)",
+				interval, cfg.HangBudget, elapsed)
 		}
-	}()
+		s.bumpActivityAt(now) // activity resets the no-progress reference
+	}
 
-	res := s.Run(context.Background(),
-		func(ctx context.Context, sess *Session) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(runFor):
-				return nil
-			}
-		},
-		&Session{})
-	close(stopBumping)
-
-	if res.Status != StatusOK {
-		t.Fatalf("expected OK with activity bumps, got %s (err=%v)", res.Status, res.Err)
+	// Complement: once activity stops, silence beyond one full budget MUST
+	// fire — proving the resets above were the only thing holding it off, not
+	// an inert watchdog.
+	lastBump := base.Add(runFor)
+	if s.hangExceeded(lastBump.Add(cfg.HangBudget)) {
+		t.Fatalf("watchdog fired at exactly the budget boundary; firing must require strictly > budget")
+	}
+	if !s.hangExceeded(lastBump.Add(cfg.HangBudget + time.Millisecond)) {
+		t.Fatalf("watchdog did not fire %s after activity stopped", cfg.HangBudget+time.Millisecond)
 	}
 }
 

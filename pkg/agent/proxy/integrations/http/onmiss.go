@@ -11,7 +11,10 @@ import (
 	"sync"
 	"time"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -86,9 +89,12 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 		return false, err
 	}
 
-	// Read the upstream response.
+	// Read the upstream's final response: an interim one (the 100 Continue
+	// to an upload, a 103 Early Hints) is not its answer, and is not relayed.
+	// The app had its 100 from the decoder already, and a matched mock
+	// serves the final response alone too.
 	respReader := bufio.NewReader(dstConn)
-	respParsed, err := http.ReadResponse(respReader, request)
+	respParsed, err := pUtil.ReadFinalResponse(respReader, request, nil)
 	if err != nil {
 		return false, err
 	}
@@ -118,7 +124,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 
 	// record policy: capture the exchange for the CLI to persist.
 	if opts.OnMiss.RecordsOnMiss() {
-		appendCaptured(&models.Mock{
+		captured := &models.Mock{
 			Version: models.GetVersion(),
 			Name:    "mocks",
 			Kind:    models.HTTP,
@@ -137,12 +143,22 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 					StatusCode: respParsed.StatusCode,
 					Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 					Body:       string(respBody),
+
+					// Replay serves this response: keep what it takes to serve a
+					// repeated header (Set-Cookie) on its own lines.
+					HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				},
 				Created:          time.Now().Unix(),
 				ReqTimestampMock: reqTs,
 				ResTimestampMock: resTs,
 			},
-		})
+		}
+		// A capture never passes the sync manager, which stamps every other
+		// recorded mock with its connection's container key (containerkey).
+		if key, ok := containerkey.FromContext(ctx); ok {
+			captured.Spec.Metadata[containerkey.MetadataKey] = key
+		}
+		appendCaptured(captured)
 	}
 	return true, nil
 }
@@ -156,7 +172,12 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 // on-miss path dials the real network, so it must not disable verification.
 func (h *HTTP) dialUpstream(ctx context.Context, dstCfg *models.ConditionalDstCfg) (net.Conn, error) {
 	d := &net.Dialer{Timeout: 30 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", dstCfg.Addr)
+	raw, err := pUtil.DialDestinationWith(ctx, h.Logger,
+		pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated},
+		func(ctx context.Context, a string) (net.Conn, error) {
+			// Only replay misses dial here; no handshake was held for them.
+			return pUtil.DialRaw(ctx, d, "tcp", a, nil)
+		})
 	if err != nil {
 		return nil, err
 	}

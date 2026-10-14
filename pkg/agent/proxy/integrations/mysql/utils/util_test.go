@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -428,6 +430,227 @@ func BenchmarkReadLengthEncodedInteger(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				ReadLengthEncodedInteger(tc.data)
+			}
+		})
+	}
+}
+
+// Input that ends before its string does is io.ErrUnexpectedEOF, never
+// io.EOF: the record loops read a bare io.EOF as the connection closing, and
+// a malformed packet ended the recording as if nothing were wrong.
+func TestReadLengthEncodedString_TruncatedIsUnexpectedEOF(t *testing.T) {
+	for _, b := range [][]byte{
+		{},                // no length at all
+		{0xfc}, {0xfc, 1}, // 2-byte length cut short (read as NULL before)
+		{0xfd, 1, 2},            // 3-byte length cut short
+		{0xfe, 1, 2, 3},         // 8-byte length cut short
+		{3, 'a', 'b'},           // body cut short
+		{0xfc, 0x00, 0x01, 'x'}, // 256-byte body, 1 present
+		{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 'x'}, // overflows int: sliced with a negative bound before
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("% x: panicked: %v", b, r)
+				}
+			}()
+			if s, _, _, err := ReadLengthEncodedString(b); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("% x: (%q, %v), want io.ErrUnexpectedEOF", b, s, err)
+			}
+		}()
+	}
+	for _, c := range []struct {
+		in     []byte
+		want   string
+		isNull bool
+		n      int
+	}{
+		{[]byte{0xfb, 'x'}, "", true, 1},
+		{[]byte{0x00, 'x'}, "", false, 1},
+		{[]byte{2, 'a', 'b', 'x'}, "ab", false, 3},
+		{append([]byte{0xfc, 0x01, 0x01}, make([]byte, 257)...), string(make([]byte, 257)), false, 260},
+	} {
+		s, isNull, n, err := ReadLengthEncodedString(c.in)
+		if err != nil || string(s) != c.want || isNull != c.isNull || n != c.n {
+			t.Fatalf("% x = (%q, %v, %d, %v), want (%q, %v, %d, nil)", c.in[:min(len(c.in), 4)], s, isNull, n, err, c.want, c.isNull, c.n)
+		}
+	}
+}
+
+func TestReadNullTerminatedString_UnterminatedIsUnexpectedEOF(t *testing.T) {
+	if _, _, err := ReadNullTerminatedString([]byte("abc")); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if s, n, err := ReadNullTerminatedString([]byte("ab\x00c")); err != nil || string(s) != "ab" || n != 3 {
+		t.Fatalf("= (%q, %d, %v)", s, n, err)
+	}
+}
+
+// TestParseBinaryDate_TruncatedBuffer guards the bounds-check fix for
+// ParseBinaryDate. Before the fix, a non-zero length byte with a payload
+// shorter than 4 bytes (e.g. a truncated DATE column in a malformed or
+// fuzzed row packet) indexed past the end of b and panicked instead of
+// returning a decode error.
+func TestParseBinaryDate_TruncatedBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "length byte only", data: []byte{0x04}},
+		{name: "missing day byte", data: []byte{0x04, 0x01, 0x02, 0x03}},
+		// A garbage length byte (200) must not be trusted as the
+		// bytes-consumed count: DecodeBinaryRow's row loop advances its
+		// read offset by that count on the next column, so an
+		// unvalidated value here becomes an out-of-range panic one
+		// column later rather than in this function.
+		{name: "non-canonical length byte", data: []byte{0xC8, 0x01, 0x02, 0x03, 0x04}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("ParseBinaryDate panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := ParseBinaryDate(tt.data)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestParseBinaryTime_TruncatedBuffer guards the bounds-check fix for
+// ParseBinaryTime. Before the fix, a non-zero length byte with a payload
+// shorter than 8 bytes (or shorter than 12 when microseconds are present)
+// indexed past the end of b and panicked instead of returning a decode
+// error.
+func TestParseBinaryTime_TruncatedBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "length byte only", data: []byte{0x08}},
+		{name: "missing seconds byte", data: []byte{0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02}},
+		{name: "microseconds present but truncated", data: []byte{0x0C, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04}},
+		// A garbage length byte (240) must not be trusted as the
+		// bytes-consumed count for the same reason as ParseBinaryDate
+		// above - it would otherwise surface as a panic one column
+		// later in DecodeBinaryRow's row loop. The buffer is padded to
+		// 13 bytes (>= the microseconds floor) so this case is only
+		// caught by the canonical-length check, not incidentally by
+		// the floor check above.
+		{name: "non-canonical length byte", data: []byte{0xF0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("ParseBinaryTime panicked on %q: %v", tt.name, r)
+				}
+			}()
+			_, _, err := ParseBinaryTime(tt.data)
+			if err == nil {
+				t.Fatalf("expected a decode error for %q, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestReadLengthEncodedString_TruncatedExtendedPrefix guards the fix where
+// ReadLengthEncodedString conflated a real NULL (the single byte 0xfb) with
+// a truncated extended length-encoded-integer prefix (a lone 0xfc/0xfd/0xfe
+// marker whose follow-up bytes are missing). Both used to report num < 1 and
+// return a nil error; only n distinguishes them - a real NULL or a genuine
+// empty string always consumes at least 1 byte (n >= 1), while a truncated
+// prefix consumes none (n == 0).
+func TestReadLengthEncodedString_TruncatedExtendedPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "0xfc with no follow-up bytes", data: []byte{0xfc}},
+		{name: "0xfc with one of two follow-up bytes", data: []byte{0xfc, 0x01}},
+		{name: "0xfd with follow-up bytes missing", data: []byte{0xfd, 0x01}},
+		{name: "0xfe with follow-up bytes missing", data: []byte{0xfe, 0x01, 0x02}},
+		{name: "empty buffer", data: []byte{}},
+		// The other truncation path out of this function: the length prefix
+		// reads fine, but the string body runs past the end of the packet.
+		// Pre-existing on main and it returned the same bare io.EOF, so it is
+		// covered here alongside the new branch.
+		{name: "body declared longer than the buffer", data: []byte{0x05, 'a', 'b'}},
+		{name: "0xfc body declared longer than the buffer", data: []byte{0xfc, 0x10, 0x00, 'a'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, n, err := ReadLengthEncodedString(tt.data)
+			if err == nil {
+				t.Fatalf("expected an error for %q, got nil (n=%d)", tt.name, n)
+			}
+			// Which sentinel matters, not just that one was returned.
+			// recorder/record_v2.go:110,142 treat io.EOF as a clean connection
+			// close, so returning it here would make a malformed packet look
+			// like the client hanging up: the recording would end quietly
+			// instead of falling through to passthrough with a warning.
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected io.ErrUnexpectedEOF for %q, got %v", tt.name, err)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("%q returned io.EOF, which upstream reads as a clean close", tt.name)
+			}
+		})
+	}
+}
+
+// TestReadLengthEncodedString_RealNullAndEmptyString are the cases the fix
+// above must not regress: an actual NULL marker and a genuine zero-length
+// string both consume exactly 1 byte and must still succeed.
+func TestReadLengthEncodedString_RealNullAndEmptyString(t *testing.T) {
+	value, isNull, n, err := ReadLengthEncodedString([]byte{0xfb})
+	if err != nil {
+		t.Fatalf("NULL marker: unexpected error: %v", err)
+	}
+	if !isNull || n != 1 {
+		t.Fatalf("NULL marker: got isNull=%v n=%d, want isNull=true n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("NULL marker: expected empty value, got %q", value)
+	}
+
+	value, isNull, n, err = ReadLengthEncodedString([]byte{0x00})
+	if err != nil {
+		t.Fatalf("empty string: unexpected error: %v", err)
+	}
+	if isNull || n != 1 {
+		t.Fatalf("empty string: got isNull=%v n=%d, want isNull=false n=1", isNull, n)
+	}
+	if len(value) != 0 {
+		t.Fatalf("empty string: expected empty value, got %q", value)
+	}
+}
+
+// ReadNullTerminatedString sits one function below ReadLengthEncodedString and
+// had the same bare-sentinel problem: its only caller is the handshake path
+// (wire/phase/conn/authNextFactorPacket.go), whose error reaches the record
+// loop's io.EOF check and is read there as the client closing cleanly.
+func TestReadNullTerminatedString_NoTerminator(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "no NUL byte", data: []byte{'a', 'b', 'c'}},
+		{name: "empty buffer", data: []byte{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ReadNullTerminatedString(tt.data)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected io.ErrUnexpectedEOF, got %v", err)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("returned io.EOF, which the record loop reads as a clean close")
 			}
 		})
 	}

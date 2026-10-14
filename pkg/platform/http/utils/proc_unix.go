@@ -9,13 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/creack/pty"
+	keployutils "go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -80,102 +82,94 @@ func StartCommand(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
-// gracefulStopTimeout bounds how long StopCommand waits for a SIGTERM'd process
-// group to exit before escalating to SIGKILL. StopCommand returns as soon as the
-// group is actually gone, so this is only the ceiling for a process that ignores
-// SIGTERM — the common case (a process that exits on SIGTERM) returns in well
-// under a second.
-const gracefulStopTimeout = 8 * time.Second
-
-// forceKillTimeout bounds the post-SIGKILL wait for the group to disappear.
-const forceKillTimeout = 3 * time.Second
-
-// groupGone reports whether no process remains in process group pgid. kill(-pgid, 0)
-// returns ESRCH once every member has exited and been reaped (keploy's app-watch
-// goroutine reaps the leader, so a graceful exit clears the group promptly).
-func groupGone(pgid int) bool {
-	return errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
-}
-
-// waitGroupGone polls until process group pgid is gone or timeout elapses.
-func waitGroupGone(pgid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if groupGone(pgid) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// waitPIDGone polls until process pid is gone or timeout elapses (fallback path
-// where the process is not in its own group).
-func waitPIDGone(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// StopCommand gracefully stops the app's process group: SIGTERM, then WAIT for the
-// group to actually exit so its resources (listening ports, sockets) are released,
-// then SIGKILL if it ignored SIGTERM. The wait is load-bearing: returning before
-// the group has exited races the next app start against a still-bound port and
-// surfaces as "listen tcp :PORT: bind: address already in use" (the
-// go-docker-timefreeze flake). The previous implementation SIGTERM'd the group and
-// returned immediately, doing neither the wait nor the documented SIGKILL fallback.
-func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
+// TerminateCommand asks cmd to stop with SIGTERM -- cmd alone: under sudo cmd
+// is sudo, which the invoking user may signal (it keeps the user's real uid)
+// and which hands the signal to the agent; without sudo cmd is the agent --
+// and returns without waiting and without any later SIGKILL. It
+// is how the CLI stops a running keploy agent it could not ask over the
+// agent's API: the caller then waits for the agent's own exit
+// (AgentClient.terminateAgent), and must not call it for a cmd it has already
+// reaped, whose pid may belong to another process by then. A process that has
+// already exited is not an error.
+func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 	pid := cmd.Process.Pid
-
-	// Determine pgid (with Setpgid, leader's pgid == pid)
-	pgid, err := syscall.Getpgid(pid)
-	if err != nil {
-		logger.Debug("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
-		// Graceful SIGTERM to the leader only.
-		if sigErr := cmd.Process.Signal(syscall.SIGTERM); sigErr != nil {
-			// Process already finished is expected during graceful shutdown, not an error
-			if sigErr.Error() == "os: process already finished" {
-				logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
-				return nil
-			}
-			logger.Debug("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(sigErr))
-		}
-		// Wait (bounded) for exit so the port is released, then force-kill.
-		if waitPIDGone(pid, gracefulStopTimeout) {
-			return nil
-		}
-		return cmd.Process.Kill()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		logger.Debug("failed to send SIGTERM to process", zap.Int("pid", pid), zap.Error(err))
+		return err
 	}
+	return nil
+}
 
-	// Graceful: SIGTERM the whole group.
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
-		logger.Debug("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
-	}
-
-	// Wait (bounded) for the group to fully exit so its port/sockets are released
-	// before we return — otherwise the next app start races a still-bound port.
-	if waitGroupGone(pgid, gracefulStopTimeout) {
+// KillAgentCommand ends the agent cmd started, for a stop that has to be
+// forced (the CLI's stopWatch in pkg/platform/http). The agent is sent
+// keployutils.EscalationSignal, on which it kills itself once no teardown work
+// is in progress (utils.DieOnEscalation): the CLI judged from a report a
+// moment old. now -- the user pressed Ctrl+C again -- sends SIGKILL instead,
+// where it can: to an agent started directly. One started through sudo runs
+// as root, which the user who ran keploy may not signal; sudo keeps that
+// user's uid and hands the escalation signal on to the agent. Through
+// cmd.Process, so an agent already reaped is never signalled. A process that
+// has already exited is not an error.
+func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, now bool) error {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-
-	// Ignored SIGTERM: force-kill the whole group and confirm it is gone.
-	logger.Debug("process group did not exit after SIGTERM; escalating to SIGKILL", zap.Int("pgid", pgid))
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		logger.Debug("failed to send SIGKILL to process group", zap.Int("pgid", pgid), zap.Error(err))
+	sig := os.Signal(keployutils.EscalationSignal)
+	if now && !isSudo(cmd) {
+		sig = syscall.SIGKILL
 	}
-	waitGroupGone(pgid, forceKillTimeout)
+	if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		logger.Debug("failed to kill the agent", zap.Int("pid", cmd.Process.Pid), zap.Stringer("signal", sig), zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+// KillAgentReach says what KillAgentCommand does to the agent cmd started:
+// whether a kill that is not now already ends it at once (never here: it is
+// the escalation signal), and whether one that is now does not (through
+// sudo, whose agent the user who ran keploy may not SIGKILL).
+func KillAgentReach(cmd *exec.Cmd) (firstAtOnce, noAtOnce bool) {
+	return false, cmd != nil && isSudo(cmd)
+}
+
+// KillPTYReach is KillAgentReach for a command started on a PTY.
+func KillPTYReach(handle *PTYHandle) (firstAtOnce, noAtOnce bool) {
+	if handle == nil {
+		return false, false
+	}
+	return KillAgentReach(handle.cmd)
+}
+
+// KillPTYCommand is KillAgentCommand for a command started on a PTY.
+func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
+	if handle == nil {
+		return nil
+	}
+	return KillAgentCommand(handle.cmd, logger, now)
+}
+
+// isSudo reports whether cmd runs sudo, which runs the agent as another user.
+func isSudo(cmd *exec.Cmd) bool {
+	return filepath.Base(cmd.Path) == "sudo"
+}
+
+// TerminatePTYCommand is TerminateCommand for a command started on a PTY: it
+// sends SIGTERM to the command (sudo, which hands it to the agent) and leaves
+// the PTY open. Closing the PTY hangs the agent up, and a hung-up agent dies
+// where it stands instead of finishing its shutdown; the PTY is closed once
+// the command has exited (PTYHandle.Wait).
+func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil || handle.cmd == nil || handle.cmd.Process == nil {
+		return nil
+	}
+	if err := handle.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		logger.Debug("failed to send SIGTERM to PTY process", zap.Int("pid", handle.cmd.Process.Pid), zap.Error(err))
+		return err
+	}
 	return nil
 }
 
@@ -187,6 +181,8 @@ type PTYHandle struct {
 	resizeCh     chan os.Signal
 	wg           sync.WaitGroup
 	oldTermState *term.State // Store original terminal state for restoration
+	termMu       sync.Mutex  // Guards oldTermState (RestoreTerminal)
+	stdinOff     atomic.Bool // set by RestoreTerminal: keystrokes stay the user's
 	closeOnce    sync.Once   // Ensure PTY is closed only once
 	stopOnce     sync.Once   // Ensure resize channel cleanup happens only once
 	ptmxMu       sync.Mutex  // Protects access to ptmx during resize and close
@@ -295,7 +291,7 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 	// which cannot be interrupted by closing ptmx. This goroutine will exit when
 	// the process terminates or when a write to closed ptmx fails.
 	go func() {
-		_, copyErr := io.Copy(ptmx, os.Stdin)
+		_, copyErr := io.Copy(stdinGate{handle}, os.Stdin)
 		if copyErr != nil && !isClosedPTYError(copyErr) {
 			logger.Debug("error copying stdin to PTY", zap.Error(copyErr))
 		}
@@ -310,13 +306,9 @@ func (h *PTYHandle) Wait() error {
 	cmdErr := h.cmd.Wait()
 
 	// Restore terminal state before any other cleanup
-	if h.oldTermState != nil {
-		if restoreErr := term.Restore(int(os.Stdin.Fd()), h.oldTermState); restoreErr != nil {
-			h.logger.Debug("failed to restore terminal state", zap.Error(restoreErr))
-		}
-	}
+	h.RestoreTerminal()
 
-	// Use stopOnce to ensure cleanup only happens once (Wait and StopPTYCommand may both be called)
+	// stopOnce: the cleanup happens once
 	h.stopOnce.Do(func() {
 		// Stop listening for resize signals
 		signal.Stop(h.resizeCh)
@@ -344,65 +336,49 @@ func (h *PTYHandle) Wait() error {
 	return cmdErr
 }
 
+// stdinGate forwards the user's keystrokes to the PTY until RestoreTerminal
+// has given the terminal back. From then on it refuses the next one, which
+// ends the copy loop, as a closed PTY did: that one keystroke is dropped, not
+// fed to an agent that is only shutting down, and the loop does not live on
+// to take every keystroke after it.
+type stdinGate struct{ h *PTYHandle }
+
+func (g stdinGate) Write(p []byte) (int, error) {
+	if g.h.stdinOff.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	return g.h.ptmx.Write(p)
+}
+
+// StdinOff reports whether RestoreTerminal has given h's terminal back and
+// stopped forwarding keystrokes; for tests of the stop paths.
+func StdinOff(h *PTYHandle) bool { return h.stdinOff.Load() }
+
+// RestoreTerminal gives the user's terminal back the state StartCommandWithPTY
+// found it in, and stops forwarding keystrokes to the PTY. Wait does it once the command has exited; a stop that waits for
+// a running agent to finish its shutdown does it at once, so the terminal is
+// the user's again even if keploy exits before the agent does. Idempotent.
+func (h *PTYHandle) RestoreTerminal() {
+	if h == nil {
+		return
+	}
+	h.stdinOff.Store(true)
+	h.termMu.Lock()
+	defer h.termMu.Unlock()
+	if h.oldTermState == nil {
+		return
+	}
+	if err := term.Restore(int(os.Stdin.Fd()), h.oldTermState); err != nil && h.logger != nil {
+		h.logger.Debug("failed to restore terminal state", zap.Error(err))
+	}
+	h.oldTermState = nil
+}
+
 // GetProcess returns the underlying process for signal handling
 func (h *PTYHandle) GetProcess() *os.Process {
 	if h.cmd != nil {
 		return h.cmd.Process
 	}
-	return nil
-}
-
-// StopPTYCommand gracefully stops a command running with PTY
-func StopPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
-	if handle == nil || handle.cmd == nil || handle.cmd.Process == nil {
-		return nil
-	}
-
-	// Restore terminal state first
-	if handle.oldTermState != nil {
-		if restoreErr := term.Restore(int(os.Stdin.Fd()), handle.oldTermState); restoreErr != nil {
-			logger.Debug("failed to restore terminal state", zap.Error(restoreErr))
-		}
-		handle.oldTermState = nil // Prevent double restore
-	}
-
-	pid := handle.cmd.Process.Pid
-
-	// Use stopOnce to ensure cleanup only happens once (Wait and StopPTYCommand may both be called)
-	handle.stopOnce.Do(func() {
-		// Stop resize signal handling BEFORE closing the PTY
-		signal.Stop(handle.resizeCh)
-		// Drain any pending signals
-		select {
-		case <-handle.resizeCh:
-		default:
-		}
-		close(handle.resizeCh)
-
-		// Close PTY FIRST - this causes sudo to see EOF and exit immediately
-		// This is more effective than SIGTERM when sudo is waiting for password input
-		handle.ptmxMu.Lock()
-		handle.closing = true
-		handle.closeOnce.Do(func() {
-			if handle.ptmx != nil {
-				if err := handle.ptmx.Close(); err != nil && !isClosedPTYError(err) {
-					logger.Debug("failed to close PTY in StopPTYCommand", zap.Error(err))
-				}
-			}
-		})
-		handle.ptmxMu.Unlock()
-	})
-
-	// Send SIGTERM as a fallback in case closing PTY didn't terminate the process
-	if err := handle.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		if err.Error() != "os: process already finished" {
-			logger.Debug("failed to send SIGTERM to PTY process", zap.Int("pid", pid), zap.Error(err))
-		}
-	}
-
-	// Wait for all goroutines (resize, stdout copy) to finish
-	handle.wg.Wait()
-
 	return nil
 }
 
@@ -413,7 +389,7 @@ func isClosedPTYError(err error) bool {
 		return false
 	}
 	errStr := err.Error()
-	return err == io.EOF ||
+	return err == io.EOF || errors.Is(err, io.ErrClosedPipe) ||
 		strings.Contains(errStr, "input/output error") ||
 		strings.Contains(errStr, "file already closed") ||
 		strings.Contains(errStr, "bad file descriptor")
@@ -425,4 +401,13 @@ func ConfigureCommandForPTY(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // create new session for PTY
 	}
+}
+
+// SetOwnProcessGroup starts cmd in a process group of its own, so a signal to
+// the caller's group -- a terminal's Ctrl+C -- does not reach it.
+func SetOwnProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 }

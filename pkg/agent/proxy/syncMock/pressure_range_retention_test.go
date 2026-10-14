@@ -19,9 +19,7 @@ func TestPressureRangesRetainedBeyondFormerStaleness(t *testing.T) {
 	// A pressure interval that opened and closed a full minute ago — well
 	// beyond the former 7s staleness horizon that used to prune it.
 	old := time.Now().Add(-time.Minute)
-	mgr := &SyncMockManager{
-		pressureRanges: []pressureRange{{start: old.Add(-time.Second), end: old}},
-	}
+	mgr := withPressure(pressureRange{start: old.Add(-time.Second), end: old})
 
 	// memoryguard keeps ticking SetMemoryPressure long after that interval
 	// closed. Every such call ran the old age-based prune, which would have
@@ -40,23 +38,35 @@ func TestPressureRangesRetainedBeyondFormerStaleness(t *testing.T) {
 	}
 }
 
-// TestPressureRangeCountCapEvictsOldest verifies the memory bound: past
-// maxPressureRanges intervals the slice is capped (oldest evicted, newest kept),
-// so retention-by-count cannot leak unbounded over a long recording.
-func TestPressureRangeCountCapEvictsOldest(t *testing.T) {
+// TestPressureRangeCountCapNeverUncoversARange verifies the memory bound:
+// past maxPressureRanges intervals the spans are capped, so retention by count
+// cannot leak unbounded over a long recording, and the cap never uncovers an
+// interval: past it the oldest are joined, not evicted. A test case over an
+// evicted interval, checked by a record.go that lags the recorder, was saved
+// without the mocks the pressure dropped.
+func TestPressureRangeCountCapNeverUncoversARange(t *testing.T) {
 	t.Parallel()
 
 	mgr := &SyncMockManager{}
-	// Each true→false pair appends exactly one closed range.
-	for i := 0; i < maxPressureRanges+64; i++ {
+	before := time.Now()
+	mgr.SetMemoryPressure(true)
+	mgr.SetMemoryPressure(false)
+	afterFirst := time.Now()
+	// Each true→false pair records exactly one closed range.
+	const total = maxPressureRanges + maxPressureRanges/4 + 64
+	for i := 1; i < total; i++ {
 		mgr.SetMemoryPressure(true)
 		mgr.SetMemoryPressure(false)
 	}
 
-	mgr.mu.Lock()
-	n := len(mgr.pressureRanges)
-	mgr.mu.Unlock()
-	if n > maxPressureRanges {
-		t.Fatalf("pressureRanges exceeded the count cap: got %d, want <= %d", n, maxPressureRanges)
+	recorded, spans := mgr.PressureRangeCount()
+	if recorded != total {
+		t.Fatalf("PressureRangeCount recorded %d ranges, want %d: every one is counted", recorded, total)
+	}
+	if spans == 0 || spans > maxPressureRanges {
+		t.Fatalf("pressure spans exceeded the count cap: got %d, want 1..%d", spans, maxPressureRanges)
+	}
+	if ok, _ := mgr.WasPressureActiveInWindow(before, afterFirst); !ok {
+		t.Fatal("the first pressure range is no longer covered: the cap uncovered it")
 	}
 }

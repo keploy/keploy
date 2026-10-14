@@ -38,7 +38,7 @@ func TestDefaultConfigParses(t *testing.T) {
 		got  time.Duration
 		want time.Duration
 	}{
-		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, 60 * time.Second},
+		{"test.healthPollTimeout", cfg.Test.HealthPollTimeout, DefaultHealthPollTimeout},
 		{"record.recordTimer", cfg.Record.RecordTimer, 0},
 		// Asserted against the relay's own constant rather than a literal: the
 		// yaml default and relay.DefaultConsumerStallGrace are two sources of
@@ -78,6 +78,16 @@ func TestDefaultConfigParses(t *testing.T) {
 	}
 	if got := cfg.Record.UpstreamTLS.CACert; got != "" {
 		t.Errorf("record.upstreamTls.caCert = %q, want empty", got)
+	}
+
+	// Present in the generated config so the escape hatch is
+	// discoverable, and false so nothing changes for anyone who does not
+	// need it. A readiness probe is destructive only in specific
+	// environments (an app behind a kubectl port-forward); everywhere
+	// else it is the thing preventing status_code=0 flakes.
+	if cfg.Test.DisableAppReadyProbe {
+		t.Error("test.disableAppReadyProbe defaults to true; it must default to false or every " +
+			"app silently loses the readiness gate that stops the first test firing early")
 	}
 }
 

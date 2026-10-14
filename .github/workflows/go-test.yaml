@@ -21,10 +21,57 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1" # Enable CGO for this job
+      # This lane PROVIDES the MySQL below, so it is the one lane entitled to
+      # fail when the server is missing. The real-server tests key their hard
+      # failure on this var rather than on the generic CI var: CI is set by
+      # every GitHub Actions run, including forks and lanes that promise no
+      # database, so keying on it would turn an unrelated contributor's PR red
+      # over a service they were never offered. Unset, the tests skip.
+      KEPLOY_TEST_MYSQL_REQUIRED: "1"
+      # Same shape, different resource: the proxy's loopback address-family
+      # fallback tests need ::1 on lo. Without this they SKIP and the package
+      # still reports ok — a suite that tests nothing while looking healthy,
+      # which is the exact failure the fallback itself exists to prevent.
+      # Unlike MySQL this is not a service the lane provides, it is a property
+      # of the runner; every GitHub-hosted ubuntu image has ::1 on lo, so this
+      # only fires if that stops being true, and it stays unset elsewhere so a
+      # v6-less environment skips rather than fails.
+      KEPLOY_TEST_IPV6_REQUIRED: "1"
+      # And for user namespaces, which this lane lets unprivileged users
+      # create (the step before the unit tests). utils' test of the process
+      # tree InterruptProcessTree signals starts a process in a nested pid
+      # namespace under `unshare --user`, the one real check that it never
+      # signals pid 1; without user namespaces it skips, and the package
+      # still reports ok. With this set it fails instead.
+      KEPLOY_TEST_USERNS_REQUIRED: "1"
+      KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
+      KEPLOY_TEST_MYSQL_USER: root
+      KEPLOY_TEST_MYSQL_PASS: rootpass
+      KEPLOY_TEST_MYSQL_DB: sampledb
     permissions:
       contents: read
       packages: write
       id-token: write
+
+    # The MySQL V2 record path is the one place keploy terminates TLS on
+    # BOTH sides of a connection it is also parsing, and its client-write
+    # hold is only observable against a server that actually speaks the
+    # protocol: a scripted peer accepts a leaked ClientHello that a real
+    # mysqld rejects. mysql:8.0 generates its own certs at init, so
+    # have_ssl is YES with no extra configuration.
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass
+          MYSQL_DATABASE: sampledb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -prootpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +83,7 @@ jobs:
       
       - name: Installing build Essentials and gcc
         run: |
-          sudo timeout 600 apt-get -y update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120
-          sudo timeout 600 apt-get -y install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 build-essential gcc libc-dev  \
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
             pkg-config \
             libgl1-mesa-dev          \
             libxi-dev libxcursor-dev \
@@ -45,7 +91,105 @@ jobs:
             libxxf86vm-dev libx11-dev libx11-xcb-dev  
 
       - name: Install dependencies
-        run: go get .
+        run: |
+          # `cache: false` above means this lane re-downloads keploy's whole
+          # module graph on every run, before every test in this job.
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry get .
+          # `go get .` resolves the main module's NON-test import graph. The two
+          # test steps additionally load github.com/go-sql-driver/mysql and its
+          # dependency filippo.io/edwards25519, and neither step can be wrapped
+          # (go-retry.sh forbids wrapping `go test`), so a transient proxy error
+          # while those resolve kills the job unretried. Measured by evicting
+          # both from GOMODCACHE: `go get .` leaves them absent, and
+          # `go list -deps -test ./...` extracts exactly those two.
+          # `go list -deps -test` rather than `go mod download` is a preference,
+          # not a correctness point — both warm what the test steps need, and
+          # both leave go.sum byte-identical (measured +0 lines, 3/3 trials; the
+          # command that does rewrite go.sum is `go mod download all`, which is
+          # not this). `go list` warms only what these steps load and picks up
+          # new test-only deps by itself.
+          go_retry list -deps -test ./... > /dev/null
+
+      # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor
+      # by default (kernel.apparmor_restrict_unprivileged_userns=1), so
+      # `unshare --user` fails there (actions/runner-images#10443). Lift that
+      # for this job, which promises user namespaces to the tests
+      # (KEPLOY_TEST_USERNS_REQUIRED above). A runner without the setting
+      # fails this step, and the lane's promise has to be looked at again.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Running Unit Tests
         run: go test ./...
+
+      # The hooks package's root tests skip in the run above, which is the
+      # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
+      # objects against this kernel's BTF, as the agent does, and
+      # TestTracefsMountedAgreesWithCiliumInEveryLayout holds tracefsMounted to
+      # cilium/ebpf's own tracefs lookup in five mount layouts, each built in a
+      # mount namespace of its own. Built as the runner user, run as root, and
+      # each PASS line grepped, so a test or layout that skips or vanishes
+      # fails the step.
+      - name: Hooks tests as root
+        shell: bash
+        run: |
+          go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
+          cd pkg/agent/hooks/linux
+          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout)$' | tee /tmp/hooks-linux.out
+          for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout \
+            TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
+            grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
+          done
+
+      # The compose library is behind the `composelib` build tag, so the plain
+      # run above exercises the SHELL-OUT path and never the library. Its own
+      # tests — and the App call sites that choose between the two — would go
+      # uncovered on every PR without this second run.
+      #
+      # Scoped to the two packages that have tagged tests rather than ./... ,
+      # because everything else is identical in both shapes and would just be
+      # run twice.
+      #
+      # Under -race: compose writes what it reports from several goroutines
+      # (the app's log streams, its container monitor), so a writer that is
+      # not safe for that is a data race the plain run passes. The live tests
+      # had one in their own buffers until they moved to syncBuffer.
+      - name: Running Unit Tests (compose library)
+        run: go test -race -tags composelib -count=1 ./pkg/client/app/... ./pkg/platform/docker/...
+
+      # The mock-manager's concurrency guards — the match-count race and the
+      # hitMu/treesMu lock order — are only meaningful under -race: without
+      # it their tests pass on a build that races, so they read as coverage
+      # while proving nothing. That applies past the mock manager: util/ keeps the
+      # loopback fallback's process-wide atomic.Bool, and syncMock, supervisor and
+      # tls ship eight tests with Race/Concurrent/Deadlock in their names. Naming
+      # packages here left those eight raced by nothing, so race the whole subtree
+      # instead — it is not slower in any way that matters, because package tests
+      # run in parallel: measured 43s for all 29 packages against 40.5s for
+      # ./pkg/agent/proxy/ alone, which dominates either way.
+      - name: Running Race Detector (agent proxy)
+        run: go test -race -count=1 ./pkg/agent/proxy/...
+
+      # Same argument, different subtree: pkg/agent/token holds the
+      # control-plane token behind a mutex that Session and Adopt share, and a
+      # reader that slipped between them would hand the agent an empty token
+      # and serve the whole control plane unauthenticated. Plain `go test`
+      # cannot see that — the guard's absence is a data race, not a failed
+      # assertion — so the test that covers it only proves anything here.
+      - name: Running Race Detector (agent control-plane token)
+        run: go test -race -count=1 ./pkg/agent/token/...
+
+      # Same argument for replay: its test-set loop runs the application, its
+      # watcher and the tests on goroutines of their own, and one defect its
+      # tests pin is a data race: the teardown closed a channel the app watcher
+      # sends on, after a drain that had given up on the app. Plain `go test`
+      # passes a race by, so TestRunTestSetDrainThatGivesUpLeavesTheWatcherAlone
+      # proves something only here. The whole package, not the tests named
+      # for that loop, so the rest of its concurrency is raced too. Measured
+      # under -race: 4m09s on 14 cores and 6m22s with the test binary pinned to
+      # 4 CPUs (the size of ubuntu-latest), with no race. -timeout 20m gives
+      # that run about three times its 4-CPU time before go test calls it
+      # hung; the default 10m gives it less than twice.
+      - name: Running Race Detector (replay)
+        run: go test -race -count=1 -timeout 20m ./pkg/service/replay/

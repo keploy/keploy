@@ -3,11 +3,13 @@ package testdb
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	yamlLib "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
@@ -505,3 +507,148 @@ func TestIsIDSegment(t *testing.T) {
 		}
 	}
 }
+
+// The production defect this pins: descriptive names were minted from a disk
+// scan alone, and auto-replay deletes every executed test's file — so a later
+// capture of the same endpoint re-minted an earlier name, aliasing two
+// different requests under one identity (corrupted name-keyed mappings and
+// verdicts; same-named files collapsing on download). Numbering must be
+// monotonic per (test set, slug) regardless of what happens to the files.
+func TestDescriptiveNamesNeverReuseAfterFileDeletion(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app:8080/k8s-proxy/mappings"}}
+
+	n1, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, n1+".yaml"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n2, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Auto-replay deletes executed test files.
+	if err := os.Remove(filepath.Join(dir, n1+".yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	n3, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n1 == n3 || n2 == n3 {
+		t.Fatalf("name re-minted after deletion: %s, %s, %s", n1, n2, n3)
+	}
+	if n1 != "get-k8s-proxy-mappings-1" || n2 != "get-k8s-proxy-mappings-2" || n3 != "get-k8s-proxy-mappings-3" {
+		t.Fatalf("unexpected sequence: %s, %s, %s", n1, n2, n3)
+	}
+}
+
+// First mint on a directory that already holds files continues from the disk
+// maximum — the counter seeds from the scan, it does not fight it.
+func TestDescriptiveNamesSeedFromExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	for _, n := range []string{"post-pay-1.yaml", "post-pay-7.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app:8080/pay"}}
+	n, err := ts.generateName(dir, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != "post-pay-8" {
+		t.Fatalf("got %s, want post-pay-8 (continue from disk max)", n)
+	}
+}
+
+// Concurrent mints for the same slug must produce unique names.
+func TestDescriptiveNamesConcurrentMintsUnique(t *testing.T) {
+	dir := t.TempDir()
+	ts := NewWithFormatAndNaming(zap.NewNop(), dir, yamlLib.FormatYAML, NamingDescriptive)
+	tc := &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app:8080/users"}}
+
+	const n = 32
+	names := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name, err := ts.generateName(dir, tc)
+			if err == nil {
+				names <- name
+			}
+		}()
+	}
+	wg.Wait()
+	close(names)
+	seen := map[string]bool{}
+	for name := range names {
+		if seen[name] {
+			t.Fatalf("duplicate name minted concurrently: %s", name)
+		}
+		seen[name] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("minted %d unique names, want %d", len(seen), n)
+	}
+}
+
+// A FOREIGN writer (a cloud-replay download, a low seed) can drop names into
+// the tests dir that this recorder's counter never issued. The counter climbs
+// one EEXIST per claimName attempt, so without a disk resync a gap wider than
+// maxNameClaimAttempts exhausts the retry loop and the capture is lost with an
+// error — a regression against the pre-counter code, which re-scanned on every
+// mint and so always jumped straight past the gap.
+func TestClaimName_ForeignWriteGapBeyondRetryBound(t *testing.T) {
+	for _, gap := range []int{10, 255, 300, 1000} {
+		dir := t.TempDir()
+		ts := NewWithNaming(zap.NewNop(), "", NamingDescriptive)
+		tc := httpTC("POST", "http://api.test/pay")
+
+		// Take one name so the counter exists and is low (mints post-pay-1).
+		first, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: first claim: %v", gap, err)
+		}
+		if first != "post-pay-1" {
+			t.Fatalf("gap=%d: first = %q, want post-pay-1", gap, first)
+		}
+
+		// Foreign writer fills post-pay-2 .. post-pay-(gap+1) behind the
+		// counter's back.
+		for i := 2; i <= gap+1; i++ {
+			p := filepath.Join(dir, "post-pay-"+itoa(i)+"."+ts.Format.FileExtension())
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatalf("gap=%d: seed file: %v", gap, err)
+			}
+		}
+
+		got, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: claim after foreign writes failed (the regression): %v", gap, err)
+		}
+		want := "post-pay-" + itoa(gap+2)
+		if got != want {
+			t.Fatalf("gap=%d: got %q, want %q (must jump past the whole gap)", gap, got, want)
+		}
+
+		// And the counter must keep climbing from there, not rescan-and-stall.
+		next, err := ts.claimName(dir, tc)
+		if err != nil {
+			t.Fatalf("gap=%d: follow-up claim: %v", gap, err)
+		}
+		if next != "post-pay-"+itoa(gap+3) {
+			t.Fatalf("gap=%d: follow-up = %q, want post-pay-%d", gap, next, gap+3)
+		}
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }

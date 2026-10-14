@@ -1,4 +1,6 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # This script tests the go-grpc sample application in two modes:
 # 'incoming': Tests the gRPC server by recording its incoming gRPC calls.
@@ -31,8 +33,8 @@ echo "Building gRPC server and client binaries..."
 if grep -q '"localhost:50051"' client/client.go; then
     sed -i 's/"localhost:50051"/"127.0.0.1:50051"/' client/client.go
 fi
-go build -o grpc-server .
-go build -o grpc-client ./client
+go_retry build -o grpc-server .
+go_retry build -o grpc-client ./client
 chmod +x ./grpc-server ./grpc-client
 
 # --- Helper Functions ---
@@ -154,7 +156,9 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    REC_PID=$(pgrep keploy | sort -n | head -1)
+    # The recording this lane started (its pipeline's keploy, rec_keploy), not
+    # whichever process named keploy has the lowest PID on the host.
+    REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
@@ -164,7 +168,12 @@ kill_keploy_process() {
 
 # Reset state before each run
 rm -rf ./keploy*
-"$RECORD_BIN" config --generate
+# Only when the sample does not ship one. `config --generate` used to do
+# nothing at all over an existing keploy.yml -- it asked, stdin answered EOF,
+# and it skipped and exited 0 -- so the shipped config is what these runs have
+# always used, noise rules and all. It refuses out loud now rather than
+# pretending, which is right, and this says what the run actually wants.
+[ -f keploy.yml ] || "$RECORD_BIN" config --generate
 
 # shellcheck disable=SC1091
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/json-pass-helpers.sh"
@@ -173,7 +182,12 @@ if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
     ./grpc-client &> client_incoming.log &
+    client_pid=$!
     "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
+    # tee ends once keploy and everything it started (the agent, the app)
+    # have exited: they all write to it.
+    rec_pid=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy
     wait_for_port 50051
 
     sleep 5
@@ -182,8 +196,10 @@ if [ "$MODE" = "incoming" ]; then
     sleep 15 # Allow time for traces to be recorded
     
     kill_keploy_process
-
-    sleep 5
+    # Wait for the recording to end, not for a fixed time: keploy drains
+    # what it captured before it exits, and that takes as long as the
+    # runner's load makes it. The next step reuses the ports and the agent.
+    wait_recording_end "$rec_pid" record_incoming.log || exit 1
 
     check_for_errors record_incoming.log
 
@@ -192,16 +208,24 @@ if [ "$MODE" = "incoming" ]; then
         # because kill_keploy_process only stops keploy and its -c child (the
         # server). Without this teardown, the new ./grpc-client below fails to
         # bind :8080 and send_requests races against the stale client.
-        pkill -f grpc-client || true
-        sleep 1
+        # Wait for it to exit, not for a fixed time: the next one binds :8080.
+        kill "$client_pid" 2>/dev/null || true
+        wait "$client_pid" 2>/dev/null || true
         ./grpc-client &> client_incoming_json.log &
         "$RECORD_BIN" record --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming_json.log &
+        # tee ends once keploy and everything it started (the agent, the app)
+        # have exited: they all write to it.
+        rec_pid=$!
+        rec_keploy=$(jobs -p %%) # the pipeline's keploy
         wait_for_port 50051
         sleep 5
         send_requests
         sleep 15
         kill_keploy_process
-        sleep 5
+        # Wait for the recording to end, not for a fixed time: keploy drains
+        # what it captured before it exits, and that takes as long as the
+        # runner's load makes it. The next step reuses the ports and the agent.
+        wait_recording_end "$rec_pid" record_incoming_json.log || exit 1
         check_for_errors record_incoming_json.log
     fi
 
@@ -231,15 +255,22 @@ elif [ "$MODE" = "outgoing" ]; then
     echo "🧪 Testing outgoing gRPC requests (testing grpc-client)"
     # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
     ./grpc-server &> server_outgoing.log &
+    server_pid=$!
     wait_for_port 50051
     "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
+    # tee ends once keploy and everything it started (the agent, the app)
+    # have exited: they all write to it.
+    rec_pid=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy
 
     send_requests
     sleep 15 # Allow time for traces to be recorded
 
     kill_keploy_process
-    
-    sleep 5
+    # Wait for the recording to end, not for a fixed time: keploy drains
+    # what it captured before it exits, and that takes as long as the
+    # runner's load makes it. The next step reuses the ports and the agent.
+    wait_recording_end "$rec_pid" record_outgoing.log || exit 1
     
     check_for_errors record_outgoing.log
 
@@ -250,15 +281,23 @@ elif [ "$MODE" = "outgoing" ]; then
         # succeeds against the stale server, and the send_requests sequence
         # tries to UpdateUser id=1 — which was deleted at the end of the yaml
         # pass — producing curl exit 22 / HTTP 500 "user not found".
-        pkill -f grpc-server || true
-        sleep 1
+        # Wait for it to exit, not for a fixed time: the next one binds :50051.
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
         ./grpc-server &> server_outgoing_json.log &
         wait_for_port 50051
         "$RECORD_BIN" record --storage-format json -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing_json.log &
+        # tee ends once keploy and everything it started (the agent, the app)
+        # have exited: they all write to it.
+        rec_pid=$!
+        rec_keploy=$(jobs -p %%) # the pipeline's keploy
         send_requests
         sleep 15
         kill_keploy_process
-        sleep 5
+        # Wait for the recording to end, not for a fixed time: keploy drains
+        # what it captured before it exits, and that takes as long as the
+        # runner's load makes it. The next step reuses the ports and the agent.
+        wait_recording_end "$rec_pid" record_outgoing_json.log || exit 1
         check_for_errors record_outgoing_json.log
     fi
 

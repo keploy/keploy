@@ -20,8 +20,6 @@ import (
 
 func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapabilities uint32) (*mysql.QueryPacket, error) {
 
-	logger.Debug("Decoding query packet", zap.Int("data_length", len(data)), zap.Any("query buffer", string(data)))
-
 	if len(data) < 2 {
 		return nil, fmt.Errorf("query packet is empty")
 	}
@@ -35,7 +33,6 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	if clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES == 0 {
 		packet.Query = string(data[pos:])
 		packet.Query = replaceTabsWithSpaces(packet.Query)
-		logger.Debug("Decoded query packet without attributes", zap.String("query", packet.Query))
 		return packet, nil
 	}
 
@@ -220,8 +217,6 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	// Trim any trailing null bytes which can sometimes be appended by clients.
 	packet.Query = string(data[pos:])
 	packet.Query = replaceTabsWithSpaces(packet.Query)
-
-	logger.Debug("Decoded query packet with attributes", zap.String("query", packet.Query))
 
 	return packet, nil
 }

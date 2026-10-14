@@ -1,10 +1,21 @@
------BEGIN CERTIFICATE-----
-MIIBczCCARigAwIBAgIUe1yXSfGefdyA09reeQpit2S7TXMwCgYIKoZIzj0EAwIw
-FzEVMBMGA1UEAxMMTXkgQ3VzdG9tIENBMB4XDTIzMDQyMDExMDYwMFoXDTMzMDQx
-NzExMDYwMFowFzEVMBMGA1UEAxMMTXkgQ3VzdG9tIENBMFkwEwYHKoZIzj0CAQYI
-KoZIzj0DAQcDQgAE+QJh3KtWSGRe9NtzZGcJQBcn0ipsjzpo7YlLvbaSFeI62H1b
-5EPUjnbDInG4K0nO1Dq/gPtnsVXZcJx06oHj9qNCMEAwDgYDVR0PAQH/BAQDAgEG
-MA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFDejUAabmE7NFoKSOo5uHAHMumal
-MAoGCCqGSM49BAMCA0kAMEYCIQDkGU6Oku9vLo7fLLquHWXR1rB/1YgWIBghnQXJ
-fF5GawIhAK/0BaJCVm6rkRuYCdtahkN1N5DtTPr8AQoDV+MT0UmL
------END CERTIFICATE-----
+# DEPRECATED - this file no longer contains a certificate.
+#
+# Keploy used to ship one static MITM certificate authority here, and this URL
+# is still referenced by old Dockerfiles that baked it into an image:
+#
+#   ADD https://raw.githubusercontent.com/keploy/keploy/refs/heads/main/pkg/core/proxy/tls/asset/ca.crt ...
+#
+# That static CA has been retired because its private key was committed to this
+# public repository. Keploy now generates a fresh MITM CA for every run and
+# removes it when the run ends, so there is nothing to bake in.
+#
+# You do NOT need to add any certificate to your image. Since keploy v3.3.0 the
+# tooling injects its per-run CA and the matching trust environment variables
+# (SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, JAVA_TOOL_OPTIONS,
+# ...) into your application container automatically for `keploy record`/`test`
+# with docker run, docker compose and --from-container.
+#
+# To remove the old static CA that a previous keploy version may have left
+# trusted on a host, run:  sudo keploy ca clean --fresh
+#
+# See https://keploy.io/docs/running-keploy/docker-tls/ for the current setup.

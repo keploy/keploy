@@ -123,6 +123,29 @@ func FlakyHeaderNoise() map[string][]string {
 	return nm
 }
 
+// CredentialHeaders are the request headers that say who is calling, or make
+// a call the one it is: under the proven switch they leave the static list and
+// are compared (design v14 §7.2 item 8). A token minted earlier in the test is
+// a variable, one from the environment binds, one that drifts at record's
+// full round is learned as noise, and anything else must be the recorded one.
+var CredentialHeaders = []string{
+	"authorization",
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+}
+
+// ProvenFlakyHeaderNoise is FlakyHeaderNoise without the CredentialHeaders:
+// the static list a request is matched with under the proven switch.
+func ProvenFlakyHeaderNoise() map[string][]string {
+	nm := FlakyHeaderNoise()
+	for _, h := range CredentialHeaders {
+		delete(nm, h)
+	}
+	return nm
+}
+
 // volatileResponseHeaders are response headers a server mints fresh on every
 // call, so comparing their VALUES asserts nothing.
 //
@@ -133,26 +156,32 @@ func FlakyHeaderNoise() map[string][]string {
 // a correctness assertion in Stripe-style APIs; authorization appears in
 // token-refresh responses. Suppressing those would delete real coverage.
 //
-// This set is therefore only the identifiers and timing values that are, by
-// construction, different on every response: the HTTP date, request/correlation
-// ids, and distributed-trace ids.
+// This set is therefore only the identifiers, timing values and rate-limit
+// counters that are, by construction, different on every response: the HTTP
+// date, request/correlation ids, distributed-trace ids and rate-limit counters.
 var volatileResponseHeaders = map[string]struct{}{
-	"date":                  {},
-	"x-request-id":          {},
-	"request-id":            {},
-	"x-correlation-id":      {},
-	"x-runtime":             {}, // Rails: per-request wall time
-	"traceparent":           {},
-	"tracestate":            {},
-	"b3":                    {},
-	"x-b3-traceid":          {},
-	"x-b3-spanid":           {},
-	"x-b3-parentspanid":     {},
-	"x-datadog-trace-id":    {},
-	"x-datadog-parent-id":   {},
-	"x-amzn-trace-id":       {},
-	"x-cloud-trace-context": {},
-	"sentry-trace":          {},
+	"date":                   {},
+	"x-request-id":           {},
+	"request-id":             {},
+	"x-correlation-id":       {},
+	"x-runtime":              {}, // Rails: per-request wall time
+	"traceparent":            {},
+	"tracestate":             {},
+	"b3":                     {},
+	"x-b3-traceid":           {},
+	"x-b3-spanid":            {},
+	"x-b3-parentspanid":      {},
+	"x-datadog-trace-id":     {},
+	"x-datadog-parent-id":    {},
+	"x-amzn-trace-id":        {},
+	"x-cloud-trace-context":  {},
+	"sentry-trace":           {},
+	"x-ratelimit-remaining":  {},
+	"x-ratelimit-reset":      {},
+	"x-rate-limit-remaining": {},
+	"x-rate-limit-reset":     {},
+	"ratelimit-remaining":    {},
+	"ratelimit-reset":        {},
 }
 
 // IsVolatileResponseHeader reports whether name is EXACTLY one of the headers
