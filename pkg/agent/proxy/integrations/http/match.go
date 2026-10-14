@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v3/pkg"
@@ -162,12 +163,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			withVars, rest := splitVariableMocks(unfilteredMocks)
 			if len(withVars) > 0 {
 				table := varTable
-				hits, fits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
+				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
 				if err != nil {
 					return false, nil, nil, err
 				}
 				if len(hits) > 0 {
-					hit, commitCursor := h.pickHit(hits, fits, mockDb, statefulMocks)
+					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
 					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
 					if err != nil {
 						return false, nil, nil, err
@@ -393,6 +394,34 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 	}
 	n := len(group)
 	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+}
+
+// servedPick picks, among a call's reusable recordings (in record order), the
+// first not yet served, else the last (a call past them stays on it), and
+// returns its index with the commit that marks it served once the call is
+// answered (nil when it already is, or when the store keeps no cursor: then
+// the first answers, as without the capability). A recording's mark is kept
+// in the stateful cursor's store under its own key, so it is reset with the
+// cursors and holds whichever other recordings a later call fits. The commit
+// follows the peek of its own key, the last peek made (MockCursor).
+func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) {
+	for i, m := range group {
+		key := servedKey(m)
+		switch idx := cs.MockCursorIndex(key, 2); {
+		case idx < 0:
+			return 0, nil
+		case idx == 0:
+			return i, func() { cs.AdvanceMockCursor(key, 0, 2) }
+		}
+	}
+	return len(group) - 1, nil
+}
+
+// servedKey is the stateful cursor store's key of m's served mark, apart from
+// every request's cursor key (cursorKey). A recording's name is unique in its
+// test set, whose staging resets the store; its recorded time breaks a tie.
+func servedKey(m *models.Mock) string {
+	return "served\x00" + m.Name + "\x00" + m.Spec.ReqTimestampMock.UTC().Format(time.RFC3339Nano)
 }
 
 // cursorGroup returns the recordings of schemaMatched that are bestMatch's
