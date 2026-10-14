@@ -2297,6 +2297,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// consumedUnread names the tests that own test mocks and whose consumed
 	// mocks could not be read (proven switch): see testMocksUnknown.
 	var consumedUnread []string
+	// variablesUnjudged names the tests whose captures could not be checked
+	// against what their dependency calls carried (proven switch): a
+	// keploy-side fault, so the set is not judged (testVariables);
+	// variablesWhy is the first reason.
+	var variablesUnjudged []string
+	variablesWhy := ""
+	variablesWarned := false
 	// consumptionUnread names every test, in any cycle and with the switch on or
 	// off, for which a read of what it consumed failed: what it consumed is not
 	// known, so the mapping write leaves its entry as it is (passingTests).
@@ -2523,6 +2530,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var loopErr error
 			var captured []models.TemplateCapture
 			var templateFailures []models.TemplateFailure
+			// boundVariables is what the agent bound in this test (proven
+			// switch), for the report; variablesUnchecked, why its captures
+			// could not be checked (it then has no verdict).
+			var boundVariables []models.VariableBinding
+			variablesUnchecked := ""
 
 			reqTime, respTime := testWindowOf(testCase)
 
@@ -2539,7 +2551,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in reaction is this test's. Opened after, that miss landed with
 			// no window open and was discarded.
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, testCase)...)
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -2838,8 +2850,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				tmplPass.captured(testCase, resolved.captures)
 				captured = reportCaptures(resolved.captures)
 				templateFailures = reportFailures(resolved.failures)
+				var varFailures []models.TemplateFailure
+				var unjudged string
+				boundVariables, varFailures, unjudged = r.testVariables(runTestSetCtx, tmplRun, testCase, resolved.captures, &variablesWarned)
+				templateFailures = append(templateFailures, varFailures...)
+				if unjudged != "" {
+					variablesUnjudged = appendOnce(variablesUnjudged, testCase.Name)
+					if variablesWhy == "" {
+						variablesWhy = unjudged
+					}
+					variablesUnchecked = unjudged
+				}
 				opts := resolved.opts
-				if failedOnItsOwn {
+				if failedOnItsOwn || len(varFailures) > 0 {
+					// The test case has failed on its own: no pass line.
 					opts = append(opts, httpMatcher.WithoutPassLine())
 				}
 				if len(templateFailures) > 0 || failedOnItsOwn {
@@ -3094,6 +3118,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Result:       *testResult,
 						TimeTaken:    time.Since(started).String(),
 						Captured:     captured,
+						Variables:    boundVariables,
 
 						TemplateFailures: templateFailures,
 					}
@@ -3217,6 +3242,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if testMocksUnread {
 						// No verdict: its row says so, before any hook reads it.
 						testCaseResult.FailureInfo.TestMocksUnread = true
+					}
+					if variablesUnchecked != "" {
+						// No verdict either: what it captured was not checked.
+						testCaseResult.FailureInfo.VariablesUnchecked = variablesUnchecked
 					}
 					attachMisses(testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
@@ -3501,7 +3530,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// the stream body below. Every exit path therefore calls
 			// attachMockErrors only AFTER stream consumption has finished.
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{})
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -4141,6 +4170,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("tests", consumedUnread))
 			testSetStatus = models.TestSetStatusInternalErr
 			// Not judged, not broken: the round goes on (abortAfterTestSet).
+			r.markNotJudged(testSetID)
+		}
+		if len(variablesUnjudged) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			notJudged = alsoNotJudged(notJudged, variablesUnjudgedReason(variablesUnjudged, variablesWhy))
+			r.logger.Error("test-set is not judged: keploy could not check what some of its tests captured against what their dependency calls carried; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", variablesUnjudged))
+			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		}
 	}
@@ -5000,7 +5037,7 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
 // sending filtered mocks. shape is only meaningful on the set's staging call
 // (see recordedSetShape); pass the zero value on per-test calls.
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape) error {
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape, vars ...models.VariableBinding) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -5055,6 +5092,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		AgentOwnsConsumed:      agentOwnsConsumed,
 		TotalConsumedMocks:     consumedForAgent,
 		StrictMockWindow:       strictMockWindow,
+		Variables:              vars,
 	}
 
 	// Send parameters to agent for filtering and mock updates

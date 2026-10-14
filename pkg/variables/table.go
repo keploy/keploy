@@ -3,22 +3,14 @@ package variables
 import (
 	"sort"
 	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
-// Binding is the value a variable has in a scope, and where it was taken.
-type Binding struct {
-	// Name is the variable.
-	Name string
-	// Value is the live value taken at the binding place.
-	Value string
-	// Recorded is the value the recording held at the binding place. Every
-	// other place of the variable held it too when the call was recorded.
-	Recorded string
-	// Mock and Place are where the value was taken: the mock whose call bound
-	// it, and the place in that call.
-	Mock  string
-	Place string
-}
+// Binding is the value a variable has in a scope, and where it was taken:
+// Name, the live Value, the Recorded value at the binding place, and the Mock
+// and Place where it was taken.
+type Binding = models.VariableBinding
 
 // Table holds the variables one scope has bound: one test case in keploy
 // test, one test in keploy mock replay. A variable is bound once; a later binding of
@@ -80,7 +72,7 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 			return b, have, false, false
 		}
 		for _, other := range t.vals {
-			if other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
+			if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
 				return b, other, false, false
 			}
 		}
@@ -102,6 +94,26 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 		}
 	}
 	return Binding{}, Binding{}, false, true
+}
+
+// Start begins a new scope (as Reset) with the values its test case gave
+// bound, under one lock: no call of the scope binds before them. A name given
+// twice keeps its first value.
+func (t *Table) Start(given []Binding) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.gen++
+	t.vals = nil
+	if len(given) == 0 {
+		return
+	}
+	t.vals = make(map[string]Binding, len(given))
+	for _, b := range given {
+		b.Given = true
+		if _, dup := t.vals[b.Name]; !dup {
+			t.vals[b.Name] = b
+		}
+	}
 }
 
 // Reset forgets every binding: a new scope begins.

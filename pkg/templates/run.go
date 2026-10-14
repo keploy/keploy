@@ -6,9 +6,11 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -248,4 +250,53 @@ func fitsType(typ, text string) bool {
 		return numberRe.FindString(text) == text
 	}
 	return true
+}
+
+// Recorded is key's config.yaml (recorded) value.
+func (r *Run) Recorded(key string) (string, bool) {
+	v, ok := r.recorded[key]
+	return v, ok
+}
+
+// RequestVariable is a template variable a test case's request sends: its
+// key, its value in the run now, and its config.yaml (recorded) value.
+type RequestVariable struct {
+	Key, Value, Recorded string
+}
+
+// RequestVariables are the variables req sends, by key: each key a placeholder
+// of its URL, query, headers, body or form names, that config.yaml defines and
+// that is usable (a secret is the literal it redacts, never a variable).
+func (r *Run) RequestVariables(req models.HTTPReq) []RequestVariable {
+	texts := []string{req.URL, req.Body}
+	for _, v := range req.URLParams {
+		texts = append(texts, v)
+	}
+	for _, v := range req.Header {
+		texts = append(texts, v)
+	}
+	for _, f := range req.Form {
+		texts = append(texts, f.Values...)
+	}
+	seen := map[string]bool{}
+	var out []RequestVariable
+	for _, t := range texts {
+		for _, p := range Find(t) {
+			if _, secret := p.Secret(); secret || seen[p.Key] {
+				continue
+			}
+			if _, bad := r.Unusable(p); bad {
+				continue
+			}
+			now, ok := r.current(p)
+			if !ok {
+				continue
+			}
+			rec, _ := r.recordedValue(p)
+			seen[p.Key] = true
+			out = append(out, RequestVariable{Key: p.Key, Value: now, Recorded: rec})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }

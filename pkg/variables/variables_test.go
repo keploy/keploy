@@ -245,3 +245,22 @@ func TestTable_ConcurrentBindAllKeepsValuesApart(t *testing.T) {
 		}
 	}
 }
+
+// Start begins a scope with the values a test case gave bound, marked given;
+// a call of the previous scope is stale in it.
+func TestTable_Start(t *testing.T) {
+	var tb Table
+	tb.Bind(Binding{Name: "old", Value: "x"})
+	gen := tb.Gen()
+	tb.Start([]Binding{{Name: "id", Value: "u1"}, {Name: "id", Value: "u2"}})
+	got := tb.Snapshot()
+	if len(got) != 1 || got[0].Value != "u1" || !got[0].Given {
+		t.Fatalf("started with %+v", got)
+	}
+	if _, _, stale, _ := tb.BindAll(gen, []Binding{{Name: "z", Value: "9"}}); !stale {
+		t.Fatal("a call of the previous scope was not stale")
+	}
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "order", Value: "u1", Recorded: "r"}}); !ok {
+		t.Fatal("a given value blocked another variable from taking it")
+	}
+}

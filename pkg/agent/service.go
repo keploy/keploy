@@ -188,6 +188,15 @@ type VariableResetter interface {
 	ResetVariables()
 }
 
+// VariableBinder is the optional extension implemented by proxies that keep
+// the test variables a replay binds: it begins a test's variables with the
+// values its own request gave (false when it holds no table), and reads back
+// what the test has bound.
+type VariableBinder interface {
+	StartVariables(given []models.VariableBinding) bool
+	BoundVariables() ([]models.VariableBinding, bool)
+}
+
 // CarryOverPlanner is the optional extension implemented by proxies with a
 // carry-over tier (models.RegisterCarryOver). For the window that starts at
 // start it names the recorded-time range of registered per-test mocks the agent

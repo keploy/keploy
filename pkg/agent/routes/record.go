@@ -90,6 +90,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
 		r.Get("/ids", a.HandleIDs)
+		r.Get("/variables", a.HandleTestVariables)
 		r.Post("/test-capture/begin", a.BeginTestErrorCapture)
 		// Per-test scope API for `keploy mock record|replay` — a user's test
 		// runner marks per-test boundaries so mocks are attributed / restricted

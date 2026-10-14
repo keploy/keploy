@@ -4045,6 +4045,28 @@ func (p *Proxy) ResetVariables() {
 	}
 }
 
+// StartVariables begins a test's variables with the values its test case's
+// request gave bound (variables.Table.Start). false when the proxy keeps no
+// mock manager to hold them. Satisfies the agent's optional VariableBinder
+// extension interface.
+func (p *Proxy) StartVariables(given []models.VariableBinding) bool {
+	m := p.getMockManager()
+	if m == nil {
+		return false
+	}
+	m.Variables().Start(given)
+	return true
+}
+
+// BoundVariables returns the test variables bound so far in the test, and
+// false when the proxy keeps no mock manager to hold them.
+func (p *Proxy) BoundVariables() ([]models.VariableBinding, bool) {
+	if m := p.getMockManager(); m != nil {
+		return m.Variables().Snapshot(), true
+	}
+	return nil, false
+}
+
 // CarryOverLoadRange reports which recorded-time range of carry-over mocks the
 // agent should load beside the window that starts at start. Satisfies the
 // agent's optional CarryOverPlanner extension interface.

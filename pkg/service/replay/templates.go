@@ -13,7 +13,9 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -699,4 +701,91 @@ func refusedUnsent(res models.TestResult) bool {
 		}
 	}
 	return true
+}
+
+// requestVariables are the template variables tc's request sends, for the agent
+// to bind as tc begins (proven switch): a dependency call that the learn step
+// declared to use one is then asserted to send this run's value. None for a
+// set without templates, a test case that is not HTTP, or with the switch off.
+func requestVariables(run *templates.Run, tc *models.TestCase) []models.VariableBinding {
+	if !provenswitch.On() || run == nil || run.Empty() || tc == nil || tc.Kind != models.HTTP {
+		return nil
+	}
+	var out []models.VariableBinding
+	for _, v := range run.RequestVariables(tc.HTTPReq) {
+		out = append(out, models.VariableBinding{Name: v.Key, Value: v.Value, Recorded: v.Recorded, Mock: "test case " + tc.Name, Place: "request", Given: true})
+	}
+	return out
+}
+
+// variableReader reads back the test variables the agent bound in a test.
+type variableReader interface {
+	TestVariables(ctx context.Context) ([]models.VariableBinding, error)
+}
+
+// testVariables reads back the test variables the agent bound while tc ran
+// (proven switch, with an agent), and checks each value tc's response captured
+// against them: a capture of a key a dependency call bound must have taken
+// the value the app sent that dependency (the app answered the id it stored,
+// not another), a failure of the test case logged with its next step.
+//
+// What keploy itself cannot vouch for is no failure of the app: when the read
+// fails (or this keploy cannot read) and tc captured something, or when a
+// dependency's variable named after a template key was recorded with another
+// value than config.yaml's (the learn step and the templates disagree),
+// unjudged says why and the test set is not judged. A read that fails for a
+// test case that captured nothing only loses its report rows, said once per
+// set (warned).
+func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *models.TestCase, caps []templates.Capture, warned *bool) (bound []models.VariableBinding, fails []models.TemplateFailure, unjudged string) {
+	if !provenswitch.On() || !r.instrument || tc == nil || tc.Kind != models.HTTP {
+		return nil, nil, ""
+	}
+	err := errors.New("this keploy cannot read the variables its agent bound")
+	if reader, ok := r.instrumentation.(variableReader); ok {
+		bound, err = reader.TestVariables(ctx)
+	}
+	if err != nil {
+		if len(caps) == 0 {
+			if !*warned {
+				*warned = true
+				r.logger.Warn("keploy could not read the test variables its agent bound; the report lists none for the test cases of this set that capture nothing",
+					zap.String("testcase", tc.Name), zap.Error(err))
+			}
+			return nil, nil, ""
+		}
+		return nil, nil, "keploy could not read the variables its agent bound, so it cannot check what the test case captured: " + err.Error()
+	}
+	byName := make(map[string]models.VariableBinding, len(bound))
+	for _, b := range bound {
+		byName[b.Name] = b
+	}
+	for _, c := range caps {
+		// Only a variable named after the key is the key's: a variable under
+		// another name recorded with an equal value may be another value (two
+		// counters both at 1 when recorded), so values cannot tell a misnamed
+		// variable from it, and the capture is checked by its template alone.
+		b, ok := byName[c.Key]
+		if !ok || b.Given {
+			continue
+		}
+		// Compared as the placeholder types the capture: numbers by their
+		// value, a string as written ("1e2" is not "100").
+		number := c.Type == templates.TypeInt || c.Type == templates.TypeFloat
+		recorded, _ := run.Recorded(c.Key)
+		if !variables.SameValue(b.Recorded, recorded, number) {
+			unjudged = fmt.Sprintf("the variables block of %s names a variable after template key %s but records it as %q, and config.yaml records %q: the learn step and the templates disagree (report it to keploy, or remove that block to replay the call as recorded)",
+				b.Mock, c.Key, b.Recorded, recorded)
+			continue
+		}
+		if variables.SameValue(b.Value, c.Value, number) {
+			continue
+		}
+		why := fmt.Sprintf("the app answered %q here, but sent %q as %s to its dependency (%s %s) in this test",
+			c.Value, b.Value, c.Key, b.Mock, b.Place)
+		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
+			zap.String("testcase", tc.Name), zap.String("where", c.Where), zap.String("why", why),
+			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
+		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
+	}
+	return bound, fails, unjudged
 }

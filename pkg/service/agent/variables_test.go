@@ -9,6 +9,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -19,6 +20,47 @@ type resetProxy struct {
 }
 
 func (p *resetProxy) ResetVariables() { p.resets++ }
+
+// bindProxy keeps a real table.
+type bindProxy struct {
+	coreAgent.Proxy
+	table variables.Table
+}
+
+func (p *bindProxy) ResetVariables() { p.table.Reset() }
+func (p *bindProxy) StartVariables(given []models.VariableBinding) bool {
+	p.table.Start(given)
+	return true
+}
+func (p *bindProxy) BoundVariables() ([]models.VariableBinding, bool) {
+	return p.table.Snapshot(), true
+}
+
+// A test begins with what the previous one bound forgotten and the values its
+// request gave bound, marked as given; an agent whose proxy keeps no table
+// refuses given values.
+func TestStartTestVariables(t *testing.T) {
+	p := &bindProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	p.table.Bind(models.VariableBinding{Name: "old", Value: "x"})
+	if err := a.StartTestVariables([]models.VariableBinding{{Name: "id", Value: "u1"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, kept := a.TestVariables()
+	if !kept || len(got) != 1 || got[0].Name != "id" || got[0].Value != "u1" || !got[0].Given {
+		t.Fatalf("bound %+v (%v)", got, kept)
+	}
+	none := &Agent{logger: zap.NewNop(), Proxy: &resetProxy{}}
+	if err := none.StartTestVariables([]models.VariableBinding{{Name: "id", Value: "u1"}}); err == nil {
+		t.Fatal("an agent that keeps no table took given values")
+	}
+	if err := none.StartTestVariables(nil); err != nil {
+		t.Fatalf("an agent that keeps no table, given nothing: %v", err)
+	}
+	if _, kept := none.TestVariables(); kept {
+		t.Fatal("an agent that keeps no table said it keeps one")
+	}
+}
 
 // Every test begins with no variable bound, and a test begun again (go test
 // -count=2) starts afresh.
@@ -101,5 +143,28 @@ func TestStoreMocksStreamRefusesVariablesKeployCannotFollow(t *testing.T) {
 				t.Fatalf("stored %d mocks, want %d", len(st.unfiltered), tc.want)
 			}
 		})
+	}
+}
+
+// managerlessProxy keeps variables but no mock manager to hold them.
+type managerlessProxy struct{ coreAgent.Proxy }
+
+func (managerlessProxy) ResetVariables()                                  {}
+func (managerlessProxy) StartVariables([]models.VariableBinding) bool     { return false }
+func (managerlessProxy) BoundVariables() ([]models.VariableBinding, bool) { return nil, false }
+
+// A proxy with no mock manager cannot bind a test's values: the filter that
+// carries some fails, one that carries none begins an empty scope, and the
+// read says it keeps none.
+func TestAManagerlessProxyCannotBeginGivenValues(t *testing.T) {
+	a := &Agent{logger: zap.NewNop(), Proxy: managerlessProxy{}}
+	if err := a.StartTestVariables([]models.VariableBinding{{Name: "id", Value: "u1"}}); err == nil {
+		t.Fatal("given values were accepted with no manager to hold them")
+	}
+	if err := a.StartTestVariables(nil); err != nil {
+		t.Fatalf("no given values: %v", err)
+	}
+	if _, kept := a.TestVariables(); kept {
+		t.Fatal("a proxy with no manager said it keeps variables")
 	}
 }

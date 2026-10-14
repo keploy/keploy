@@ -20,6 +20,10 @@ type Capture struct {
 	Value string
 	// Where names the place: "body.items[0].id", "header Set-Cookie.sid".
 	Where string
+	// Type is the placeholder's: TypeString, TypeInt or TypeFloat. Two
+	// numbers are one value when their values are (1.50 is 1.5); a string is
+	// its text.
+	Type string
 }
 
 // Failure is a variable place that the app's answer does not satisfy: a
@@ -139,7 +143,7 @@ func (r *Run) Expected(exp, answer models.HTTPResp, opts ExpectOptions) Resolved
 			}
 			r.set(p.Key, value)
 			overrides[i] = a.Raw(answer.Body)
-			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where})
+			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where, Type: p.Type})
 		}
 	}
 	headerEdits := map[string][]edit{}
@@ -297,7 +301,7 @@ func (r *Run) headerCapture(name, v string, answer map[string]string) ([]edit, [
 		return nil, nil, []Failure{{Where: where, Placeholder: p.Text, Why: fmt.Sprintf("needs a non-empty %s; the answer holds %q there", p.Type, span)}}
 	}
 	r.set(p.Key, value)
-	return []edit{{start: p.Start, end: p.End, text: span}}, []Capture{{Key: p.Key, Value: value, Where: where}}, nil
+	return []edit{{start: p.Start, end: p.End, text: span}}, []Capture{{Key: p.Key, Value: value, Where: where, Type: p.Type}}, nil
 }
 
 // setCookieCaptures resolves a Set-Cookie value cookie by cookie. A cookie is
@@ -365,7 +369,7 @@ func (r *Run) setCookieCaptures(name, v string, exp, answer models.HTTPResp, now
 			default:
 				r.set(p.Key, lv)
 				es = append(es, edit{start: c.ValueStart, end: c.ValueEnd, text: live[lc.ValueStart:lc.ValueEnd]})
-				caps = append(caps, Capture{Key: p.Key, Value: lv, Where: where})
+				caps = append(caps, Capture{Key: p.Key, Value: lv, Where: where, Type: p.Type})
 			}
 		}
 		if !has {

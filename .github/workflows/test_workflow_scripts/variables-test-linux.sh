@@ -11,16 +11,24 @@
 # in the dependency calls. Replayed with the dependency down, the app mints
 # another id, so the recorded calls do not match as recorded.
 #
+# A user is also created (the app mints its id, stores it at the dependency
+# and answers it) and read back by the id the client sends: the test-case
+# side, which keploy templatize (A1) follows with {{capture string .id}} and
+# {{string .id}}.
+#
 # The learn step (row L) writes, on each mock, where the variable is:
 #   POST /orders   orderId: bound at body.id,    answered at body.id
 #   GET  /orders/x orderId: used at url.path[1], answered at body.id
+#   POST /users    id:      bound at body.id,    answered at body.id
+#   GET  /users/x  id:      used at url.path[1], answered at body.id (bound by
+#                           the test case's request, which sends the template)
 # This script writes that block itself, as L would (L is built in parallel).
 #
-#   1. record two creates (two test cases, each its own id).
+#   1. record two creates and a user created and read back (four test cases).
 #   2. KEPLOY_PROVEN=1 keploy test without the block: the set fails (the calls
 #      carry a new id; a miss fails its test).
-#   3. write the variables block on the six mocks; the recorded values stay as
-#      recorded (mocks are byte-literal).
+#   3. keploy templatize, then the variables block on the eight mocks; the
+#      recorded values stay as recorded (mocks are byte-literal).
 #   4. KEPLOY_PROVEN=1 keploy test: the set passes. Each test case binds
 #      orderId where its create sends it, its two read-backs are asserted to
 #      ask for that id and are answered in record order (new, then ready), and
@@ -33,6 +41,10 @@
 #      says the variable was used before the call that binds it.
 #   8. the app sends the id as a number: the set fails; the report says the
 #      value is of another JSON type.
+#  8b. the user create answers another id than it stored: the create fails,
+#      the report saying the app sent another id to its dependency.
+#  8c. the user read-back asks its dependency for another id than the client
+#      sent: the read-back fails, the id taken at the test case's request.
 #   9. switch off: the block is not read; the set gets the verdicts it gets
 #      without the block, and no report mentions a variable.
 #  10. no ERROR in the passing run's log, no data race in any log.
@@ -59,7 +71,7 @@ fail() {
 
 cat > dep.py <<'PY'
 import http.server, json, socketserver, sys
-PORT = int(sys.argv[1]); orders = {}
+PORT = int(sys.argv[1]); orders = {}; users = {}
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def _send(self, code, obj):
@@ -68,10 +80,16 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
         o = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/users":
+            users[str(o["id"])] = o
+            return self._send(201, {"id": o["id"], "name": o["name"]})
         orders[str(o["id"])] = o
         self._send(201, {"id": o["id"], "item": o["item"]})
     def do_GET(self):
         oid = self.path.rsplit("/", 1)[-1]
+        if self.path.startswith("/users/"):
+            if oid not in users: return self._send(404, {"error": "no such user"})
+            return self._send(200, {"id": oid, "name": users[oid]["name"]})
         if oid not in orders: return self._send(404, {"error": "no such order"})
         o = orders[oid]; o["reads"] = o.get("reads", 0) + 1
         self._send(200, {"id": oid, "item": o["item"], "status": "new" if o["reads"] == 1 else "ready"})
@@ -86,7 +104,9 @@ PORT = int(sys.argv[1]); DEP = "http://127.0.0.1:%s" % sys.argv[2]
 # A regression to replay with. "wrong-read": the read-backs ask the dependency
 # for another id than the one the create sent. "stale-read:<id>": they ask for
 # <id> (the recorded one). "no-create": the create is never sent.
-# "number-id": the create sends the id as a JSON number.
+# "number-id": the create sends the id as a JSON number. "user-answer-other":
+# the user create answers another id than the one it stored.
+# "user-wrong-read": the user read-back asks the dependency for another id.
 MODE = sys.argv[3] if len(sys.argv) > 3 else ""
 def dep(method, path, obj=None):
     data = json.dumps(obj).encode() if obj is not None else None
@@ -99,7 +119,26 @@ class H(http.server.BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_GET(self):
+        uid = self.path.rsplit("/", 1)[-1]
+        asked = "u" + secrets.token_hex(6) if MODE == "user-wrong-read" else uid
+        try:
+            got = dep("GET", "/users/" + asked)
+        except urllib.error.HTTPError as e:
+            return self._send(502, {"error": "the dependency answered %d" % e.code})
+        except Exception as e:
+            return self._send(502, {"error": str(e)})
+        self._send(200, {"id": got.get("id"), "name": got.get("name")})
     def do_POST(self):
+        if self.path == "/users":
+            name = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("name", "ann")
+            uid = "u" + secrets.token_hex(6)  # a new id on every run
+            try:
+                dep("POST", "/users", {"id": uid, "name": name})
+            except Exception as e:
+                return self._send(502, {"error": str(e)})
+            answered = "u" + secrets.token_hex(6) if MODE == "user-answer-other" else uid
+            return self._send(201, {"id": answered, "name": name})
         item = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("item", "pen")
         oid = "o" + secrets.token_hex(6)  # a new id on every run
         sent = int(oid[1:], 16) if MODE == "number-id" else oid
@@ -128,7 +167,7 @@ cat > declare.py <<'PY'
 import re, sys
 path = sys.argv[1]
 docs = open(path).read().split("\n---\n")
-out, binds, uses, recorded = [], 0, 0, []
+out, binds, uses, users, recorded = [], 0, 0, 0, []
 for d in docs:
     if not re.search(r"^kind: Http$", d, re.M):
         out.append(d); continue
@@ -141,13 +180,22 @@ for d in docs:
         rid = rid.group(1) or rid.group(2)
         d = d.rstrip("\n") + "\nvariables:\n    orderId:\n        recorded: %s\n        bind: body.id\n        answer:\n            - body.id\n" % rid
         binds += 1; recorded.append(rid)
+    elif method == "POST" and url.endswith("/users"):
+        rid = re.search(r'\\"id\\": ?\\"(u[0-9a-f]+)\\"|"id": ?"(u[0-9a-f]+)"', d)
+        rid = rid.group(1) or rid.group(2)
+        d = d.rstrip("\n") + "\nvariables:\n    id:\n        recorded: %s\n        bind: body.id\n        answer:\n            - body.id\n" % rid
+        users += 1
+    elif method == "GET" and "/users/" in url:
+        rid = url.rsplit("/", 1)[-1]
+        d = d.rstrip("\n") + "\nvariables:\n    id:\n        recorded: %s\n        use:\n            - url.path[1]\n        answer:\n            - body.id\n" % rid
+        users += 1
     elif method == "GET" and "/orders/" in url:
         rid = url.rsplit("/", 1)[-1]
         d = d.rstrip("\n") + "\nvariables:\n    orderId:\n        recorded: %s\n        use:\n            - url.path[1]\n        answer:\n            - body.id\n" % rid
         uses += 1
     out.append(d)
-if binds != 2 or uses != 4:
-    sys.exit("found %d creates and %d read-backs, want 2 and 4" % (binds, uses))
+if binds != 2 or uses != 4 or users != 2:
+    sys.exit("found %d creates, %d read-backs and %d user calls, want 2, 4 and 2" % (binds, uses, users))
 open(path, "w").write("\n---\n".join(out))
 print(recorded[0])
 PY
@@ -206,6 +254,9 @@ replay() {
     fail "$log: keploy test wrote no report (exit $RC)"; tail -30 "$log.log"
   fi
 }
+test_status() {
+  awk -v id="$1" '/^ *- kind:/{st=""} /^ *status:/{ if (st=="") st=$2 } /test_case_id:/{ if ($2==id) {print st; exit} }' "$(REPORT)"
+}
 expect_rc() { [ "$RC" = "$1" ] || fail "$2: keploy exited $RC, want $1"; }
 expect_failed_with() { # STEP WHAT: the newest set failed, its report holding WHAT
   [ "$(set_status)" = FAILED ] || fail "$1: the set must fail (status: $(set_status))"
@@ -234,12 +285,16 @@ for item in pen book; do
   echo "$out" | grep -q '"statuses": \["new", "ready"\]' && echo "$out" | grep -q '"read_same_id": true' ||
     fail "the create of $item answered '$out'"
 done
-wait_for_tests 2 || fail "keploy record wrote $(test_files) test cases, want 2"
+user="$(curl -s -XPOST "http://127.0.0.1:$APP/users" -H 'Content-Type: application/json' -d '{"name":"ann"}')"
+UID_REC="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$user" 2>/dev/null)"
+[ -n "$UID_REC" ] || fail "the user create answered '$user'"
+curl -s "http://127.0.0.1:$APP/users/$UID_REC" | grep -q "\"$UID_REC\"" || fail "the user read-back did not answer the id"
+wait_for_tests 4 || fail "keploy record wrote $(test_files) test cases, want 4"
 stop_pid "$REC_PID"; REC_PID=""; own
 kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null
-[ "$(test_files)" -eq 2 ] || { fail "recorded $(test_files) test cases, want 2"; tail -30 record.log; exit 1; }
+[ "$(test_files)" -eq 4 ] || { fail "recorded $(test_files) test cases, want 4"; tail -30 record.log; exit 1; }
 MOCKS=keploy/test-set-0/mocks.yaml
-[ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 6 ] || { fail "the six dependency calls were not recorded as mocks"; tail -30 record.log; exit 1; }
+[ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 8 ] || { fail "the eight dependency calls were not recorded as mocks"; tail -30 record.log; exit 1; }
 cp -a keploy keploy.plain
 
 echo "== 2. KEPLOY_PROVEN=1 keploy test without the variables: the set fails =="
@@ -248,7 +303,12 @@ expect_rc 1 "step 2"
 [ "$(set_status)" = FAILED ] || fail "without the variables the set must fail: the creates send new ids (status: $(set_status))"
 grep -q 'variable_mismatch' "$(REPORT)" && fail "step 2: a variable was reported in a set that declares none"
 
-echo "== 3. write the variables on the mocks, as the learn step would =="
+echo "== 3. keploy templatize, then the variables on the mocks, as the learn step would =="
+sudo -E env PATH="$PATH" "$REPLAY_BIN" templatize --disable-tele >templatize.log 2>&1 </dev/null; own
+UC="$(grep -l 'url: .*/users$' keploy/test-set-0/tests/*.yaml | head -n1)"
+UR="$(grep -l 'url: .*/users/' keploy/test-set-0/tests/*.yaml | head -n1)"
+grep -q '{{capture string .id}}' "$UC" 2>/dev/null || fail "templatize did not capture the user's id: $(grep -m1 'body:' "$UC" 2>/dev/null)"
+grep -q 'url: .*/users/{{string .id}}' "$UR" 2>/dev/null || fail "templatize did not use the id in the read-back's URL"
 REC_ID="$(python3 declare.py "$MOCKS")" || fail "could not write the variables block: $REC_ID"
 cp "$MOCKS" mocks.declared.yaml
 
@@ -257,6 +317,8 @@ replay follow "" KEPLOY_PROVEN=1
 expect_rc 0 "step 4"
 [ "$(set_status)" = PASSED ] || { fail "with the variables the set must pass (status: $(set_status))"; grep -nE 'status:|match_phase|diff:|next_steps' "$(REPORT)" | head -40; tail -40 follow.log; }
 cmp -s "$MOCKS" mocks.declared.yaml || fail "keploy test rewrote the mocks"
+grep -q '^ *variables:$' "$(REPORT)" || fail "the report lists no variable the tests bound"
+grep -A6 '^ *variables:$' "$(REPORT)" | grep -q 'given: true' || fail "the report does not list the id the read-back's request gave"
 grep -q ' ERROR ' follow.log && { fail "the passing run logged an ERROR"; grep ' ERROR ' follow.log | head; }
 
 echo "== 5. the app reads back another id: the set fails with the variable as evidence =="
@@ -282,18 +344,32 @@ replay numberid number-id KEPLOY_PROVEN=1
 expect_rc 1 "step 8"
 expect_failed_with "step 8" 'another JSON type'
 
+UCN="$(basename "$UC" .yaml)"; URN="$(basename "$UR" .yaml)"
+echo "== 8b. the user create answers another id than it stored: the create fails =="
+replay useranswer user-answer-other KEPLOY_PROVEN=1
+expect_rc 1 "step 8b"
+[ "$(test_status "$UCN")" = FAILED ] || fail "step 8b: the user create must fail (status: $(test_status "$UCN"))"
+grep -q 'as id to its dependency' "$(REPORT)" || { fail "step 8b: the report does not say the app answered another id than it sent its dependency"; grep -n -A3 'template_failures' "$(REPORT)" | head; }
+sed 's/\x1b\[[0-9;]*m//g' useranswer.log | grep -q "\"testcase id\": \"$UCN\".*\"passed\": \"false\"" || fail "step 8b: the log does not say the create failed"
+
+echo "== 8c. the user read-back asks its dependency for another id: the read-back fails =="
+replay userread user-wrong-read KEPLOY_PROVEN=1
+expect_rc 1 "step 8c"
+[ "$(test_status "$URN")" = FAILED ] || fail "step 8c: the read-back must fail (status: $(test_status "$URN"))"
+grep -q "taken at test case $URN request" "$(REPORT)" || { fail "step 8c: the report does not say the id was taken at the test case's request"; grep -nE 'diff:' "$(REPORT)" | head; }
+
 echo "== 9. switch off: the block is not read =="
 replay off ""
 OFF="$(case_statuses)"
-[ "$(echo "$OFF" | grep -c .)" -eq 2 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 2"
-grep -q 'variable_mismatch\|kind: variable' "$(REPORT)" && fail "switch off: a report mentions a variable"
+[ "$(echo "$OFF" | grep -c .)" -eq 4 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 4"
+grep -q 'variable_mismatch\|kind: variable\|^ *variables:$' "$(REPORT)" && fail "switch off: a report mentions a variable"
 cp keploy.plain/test-set-0/mocks.yaml "$MOCKS"
 replay offplain ""
 OFFPLAIN="$(case_statuses)"
 [ "$OFF" = "$OFFPLAIN" ] || fail "switch off: the verdicts with the block ($OFF) differ from those without it ($OFFPLAIN)"
 
 echo "== 10. no data race =="
-for f in record.log plain.log follow.log wrong.log stale.log nocreate.log numberid.log off.log offplain.log; do
+for f in record.log plain.log follow.log wrong.log stale.log nocreate.log numberid.log useranswer.log userread.log off.log offplain.log; do
   grep -q 'WARNING: DATA RACE' "$f" 2>/dev/null && fail "data race in $f"
 done
 
