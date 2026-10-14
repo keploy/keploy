@@ -118,6 +118,12 @@ type MockManager struct {
 	// answer more than once keeps its first-use timestamp and its usage in
 	// consumedPersistent, so only a count tells that it answered again.
 	servedCount map[string]uint64
+	// scopeConsumed names the per-test mocks served while a test of keploy
+	// mock replay begun without a worker pid was open (SetScopeMocks), in any
+	// way: consumed out of its per-test tier, or used where it stays. The
+	// staging that ends such a test leaves them out, so a test's recording
+	// answers no call after its test ended. Reset with consumedPersistent.
+	scopeConsumed map[string]struct{}
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -152,6 +158,19 @@ type MockManager struct {
 	windowMu    sync.RWMutex
 	windowStart time.Time
 	windowEnd   time.Time
+	// scopeOpen is a test of keploy mock replay that its harness began
+	// without a worker pid, while it runs (SetScopeMocks): a test window with
+	// no recorded-time bounds, since such a test is served the mocks its
+	// mapping names rather than the ones recorded in a span of time. It makes
+	// the window active and the set's first test fired, and leaves
+	// windowStart/windowEnd zero. Every window staging (SetMocksWithWindow,
+	// SetMocksWithWindowThreeTier, SetScopeMocks) sets it, with the window,
+	// after the trees: true only for SetScopeMocks opening a test;
+	// SetCurrentTestWindow clears it with the window it sets; SetFilteredMocks
+	// and SetUnFilteredMocks leave it. Guarded by windowMu; the stagings write
+	// it under swapMu, so WindowSnapshot reads it with testFiredThisSet
+	// tear-free.
+	scopeOpen bool
 
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
@@ -390,6 +409,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		consumedIndex:       make(map[string]int),
 		consumedPersistent:  make(map[string]models.MockState),
 		servedCount:         make(map[string]uint64),
+		scopeConsumed:       make(map[string]struct{}),
 		connectionTrees:     make(map[string]*TreeDb),
 		connectionLastTs:    make(map[string]time.Time),
 		sweeperStop:         make(chan struct{}),
@@ -560,6 +580,9 @@ func (m *MockManager) ResetForReplaySession() {
 	}
 	if m.servedCount != nil {
 		m.servedCount = make(map[string]uint64)
+	}
+	if m.scopeConsumed != nil {
+		m.scopeConsumed = make(map[string]struct{})
 	}
 	m.consumedMu.Unlock()
 
@@ -749,6 +772,7 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowMu.Lock()
 	m.windowStart = start
 	m.windowEnd = end
+	m.scopeOpen = false
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 	m.signalWindowChange()
@@ -765,13 +789,21 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 // Concurrency: acquires windowMu for read only. A racy observation is
 // tolerable — callers that need strict window/pool atomicity go
 // through GetPerTestMocksInWindow (which snapshots both under swapMu).
+//
+// A test of keploy mock replay begun without a worker pid (SetScopeMocks) is
+// an active window too, one with no recorded-time bounds.
 func (m *MockManager) IsTestWindowActive() bool {
 	if v := m.exactView(); v != nil {
 		return v.test != ""
 	}
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
-	return !m.windowStart.IsZero() && !m.windowEnd.IsZero()
+	return m.windowActiveLocked()
+}
+
+// windowActiveLocked is IsTestWindowActive with windowMu held.
+func (m *MockManager) windowActiveLocked() bool {
+	return m.scopeOpen || (!m.windowStart.IsZero() && !m.windowEnd.IsZero())
 }
 
 // GetFilteredMocksInWindow returns non-config filtered mocks whose recorded
@@ -929,7 +961,94 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&filtered, &unfiltered)
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, false)
+}
+
+// SetScopeMocks stages the pool of keploy mock replay, with the proven switch
+// off, for a test its harness began (open) or ended (!open) without a worker
+// pid. Such a test is served the mocks its mapping names, not the ones
+// recorded in a span of time, so it has no recorded-time window to stage.
+//
+// open: filtered is the test's whole per-test pool and goes into the per-test
+// tier as it is, with no window containment and no startup-init routing;
+// unfiltered is the session tier; the startup tier is emptied. The test window
+// is open (IsTestWindowActive, and HasFirstTestFired with it) until the next
+// staging, with no time bounds: CurrentTestWindow stays zero, so nothing that
+// reads time bounds (GetFilteredMocksInWindow, carry-over, matchers comparing
+// recorded times) changes. Tier-aware parsers route the test's calls to the
+// per-test tier and report a miss as one inside a test.
+//
+// !open: the pool between tests, staged exactly as a models.BaseTime staging
+// stages it (everything in the startup tier), which closes the window, less
+// every per-test mock served while a test was open (scopeConsumed): a test's
+// recording answers no call after its test ended. Between tests is routed as
+// before any test, as it was before tests opened windows, and what is served
+// there is served from the startup tier, re-armed by each staging as always.
+// A begin stages a test's own mocks afresh, so a test run again is served its
+// whole recording.
+//
+// Like a models.BaseTime staging, each call starts a new staging epoch. A
+// reader that takes swapMu (WindowSnapshot, GetPerTestMocksInWindow) sees the
+// trees and the window of one staging; the others see each change as it
+// lands, the trees before the window, as with any staging.
+func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bool) {
+	defer m.signalWindowChange()
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if !open {
+		served := m.scopeServed()
+		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
+		ownForStaging(&filtered, &unfiltered)
+		m.setMocksWithWindowLocked(filtered, unfiltered, nil, models.BaseTime, time.Now(), false)
+		return
+	}
+	ownForStaging(&filtered, &unfiltered)
+	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
+	// the zero-window staging below leaves alone.
+	m.stagingEpoch.Add(1)
+	m.carry.reset()
+	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+	// A zero window is no time window: the per-test tier takes filtered as
+	// it is, the startup tier is rebuilt empty, and the published window
+	// stays zero, published with the open scope.
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, true)
+}
+
+// scopeIsOpen reports whether a test begun without a worker pid is open
+// (SetScopeMocks).
+func (m *MockManager) scopeIsOpen() bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.scopeOpen
+}
+
+// scopeServed is a copy of scopeConsumed: the per-test mocks served while a
+// test begun without a worker pid was open.
+func (m *MockManager) scopeServed() map[string]struct{} {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]struct{}, len(m.scopeConsumed))
+	for name := range m.scopeConsumed {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+// withoutScopeServed is mocks less the per-test mocks in served.
+func withoutScopeServed(mocks []*models.Mock, served map[string]struct{}) []*models.Mock {
+	if len(served) == 0 {
+		return mocks
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, mk := range mocks {
+		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest {
+			if _, ok := served[mk.Name]; ok {
+				continue
+			}
+		}
+		out = append(out, mk)
+	}
+	return out
 }
 
 // mockOwner settles which objects a staging call may stamp.
@@ -1002,7 +1121,10 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // explicitStartup is SetMocksWithWindowThreeTier's startup slice: it joins
 // the startup tier this call builds, and is stamped with the rest of the
 // staging, before any tier is published.
-func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time) {
+//
+// scope opens a test with no time bounds (SetScopeMocks); it is published
+// with the window, and every other staging closes one.
+func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1437,12 +1559,18 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// SetMocksWithWindow call — the first real test — overwrites them
 	// with real timestamps, at which point IsTestWindowActive becomes
 	// true and the dispatcher routes to PerTest as intended.
+	//
+	// A scope is closed by every staging but the one that opens it, BaseTime
+	// staging included: that staging moves the pool to the startup tier, so a
+	// test window left open over it would route the test's calls to an empty
+	// per-test tier.
+	m.windowMu.Lock()
 	if !isInitialStaging {
-		m.windowMu.Lock()
 		m.windowStart = start
 		m.windowEnd = end
-		m.windowMu.Unlock()
 	}
+	m.scopeOpen = scope
+	m.windowMu.Unlock()
 	// Counter reflects pre-filtering drops for THIS test; legacy
 	// match-time filtering in GetFilteredMocksInWindow will add zero
 	// now that the tree is pre-filtered, which keeps the semantic
@@ -1511,7 +1639,7 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 	// mocks the caller partitioned that the heuristic can't derive on its
 	// own. The slice is stamped, filed and indexed for counting with the
 	// rest of the staging, before any tier is published.
-	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end)
+	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end, false)
 }
 
 // GetSessionMocks returns the UNION of startup-tier and session-tier
@@ -1773,13 +1901,20 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // because the two bits live under different locks (windowMu vs
 // swapMu). For pair-coherent reads use WindowSnapshot, which
 // takes both locks in declared order and returns a tear-free snapshot.
+//
+// A test of keploy mock replay begun without a worker pid has fired while it
+// runs (SetScopeMocks), so WindowSnapshot never reads Active without
+// FirstTestFired for it. Its end goes back to the routing before it: unlike a
+// test window, a scope does not stay fired.
 func (m *MockManager) HasFirstTestFired() bool {
 	if m.exactView() != nil {
 		return m.exact.fired.Load()
 	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
-	return m.testFiredThisSet
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.testFiredThisSet || m.scopeOpen
 }
 
 // FirstTestWindowStart returns this set's startup-init cutoff: the earliest
@@ -1845,15 +1980,17 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return models.WindowSnapshot{
-		Active:         !m.windowStart.IsZero() && !m.windowEnd.IsZero(),
-		FirstTestFired: m.testFiredThisSet,
+		Active:         m.windowActiveLocked(),
+		FirstTestFired: m.testFiredThisSet || m.scopeOpen,
 	}
 }
 
 // CurrentTestWindow returns the [start, end] request-timestamp bounds of the
 // outer test currently being replayed (as set by SetCurrentTestWindow /
-// SetMocksWithWindow). Both zero means no window is active (initial staging
-// or between tests). Read under windowMu so callers see a tear-free pair.
+// SetMocksWithWindow). Both zero means no time window: none is active
+// (initial staging or between tests), or the active one has no recorded-time
+// bounds (SetScopeMocks), which IsTestWindowActive tells apart. Read under
+// windowMu so callers see a tear-free pair.
 //
 // Exposed for matchers that receive data mocks in the SESSION pool (because
 // the enterprise agent lax-promotes per-test data mocks to session and lets
@@ -2939,7 +3076,8 @@ func (m *MockManager) WindowChanged() <-chan struct{} {
 
 // StagingEpoch identifies the current staging snapshot. It changes at every
 // staging call (SetMocksWithWindow with models.BaseTime): a new test set, or the
-// same set staged again for a replacement agent. Anything a consumer derived
+// same set staged again for a replacement agent; and at every SetScopeMocks,
+// which re-stages the pool as a test of keploy mock replay begins or ends. Anything a consumer derived
 // from a staging snapshot — a per-set delivery queue — must be rebuilt when it
 // changes. Zero until the first staging call.
 func (m *MockManager) StagingEpoch() uint64 {
@@ -3177,7 +3315,11 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Timestamp == 0 {
 		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
 	}
+	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	if inScope && m.scopeConsumed != nil {
+		m.scopeConsumed[mock.Name] = struct{}{}
+	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
 		m.consumedList[idx] = mock // update state, preserve position and first use

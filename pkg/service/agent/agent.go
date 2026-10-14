@@ -1409,7 +1409,35 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if params.Exact != nil && provenswitch.On() {
 		return a.serveKeployTestExactly(ctx, params)
 	}
+	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params)
+	if err != nil {
+		return err
+	}
 
+	// Atomically update mocks AND the active test window when the proxy
+	// supports the WindowedProxy extension. Otherwise fall back to the
+	// stable SetMocks contract — third-party proxies without window
+	// support keep working in legacy lax mode.
+	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
+			return err
+		}
+	} else {
+		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks on proxy")
+			return err
+		}
+	}
+
+	return nil
+}
+
+// mocksForParams is the pool UpdateMockParams stages for params: the per-test
+// and the session tier, filtered as params ask. It also applies what the
+// staging call carries beside the pool (the startup cutoff, the recorded
+// windows, the stateful cursors' reset), as UpdateMockParams always has.
+func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams) ([]*models.Mock, []*models.Mock, error) {
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
 	// test fires FIRST, so a --test-sets selection, an ignored test or the
@@ -1489,7 +1517,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
-		return fmt.Errorf("no mocks stored for client ID")
+		return nil, nil, fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
 
@@ -1540,12 +1568,12 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return err
+		return nil, nil, err
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return err
+		return nil, nil, err
 	}
 
 	a.logger.Debug("Original mocks before filtering",
@@ -1645,23 +1673,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 
-	// Atomically update mocks AND the active test window when the proxy
-	// supports the WindowedProxy extension. Otherwise fall back to the
-	// stable SetMocks contract — third-party proxies without window
-	// support keep working in legacy lax mode.
-	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
-		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
-			return err
-		}
-	} else {
-		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks on proxy")
-			return err
-		}
-	}
-
-	return nil
+	return filteredMocks, unfilteredMocks, nil
 }
 
 // ServedMocks reports the mocks served so far this session, keyed by mock name.
