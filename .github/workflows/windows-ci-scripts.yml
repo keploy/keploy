@@ -20,10 +20,12 @@ on:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/tools/**'
   pull_request:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/tools/**'
 
 permissions:
   contents: read

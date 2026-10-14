@@ -21,7 +21,10 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 echo "Installing grpcurl..."
 if ! command -v grpcurl &> /dev/null; then
     echo "grpcurl not found, installing..."
-    go_retry install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+    # Pinned, with every module's hash, by .github/tools/grpcurl (go.mod and
+    # go.sum): the install verifies against go.sum, never the checksum
+    # database, and installs the same grpcurl every run.
+    (cd "$(dirname "${BASH_SOURCE[0]}")/../../../../tools/grpcurl" && go_retry install github.com/fullstorydev/grpcurl/cmd/grpcurl)
     export PATH="$PATH:$HOME/go/bin"
 fi
 command -v grpcurl >/dev/null 2>&1 || { echo "grpcurl installation failed"; exit 1; }

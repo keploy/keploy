@@ -205,6 +205,24 @@ if [[ $rc == 0 && $(calls "$t/docker.calls") == 3 && "$(cat "$t/sleeps" 2>/dev/n
 else bad "pull" "rc=$rc calls=$(calls "$t/docker.calls") sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
 rm -rf "$t"
 
+echo "tools are pinned in a go.sum:"
+# A `go install` or `go run` of a package at a version has no go.sum: go
+# verifies it against the checksum database, which a LAN registry cache cannot
+# promise in an upstream outage, and @latest changes under the lane. A tool is
+# pinned in a module of its own under .github/tools (a `tool` directive, the
+# version and every module's hash in go.mod and go.sum) and installed there.
+ROOT="$(cd "$HERE/../../.." && pwd -P)"
+hits=$(cd "$ROOT" && grep -rnE --include='*.sh' --include='*.yml' --include='*.yaml' --include='*.ps1' --include='Dockerfile*' \
+  '(^|[^[:alnum:]_])go(_retry)?[[:space:]]+(install|run)[[:space:]]+([^[:space:]]+[[:space:]]+)*[^[:space:]#]*@' .github \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -v 'fetch-test.sh' || true)
+if [[ -z $hits ]]; then ok "no lane installs or runs a tool at a version"
+else bad "a tool installed at a version, verified against the checksum database rather than a go.sum" "$hits"; fi
+for mod in "$ROOT"/.github/tools/*/go.mod; do
+  d=$(dirname "$mod")
+  if grep -qE '^tool[[:space:]]' "$mod" && [[ -s $d/go.sum ]]; then ok "${d#"$ROOT"/} names its tool and keeps its hashes"
+  else bad "${d#"$ROOT"/}" "a tools module needs a \`tool\` directive and a go.sum"; fi
+done
+
 echo "usage:"
 for args in "" "clone onlyurl" "modules a b" "go" "pip" "bogus"; do
   rc=0
