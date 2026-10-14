@@ -436,6 +436,7 @@ func TestAnUnreadableMissListFailsTheTest(t *testing.T) {
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
 	require.Contains(t, w.Evidence.Reason, "the drain did not finish")
+	require.True(t, w.Evidence.Unread, "keploy could not read what the test did: the CLI's verdict is not judged, not the test's fault")
 }
 
 // In a replay a proxy that cannot count answers cannot judge a test, so the

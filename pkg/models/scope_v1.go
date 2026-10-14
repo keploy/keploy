@@ -135,6 +135,10 @@ type ScopeEvidence struct {
 	Unconsumed []string        `json:"unconsumed,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty"`
+	// Unread: keploy could not read everything the test did (its misses,
+	// or the mocks it consumed), so the test has no verdict of its own;
+	// keploy's verdict on the run is "not judged", never the test's fault.
+	Unread bool `json:"unread,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID

@@ -565,6 +565,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 				ev = &models.ScopeEvidence{}
 			}
 			ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
+			ev.Unread = true
 			outcome = models.ScopeOutcomeFailed
 		case !ev.Empty():
 			ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
