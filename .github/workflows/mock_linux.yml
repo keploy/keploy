@@ -6,10 +6,20 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
-# Another replays two concurrent workers under different named scopes and
-# asserts each is served only its own scope's mocks. Another replays a stateful
+# The lanes run their keploy commands both ways: without the proven switch
+# (today's default) and under KEPLOY_PROVEN=1, which the flip makes the default;
+# their harnesses speak scope protocol v1 (mock/keploy_v1.py). Each way runs in
+# a job of its own (MOCK_LANE_SWITCH, mock/lane_switch.sh): mock_linux without
+# the switch, mock_linux_proven under it, so neither's length decides whether
+# the other finishes. Under the switch this build refuses a replay (it does not
+# judge each test) and a docker command, and the lanes assert those refusals.
+# Another, under the switch, asserts a second test process and a second open
+# test are refused (one_test_process_at_a_time, one_test_at_a_time) until
+# release 2; without it, replays two concurrent workers under different named
+# scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
-# per worker and per scope. Another runs more short-lived processes than the
+# per worker and per scope, and, with consume-once mocks, that a mock a test
+# consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
 # agent's PID map holds between two calls and asserts both are recorded, then
 # replayed without reaching the dependency. Another records, under the
 # proven switch, three containers of one image on random published ports and
@@ -56,6 +66,10 @@ jobs:
     runs-on: ${{ inputs.runner }}
     name: mock-mode (record_replay_build)
     timeout-minutes: 30
+    # The mock lanes' runs without the proven switch; mock_linux_proven runs
+    # their runs under it.
+    env:
+      MOCK_LANE_SWITCH: 'off'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -98,6 +112,9 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
 
+      # Parallel test workers, without the switch: two concurrent pid-scoped
+      # workers are each served only their own scope's mocks. (Its switched
+      # half, the refusal check, runs in mock_linux_proven.)
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -107,7 +124,11 @@ jobs:
 
       # A stateful dependency (the same request recorded several times) must
       # replay in record order then saturate — unscoped, per concurrent scoped
-      # worker, and from the start again for a re-run of a test.
+      # worker, and from the start again for a re-run of a test. With
+      # consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1), a mock a test
+      # consumed must not be served again after that test's end, on the
+      # worker's pid; a control shows the same call is answered while the
+      # mock is unconsumed.
       - name: Run mock-mode stateful-dependency e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -127,13 +148,11 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
 
-      # The proven model (KEPLOY_PROVEN=1) names a dependency that runs in a
-      # container by the container: container:<image>:<port>#<n>, where n
-      # numbers the image's containers per test, after the suite's. Three
-      # containers of one image on random published ports must be keyed the
-      # suite's #1 and each test's own #2, be named the same when recorded
-      # again on new ports or one test alone, and record no keys without the
-      # switch.
+      # Container keys, without the switch: a recording made without it
+      # carries none. (Its switched half runs in mock_linux_proven: the proven
+      # model names a dependency that runs in a container by the container,
+      # container:<image>:<port>#<n>, the suite's #1 and each test's own #2,
+      # the same on new ports or for one test alone.)
       - name: Run mock-mode container-keys e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -260,6 +279,108 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
+
+  # The mock lanes' runs under the proven switch (KEPLOY_PROVEN=1), which the
+  # flip makes the default: each lane's record under the switch, and the
+  # refusals this build makes there (a replay, a docker command, a second test
+  # process or open test). A job of its own, beside mock_linux's runs without
+  # the switch.
+  mock_linux_proven:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: mock-mode (record_replay_build, KEPLOY_PROVEN)
+    timeout-minutes: 30
+    env:
+      MOCK_LANE_SWITCH: 'on'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run mock-mode e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
+
+      - name: Run mock-mode non-destructive-record e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
+
+      - name: Run mock CLI exit-codes e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
+
+      # Until release 2: a second test process claiming the run, and a test
+      # begun while another is open, are refused (422
+      # one_test_process_at_a_time, one_test_at_a_time); the run does not pass.
+      - name: Run mock-mode parallel refusal e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"
+
+      - name: Run mock-mode stateful-dependency e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      - name: Run mock-mode process-churn e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
+
+      - name: Run mock-mode container-keys e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-container-keys-linux.sh"
+
+      - name: Run mock-mode offline e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-offline-linux.sh"
+
+      - name: Run mock-mode agent-cannot-start e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      - name: Run mock-mode config-guard e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-config-guard-linux.sh"
+
+      - name: Run mock-mode hang-up e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
 
   # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
   # request-drift app: its response never shows where or what its dependency

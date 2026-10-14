@@ -8,23 +8,37 @@
 # be parsed or the wrong number of arguments; a group with no verb still shows
 # help (0); a valid subcommand resolves normally. (design §P0b.)
 #
-# Pure CLI behaviour: no sudo, no eBPF, no dependencies.
+# Pure CLI behaviour: no sudo, no eBPF, no dependencies. Every check runs
+# twice: without the proven switch (today's default) and under KEPLOY_PROVEN=1,
+# which the flip makes the default. MOCK_LANE_SWITCH (lane_switch.sh) picks
+# the half a run runs; CI runs each in a job of its own.
 set -uo pipefail
 
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 RECORD_BIN="${RECORD_BIN:-keploy}"
 FAIL=0
 
 check() {
-  local want="$1"
+  local want="$1" proven got
   shift
-  "$RECORD_BIN" "$@" >/dev/null 2>&1
-  local got=$?
-  if [ "$got" -ne "$want" ]; then
-    echo "FAIL: 'keploy $*' exited $got, want $want"
-    FAIL=1
-  else
-    echo "ok: 'keploy $*' -> $got"
-  fi
+  for proven in "${SWITCH_VALUES[@]}"; do
+    KEPLOY_PROVEN="$proven" "$RECORD_BIN" "$@" >/dev/null 2>&1
+    got=$?
+    if [ "$got" -ne "$want" ]; then
+      echo "FAIL: 'KEPLOY_PROVEN=$proven keploy $*' exited $got, want $want"
+      FAIL=1
+    else
+      echo "ok: 'KEPLOY_PROVEN=$proven keploy $*' -> $got"
+    fi
+  done
 }
 
 # Unknown verb on a command group is a usage error (8), never a false 0.

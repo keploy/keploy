@@ -24,8 +24,27 @@
 #   loopback loopback only: record a dependency on 127.0.0.1, stop it, and
 #            replay it
 #
+# Every record phase runs again under KEPLOY_PROVEN=1, which the flip makes
+# the default (phases named *-proven, into sets of their own), and must record
+# the same. A replay under the switch needs a build that judges each test
+# (keploy enterprise): offline-proven checks this build refuses it before it
+# runs the test command. The replays above run without the switch, today's
+# default, which the flip deletes with the switch.
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
+
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
@@ -40,13 +59,14 @@ fail() {
 }
 
 # Answers A for dep.keploy.test with DEP_IP, an empty AAAA, NXDOMAIN for
-# every other name. A query it cannot parse goes unanswered rather than
+# every other name. Says "ready" once it is bound. A query it cannot parse goes unanswered rather than
 # stopping it.
 cat > "$WORK/dnsserver.py" <<'PY'
 import socket, struct, sys
 ip = sys.argv[1]
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind((ip, 53))
+print("ready", flush=True)
 def answer(q):
     tid = struct.unpack(">H", q[:2])[0]
     i, labels = 12, []
@@ -82,6 +102,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer((sys.argv[1], int(sys.argv[2])), H) as s:
+    print("ready", flush=True)
     s.serve_forever()
 PY
 
@@ -101,13 +122,25 @@ PY
 cat > "$WORK/inside.sh" <<'SH'
 #!/bin/sh
 PHASE=$1
+# <phase>-proven: the phase under the proven switch, into a set of its own.
+BASE=${PHASE%-proven}
+PROVEN=""
+[ "$BASE" != "$PHASE" ] && PROVEN=1
 PIDS=""
 trap '[ -z "$PIDS" ] || kill $PIDS 2>/dev/null' EXIT
+# ready PID FILE: waits for the server PID to say "ready" in FILE, once it
+# listens; a server that exits first fails the phase.
+ready() {
+  until grep -qx ready "$2" 2>/dev/null; do
+    kill -0 "$1" 2>/dev/null || { echo "$PHASE: a server exited before it listened:" >&2; cat "$2" >&2; exit 1; }
+    sleep 0.1
+  done
+}
 cd "$WORK" || exit 1
 export HOME="$WORK/home"
 mkdir -p "$HOME"
 ip link set lo up || exit 1
-case "$PHASE" in
+case "$BASE" in
   online|offline|hosts-*)
     URL="http://dep.keploy.test:$PORT"
     echo "nameserver $DEP_IP" > "$WORK/resolv.conf"
@@ -122,52 +155,50 @@ case "$PHASE" in
     URL="http://127.0.0.1:$PORT"
     ;;
 esac
-case "$PHASE" in
+case "$BASE" in
   online|offline) SET=online ;;
   hosts-*) SET=hosts ;;
   loopback-*) SET=loopback ;;
 esac
-case "$PHASE" in
+[ -n "$PROVEN" ] && SET="$SET-proven"
+case "$BASE" in
   online|hosts-record|loopback-record) SUB=record ;;
   *) SUB=replay ;;
 esac
-if [ "$PHASE" = online ] || [ "$PHASE" = hosts-record ]; then
+if [ "$BASE" = online ] || [ "$BASE" = hosts-record ]; then
   # A veth pair only to hold DEP_IP: the veth driver is there wherever Docker
   # is, which a dummy link's module is not on every runner kernel.
   ip link add kdep0 type veth peer name kdep1 || exit 1
   ip addr add "$DEP_IP/24" dev kdep0 || exit 1
   ip link set kdep0 up && ip link set kdep1 up || exit 1
-  python3 depserver.py "$DEP_IP" "$PORT" &
+  python3 depserver.py "$DEP_IP" "$PORT" > "$WORK/$PHASE.dep.out" 2>&1 &
   PIDS="$!"
+  ready "$!" "$WORK/$PHASE.dep.out"
 fi
-if [ "$PHASE" = online ]; then
-  python3 dnsserver.py "$DEP_IP" &
+if [ "$BASE" = online ]; then
+  python3 dnsserver.py "$DEP_IP" > "$WORK/$PHASE.dns.out" 2>&1 &
   PIDS="$PIDS $!"
+  ready "$!" "$WORK/$PHASE.dns.out"
 fi
-if [ "$PHASE" = hosts-record ]; then
+if [ "$BASE" = hosts-record ]; then
   { cat /etc/hosts; echo "$DEP_IP dep.keploy.test"; } > "$WORK/hosts"
   mount --bind "$WORK/hosts" /etc/hosts || exit 1
 fi
-if [ "$PHASE" = loopback-record ]; then
-  python3 depserver.py 127.0.0.1 "$PORT" &
+if [ "$BASE" = loopback-record ]; then
+  python3 depserver.py 127.0.0.1 "$PORT" > "$WORK/$PHASE.dep.out" 2>&1 &
   PIDS="$!"
+  ready "$!" "$WORK/$PHASE.dep.out"
 fi
 ip -brief addr > "$WORK/$PHASE.addr"
-# The dependency has to answer only where the phase has one: wait up to 20s
-# for it to come up there, and ask once where there is none.
-DEADLINE=$(($(date +%s) + 20))
-while :; do
-  python3 client.py "$URL" > /dev/null 2>&1
-  DIRECT=$?
-  [ "$DIRECT" = 0 ] || [ -z "$PIDS" ] || [ "$(date +%s)" -ge "$DEADLINE" ] && break
-  sleep 0.2
-done
-echo "$DIRECT" > "$WORK/$PHASE.direct"
+# The test command without keploy: it gets its answers only where the phase
+# has a dependency (which listens by now).
+python3 client.py "$URL" > /dev/null 2>&1
+echo $? > "$WORK/$PHASE.direct"
 # Only the debug log says what keploy's DNS server answered a name it has no
 # recorded answer for, which hosts-replay has to show.
 DEBUG=""
 [ "$PHASE" = hosts-replay ] && DEBUG="--debug"
-timeout -s INT -k 30 90 "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
+KEPLOY_PROVEN="$PROVEN" "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
 echo $? > "$WORK/$PHASE.exit"
 exit 0
 SH
@@ -204,6 +235,7 @@ proven_offline() {
   fi
 }
 
+if half off; then
 phase online 0
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online: no DNS lookup was recorded"
@@ -231,6 +263,35 @@ phase loopback-record 0
   fail "loopback-record: want 2 HTTP mocks"
 phase loopback-replay 1
 proven_offline loopback
+fi
+
+if half on; then
+# Under the proven switch: the same records.
+phase online-proven 0
+[ "$(grep -c '^kind: DNS' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
+  fail "online-proven: no DNS lookup was recorded"
+[ "$(grep -c '^kind: Http' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "online-proven: want 2 HTTP mocks"
+phase hosts-record-proven 0
+[ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
+  fail "hosts-record-proven: a DNS lookup was recorded for a name /etc/hosts answers"
+[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "hosts-record-proven: want 2 HTTP mocks"
+phase loopback-record-proven 0
+[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
+  fail "loopback-record-proven: want 2 HTTP mocks"
+
+# ...and this build refuses the replay under it, offline, before the test
+# command runs.
+echo "--- offline-proven ---"
+sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+  unshare -n -m --propagation private "$WORK/inside.sh" offline-proven || fail "offline-proven: the namespace itself failed"
+[ "$(cat "$WORK/offline-proven.exit" 2>/dev/null)" = 1 ] ||
+  fail "offline-proven: keploy exited $(cat "$WORK/offline-proven.exit" 2>/dev/null), want this build's refusal (1)"
+grep -q "needs a keploy build that judges each test" "$WORK/offline-proven.log" ||
+  fail "offline-proven: keploy did not say it needs a build that judges each test"
+grep -q "^ok /" "$WORK/offline-proven.log" && fail "offline-proven: the refused replay ran the test command"
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "mock offline e2e FAILED; logs, mocks and receipts are kept in $WORK"
