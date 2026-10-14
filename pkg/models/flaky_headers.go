@@ -123,6 +123,29 @@ func FlakyHeaderNoise() map[string][]string {
 	return nm
 }
 
+// CredentialHeaders are the request headers that say who is calling, or make
+// a call the one it is: under the proven switch they leave the static list and
+// are compared (design v14 §7.2 item 8). A token minted earlier in the test is
+// a variable, one from the environment binds, one that drifts at record's
+// full round is learned as noise, and anything else must be the recorded one.
+var CredentialHeaders = []string{
+	"authorization",
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+}
+
+// ProvenFlakyHeaderNoise is FlakyHeaderNoise without the CredentialHeaders:
+// the static list a request is matched with under the proven switch.
+func ProvenFlakyHeaderNoise() map[string][]string {
+	nm := FlakyHeaderNoise()
+	for _, h := range CredentialHeaders {
+		delete(nm, h)
+	}
+	return nm
+}
+
 // volatileResponseHeaders are response headers a server mints fresh on every
 // call, so comparing their VALUES asserts nothing.
 //

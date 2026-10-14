@@ -1227,3 +1227,25 @@ func TestARefusalIsKeptOnceWhateverCameBetween(t *testing.T) {
 	}
 	require.Equal(t, []models.RunRefusal{begin, end, process}, got)
 }
+
+// A miss's reason names the fields in which the call differed from its
+// closest recording (row S1: "GET /users/{} had no recorded answer
+// (body.role differs)"), and never a value: a map key the app sent (an ID,
+// an email address) becomes {}, as a path's segments do.
+func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
+	// The matcher names fields so already (it shapes each key); the
+	// evidence shapes each part again, for a field named by any other means.
+	miss := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge", Destination: "pay.internal",
+		Differs: []string{"body.amount", "body.users.alice@example.role", "body.orders.123456.total", "header.authorization", "body.items[].sku9X0001234[]"}})
+	require.Equal(t, []string{"body.amount", "body.users.{}.role", "body.orders.{}.total", "header.authorization", "body.items[].{}[]"}, miss.Differs)
+	reason := evidenceReason("orders::TestCharge", &models.ScopeEvidence{Misses: []models.UnmatchedCall{miss}}, nil)
+	require.Contains(t, reason, "POST /charge to pay.internal had no recorded answer (body.amount, body.users.{}.role, body.orders.{}.total and 2 more differ)")
+	require.NotContains(t, reason, "alice")
+
+	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil)
+	require.Contains(t, one, "POST /charge had no recorded answer (body.amount differs)")
+	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil)
+	require.Contains(t, two, "GET /x had no recorded answer (host and header.accept differ)")
+	none := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}}, nil)
+	require.Contains(t, none, "GET /x had no recorded answer.")
+}

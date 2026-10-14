@@ -11,7 +11,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -607,33 +606,15 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 }
 
 // fitsRecording reports whether the call (the recorded values put back) is
-// m's recorded request exactly, outside the known noise.
+// m's recorded request exactly, outside the known noise: the strict
+// comparison every other mock is matched with under the proven switch
+// (strictDiff, row S1), so a mock with variables is held to the same rules:
+// the destination, every header value (the credentials included) and the
+// body field by field. Known noise widens only this comparison: the
+// variables are checked at their places apart from it, so a noise entry over
+// a variable's place never excuses a wrong value there.
 func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	matched, err := h.SchemaMatch(ctx, asRecorded, []*models.Mock{m}, headerNoise, urlNoise, false)
-	if err != nil || len(matched) != 1 {
-		return false
-	}
-	recBody := m.Spec.HTTPReq.Body
-	if string(asRecorded.body) == recBody {
-		return true
-	}
-	if !variables.IsJSONDoc(recBody) || !variables.IsJSONDoc(string(asRecorded.body)) {
-		// A body that is not JSON holds no variable place: as recorded, or
-		// equal outside the obfuscator's values.
-		ok, _ := h.ExactBodyMatch(asRecorded.body, []*models.Mock{m})
-		return ok
-	}
-	var noise variables.Noise
-	for k, regs := range m.Spec.ReqBodyNoise {
-		noise.Add(k, regs)
-	}
-	for k, regs := range userBodyNoise {
-		noise.Add(k, regs)
-	}
-	if nc := util.NewNoiseChecker(m.Noise); nc != nil {
-		noise.RecordedValueIsNoise = nc.IsNoisy
-	}
-	return variables.SameJSONUnder(recBody, string(asRecorded.body), noise)
+	return len(strictDiff(asRecorded, liveDestination(asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
 // pickHit chooses the hit that answers: the first of hits, and among the
@@ -843,32 +824,17 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 }
 
 // exactOnly answers a call whose variables did not hold in the recording it
-// fit, with an exact recording of this very call (a mock without variables),
-// if one is in the pool: the URL as recorded (configured url noise only) and
-// the body as recorded (the obfuscator's values aside). No lenient pass runs.
-// retry is true when another connection took the mock first.
-func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise map[string][]string, urlNoise []string, statefulMocks bool) (*models.Mock, bool, bool, error) {
+// fit, with a recording of this very call (a mock without variables), if one
+// is in the pool: the strict comparison every other mock is matched with
+// (strictServe, row S1). No lenient pass runs. retry is true when another
+// connection took the mock first.
+func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (*models.Mock, bool, bool, error) {
 	if len(pool) == 0 {
 		return nil, false, false, nil
 	}
-	schemaMatched, err := h.SchemaMatch(ctx, input, pool, headerNoise, urlNoise, false)
-	if err != nil || len(schemaMatched) == 0 {
-		return nil, false, false, err
-	}
-	ok, best := h.ExactBodyMatch(input.body, schemaMatched)
-	if !ok {
-		return nil, false, false, nil
-	}
-	best, commitCursor := h.cursorPick(best, schemaMatched, mockDb, statefulMocks)
-	served, claimed, err := h.claim(ctx, best, mockDb, nil, nil)
-	if err != nil {
-		return nil, false, false, err
-	}
-	if !claimed {
-		return nil, false, true, nil
-	}
-	if commitCursor != nil {
-		commitCursor()
+	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+	if err != nil || retry || served == nil {
+		return nil, false, retry, err
 	}
 	return served, true, false, nil
 }
