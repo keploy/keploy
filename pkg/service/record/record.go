@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"time"
 
@@ -1124,7 +1125,77 @@ func (r *Recorder) GetRecordHooks() RecordHooks {
 	return r.hooks
 }
 
-func (r *Recorder) Start(ctx context.Context) error {
+// ComposeAgentFailureReader is an optional Instrumentation extension for a
+// docker compose recording: whether the keploy agent, a service in the
+// project, is what stopped it, as keploy's own failure, or nil.
+// AgentClient implements it (keploy mock reads the same).
+type ComposeAgentFailureReader interface {
+	ComposeAgentFailure() error
+}
+
+// ComposeEndReader is an optional Instrumentation extension for a docker
+// compose recording under way: what ended the project when the app's own end
+// does not stand -- the keploy agent's crash after keploy saw it ready (the
+// app stopped over it, or never started), or the project stopping before the
+// app ever started though compose reported 0 -- or nil. appExit is the app's
+// exit as keploy got it. AgentClient implements it.
+type ComposeEndReader interface {
+	ComposeEndAfterReady(appExit int) error
+}
+
+// composeEnd is what ended a compose recording when the app's own end does
+// not stand (ComposeEndReader), or nil.
+func (r *Recorder) composeEnd(appExit int) error {
+	reader, ok := r.instrumentation.(ComposeEndReader)
+	if !ok {
+		return nil
+	}
+	return reader.ComposeEndAfterReady(appExit)
+}
+
+// composeAgentFailure is the agent's own failure when it stopped the compose
+// project, or nil.
+func (r *Recorder) composeAgentFailure() error {
+	reader, ok := r.instrumentation.(ComposeAgentFailureReader)
+	if !ok {
+		return nil
+	}
+	return reader.ComposeAgentFailure()
+}
+
+// appStoppedBySignal reports whether the app ended on SIGTERM or SIGINT
+// (exit 143 or 130: `docker stop`, `kill` or `kill -INT` on the app). That is
+// how an app is stopped, so it ends the recording normally, with exit 0, as
+// an app that exited 0 does. Any other end -- a crash, the app's own non-zero
+// code, SIGKILL or SIGSEGV (137, 139) -- fails the recording with that code
+// (recordExitCode). Under docker compose a run the keploy agent's crash
+// ended is keploy's failure instead, whatever the app's code (composeEnd).
+func appStoppedBySignal(appErr models.AppError) bool {
+	return appErr.AppErrorType == models.ErrUnExpected &&
+		(appErr.ExitCode == 128+int(syscall.SIGTERM) || appErr.ExitCode == 128+int(syscall.SIGINT))
+}
+
+// recordExitCode is the exit code a recording that failed with err ends the
+// process with. An app that ended with a code of its own (a non-zero exit, or
+// 128+N for signal N; SIGTERM and SIGINT are a stop, appStoppedBySignal)
+// gives that code, as `keploy mock` mirrors its runner's (utils/exitcodes.go:
+// the wrapped command's own code, verbatim); anything else is a Keploy-side
+// failure, with the code err is tagged with.
+func recordExitCode(err error) int {
+	var appErr models.AppError
+	if errors.As(err, &appErr) && appErr.ExitCode > 0 &&
+		(appErr.AppErrorType == models.ErrUnExpected || appErr.AppErrorType == models.ErrCommandError) {
+		return appErr.ExitCode
+	}
+	return utils.ExitCodeFor(err)
+}
+
+// Start records until it is stopped or the recording fails, and it ends a
+// failed recording with a non-zero exit code itself (see the stop defer
+// below): every caller of it, keploy's own `record` and the downstream ones,
+// logs its error and goes on, and the process exit code is the only thing CI
+// reads.
+func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
 	// A recorder can be started again: this recording has not begun to stop,
@@ -1334,6 +1405,28 @@ func (r *Recorder) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 		default:
+			// Start is ending on its own: nothing stopped it (a signal to
+			// keploy, the record timer, or a caller cancelling ctx each end
+			// ctx first), so an error it returns is the recording failing --
+			// an agent that could not start, an environment that could not be
+			// set up, a store that refused a write, an app that died. It used
+			// to end the process with exit 0: `keploy record` logged the error
+			// and returned nil, so a CI job whose agent never started went
+			// green with nothing recorded (#4772). The code is armed here,
+			// where Start still knows it was not stopped, because the Stop
+			// below ends ctx and no caller can tell afterwards. A code the
+			// failure armed already (the agent's own, 3 or 6) is kept.
+			//
+			// "Not stopped" is read from ctx alone, so a stop signal that
+			// reaches the app as well as keploy (a service manager that
+			// signals the whole control group) can end the app before keploy
+			// has ended ctx, and is then taken for the app's own end: a stop
+			// when the app died of SIGTERM or SIGINT (appStoppedBySignal), a
+			// failure when it exited with another code (a handler's own, or
+			// SIGKILL's 137).
+			if startErr != nil {
+				utils.SetExitCodeOnce(recordExitCode(startErr))
+			}
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to stop recording")
@@ -1789,7 +1882,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = "failed to get new test-set id"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// Create config.yaml if metadata is provided
@@ -1840,7 +1933,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+		// Wrapped, so the cause is named where the run's error is printed
+		// and the exit code its tag calls for (utils.ExitCodeFor) survives.
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	r.logger.Debug("Command type:", zap.String("commandType", r.config.CommandType))
@@ -1872,8 +1967,43 @@ func (r *Recorder) Start(ctx context.Context) error {
 			// Parent context cancelled (user pressed Ctrl+C)
 			return ctx.Err()
 		case <-agentCtx.Done():
-			return fmt.Errorf("keploy-agent did not become ready in time")
-		case <-agentReadyCh:
+			stopReason = "keploy-agent did not become ready in time"
+			utils.LogError(r.logger, nil, stopReason)
+			return errors.New(stopReason)
+		case appErr := <-appErrChan:
+			// The project stopped before the agent was ready. When the agent
+			// is what stopped -- it could not start: no tracefs where Docker
+			// runs, a kernel that refused it eBPF -- compose aborts the
+			// project over it ("dependency failed to start"), and its own
+			// exit says why, with its code (as `keploy mock` reads it).
+			// Otherwise the project died on its own (a bad compose file, a
+			// failed build, a port in use), with its code. Either way, now:
+			// not after the agent's whole readiness budget, as a "not ready
+			// in time" that names neither.
+			if err := r.composeAgentFailure(); err != nil {
+				stopReason = "the keploy agent stopped the compose project before it was ready"
+				utils.LogError(r.logger, err, stopReason)
+				return fmt.Errorf("%s: %w", stopReason, err)
+			}
+			if appStoppedBySignal(appErr) {
+				stopReason = "the compose project was stopped (SIGTERM or SIGINT) before the keploy-agent was ready, hence stopping keploy"
+				r.logger.Info(stopReason, zap.Int("app_exit_code", appErr.ExitCode))
+				return nil
+			}
+			stopReason = "the compose project stopped while keploy was waiting for the keploy-agent to come up"
+			utils.LogError(r.logger, appErr, stopReason)
+			return fmt.Errorf("%s: %w", stopReason, appErr)
+		case ready, ok := <-agentReadyCh:
+			// The ticker closes its channel, unready, when the budget ends:
+			// the same "not ready in time" as agentCtx's own end.
+			if !ok || !ready {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				stopReason = "keploy-agent did not become ready in time"
+				utils.LogError(r.logger, nil, stopReason)
+				return errors.New(stopReason)
+			}
 		}
 	}
 
@@ -1896,7 +2026,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf("%s", stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 	recordingStarted = true
 	// Stamped HERE, beside the flag, because they mean the same thing:
@@ -2343,6 +2473,23 @@ func (r *Recorder) Start(ctx context.Context) error {
 	// Waiting for the error to occur in any of the go routines
 	select {
 	case appErr := <-appErrChan:
+		// Under compose the agent is a service in the project: when it
+		// crashes, compose stops the app over it (143 or 137), or never
+		// starts it (and may report 0), and the run is the agent's failure,
+		// keploy's, whatever the app's code. A project that stopped before
+		// the app ever started is no clean end either, though compose
+		// reports 0. An app that ran and ended with a code of its own (0,
+		// 42) keeps it, even if the agent crashed after that.
+		if err := r.composeEnd(appErr.ExitCode); err != nil {
+			stopReason = "the compose project stopped after the keploy-agent was ready"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s: %w", stopReason, err)
+		}
+		if appStoppedBySignal(appErr) {
+			stopReason = "the user application was stopped (SIGTERM or SIGINT), hence stopping keploy"
+			r.logger.Info(stopReason, zap.Int("app_exit_code", appErr.ExitCode))
+			return nil
+		}
 		switch appErr.AppErrorType {
 		case models.ErrCommandError:
 			stopReason = "error in running the user application, hence stopping keploy"
@@ -2362,6 +2509,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		default:
 			stopReason = "unknown error received from application, hence stopping keploy"
 		}
+		err = appErr
 
 	case err = <-insertTestErrChan:
 		stopReason = "error while inserting test case into db, hence stopping keploy"
@@ -2371,7 +2519,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)
-	return fmt.Errorf("%s", stopReason)
+	return fmt.Errorf("%s: %w", stopReason, err)
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {

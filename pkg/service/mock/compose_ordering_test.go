@@ -586,7 +586,7 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 137})
 			instr.runUntilReady = true
-			died := errors.New("the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137")
+			died := errors.New("the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 137")
 			instr.agentFailure = func() error { return died }
 			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
 			cfg.Mock.OnMiss = string(models.MissFail)
