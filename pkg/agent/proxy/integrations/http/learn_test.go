@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -429,5 +430,40 @@ func TestLearnMatchMultipartBoundary(t *testing.T) {
 	db = &learnDb{perTest: []*models.Mock{rec}}
 	if served, miss, _ := h.learnMatch(context.Background(), live("POST", "/up", body("CCC", "other", "n-1"), map[string]string{"Content-Type": "multipart/form-data; boundary=CCC"}), db, n, opts); served != nil || miss == nil {
 		t.Fatal("a file part is compared whole")
+	}
+}
+
+// The destination in the operation key is the container key when both the
+// live connection and the recording name one (row 4k), the Host otherwise:
+// a call to the same Host in another container is not a candidate, and one
+// to the same container under another Host is.
+func TestOperationKeyNamesTheContainer(t *testing.T) {
+	_, n, _ := learnOn(t)
+	rec := recorded("m", 0, "GET", "/a", "", nil, `{}`)
+	rec.Spec.Metadata[containerkey.MetadataKey] = "docker:api"
+	rp := recordedParts(rec)
+	if rp.container != "docker:api" {
+		t.Fatalf("the recorded side reads the mock's container key: %q", rp.container)
+	}
+	live := func(host, container string) learn.Shape {
+		p := liveParts(context.Background(), live("GET", "/a", "", map[string]string{"Host": host}))
+		p.container = container
+		return n.shape(p, sameDest)
+	}
+	for _, tc := range []struct {
+		host, container string
+		key             bool
+	}{
+		{"api.test", "docker:api", true},
+		{"other.test", "docker:api", true}, // the same container under another name
+		{"api.test", "docker:web", false},  // the same Host, another container
+		{"api.test", "", true},             // no live key: the Host decides
+	} {
+		l := live(tc.host, tc.container)
+		lp := httpParts{host: strings.ToLower(tc.host), container: tc.container}
+		got := n.shape(rp, destOf(lp, rp)).Key == l.Key
+		if got != tc.key {
+			t.Errorf("host %s container %q: candidate %v, want %v", tc.host, tc.container, got, tc.key)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -36,15 +37,6 @@ import (
 // body that is neither JSON nor a form. Host, Content-Type and Content-Length
 // are not leaves: the first is in the key, the second is compared by its
 // media type, and the third follows the body.
-
-// liveContainerKey names the container a connection reaches, when it reaches
-// one. Container keys (row 4k) are not in keploy yet: until they are, it names
-// none, and every destination is keyed by its Host.
-var liveContainerKey = func(context.Context) (string, bool) { return "", false }
-
-// containerKeyMeta is the mock metadata field container keys record a
-// container destination's key under (row 4k).
-const containerKeyMeta = "containerKey"
 
 // credentialHeaders leave the static noise list in the learn step (design
 // §7.2 step 8): a token minted earlier in the test becomes a variable, one
@@ -105,7 +97,8 @@ func liveParts(ctx context.Context, in *req) httpParts {
 		p.header[strings.ToLower(k)] = strings.Join(v, ",")
 	}
 	p.host = strings.ToLower(p.header["host"])
-	if k, ok := liveContainerKey(ctx); ok {
+	// The container the connection reaches, when it reaches one (row 4k).
+	if k, ok := containerkey.FromContext(ctx); ok {
 		p.container = k
 	}
 	p.mediaType = mediaTypeOf(p.header["content-type"])
@@ -135,7 +128,7 @@ func recordedParts(m *models.Mock) httpParts {
 		p.header[strings.ToLower(k)] = v
 	}
 	p.host = strings.ToLower(p.header["host"])
-	p.container = m.Spec.Metadata[containerKeyMeta]
+	p.container, _ = containerkey.Recorded(m)
 	p.mediaType = mediaTypeOf(p.header["content-type"])
 	return p
 }
