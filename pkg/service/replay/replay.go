@@ -1342,7 +1342,11 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
-		return &InstrumentState{}, fmt.Errorf("%s", stopReason)
+		// Keep the cause: a setup the user's cancel ended (context.Canceled,
+		// from the agent's readiness wait, the retry's backoff, or the docker
+		// setup hooks, which get the run's ctx) is the run's cancellation,
+		// which Start does not log as a failure.
+		return &InstrumentState{}, fmt.Errorf("%s: %w", stopReason, err)
 	}
 	return &InstrumentState{}, nil
 }
