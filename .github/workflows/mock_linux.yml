@@ -262,12 +262,13 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
 
   # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
-  # request-drift app: its response never shows where its dependency call
-  # went, so only the call can show it. Replayed under the switch, a call to
-  # another authority (another host, or a container on another random port)
-  # must fail the test naming the host, and a recording of a container
-  # carries its key; without the switch every case passes, as on main. Its
-  # own job: the mock-mode job above is near its timeout.
+  # request-drift app: its response never shows where or what its dependency
+  # call sent, so only the call can show it. Replayed under the switch, a call
+  # to another authority (another host, or a container on another random
+  # port) or with another body value must fail the test naming the field, and
+  # a recording of a container carries its key; without the switch every case
+  # passes, as on main. Its own job: the mock-mode job above is near its
+  # timeout.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}

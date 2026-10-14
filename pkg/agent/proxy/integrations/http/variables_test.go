@@ -637,10 +637,15 @@ func TestVariables_ABrokenDeclarationLeavesOtherCallsAlone(t *testing.T) {
 	h := newHTTP()
 	broken := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{}`,
 		models.MockVariables{"orderId": bindV("r1", "body.missing")}), 1)
-	// Answered by main's lenient body pass only: the live body differs.
 	other := at(varMock("mock-2", "POST", "http://store/items", `{"name":"pen","n":1}`, 201, `{"ok":true}`, nil), 2)
 	db := &varDb{perTest: []*models.Mock{broken, other}}
+	// A changed call of another route is a plain miss (S1 has no lenient
+	// pass), not the broken declaration's evidence.
 	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/items", `{"name":"pen","n":2}`))
+	if ok || diag == nil || diag.variable != nil {
+		t.Fatalf("a changed call of another route: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	ok, stub, diag = matchVar(t, h, db, liveReq("POST", "/items", `{"name":"pen","n":1}`))
 	if !ok || stub.Name != "mock-2" {
 		t.Fatalf("a call of another route: ok=%v stub=%v diag=%+v", ok, stub, diag)
 	}
@@ -1406,5 +1411,81 @@ func TestVariables_OnlyStatefulRecordingsTakeTurns(t *testing.T) {
 	}}
 	if got := servedNames(t, newHTTP(), db, `{"token":"L"}`, 3); strings.Join(got, " ") != "a-1 a-2 a-2" {
 		t.Fatalf("served %v, want a-1 a-2 a-2", got)
+	}
+}
+
+// Known noise widens only the comparison of the call outside its variables'
+// places: a request-body noise entry over a use place never excuses another
+// value there.
+func TestVariables_NoiseOverAUsePlaceDoesNotExcuseAnotherValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	create := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"ord-rec-1","item":"pen"}`, 201, `{}`,
+		models.MockVariables{"orderId": bindV("ord-rec-1", "body.id")}), 1)
+	confirm := at(varMock("mock-2", "POST", "http://store/confirm", `{"id":"ord-rec-1"}`, 200, `{}`,
+		models.MockVariables{"orderId": useV("ord-rec-1", []string{"body.id"})}), 2)
+	db := &varDb{perTest: []*models.Mock{create, confirm}}
+	noise := map[string][]string{"id": {}}
+	call := func(r *req) (bool, *matchDiag) {
+		ok, _, diag, err := h.match(context.Background(), r, db, nil, noise, nil, true, false, false, true, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok, diag
+	}
+	if ok, diag := call(liveReq("POST", "/orders", `{"id":"ord-live","item":"pen"}`)); !ok {
+		t.Fatalf("the create should bind: %+v", diag)
+	}
+	ok, diag := call(liveReq("POST", "/confirm", `{"id":"ord-other"}`))
+	if p := wantProblem(t, ok, diag, "this call sent"); p.place != "body.id" {
+		t.Fatalf("evidence %+v", p)
+	}
+	if ok, diag := call(liveReq("POST", "/confirm", `{"id":"ord-live"}`)); !ok {
+		t.Fatalf("the bound value should be answered: %+v", diag)
+	}
+}
+
+// A wrong token in a header misses with the evidence of the recording the
+// cursor is at, even when another test's recording of the same request
+// carries that header as a literal: the header's value is compared outside
+// a recording's variables' places (strictDiff), so that recording is not
+// this call. Main compared header keys only, so it answered (reported by
+// A2's #4801 review).
+func TestVariables_AWrongHeaderTokenMissesThoughAnotherRecordingHasItAsALiteral(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	login := at(varMock("login", "GET", "http://auth/session?token=t-rec", "", 200, `{"ok":true}`,
+		models.MockVariables{"token": bindV("t-rec", "url.query.token")}), 1)
+	me := func(name, tok string, seq int, vars models.MockVariables) *models.Mock {
+		m := reusable(at(varMock(name, "GET", "http://api/me", "", 200, `{"me":"`+name+`"}`, vars), seq))
+		m.Spec.HTTPReq.Header["X-Tok"] = tok
+		m.Spec.HTTPReq.Header["X-Trace"] = "tr-1"
+		return m
+	}
+	a1 := me("a-1", "t-rec", 2, models.MockVariables{"token": useV("t-rec", []string{"header.X-Tok"})})
+	a2 := me("a-2", "t-rec", 3, models.MockVariables{"token": useV("t-rec", []string{"header.X-Tok"})})
+	// Another test's: only its trace is a variable; its token is a literal.
+	c1 := me("c-1", "t-other", 9, models.MockVariables{"trace": bindV("tr-1", "header.X-Trace")})
+	db := &varDb{perTest: []*models.Mock{login}, session: []*models.Mock{c1, a1, a2}}
+	call := func(tok string) (bool, *models.Mock, *matchDiag) {
+		r := liveReq("GET", "http://api/me", "")
+		r.header.Set("X-Tok", tok)
+		r.header.Set("X-Trace", "tr-1")
+		return matchVar(t, h, db, r)
+	}
+	if ok, _, _ := matchVar(t, h, db, liveReq("GET", "/session?token=t-live", "")); !ok {
+		t.Fatal("the login should bind the token")
+	}
+	if ok, stub, diag := call("t-live"); !ok || stub.Name != "a-1" {
+		t.Fatalf("the bound token should be answered by a-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	ok, stub, diag := call("t-wrong")
+	if ok {
+		t.Fatalf("a wrong token was answered by %s", stub.Name)
+	}
+	// The evidence is this test's recording's (keploy #4801 makes it the
+	// one the cursor is at, a-2).
+	if p := wantProblem(t, ok, diag, "this call sent"); (p.mock != "a-1" && p.mock != "a-2") || p.place != "header.X-Tok" || p.kind != models.DiffKindVariable {
+		t.Fatalf("evidence %+v, want this test's recording's at header.X-Tok", p)
 	}
 }

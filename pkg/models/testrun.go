@@ -243,6 +243,9 @@ type UnmatchedCall struct {
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
+	// which the call differs from its closest recording, without values.
+	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
 }
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it

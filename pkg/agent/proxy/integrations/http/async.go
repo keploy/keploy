@@ -227,6 +227,12 @@ func liveReqToMock(input *req) *models.Mock {
 // Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
 // can't drift. The response assertion shares the underlying models list but not
 // this function — it must compare names exactly, not through a noise map.
+//
+// Under the proven switch the credentials leave it (models.CredentialHeaders):
+// a request's Authorization, idempotency keys and CSRF tokens are compared.
 func flakyHeaderNoise() map[string][]string {
+	if provenswitch.On() {
+		return models.ProvenFlakyHeaderNoise()
+	}
 	return models.FlakyHeaderNoise()
 }

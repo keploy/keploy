@@ -862,7 +862,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // own fixed advice (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At}
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, Differs: fieldShapes(m.Differs)}
 	switch {
 	case isHTTP(m.Protocol):
 		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
@@ -1091,7 +1091,7 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock) string {
 	var what []string
 	for _, m := range ev.Misses {
-		what = append(what, missText(m)+" had no recorded answer")
+		what = append(what, missText(m)+" had no recorded answer"+differsText(m.Differs))
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
@@ -1157,6 +1157,47 @@ func missText(m models.UnmatchedCall) string {
 		s += " to " + m.Destination
 	}
 	return s
+}
+
+// differsText names, for a miss's reason, the fields in which the call
+// differed from its closest recording: " (body.amount differs)", " (host and
+// header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
+func differsText(fields []string) string {
+	const most = 3
+	switch n := len(fields); {
+	case n == 0:
+		return ""
+	case n == 1:
+		return " (" + fields[0] + " differs)"
+	case n <= most:
+		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
+	default:
+		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+	}
+}
+
+// fieldShapes keeps the shape of each field name and drops a part of it that
+// may be a value: a map key the app sent (an ID, an email address) becomes
+// {}, by pathShape's rule, so a reason never holds a recorded or sent value.
+func fieldShapes(fields []string) []string {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		parts := strings.Split(f, ".")
+		for i, p := range parts {
+			base, suffix := p, ""
+			if strings.HasSuffix(base, "[]") {
+				base, suffix = strings.TrimSuffix(base, "[]"), "[]"
+			}
+			if allDigits.MatchString(base) || (len(base) >= 8 && hasDigit.MatchString(base)) || strings.Contains(base, "@") {
+				parts[i] = "{}" + suffix
+			}
+		}
+		out = append(out, strings.Join(parts, "."))
+	}
+	return out
 }
 
 func mockText(name string, m *models.Mock) string {
