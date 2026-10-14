@@ -485,7 +485,12 @@ func fmtTestTime(timeTaken string) string {
 // provenEvidenceLines are what keploy's agent could not capture while a failed
 // test or one before it ran, its calls that got no recorded answer (DNS left
 // out, as the verdict leaves it out) and its unconsumed test mocks, one line
-// each, under the proven switch.
+// each, under the proven switch. A call is named by its shape
+// (models.MissShape), and a capture loss by its kind and destination
+// (models.CaptureLosses.Text, which shapes any path in it), as the proven
+// model's evidence names them: the JUnit file is a CI artifact, and a call's
+// URL or statement can hold the values the app sent (an email, an ID, a
+// token).
 func provenEvidenceLines(fi models.FailureInfo) []string {
 	var lines []string
 	if t := fi.CaptureIncomplete.Text(); t != "" {
@@ -496,7 +501,10 @@ func provenEvidenceLines(fi models.FailureInfo) []string {
 		if strings.EqualFold(c.Protocol, "DNS") {
 			continue
 		}
-		line := fmt.Sprintf("call with no recorded answer: %s %s", c.Protocol, c.ActualSummary)
+		line := "call with no recorded answer: " + c.Protocol
+		if shape := models.MissShape(c); shape != "" {
+			line += " " + shape
+		}
 		if c.Destination != "" {
 			line += " (to " + c.Destination + ")"
 		}

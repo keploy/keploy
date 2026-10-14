@@ -5,15 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
@@ -993,21 +990,25 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, and the call's shape: for HTTP
-// the method and the path's shape, for SQL the statement with its literals
-// written "?" (sqlShape). Never a value the app sent (a query's literals or
-// bound parameters, a path's IDs, a body). The next step is the matcher's
-// own fixed advice (nextStepOf).
+// the matcher's next step, when it happened, and the call's shape
+// (models.MissShape): for HTTP and gRPC the method and the target's shape,
+// for SQL the statement with its literals written "?". No body, no bound
+// parameter, no SQL literal, no query value, and no path segment that looks
+// like a value (models.PathShape says which do) or that a test variable's
+// place on the call names (VariablePlaces: one the miss names, one the
+// closest mock or a mock on the call's route declares, or one that holds a
+// value the test bound). The next step is the matcher's own fixed advice
+// (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, Differs: fieldShapes(m.Differs)}
-	switch {
-	case isHTTP(m.Protocol):
-		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
-			out.ActualSummary = method + " " + pathShape(path)
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs)}
+	// A variable's path places name segments, not values: kept, so a shape
+	// of this miss (models.MissShape) still writes them {}. Any other place
+	// can name a JSON key that is a value.
+	for _, p := range m.VariablePlaces {
+		if models.IsPathPlace(p) {
+			out.VariablePlaces = append(out.VariablePlaces, p)
 		}
-	case isSQL(m.Protocol):
-		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
 	if m.MatchPhase == models.MatchPhaseVariable {
 		// A test variable did not hold, or the closest mock's variables could
@@ -1043,144 +1044,6 @@ func nextStepOf(m models.UnmatchedCall) string {
 	return m.NextSteps
 }
 
-// isSQL reports whether a miss's protocol speaks SQL, whose summary is the
-// statement keploy saw.
-func isSQL(protocol string) bool {
-	p := strings.ToLower(protocol)
-	return strings.Contains(p, "sql") || strings.Contains(p, "postgres")
-}
-
-// maxSQLText bounds a statement's shape.
-const maxSQLText = 160
-
-// sqlShape is a SQL statement with every quoted string and number written
-// "?". It fails closed: what it cannot read for certain is withheld, the rest
-// of the statement written "…": a literal holding a backslash (MySQL reads
-// \' as a quote by default, so where the literal ends depends on the
-// server's sql_mode), one never closed, a dollar quote ($tag$), and a
-// comment. MySQL's bound parameters ("params=[...]", which the replayer adds
-// to a prepared statement's summary) are dropped whole, and a backtick
-// identifier is kept only when it holds no quote. A quoted identifier
-// (Postgres "table") is written "?" too: hiding a name beats keeping a value.
-func sqlShape(q string) string {
-	if i := strings.Index(q, "params=["); i >= 0 {
-		q = q[:i]
-	}
-	var b strings.Builder
-	withheld := false
-	firstLiteral := -1
-scan:
-	for i := 0; i < len(q); {
-		c := q[i]
-		switch {
-		case c == '\'' || c == '"':
-			if firstLiteral < 0 {
-				firstLiteral = b.Len()
-			}
-			end, ok := closeQuote(q, i)
-			if !ok {
-				// A literal never closed leaves no quote of the statement
-				// paired for certain: everything from the first is withheld.
-				if end < 0 {
-					s := b.String()[:firstLiteral]
-					b.Reset()
-					b.WriteString(s)
-				}
-				b.WriteString("?")
-				withheld = true
-				break scan
-			}
-			b.WriteString("?")
-			i = end
-		case c == '`':
-			// A MySQL identifier: kept, as a name. One never closed, or
-			// holding a quote (which a reader would take for a literal's
-			// start), is withheld with the rest; so is a backslash, and
-			// Postgres's operator character.
-			end, ok := closeQuote(q, i)
-			if !ok || strings.ContainsAny(q[i+1:end-1], `'"`) {
-				if !ok && end < 0 && firstLiteral >= 0 {
-					s := b.String()[:firstLiteral]
-					b.Reset()
-					b.WriteString(s)
-				}
-				withheld = true
-				break scan
-			}
-			// A name keeps its letters; a run of digits in it is written
-			// "?", in case the span was misread (a Postgres operator, a
-			// multi-byte character set's trail byte).
-			b.WriteString(digitRuns.ReplaceAllString(q[i:end], "?"))
-			i = end
-		case c == '$' && i+1 < len(q) && isDigitByte(q[i+1]):
-			// A placeholder ($1): kept.
-			j := i + 1
-			for j < len(q) && isDigitByte(q[j]) {
-				j++
-			}
-			b.WriteString(q[i:j])
-			i = j
-		case c == '$', c == '#', strings.HasPrefix(q[i:], "--"), strings.HasPrefix(q[i:], "/*"):
-			// A dollar quote or a comment: withheld.
-			withheld = true
-			break scan
-		case isDigitByte(c) && (i == 0 || !isIdentByte(q[i-1])):
-			j := i
-			for j < len(q) && (isIdentByte(q[j]) || q[j] == '.') {
-				j++
-			}
-			b.WriteString("?")
-			i = j
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	out := strings.TrimSpace(sqlSpace.ReplaceAllString(b.String(), " "))
-	if withheld {
-		out += " …"
-	}
-	if len(out) > maxSQLText {
-		i := maxSQLText
-		for i > 0 && !utf8.RuneStart(out[i]) {
-			i--
-		}
-		out = out[:i] + "…"
-	}
-	return out
-}
-
-// closeQuote is the index past the quote that closes the literal opening at
-// q[i] (a doubled quote inside it is one quote), and false for a literal with
-// a backslash in it (index 0), or one never closed (index -1).
-func closeQuote(q string, i int) (int, bool) {
-	quote := q[i]
-	for j := i + 1; j < len(q); j++ {
-		switch q[j] {
-		case '\\':
-			return 0, false
-		case quote:
-			if j+1 < len(q) && q[j+1] == quote {
-				j++
-				continue
-			}
-			return j + 1, true
-		}
-	}
-	return -1, false
-}
-
-var (
-	sqlSpace  = regexp.MustCompile(`\s+`)
-	digitRuns = regexp.MustCompile(`[0-9]+`)
-)
-
-func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
-
-func isIdentByte(c byte) bool {
-	return c == '_' || isDigitByte(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
-}
-
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
 // as evidence keeps them (no value the app sent): they are counted, and
 // named in the run's summary, but no full request piles up across a run.
@@ -1208,12 +1071,6 @@ func errClosed() *models.ScopeError {
 		"this keploy run's results were read: the run is over, and nothing begun now would be judged", "run the tests through keploy again")
 }
 
-// isHTTP reports whether a miss's protocol is HTTP, whose summary is a method
-// and a path: "HTTP", "HTTP2" or "HTTP/2".
-func isHTTP(proto string) bool {
-	return strings.EqualFold(proto, "HTTP") || strings.EqualFold(proto, "HTTP2") || strings.EqualFold(proto, "HTTP/2")
-}
-
 // takeChargedMisses returns, once, the misses the ends drained from the proxy.
 func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 	a.provenMu.Lock()
@@ -1224,15 +1081,15 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 }
 
 // evidenceReason is keploy's text for a failed test (design v14 §5.3). It
-// names calls by method, destination and path shape, never by a recorded or
-// sent value.
+// names calls by method, destination and URL shape (models.PathShape), never
+// by a body or a query value.
 func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
 	}
 	for _, m := range ev.Misses {
-		what = append(what, missText(m)+" had no recorded answer"+differsText(m.Differs))
+		what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
@@ -1276,38 +1133,19 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-var (
-	allDigits = regexp.MustCompile(`^[0-9]+$`)
-	hasDigit  = regexp.MustCompile(`[0-9]`)
-)
-
-// pathShape keeps a path's shape and drops its values: a segment of digits,
-// of eight or more characters with a digit in it (an ID, a hash, a UUID), or
-// with an @ (an email address), becomes {}; the query is dropped. A value
-// that looks like a word (a user name) is kept: the shape is a best effort.
-func pathShape(p string) string {
-	p, _, _ = strings.Cut(p, "?")
-	segs := strings.Split(p, "/")
-	for i, s := range segs {
-		if allDigits.MatchString(s) || (len(s) >= 8 && hasDigit.MatchString(s)) || strings.Contains(s, "@") {
-			segs[i] = "{}"
-		}
-	}
-	return strings.Join(segs, "/")
-}
-
-// missText names a miss: an HTTP request by method and path shape; any other
-// protocol by itself and its destination only, since its summary can hold
-// the values it sent (a query's literals).
+// missText names a miss: an HTTP or gRPC call by its method and target
+// shape (models.MissShape); any other protocol by itself and its destination
+// only, as one line of the reason (a SQL statement's shape is in the
+// evidence).
 func missText(m models.UnmatchedCall) string {
 	proto := strings.TrimSpace(m.Protocol)
 	s := "a call"
 	if proto != "" {
 		s = "a " + proto + " call"
 	}
-	if isHTTP(proto) {
-		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
-			s = method + " " + pathShape(path)
+	if models.IsPathProtocol(proto) {
+		if shape := models.MissShape(m); shape != "" {
+			s = shape
 		}
 	}
 	if m.Destination != "" {
@@ -1333,46 +1171,12 @@ func differsText(fields []string) string {
 	}
 }
 
-// fieldShapes keeps the shape of each field name and drops a part of it that
-// may be a value: a map key the app sent (an ID, an email address) becomes
-// {}, by pathShape's rule, so a reason never holds a recorded or sent value.
-// A header's name is kept whole: it names the field (header.Authorization).
-func fieldShapes(fields []string) []string {
-	if len(fields) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if name, ok := strings.CutPrefix(f, "header."); ok && !strings.Contains(name, ".") {
-			// A header's name names the field, as every report writes it.
-			out = append(out, f)
-			continue
-		}
-		parts := strings.Split(f, ".")
-		for i, p := range parts {
-			base, suffix := p, ""
-			if strings.HasSuffix(base, "[]") {
-				base, suffix = strings.TrimSuffix(base, "[]"), "[]"
-			}
-			if allDigits.MatchString(base) || (len(base) >= 8 && hasDigit.MatchString(base)) || strings.Contains(base, "@") {
-				parts[i] = "{}" + suffix
-			}
-		}
-		out = append(out, strings.Join(parts, "."))
-	}
-	return out
-}
-
 func mockText(name string, m *models.Mock) string {
 	if m == nil {
 		return name
 	}
 	if m.Kind == models.HTTP && m.Spec.HTTPReq != nil {
-		where := pathShape(m.Spec.HTTPReq.URL)
-		if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
-			where = u.Host + pathShape(u.EscapedPath())
-		}
-		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, where, name)
+		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, models.MockURLShape(m), name)
 	}
 	return fmt.Sprintf("%s mock %s", m.Kind, name)
 }

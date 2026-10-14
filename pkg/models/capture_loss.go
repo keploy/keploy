@@ -90,12 +90,30 @@ func (l CaptureLosses) Text() string {
 	var parts []string
 	for _, c := range l {
 		s := captureLossText(c)
-		if c.What != "" {
-			s += " (" + c.What + ")"
+		if w := captureWhatShape(c.What); w != "" {
+			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
 	}
 	return "capture incomplete: " + strings.Join(parts, "; ")
+}
+
+// captureWhatShape is what a capture loss was, as a report names it. Its
+// producers give keploy's own words and a destination (host and port), which
+// are kept as they are. A word that carries a path, a query or credentials
+// (one of / ? # @ =) is written as a miss's target is (targetShape): a
+// host-first destination keeps its host and port when they read as one
+// (hostPort), an absolute URL keeps only its path's shape, credentials and
+// the host they precede are {}, query values are {}, and path segments are
+// shaped by PathShape, which keeps a segment that reads as a name.
+func captureWhatShape(what string) string {
+	words := strings.Fields(what)
+	for i, w := range words {
+		if strings.ContainsAny(w, "/?#@=") {
+			words[i] = targetShape(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func captureLossText(c CaptureLoss) string {

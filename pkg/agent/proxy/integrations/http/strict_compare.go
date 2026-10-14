@@ -119,19 +119,11 @@ func shaped(path, shape string, kind models.MockFieldDiffKind, expected, actual 
 	return strictField{diff: models.MockFieldDiff{Path: path, Kind: kind, Expected: expected, Actual: actual}, shape: shape}
 }
 
-var (
-	keyAllDigits = regexp.MustCompile(`^[0-9]+$`)
-	keyHasDigit  = regexp.MustCompile(`[0-9]`)
-)
-
 // shapeKey is an object key, a form key or a query name as a reason names
-// it: {} when it may be a value the app sent (all digits, eight or more
-// characters with a digit, or an @), as the agent shapes a path's segments.
+// it: {} when it may be a value the app sent, by the rule a call's path
+// segments follow (models.KeyShape).
 func shapeKey(k string) string {
-	if keyAllDigits.MatchString(k) || (len(k) >= 8 && keyHasDigit.MatchString(k)) || strings.Contains(k, "@") {
-		return "{}"
-	}
-	return k
+	return models.KeyShape(k)
 }
 
 // fieldDiffs are the fields' diffs, for the report.

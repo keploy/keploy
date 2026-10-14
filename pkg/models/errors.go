@@ -219,6 +219,14 @@ type MockMismatchReport struct {
 	// value: the reason keploy gives for a failed test names them (proven
 	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
 	Differs []string
+	// VariablePlaces are, under the proven switch only, the URL path places
+	// (url.path[<n>]) of a test variable on this call: those declared by the
+	// closest mock or by a mock on the call's route (DeclaredPathPlaces), the
+	// place a variable miss names, and the segments that hold a value the
+	// test's variables have. The call holds the application's values there,
+	// which the miss's shape writes {} (MissShape); the summary then names
+	// the path escaped, as a place counts segments.
+	VariablePlaces []string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
