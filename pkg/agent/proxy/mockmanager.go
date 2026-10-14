@@ -1555,8 +1555,10 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // caller advances via AdvanceMockCursor only once the response is actually
 // served (a successful claim), so a failed/retried match does not skip a
 // recorded response. Session-scoped: the cursor map is cleared per test-set
-// (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
-// parsers that do not type-assert it are unaffected.
+// (ResetStatefulCursors). The map also keeps the HTTP variable pass's served
+// marks, one per reusable recording under a key of its own (n = 2: served or
+// not), which reset with the cursors. Satisfies the matcher's optional cursor
+// interface; parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
 	if n <= 1 {
 		// Zero or one recorded response: always the first (only) one — identical
