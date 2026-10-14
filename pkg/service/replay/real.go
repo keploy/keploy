@@ -28,9 +28,10 @@ type realTestAgent interface {
 
 // readRealTest adds to a test case's read of its misses, under the proven
 // switch with a mock.real list, what it did with mock.real (design v14 §4):
-// its REAL rows, and each connection keploy could neither capture nor relay
-// as real while it ran, charged as a miss is (capture_incomplete, §3.2), so
-// it fails the test with what to change. A read that fails leaves the test
+// its REAL rows, and the connections keploy could neither capture nor relay
+// as real while it ran (capture_incomplete, §3.2 as amended for class e: each
+// test it was undecided or used in), so it fails the test with what to
+// change. A read that fails leaves the test
 // without a verdict, as a failed read of its misses does.
 func (r *Replayer) readRealTest(ctx context.Context, read *testMisses) {
 	if !provenswitch.On() || len(r.mockReal()) == 0 || r.noAgent {

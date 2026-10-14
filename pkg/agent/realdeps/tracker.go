@@ -17,10 +17,15 @@ import (
 //
 // A test's REAL use is counted from the bytes its connections send while it
 // is open, so a pooled connection opened before the test counts for every
-// test that uses it. capture_incomplete evidence is charged as a miss is
-// (design v14 §5.1): to the open test, or, made while no test is open, to the
-// next test that ends; what the run's processes did before a test process
-// claimed the run, and after its last test, is the run's.
+// test that uses it. capture_incomplete evidence of class e (design v14
+// §3.2, as amended for class e) is charged to every test during which its
+// connection was undecided or used, never as a taint of every later test: a
+// connection still waiting for its client to name it is charged to each test
+// that ends while it waits, and to the open test when keploy closes it
+// unnamed or ends it; evidence that touched no test (made while none was
+// open: before the first test, between two, after the last), and what a
+// test that never ended was charged, is the run's. A test that never touched a connection is never charged for it, and
+// nothing is a false green: keploy relays nothing of such a connection.
 type Tracker struct {
 	mu sync.Mutex
 	// open: a test is open.
@@ -30,8 +35,8 @@ type Tracker struct {
 	// reached are the destinations the run reached since the last read (Run);
 	// outside, those it first reached in that time while no test was open.
 	reached, outside map[string]bool
-	// events are capture_incomplete evidence since the last test ended, for
-	// the next test's end; run is the run's own.
+	// events are the open test's capture_incomplete evidence, for its end;
+	// run is the run's own: what touched no test.
 	events, run []models.CaptureIncomplete
 	// pending are the connections whose name is still being read.
 	pending map[int64]*pendingConn
@@ -57,7 +62,7 @@ type use struct {
 type pendingConn struct {
 	dst        string
 	candidates []string
-	// reported: a test's end already charged it.
+	// reported: a test's end, or a read, charged it as undecided.
 	reported bool
 }
 
@@ -82,23 +87,18 @@ func (t *Tracker) Reset() {
 	}
 }
 
-// Claimed is a test process claiming the run: the evidence made before it is
-// the run's, not its first test's (design v14 §5.1).
-func (t *Tracker) Claimed() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.open {
-		t.run = append(t.run, t.events...)
-		t.events = nil
-	}
-}
-
 // Interrupt drops a test left open by a session that ended without its end:
 // its uses go with it, and the evidence it would have been charged is the
 // run's.
 func (t *Tracker) Interrupt() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.dropOpenLocked()
+}
+
+// dropOpenLocked gives the run the evidence of a test that never ended, and
+// drops its uses.
+func (t *Tracker) dropOpenLocked() {
 	if !t.open {
 		return
 	}
@@ -111,12 +111,16 @@ func (t *Tracker) Interrupt() {
 func (t *Tracker) BeginTest() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// A test never ended (its window left open: its read never reached the
+	// agent) gives the run its evidence, never the test that begins.
+	t.dropOpenLocked()
 	t.open, t.uses = true, map[string]*use{}
 }
 
 // EndTest closes the open test, and returns its REAL uses, by destination,
-// and the capture_incomplete evidence charged to it: what was made since the
-// last test ended, and every connection whose name is still being read.
+// and the capture_incomplete evidence charged to it: what was made while it
+// was open, and every connection whose name is still being read, which was
+// undecided during it, whatever earlier tests it was charged to.
 func (t *Tracker) EndTest() ([]models.RealUse, []models.CaptureIncomplete) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -125,7 +129,7 @@ func (t *Tracker) EndTest() ([]models.RealUse, []models.CaptureIncomplete) {
 		uses = append(uses, models.RealUse{Dest: dest, Conns: len(u.conns), Failed: u.failed, H2: u.h2})
 	}
 	sort.Slice(uses, func(i, j int) bool { return uses[i].Dest < uses[j].Dest })
-	ev := append(t.events, t.undecidedLocked("the test ended")...)
+	ev := append(t.events, t.undecidedLocked("the test ended", true)...)
 	t.events = nil
 	t.open, t.uses = false, nil
 	if len(uses) == 0 {
@@ -134,9 +138,11 @@ func (t *Tracker) EndTest() ([]models.RealUse, []models.CaptureIncomplete) {
 	return uses, ev
 }
 
-// undecidedLocked charges every connection still being read that no end
-// charged yet, as capture_incomplete: when says what it was undecided at.
-func (t *Tracker) undecidedLocked(when string) []models.CaptureIncomplete {
+// undecidedLocked charges connections still being read as capture_incomplete:
+// every one when all (a test's end: each was undecided during it), else only
+// those no test's end or read charged yet (the run's read). when says what it
+// was undecided at.
+func (t *Tracker) undecidedLocked(when string, all bool) []models.CaptureIncomplete {
 	var out []models.CaptureIncomplete
 	ids := make([]int64, 0, len(t.pending))
 	for id := range t.pending {
@@ -145,7 +151,7 @@ func (t *Tracker) undecidedLocked(when string) []models.CaptureIncomplete {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		p := t.pending[id]
-		if p.reported {
+		if p.reported && !all {
 			continue
 		}
 		p.reported = true
@@ -156,18 +162,16 @@ func (t *Tracker) undecidedLocked(when string) []models.CaptureIncomplete {
 }
 
 // Run is what the run saw beyond its tests: the destinations it reached, those
-// it first reached outside a test, and the evidence charged to no test (what
-// came after the last test ended, and every connection still being read).
-// It takes that evidence: a second Run does not repeat it.
+// it first reached outside a test, and the evidence charged to no test: what
+// touched none (before the first, between two, after the last), what a test
+// that never ended was charged (left open, or interrupted), and every
+// connection still being read that no test's end or read charged yet. It
+// takes that evidence: a second Run does not repeat it.
 func (t *Tracker) Run() models.RealRun {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := models.RealRun{Reached: sortedKeys(t.reached), Outside: sortedKeys(t.outside)}
-	if !t.open {
-		t.run = append(t.run, t.events...)
-		t.events = nil
-	}
-	out.Incomplete = append(t.run, t.undecidedLocked("the run's results were read")...)
+	out.Incomplete = append(t.run, t.undecidedLocked("the run's results were read", false)...)
 	t.run = nil
 	// What was reached is since the last read: keploy test reads each test
 	// set's, keploy mock and keploy record their run's once.
@@ -207,31 +211,45 @@ func sortedKeys(m map[string]bool) []string {
 
 // Pending notes that connection id, to dst, waits for its client's first
 // bytes to name it; candidates are the name entries resolving to dst. done
-// ends the wait, whatever it decided, and reports whether a test's end (or
-// the run's) already charged the connection as undecided: the caller then
-// charges it nothing more.
-func (t *Tracker) Pending(id int64, dst string, candidates []string) (done func() (charged bool)) {
+// ends the wait, whatever it decided: unnamed is why keploy closed the
+// connection without a name ("" when it was named, or the run ended). A
+// connection closed unnamed is charged to the open test, during which it was
+// undecided, whatever earlier tests' ends charged it; with no test open, it
+// is the run's, unless a test's end or a read charged it already.
+func (t *Tracker) Pending(id int64, dst string, candidates []string) (done func(unnamed string)) {
 	t.mu.Lock()
 	if t.pending == nil {
 		t.pending = map[int64]*pendingConn{}
 	}
 	t.pending[id] = &pendingConn{dst: dst, candidates: candidates}
 	t.mu.Unlock()
-	return func() bool {
+	return func(unnamed string) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		p := t.pending[id]
 		delete(t.pending, id)
-		return p != nil && p.reported
+		if unnamed == "" || (!t.open && p != nil && p.reported) {
+			return
+		}
+		t.incompleteLocked(models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: unnamed, At: t.stamp()})
 	}
 }
 
 // Incomplete adds capture_incomplete evidence (class e) for a connection to
-// dst, with why.
+// dst, with why: the open test's, during which keploy ended the connection,
+// or, with no test open, the run's.
 func (t *Tracker) Incomplete(dst, why string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.events = append(t.events, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: why, At: t.stamp()})
+	t.incompleteLocked(models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: why, At: t.stamp()})
+}
+
+func (t *Tracker) incompleteLocked(c models.CaptureIncomplete) {
+	if t.open {
+		t.events = append(t.events, c)
+		return
+	}
+	t.run = append(t.run, c)
 }
 
 // Dialed notes a dial of REAL destination dest for connection id: one that
