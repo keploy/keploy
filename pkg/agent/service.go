@@ -442,6 +442,18 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
+// ConnDestInfo is the optional extension of a DestInfo that names a
+// connection's original destination by the application's end of it, its
+// address and port, as the proxy sees the connection's remote end. The Linux
+// hooks key their redirects so: an IPv4 and an IPv6 connection on the same
+// local port are two connections. The proxy prefers it; Get and Delete by
+// source port alone remain for hooks whose shims key by port (darwin,
+// windows).
+type ConnDestInfo interface {
+	GetForConn(ctx context.Context, app netip.AddrPort) (*NetworkAddress, error)
+	DeleteForConn(ctx context.Context, app netip.AddrPort) error
+}
+
 // ErrConnectingSocketGone is GetForHandshake's error when the application's
 // connecting socket no longer exists: it gave up on the connection.
 var ErrConnectingSocketGone = errors.New("the application's connecting socket is gone")
