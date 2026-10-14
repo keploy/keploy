@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -58,6 +59,10 @@ type Hooks struct {
 	// unix is the AF_UNIX connect report (unixconn.go), under unixMu.
 	unixMu sync.Mutex
 	unix   *unixConn
+	// udp is the proven switch's UDP watch (udpwatch.go), under udpMu; nil
+	// with the switch off.
+	udpMu sync.Mutex
+	udp   *udpWatch
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -541,6 +546,24 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if h.kernelPortAlloc {
 		agentInfo.Flags |= structs.FlagKernelPortAlloc
 	}
+	// Under the proven switch, the application's non-DNS UDP is watched for
+	// replies, and QUIC refused (udpwatch.go): the programs first, then the
+	// flag, so the kernel never registers what no reader drains.
+	if provenswitch.On() {
+		w, err := startUDPWatch(&h.objects, cGroupPath)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
+			return err
+		}
+		h.udpMu.Lock()
+		h.udp = w
+		h.udpMu.Unlock()
+		go func() {
+			defer utils.Recover(h.logger)
+			w.watch(h.logger)
+		}()
+		agentInfo.Flags |= structs.FlagProvenUDP
+	}
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
@@ -656,6 +679,12 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockops != nil {
 		h.sockops.Close()
 	}
+
+	// The UDP watch reads the objects' ring buffer: closed before them.
+	h.udpMu.Lock()
+	h.udp.close()
+	h.udp = nil
+	h.udpMu.Unlock()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()

@@ -305,13 +305,22 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 
 // CaptureLosses is what the hooks saw the application do that keploy could
 // not capture, besides the PID-map refusals: its AF_UNIX connects to sockets
-// no member owns. Empty while the report is off or not loaded.
+// no member owns, and (under the proven switch) replies its non-DNS UDP got.
 func (h *Hooks) CaptureLosses() models.CaptureLosses {
+	var out models.CaptureLosses
 	h.unixMu.Lock()
 	u := h.unix
 	h.unixMu.Unlock()
-	if u == nil || u.off != "" {
-		return nil
+	if u != nil && u.off == "" {
+		out = append(out, u.snapshot()...)
 	}
-	return u.snapshot()
+	// Under the proven switch, replies to the application's non-DNS UDP
+	// (udpwatch.go).
+	h.udpMu.Lock()
+	w := h.udp
+	h.udpMu.Unlock()
+	if w != nil {
+		out = append(out, w.snapshot()...)
+	}
+	return out
 }

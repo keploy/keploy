@@ -326,7 +326,7 @@ jobs:
       - name: Run the PID map integration test (root)
         run: |
           set -o pipefail
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss' -test.v | tee /tmp/pidmap.out
-          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss; do
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss' -test.v | tee /tmp/pidmap.out
+          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; exit 1; }
           done

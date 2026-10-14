@@ -41,6 +41,11 @@ const (
 	// bus, the journal, the Docker daemon, a name service): a call over it
 	// goes nowhere keploy's proxy sees, neither recorded nor mocked.
 	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
+	// CaptureLossUDPReply (4c c): the application's UDP other than DNS got a
+	// reply; keploy leaves such UDP where the application sends it, so it was
+	// answered live, neither recorded nor mocked. Only under the proven
+	// switch.
+	CaptureLossUDPReply CaptureLossKind = "udp_reply"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -111,6 +116,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s)' parser stopped taking what keploy captured, and what was still queued for it was abandoned, neither recorded nor mocked", c.Count)
 	case CaptureLossDropped:
 		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
+	case CaptureLossUDPReply:
+		return fmt.Sprintf("%d UDP socket(s) of the application got a reply from the real destination, which keploy neither records nor mocks (UDP other than DNS); list it in mock.real if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application made %d connect(s) to Unix sockets keploy does not see, so calls over them were neither recorded nor mocked; reach such a dependency over a TCP address", c.Count)
 	default:
