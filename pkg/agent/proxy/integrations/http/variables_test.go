@@ -1489,3 +1489,37 @@ func TestVariables_AWrongHeaderTokenMissesThoughAnotherRecordingHasItAsALiteral(
 		t.Fatalf("evidence %+v, want this test's recording's at header.X-Tok", p)
 	}
 }
+
+// A mock whose variables keploy cannot follow is evidence only for a call to
+// its own destination: a call to another host on the same route is not its.
+// That call is answered by its host's own recording, or misses without the
+// other host's mock as its evidence. Every miss under the switch names where
+// the call went.
+func TestVariables_ARefusedMockIsNoOtherHostsEvidence(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	bad := at(varMock("bad-on-store", "POST", "http://store/orders", `{"id":"r1"}`, 201, `{"id":"r1"}`,
+		models.MockVariables{"orderId": bindV("r1", "body.missing")}), 1)
+	good := at(varMock("plain-on-other", "POST", "http://other/orders", `{"id":"r1"}`, 201, `{"id":"r1"}`, nil), 1)
+	ok, stub, diag := matchVar(t, h, &varDb{perTest: []*models.Mock{bad, good}}, liveReq("POST", "http://other/orders", `{"id":"r1"}`))
+	if !ok || stub.Name != "plain-on-other" {
+		t.Fatalf("a call to host other was not answered by its own recording (ok=%v, diag %+v)", ok, diag)
+	}
+	ok, _, diag = matchVar(t, h, &varDb{perTest: []*models.Mock{bad, good}}, liveReq("POST", "http://other/orders", `{"id":"r2"}`))
+	if ok {
+		t.Fatal("a call no recording is was answered")
+	}
+	if diag == nil || diag.variable != nil {
+		t.Fatalf("a call to host other missed with another host's mock as its evidence: %+v", diag.variable)
+	}
+	if diag.live == nil || diag.live.host != "other" {
+		t.Fatalf("the miss does not name where the call went: %+v", diag.live)
+	}
+	ok, _, diag = matchVar(t, h, &varDb{perTest: []*models.Mock{bad}}, liveReq("POST", "http://store/orders", `{"id":"r1"}`))
+	if p := wantProblem(t, ok, diag, "cannot be followed"); p.mock != "bad-on-store" {
+		t.Fatalf("evidence %+v, want bad-on-store's", p)
+	}
+	if diag.live == nil || diag.live.host != "store" {
+		t.Fatalf("the variable miss does not name where the call went: %+v", diag.live)
+	}
+}

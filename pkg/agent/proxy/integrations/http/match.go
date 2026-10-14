@@ -88,6 +88,18 @@ type matchDiag struct {
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
 func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if diag != nil && provenswitch.On() {
+		// Under the proven switch a miss names where the call went too
+		// (strict.go), so its report can name a destination that differs.
+		live := liveDestination(input)
+		diag.live = &live
+	}
+	return ok, stub, diag, err
+}
+
+// matchCascade is match without its proven-switch report additions.
+func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns

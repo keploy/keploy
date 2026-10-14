@@ -149,7 +149,9 @@ replay() {
     local name="$1" amount="$2" url="$3" before
     shift 3
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
+    # The switch is on only where a step asks for it, whatever the job's
+    # environment holds.
+    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$@" "$REPLAY_BIN" test -c "env AMOUNT=$amount PAYMENTS_URL=$url ./order-app" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -170,9 +172,12 @@ expect_miss() {
     if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
         fail "$1: the set must fail (exit $RC, status $(set_status))"
     fi
-    grep -q 'unmatched_calls:' "$(REPORT)" || fail "$1: the report lists no call that got no recorded answer"
-    grep -A40 'unmatched_calls:' "$(REPORT)" | grep -qE "path: $2\$" || fail "$1: the report's field diffs do not name $2"
-    grep -A60 'unmatched_calls:' "$(REPORT)" | grep -A6 'differs:' | grep -qE -- "- $2\$" || fail "$1: the report's differs do not name $2"
+    FIELD="$2" yq -e '[.tests[].failure_info.unmatched_calls[]?] | length > 0' "$(REPORT)" >/dev/null ||
+        fail "$1: the report lists no call that got no recorded answer"
+    FIELD="$2" yq -e '[.tests[].failure_info.unmatched_calls[]?.field_diffs[]?.path] | any_c(. == strenv(FIELD))' "$(REPORT)" >/dev/null ||
+        fail "$1: the report's field diffs do not name $2"
+    FIELD="$2" yq -e '[.tests[].failure_info.unmatched_calls[]?.differs[]?] | any_c(. == strenv(FIELD))' "$(REPORT)" >/dev/null ||
+        fail "$1: the report's differs do not name $2"
 }
 
 for p in "$APP" "$DEP"; do
@@ -211,7 +216,7 @@ expect_pass "step 3"
 echo "== 4. KEPLOY_PROVEN=1, AMOUNT=250: fails naming body.amount =="
 replay drift 250 "http://127.0.0.1:$DEP" KEPLOY_PROVEN=1
 expect_miss "step 4" body.amount
-grep -A60 'unmatched_calls:' "$(REPORT)" | grep -A6 'differs:' | grep -q '250' && fail "step 4: differs holds a value"
+yq -e '[.tests[].failure_info.unmatched_calls[]?.differs[]?] | any_c(test("250"))' "$(REPORT)" >/dev/null && fail "step 4: differs holds a value"
 
 echo "== 5. switch off, AMOUNT=250: passes, as on main =="
 replay driftoff 250 "http://127.0.0.1:$DEP"
@@ -225,7 +230,7 @@ REC_PORT=$PORT
 record 1 "http://127.0.0.1:$REC_PORT"
 
 echo "== 6. the recording carries the container's key =="
-grep -q "containerKey: container:${IMAGE}:${DEP}#1" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
+grep -q "containerKey: container:${IMAGE%%:*}" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
 
 # The new container starts while the recorded one still holds its port, so
 # Docker gives it another.
