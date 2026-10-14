@@ -138,6 +138,9 @@ type Proxy struct {
 	// connections did.
 	real        atomic.Pointer[realState]
 	realTracker realdeps.Tracker
+	// realDialResolved, when set (tests), is told each time a failed
+	// connect's mock.real standing is told (realDialFailed).
+	realDialResolved func()
 	// agentMode is the mode the agent was started in (--mode); with
 	// GlobalPassthrough it decides what happens to a connection that arrives
 	// while there is no session (no_session.go). noSessionDests are the

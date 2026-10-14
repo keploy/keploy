@@ -155,7 +155,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 	if st == nil {
 		return false, src, nil
 	}
-	dst, perr := netip.ParseAddrPort(dstAddr)
+	dst, perr := containerkey.ParseAddrPort(dstAddr)
 	if perr != nil {
 		return false, src, nil
 	}
@@ -315,7 +315,7 @@ func (p *Proxy) realAtHandshake(dest *agent.NetworkAddress) (string, bool) {
 		return "", false
 	}
 	addr := destAddr(dest)
-	dst, err := netip.ParseAddrPort(addr)
+	dst, err := containerkey.ParseAddrPort(addr)
 	if err != nil {
 		return "", false
 	}
@@ -396,7 +396,7 @@ func (p *Proxy) otherLoopback(dec realdeps.Decision, dstAddr string, err error) 
 	if !errors.Is(err, syscall.ECONNREFUSED) || !strings.HasPrefix(dec.Label, "localhost:") {
 		return "", false
 	}
-	ap, perr := netip.ParseAddrPort(dstAddr)
+	ap, perr := containerkey.ParseAddrPort(dstAddr)
 	if perr != nil || !ap.Addr().IsLoopback() {
 		return "", false
 	}
@@ -442,4 +442,60 @@ func tcpConnOf(c net.Conn) (*net.TCPConn, bool) {
 		c = u.NetConn()
 	}
 	return nil, false
+}
+
+// realDialFailed counts, against the open test's REAL row, a held handshake's
+// dial to a mock.real destination that failed (the app's connect fails the
+// same way, answered at once), and returns the destination's label. label is
+// what the hold knew of addr; "" when addr was not a mock.real destination by
+// then, which for a list with container: entries may be only because the
+// index was still placing a container Docker started a moment before. Placed
+// since, the failure counts now. Still being placed, the failed connect is
+// noted with the tracker as it happens (Tracker.FailedUndecided) and the
+// placing is waited for off the handshake's path (Keyer.PlacedOrPlacing):
+// told REAL while the test it failed in is open, it counts against that test;
+// that test ending first is charged with it as capture_incomplete. An index
+// that cannot be read, or places nothing that could be there, leaves it a
+// dependency's failed connect, as at the accept.
+func (p *Proxy) realDialFailed(addr, label string) (string, bool) {
+	if label != "" {
+		p.realTracker.Dialed(0, label, false)
+		return label, false
+	}
+	st := p.realList()
+	if st == nil || !st.list.HasContainers() {
+		return "", false
+	}
+	dst, err := containerkey.ParseAddrPort(addr)
+	if err != nil {
+		return "", false
+	}
+	decide := func(repo string) string {
+		if dec := (realdeps.Decider{List: st.list, Book: st.book}).AtAccept(dst, repo); dec.Verdict == realdeps.Real {
+			return dec.Label
+		}
+		return ""
+	}
+	c, ok, wait := containerkey.Default.PlacedOrPlacing(addr)
+	switch {
+	case ok:
+		if label = decide(containerkey.Repository(c.Image)); label != "" {
+			p.realTracker.Dialed(0, label, false)
+		}
+		return label, false
+	case wait != nil:
+		resolve := p.realTracker.FailedUndecided(addr)
+		wait(func(c containerkey.Container, ok, resolved bool) {
+			label := ""
+			if resolved && ok {
+				label = decide(containerkey.Repository(c.Image))
+			}
+			resolve(label, !resolved)
+			if p.realDialResolved != nil {
+				p.realDialResolved()
+			}
+		})
+		return "", true
+	}
+	return "", false
 }
