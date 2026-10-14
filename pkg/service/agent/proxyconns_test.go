@@ -26,6 +26,28 @@ type connHooks struct {
 	established uint64
 	err         error
 	marked      int
+	// The application's side: its count, and the numbers resolved.
+	app        uint64
+	appSettled acceptcount.Counter
+	appParked  chan uint64
+}
+
+func (h *connHooks) AppConnsEstablished(context.Context) (uint64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.app, h.err
+}
+func (h *connHooks) AppConnsSettled() (uint64, error) { return h.appSettled.Accepted() }
+func (h *connHooks) WaitAppConnsSettled(ctx context.Context, n uint64) error {
+	if h.appParked != nil {
+		h.appParked <- n
+	}
+	return h.appSettled.WaitAccepted(ctx, n)
+}
+func (h *connHooks) countApp(n uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.app = n
 }
 
 func (h *connHooks) ProxyConnsEstablished(context.Context) (uint64, error) {
@@ -39,7 +61,9 @@ func (h *connHooks) MarkProxyListener(syscall.RawConn) error {
 	h.marked++
 	return nil
 }
-func (h *connHooks) ProxyConnSeq(syscall.RawConn) (uint64, error) { return 0, errors.New("not used") }
+func (h *connHooks) ProxyConnPair(syscall.RawConn) (coreAgent.ProxyConnPairing, error) {
+	return coreAgent.ProxyConnPairing{}, errors.New("not used")
+}
 func (h *connHooks) count(n uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -95,10 +119,20 @@ func TestProxyConnsAreTheHooksCountAndTheProxysAccepts(t *testing.T) {
 	proxy := &acceptingProxy{drops: 7}
 	proxy.Add(1)
 	proxy.Add(2)
-	a := &Agent{logger: zap.NewNop(), Hooks: &connHooks{established: 5}, Proxy: proxy}
+	hooks := &connHooks{established: 5, app: 4}
+	hooks.appSettled.Add(1)
+	hooks.appSettled.Add(2)
+	hooks.appSettled.Add(3)
+	a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
 	got, err := a.ProxyConns(ctx)
-	if err != nil || got != (models.ProxyConnCounts{Established: 5, Accepted: 2, ListenDrops: 7}) {
-		t.Fatalf("ProxyConns = %+v, %v; want Established 5, Accepted 2, ListenDrops 7", got, err)
+	if err != nil || got != (models.ProxyConnCounts{Established: 5, Accepted: 2, ListenDrops: 7, AppConns: 4, AppSettled: 3}) {
+		t.Fatalf("ProxyConns = %+v, %v; want Established 5, Accepted 2, ListenDrops 7, AppConns 4, AppSettled 3", got, err)
+	}
+	lostApp := &connHooks{established: 5, app: 1}
+	lostApp.appSettled.Add(1)
+	lostApp.appSettled.Add(2)
+	if c, err := (&Agent{logger: zap.NewNop(), Hooks: lostApp, Proxy: proxy}).ProxyConns(ctx); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("more application connections settled than counted: ProxyConns = %+v, %v; want a lost count", c, err)
 	}
 	if got.Waiting() != 3 {
 		t.Fatalf("Waiting() = %d, want 3", got.Waiting())
@@ -211,6 +245,69 @@ func TestWaitProxyAcceptedWaitsForExactlyTheNumbersRead(t *testing.T) {
 	}
 }
 
+// WaitProxySettled waits first for every application connection the read
+// counted to be settled, while its proxy side is not complete yet (in neither
+// proxy-side count), then for the proxy to accept every connection completed
+// to it by then. A lost one settles it too.
+func TestWaitProxySettledWaitsForTheApplicationsConnections(t *testing.T) {
+	hooks := &connHooks{app: 2, appParked: make(chan uint64, 1)}
+	proxy := &acceptingProxy{parked: make(chan uint64, 1)}
+	a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
+	c, err := a.ProxyConns(context.Background())
+	if err != nil || c.AppConns != 2 || c.Established != 0 {
+		t.Fatalf("ProxyConns = %+v, %v", c, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- a.WaitProxySettled(context.Background(), c) }()
+	if n := <-hooks.appParked; n != 2 {
+		t.Fatalf("waits for the application's %d, want 2", n)
+	}
+	// The first one's proxy side completes and is accepted; the second is
+	// lost. Neither proxy-side count saw either when the counts were read.
+	hooks.count(1)
+	proxy.Add(1)
+	hooks.appSettled.Add(1)
+	select {
+	case err := <-done:
+		t.Fatalf("WaitProxySettled returned %v with an application connection unsettled", err)
+	case n := <-proxy.parked:
+		t.Fatalf("WaitProxySettled went on to the proxy's accepts (%d) with an application connection unsettled", n)
+	default:
+	}
+	hooks.appSettled.Add(2)
+	if err := <-done; err != nil {
+		t.Fatalf("WaitProxySettled: %v", err)
+	}
+}
+
+// After the application's side settles, the proxy's side is waited on as far
+// as the kernel has counted by then: a paired connection not yet accepted
+// holds it, and later application connections do not.
+func TestWaitProxySettledThenWaitsForThePairedConnectionsAccept(t *testing.T) {
+	hooks := &connHooks{app: 1, appParked: make(chan uint64, 1)}
+	proxy := &acceptingProxy{parked: make(chan uint64, 1)}
+	a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
+	c, err := a.ProxyConns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Paired (its proxy side numbered 1) before the wait, not accepted.
+	hooks.count(1)
+	hooks.appSettled.Add(1)
+	// Later application connections, never settled.
+	hooks.countApp(50)
+	done := make(chan error, 1)
+	go func() { done <- a.WaitProxySettled(context.Background(), c) }()
+	<-hooks.appParked
+	if n := <-proxy.parked; n != 1 {
+		t.Fatalf("waits for the proxy's %d, want 1", n)
+	}
+	proxy.Add(1)
+	if err := <-done; err != nil {
+		t.Fatalf("WaitProxySettled: %v", err)
+	}
+}
+
 // markingProxy can have its listener marked, and notes the order of the calls
 // the agent makes.
 type markingProxy struct {
@@ -271,5 +368,26 @@ func TestHookAsksTheProxyToMarkItsListenerUnderTheSwitchOnly(t *testing.T) {
 				t.Fatalf("the proxy's mark reached the hooks %d times, want 1", h.marked)
 			}
 		})
+	}
+}
+
+// losingHooks count, and have seen application connections lost before the
+// proxy got them.
+type losingHooks struct {
+	countingHooks
+	lost models.CaptureLosses
+}
+
+func (h losingHooks) CaptureLosses() models.CaptureLosses { return h.lost }
+
+// An application connection lost before the proxy got it is one of the
+// agent's capture losses, with the rest: a test that ends after it is not
+// judged as if every call reached keploy.
+func TestAnApplicationConnectionLostIsACaptureLoss(t *testing.T) {
+	lost := models.CaptureLoss{Kind: models.CaptureLossAppConnLost, Count: 1, What: "the latest on local port 41000"}
+	a := &Agent{logger: zap.NewNop(), Hooks: losingHooks{lost: models.CaptureLosses{lost}}, Proxy: gracefulProxy{}}
+	got, err := a.CaptureLosses(context.Background())
+	if err != nil || len(got) != 1 || got[0] != lost {
+		t.Fatalf("CaptureLosses = %+v, %v; want the lost application connection", got, err)
 	}
 }

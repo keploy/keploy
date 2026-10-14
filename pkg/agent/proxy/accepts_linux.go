@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"syscall"
 	"unsafe"
 
@@ -33,4 +34,23 @@ func listenerDrops(rc syscall.RawConn) (uint64, error) {
 		return 0, fmt.Errorf("%w: the kernel's SO_MEMINFO has no drops (%d bytes)", models.ErrProxyConnsUnsupported, size)
 	}
 	return uint64(mem[unix.SK_MEMINFO_DROPS]), nil
+}
+
+// noFastOpen turns TCP Fast Open off on a listening socket: a Fast Open queue
+// of 0 refuses every Fast Open SYN, so each connection completes its
+// handshake first (set after listen(), which, under the sysctl's
+// "without the socket option" bit, would give it one).
+func noFastOpen(ln net.Listener) error {
+	rc, err := ln.(*net.TCPListener).SyscallConn()
+	if err != nil {
+		return fmt.Errorf("reach the listener to turn TCP Fast Open off: %w", err)
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN, 0) }); err != nil {
+		return fmt.Errorf("reach the listener to turn TCP Fast Open off: %w", err)
+	}
+	if serr != nil {
+		return fmt.Errorf("turn TCP Fast Open off on the listener: %w", serr)
+	}
+	return nil
 }
