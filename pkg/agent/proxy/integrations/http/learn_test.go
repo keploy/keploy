@@ -450,37 +450,27 @@ func TestLearnMatchMultipartBoundary(t *testing.T) {
 	}
 }
 
-// The destination in the operation key is the container key when both the
-// live connection and the recording name one (row 4k), the Host otherwise:
-// a call to the same Host in another container is not a candidate, and one
-// to the same container under another Host is.
-func TestOperationKeyNamesTheContainer(t *testing.T) {
+// The destination in the operation key is the Host, as the replay matcher
+// compares it under the switch: a container key the recording carries is not
+// compared (its first-use numbering can swap two containers of one image).
+func TestOperationKeyNamesTheHost(t *testing.T) {
 	_, n, _ := learnOn(t)
 	rec := recorded("m", 0, "GET", "/a", "", nil, `{}`)
-	rec.Spec.Metadata[containerkey.MetadataKey] = "docker:api"
+	rec.Spec.Metadata[containerkey.MetadataKey] = "docker:api#1"
 	rp := recordedParts(rec)
-	if rp.container != "docker:api" {
-		t.Fatalf("the recorded side reads the mock's container key: %q", rp.container)
-	}
-	live := func(host, container string) learn.Shape {
-		p := liveParts(context.Background(), live("GET", "/a", "", map[string]string{"Host": host}))
-		p.container = container
-		return n.shape(p, sameDest)
-	}
 	for _, tc := range []struct {
-		host, container string
-		key             bool
+		host string
+		key  bool
 	}{
-		{"api.test", "docker:api", true},
-		{"other.test", "docker:api", true}, // the same container under another name
-		{"api.test", "docker:web", false},  // the same Host, another container
-		{"api.test", "", true},             // no live key: the Host decides
+		{"api.test", true},
+		{"API.test", true},
+		{"other.test", false},
+		{"api.test:8080", false},
 	} {
-		l := live(tc.host, tc.container)
-		lp := httpParts{host: strings.ToLower(tc.host), container: tc.container}
-		got := n.shape(rp, destOf(lp, rp)).Key == l.Key
+		lp := liveParts(context.Background(), live("GET", "/a", "", map[string]string{"Host": tc.host}))
+		got := n.shape(rp, destOf(lp, rp)).Key == n.shape(lp, sameDest).Key
 		if got != tc.key {
-			t.Errorf("host %s container %q: candidate %v, want %v", tc.host, tc.container, got, tc.key)
+			t.Errorf("host %s: candidate %v, want %v", tc.host, got, tc.key)
 		}
 	}
 }

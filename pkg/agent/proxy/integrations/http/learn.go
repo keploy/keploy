@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -27,10 +26,12 @@ import (
 // The learn step for HTTP (design v14 §7.2; package matcher/learn).
 //
 // An HTTP request's operation key is its method, its destination and the
-// number of its path segments. The destination is the container key when
-// both the request and the recording name one (row 4k), and otherwise the
-// Host the client sent: an HTTP mock does not record its scheme, and a port
-// other than the scheme's is in the Host. The learnable leaves are the path
+// number of its path segments. The destination is the Host the client sent
+// (lowercased, with its port), as the replay matcher compares it under the
+// switch (S1): an HTTP mock does not record its scheme, and a port other
+// than the scheme's is in the Host. Container keys are not compared yet:
+// their first-use numbering can swap two containers of one image used at
+// once, and learning across a swapped key would pair the wrong recording. The learnable leaves are the path
 // segments (url.path.<i>), the query values (url.query.<name>, a repeated
 // parameter's values in any order), the header values (header.<name>) and
 // the body's scalars (body.<path>, or body.<key> of a form). What must be
@@ -84,7 +85,6 @@ func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][
 type httpParts struct {
 	method    string
 	host      string // the Host, lowercased
-	container string // the container key, when there is one
 	path      string
 	query     map[string][]string
 	header    map[string]string // by lowercased name, a repeated header's values joined as recorded
@@ -92,16 +92,12 @@ type httpParts struct {
 	body      []byte
 }
 
-func liveParts(ctx context.Context, in *req) httpParts {
+func liveParts(_ context.Context, in *req) httpParts {
 	p := httpParts{method: in.method, path: in.url.Path, query: in.url.Query(), header: make(map[string]string, len(in.header)), body: in.body}
 	for k, v := range in.header {
 		p.header[strings.ToLower(k)] = strings.Join(v, ",")
 	}
 	p.host = strings.ToLower(p.header["host"])
-	// The container the connection reaches, when it reaches one (row 4k).
-	if k, ok := containerkey.FromContext(ctx); ok {
-		p.container = k
-	}
 	p.mediaType = mediaTypeOf(p.header["content-type"])
 	return p
 }
@@ -129,7 +125,6 @@ func recordedParts(m *models.Mock) httpParts {
 		p.header[strings.ToLower(k)] = v
 	}
 	p.host = strings.ToLower(p.header["host"])
-	p.container, _ = containerkey.Recorded(m)
 	p.mediaType = mediaTypeOf(p.header["content-type"])
 	return p
 }
@@ -150,22 +145,16 @@ func mediaTypeOf(ct string) string {
 const sameDest = "="
 
 // sameDestination reports whether a recorded request went where the live one
-// goes: to the same container when both name one, to the same Host otherwise.
+// goes: to the same Host.
 func sameDestination(live, rec httpParts) bool {
-	if live.container != "" && rec.container != "" {
-		return live.container == rec.container
-	}
 	return live.host == rec.host
 }
 
 // destOf is the destination in a recorded request's operation key, for the
 // live request live.
 func destOf(live, rec httpParts) string {
-	switch {
-	case sameDestination(live, rec):
+	if sameDestination(live, rec) {
 		return sameDest
-	case rec.container != "":
-		return rec.container
 	}
 	return rec.host
 }
