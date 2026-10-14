@@ -90,6 +90,29 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// to this receipt as though they were its.
 		writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{Set: name, At: started.UTC().Truncate(time.Second)})
 	}()
+	// A replay the user stopped before keploy judged it did not verify the
+	// suite, wherever the stop came: while the agent started, while the test
+	// command ran, or after it exited, while keploy read what the run did.
+	// It exits 128+N for the signal (SIGINT 130, SIGHUP 129, SIGTERM 143),
+	// never the test command's code -- 0 for a suite that passed -- and it is
+	// not keploy's failure, so it returns nil, and the last receipt stands
+	// (above). Every return before the verdict ends here, so no stop can slip
+	// past it: one that came while keploy read the windows or mock.real
+	// returned the read's error, which the CLI drops on a cancelled context,
+	// and the replay exited 0, unjudged. While Replay runs only NewCtx's
+	// handler cancels parent (the CLI's own ExecCancel comes after it
+	// returns). A code already armed is kept (SetExitCodeOnce): the runner's
+	// own, or keploy's 3 or 6, is non-zero too. A cancel that is no signal's
+	// arms nothing (InterruptExitCode is 0).
+	defer func() {
+		if finished || parent.Err() == nil {
+			return
+		}
+		if code := utils.InterruptExitCode(); code != 0 {
+			utils.SetExitCodeOnce(code)
+		}
+		err = nil
+	}()
 	// Coverage is read from a report the runner writes during THIS run. What
 	// the report files looked like beforehand is what tells that report from
 	// one an earlier run left behind.
@@ -347,15 +370,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
-		// A replay stopped by a signal before it finished did not verify the
-		// suite, so it must not exit 0 (a pass). Exit 128+N for the signal that
-		// stopped it (SIGINT→130, SIGHUP→129, SIGTERM→143); a non-signal cancel
-		// leaves the code alone (InterruptExitCode returns 0, SetExitCodeOnce is
-		// a no-op). Record is unaffected -- a stopped recording is a finish, and
+		// Stopped before it finished: not judged, 128+N (the deferred rule
+		// above). Record is unaffected -- a stopped recording is a finish, and
 		// it returns 0 from its own path, not here.
-		if code := utils.InterruptExitCode(); code != 0 {
-			utils.SetExitCodeOnce(code)
-		}
 		return nil
 	}
 	// Either way the cause is returned as keploy's own failure (see
@@ -422,6 +439,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if rerr != nil {
 		return fmt.Errorf("keploy could not read the run's mock.real destinations from its agent: %w", rerr)
 	}
+	if parent.Err() != nil {
+		// The user's Ctrl+C came while keploy read what the run did, and
+		// the read may be short of it (with the switch off, a failed read is
+		// no windows): a verdict on part of a run could pass a suite that did
+		// not. Not judged: 128+N (the deferred rule above).
+		return nil
+	}
 	detail := replayDetail{
 		windows:  testWindows(all),
 		starts:   appStarts(all),
@@ -429,7 +453,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
 	}
-	counts := m.reportOutcome(ctx, loaded, detail)
+	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
@@ -482,6 +506,15 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// fails it the same way: each test after it already failed with it, and
 	// this covers a loss after the last test too.
 	lost, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	if parent.Err() != nil {
+		// The user's Ctrl+C came while keploy read the agent's counts (what
+		// it served and missed, its PID maps, its capture losses): a read it
+		// cut short is no agent failure, and no gate below may fail the run
+		// on it -- --strict's "never reported which calls were missed" did,
+		// exit 1 -- nor pass a verdict on part of it. No read of the agent
+		// comes after this one. Not judged: 128+N (the deferred rule above).
+		return nil
+	}
 	if t := lost.Text(); t != "" {
 		if captureIncomplete == "" {
 			captureIncomplete = t
@@ -1407,12 +1440,14 @@ type replayCounts struct {
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
 // nothing. It returns the consumed and missed counts, each -1 when its read
 // failed; whether the MISSES specifically were readable is the only half
-// --strict turns on.
+// --strict turns on. stopped reports whether the user's interrupt stopped the
+// replay: a read it cut short is not the agent's failure, and the replay ends
+// unjudged on it (Replay).
 //
 // The two reads are tracked apart on purpose. Collapsing them into one "did the
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
-func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail) replayCounts {
+func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
 	var consumed []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr error
@@ -1483,6 +1518,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	if consumedErr == nil && missesErr == nil {
 		m.logger.Info("mock replay summary", summary...)
+	} else if stopped() {
+		// The user's Ctrl+C cut the reads short, not the agent: nothing here
+		// is the agent's to explain, and the run ends unjudged (Replay).
+		m.logger.Debug("mock replay summary (incomplete: the user stopped the replay while keploy read it)", summary...)
 	} else {
 		next := "check the agent logs for why it stopped before the run ended"
 		if fromCompose && consumedErr == nil {
