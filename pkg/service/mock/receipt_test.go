@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -140,7 +141,12 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
 	}
-	svc := New(zap.New(core), run, stubMockDB{}, mapDB, nil, nil, cfg)
+	var store MockDB = stubMockDB{}
+	if c.mapped && provenswitch.On() {
+		// Under the switch the mapping must name mocks the recording has.
+		store = named("mock-0")
+	}
+	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {

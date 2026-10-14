@@ -214,6 +214,13 @@ type MockMismatchReport struct {
 	// are redacted by the producing parser before they land here.
 	ClosestMockReq string // rendered request of the closest mock
 	ReceivedReq    string // rendered request the app actually sent
+	// MissKind is MissExtraCall when the matcher found the call identical to
+	// one the open test's own mocks had already answered (exact serving,
+	// under the proven switch), and Recorded is how many times that call was
+	// recorded for the test. The proxy files every other miss by where it was
+	// made. Empty without the switch.
+	MissKind string
+	Recorded int
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven
@@ -261,6 +268,13 @@ type ParserError struct {
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
 	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
+	// MissKind is where the miss was made (MissInTest, MissExtraCall,
+	// MissOutsideTest), set by the proxy under exact serving; empty without
+	// the proven switch.
+	MissKind string
+	// Recorded is, for MissExtraCall, how many times the call was recorded
+	// for the test.
+	Recorded int
 }
 
 type ParserErrorType string
