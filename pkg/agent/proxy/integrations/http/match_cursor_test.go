@@ -153,3 +153,32 @@ func TestMatch_StatefulCursorKeyIsTheRequest(t *testing.T) {
 		t.Fatalf("served %s, want %s", g, want)
 	}
 }
+
+// noCursor is a store whose cursor is absent (a negative index).
+type noCursor struct{}
+
+func (noCursor) MockCursorIndex(string, int) int    { return -1 }
+func (noCursor) AdvanceMockCursor(string, int, int) {}
+
+// servedPick takes the first recording not yet served, marks it once the
+// call is answered, and stays on the last once all are; a store that keeps
+// no cursor serves the first, as without the capability.
+func TestServedPick(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	group := []*models.Mock{cursorMock("r1", base), cursorMock("r2", base.Add(time.Second))}
+	db := &mockMemDb{}
+	var got []int
+	for i := 0; i < 3; i++ {
+		idx, commit := servedPick(group, db)
+		got = append(got, idx)
+		if commit != nil {
+			commit()
+		}
+	}
+	if got[0] != 0 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("picked %v, want [0 1 1]", got)
+	}
+	if idx, commit := servedPick(group, noCursor{}); idx != 0 || commit != nil {
+		t.Fatalf("no cursor: picked %d (commit %v), want the first and no commit", idx, commit != nil)
+	}
+}
