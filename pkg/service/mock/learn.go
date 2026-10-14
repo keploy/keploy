@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -102,7 +103,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 }
 
 // learnsOnto reports whether what the learn step learned is kept on a mock
-// whose test (by mapping) is test, "" for the pool's.
+// whose test (by mapping) is test, "" for the pool's. A test the record made
+// covers its subtests: a mock made inside one maps to the subtest
+// ("pkg::TestA/x"), and the record made it with its top-level test.
 func (m *mockService) learnsOnto(test string) bool {
 	switch {
 	case m.config.Test.LearnTests == nil:
@@ -110,5 +113,14 @@ func (m *mockService) learnsOnto(test string) bool {
 	case test == "":
 		return m.config.Test.LearnPool
 	}
-	return m.config.Test.LearnTests[test]
+	for t := test; ; {
+		if m.config.Test.LearnTests[t] {
+			return true
+		}
+		i := strings.LastIndexByte(t, '/')
+		if i < 0 {
+			return false
+		}
+		t = t[:i]
+	}
 }

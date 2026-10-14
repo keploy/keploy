@@ -21,6 +21,9 @@ func TestLearnsOnto(t *testing.T) {
 	if !m.learnsOnto("o::A") || m.learnsOnto("o::B") {
 		t.Fatal("only the tests the record made keep what was learned")
 	}
+	if !m.learnsOnto("o::A/case_1") || !m.learnsOnto("o::A/case_1/inner") || m.learnsOnto("o::AB/x") || m.learnsOnto("o::B/x") {
+		t.Fatal("a test the record made covers its subtests, and only its own")
+	}
 	if m.learnsOnto("") {
 		t.Fatal("a partial record never changes the pool")
 	}
