@@ -215,7 +215,7 @@ dep_key() {
   local k
   k=$(keys_of | awk '{ print $2 }' | sort -u)
   echo "$k"
-  if ! grep -qxE "container:${DEP_IMAGE%%:*}:9411@[0-9a-f]{12}" <<<"$k"; then
+  if [ "$(grep -c . <<<"$k")" -ne 1 ] || ! grep -qxE "container:${DEP_IMAGE%%:*}:9411@[0-9a-f]{12}" <<<"$k"; then
     echo "FAIL: $1: the /price mocks carry '$k', want one key of the dependency's port 9411" >&2
     return 1
   fi
