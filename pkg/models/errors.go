@@ -254,6 +254,9 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

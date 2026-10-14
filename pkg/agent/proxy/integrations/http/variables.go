@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/bodydigest"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -419,6 +420,13 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if bad != "" {
 		return refuse(bad)
 	}
+	// Learned noise at a SigV4 Authorization or a presigned URL's signing
+	// parameters is put back below; the parts the strict matcher compares
+	// by grammar must hold first (founder decision 25), or the call is the
+	// strict matcher's to decide.
+	if !sigV4PartsHold(recordedParts(m), liveParts(ctx, input)) {
+		return nil, nil
+	}
 
 	// The variables' places, read on both sides; then the recorded values put
 	// back into the live call.
@@ -449,6 +457,36 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				return nil, nil
 			}
 			liveAt[vp.place.String()] = l
+		}
+	}
+
+	// What the learn step learned as noise at one exact place of this call
+	// (a path segment, a query value, a header value, one element of an
+	// array) is not compared either: its recorded value is put back there
+	// too, the place's presence and JSON type still required.
+	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
+	for k := range m.Spec.ReqBodyNoise {
+		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
+		if !ok {
+			continue // a body path in the matcher's dialect: the body noise
+		}
+		place, err := variables.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if _, isVar := liveAt[place.String()]; isVar {
+			continue
+		}
+		r, ok := rec.read(place)
+		if !ok {
+			continue
+		}
+		l, ok := live.read(place)
+		if !ok || l.body && l.kind != r.kind {
+			return nil, nil
+		}
+		if asRecorded, ok = asRecorded.putBack(place, r); !ok {
+			return nil, nil
 		}
 	}
 

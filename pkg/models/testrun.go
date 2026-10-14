@@ -360,7 +360,29 @@ type UnmatchedCall struct {
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// Reason is why the call missed, in judging's words (design v14 §5.3,
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
+	// record's full round, where the learn step runs, gives one; empty
+	// everywhere else.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
+
+// The reasons a miss of record's full round carries (UnmatchedCall.Reason),
+// as the learn step decides them (package matcher/learn).
+const (
+	// MissRequestChanged: a recorded call had the request's method,
+	// destination and shape, but the request differs from it in a way the
+	// learn step does not learn (a field added or removed, a type changed, a
+	// value several recorded calls explain equally, a value that flows from an
+	// earlier call when nothing can follow it).
+	MissRequestChanged = "request_changed"
+	// MissUnstableOrder: the closest recorded call holds an array the request
+	// sent with the recorded elements in another order (the order rule).
+	MissUnstableOrder = "unstable_order"
+	// MissUnmockedCall: no recorded call has the request's method,
+	// destination and shape.
+	MissUnmockedCall = "unmocked_call"
+)
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what

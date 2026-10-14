@@ -2034,6 +2034,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
@@ -2165,6 +2167,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
@@ -4647,6 +4651,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	case captureUnverified != "":
 		captureVerification = &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: captureUnverified}
 	}
+	// What record's full round learned goes onto the recording before the
+	// set is reported, and is said per test; a prune after it keeps it
+	// (pruneKeeps). A round that could not keep it did not complete: its
+	// verdict would be about recordings that lack what it served.
+	if r.learning() && r.instrument {
+		if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
+			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
 	// Under the proven switch a set none of whose tests got a verdict, its
 	// tests IGNORED, verified nothing, and is IGNORED, as a set the run skips
 	// whole is, not PASSED. Last, so a status that says more (FAILED, not
@@ -4806,7 +4821,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.NoiseDetection() && r.instrument {
+	} else if r.config.Test.NoiseDetection() && r.instrument && !provenswitch.On() {
+		// (Under the proven switch only record's full round writes what was
+		// learned, above: a replay in CI writes no recording.)
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.

@@ -198,6 +198,11 @@ type TestsReceipt struct {
 	// those it first reached outside a test, and the capture_incomplete
 	// evidence charged to no test. nil without the switch.
 	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto
+	// mocks no test consumed (the set's start-up and pool), each field as
+	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
+	// §7.2 step 10).
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // empty reports whether the run reported no test and keploy refused
@@ -230,6 +235,10 @@ type TestReceipt struct {
 	// test's recording lists: the run must reach each (design v14 §8.2 rule
 	// 4), and the test ran on the real clock (§3.4, F3).
 	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto the
+	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
+	// §7.2 step 10). Only that round has any.
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner

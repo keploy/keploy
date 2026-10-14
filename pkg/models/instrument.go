@@ -208,6 +208,18 @@ type OutgoingOptions struct {
 	// so a field placed where it takes a word of its own grows the Session of
 	// every connection.
 	SkipTLSMITM bool
+	// Learn turns the learn step on (design v14 §7.2, row L; package
+	// matcher/learn): the agent pairs a request no recorded mock answers
+	// exactly with the mock it drifted from and learns what drifted, and a
+	// miss carries its reason. Only record's full round sets it, under the
+	// proven switch: the round that replays the build that was just
+	// recorded. Like SkipTLSMITM it sits in the padding after the TLS
+	// switches.
+	Learn bool `json:"Learn,omitempty"`
+	// LearnPool lets the learn step pair pool mocks too, not only the test's
+	// own: a full record replaces the pool, a partial one never changes it
+	// (design §7.2 step 10, §7.5).
+	LearnPool bool `json:"LearnPool,omitempty"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
