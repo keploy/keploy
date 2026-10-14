@@ -61,6 +61,14 @@ func matchedHandshakeMiss(dst, step, why string) error {
 	return newConnectionMiss(dst, step, why, models.MatchPhaseExhausted, 1)
 }
 
+// unencodableMiss is a miss of the connection phase at step: the recorded
+// packet the client is to be answered with (what) cannot be encoded, err says
+// why, so the recording holds no answer replay can write. Nothing is written
+// for it.
+func unencodableMiss(dst, step, what string, err error) error {
+	return newConnectionMiss(dst, step, fmt.Sprintf("the recorded %s cannot be encoded: %v", what, err), models.MatchPhaseProtoError, 1)
+}
+
 // destinationOf is the upstream a client dialled, as a miss's report names it:
 // "" when unknown, or when the capture layer fabricated it (a report must not
 // name a server the application never dialled).

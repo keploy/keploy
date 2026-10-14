@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -617,6 +618,14 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		phase   string
 		diff    string
 	}{{
+		name: "a recorded verdict that cannot be encoded",
+		session: []*models.Mock{fastAuthHandshake(mysql.Response{PacketBundle: bundle(3, mysql.StatusToString(mysql.OK),
+			&mysql.AuthNextFactorPacket{PacketType: mysql.AuthNextFactor, PluginName: "x"})})}, // an OK header on another packet
+		client:  fastAuthLogin,
+		summary: "connection phase: caching_sha2_password authentication",
+		phase:   models.MatchPhaseProtoError,
+		diff:    "cannot be encoded",
+	}, {
 		name:    "a next authentication factor after a fast authentication",
 		session: []*models.Mock{fastAuthHandshake(nextFactorAnswer(3))},
 		client:  fastAuthLogin,
@@ -776,4 +785,34 @@ func headerlessGreeting() *models.Mock {
 	m := nativeHandshake()
 	m.Spec.MySQLResponses[0].Header = nil
 	return m
+}
+
+// Connections opened at once on handshakes no connection has used yet each
+// get the recorded verdict: serving one handshake changes nothing another
+// connection reads while ranking its candidates. Encoding a recorded
+// AuthMoreData rewrote the mock's mechanism in place, so a connection ranking
+// the handshakes raced with one serving them (a DATA RACE under -race, and a
+// candidate read as an unknown mechanism, so unservable, without it).
+func TestHandshakesServedAtOnceAreNotRewritten(t *testing.T) {
+	refused := fastAuthHandshake(refusal(3))
+	refused.Name = "mock-refused"
+	ok := fastAuthHandshake(okAnswer(3))
+	ok.Name = "mock-ok"
+	full := fullAuthHandshake(okAnswer(6))
+	full.Name = "mock-full"
+	db := &fakeMockDb{session: []*models.Mock{refused, ok, full}}
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := login(t, db, fastAuthLogin); got != mysql.OK {
+				t.Errorf("a connection read %#x; want the recorded OK", got)
+			}
+		}()
+	}
+	wg.Wait()
+	if more := ok.Spec.MySQLResponses[1].Message.(*mysql.AuthMoreDataPacket); more.Data != mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess) {
+		t.Fatalf("serving the handshake rewrote its recorded mechanism to %q", more.Data)
+	}
 }

@@ -129,7 +129,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode handshake packet")
-		return res, err
+		return res, unencodableMiss(dst, stepGreeting, "server greeting", err)
 	}
 
 	// Write the initial handshake to the client
@@ -464,7 +464,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		buf, err = wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth switch request packet")
-			return res, err
+			return res, unencodableMiss(dst, stepHandshakeResponse, "AuthSwitchRequest", err)
 		}
 
 		// Write the AuthSwitchRequest packet to the client
@@ -596,7 +596,7 @@ func serveVerdict(ctx context.Context, logger *zap.Logger, clientConn net.Conn, 
 	buf, err := wire.EncodeToBinary(ctx, logger, verdict, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the recorded verdict on the login")
-		return false, err
+		return false, unencodableMiss(dst, step, "verdict on the login", err)
 	}
 
 	_, err = clientConn.Write(buf)
@@ -636,7 +636,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode auth more data packet")
-		return false, err
+		return false, unencodableMiss(dst, stepCachingSha2, "AuthMoreData", err)
 	}
 
 	// Write the AuthMoreData packet to the client
@@ -774,7 +774,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode public key response packet")
-		return false, err
+		return false, unencodableMiss(dst, stepPublicKey, "public key", err)
 	}
 
 	// Write the public key response to the client
