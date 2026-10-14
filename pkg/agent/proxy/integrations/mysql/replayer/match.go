@@ -148,8 +148,14 @@ func matchSSLRequest(_ context.Context, _ *zap.Logger, expected, actual mysql.Pa
 	//Don't match the header, because the payload length can be different.
 
 	// Match the payload
-	expectedMessage, _ := expected.Message.(*mysql.SSLRequestPacket)
-	actualMessage, _ := actual.Message.(*mysql.SSLRequestPacket)
+	expectedMessage, ok := expected.Message.(*mysql.SSLRequestPacket)
+	if !ok {
+		return fmt.Errorf("the recorded SSL request cannot be read: it holds a %T", expected.Message)
+	}
+	actualMessage, ok := actual.Message.(*mysql.SSLRequestPacket)
+	if !ok {
+		return fmt.Errorf("the client's SSL request cannot be read: it holds a %T", actual.Message)
+	}
 
 	// Match the MaxPacketSize
 	if expectedMessage.MaxPacketSize != actualMessage.MaxPacketSize {
@@ -179,11 +185,16 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 
 	// Match the payload
 
-	//Get the packet type from both the packet bundles
-	// we don't need to do type assertion because its already done in the caller function
-
-	exp := expected.Message.(*mysql.HandshakeResponse41Packet)
-	act := actual.Message.(*mysql.HandshakeResponse41Packet)
+	// The header says HandshakeResponse41; a recorded message of another
+	// type (a malformed recording) is no match, not a panic.
+	exp, ok := expected.Message.(*mysql.HandshakeResponse41Packet)
+	if !ok {
+		return fmt.Errorf("the recorded handshake response cannot be read: it holds a %T", expected.Message)
+	}
+	act, ok := actual.Message.(*mysql.HandshakeResponse41Packet)
+	if !ok {
+		return fmt.Errorf("the client's handshake response cannot be read: it holds a %T", actual.Message)
+	}
 
 	// Match the MaxPacketSize
 	if exp.MaxPacketSize != act.MaxPacketSize {
@@ -453,9 +464,19 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		tiersRead = true // recordedQuery reads these tiers, not a second snapshot
 		pool = merge(perTestTier, sessionMocks, connectionTier)
+		// An empty pool is no error: it is loaded (non-nil, so never read
+		// again for this command), the scan below finds no candidate, and the
+		// command is answered as it is against a pool holding only mocks it
+		// cannot match: a control statement, a SEND_LONG_DATA, a STMT_RESET or
+		// an unrecorded PREPARE by its synthesized answer, anything else by
+		// the no_mocks miss. It was an error that did not wrap
+		// models.ErrNoMockMatched: the connection was dropped, the proxy
+		// dropped the error too, and the test that sent the command passed
+		// with no miss. The pool is empty, for one, when a connection
+		// outlives the mocks its handshake was served from: the pool was
+		// replaced by one holding no mock at all.
 		if len(pool) == 0 {
-			utils.LogError(logger, nil, "no mysql mocks found")
-			return fmt.Errorf("no mysql mocks found")
+			logger.Debug("the mysql mock pool is empty")
 		}
 		return nil
 	}
