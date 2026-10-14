@@ -332,6 +332,21 @@ var (
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
 )
 
+// OwnedByTest implements integrations.TestOwnership: a mock is the open
+// test's own when its worker's current allowlist (the test's mapping) names
+// it.
+func (s *scopedMockDb) OwnedByTest(m *models.Mock) (owned, known bool) {
+	if s.live || m == nil {
+		return false, false
+	}
+	v := s.current()
+	if v.allow == nil {
+		return false, false
+	}
+	_, owned = v.allow[m.Name]
+	return owned, true
+}
+
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetFilteredMocks())
 }
@@ -485,6 +500,30 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	if c, ok := s.MockMemDb.(integrations.MockCursor); ok {
 		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
 	}
+}
+
+// InTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InTestWindow(t time.Time) bool {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InTestWindow(t)
+	}
+	return false
+}
+
+// InRecordedTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InRecordedTestWindow(t)
+	}
+	return false, false
+}
+
+// SameRecordedTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.SameRecordedTestWindow(a, b)
+	}
+	return false, false
 }
 
 // Variables forwards the replay's variable table. Under the proven switch one
@@ -934,8 +973,9 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.
 var (
-	_ integrations.MockCursor = (*MockManager)(nil)
-	_ integrations.MockCursor = (*scopedMockDb)(nil)
+	_ integrations.MockCursor    = (*MockManager)(nil)
+	_ integrations.MockCursor    = (*scopedMockDb)(nil)
+	_ integrations.TestOwnership = (*scopedMockDb)(nil)
 )
 
 // StatesLifetimes answers for the recording the view is cut from: whether it

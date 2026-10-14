@@ -1677,6 +1677,18 @@ func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.Mo
 // (old=matchedMock, new=&updatedMock) to the mock DB — which already
 // takes treesMu internally to swap the pointer atomically.
 func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+	return h.consumeWith(ctx, matchedMock, mockDb, func(spec *models.MockSpec) {
+		if len(detectedNoise) > 0 {
+			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, detectedNoise)
+		}
+	})
+}
+
+// consumeWith is updateMock with what this match attaches to the consumed
+// mock's state written by attach, onto the copies it hands the mock DB
+// (never the shared pooled mock): detected noise, or what the learn step
+// learned.
+func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, attach func(spec *models.MockSpec)) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
@@ -1686,9 +1698,7 @@ func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb 
 	// flagMockAsUsed reads updatedMock.Spec.ReqBodyNoise to carry it out on the
 	// MockState; mockdb.UpdateMocks persists it. Stored on the kind-agnostic
 	// MockSpec.ReqBodyNoise, same as every other parser.
-	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = mergeReqBodyNoise(updatedMock.Spec.ReqBodyNoise, detectedNoise)
-	}
+	attach(&updatedMock.Spec)
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -1706,9 +1716,7 @@ func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb 
 	// lifetimes writes it (ConsumeCursorSaturate).
 	if lifetime == models.LifetimePerTest && updatedMock.TestModeInfo.Consume == models.ConsumeCursorSaturate && matchedMock.StatesLifetime() {
 		used := *matchedMock
-		if len(detectedNoise) > 0 {
-			used.Spec.ReqBodyNoise = mergeReqBodyNoise(used.Spec.ReqBodyNoise, detectedNoise)
-		}
+		attach(&used.Spec)
 		// No open test's own (openTestOwner: no test is open, or every test
 		// may be served it): served as a reusable recording is, marked used
 		// and neither consumed nor kept, so whichever call comes next may be
@@ -1744,9 +1752,7 @@ func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb 
 	// matchedMock has no noise, and updatedMock's mutated TestModeInfo wouldn't
 	// match the tree node).
 	deleteMock := *matchedMock
-	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
-	}
+	attach(&deleteMock.Spec)
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}

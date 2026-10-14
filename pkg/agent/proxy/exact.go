@@ -661,6 +661,8 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+		Variables:        variablesOf(mk.Spec),
+		Binds:            bindsOf(mk.Spec),
 	}); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
@@ -671,7 +673,9 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 // noteExactServed records that test mock owned answered (consumed, served
 // once) and tells the parsers that keep an index that it is gone. served is
 // the copy the parser reported, which carries the request-body noise it
-// detected, if any.
+// detected, if any, and under the proven switch what record's full round
+// learned onto it (its variables and the binds it carries onto earlier
+// calls), as the other doors' states do.
 func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:             owned.Name,
@@ -685,6 +689,8 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		ReqTimestampMock: models.FormatMockTimestamp(owned.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(owned.Spec.ResTimestampMock),
 		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
+		Variables:        variablesOf(served.Spec),
+		Binds:            bindsOf(served.Spec),
 	}); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}

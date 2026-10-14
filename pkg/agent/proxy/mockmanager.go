@@ -10,7 +10,9 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
@@ -55,6 +57,12 @@ import (
 // the atomic variants above.
 
 type MockManager struct {
+	// servedObserver, when set, is told of every mock a parser is served
+	// (consumed or reused), before the claim takes it out of the pool and
+	// outside the manager's own locks: under the proven switch, the learn
+	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
+	servedObserver atomic.Pointer[func(*models.Mock)]
+
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
 	unfiltered *TreeDb
@@ -252,7 +260,11 @@ type MockManager struct {
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
-	windowsSeeded   *models.WindowSchedule
+	// testWindows is the last set's recorded test windows as seeded, kept
+	// whether or not the release rule uses them: where a recorded mock falls
+	// among them (InRecordedTestWindow).
+	testWindows   atomic.Pointer[models.WindowSchedule]
+	windowsSeeded *models.WindowSchedule
 
 	// statedKinds are the kinds of which a mock staged since the current
 	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
@@ -808,6 +820,39 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 	m.signalWindowChange()
+}
+
+// InTestWindow reports whether a mock recorded at t was recorded inside the
+// window of the test the replay runs now (integrations.TestWindows).
+func (m *MockManager) InTestWindow(t time.Time) bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	if m.windowStart.IsZero() || m.windowEnd.IsZero() || t.IsZero() {
+		return false
+	}
+	return !t.Before(m.windowStart) && !t.After(m.windowEnd)
+}
+
+// InRecordedTestWindow reports whether a mock recorded at t was recorded
+// inside the window of some recorded test of the set (SeedRecordedWindows);
+// known is false when the replay seeded none (integrations.TestWindows).
+func (m *MockManager) InRecordedTestWindow(t time.Time) (inside, known bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || t.IsZero() {
+		return false, false
+	}
+	return s.Contains(t), true
+}
+
+// SameRecordedTestWindow reports whether a and b were recorded inside one
+// recorded test's window; known is false when the replay seeded none.
+func (m *MockManager) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || a.IsZero() || b.IsZero() {
+		return false, false
+	}
+	i := s.IndexOf(a)
+	return i >= 0 && i == s.IndexOf(b), true
 }
 
 // IsTestWindowActive reports whether a non-zero test window is currently
@@ -2806,7 +2851,15 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	switch m.exactConsume(old, false) {
+	m.observeServed(new)
+	// The copy the parser reports carries what it detected and what the
+	// learn step learned onto the recording; the exact view knows it by
+	// name, as it knows old.
+	served := new
+	if served == nil {
+		served = old
+	}
+	switch m.exactConsume(served, false) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -2902,6 +2955,8 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
+			Variables:        variablesOf(new.Spec),
+			Binds:            bindsOf(new.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2927,6 +2982,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
 	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
 		return true
@@ -2960,6 +3016,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2994,7 +3052,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// Returning true here keeps the caller contract ("consumed, stop looping")
 	// exactly as it was, while the mock that actually gets consumed is now the
 	// one the caller matched instead of whatever shared its key.
-	if m.DeleteStartupMock(mock) {
+	if m.deleteStartupMock(mock) {
 		return true
 	}
 	// Last, the carry-over tier (RegisterCarryOver kinds only): a mock
@@ -3016,6 +3074,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+				Variables:        variablesOf(mock.Spec),
+				Binds:            bindsOf(mock.Spec),
 				CarryOver:        true,
 			}); err != nil {
 				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
@@ -3029,6 +3089,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
 	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
 		return true
@@ -3072,6 +3133,8 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -3116,6 +3179,13 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
 func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
+	return m.deleteStartupMock(mock)
+}
+
+// deleteStartupMock is DeleteStartupMock without telling the served
+// observer: for a caller that told it already.
+func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
@@ -3173,7 +3243,9 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 			Lifetime:         mk.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
-			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -3259,8 +3331,14 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 // garbage once the call returns, and no schedule is left installed or parked.
 func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	if len(ws) == 0 {
+		// A set with none: the learn step knows none, not the previous
+		// set's.
+		m.testWindows.Store(nil)
 		return
 	}
+	// The learn step tells the pool's mocks from a test's by them, whatever
+	// the release rule does with them (InRecordedTestWindow).
+	m.testWindows.Store(models.NewWindowSchedule(ws))
 	if !models.CarryOverRegistered() {
 		m.swapMu.Lock()
 		m.windowsSeeded = nil
@@ -3351,6 +3429,7 @@ func (m *MockManager) signalWindowChange() {
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+	m.observeServedCopy(mock)
 	if mock.Name == "" {
 		return false
 	}
@@ -3376,6 +3455,11 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
 		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
 		ReqBodyNoise: reqBodyNoiseOf(mock.Spec),
+		// What record's full round learned onto a mock this door keeps (a
+		// reusable stateful recording, a scoped worker's held own mock), as
+		// the other doors carry it (nil with the switch off).
+		Variables: variablesOf(mock.Spec),
+		Binds:     bindsOf(mock.Spec),
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -3544,11 +3628,43 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 
 // ---------- bookkeeping ----------
 
-// flagMockAsUsed records that a mock was consumed from the network.
-// The first call for a given name establishes its position in the consumption
-// order; subsequent calls for the same name update the stored state in-place
-// without changing its position. This preserves true network call order in
-// GetConsumedMocks.
+// SetServedObserver makes f told of every mock a parser is served, from now
+// on (nil: none).
+func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
+	if f == nil {
+		m.servedObserver.Store(nil)
+		return
+	}
+	m.servedObserver.Store(&f)
+}
+
+// observeServed tells the served observer of mock before a parser's claim
+// takes it out of the pool, so a request reading the pool and then the
+// observer's record never finds it in neither (the learn step's earlier
+// places). A claim that then fails was another connection's serve of the
+// same mock: the observer is told of a mock that was served either way.
+func (m *MockManager) observeServed(mock *models.Mock) {
+	if mock == nil || mock.Name == "" {
+		return
+	}
+	if f := m.servedObserver.Load(); f != nil {
+		(*f)(mock)
+	}
+}
+
+// observeServedCopy is observeServed of a mock a door took by value: the
+// observer keeps a copy of its own, made only when there is an observer (the
+// proven switch), so the door's mock does not move to the heap without one.
+func (m *MockManager) observeServedCopy(mock models.Mock) {
+	if mock.Name == "" {
+		return
+	}
+	if f := m.servedObserver.Load(); f != nil {
+		c := mock
+		(*f)(&c)
+	}
+}
+
 // reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
 // request (nil when none was detected). Used to carry schema-detected noise out
 // on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
@@ -3557,6 +3673,54 @@ func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 	return spec.ReqBodyNoise
 }
 
+// learnedNoiseOf is the request noise a consumed start-up mock's state
+// carries: the tree's copy's, as before the proven switch, and under it the
+// caller's (the copy the learn step attached what it learned to).
+func learnedNoiseOf(tree, caller models.MockSpec) map[string][]string {
+	if provenswitch.On() {
+		return caller.ReqBodyNoise
+	}
+	return tree.ReqBodyNoise
+}
+
+// variablesOf is what a consumed mock's state carries of its variables:
+// under the proven switch, its own (MockSpec.Variables) and the ones the
+// learn step learned on it (MockSpec.Learned), which record's full round
+// writes onto the recording. Without the switch nothing, as before it.
+func variablesOf(spec models.MockSpec) models.MockVariables {
+	if !provenswitch.On() {
+		return nil
+	}
+	out := spec.Variables.Clone()
+	for name, v := range spec.Learned().Clone() {
+		if out == nil {
+			out = models.MockVariables{}
+		}
+		out[name] = v
+	}
+	return out
+}
+
+// bindsOf is what a consumed mock's state carries of the variables the learn
+// step learned while answering it that are bound at an earlier mock
+// (MockSpec.LearnedBinds): under the proven switch only.
+func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
+	binds := spec.LearnedBinds()
+	if !provenswitch.On() || len(binds) == 0 {
+		return nil
+	}
+	out := make(map[string]models.MockVariables, len(binds))
+	for m, v := range binds {
+		out[m] = v.Clone()
+	}
+	return out
+}
+
+// flagMockAsUsed records that a mock was consumed from the network.
+// The first call for a given name establishes its position in the consumption
+// order; subsequent calls for the same name update the stored state in-place
+// without changing its position. This preserves true network call order in
+// GetConsumedMocks.
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
@@ -3566,6 +3730,28 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	}
 	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	// Under the proven switch what record's full round learned onto a mock
+	// is cumulative across its states: a reusable recording the learn step
+	// pairs twice keeps both pairings' variables, binds and noise, whichever
+	// door each left through (a door that keeps the pool's copy, as
+	// MarkMockAsUsed does, hands the second pairing a copy without the
+	// first's).
+	if provenswitch.On() {
+		var prev models.MockState
+		var ok bool
+		if m.consumedPersistent != nil {
+			prev, ok = m.consumedPersistent[mock.Name]
+		} else if idx, exists := m.consumedIndex[mock.Name]; exists {
+			prev, ok = m.consumedList[idx], true
+		}
+		if ok {
+			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
+			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
+			if len(prev.ReqBodyNoise) > 0 {
+				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
+			}
+		}
+	}
 	if inScope && m.scopeConsumed != nil {
 		m.scopeConsumed[mock.Name] = struct{}{}
 	}

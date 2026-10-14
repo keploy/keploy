@@ -1,0 +1,836 @@
+package proxy
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
+)
+
+// learnCall sends one request through the HTTP integration in record's full
+// round (OutgoingOptions.Learn), against a test whose one recorded call is
+// rec, with the proxy's miss reporter and learn tracker as the proxy installs
+// them. It returns the app's answer and the mock manager.
+func learnCall(t *testing.T, p *Proxy, rec *models.Mock, request string) (*http.Response, string, *MockManager) {
+	t.Helper()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	now := time.Now()
+	rec.Spec.ReqTimestampMock = now
+	mm.SetMocksWithWindow([]*models.Mock{rec}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+	app, agentEnd := net.Pipe()
+	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+	ctx = learn.WithTracker(ctx, p.learnTracker)
+	t.Cleanup(func() { _ = app.Close() })
+	go func() {
+		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{Learn: true})
+		_ = agentEnd.Close()
+	}()
+	if _, err := app.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(body), mm
+}
+
+func batchMock() *models.Mock {
+	return &models.Mock{
+		Name: "mock-7",
+		Kind: models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{"type": models.HTTPClient},
+			HTTPReq: &models.HTTPReq{Method: "POST", URL: "/batch", Header: map[string]string{"Host": "deps.example", "Content-Type": "application/json"},
+				Body: `{"rid":"r-1","ids":[1,2,3]}`},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": "23"}, Body: `{"ok":true,"rid":"r-1"}`},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest},
+	}
+}
+
+func post(body string) string {
+	return "POST /batch HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: " +
+		strconv.Itoa(len(body)) + "\r\n\r\n" + body
+}
+
+// A request the learn step refuses on the order rule is a miss of its test,
+// with its reason and the candidate it refused: judging's unstable_order.
+func TestALearnStepMissCarriesItsReason(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	p.ContinueTestErrorCapture()
+	resp, _, _ := learnCall(t, p, batchMock(), post(`{"rid":"r-1","ids":[3,1,2]}`))
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("the app got %d, want 502", resp.StatusCode)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || misses[0].Reason != models.MissUnstableOrder || misses[0].ClosestMock != "mock-7" {
+		t.Fatalf("misses %+v", misses)
+	}
+	if !strings.Contains(misses[0].NextSteps, "body.ids has the recorded elements in another order") {
+		t.Fatalf("next steps %q", misses[0].NextSteps)
+	}
+}
+
+// A request that drifted only in a value is answered from the mock it drifted
+// from, and the consumed mock carries what was learned, which the replay
+// writes onto the recording; the echo is rendered into the answer.
+func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	p.ContinueTestErrorCapture()
+	resp, body, mm := learnCall(t, p, batchMock(), post(`{"rid":"r-2","ids":[1,2,3]}`))
+	if resp.StatusCode != http.StatusOK || body != `{"ok":true,"rid":"r-2"}` {
+		t.Fatalf("the app got %d %s", resp.StatusCode, body)
+	}
+	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {
+		t.Fatalf("misses %+v", misses)
+	}
+	consumed := mm.GetConsumedMocks()
+	if len(consumed) != 1 {
+		t.Fatalf("consumed %+v", consumed)
+	}
+	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true}}
+	if !reflect.DeepEqual(consumed[0].Variables, want) {
+		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Variables)
+	}
+}
+
+// A value one call of the test sent and a later call uses is followed as a
+// variable: the later call is answered with it, and its consumed state says
+// where it is used and where it is bound (Binds), which the replay writes onto
+// both recordings.
+func TestALearnStepFollowsAVariableAcrossCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	p.ContinueTestErrorCapture()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	now := time.Now()
+	call := func(name string, at time.Duration, method, target, body, resp string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": models.HTTPClient},
+			HTTPReq:          &models.HTTPReq{Method: models.Method(method), URL: "http://deps.example" + target, Header: map[string]string{"Host": "deps.example", "Content-Type": "application/json"}, Body: body},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": strconv.Itoa(len(resp))}, Body: resp},
+			ReqTimestampMock: now.Add(at),
+		}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest}}
+	}
+	mm.SetMocksWithWindow([]*models.Mock{
+		call("mock-a", 0, "POST", "/orders", `{"order":"o-1"}`, `{}`),
+		call("mock-b", time.Second, "GET", "/orders/o-1", "", `{"id":"o-1"}`),
+	}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+	send := func(request string) (int, string) {
+		app, agentEnd := net.Pipe()
+		ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+		ctx = learn.WithTracker(ctx, p.learnTracker)
+		defer app.Close()
+		go func() {
+			_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{Learn: true})
+			_ = agentEnd.Close()
+		}()
+		if _, err := app.Write([]byte(request)); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, string(b)
+	}
+	body := `{"order":"o-9"}`
+	if code, _ := send("POST /orders HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body); code != http.StatusOK {
+		t.Fatalf("the create got %d", code)
+	}
+	if code, got := send("GET /orders/o-9 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"); code != http.StatusOK || got != `{"id":"o-9"}` {
+		t.Fatalf("the read got %d %s", code, got)
+	}
+	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {
+		t.Fatalf("misses %+v", misses)
+	}
+	states := map[string]models.MockState{}
+	for _, st := range mm.GetConsumedMocks() {
+		states[st.Name] = st
+	}
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
+		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
+	}
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
+	}
+}
+
+// r3Mock is a recorded HTTP call as the recorder writes it.
+func r3Mock(name string, at time.Time, method, target, body, resp string) *models.Mock {
+	return &models.Mock{Version: "api.keploy.io/v1beta1", Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": models.HTTPClient},
+		HTTPReq:          &models.HTTPReq{Method: models.Method(method), URL: "http://deps.example" + target, Header: map[string]string{"Host": "deps.example", "Content-Type": "application/json"}, Body: body},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": strconv.Itoa(len(resp))}, Body: resp},
+		ReqTimestampMock: at,
+		ResTimestampMock: at.Add(time.Millisecond),
+	}}
+}
+
+// r3Send sends one request through the HTTP integration with the proxy's
+// tracker and miss reporter.
+func r3Send(t *testing.T, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+	t.Helper()
+	app, agentEnd := net.Pipe()
+	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+	ctx = learn.WithTracker(ctx, p.learnTracker)
+	defer app.Close()
+	go func() {
+		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = agentEnd.Close()
+	}()
+	if _, err := app.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode, string(b)
+}
+
+func r3States(mm *MockManager) map[string]models.MockState {
+	out := map[string]models.MockState{}
+	for _, st := range mm.GetConsumedMocks() {
+		out[st.Name] = st
+	}
+	return out
+}
+
+// With the default environment every HTTP mock loads as session lifetime,
+// so keploy test stages every test's HTTP mocks in the session tier. The
+// learn step still tells them apart: the open test's are the ones its
+// mapping names (or recorded in its window); another test's is never paired,
+// even in a full record (the round-3 reviewer's repro).
+func TestALearnStepNeverPairsAnotherTestsRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	t1 := r3Mock("mock-t1", now, "GET", "/users/u1", "", `{"name":"alice"}`)
+	t2 := r3Mock("mock-t2", now.Add(time.Second), "GET", "/users/u2", "", `{"name":"bob"}`)
+	for _, m := range []*models.Mock{t1, t2} {
+		m.DeriveLifetime()
+	}
+	if t1.TestModeInfo.Lifetime != models.LifetimeSession {
+		t.Fatalf("precondition: an HTTP mock loads as %v", t1.TestModeInfo.Lifetime)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{t1, t2}, []string{"mock-t2"})
+	mm.SetMocksWithWindow(nil, session, now.Add(500*time.Millisecond), now.Add(2*time.Second))
+	p.ContinueTestErrorCapture() // test 2 begins
+
+	code, body := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"GET /users/u2x HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+	st := r3States(mm)
+	if _, learnedOnT1 := st["mock-t1"].ReqBodyNoise["url.path.1"]; learnedOnT1 || body == `{"name":"alice"}` {
+		t.Fatalf("test 2's call was paired with test 1's recording: answered %d %s, mock-t1 learned %v", code, body, st["mock-t1"].ReqBodyNoise)
+	}
+	if code != http.StatusOK || body != `{"name":"bob"}` {
+		t.Fatalf("test 2's call is its own recording's: %d %s", code, body)
+	}
+}
+
+// A late call of test 1 made after test 2's window opened, before its mocks
+// moved, still finds its earlier places in what test 1 served: the id that
+// flowed from test 1's create is refused, never learned as noise.
+func TestALearnStepLateCallKeepsItsEarlierPlaces(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	a := r3Mock("mock-a", now, "POST", "/orders", `{"order":"o-1"}`, `{}`)
+	b := r3Mock("mock-b", now.Add(time.Second), "GET", "/orders/o-1", "", `{"status":"new"}`)
+	for _, m := range []*models.Mock{a, b} {
+		m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow([]*models.Mock{a, b}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock) // as setMockManager installs it
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+
+	p.ContinueTestErrorCapture() // test 1 begins
+	body := `{"order":"o-9"}`
+	if code, _ := r3Send(t, p, mm, opts, "POST /orders HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body); code != http.StatusOK {
+		t.Fatalf("the create got %d", code)
+	}
+	if _, err := p.GetMockErrors(context.Background()); err != nil { // test 1 ends
+		t.Fatal(err)
+	}
+	p.ContinueTestErrorCapture() // test 2's window opens; the mocks have not moved
+
+	code, got := r3Send(t, p, mm, opts, "GET /orders/o-9 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+	if _, noise := r3States(mm)["mock-b"].ReqBodyNoise["url.path.1"]; noise {
+		t.Fatalf("the id that flowed from test 1's create became noise (answered %d %s)", code, got)
+	}
+}
+
+// A reused pool mock (recorded outside every test's window, so a full
+// record's to learn onto, and reusable) the learn step paired with an echo
+// answers every call of the round: what was learned rides on the consumed
+// state, not on the pooled recording. (A test's own mock answers one call of
+// its test: TestALearnStepOwnMockAnswersOnceSoTheNextIsPaired.)
+func TestALearnStepReusedMockWithAnEchoAnswersAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	m := r3Mock("mock-0", now, "POST", "/ping", `{"rid":"r-1"}`, `{"rid":"r-1"}`)
+	m.DeriveLifetime()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, []*models.Mock{m}, now.Add(-time.Hour), now.Add(time.Hour))
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	for i, rid := range []string{"r-2", "r-3"} {
+		body := `{"rid":"` + rid + `"}`
+		code, got := r3Send(t, p, mm, opts, "POST /ping HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+		if code != http.StatusOK || got != body {
+			misses, _ := p.GetMockErrors(context.Background())
+			t.Fatalf("call %d to a reusable mock got %d %s; misses %+v", i+1, code, got, misses)
+		}
+	}
+	if v := r3States(mm)["mock-0"].Variables; v["rid"].Bind != "body.rid" || !v["rid"].Echo {
+		t.Fatalf("the consumed state carries the echo: %+v", v)
+	}
+}
+
+// (Round-4 review repro.) an HTTP mock recorded before the first test, with per-test lifetime
+// (what DeriveLifetime gives an HTTP_CLIENT mock under
+// KEPLOY_STRICT_MOCK_WINDOW=1), is staged by the agent's own filter into the
+// startup tier. The learn step pairs it (its IsFiltered makes it own) and
+// serves it with an echo, but consumeWith -> DeleteFilteredMock ->
+// deleteStartupMock flags the state from the TREE's mock (mk), not the copy
+// carrying what was learned: the consumed state has neither the echo
+// variable nor any learned noise, so the recording never gets it.
+func TestALearnStepStartupTierMockKeepsWhatWasLearned(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	// The drifting ts shares no word with the answer: a word of a drift
+	// that the call's own answer holds is refused (an echo keploy cannot
+	// answer), never noise.
+	boot := r3Mock("mock-boot", now, "POST", "/token", `{"nonce":"n-1","ts":"t-7"}`, `{"nonce":"n-1"}`)
+	own := r3Mock("mock-t1", now.Add(2*time.Second), "GET", "/users/u1", "", `{}`)
+	for _, m := range []*models.Mock{boot, own} {
+		m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	}
+	start, end := now.Add(time.Second), now.Add(3*time.Second)
+	perTest, promoted := pkg.FilterPerTestAndLaxPromotedTierAware(context.Background(), zap.NewNop(), []*models.Mock{boot, own}, start, end, false, start)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedStartupCutoff(start)
+	mm.SetMocksWithWindow(perTest, promoted, start, end)
+	p.ContinueTestErrorCapture() // test 1 begins; the app's token call is lazy
+	body := `{"nonce":"n-2","ts":"t-8"}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /token HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK || got != `{"nonce":"n-2"}` {
+		t.Fatalf("precondition: the learn step pairs the start-up call and answers the echo: %d %s", code, got)
+	}
+	st := r3States(mm)["mock-boot"]
+	if _, ok := st.ReqBodyNoise["body.ts"]; !ok || st.Variables["nonce"].Bind == "" {
+		t.Fatalf("what F served the start-up call with is not on its consumed state: noise %v variables %+v", st.ReqBodyNoise, st.Variables)
+	}
+}
+
+// (Round-4 review repro.) a reusable pool mock the learn step pairs twice in
+// one test. The first call drifts the path id and the rid (both echoed), the
+// second only the rid. SetLearned REPLACES what the tree's copy carried, so
+// the consumed state ends with the rid echo alone: the path echo F served
+// with is never written, and the next replay misses the first call.
+func TestALearnStepReusedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	m := r3Mock("mock-0", now, "GET", "/users/u-1?rid=r-1", "", `{"id":"u-1","rid":"r-1"}`)
+	m.DeriveLifetime()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.SetMocksWithWindow(nil, []*models.Mock{m}, now.Add(-time.Hour), now.Add(time.Hour))
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	for _, c := range []struct{ target, want string }{
+		{"/users/u-2?rid=r-2", `{"id":"u-2","rid":"r-2"}`},
+		{"/users/u-1?rid=r-3", `{"id":"u-1","rid":"r-3"}`},
+	} {
+		code, got := r3Send(t, p, mm, opts, "GET "+c.target+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+		if code != http.StatusOK || got != c.want {
+			t.Fatalf("precondition: %s answered %d %s", c.target, code, got)
+		}
+	}
+	v := r3States(mm)["mock-0"].Variables
+	if len(v) < 2 {
+		t.Fatalf("the consumed state lost an echo F served the first call with: %+v", v)
+	}
+}
+
+// (Round-4 review repro.) keploy test's per-test call in mapping mode sends the test's names
+// merged with the set's start-up names (models.MergeStartupMockNames), so the
+// agent's FilterConfigMocksMapping marks every start-up mock IsFiltered, and
+// ownership() reads a start-up mock as the OPEN TEST'S OWN in every test. A
+// start-up call made lazily inside a test is then paired in a partial record
+// (LearnPool false), which design §7.5 says never changes the pool, and the
+// start-up mock may carry that test's variables.
+func TestALearnStepStartupMockIsNotTheOpenTestsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	boot := r3Mock("mock-boot", now, "POST", "/token", `{"nonce":"n-1"}`, `{"token":"t"}`)
+	t2 := r3Mock("mock-t2", now.Add(2*time.Second), "GET", "/users/u2", "", `{}`)
+	for _, m := range []*models.Mock{boot, t2} {
+		m.DeriveLifetime()
+	}
+	names := models.MergeStartupMockNames([]models.MockEntry{{Name: "mock-t2"}}, []string{"mock-boot"})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{boot, t2}, names)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(nil, session, now.Add(time.Second), now.Add(3*time.Second))
+	// keploy test seeds every recorded test's window: the start-up's mock is
+	// outside all of them.
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Second), End: now.Add(3 * time.Second)}})
+	p.ContinueTestErrorCapture()
+	body := `{"nonce":"n-2"}`
+	code, _ := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: false},
+		"POST /token HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code == http.StatusOK {
+		t.Fatalf("a partial record paired the start-up mock as the test's own: learned %v", r3States(mm)["mock-boot"].ReqBodyNoise)
+	}
+}
+
+// (Round-5 review repro.) with the default environment an HTTP mock loads as
+// session lifetime, reusable. A test sends one app-minted session id on two
+// identical calls (recorded mock-a, mock-b). Each of the test's own mocks
+// answers one call of it (design §5.2): the first call pairs mock-a and,
+// with nothing earlier, learns the id as noise there; the second is not
+// answered by mock-a through that noise, but pairs mock-b, where the id is
+// the variable bound at mock-a. So CI refuses a second call that sends
+// another id than the first.
+func TestALearnStepOwnMockAnswersOnceSoTheNextIsPaired(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	mk := func(name string, at time.Time) *models.Mock {
+		m := r3Mock(name, at, "POST", "/events", `{"session":"s-1","kind":"view"}`, `{"ok":true}`)
+		m.DeriveLifetime()
+		return m
+	}
+	a, b := mk("mock-a", now), mk("mock-b", now.Add(time.Second))
+	if a.TestModeInfo.Lifetime != models.LifetimeSession {
+		t.Fatalf("precondition: lifetime %v", a.TestModeInfo.Lifetime)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(nil, []*models.Mock{a, b}, now.Add(-time.Hour), now.Add(time.Hour))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	body := `{"session":"s-9","kind":"view"}`
+	for i := 0; i < 2; i++ {
+		code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true},
+			"POST /events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+		if code != http.StatusOK {
+			misses, _ := p.GetMockErrors(context.Background())
+			t.Fatalf("F call %d: %d %s %+v", i, code, got, misses)
+		}
+	}
+	st := r3States(mm)
+	if v := st["mock-b"].Variables["session"]; v.Recorded != "s-1" || len(v.Use) != 1 || v.Use[0] != "body.session" {
+		t.Fatalf("the second call's id is the variable bound at mock-a: mock-b %+v", st["mock-b"])
+	}
+	if bv := st["mock-b"].Binds["mock-a"]["session"]; bv.Bind != "body.session" {
+		t.Fatalf("the bind rides onto mock-a: %+v", st["mock-b"].Binds)
+	}
+
+	// A third identical call: both answered, so it is a miss, never mock-a
+	// again through what F learned onto it.
+	code, _ := r3Send(t, p, mm, models.OutgoingOptions{Learn: true},
+		"POST /events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code == http.StatusOK {
+		t.Fatal("a call more than the test recorded was answered by a mock that answered already")
+	}
+}
+
+// (Round-5 review repro.) every HTTP mock loads as session lifetime by
+// default, so test 1's recordings stay visible in test 2. A visible
+// recording of another recorded test is no earlier place of test 2's calls:
+// test 1's call in the same second does not refuse test 2's own clock read
+// (request_changed), as the mocks served before test 2 began do not.
+func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	m1 := r3Mock("mock-t1", now.Add(500*time.Millisecond), "POST", "/ping", `{"at":1760436000}`, `{}`)
+	m2 := r3Mock("mock-t2", now.Add(2500*time.Millisecond), "POST", "/pong", `{"at":1760436000}`, `{}`)
+	for _, m := range []*models.Mock{m1, m2} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}, {Start: now.Add(2 * time.Second), End: now.Add(3 * time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{m1, m2}, []string{"mock-t2"})
+	mm.SetMocksWithWindow(nil, session, now.Add(2*time.Second), now.Add(3*time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture() // test 1 (nothing called)
+	_, _ = p.GetMockErrors(context.Background())
+	p.ContinueTestErrorCapture() // test 2
+	body := `{"at":1760436093}`
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+		"POST /pong HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	if code != http.StatusOK {
+		misses, _ := p.GetMockErrors(context.Background())
+		t.Fatalf("test 2's own clock read was refused because test 1's recording (same second) is visible: %d %s %+v", code, got, misses)
+	}
+	if _, ok := r3States(mm)["mock-t2"].ReqBodyNoise["body.at"]; !ok {
+		t.Fatalf("test 2's clock read is noise: %+v", r3States(mm)["mock-t2"])
+	}
+}
+
+// (Round-6 review repro, real MockManager with keploy test's
+// staging: default session lifetime, the test's mapping, seeded windows.) A
+// Jaeger-traced app sends its per-test trace id on both calls, each with a
+// fresh span id. In F the second call's uber-trace-id shares the trace id
+// with the first call's, next to a fresh span in both: it flowed, so the
+// call is refused, never learned as noise.
+func TestALearnStepATraceIdNextToAFreshSpanIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	T1, T2 := "4bf92f3577b34da6a3ce929d0e0e4736", "0af7651916cd43dd8448eb211c80319c"
+	a := r3Mock("mock-a", now.Add(100*time.Millisecond), "GET", "/users/7", "", `{"id":7}`)
+	b := r3Mock("mock-b", now.Add(200*time.Millisecond), "GET", "/orders/7", "", `{"orders":[]}`)
+	a.Spec.HTTPReq.Header["Uber-Trace-Id"] = T1 + ":00f067aa0ba902b7:a1b2c3d4e5f60718:1"
+	b.Spec.HTTPReq.Header["Uber-Trace-Id"] = T1 + ":11f067aa0ba902b8:a1b2c3d4e5f60718:1"
+	for _, m := range []*models.Mock{a, b} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{a, b}, []string{"mock-a", "mock-b"})
+	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true}
+	if code, got := r3Send(t, p, mm, opts, "GET /users/7 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nUber-Trace-Id: "+T2+":b7ad6b7169203331:0102030405060708:1\r\n\r\n"); code != http.StatusOK {
+		t.Fatalf("precondition: %d %s", code, got)
+	}
+	code, got := r3Send(t, p, mm, opts, "GET /orders/7 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nUber-Trace-Id: "+T2+":c7ad6b7169203332:0102030405060708:1\r\n\r\n")
+	st := r3States(mm) // GetConsumedMocks drains: read once
+	if _, noise := st["mock-b"].ReqBodyNoise["header.uber-trace-id"]; noise || code == http.StatusOK {
+		t.Fatalf("the trace id that flowed from mock-a was learned on mock-b (answered %d %s): mock-b noise %v", code, got, st["mock-b"].ReqBodyNoise)
+	}
+}
+
+// (Round-6 review repro.) an EXTRA call identical to an own mock that
+// answered already (a cold-cache race in F: two goroutines fetch the flags)
+// is one call more than recorded (design §5.2): a miss. The spent mock still
+// competes, so the call is never paired with a farther unanswered key-mate
+// (same method, host and segment count), which would learn the path segment
+// that tells the endpoints apart as noise onto that other recording.
+func TestALearnStepAnExtraIdenticalCallIsAMiss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	f := r3Mock("mock-flags", now.Add(100*time.Millisecond), "GET", "/v1/flags", "", `{"beta":true}`)
+	pr := r3Mock("mock-profile", now.Add(200*time.Millisecond), "GET", "/v1/profile", "", `{"name":"alice"}`)
+	for _, m := range []*models.Mock{f, pr} {
+		m.DeriveLifetime()
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{f, pr}, []string{"mock-flags", "mock-profile"})
+	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true}
+	flags := "GET /v1/flags HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	if code, got := r3Send(t, p, mm, opts, flags); code != http.StatusOK || got != `{"beta":true}` {
+		t.Fatalf("precondition: %d %s", code, got)
+	}
+	code, got := r3Send(t, p, mm, opts, flags) // the extra call
+	st := r3States(mm)
+	if _, noise := st["mock-profile"].ReqBodyNoise["url.path.1"]; noise || got == `{"name":"alice"}` {
+		t.Fatalf("the extra flags call was paired with mock-profile: answered %d %s, mock-profile learned %v", code, got, st["mock-profile"].ReqBodyNoise)
+	}
+}
+
+// (Round-6 review repro.) default HTTP mocks load as session lifetime with
+// cursor+saturate consumption. A test reads a counter three times (recorded
+// answers 1, 2, 3) and reports the last value it read. The test's own
+// recordings answer in recorded order, each once, with no stateful cursor
+// over a group that answering shrinks: 1, 2, 3, so the report is the one
+// recorded and nothing is learned on it.
+func TestALearnStepOwnRecordingsAnswerInRecordedOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	var all []*models.Mock
+	for i, n := range []string{"1", "2", "3"} {
+		all = append(all, r3Mock("mock-c"+n, now.Add(time.Duration(100*(i+1))*time.Millisecond), "GET", "/counter", "", `{"n":`+n+`}`))
+	}
+	all = append(all, r3Mock("mock-report", now.Add(500*time.Millisecond), "POST", "/report", `{"last":3}`, `{}`))
+	var names []string
+	for _, m := range all {
+		m.DeriveLifetime()
+		names = append(names, m.Name)
+	}
+	if all[0].TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		t.Fatalf("precondition: consume %v", all[0].TestModeInfo.Consume)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), all, names)
+	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true}
+	var got []string
+	for i := 0; i < 3; i++ {
+		_, body := r3Send(t, p, mm, opts, "GET /counter HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+		got = append(got, body)
+	}
+	last := got[2][len(`{"n":`) : len(got[2])-1]
+	report := `{"last":` + last + `}`
+	_, _ = r3Send(t, p, mm, opts, "POST /report HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(report))+"\r\n\r\n"+report)
+	if got[0] != `{"n":1}` || got[1] != `{"n":2}` || got[2] != `{"n":3}` {
+		t.Fatalf("F answered the recorded reads out of order: %v; then mock-report learned %v", got, r3States(mm)["mock-report"].ReqBodyNoise)
+	}
+}
+
+// (Round-7 review repro.) per-test mocks (KEPLOY_STRICT_MOCK_WINDOW's
+// lifetime) are deleted from the store when they answer. An own mock that
+// answered still competes as spent: an extra identical call is one call more
+// than recorded, a miss, never paired with the farther key-mate of another
+// endpoint (which would learn the path segment that tells them apart).
+func TestALearnStepAConsumedPerTestMockStillCompetes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	f := r3Mock("mock-flags", now.Add(100*time.Millisecond), "GET", "/v1/flags", "", `{"beta":true}`)
+	pr := r3Mock("mock-profile", now.Add(200*time.Millisecond), "GET", "/v1/profile", "", `{"name":"alice"}`)
+	for _, m := range []*models.Mock{f, pr} {
+		m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.SetMocksWithWindow([]*models.Mock{f, pr}, nil, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	opts := models.OutgoingOptions{Learn: true}
+	flags := "GET /v1/flags HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	if code, got := r3Send(t, p, mm, opts, flags); code != http.StatusOK || got != `{"beta":true}` {
+		t.Fatalf("precondition: %d %s", code, got)
+	}
+	if per, _ := mm.GetPerTestMocksInWindow(); len(per) != 1 {
+		t.Fatalf("precondition: the answered per-test mock left the store: %d left", len(per))
+	}
+	code, got := r3Send(t, p, mm, opts, flags) // the extra call
+	st := r3States(mm)
+	if _, noise := st["mock-profile"].ReqBodyNoise["url.path.1"]; noise || code == http.StatusOK {
+		t.Fatalf("the extra flags call was paired with mock-profile: answered %d %s, mock-profile learned %v", code, got, st["mock-profile"].ReqBodyNoise)
+	}
+}
+
+// (Round-7 review repro.) a protocol-phase mock (a handshake, a token
+// fetch: type config) recorded inside the test's window is never the test's
+// own: it answers any number of the test's identical requests, as the pool
+// does (design §5.2), and is never paired.
+func TestALearnStepAProtocolPhaseMockAnswersAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	cfg := r3Mock("mock-flags", now.Add(100*time.Millisecond), "GET", "/v1/flags", "", `{"beta":true}`)
+	cfg.Spec.Metadata["type"] = "config"
+	cfg.Spec.Metadata["passthrough"] = string(models.PassThroughRecordOne)
+	cfg.DeriveLifetime()
+	if !cfg.IsProtocolPhase() {
+		t.Fatal("precondition: protocol-phase")
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{cfg}, nil)
+	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	p.ContinueTestErrorCapture()
+	flags := "GET /v1/flags HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	for i := 0; i < 2; i++ {
+		if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, flags); code != http.StatusOK {
+			misses, _ := p.GetMockErrors(context.Background())
+			t.Fatalf("call %d to a protocol-phase mock missed: %d %s %+v", i, code, got, misses)
+		}
+	}
+}
+
+// (Round-8 review.) per-test tier (consumed mocks are deleted), concurrent identical calls,
+// more calls than recordings: each recording answers once, the extra calls
+// miss, and the same-key recording of another endpoint is never paired
+// (gone spent mocks still compete), under -race.
+func TestALearnStepConcurrentExtraCallsOnPerTestMocks(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, calls := range []int{3, 5, 8} {
+		for round := 0; round < 5; round++ {
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			now := time.Now()
+			var all []*models.Mock
+			var names []string
+			for i := 0; i < 3; i++ {
+				all = append(all, r3Mock("mock-c"+strconv.Itoa(i), now.Add(time.Duration(100*(i+1))*time.Millisecond), "GET", "/v1/counter", "", `{"n":`+strconv.Itoa(i)+`}`))
+			}
+			all = append(all, r3Mock("mock-other", now.Add(600*time.Millisecond), "GET", "/v1/other", "", `{"other":true}`))
+			for _, m := range all {
+				m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+				names = append(names, m.Name)
+			}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+			perTest := pkg.FilterTcsMocksMapping(context.Background(), zap.NewNop(), all, names)
+			mm.SetMocksWithWindow(perTest, nil, now, now.Add(time.Second))
+			mm.SetServedObserver(p.learnTracker.ServedMock)
+			p.ContinueTestErrorCapture()
+			opts := models.OutgoingOptions{Learn: true}
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			got := map[string]int{}
+			misses := 0
+			for i := 0; i < calls; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					code, body := r3Send(t, p, mm, opts, "GET /v1/counter HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+					mu.Lock()
+					defer mu.Unlock()
+					if code == http.StatusOK {
+						got[body]++
+					} else {
+						misses++
+					}
+				}()
+			}
+			wg.Wait()
+			st := r3States(mm)
+			mm.Close()
+			if len(st["mock-other"].ReqBodyNoise) > 0 || got[`{"other":true}`] > 0 {
+				t.Fatalf("calls=%d: mock-other was paired: %v %v", calls, got, st["mock-other"].ReqBodyNoise)
+			}
+			for body, n := range got {
+				if n > 1 {
+					t.Fatalf("calls=%d: %s answered %d times: %v", calls, body, n, got)
+				}
+			}
+			if want := calls - 3; misses != want {
+				t.Fatalf("calls=%d: %d misses, want %d (%v)", calls, misses, want, got)
+			}
+		}
+	}
+}
+
+// (Round-8 review.) a set seeded with no recorded windows leaves the learn
+// step none, not the previous set's.
+func TestSeedRecordedWindowsOfASetWithNoneForgetsThePrevious(t *testing.T) {
+	now := time.Now()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	if inside, known := mm.InRecordedTestWindow(now.Add(time.Millisecond)); !inside || !known {
+		t.Fatalf("precondition: inside %v known %v", inside, known)
+	}
+	mm.SeedRecordedWindows(nil)
+	if _, known := mm.InRecordedTestWindow(now.Add(time.Millisecond)); known {
+		t.Fatal("the previous set's windows outlived a set with none")
+	}
+}
+
+// Under exact serving (S12: keploy test's agent under the switch), what the
+// learn step learned as a variable rides the consumed mock's state, as on
+// every other door: persistLearned writes it onto the recording.
+func TestALearnStepVariableRidesExactServing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, exact := range []bool{false, true} {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		p.ContinueTestErrorCapture()
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		rec := batchMock()
+		now := time.Now()
+		rec.Spec.ReqTimestampMock = now
+		if exact {
+			mm.SetMocksWithWindow([]*models.Mock{rec}, nil, models.BaseTime, now.Add(time.Hour))
+			mm.ServeExactTest("test-1", []*models.Mock{rec})
+		} else {
+			mm.SetMocksWithWindow([]*models.Mock{rec}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+		}
+		mm.SetServedObserver(p.learnTracker.ServedMock)
+		app, agentEnd := net.Pipe()
+		ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+		ctx = learn.WithTracker(ctx, p.learnTracker)
+		go func() {
+			_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{Learn: true})
+			_ = agentEnd.Close()
+		}()
+		if _, err := app.Write([]byte(post(`{"rid":"r-2","ids":[1,2,3]}`))); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		_ = app.Close()
+		consumed := mm.GetConsumedMocks()
+		if resp.StatusCode != http.StatusOK || len(consumed) != 1 || len(consumed[0].Variables) == 0 {
+			t.Fatalf("exact=%v: answered %d %s; consumed %+v: the learned echo does not ride the state", exact, resp.StatusCode, body, consumed)
+		}
+	}
+}

@@ -518,6 +518,25 @@ type Test struct {
 	// nondeterminism. Left false so the CLI and cloud replay keep today's
 	// behaviour; only the auto-replay caller opts in.
 	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
+	// Learn runs the learn step in this replay (design v14 §7.2, row L;
+	// models.OutgoingOptions.Learn), under the proven switch: the agent pairs
+	// a call no recorded mock answers exactly with the mock it drifted from,
+	// and the replay writes what it learned onto the recording. Only record's
+	// full round sets it, in memory: the round that replays the build that
+	// was just recorded. Never read from keploy.yml or a flag, so a replay in
+	// CI can never rewrite the recording it judges.
+	Learn bool `json:"-" yaml:"-" mapstructure:"-"`
+	// LearnPool lets the learn step pair the set's pool mocks too: only a
+	// full record replaces the pool (models.OutgoingOptions.LearnPool).
+	LearnPool bool `json:"-" yaml:"-" mapstructure:"-"`
+	// LearnTests, when not nil, are the tests whose recordings the record has
+	// just made: what the learn step learns is written onto their own mocks
+	// only (and onto the pool's with LearnPool). A test that keeps its
+	// previous recording keeps it as it is: the current build's drift against
+	// an older build's recording is not non-determinism. nil writes onto
+	// every mock (keploy record's auto-replay, whose sets were all just
+	// recorded).
+	LearnTests map[string]bool `json:"-" yaml:"-" mapstructure:"-"`
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
 	// SchemaNoise* pair below is the previous one, kept so an existing
 	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via
