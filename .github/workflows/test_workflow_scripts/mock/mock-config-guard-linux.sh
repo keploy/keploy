@@ -129,21 +129,21 @@ succeeds() {
 cases() {
   local P="$1" c m
   PROVEN="$2"
-  mkcase ${P}fifo-config
+  mkcase "${P}fifo-config"
   mkfifo "$WORK/${P}fifo-config/keploy.yml"
-  run ${P}fifo-config
-  refuses ${P}fifo-config "keploy.yml: not a regular file: it is a FIFO"
+  run "${P}fifo-config"
+  refuses "${P}fifo-config" "keploy.yml: not a regular file: it is a FIFO"
 
-  mkcase ${P}devzero-config
+  mkcase "${P}devzero-config"
   ln -s /dev/zero "$WORK/${P}devzero-config/keploy.yml"
-  run ${P}devzero-config
-  refuses ${P}devzero-config "keploy.yml: not a regular file: it is a device"
+  run "${P}devzero-config"
+  refuses "${P}devzero-config" "keploy.yml: not a regular file: it is a device"
 
-  mkcase ${P}fifo-override
+  mkcase "${P}fifo-override"
   printf 'path: ""\n' >"$WORK/${P}fifo-override/keploy.yml"
   mkfifo "$WORK/${P}fifo-override/${P}fifo-override.keploy.yml"
-  run ${P}fifo-override
-  refuses ${P}fifo-override "failed to merge override config file" "${P}fifo-override.keploy.yml: not a regular file: it is a FIFO"
+  run "${P}fifo-override"
+  refuses "${P}fifo-override" "failed to merge override config file" "${P}fifo-override.keploy.yml: not a regular file: it is a FIFO"
 
   # A report, or the reports directory, keploy cannot read is reported as an
   # error, as any unreadable report is. (`keploy report` then exits 0, as it
@@ -164,7 +164,7 @@ cases() {
     returned "$c" && says "$c" "$m"
   done
 
-  mkcase ${P}large-report
+  mkcase "${P}large-report"
   printf 'path: ""\n' >"$WORK/${P}large-report/keploy.yml"
   mkdir -p "$WORK/${P}large-report/keploy/reports/test-run-0"
   # 1200 passing tests, each with a 20 KB JSON body that the matcher records as
@@ -191,16 +191,16 @@ cases() {
   # Reading 75 MB takes CI's race-built binary about 25 s and 780 MB (1 to 3 s
   # and 260 MB without -race). This case shows keploy reads what it writes, not
   # that a read is bounded, so it runs with room: 180 s and 2 GiB.
-  run ${P}large-report 180 2g
+  run "${P}large-report" 180 2g
   if [ "$(cat "$WORK/${P}large-report/exit")" -ne 0 ] || ! grep -aqF "test-1200" "$WORK/${P}large-report/out.log"; then
     fail "${P}large-report: keploy did not read a report it writes (exit $(cat "$WORK/${P}large-report/exit"))"
     tail -n 5 "$WORK/${P}large-report/out.log"
   fi
 
-  mkcase ${P}control
+  mkcase "${P}control"
   printf 'path: ""\nappName: demo\n' >"$WORK/${P}control/keploy.yml"
-  run ${P}control
-  succeeds ${P}control
+  run "${P}control"
+  succeeds "${P}control"
 }
 
 cases "" ""

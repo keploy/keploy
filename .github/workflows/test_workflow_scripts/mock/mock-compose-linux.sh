@@ -12,9 +12,11 @@
 #
 # Without the proven switch: today's default, which the flip deletes with the
 # switch. Under KEPLOY_PROVEN=1, which the flip makes the default, this
-# release runs a mock record or replay's test command natively only: keploy
-# cannot tell, inside a container, which process runs the tests. Step 0 checks
-# both are refused before anything starts: no compose project, no agent.
+# release runs a mock record's test command natively only: keploy cannot
+# tell, inside a container, which process runs the tests; and this build
+# refuses every replay under the switch, as it does not judge each test.
+# Step 0 checks both are refused before anything starts: no compose project,
+# no agent.
 # The runner's harness speaks scope protocol v1 (keploy_v1.py); without the
 # switch the agent has no claim route, and it speaks the scope API as it was.
 #
@@ -208,8 +210,9 @@ for verb in record replay; do
   RC=$?
   echo "$verb under the switch exit=$RC"
   [ "$RC" -eq 1 ] || { echo "FAIL: under the switch a compose $verb should be refused with exit 1, got $RC"; tail -20 "proven-$verb.log"; FAIL=1; }
-  grep -q "keploy mock $verb with KEPLOY_PROVEN runs the test command natively in this release" "proven-$verb.log" ||
-    { echo "FAIL: the refused compose $verb does not say this release runs the test command natively"; FAIL=1; }
+  WHY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
+  [ "$verb" = replay ] && WHY="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+  grep -qF "$WHY" "proven-$verb.log" || { echo "FAIL: the refused compose $verb does not say: $WHY"; FAIL=1; }
   no_project_started "proven-$verb.log" "a compose $verb under the switch"
 done
 cleanup

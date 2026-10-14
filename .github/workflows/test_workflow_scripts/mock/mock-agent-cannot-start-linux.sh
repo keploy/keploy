@@ -45,9 +45,11 @@
 #   unprivileged, no-tracefs  record fails as above (3, 6); this build refuses
 #                             the replay first, as it does any replay under
 #                             the switch: it does not judge each test       -> 1
-#   docker-unprivileged,      docker mode is refused before anything is
-#   docker-3                  checked or changed: no docker call, the pinned
-#                             perf_event_paranoid as it was                  -> 1
+#   docker-unprivileged,      refused before anything is checked or
+#   docker-3                  changed: no docker call, the pinned
+#                             perf_event_paranoid as it was. The record is
+#                             refused for docker mode; the replay first for
+#                             wanting a build that judges each test          -> 1
 # (agent-no-ipv4 runs the agent alone: an agent takes the switch only from
 # the --proven flag of the keploy that starts it, and under the switch no
 # keploy starts an agent container.)
@@ -209,10 +211,9 @@ check_proven() {
 JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
 check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
 check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged
-check_proven docker-unprivileged 1 "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" \
-  1 "keploy mock replay with KEPLOY_PROVEN runs the test command natively in this release" -e AGENT_EXIT=0
-check_proven docker-3 1 "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" \
-  1 "keploy mock replay with KEPLOY_PROVEN runs the test command natively in this release" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
+NATIVELY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
+check_proven docker-unprivileged 1 "$NATIVELY" 1 "$JUDGES" -e AGENT_EXIT=0
+check_proven docker-3 1 "$NATIVELY" 1 "$JUDGES" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 
 rm -rf "$WORK"
 if [ "$FAIL" -ne 0 ]; then
