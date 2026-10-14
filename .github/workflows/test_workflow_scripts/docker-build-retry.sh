@@ -69,19 +69,28 @@
 # module graph over the network on every build; a cache mount or vendoring in
 # the samples repos would remove the exposure instead of retrying it.
 #
+# The same transport set covers the proxy's 5xx answers and a cut response
+# (`read "https://...": unexpected EOF`, anchored on the URL so a compiler's or
+# bash's bare "unexpected EOF" never matches), and pip's transport failures in
+# the Python samples' builds: a read that timed out, a download cut short, a
+# connection that never came back. A missing package or a bad pin says
+# "Could not find a version" or "No matching distribution" and is not retried.
+#
 # Scope caveat: the grep is over the whole build log, and the compose call sites
 # build several services at once, so one service's transient blip retries the
 # others too — including a sibling's genuine compile break.
-DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate limit exceeded|stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer'
+DOCKER_BUILD_RETRY_RE='toomanyrequests|too many requests|pull rate limit|rate limit exceeded|stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|read "https?://[^"]*": unexpected EOF|ReadTimeoutError|incomplete-download|Max retries exceeded'
 
 # docker_build_retry <command> [args...]
 #
-# Runs the build, echoing its output, and retries with exponential backoff
-# only while the failure looks transient — a Docker Hub rate limit, or a
-# module/registry fetch that failed in transport rather than in the compiler.
+# Runs the build, echoing its output, and retries it only while the failure
+# looks transient — a Docker Hub rate limit, or a module/registry fetch that
+# failed in transport rather than in the compiler. The schedule is the lanes'
+# shared fetch rule (fetch.sh): at most 5 attempts, attempt x 10 s between them.
 docker_build_retry() {
-    local _max="${DOCKER_BUILD_RETRY_ATTEMPTS:-4}"
-    local _backoff="${DOCKER_BUILD_RETRY_BACKOFF:-15}"
+    local _max="${DOCKER_BUILD_RETRY_ATTEMPTS:-5}"
+    local _base="${DOCKER_BUILD_RETRY_BACKOFF:-10}"
+    local _backoff
     local _attempt=1
     local _rc=0
     local _log
@@ -120,10 +129,10 @@ docker_build_retry() {
             exit 1
         fi
 
+        _backoff=$((_base * _attempt))
         echo "Transient fetch failure (exit ${_rc}); retrying in ${_backoff}s…"
         sleep "$_backoff"
         _attempt=$((_attempt + 1))
-        _backoff=$((_backoff * 2))
     done
 }
 
@@ -153,11 +162,13 @@ DOCKER_PULL_RETRY_RE="${DOCKER_BUILD_RETRY_RE}|client\.timeout|context deadline 
 #
 # Shared body of docker_pull_retry / docker_compose_pull_retry: run the fetch,
 # retry only while the failure looks transient, abort otherwise. <what> names
-# the target in the messages.
+# the target in the messages. The schedule is the lanes' shared fetch rule
+# (fetch.sh): at most 5 attempts, attempt x 10 s between them.
 _docker_fetch_retry() {
     local _what="$1"; shift
-    local _max="${DOCKER_PULL_RETRY_ATTEMPTS:-4}"
-    local _backoff="${DOCKER_PULL_RETRY_BACKOFF:-5}"
+    local _max="${DOCKER_PULL_RETRY_ATTEMPTS:-5}"
+    local _base="${DOCKER_PULL_RETRY_BACKOFF:-10}"
+    local _backoff
     local _attempt=1
     local _rc=0
     local _log
@@ -191,10 +202,10 @@ _docker_fetch_retry() {
             exit 1
         fi
 
+        _backoff=$((_base * _attempt))
         echo "Transient registry failure fetching ${_what} (exit ${_rc}); retrying in ${_backoff}s…"
         sleep "$_backoff"
         _attempt=$((_attempt + 1))
-        _backoff=$((_backoff * 2))
     done
 }
 

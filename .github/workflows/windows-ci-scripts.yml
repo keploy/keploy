@@ -40,15 +40,16 @@ jobs:
         run: ./.github/scripts/windows/reap-keploy-containers.tests.ps1
 
   # The lanes' shared fetch rule (test_workflow_scripts/fetch.sh, go-retry.sh,
-  # go-retry.ps1 and go-dedup's Invoke-DockerBuildWithRetry): the same rule as
-  # keploy/enterprise's and keploy/ebpf's lanes, tested with stubs, no network.
+  # docker-build-retry.sh, go-retry.ps1 and go-dedup's
+  # Invoke-DockerBuildWithRetry): the same rule as keploy/enterprise's and
+  # keploy/ebpf's lanes, tested with stubs, no network.
   fetch:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test fetch.sh and go-retry.sh (bash)
+      - name: Test fetch.sh, go-retry.sh and docker-build-retry.sh (bash)
         run: bash .github/workflows/test_workflow_scripts/fetch-test.sh
 
       - name: Test go-retry.ps1 and the go-dedup docker build retry (pwsh)
