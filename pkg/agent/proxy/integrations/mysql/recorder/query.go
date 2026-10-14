@@ -654,6 +654,12 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 		}
 		if stmtPrepareOk != nil {
 			delete(lostStatements, stmtPrepareOk.StatementID)
+			if prepPkt, ok := pendingCommand.Message.(*mysql.StmtPreparePacket); ok && prepPkt != nil && decodeCtx != nil {
+				if decodeCtx.StmtIDToQuery == nil {
+					decodeCtx.StmtIDToQuery = make(map[uint32]string)
+				}
+				decodeCtx.StmtIDToQuery[stmtPrepareOk.StatementID] = prepPkt.Query
+			}
 		}
 		// If the recorder is force-flushing mid-result-set (i.e., a new client
 		// command arrived, or the connection closed, before we observed the
@@ -706,7 +712,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 			mockType = "connection"
 		}
 		// (res>=req order is clamped centrally in recordMock for every mysql mock.)
-		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts)
+		recordMock(ctx, requests, responses, mockType, pendingCommand.Header.Type, respOp, mocks, reqTimestamp, resTimestamp, opts, decodeCtx)
 		resetActiveExchange()
 	}
 
@@ -805,7 +811,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 				// ResTimestampMock before ReqTimestampMock.
 				if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 					requests := []mysql.Request{{PacketBundle: *commandPkt}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts, decodeCtx)
 					continue
 				}
 
@@ -815,7 +821,7 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					logger.Debug("Skipping unknown command packet to avoid stream desync",
 						zap.String("type", commandPkt.Header.Type))
 					requests := []mysql.Request{{PacketBundle: *commandPkt}}
-					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts)
+					recordMock(ctx, requests, []mysql.Response{}, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, item.ts, item.ts, opts, decodeCtx)
 					continue
 				}
 
@@ -1432,7 +1438,7 @@ func relayRawPassthrough(clientConn, destConn net.Conn) {
 	proxyutil.RelayRawPassthrough(clientConn, destConn)
 }
 
-// statementOf returns the prepared statement a response-bearing command runs.
+// statementOf returns the prepared statement a command runs or references.
 func statementOf(msg interface{}) (uint32, bool) {
 	switch m := msg.(type) {
 	case *mysql.StmtExecutePacket:
@@ -1440,6 +1446,10 @@ func statementOf(msg interface{}) (uint32, bool) {
 	case *mysql.StmtFetchPacket:
 		return m.StatementID, true
 	case *mysql.StmtResetPacket:
+		return m.StatementID, true
+	case *mysql.StmtClosePacket:
+		return m.StatementID, true
+	case *mysql.StmtSendLongDataPacket:
 		return m.StatementID, true
 	}
 	return 0, false

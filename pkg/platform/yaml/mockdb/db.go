@@ -275,6 +275,40 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.String("detectedFormat", string(detectedFormat)),
 		zap.Time("pruneBefore", pruneBefore))
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if mockNames == nil {
+		mockNames = make(map[string]models.MockState)
+	}
+
+	// Pre-scan to preserve MySQL prepared statement dependencies:
+	// if an EXECUTE/CLOSE mock is kept, its PREPARE (and CLOSE) mocks
+	// must also be kept so statement queries stay resolvable at replay.
+	tracker := newMySQLStmtTracker()
+	preReader, err := yaml.NewMockReaderF(context.Background(), zap.NewNop(), path, mockFileName, detectedFormat)
+	if err == nil {
+		for {
+			if err := ctx.Err(); err != nil {
+				_ = preReader.Close()
+				return err
+			}
+			doc, readErr, decodeErr := nextDoc(preReader, zap.NewNop(), true)
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil || decodeErr != nil {
+				break
+			}
+			for _, mock := range doc.mocks {
+				tracker.inspect(mock, mockNames, pruneBefore, startupCutoffTime)
+			}
+		}
+		_ = preReader.Close()
+		tracker.apply(mockNames)
+	}
+
 	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
@@ -404,6 +438,18 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 	defer rw.discard()
+
+	if mockNames == nil {
+		mockNames = make(map[string]models.MockState)
+	}
+
+	// Pre-scan to preserve MySQL prepared statement dependencies.
+	tracker := newMySQLStmtTracker()
+	_ = forEachGobMock(gobPath, func(mock *models.Mock) error {
+		tracker.inspect(mock, mockNames, pruneBefore, startupCutoffTime)
+		return nil
+	})
+	tracker.apply(mockNames)
 
 	// See the YAML path above for why per-mock collection is gated on
 	// debug level — the gob path is the one most likely to hit

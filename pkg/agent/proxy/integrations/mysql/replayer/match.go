@@ -921,11 +921,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					// query-aware CLOSE matching via recordedPrepByConn + runtime map
 					var expectedQuery, actualQuery string
 					if expClose, _ := mockReq.PacketBundle.Message.(*mysql.StmtClosePacket); expClose != nil {
-						q, err := recordedQuery(mock.Spec.Metadata["connID"], expClose.StatementID)
-						if err != nil {
-							return nil, false, nil, err
+						if q := mock.Spec.Metadata["query"]; q != "" {
+							expectedQuery = q
+						} else if q := mockReq.PacketBundle.Meta["query"]; q != "" {
+							expectedQuery = q
+						} else {
+							q, err := recordedQuery(mock.Spec.Metadata["connID"], expClose.StatementID)
+							if err != nil {
+								return nil, false, nil, err
+							}
+							expectedQuery = q
 						}
-						expectedQuery = q
 					}
 					if actClose, _ := req.PacketBundle.Message.(*mysql.StmtClosePacket); actClose != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
 						actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actClose.StatementID])
@@ -1054,11 +1060,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 						var expectedQuery, actualQuery string
 						if expMsg != nil {
-							q, err := recordedQuery(mock.Spec.Metadata["connID"], expMsg.StatementID)
-							if err != nil {
-								return nil, false, nil, err
+							if q := mock.Spec.Metadata["query"]; q != "" {
+								expectedQuery = q
+							} else if q := mockReq.PacketBundle.Meta["query"]; q != "" {
+								expectedQuery = q
+							} else {
+								q, err := recordedQuery(mock.Spec.Metadata["connID"], expMsg.StatementID)
+								if err != nil {
+									return nil, false, nil, err
+								}
+								expectedQuery = q
 							}
-							expectedQuery = q
 						}
 						if actMsg != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
 							actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])

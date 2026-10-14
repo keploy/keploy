@@ -1,9 +1,12 @@
 package replayer
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -85,4 +88,125 @@ func TestMatchStmtExecuteQueryAware_QueryExactSignal(t *testing.T) {
 			t.Errorf("queryExactMatched must be false for structurally different queries")
 		}
 	})
+}
+
+func TestMatchCommand_ExecMatchesMetadataQueryWithoutPrepareMock(t *testing.T) {
+	logger := zap.NewNop()
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	buildExecMock := func(name, query, connID string, stmtID uint32, paramVal string) *models.Mock {
+		b := execBundle(paramVal)
+		b.Message.(*mysql.StmtExecutePacket).StatementID = stmtID
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Kind:    models.MySQL,
+			Name:    name,
+			Spec: models.MockSpec{
+				Metadata: map[string]string{
+					"connID": connID,
+					"type":   "mocks",
+					"query":  query,
+				},
+				ReqTimestampMock: t0,
+				MySQLRequests:    []mysql.Request{{PacketBundle: b}},
+				MySQLResponses: []mysql.Response{{
+					PacketBundle: mysql.PacketBundle{
+						Header:  &mysql.PacketInfo{Type: "OK_PACKET"},
+						Message: &mysql.OKPacket{Header: 0x00, AffectedRows: 1},
+					},
+				}},
+			},
+		}
+	}
+
+	mockOrders := buildExecMock("mock-exec-orders", "INSERT INTO orders VALUES (?)", "conn-1", 77, "order-123")
+	mockOrders.Spec.MySQLResponses[0].Message.(*mysql.OKPacket).AffectedRows = 42
+	mockUsers := buildExecMock("mock-exec-users", "SELECT * FROM users WHERE id = ?", "conn-1", 88, "user-456")
+	mockUsers.Spec.MySQLResponses[0].Message.(*mysql.OKPacket).AffectedRows = 99
+
+	db := &fakeMockDb{
+		perTest: []*models.Mock{mockOrders, mockUsers},
+	}
+
+	dctx := newDecodeCtx()
+	// Live prepare assigned statement ID 33 to "INSERT INTO orders VALUES (?)"
+	dctx.StmtIDToQuery[33] = "INSERT INTO orders VALUES (?)"
+
+	reqBundle := execBundle("order-123")
+	reqBundle.Message.(*mysql.StmtExecutePacket).StatementID = 33
+	req := mysql.Request{PacketBundle: reqBundle}
+
+	matchedResp, ok, _, err := matchCommand(context.Background(), logger, req, db, dctx, nil, nil)
+	if err != nil {
+		t.Fatalf("matchCommand returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("matchCommand expected match, got ok=false")
+	}
+	if len(db.deletedFil) == 0 || db.deletedFil[0] != "mock-exec-orders" {
+		t.Errorf("expected mock-exec-orders to be consumed, got %v", db.deletedFil)
+	}
+	if matchedResp.Message.(*mysql.OKPacket).AffectedRows != 42 {
+		t.Errorf("expected mock-exec-orders response (AffectedRows=42), got %d", matchedResp.Message.(*mysql.OKPacket).AffectedRows)
+	}
+}
+
+func TestMatchCommand_CloseMatchesMetadataQueryWithoutPrepareMock(t *testing.T) {
+	logger := zap.NewNop()
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	buildCloseMock := func(name, query, connID string, stmtID uint32) *models.Mock {
+		return &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Kind:    models.MySQL,
+			Name:    name,
+			Spec: models.MockSpec{
+				Metadata: map[string]string{
+					"connID": connID,
+					"type":   "mocks",
+					"query":  query,
+				},
+				ReqTimestampMock: t0,
+				MySQLRequests: []mysql.Request{{
+					PacketBundle: mysql.PacketBundle{
+						Header: &mysql.PacketInfo{
+							Header: &mysql.Header{PayloadLength: 5, SequenceID: 0},
+							Type:   "COM_STMT_CLOSE",
+						},
+						Message: &mysql.StmtClosePacket{StatementID: stmtID},
+					},
+				}},
+			},
+		}
+	}
+
+	mockCloseOrders := buildCloseMock("mock-close-orders", "INSERT INTO orders VALUES (?)", "conn-1", 77)
+	mockCloseUsers := buildCloseMock("mock-close-users", "SELECT * FROM users WHERE id = ?", "conn-1", 88)
+
+	db := &fakeMockDb{
+		perTest: []*models.Mock{mockCloseOrders, mockCloseUsers},
+	}
+
+	dctx := newDecodeCtx()
+	dctx.StmtIDToQuery[33] = "INSERT INTO orders VALUES (?)"
+
+	closeReqBundle := mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Header: &mysql.Header{PayloadLength: 5, SequenceID: 0},
+			Type:   "COM_STMT_CLOSE",
+		},
+		Message: &mysql.StmtClosePacket{StatementID: 33},
+	}
+	req := mysql.Request{PacketBundle: closeReqBundle}
+
+	_, ok, _, err := matchCommand(context.Background(), logger, req, db, dctx, nil, nil)
+	if err != nil {
+		t.Fatalf("matchCommand returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("matchCommand expected match, got ok=false")
+	}
+	if len(db.deletedFil) == 0 || db.deletedFil[0] != "mock-close-orders" {
+		t.Errorf("expected mock-close-orders to be consumed, got %v", db.deletedFil)
+	}
 }
