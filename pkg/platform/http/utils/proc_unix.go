@@ -128,6 +128,22 @@ func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, now bool) error {
 	return nil
 }
 
+// KillAgentReach says what KillAgentCommand does to the agent cmd started:
+// whether a kill that is not now already ends it at once (never here: it is
+// the escalation signal), and whether one that is now does not (through
+// sudo, whose agent the user who ran keploy may not SIGKILL).
+func KillAgentReach(cmd *exec.Cmd) (firstAtOnce, noAtOnce bool) {
+	return false, cmd != nil && isSudo(cmd)
+}
+
+// KillPTYReach is KillAgentReach for a command started on a PTY.
+func KillPTYReach(handle *PTYHandle) (firstAtOnce, noAtOnce bool) {
+	if handle == nil {
+		return false, false
+	}
+	return KillAgentReach(handle.cmd)
+}
+
 // KillPTYCommand is KillAgentCommand for a command started on a PTY.
 func KillPTYCommand(handle *PTYHandle, logger *zap.Logger, now bool) error {
 	if handle == nil {

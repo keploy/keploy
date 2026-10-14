@@ -431,6 +431,62 @@ func TestRecord_DrainWaitsWhileTheAgentSaysItHoldsMore(t *testing.T) {
 	}
 }
 
+// A stop delivered twice is one stop: the copy of a signal that sudo hands on
+// (`sudo pkill -INT -f keploy` reaches keploy directly and from sudo) comes
+// before the drain says another interrupt stops it now (utils.OfferStopNow),
+// and ends nothing. Taken for a second Ctrl+C, it gave the drain up at once,
+// and the mock the agent still held was lost. The drain offers only a whole
+// notice period after the stop's signal came: on the test's clock, which
+// stands still, never -- the copy comes after its notices have begun.
+func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	utils.MarkInterrupted() // the stop
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
+	inst := &pendingInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+		quietFor:               4 * mockDrainQuiet,
+	}
+	db := &recordingMockDB{}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "duplicate-stop"
+	core, logs := observer.New(zapcore.InfoLevel)
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	}()
+	deadline := time.After(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessageSnippet(recordDrainWords.saving).Len() == 0 {
+		select {
+		case err := <-returned:
+			t.Fatalf("Record returned (%v) before its drain gave a notice: %v", err, logs.All())
+		case <-deadline:
+			t.Fatalf("the drain gave no notice: %v", logs.All())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	utils.MarkInterruptedAgain() // the copy, after the drain's notices began
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	case <-deadline:
+		t.Fatal("Record never returned")
+	}
+	inst.wg.Wait()
+	if got := db.inserted(); len(got) != 1 {
+		t.Fatalf("persisted %v: the copy of the stop gave the drain up before the agent handed its mock over", got)
+	}
+	if logs.FilterMessage(recordDrainWords.gaveUp).Len() != 0 {
+		t.Fatalf("the copy of the stop was taken for a second interrupt: %v", logs.All())
+	}
+}
+
 // unansweredInstrumentation is pendingInstrumentation whose agent does not
 // answer the drain's looks while its parser is behind (a /record/pending that
 // times out), and says it holds nothing more once it has handed the mock over.
@@ -632,7 +688,7 @@ func gatedDrain(t *testing.T, lookErr error, frames *atomic.Uint64, whileLooking
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		lost.Store(m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load))
+		lost.Store(m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load, recordDrainWords))
 	}()
 	wait := func(c <-chan struct{}, what string) {
 		t.Helper()
@@ -696,19 +752,26 @@ func TestDrainTrailingMocks_AnAgentGoneAtTheFirstLookIsAWarning(t *testing.T) {
 }
 
 // A second interrupt that reaches the agent too ends its stream as the user
-// gives the drain up: the user's stop, not the agent going away, and the run is
-// not failed for it. Both are ready when the drain's look returns: a drain that
-// went by the order its select took them in failed about half its runs, and 8
-// runs catch that all but surely.
+// gives the drain up: the user's stop, not the agent going away. What the agent
+// still held is not saved, so the drain is lost (the set is not saved over the
+// existing one), said at WARN as the user's stop. Both are ready when the
+// drain's look returns: a drain that went by the order its select took them in
+// failed about half its runs, and 8 runs catch that all but surely.
 func TestDrainTrailingMocks_ASecondInterruptAsTheStreamEndsIsTheUsersStop(t *testing.T) {
 	defer utils.ResetInterruptedAgain()
 	for i := 0; i < 8; i++ {
 		var frames atomic.Uint64
 		frames.Store(1)
-		lost, logs, code := gatedDrain(t, nil, &frames, utils.MarkInterruptedAgain)
+		// The drain has said another interrupt stops it now: this one does.
+		lost, logs, code := gatedDrain(t, nil, &frames, func() {
+			utils.MarkInterrupted() // the stop
+			utils.OfferStopNow()
+			utils.MarkInterruptedAgain()
+		})
+		utils.ClearInterrupted()
 		utils.ResetInterruptedAgain()
-		if lost || code != 0 || logs.FilterMessageSnippet("ended its mock stream").Len() != 0 {
-			t.Fatalf("run %d: a second interrupt was taken for the agent going away (lost=%v, exit code %d): %v", i, lost, code, logs.All())
+		if !lost || code != 0 || logs.FilterMessageSnippet("ended its mock stream").Len() != 0 {
+			t.Fatalf("run %d: want the user's stop, the drain lost and not the agent going away (lost=%v, exit code %d): %v", i, lost, code, logs.All())
 		}
 		if logs.FilterMessageSnippet("at a second interrupt").FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
 			t.Fatalf("run %d: the second interrupt was not said once at WARN: %v", i, logs.All())
@@ -929,5 +992,60 @@ func TestRecord_AnAgentThatDiedUnderTheRunFailsWithItsExit(t *testing.T) {
 	}
 	if db.promoted.Load() {
 		t.Fatal("a run whose agent died under it was promoted over the existing set")
+	}
+}
+
+// alwaysPending is an agent that says it still holds what it captured before
+// the run ended, at every look: a drain on it waits until it is stopped.
+type alwaysPending struct{ Instrumentation }
+
+func (alwaysPending) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+}
+
+// The drain tells each caller's user what ending it at a second interrupt
+// costs, in the caller's terms: mock record does not save the recording at
+// all (the existing set is kept), not just "the rest"; replay leaves requests
+// out of its report, and has no mock set to speak of. Its notice offers once
+// a whole notice period after the stop's signal, and the user's interrupt
+// then ends it, said in the same terms.
+func TestDrainTrailingMocks_SaysWhatStoppingNowCostsItsCaller(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	for name, words := range map[string]drainWords{"record": recordDrainWords, "replay": replayDrainWords} {
+		t.Run(name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+			utils.MarkInterrupted() // the stop
+			core, logs := observer.New(zapcore.InfoLevel)
+			m := &mockService{logger: zap.New(core), instrumentation: alwaysPending{}}
+			lost := make(chan bool, 1)
+			go func() {
+				lost <- m.drainTrailingMocks(make(chan struct{}), time.Now(), false,
+					func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, words)
+			}()
+			offered := words.saving + "; " + words.stopNow
+			deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never offers
+			for logs.FilterMessage(offered).Len() == 0 {
+				if time.Now().After(deadline) {
+					t.Fatalf("the drain never offered to stop now: %v", logs.All())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			utils.MarkInterruptedAgain() // the user, as told
+			select {
+			case l := <-lost:
+				if !l {
+					t.Fatal("a drain the user ended was not lost")
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the user's interrupt after the offer did not end the drain")
+			}
+			warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(words.gaveUp).All()
+			if len(warned) != 1 || warned[0].ContextMap()["next_step"] != words.nextStep {
+				t.Fatalf("the user's stop was not said in the caller's terms: %v", logs.All())
+			}
+		})
 	}
 }

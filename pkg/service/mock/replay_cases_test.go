@@ -212,6 +212,88 @@ func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	require.True(t, got.Cases[0].Passed)
 }
 
+// heldIncoming is a replay whose agent still holds requests from before the
+// test command exited, and says so, while the stop's signal comes as the
+// command ends: the drain waits on the agent and offers to stop now.
+type heldIncoming struct{ *runnerInstr }
+
+func (h heldIncoming) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	res := h.runnerInstr.Run(ctx, opts)
+	utils.MarkInterrupted() // the user's Ctrl+C, as the command ends
+	return res
+}
+
+func (heldIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	out := make(chan *models.TestCase)
+	go func() { <-ctx.Done(); close(out) }()
+	return out, nil
+}
+
+func (heldIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+}
+
+// A replay whose drain the user ends -- a press after it offered to stop now
+// -- is judged on part of the run if it is judged at all, and a verdict on
+// part of a run can pass a suite that did not. It ends as a replay the user
+// stopped before it finished does: 128+N, no verdict, the last receipt left
+// standing.
+func TestReplayTheUserStoppedWhileItCollectedRequestsIsNotJudged(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	defer utils.SetInterruptSignalForTest(2)() // SIGINT
+	instr := heldIncoming{newRunnerInstr(t, sequentialMarks()...)}
+	dir := t.TempDir()
+	mapDB := mapdb.New(zap.NewNop(), dir, "")
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+	judged := false
+	RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { judged = true })
+	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), instr, stubMockDB{}, mapDB, nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db)
+	returned := make(chan error, 1)
+	go func() { returned <- svc.Replay(context.Background()) }()
+	offered := replayDrainWords.saving + "; " + replayDrainWords.stopNow
+	within := time.After(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessage(offered).Len() == 0 {
+		select {
+		case err := <-returned:
+			t.Fatalf("the replay returned (%v) before its drain offered to stop now: %v", err, logs.All())
+		case <-within:
+			t.Fatalf("the drain never offered to stop now: %v", logs.All())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if !utils.MarkInterruptedAgain() { // the user, as told
+		t.Fatal("setup: no offer standing")
+	}
+	select {
+	case err := <-returned:
+		require.NoError(t, err, "a replay the user stopped is not keploy's failure")
+	case <-within:
+		t.Fatal("the user's press did not end the replay")
+	}
+	if judged {
+		t.Fatal("a replay the user stopped while it collected the requests was judged on part of them")
+	}
+	if utils.ErrCode != 130 {
+		t.Fatalf("a replay the user stopped exits %d, want 130", utils.ErrCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "set", ReceiptFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a replay the user stopped wrote a receipt (%v)", err)
+	}
+}
+
 func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
 	grpc := &models.TestCase{Name: "grpc-1", Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: runnerT0.Add(10 * time.Millisecond)}}
 	recorded := map[string][]*models.TestCase{"pkg.TestA": {grpc, httpCase("get-1", "GET", "/orders", 200, `[]`, runnerT0)}}

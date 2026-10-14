@@ -15,6 +15,7 @@ package http
 // Each landed wherever the agent's shutdown happened to be (agentRun).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -33,37 +35,10 @@ import (
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
-
-// hangBound turns a regression that would hang a test into a failure. It is
-// not part of any assertion: every positive assertion waits on its event, and
-// this bound is only how long a test gives that event before saying it never
-// came.
-const hangBound = 2 * time.Minute
-
-// within runs f and fails the test if it has not returned within hangBound.
-func within(t *testing.T, what string, f func()) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() { f(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(hangBound):
-		t.Fatalf("%s did not return within %v", what, hangBound)
-	}
-}
-
-// returnsWithin reports whether done is closed within d. It asserts only that
-// something has NOT happened yet; every positive assertion waits on the event.
-func returnsWithin(done <-chan struct{}, d time.Duration) bool {
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
-}
 
 // closedAgentURL is the URL of an agent API nothing listens on: a stop
 // request to it is refused, as one to an agent that cannot be asked is.
@@ -135,6 +110,8 @@ const fakeNativeAgent = `report() {
 }
 term=0
 trap 'term=1' TERM
+# busy: in the middle of teardown work, it does not die of the escalation.
+[ "$MODE" = busy ] && trap '' USR2
 : > "$READY"
 while [ "$term" = 0 ]; do sleep 0.01; done
 : > "$GOT"
@@ -145,7 +122,7 @@ while :; do
     progressing) report "$beat" "$beat" false; [ "$beat" -ge 10 ] && exit 0 ;;
     stalled) report 1 "$beat" false ;;
     detached) report 1 "$beat" true ;;
-    endless) report "$beat" "$beat" false ;;
+    endless|busy) report "$beat" "$beat" false ;;
   esac
   sleep 0.01
 done`
@@ -163,14 +140,20 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 	defer func(n uint64) { stallChecks = n }(stallChecks)
 	stallChecks = 3
 	for _, tc := range []struct {
-		mode      string
-		interrupt bool
-		wantKill  bool
+		mode string
+		// presses: the user's Ctrl+C presses while keploy waits, each once
+		// the stop has said a press stops the agent.
+		presses  int
+		wantKill bool
+		// atOnce: killed by SIGKILL (a press after the first), not the
+		// escalation.
+		atOnce bool
 	}{
 		{mode: "progressing"},
 		{mode: "stalled", wantKill: true},
 		{mode: "detached", wantKill: true},
-		{mode: "endless", interrupt: true, wantKill: true},
+		{mode: "endless", presses: 1, wantKill: true},
+		{mode: "busy", presses: 2, wantKill: true, atOnce: true},
 	} {
 		for _, ready := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/ready=%v", tc.mode, ready), func(t *testing.T) {
@@ -198,15 +181,27 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 						t.Fatalf("the agent exited before it was ready: %v", <-waited)
 					}
 				}
-				if tc.interrupt {
+				if tc.presses > 0 {
+					theStopWasASignal(t)
 					go func() {
-						for {
-							if _, err := os.Stat(progress); err == nil {
-								utils.MarkInterruptedAgain()
-								return
-							}
+						// Each pressed until heard: once the stop has said a
+						// press stops the agent (stopWatch), its teardown has
+						// begun, and, for the next, the offer before was
+						// answered (a press finds none standing).
+						for pressed, withdrawn := 0, true; pressed < tc.presses; {
 							if returnsWithin(run.gone, 5*time.Millisecond) {
 								return
+							}
+							if _, err := os.Stat(progress); err != nil {
+								continue
+							}
+							heard := utils.MarkInterruptedAgain()
+							switch {
+							case heard && withdrawn:
+								pressed++
+								withdrawn = false
+							case !heard:
+								withdrawn = true
 							}
 						}
 					}()
@@ -219,11 +214,12 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 					t.Fatal("the agent never got SIGTERM")
 				}
 				st := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				// A verdict kills with the escalation signal (SIGUSR2, which
-				// kills this stand-in as it kills the agent); Ctrl+C pressed
-				// again with SIGKILL, at once.
+				// A verdict, and the first press, kill with the escalation
+				// signal (SIGUSR2, which kills this stand-in as it kills the
+				// agent once no teardown work is in progress); a later press
+				// with SIGKILL, at once.
 				want := syscall.Signal(syscall.SIGUSR2)
-				if tc.interrupt {
+				if tc.atOnce {
 					want = syscall.SIGKILL
 				}
 				killed := st.Signaled() && st.Signal() == want
@@ -374,6 +370,9 @@ func fakeEngine(t *testing.T) (log, release string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
+if [ "$1" = cp ]; then
+  echo cp >> "` + engineCps(log) + `"
+fi
 if [ "$1" = cp ] && [ -e "` + filepath.Join(filepath.Dir(log), "slowcp") + `" ]; then
   exec sleep 3600
 fi
@@ -399,6 +398,10 @@ exit 0
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
 	return log, release
 }
+
+// engineCps is where the fake engine notes each `cp` it is asked for: each
+// of a stop's reads of the agent's progress, one a poll.
+func engineCps(log string) string { return filepath.Join(filepath.Dir(log), "cps") }
 
 // engineProgressFile is where the fake engine's container holds the agent's
 // teardown progress (kdocker.AgentTeardownProgressFile).
@@ -667,50 +670,121 @@ func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while the agent's container is waited for kills it at
-// once (SIGKILL).
+// Ctrl+C pressed while the agent's container is waited for, once the stop
+// has said a press stops it, sends the escalation signal: the agent dies once
+// no teardown work is in progress, here at once.
 func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
 	log, _ := fakeEngine(t)
 	ready := newAgentRun()
 	ready.ready.Store(true)
 	returned := make(chan struct{})
 	go func() { stopAgentContainerFor(zap.NewNop(), ready, stopTestContainer); close(returned) }()
 	awaitEngineWait(t, log, returned)
-	utils.MarkInterruptedAgain()
+	ctrlCWhileWaited(t)
 	within(t, "stopAgentContainerFor", func() { <-returned })
-	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill "+stopTestContainer; got != want {
-		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed again kills the container", got, want)
+	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill --signal SIGUSR2 "+stopTestContainer; got != want {
+		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed escalates the container's stop", got, want)
 	}
 }
 
 // awaitAgentExit: the group waits for the agent's exit, and once the stop has
-// begun the user's second interrupt lets the group go, not the agent.
+// killed the agent at once at the user's Ctrl+C (run.letGo) it lets the group
+// go, not waiting for the agent to finish dying. An interrupt alone does not:
+// only the stop, which hears no copy of its own signal, says what one was.
 func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
 	a := &AgentClient{logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
 	reaped := make(chan error, 1)
+	run := newAgentRun()
 	returned := make(chan struct{})
 	var ok atomic.Bool
-	go func() { _, o := a.awaitAgentExit(ctx, reaped, 1); ok.Store(o); close(returned) }()
-	cancel()
-	if returnsWithin(returned, 200*time.Millisecond) {
-		t.Fatal("the group stopped waiting on the stop alone")
-	}
+	go func() { _, o := a.awaitAgentExit(ctx, reaped, run, 1); ok.Store(o); close(returned) }()
+	cancel() // the agent stop begins
 	utils.MarkInterruptedAgain()
-	<-returned
+	if returnsWithin(returned, 200*time.Millisecond) {
+		t.Fatal("the group stopped waiting on the stop, or on an interrupt its stop did not act on")
+	}
+	run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
+	within(t, "awaitAgentExit", func() { <-returned })
 	if ok.Load() {
 		t.Fatal("awaitAgentExit reported an exit it did not see")
 	}
 
-	utils.ResetInterruptedAgain()
 	reaped2 := make(chan error, 1)
 	reaped2 <- nil
-	if _, o := a.awaitAgentExit(context.Background(), reaped2, 1); !o {
+	if _, o := a.awaitAgentExit(context.Background(), reaped2, newAgentRun(), 1); !o {
 		t.Fatal("awaitAgentExit missed the exit")
+	}
+}
+
+// The user's Ctrl+C while keploy waits for a stopping agent that runs under
+// sudo (a non-root user's), once the recording's drains are done and their
+// offers withdrawn: the stop says a press stops the agent; at the press after
+// the one that escalated, it kills it at once, which for one under sudo still
+// only escalates the signal: it dies once its teardown (uprobe removal) is
+// through. The group lets go at that press (awaitAgentExit, run.letGo), and
+// does not wait out the teardown's bound to then say a goroutine ignored its
+// cancellation.
+func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	utils.MarkInterrupted() // the user's Ctrl+C stopped the recording
+	t.Cleanup(utils.ClearInterrupted)
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := clientFor(closedAgentURL(t))
+	a.logger = zap.New(core)
+	run := newAgentRun()
+	run.ready.Store(true)
+	reaped := make(chan error, 1)
+	t.Cleanup(func() { run.exited(); reaped <- nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	var grp errgroup.Group
+	var beat atomic.Uint64
+	killedNow := make(chan struct{})
+	var once sync.Once
+	grp.Go(func() error { a.awaitAgentExit(ctx, reaped, run, 1); return nil })
+	grp.Go(func() error {
+		<-ctx.Done()
+		a.endAgent(run, 1,
+			func() error { return nil }, // asked over its API
+			func() error { return nil },
+			func(now bool) error { // under sudo: the escalation signal only
+				if now {
+					once.Do(func() { close(killedNow) })
+				}
+				return nil
+			},
+			killReach{noAtOnce: true},
+			func(context.Context) (utils.TeardownProgress, bool) {
+				return utils.TeardownProgress{Seq: 1, Beat: beat.Add(1), Busy: true, Steps: true}, true
+			})
+		return nil
+	})
+	cancel() // setupCtxCancel: the agent stop begins
+	within(t, "the stop saying a press stops the agent", func() {
+		for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent").Len() == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	// The user presses Ctrl+C, as told: the agent, busy removing its uprobes,
+	// does not die of the escalation; the user presses again once asked.
+	ctrlCWhileWaited(t)
+	ctrlCAgainWhileWaited(t)
+	within(t, "the kill at the press", func() { <-killedNow })
+	// What it was told the press does: keploy stops waiting; the agent is
+	// not killed at once, which keploy cannot do to an agent under sudo.
+	if logs.FilterMessage("Press Ctrl+C again to stop waiting for the keploy agent: it still stops once no teardown work is in progress").Len() == 0 ||
+		logs.FilterMessageSnippet("stop the keploy agent at once").Len() != 0 {
+		t.Fatalf("the stop offered a kill at once that it cannot make to an agent under sudo: %v", logs.All())
+	}
+	// The bound only catches a group that never lets go; it lets go at once.
+	if _, timedOut := utils.DrainErrGroupStatus(a.logger, "record-setup", &grp, 30*time.Second); timedOut {
+		t.Fatalf("the user's Ctrl+C during the agent stop did not let the group go: %v", logs.FilterLevelExact(zapcore.ErrorLevel).All())
 	}
 }
 
@@ -740,30 +814,59 @@ func TestAwaitPreviousAgent(t *testing.T) {
 // An interrupt that came before the docker stop began does not force it:
 // `sudo pkill -INT -f keploy` signals sudo and keploy both, and sudo hands its
 // signal on, so one stop reaches keploy twice. The container gets its SIGTERM
-// and is waited for; an interrupt during the wait would kill it.
+// and is waited for, and the copy, whether it came before the stop or during
+// it, kills nothing: the stop offers a press only a whole period after its
+// signal came -- on the test's clock, which stands still, never.
 func TestAnInterruptBeforeTheDockerStopDoesNotForceIt(t *testing.T) {
-	utils.ResetInterruptedAgain()
-	t.Cleanup(utils.ResetInterruptedAgain)
-	utils.MarkInterruptedAgain()
-	for _, ready := range []bool{true, false} {
-		log, release := fakeEngine(t)
-		run := newAgentRun()
-		run.ready.Store(ready)
-		returned := make(chan struct{})
-		go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
-		awaitEngineWait(t, log, returned)
-		// Only that it has NOT been killed: the container is still running,
-		// so a stop that counted the earlier interrupt kills it at once.
-		_ = returnsWithin(returned, 100*time.Millisecond)
-		if err := os.WriteFile(release, nil, 0o644); err != nil {
-			t.Fatal(err)
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 10 * time.Millisecond
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
+	for _, copyAt := range []string{"before", "during"} {
+		for _, ready := range []bool{true, false} {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+			utils.MarkInterrupted() // the stop
+			if copyAt == "before" {
+				utils.MarkInterruptedAgain()
+			}
+			anInterruptedDockerStopIsNotForced(t, ready, copyAt == "during")
 		}
-		within(t, "stopAgentContainerFor", func() { <-returned })
-		calls := engineLines(t, log)
-		requireSignalledAndWaited(t, calls)
-		if count(calls, "kill "+stopTestContainer) != 0 {
-			t.Fatalf("ready=%v: an interrupt from before the stop forced it; calls %q", ready, calls)
-		}
+	}
+}
+
+func anInterruptedDockerStopIsNotForced(t *testing.T, ready, copyDuring bool) {
+	t.Helper()
+	log, release := fakeEngine(t)
+	run := newAgentRun()
+	run.ready.Store(ready)
+	returned := make(chan struct{})
+	go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
+	awaitEngineWait(t, log, returned)
+	if copyDuring {
+		// Once the stop has polled the container a few times.
+		within(t, "the stop's polls", func() {
+			for {
+				if b, _ := os.ReadFile(engineCps(log)); bytes.Count(b, []byte("\n")) >= 3 {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+		utils.MarkInterruptedAgain()
+	}
+	// Only that it has NOT been killed: the container is still running, so
+	// a stop that took the copy for a press kills it.
+	_ = returnsWithin(returned, 100*time.Millisecond)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainerFor", func() { <-returned })
+	calls := engineLines(t, log)
+	requireSignalledAndWaited(t, calls)
+	if count(calls, "kill "+stopTestContainer) != 0 || count(calls, "kill --signal SIGUSR2 "+stopTestContainer) != 0 {
+		t.Fatalf("ready=%v, copy during the stop=%v: a copy of the stop forced it; calls %q", ready, copyDuring, calls)
 	}
 }
 

@@ -165,8 +165,12 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	// looks is this drain's looks at what the agent still holds from before
 	// the stop, once its stream falls quiet (holdForBacklog).
 	var looks backlogLooks
+	// giveUp ends the drain at the user's second interrupt (utils.StopNow).
+	// What the agent still held is not saved, so the recording is incomplete
+	// (captureLost): it fails, as one that lost it any other way does.
 	giveUp := func() {
 		o.closeStream()
+		r.captureLost.Store(true)
 		r.logger.Warn("stopped saving what the agent captured before the stop, at a second interrupt",
 			zap.String("frames", o.kind), zap.Int("savedSinceTheStop", sinceStop),
 			zap.String("next_step", "what the agent still held was not saved: test cases it had captured may be missing, or saved without their mocks"))
@@ -207,7 +211,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		}
 		var again <-chan struct{}
 		if draining {
-			again = utils.InterruptedAgain()
+			again = utils.StopNow()
 		}
 		onHanded := o.beforeHand(item)
 		handed := false
@@ -249,7 +253,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			shutdownC = ctx.Done()
 		} else {
 			idleC = idle.C
-			againC = utils.InterruptedAgain()
+			againC = utils.StopNow()
 		}
 		select {
 		case <-againC:
@@ -324,7 +328,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 					// stream as it gives the drain up: that is the user's
 					// stop, and said as one, whichever this select saw first.
 					select {
-					case <-utils.InterruptedAgain():
+					case <-utils.StopNow():
 						giveUp()
 					default:
 						r.agentEndedDrain(o.kind, &looks)
@@ -730,34 +734,58 @@ const drainProgressEvery = 5 * time.Second
 // frames, how many it has saved, and that a second interrupt ends it. The
 // drain has no fixed bound (forwardUntilDrained), so a user waiting on it must
 // be able to see that it is moving, and to end it. It returns the stop.
+//
+// It says so once the stop has offered to end at the next interrupt
+// (utils.StopNowNotice): at the first notice when an interrupt stopped the
+// recording, and a whole notice period after the user's interrupt was first
+// seen when the stop began on its own (the app exited, a record timer). An
+// interrupt before that is not the user's answer to it: a stop sent to both
+// sudo and keploy (`sudo pkill -f keploy`, as CI stops a recording) reaches
+// keploy a second time from sudo, as the first does, and taken for a second
+// Ctrl+C it gave the drain up at its start. A notice is given at the first
+// tick, whenever the drain moves, and at the tick that makes the offer, so the
+// user is told as soon as it is.
 func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	start := r.frameProgress.Load()
+	notice := utils.NewStopNowNotice(every)
 	go func() {
+		defer close(exited)
+		defer notice.Withdraw()
 		t := time.NewTicker(every)
 		defer t.Stop()
 		last, lastHolds := start, r.backlogHolds.Load()
+		said, offering := false, false
 		for {
 			select {
 			case <-done:
 				return
-			case <-utils.InterruptedAgain():
+			case <-utils.StopNow():
 				return
 			case <-t.C:
 			}
 			now, holds := r.frameProgress.Load(), r.backlogHolds.Load()
-			switch {
-			case now != last:
-				r.logger.Info("Still saving what Keploy captured before the stop; press Ctrl+C again to stop now, and lose the rest",
-					zap.Uint64("savedSinceTheStop", now-start))
-			case holds != lastHolds:
-				r.logger.Info("Waiting for the keploy agent to finish parsing what it captured before the stop (its parsers are behind the traffic); press Ctrl+C again to stop now, and lose the rest",
-					zap.Uint64("savedSinceTheStop", now-start))
+			wasOffering := offering
+			offering = notice.Next()
+			if now != last || holds != lastHolds || !said || offering != wasOffering {
+				msg := "Still saving what Keploy captured before the stop"
+				if now == last && holds != lastHolds {
+					msg = "Waiting for the keploy agent to finish parsing what it captured before the stop (its parsers are behind the traffic)"
+				}
+				if offering {
+					msg += "; press Ctrl+C again to stop now: the rest is then not saved, and this recording fails as incomplete"
+				}
+				r.logger.Info(msg, zap.Uint64("savedSinceTheStop", now-start))
+				said = true
 			}
 			last, lastHolds = now, holds
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 func (r *Recorder) frameQuietGrace() time.Duration {
@@ -1583,7 +1611,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if incomplete {
 			r.logger.Error("the recording may be incomplete: Keploy could not confirm it saved all the keploy agent captured before the stop",
 				zap.String("testSetID", newTestSetID),
-				zap.String("next_step", "the error above says why (the agent made no progress, or went away before it said it had handed everything over); re-record this test set"))
+				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, or a second interrupt stopped the saving); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
 		if recordingStarted || stopReason != "" {
