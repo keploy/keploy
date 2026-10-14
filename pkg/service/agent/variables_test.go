@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -110,10 +111,17 @@ func TestVariablesKeployCannotFollowAreRefusedAtLoad(t *testing.T) {
 		}
 		return out
 	}
+	cfg := &models.Mock{Name: "cfg", Kind: models.PostgresV2, Spec: models.MockSpec{Variables: vars, Metadata: map[string]string{"type": "config"}}}
 	a := &Agent{logger: zap.NewNop()}
-	got := names(a.refuseUnfollowable([]*models.Mock{httpVars, pg, async, plain}))
+	store := &ClientMockStorage{}
+	got := names(a.refuseUnfollowable([]*models.Mock{httpVars, pg, async, plain, cfg}, store))
 	if len(got) != 2 || got[0] != "http" || got[1] != "plain" {
 		t.Fatalf("kept %v, want [http plain]", got)
+	}
+	// Each refused mock is noted, a test mock (data-plane) as one its test
+	// is judged for, a protocol-phase one as no test's.
+	if want := map[string]bool{"pg": true, "async": true, "cfg": false}; !reflect.DeepEqual(store.refused, want) {
+		t.Fatalf("the store noted %v refused, want %v", store.refused, want)
 	}
 }
 

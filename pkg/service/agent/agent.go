@@ -43,6 +43,13 @@ type ClientMockStorage struct {
 	// mocks on disk; UpdateMockParams loads only the current window from it.
 	diskMocks *proxyPkg.DiskMocks
 	mu        sync.RWMutex
+	// refused names the mocks this store refused under the proven switch
+	// (variables this keploy cannot follow, followable): each was logged as
+	// it was refused. A mapping that lists one owns nothing for it, and the
+	// call it recorded misses (mocksByName). The value says whether the mock
+	// is a test mock (data-plane): one is a recorded call its test is judged
+	// for (refusedOf).
+	refused map[string]bool
 }
 
 type Agent struct {
@@ -166,6 +173,7 @@ type Agent struct {
 	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
 	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
 	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
+	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -579,6 +587,8 @@ func (a *Agent) resetScopeState() {
 	// the clock's holder is given back by releaseTestClock, before this.
 	a.testBegins = nil
 	a.testReal = nil
+	// keploy test's pool belongs to the set that staged it.
+	a.testPool = nil
 	a.scopeMu.Unlock()
 }
 
@@ -905,8 +915,8 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 			tally.Add(m)
 		}
 		containerkey.Default.SetRecorded(&tally)
-		storage.filtered = a.refuseUnfollowable(storage.filtered)
-		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered)
+		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
+		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered, storage)
 	}
 
 	// Derive Lifetime once per mock before they enter the runtime pool.
@@ -1044,6 +1054,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			tally.Add(mock)
 		}
 		if proven && !a.followable(mock) {
+			storage.noteRefused(mock)
 			continue
 		}
 		if wantAsync && mock.IsAsync() {
@@ -1114,15 +1125,29 @@ func (a *Agent) followable(m *models.Mock) bool {
 }
 
 // refuseUnfollowable drops the mocks whose variables this keploy cannot follow
-// (followable).
-func (a *Agent) refuseUnfollowable(mocks []*models.Mock) []*models.Mock {
+// (followable), noting each in store.
+func (a *Agent) refuseUnfollowable(mocks []*models.Mock, store *ClientMockStorage) []*models.Mock {
 	out := mocks[:0]
 	for _, m := range mocks {
 		if a.followable(m) {
 			out = append(out, m)
+		} else if m != nil {
+			store.noteRefused(m)
 		}
 	}
 	return out
+}
+
+// noteRefused notes that the store refused mock; before the store is
+// published.
+func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
+	if mock == nil || mock.Name == "" {
+		return
+	}
+	if s.refused == nil {
+		s.refused = map[string]bool{}
+	}
+	s.refused[mock.Name] = !mock.IsProtocolPhase()
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -1380,6 +1405,10 @@ func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	// keploy test's exact serving, under the proven switch (exact_proven.go).
+	if params.Exact != nil && provenswitch.On() {
+		return a.serveKeployTestExactly(ctx, params)
+	}
 
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever

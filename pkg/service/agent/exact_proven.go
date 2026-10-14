@@ -9,6 +9,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // Ownership and exact consumption under the proven switch (design v14 §5.2,
@@ -45,9 +46,11 @@ func (a *Agent) exactServer() (coreAgent.ExactServer, error) {
 
 // servePoolExactly serves the current claim's key's pool slice (before any
 // claim, models.PoolKeyNone's) while no test is open. It stages the replay's
-// mocks on the proxy the first time in a session, after exact serving is on,
-// so no staged mock is ever served outside it. Until the CLI sent the pool
-// slices, the slice is empty: no data-plane pool mock answers.
+// mocks on the proxy the first time in a session, under exact serving with
+// no pool, so no staged mock is ever served outside it, and no mock still
+// staged from the previous session answers under one of this session's pool
+// names (names are unique only within a recording). Until the CLI sent the
+// pool slices, the slice is empty: no data-plane pool mock answers.
 func (a *Agent) servePoolExactly(ctx context.Context) error {
 	es, err := a.exactServer()
 	if err != nil {
@@ -59,20 +62,21 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 	if key == "" {
 		key = models.PoolKeyNone
 	}
-	if err := es.ServeExactPool(key, append([]string(nil), slice[key]...)); err != nil {
-		return err
+	if !staged {
+		if err := es.ServeExactPool(key, nil); err != nil {
+			return err
+		}
+		staged, err = a.stageForExactServing(ctx)
+		if err != nil {
+			return err
+		}
+		if staged {
+			a.provenMu.Lock()
+			a.proven.staged = true
+			a.provenMu.Unlock()
+		}
 	}
-	if staged {
-		return nil
-	}
-	staged, err = a.stageForExactServing(ctx)
-	if err != nil || !staged {
-		return err
-	}
-	a.provenMu.Lock()
-	a.proven.staged = true
-	a.provenMu.Unlock()
-	return nil
+	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
 }
 
 // stageForExactServing stages every mock of the replay on the proxy, once:
@@ -123,9 +127,21 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		owned = testMocks(names, mocks)
+		owned = a.notReal(id, testMocks(names, mocks))
 	}
-	return es.ServeExactTest(id, owned)
+	// What the store refused of the test's mapping serves nothing; its end
+	// counts each as a recorded call the test did not make.
+	unservable := a.refusedOf(names)
+	a.provenMu.Lock()
+	a.proven.unservable = unservable
+	a.provenMu.Unlock()
+	if err := es.ServeExactTest(id, owned); err != nil {
+		return err
+	}
+	a.provenMu.Lock()
+	a.proven.servedSince = time.Now()
+	a.provenMu.Unlock()
+	return nil
 }
 
 // testMocks is the test mocks among a test's mapped names: the data-plane
@@ -150,5 +166,97 @@ func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
 		}
 		return ti.Before(tj)
 	})
+	return out
+}
+
+// serveKeployTestExactly is a keploy test filter under the proven switch
+// (models.ExactServing): the set's staging call stages every mock once and
+// serves the set's pool; a test case's call serves it exactly its own mocks;
+// any other call serves the pool again, between test cases. A keploy test
+// run has one key, models.PoolKeyNone.
+func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams) error {
+	es, err := a.exactServer()
+	if err != nil {
+		return err
+	}
+	ex := params.Exact
+	switch {
+	case ex.Stage:
+		staging := params
+		staging.Exact = nil
+		// Exact serving goes on, with no pool, before the stage lands: no
+		// staged mock is ever served outside it, and none still staged from
+		// the previous set answers under one of this set's pool names
+		// (names are unique only within a set). The set's pool is served
+		// once its mocks are in.
+		if err := es.ServeExactPool(models.PoolKeyNone, nil); err != nil {
+			return err
+		}
+		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+			r.ResetStatefulCursors()
+		}
+		if err := a.UpdateMockParams(ctx, staging); err != nil {
+			return fmt.Errorf("stage the test set's mocks: %w", err)
+		}
+		a.scopeMu.Lock()
+		a.testPool = append([]string(nil), ex.Pool...)
+		a.scopeMu.Unlock()
+		return es.ServeExactPool(models.PoolKeyNone, append([]string(nil), ex.Pool...))
+	case ex.Test != "":
+		var owned []*models.Mock
+		if len(ex.Owned) > 0 {
+			mocks, err := a.mocksByName(ex.Owned)
+			if err != nil {
+				return fmt.Errorf("serve %s its own mocks: %w", ex.Test, err)
+			}
+			owned = testMocks(ex.Owned, mocks)
+		}
+		return es.ServeExactTest(ex.Test, owned)
+	default:
+		a.scopeMu.Lock()
+		pool := append([]string(nil), a.testPool...)
+		a.scopeMu.Unlock()
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+}
+
+// realDestinations is implemented by a proxy that relays the run's mock.real
+// destinations: which one, if any, a recorded mock's destination is.
+type realDestinations interface {
+	RealDestination(m *models.Mock) (string, bool)
+}
+
+// notReal is owned less the mocks whose destination mock.real now reaches
+// for real: a call to one is relayed before any matcher reads it, so the
+// test is neither served the mock nor judged for not making its call (its
+// REAL row says what it did there). Each is said once per session, with the
+// fix.
+func (a *Agent) notReal(id string, owned []*models.Mock) []*models.Mock {
+	rd, ok := a.Proxy.(realDestinations)
+	if !ok {
+		return owned
+	}
+	out := owned[:0:0]
+	for _, m := range owned {
+		label, real := rd.RealDestination(m)
+		if !real {
+			out = append(out, m)
+			continue
+		}
+		a.provenMu.Lock()
+		said := a.proven.realSaid[m.Name]
+		if !said {
+			if a.proven.realSaid == nil {
+				a.proven.realSaid = map[string]bool{}
+			}
+			a.proven.realSaid[m.Name] = true
+		}
+		a.provenMu.Unlock()
+		if !said {
+			a.logger.Warn("a test's recorded call goes to a destination mock.real now reaches for real: it is neither served nor judged",
+				zap.String("test", id), zap.String("mock", m.Name), zap.String("real", label),
+				zap.String("next_step", "record the test again, so its recording holds no call to "+label))
+		}
+	}
 	return out
 }

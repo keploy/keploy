@@ -401,6 +401,14 @@ type Replayer struct {
 	noAgent         bool // runsWithoutAgent, decided once in NewReplayer and handed to its hooks
 	isLastTestSet   bool
 	isLastTestCase  bool
+
+	// exact is the set being replayed's exact serving, under the proven
+	// switch (exact.go); nil otherwise.
+	exact *exactPlan
+	// ignoredSaid holds the settings said ignored under the switch
+	// (noteIgnored), each once per run.
+	ignoredSaid sync.Map
+
 	// isFirstTestSet mirrors isLastTestSet — true while the test-set
 	// about to run is the first one of the current replay run. Read
 	// by the waitForAppReady gate so --delay applies only to the first
@@ -1697,6 +1705,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var startupMockNames []string
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
+	if r.exactServing() {
+		// Under the proven switch a test case is served its mapping, always.
+		if !isMappingEnabled {
+			r.noteMappingAlwaysUsed()
+		}
+		isMappingEnabled = true
+	}
+	r.exact = nil
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
 	mockKindByName := make(map[string]models.Kind)
@@ -1745,12 +1761,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// returns those, so every count of what the agent holds (the compose
 	// guard's among them) agrees with what was sent. The compose and the
 	// native path both load through it.
-	// winUse is, under the proven switch, what the tests consume of their
-	// recorded windows: a run that left one of those mocks unconsumed creates
-	// no mappings.yaml (proven_window_mappings.go). Nil with the switch off.
-	winUse := newWindowUse()
 	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
 		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		// fromWindows: under the proven switch, a set with no mappings.yaml,
+		// whose test windows say what each test case owns once its mocks are
+		// read (windowOwnership).
+		var fromWindows bool
+		if r.exactServing() {
+			// Under the proven switch the mapping decides what each test
+			// case owns, and a mapping that cannot be read refuses the set.
+			if expectedTestMockMappings, err = r.provenMappings(ctx, testSetID); err != nil {
+				return nil, nil, err
+			}
+			useMappingBased = true
+			fromWindows = len(expectedTestMockMappings) == 0
+		}
 		mocksThatHaveMappings := make(map[string]bool)
 		mocksWeNeed := make(map[string]bool)
 
@@ -1795,9 +1820,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
-		if !useMappingBased {
-			// With a mapping in force the file exists: no run creates it.
-			winUse.load(testCases, filtered, unfiltered)
+		if fromWindows {
+			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, filtered, unfiltered)
 		}
 		mockLookup = lookup
 		addKinds(filtered)
@@ -1833,6 +1857,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil, nil, err
 		}
 		perTestRegion = pkg.PerTestRegion(filtered)
+		if r.exactServing() {
+			r.exact = newExactPlan(expectedTestMockMappings, filtered, unfiltered)
+			r.noteOwnsNothing(testSetID)
+		}
 		return filtered, unfiltered, nil
 	}
 
@@ -1939,7 +1967,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
-			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
+			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
@@ -2070,7 +2098,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
-			DisableStatefulMocks:      r.config.Test.DisableStatefulMocks,
+			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
@@ -2615,7 +2643,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in reaction is this test's. Opened after, that miss landed with
 			// no window open and was discarded.
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, testCase)...)
+			if r.exact != nil {
+				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, requestVariables(tmplRun, testCase)...)
+			} else {
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, testCase)...)
+			}
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
@@ -2671,6 +2703,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// The test case has its answer, or none: it ends here. Under exact
+			// serving the agent serves the pool from now, so what is read next
+			// is final, and a call the application makes from here, a late
+			// asynchronous call of this test case's included, is the pool's.
+			// (Waiting for the test case's calls still in flight comes with
+			// the end count, stacked on the proxy's connection counter.)
+			exactEndErr := r.serveExactPool(runTestSetCtx, r.exact)
+
 			if loopErr != nil {
 				if status, ended := endedPartWay(); ended {
 					testSetStatus, exitLoop = status, true
@@ -2704,6 +2744,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var instrumentConsumedFetchErr error
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if err == nil && exactEndErr != nil {
+					err = exactEndErr
+				}
 				instrumentConsumedFetchErr = err
 				if err != nil {
 					consumptionUnread = appendOnce(consumptionUnread, testCase.Name)
@@ -3011,7 +3054,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
 			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
-			winUse.ran(testCase.Name)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -3595,7 +3637,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// the stream body below. Every exit path therefore calls
 			// attachMockErrors only AFTER stream consumption has finished.
 			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
+			if r.exact != nil {
+				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, requestVariables(tmplRun, tc)...)
+			} else {
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
+			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
 				loopErr = err
@@ -3797,6 +3843,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// The streamed test case's answer is read whole: it ends here.
+			// Under exact serving the agent serves the pool from now, so the
+			// drain below reads all of the test case's consumption, and a
+			// call the application makes from here is the pool's.
+			if err := r.serveExactPool(runTestSetCtx, r.exact); err != nil && streamConsumedErr == nil {
+				streamConsumedErr = err
+			}
+
 			// Drain mocks consumed during stream body transmission and union
 			// with the pre-stream mocks captured earlier. GetConsumedMocks
 			// drains on read, so if any mocks land between the pre-stream
@@ -3954,7 +4008,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
 			carryAttr.mapConsumed(actualTestMockMappings, tc.Name, tcReqTimeStream, tcRespTimeStream, consumedMocks)
-			winUse.ran(tc.Name)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -4553,14 +4606,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// run whose app could not reach its dependencies fails every test and consumes
 	// nothing — pruning that would delete the recording's mocks because of an
 	// infrastructure fault. shouldPrune holds them and lists the reasons.
-	pruneEnabled := r.config.Test.RemoveUnusedMocks && r.instrument
+	pruneEnabled := r.removeUnusedMocks() && r.instrument
 	// INTERNAL_ERR: keploy lost part of the run, e.g. a result insert. Not
 	// a set that is INTERNAL_ERR only for a capture count that could not be
 	// read (under the proven switch, above): that is capture_unverified.
 	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged
 	// Read once: the prune and the mappings hold below decide on the same value.
 	appUnreachable := anyAppConnectionError(testCaseResults)
-	prune, pruneRefusal := shouldPrune(r.config.Test.RemoveUnusedMocks, r.instrument, pruneRun{
+	prune, pruneRefusal := shouldPrune(r.removeUnusedMocks(), r.instrument, pruneRun{
 		allTestsGotAVerdict: allTestsGotAVerdict,
 		internalErr:         internalErr,
 		resultsComplete:     resultsComplete,
@@ -4720,16 +4773,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	holdMappings := ""
 	// holdQuietly: a hold that is the expected outcome, logged at Debug.
 	holdQuietly := false
-	// windowLeft and windowUnseen name, under the proven switch, the tests
-	// that left a mock of their recorded window unconsumed and those that own
-	// one and whose consumption this run did not read.
-	var windowLeft, windowUnseen []string
 	// Whether the run had anything to write at all, before the verdicts took
 	// their part: what the holds below are about.
 	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
 		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
 	switch {
 	case !wouldWrite:
+	case provenswitch.On():
+		// Under the proven switch only record writes mappings.yaml (design
+		// v14 §5.2): a replay never changes what a test owns.
+		holdMappings, holdQuietly = "under KEPLOY_PROVEN only a record writes mappings.yaml", true
+		if r.config.Test.UpdateTestMapping {
+			r.noteIgnored("updateTestMapping (--update-test-mapping)", "only a record writes mappings.yaml")
+		}
 	case pidVerdict.incomplete != "":
 		// Whatever the flag: a call of an untracked process reached the real
 		// dependency, so the mock recorded for it is in no test's entry. A
@@ -4769,13 +4825,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				holdQuietly = true
 			}
 		}
-	case winUse != nil:
-		// Under the proven switch a new file is made only from a run in which
-		// every test consumed every mock recorded in its window. Every case
-		// above that matches without holding has found a file that exists.
-		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
-			holdMappings, windowLeft, windowUnseen = winUse.holdCreate(testCases, consumptionUnread, actualTestMockMappings)
-		}
 	}
 	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""
 	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && len(mappingDoc.TestCases) > 0 {
@@ -4807,12 +4856,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		fields := []zap.Field{zap.String("testSetID", testSetID), zap.String("reason", holdMappings)}
 		if n := len(keptRecorded); n > 0 && len(mappingDoc.TestCases) == 0 {
 			fields = append(fields, zap.Int("count", n), zap.Strings("testsNotCountedAsPassing", keptRecorded[:min(n, 20)]))
-		}
-		if n := len(windowLeft); n > 0 {
-			fields = append(fields, zap.Int("leftCount", n), zap.Strings("testsThatLeftARecordedCallUnconsumed", windowLeft[:min(n, 20)]))
-		}
-		if n := len(windowUnseen); n > 0 {
-			fields = append(fields, zap.Int("notReadCount", n), zap.Strings("testsWhoseConsumptionWasNotRead", windowUnseen[:min(n, 20)]))
 		}
 		logHold("not writing mappings.yaml", fields...)
 	} else if !shouldWriteMappings && r.mappingDB != nil && len(mappingDoc.Startup) > 0 {
@@ -5266,6 +5309,12 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		TotalConsumedMocks:     consumedForAgent,
 		StrictMockWindow:       strictMockWindow,
 		Variables:              vars,
+	}
+	// Under the proven switch the set's staging call (no mapping, from
+	// BaseTime) stages the set once, and the agent then serves its pool
+	// (exact.go).
+	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
+		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...)}
 	}
 
 	// Send parameters to agent for filtering and mock updates

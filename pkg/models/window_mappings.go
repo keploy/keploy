@@ -8,8 +8,8 @@ import (
 
 // A test set's mappings derived from its recorded test windows: what a
 // recording made without --sync maps each test to under the proven switch
-// (design v14 row S3), and what a replay under the switch checks each test's
-// consumption against before it creates a mappings.yaml.
+// (design v14 row S3), and what each test owns in a replay under the switch
+// of a set with no mappings.yaml (S12), which the replay never writes.
 
 // RecordedWindow is the window a recorded test case opens when it runs: its
 // [request, response] span, for an HTTP or a gRPC test case. A test case of any

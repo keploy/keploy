@@ -282,6 +282,12 @@ type TestModeInfo struct {
 	// inert — the reapers run only on the live record buffer, never on
 	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
+
+	// ServedIn is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
+	// S12), the number of that test's view; zero on every other mock. A
+	// consume of a copy an earlier view served (a previous attempt of the
+	// same test) is refused. Runtime-only, like the fields above.
+	ServedIn uint64 `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
