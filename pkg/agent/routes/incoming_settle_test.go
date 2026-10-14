@@ -472,6 +472,10 @@ func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *tes
 	if w := logs.FilterLevelExact(zapcore.WarnLevel).All(); len(w) > 0 {
 		t.Fatalf("a client ending the stream under traffic was warned of: %q", w[0].Message)
 	}
+	srv.Close() // waits for the handler: what it logs as it returns is in
+	if e := logs.Filter(func(e observer.LoggedEntry) bool { return e.Level >= zapcore.ErrorLevel }).All(); len(e) > 0 {
+		t.Fatalf("a client ending the stream under traffic was logged as an error: %q", e[0].Message)
+	}
 }
 
 // stopWatermark is a capture at a stop: every parser is past the stop, but
