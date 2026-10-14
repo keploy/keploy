@@ -18,7 +18,11 @@ import (
 // The place is the authority the client sent: the Host header, or the URL's
 // host for a request without one, with its port. Two upstreams behind one
 // address (a gateway or LocalStack routing by virtual host) are two places,
-// and so are two services that share a path ("/v1/charge" on two hosts).
+// and so are two services that share a path ("/v1/charge" on two hosts). The
+// authority is compared as sent, lowercased: "example.com" and
+// "example.com:80", or a name with a trailing dot, are not one place. The
+// same app and configuration send the same bytes in record and replay; a
+// configuration that changes them misses, naming the host.
 //
 // The container a request reached is not compared yet. Its key (package
 // containerkey) is recorded on the mock, but it numbers an image's
@@ -47,7 +51,9 @@ func liveDestination(input *req) destination {
 }
 
 // recordedDestination is where a recorded request went: its recorded
-// authority (models.Mock.RecordedDestination).
+// authority (models.Mock.RecordedDestination). A recording whose authority
+// cannot be read (no Host, a path-only URL: an HTTP/1.0 call without one) is
+// at "", which only a live call that sent none matches.
 func recordedDestination(m *models.Mock) destination {
 	d := destination{}
 	if host, ok := m.RecordedDestination(); ok {
@@ -60,11 +66,6 @@ func recordedDestination(m *models.Mock) destination {
 // goes: to the same authority.
 func sameDestination(live, rec destination) bool {
 	return live.host == rec.host
-}
-
-// String is the destination as a report names it: its authority.
-func (d destination) String() string {
-	return d.host
 }
 
 // destinationDiff is the field difference a report shows when the closest
