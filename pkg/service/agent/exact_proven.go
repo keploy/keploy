@@ -152,3 +152,51 @@ func testMocks(names []string, byName map[string]*models.Mock) []*models.Mock {
 	})
 	return out
 }
+
+// serveKeployTestExactly is a keploy test filter under the proven switch
+// (models.ExactServing): the set's staging call stages every mock once and
+// serves the set's pool; a test case's call serves it exactly its own mocks;
+// any other call serves the pool again, between test cases. A keploy test
+// run has one key, models.PoolKeyNone.
+func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFilterParams) error {
+	es, err := a.exactServer()
+	if err != nil {
+		return err
+	}
+	ex := params.Exact
+	switch {
+	case ex.Stage:
+		staging := params
+		staging.Exact = nil
+		// Exact serving goes on before the stage lands: no staged mock is
+		// ever served outside it.
+		if err := es.ServeExactPool(models.PoolKeyNone, append([]string(nil), ex.Pool...)); err != nil {
+			return err
+		}
+		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
+			r.ResetStatefulCursors()
+		}
+		if err := a.UpdateMockParams(ctx, staging); err != nil {
+			return fmt.Errorf("stage the test set's mocks: %w", err)
+		}
+		a.scopeMu.Lock()
+		a.testPool = append([]string(nil), ex.Pool...)
+		a.scopeMu.Unlock()
+		return nil
+	case ex.Test != "":
+		var owned []*models.Mock
+		if len(ex.Owned) > 0 {
+			mocks, err := a.mocksByName(ex.Owned)
+			if err != nil {
+				return fmt.Errorf("serve %s its own mocks: %w", ex.Test, err)
+			}
+			owned = testMocks(ex.Owned, mocks)
+		}
+		return es.ServeExactTest(ex.Test, owned)
+	default:
+		a.scopeMu.Lock()
+		pool := append([]string(nil), a.testPool...)
+		a.scopeMu.Unlock()
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+}

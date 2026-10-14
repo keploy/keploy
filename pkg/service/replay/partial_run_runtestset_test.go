@@ -232,6 +232,12 @@ type prInstr struct {
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// windowAfter is the start of the window of the test the agent was last
+	// told to serve: a send's AfterTime, or, under exact serving (the proven
+	// switch), the recorded start of the test case it opened (of cases). A
+	// send that serves the pool between test cases leaves it.
+	windowAfter time.Time
+	cases       []*models.TestCase
 	// allParams is every send, in order.
 	allParams []models.MockFilterParams
 	// perTestScope makes the stand-in agent answer each send the way an agent
@@ -322,6 +328,16 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	switch ex := params.Exact; {
+	case ex == nil || ex.Stage:
+		f.windowAfter = params.AfterTime
+	case ex.Test != "":
+		for _, tc := range f.cases {
+			if tc.Name == ex.Test {
+				f.windowAfter = tc.HTTPReq.Timestamp
+			}
+		}
+	}
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
@@ -498,7 +514,7 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	// first — which on a v6-first host is not where the listener is.
 	cfg.Test.Host = "127.0.0.1"
 	reportDB := &prReportDB{}
-	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{})}
+	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{}), cases: cases}
 	mocks := &prMockDB{}
 	mappings := &prMappingDB{}
 	r := &Replayer{

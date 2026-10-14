@@ -309,3 +309,72 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
 }
+
+// keployTestAgent is a keploy test replay's agent on a real mock manager,
+// holding mocks, staged by the set's staging filter with pool as the set's
+// pool (models.ExactServing).
+func keployTestAgent(t *testing.T, mocks []*models.Mock, pool []string) (*Agent, *realProxy) {
+	t.Helper()
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newRealProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(),
+		Exact: &models.ExactServing{Stage: true, Pool: pool},
+	}))
+	return a, p
+}
+
+// keployTestCase opens test case name, owning owned, makes its calls, serves
+// the pool again, and returns what each call got and the misses it made.
+func keployTestCase(t *testing.T, a *Agent, p *realProxy, name string, owned []string, paths ...string) ([]string, []models.UnmatchedCall) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: name, Owned: owned}}))
+	var got []string
+	for _, path := range paths {
+		code, body := p.call(t, path)
+		got = append(got, fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+	}
+	misses, err := p.GetMockErrors(ctx)
+	require.NoError(t, err)
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
+	return got, misses
+}
+
+// keploy test under the switch: each test case is served exactly its own
+// mocks, out of recorded order too; one call more is an extra call; a test
+// case its mapping omits owns none; and between test cases the set's pool
+// answers, never a test case's mock.
+func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
+	a, p := keployTestAgent(t,
+		[]*models.Mock{
+			pingMock("mock-1", "/ping", "first", t0),
+			pingMock("mock-2", "/ping", "second", t0.Add(time.Second)),
+			pingMock("mock-3", "/health", "ok", t0.Add(-time.Second)),
+		}, []string{"mock-3"})
+
+	got, misses := keployTestCase(t, a, p, "test-2", []string{"mock-2"}, "/ping", "/ping")
+	require.Equal(t, "200 second", got[0], "a test case run out of recorded order is answered by its own mock")
+	require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+	require.Len(t, misses, 1)
+	require.Equal(t, models.MissExtraCall, misses[0].Kind)
+
+	got, misses = keployTestCase(t, a, p, "test-1", []string{"mock-1"}, "/ping")
+	require.Equal(t, []string{"200 first"}, got)
+	require.Empty(t, misses)
+
+	got, misses = keployTestCase(t, a, p, "test-3", nil, "/ping", "/health")
+	require.True(t, strings.HasPrefix(got[0], "502") && strings.HasPrefix(got[1], "502"), "a test case that owns nothing was answered: %v", got)
+	require.Len(t, misses, 2)
+
+	for i := 0; i < 2; i++ {
+		code, body := p.call(t, "/health")
+		require.Equal(t, 200, code, "the pool answers between test cases")
+		require.Equal(t, "ok", body)
+	}
+	code, _ := p.call(t, "/ping")
+	require.Equal(t, 502, code, "a test case's mock answered between test cases")
+}

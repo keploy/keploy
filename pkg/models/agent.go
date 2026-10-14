@@ -399,6 +399,29 @@ type MockFilterParams struct {
 	// dependency call that uses one is asserted to send that value. Empty for
 	// every other caller.
 	Variables []VariableBinding `json:"variables,omitempty"`
+
+	// Exact makes the call keploy test's exact serving, under the proven
+	// switch (design v14 §5.2): the agent stages nothing per test, and
+	// serves each test case exactly its own mocks. nil for every other
+	// caller, and always without the switch.
+	Exact *ExactServing `json:"exact,omitempty"`
+}
+
+// ExactServing is what a keploy test filter asks of exact serving, under the
+// proven switch.
+type ExactServing struct {
+	// Stage is the set's staging call: the agent stages every mock of the
+	// set once (the rest of the filter says how, as without exact serving),
+	// then serves Pool between test cases.
+	Stage bool `json:"stage,omitempty"`
+	// Pool is, on the staging call, the set's pool: every mock no test
+	// case's mapping lists. It answers between test cases, beside the
+	// protocol-phase mocks.
+	Pool []string `json:"pool,omitempty"`
+	// Test opens this test case, which owns the data-plane mocks of Owned
+	// (its mapping). Without Stage, an empty Test serves the pool again.
+	Test  string   `json:"test,omitempty"`
+	Owned []string `json:"owned,omitempty"`
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent

@@ -69,7 +69,13 @@ func TestRunTestSet_ATestCaseSendsTheAgentTheVariablesItsRequestCarries(t *testi
 			var sent [][]models.VariableBinding
 			instr.mu.Lock()
 			for _, p := range instr.allParams {
-				if !p.AfterTime.Equal(models.BaseTime) {
+				perTest := !p.AfterTime.Equal(models.BaseTime)
+				if p.Exact != nil {
+					// Under the switch: the filter that opens the test case
+					// (exact serving), not the pool after it or the staging.
+					perTest = p.Exact.Test != ""
+				}
+				if perTest {
 					sent = append(sent, p.Variables)
 				}
 			}

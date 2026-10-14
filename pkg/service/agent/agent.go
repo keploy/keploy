@@ -163,6 +163,7 @@ type Agent struct {
 	scopeMeta    map[scopeKey]scopeMeta
 	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
 	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
+	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -570,6 +571,8 @@ func (a *Agent) resetScopeState() {
 	// The tests' recorded begins belong to the replay that installed them;
 	// the clock's holder is given back by releaseTestClock, before this.
 	a.testBegins = nil
+	// keploy test's pool belongs to the set that staged it.
+	a.testPool = nil
 	a.scopeMu.Unlock()
 }
 
@@ -1338,6 +1341,10 @@ func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	// keploy test's exact serving, under the proven switch (exact_proven.go).
+	if params.Exact != nil && provenswitch.On() {
+		return a.serveKeployTestExactly(ctx, params)
+	}
 
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
