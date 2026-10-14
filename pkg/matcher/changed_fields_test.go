@@ -80,7 +80,7 @@ func TestChangedJSONFieldPaths(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ChangedJSONFieldPaths(tc.exp, tc.act, tc.known, tc.exclude)
+			got := ChangedJSONFieldPaths(tc.exp, tc.act, tc.known, nil, false, tc.exclude)
 			sort.Strings(got)
 			want := append([]string(nil), tc.expected...)
 			sort.Strings(want)

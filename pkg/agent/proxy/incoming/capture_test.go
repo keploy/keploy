@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"io"
 	"net"
 	"net/http"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,5 +197,62 @@ func TestRequestCaptureRoundTrip(t *testing.T) {
 	}
 	if got := string(body); got != "hello" {
 		t.Fatalf("parsed request body = %q, want %q", got, "hello")
+	}
+}
+
+// A recorded response carries the headers the app sent, as replay's HTTP
+// client sees them from the same app: the header whether the connection
+// closes after it is Go's verdict on reusing it, which it writes into a
+// serialized HTTP/1.0 response on its own, and so into the recording, where
+// the app's next answer, read at replay, never has it.
+func TestResponseCaptureRecordsTheHeadersTheAppSent(t *testing.T) {
+	t.Parallel()
+
+	for name, wire := range map[string]string{
+		"HTTP/1.0":                    "HTTP/1.0 200 OK\r\nServer: BaseHTTP/0.6\r\nContent-Length: 2\r\n\r\nok",
+		"HTTP/1.0, Connection: close": "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok",
+		"HTTP/1.0, keep-alive":        "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok",
+		"HTTP/1.0, no length":         "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nok",
+		"HTTP/1.1":                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+		"HTTP/1.1, Connection: close": "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok",
+		"HTTP/1.1, no length":         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			req, err := pkg.ParseHTTPRequest([]byte("GET / HTTP/1.1\r\nHost: app\r\n\r\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			replayed, err := http.ReadResponse(bufio.NewReader(strings.NewReader(wire)), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxied, err := http.ReadResponse(bufio.NewReader(strings.NewReader(wire)), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(proxied.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dump, err := dumpCapturedResponse(proxied, req, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := pkg.ParseHTTPResponse(dump, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(recorded.Header, replayed.Header) {
+				t.Fatalf("recorded header %v, want %v, as replay sees the app's response", recorded.Header, replayed.Header)
+			}
+			got, err := io.ReadAll(recorded.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "ok" {
+				t.Fatalf("recorded body %q, want %q", got, "ok")
+			}
+		})
 	}
 }

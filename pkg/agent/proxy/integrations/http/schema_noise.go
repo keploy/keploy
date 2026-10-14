@@ -66,14 +66,16 @@ func (httpNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool {
 // comparable=false and the engine falls back to byte equality. known arrives
 // root-relative from the engine; the form differ wants "body."-prefixed keys, so
 // it is re-prefixed for that branch only.
-func (httpNoiseAdapter) Diff(m *models.Mock, recorded, live []byte, known map[string][]string, valIsNoise func(string) bool) (map[string][]string, bool) {
+func (httpNoiseAdapter) Diff(m *models.Mock, recorded, live []byte, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, valIsNoise func(string) bool) (map[string][]string, bool) {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return nil, false
 	}
 	switch {
 	case pkg.IsJSON(recorded) && pkg.IsJSON(live):
-		return schemanoise.DetectJSONDrift(recorded, live, known, valIsNoise)
+		return schemanoise.DetectJSONDrift(recorded, live, known, typeStrict, valueChangesOnly, valIsNoise)
 	case isFormURLEncoded(m.Spec.HTTPReq.Header):
+		// Form bodies keep full-ignore noise semantics; type-strict / value-only
+		// enforcement is a JSON-body feature for now.
 		// Form bodies are comparable; formReqBodyNoise emits "body."-prefixed
 		// drift and expects a "body."-prefixed known set.
 		return formReqBodyNoise(string(recorded), string(live), schemanoise.AddBodyPrefix(known), valIsNoise), true

@@ -1,14 +1,17 @@
 package recorder
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
+	connPhase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
@@ -31,11 +34,9 @@ import (
 // same cached entry emits mutually indistinguishable config mocks. The V2
 // path draws this line explicitly; this test holds the legacy path to it.
 func TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock(t *testing.T) {
-	// This test takes ~7s by construction: reaching the cache fallback means
-	// missing BOTH PopWait calls in handlePostTLSRecord first (5s on the
-	// conn-specific key, then 2s on the port-only key). Those timeouts are
-	// hardcoded, so there is no knob to shorten them — and waiting them out
-	// is the point, since the fallback is only reachable after they expire.
+	// The connection below joined mid-stream (its first packet has seq 0), so
+	// handlePostTLSRecord does not wait on either PopWait before reaching the
+	// cache: nothing it waited for could serve it better.
 	store := models.NewTLSHandshakeStore()
 	// recordMock reads ClientConnectionIDKey as a string, so the emit path
 	// needs it present.
@@ -124,10 +125,10 @@ func TestLegacyPostTLS_BorrowedGreetingDoesNotBackdateTheConfigMock(t *testing.T
 	}
 }
 
-// The legacy post-TLS reader draws from the same port-only FIFO the V2 path
-// does, and an empty ConnKey collapses its conn-specific key onto that shared
-// key — so its FIRST PopWait consumes a queue every other post-TLS stream to
-// this port is competing for. Popping is destructive: a stream that takes a
+// The legacy post-TLS reader draws from the same port queue the V2 path does,
+// and a stream that cannot name its connection may take another connection's
+// entry from it — an entry every other post-TLS stream to this port may be
+// competing for. Popping is destructive: a stream that takes a
 // greeting and then fails has starved the connection that pushed it, which
 // loses its whole command phase with nothing logged. The entry must go back,
 // and without its ReqTimestamp (to the next consumer it is a borrowed entry —
@@ -143,36 +144,46 @@ func TestLegacyPostTLS_RestoresUnusedSharedGreeting(t *testing.T) {
 
 	portKey := models.HandshakeStoreKey("", 3306)
 	origTs := time.Now().Add(-time.Minute)
-	store.Push(portKey, models.TLSHandshakeEntry{
+	// Another connection's capture, which this stream (it names no connection)
+	// may take.
+	owner := models.HandshakeOwner{Conn: "sk:5", Proc: "p1"}
+	store.PushFor(portKey, owner, models.TLSHandshakeEntry{
 		RespPackets:  [][]byte{cannedHandshakeV10(t)},
 		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
 		ReqTimestamp: origTs,
 	})
 
-	// Client closed before any post-TLS packet arrives: the greeting is popped
-	// and decoded, then the first-client-packet read fails. That is the measured
-	// production shape — a stream whose own bytes never arrive.
+	// A fresh connection's HandshakeResponse41 arrives, so the greeting is
+	// popped and decoded, and then the connection is gone before its auth
+	// exchange reaches the server.
 	clientConn, peer := net.Pipe()
-	_ = peer.Close()
 	defer func() { _ = clientConn.Close() }()
 	destConn, destPeer := net.Pipe()
 	_ = destPeer.Close()
 	defer func() { _ = destConn.Close() }()
+	go func() {
+		_, _ = peer.Write(cannedHandshakeResponse41(t, 2, false))
+		_ = peer.Close()
+	}()
 
 	// ConnKey empty ⇒ storeKey == portKey ⇒ the pop reads the SHARED FIFO.
 	opts := models.OutgoingOptions{
 		DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
 		ConnKey: "",
 	}
-	if err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
-		buildPostHandshakeDecodeCtx(clientConn), opts); err == nil {
-		t.Fatal("expected the legacy post-TLS record to fail with no client packet")
+	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+		buildPostHandshakeDecodeCtx(clientConn), opts)
+	if err == nil {
+		t.Fatal("expected the legacy post-TLS record to fail when the server leg is gone")
+	}
+	if strings.Contains(err.Error(), "first post-TLS client packet") {
+		t.Fatalf("failed before adopting the greeting (%v); the restore assertion below would be vacuous", err)
 	}
 
-	restored, ok := store.PopWait(portKey, 0)
+	restored, _, ok := store.PopWaitFor(portKey, owner, true, 0)
 	if !ok {
-		t.Fatal("a greeting consumed by a FAILED legacy post-TLS attempt was never returned to the " +
-			"shared port FIFO; the connection it belonged to is starved")
+		t.Fatal("a greeting consumed by a FAILED legacy post-TLS attempt was never returned to its " +
+			"owner; the connection it belonged to is starved")
 	}
 	if !restored.ReqTimestamp.IsZero() {
 		t.Fatalf("restored entry kept ReqTimestamp %v; it would backdate the next connection's config mock",
@@ -198,31 +209,48 @@ func TestLegacyPostTLS_DoesNotRestoreAGreetingItAlreadyUsed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
+	handshakeBuf := cannedServerGreeting(t, 41)
 	portKey := models.HandshakeStoreKey("", 3306)
 	store.Push(portKey, models.TLSHandshakeEntry{
-		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		RespPackets:  [][]byte{handshakeBuf},
 		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
 		ReqTimestamp: time.Now(),
 	})
 
-	clientConn, peer := net.Pipe()
+	clientConn, clientPeer := net.Pipe()
 	defer func() { _ = clientConn.Close() }()
 	destConn, destPeer := net.Pipe()
 	defer func() { _ = destConn.Close() }()
-	_ = destPeer.Close()
 
-	// seq==0 takes the already-authenticated branch, which records the synthetic
-	// config mock built FROM the popped greeting — i.e. the greeting is spent.
+	// A fresh connection: its HandshakeResponse41 and the server's OK, each as
+	// its own side of the observed connection delivers it. The config mock is
+	// built FROM the popped greeting, so the greeting is spent, and the
+	// connection then idles in its command phase until teardown, which closes
+	// both sides as the capture layer does.
 	go func() {
-		_, _ = peer.Write(cannedCOMQuery(t, 0, "SELECT 1"))
+		_, _ = clientPeer.Write(cannedHandshakeResponse41(t, 2, false))
+		_, _ = destPeer.Write(cannedOK(t, 3, decodeGreeting(t, handshakeBuf).CapabilityFlags))
+		<-ctx.Done()
+		_ = clientPeer.Close()
+		_ = destPeer.Close()
 	}()
 
-	_ = handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
 		buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
 			DstCfg:  &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
 			ConnKey: "",
 		})
-
+	if err == nil {
+		t.Fatal("expected the teardown to end the command phase with an error")
+	}
+	var cfg bool
+	close(mocks)
+	for m := range mocks {
+		cfg = cfg || (m != nil && m.Name == "config")
+	}
+	if !cfg {
+		t.Fatalf("no config mock was recorded (err %v); the greeting was never used, so this test proves nothing", err)
+	}
 	if _, ok := store.PopWait(portKey, 0); ok {
 		t.Fatal("a greeting that was already used to build a config mock was pushed back into the " +
 			"shared FIFO; another stream would stitch a duplicate config mock from it")
@@ -252,11 +280,15 @@ func TestLegacyPostTLS_DoesNotRecycleDecodableNonHandshakeGreeting(t *testing.T)
 	})
 
 	clientConn, peer := net.Pipe()
-	_ = peer.Close()
 	defer func() { _ = clientConn.Close() }()
 	destConn, destPeer := net.Pipe()
 	_ = destPeer.Close()
 	defer func() { _ = destConn.Close() }()
+	// The stream's own first packet, so it goes on to adopt the entry.
+	go func() {
+		_, _ = peer.Write(cannedHandshakeResponse41(t, 2, false))
+		_ = peer.Close()
+	}()
 
 	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
 		buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
@@ -274,5 +306,261 @@ func TestLegacyPostTLS_DoesNotRecycleDecodableNonHandshakeGreeting(t *testing.T)
 	if _, ok := store.PopWait(portKey, 0); ok {
 		t.Fatal("a decodable non-handshake greeting was recycled into the shared FIFO; Push re-stamps " +
 			"its expiry so it would never age out and would trip every later stream to this port")
+	}
+}
+
+// A legacy post-TLS stream whose own bytes never arrive must not touch the
+// shared port FIFO: it reads its first packet before it looks for a greeting,
+// so the entry stays exactly as captured, own timestamp included, for the
+// stream that needs it.
+func TestLegacyPostTLS_StreamWithoutBytesLeavesTheSharedGreetingUntouched(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	ctx := context.WithValue(postTLSCtxWithStore(store),
+		models.ClientConnectionIDKey, "no-bytes-conn")
+	portKey := models.HandshakeStoreKey("", 3306)
+	origTs := time.Now().Add(-time.Minute)
+	store.Push(portKey, models.TLSHandshakeEntry{
+		RespPackets:  [][]byte{cannedHandshakeV10(t)},
+		ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+		ReqTimestamp: origTs,
+	})
+
+	clientConn, peer := net.Pipe()
+	_ = peer.Close()
+	defer func() { _ = clientConn.Close() }()
+	destConn, destPeer := net.Pipe()
+	_ = destPeer.Close()
+	defer func() { _ = destConn.Close() }()
+
+	err := handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, make(chan *models.Mock, 1),
+		buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
+			DstCfg: &models.ConditionalDstCfg{Addr: "127.0.0.1:1", Port: 3306, AddrFabricated: true},
+		})
+	if err == nil || !strings.Contains(err.Error(), "first post-TLS client packet") {
+		t.Fatalf("err = %v, want the first-client-packet read to fail", err)
+	}
+	got, ok := store.PopWait(portKey, 0)
+	if !ok {
+		t.Fatal("a stream with no bytes of its own consumed the shared greeting")
+	}
+	if !got.ReqTimestamp.Equal(origTs) {
+		t.Fatalf("ReqTimestamp = %v, want the entry's own %v: it was popped and pushed back", got.ReqTimestamp, origTs)
+	}
+}
+
+// The legacy reader keeps V2's rules for a connection that joined mid-stream: it
+// takes from the port's queue only an entry that is provably its own (same
+// ConnKey on both legs), and otherwise borrows the app-scoped cache. Anything
+// else on the queue may be a fresh connection's own leg that has not reached
+// its decrypted stream yet, the normal ordering: the raw leg's greeting and
+// SSLRequest precede the TLS handshake, which precedes the first decrypted
+// packet. Taking it robbed that connection of its SSLRequest, salt and
+// timestamp.
+func TestLegacyPostTLS_JoinedConnTakesOnlyItsOwnEntry(t *testing.T) {
+	portKey := models.HandshakeStoreKey("", 3306)
+	dst := &models.ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306}
+	const scope = "ns/app/test-set-0"
+	entryOf := func(version string, id uint32, ts time.Time) models.TLSHandshakeEntry {
+		return models.TLSHandshakeEntry{
+			RespPackets:  [][]byte{cannedHandshakeV10Variant(t, version, id)},
+			ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+			ReqTimestamp: ts,
+		}
+	}
+	cached := entryOf("8.0.36", 21, time.Now().Add(-time.Minute))
+	freshLeg := entryOf("8.0.36", 22, time.Now().Add(-time.Second))
+	ownLeg := entryOf("8.0.36", 23, time.Now().Add(-2*time.Second))
+	run := func(t *testing.T, store *models.TLSHandshakeStore, owner models.HandshakeOwner) *models.Mock {
+		t.Helper()
+		ctx := context.WithValue(postTLSCtxWithStore(store), models.ClientConnectionIDKey, "joined-conn")
+		mocks := make(chan *models.Mock, 16)
+		mgr := syncMock.New(zap.NewNop())
+		mgr.SetOutputChannel(mocks)
+		ctx = syncMock.NewContext(ctx, mgr)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		clientConn, clientPeer := net.Pipe()
+		defer func() { _ = clientConn.Close() }()
+		destConn, destPeer := net.Pipe()
+		defer func() { _ = destConn.Close() }()
+		go func() {
+			buf := make([]byte, 4096)
+			_, _ = clientPeer.Write(cannedCOMQuery(t, 0, "SELECT 1"))
+			_, _ = destPeer.Read(buf)
+			_, _ = destPeer.Write(cannedOK(t, 1, decodeGreeting(t, cached.RespPackets[0]).CapabilityFlags))
+			_, _ = clientPeer.Read(buf)
+			_ = clientPeer.Close()
+			_ = destPeer.Close()
+		}()
+		start := time.Now()
+		_ = handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+			buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
+				DstCfg: dst, PassThroughScope: scope, ConnKey: owner.Conn, ConnProc: owner.Proc,
+			})
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("the joined connection took %v; it waited", d)
+		}
+		close(mocks)
+		for m := range mocks {
+			if m != nil && m.Name == "config" {
+				return m
+			}
+		}
+		t.Fatal("no config mock")
+		return nil
+	}
+	greetingID := func(m *models.Mock) uint32 {
+		for _, r := range m.Spec.MySQLResponses {
+			if g, ok := r.Message.(*mysql.HandshakeV10Packet); ok {
+				return g.ConnectionID
+			}
+		}
+		return 0
+	}
+	queued := func(store *models.TLSHandshakeStore) int {
+		n := 0
+		for {
+			if _, ok := store.PopWait(portKey, 0); !ok {
+				return n
+			}
+			n++
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		owner models.HandshakeOwner
+		fresh models.HandshakeOwner
+	}{
+		{"neither leg names its connection", models.HandshakeOwner{}, models.HandshakeOwner{}},
+		{"same process, connections unnamed", models.HandshakeOwner{Proc: "p1"}, models.HandshakeOwner{Proc: "p1"}},
+		{"another connection of the same process", models.HandshakeOwner{Conn: "sk:5", Proc: "p1"}, models.HandshakeOwner{Conn: "sk:6", Proc: "p1"}},
+	} {
+		t.Run("a fresh connection's leg is left to it: "+tc.name, func(t *testing.T) {
+			store := models.NewTLSHandshakeStore()
+			store.RememberLast(models.HandshakeLastKey(scope, dst), cached) // an earlier raw leg
+			store.PushFor(portKey, tc.fresh, freshLeg)
+			cfg := run(t, store, tc.owner)
+			if id := greetingID(cfg); id != 21 {
+				t.Fatalf("stitched greeting %d, want the cached 21: it took a fresh connection's leg", id)
+			}
+			if cfg.Spec.ReqTimestampMock.Equal(cached.ReqTimestamp) {
+				t.Fatal("the joined connection's config mock carries the borrowed entry's timestamp")
+			}
+			if n := queued(store); n != 1 {
+				t.Fatalf("%d entries left on the port's queue, want the fresh connection's 1", n)
+			}
+		})
+	}
+
+	t.Run("its own entry is taken, and only that", func(t *testing.T) {
+		store := models.NewTLSHandshakeStore()
+		store.RememberLast(models.HandshakeLastKey(scope, dst), cached)
+		store.PushFor(portKey, models.HandshakeOwner{Conn: "sk:6", Proc: "p1"}, freshLeg)
+		store.PushFor(portKey, models.HandshakeOwner{Conn: "sk:5", Proc: "p1"}, ownLeg)
+		cfg := run(t, store, models.HandshakeOwner{Conn: "sk:5", Proc: "p1"})
+		if id := greetingID(cfg); id != 23 {
+			t.Fatalf("stitched greeting %d, want its own 23", id)
+		}
+		if !cfg.Spec.ReqTimestampMock.Equal(ownLeg.ReqTimestamp) {
+			t.Fatalf("ReqTimestampMock = %v, want its own greeting's %v", cfg.Spec.ReqTimestampMock, ownLeg.ReqTimestamp)
+		}
+		e, taker, ok := store.PopWaitFor(portKey, models.HandshakeOwner{}, false, 0)
+		if !ok || taker.Conn != "sk:6" || !e.ReqTimestamp.Equal(freshLeg.ReqTimestamp) {
+			t.Fatalf("queue head = %v (owner %v, %v), want the other connection's entry untouched", e, taker, ok)
+		}
+	})
+}
+
+// cannedServerGreeting is a greeting as a server sends it: a 20-byte salt plus
+// its NUL, so the legacy reader decodes its auth plugin and a fresh
+// connection's auth exchange completes.
+func cannedServerGreeting(t *testing.T, connID uint32) []byte {
+	t.Helper()
+	raw, err := connPhase.EncodeHandshakeV10(context.Background(), zap.NewNop(), &mysql.HandshakeV10Packet{
+		ProtocolVersion: 0x0a,
+		ServerVersion:   "8.0.36",
+		ConnectionID:    connID,
+		AuthPluginData:  append(bytes.Repeat([]byte{0x22}, 20), 0),
+		CapabilityFlags: uint32(mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_PLUGIN_AUTH | mysql.CLIENT_SSL | mysql.CLIENT_SECURE_CONNECTION),
+		CharacterSet:    0x21,
+		StatusFlags:     0x02,
+		AuthPluginName:  string(mysql.Native),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wrapPacket(raw, 0)
+}
+
+// The legacy reader pairs a fresh connection with its OWN raw leg, as V2 does:
+// two connections to one port whose raw legs were queued in one order and whose
+// decrypted streams arrive in the other. Arrival order alone crossed them.
+func TestLegacyPostTLS_EachStreamGetsItsOwnConnectionsGreeting(t *testing.T) {
+	store := models.NewTLSHandshakeStore()
+	portKey := models.HandshakeStoreKey("", 3306)
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	type conn struct {
+		owner models.HandshakeOwner
+		id    uint32
+		ts    time.Time
+	}
+	conns := []conn{
+		{models.HandshakeOwner{Conn: "sk:1", Proc: "p1"}, 71, base},
+		{models.HandshakeOwner{Conn: "sk:2", Proc: "p1"}, 72, base.Add(time.Millisecond)},
+	}
+	for _, c := range conns {
+		store.PushFor(portKey, c.owner, models.TLSHandshakeEntry{
+			RespPackets:  [][]byte{cannedServerGreeting(t, c.id)},
+			ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+			ReqTimestamp: c.ts,
+		})
+	}
+	for i := len(conns) - 1; i >= 0; i-- {
+		c := conns[i]
+		mocks := make(chan *models.Mock, 16)
+		mgr := syncMock.New(zap.NewNop())
+		mgr.SetOutputChannel(mocks)
+		ctx := syncMock.NewContext(context.WithValue(postTLSCtxWithStore(store),
+			models.ClientConnectionIDKey, c.owner.Conn), mgr)
+		ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		clientConn, clientPeer := net.Pipe()
+		destConn, destPeer := net.Pipe()
+		caps := decodeGreeting(t, cannedServerGreeting(t, c.id)).CapabilityFlags
+		go func() {
+			_, _ = clientPeer.Write(cannedHandshakeResponse41(t, 2, false))
+			_, _ = destPeer.Write(cannedOK(t, 3, caps))
+			<-ctx.Done()
+			_ = clientPeer.Close()
+			_ = destPeer.Close()
+		}()
+		_ = handlePostTLSRecord(ctx, zap.NewNop(), clientConn, destConn, mocks,
+			buildPostHandshakeDecodeCtx(clientConn), models.OutgoingOptions{
+				DstCfg:  &models.ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306},
+				ConnKey: c.owner.Conn, ConnProc: c.owner.Proc,
+			})
+		cancel()
+		_ = clientConn.Close()
+		_ = destConn.Close()
+		close(mocks)
+		var cfg *models.Mock
+		for m := range mocks {
+			if m != nil && m.Name == "config" {
+				cfg = m
+			}
+		}
+		if cfg == nil {
+			t.Fatalf("connection %s recorded no config mock", c.owner.Conn)
+		}
+		var got uint32
+		for _, r := range cfg.Spec.MySQLResponses {
+			if g, ok := r.Message.(*mysql.HandshakeV10Packet); ok {
+				got = g.ConnectionID
+			}
+		}
+		if got != c.id || !cfg.Spec.ReqTimestampMock.Equal(c.ts) {
+			t.Errorf("connection %s: stitched with greeting %d at %v, want its own %d at %v",
+				c.owner.Conn, got, cfg.Spec.ReqTimestampMock, c.id, c.ts)
+		}
 	}
 }

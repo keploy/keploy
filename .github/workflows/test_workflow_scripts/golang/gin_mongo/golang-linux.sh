@@ -2,6 +2,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 dump_gin_mongo_ci_diagnostics() {
@@ -24,23 +25,11 @@ dump_gin_mongo_ci_diagnostics() {
 }
 
 # Start mongo before starting keploy.
-docker rm -f mongoDb >/dev/null 2>&1 || true
-docker_pull_retry mongo
-docker run --rm -d -p27017:27017 --name mongoDb mongo
 trap 'docker rm -f mongoDb >/dev/null 2>&1 || true' EXIT
-
-mongo_ready=false
-for mongo_attempt in {1..30}; do
-    if docker exec mongoDb mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q '^1$'; then
-        mongo_ready=true
-        break
-    fi
-    sleep 2
-done
-
-if [ "$mongo_ready" != true ]; then
-    echo "::error::MongoDB did not become ready within 60 seconds. Next steps: verify the Docker daemon is available, check for image pull or container startup errors, and inspect the mongoDb logs printed below."
-    dump_gin_mongo_ci_diagnostics
+if ! start_mongo; then
+    # start_mongo printed MongoDB's state and logs.
+    echo "===== docker ps -a ====="
+    docker ps -a || true
     exit 1
 fi
 

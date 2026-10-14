@@ -62,6 +62,7 @@ type bpfProgramSpecs struct {
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	K_postBind4             *ebpf.ProgramSpec `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.ProgramSpec `ebpf:"k_post_bind6"`
+	K_processExit           *ebpf.ProgramSpec `ebpf:"k_process_exit"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
@@ -160,6 +161,7 @@ type bpfPrograms struct {
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
 	K_postBind4             *ebpf.Program `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.Program `ebpf:"k_post_bind6"`
+	K_processExit           *ebpf.Program `ebpf:"k_process_exit"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
@@ -178,6 +180,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername6,
 		p.K_postBind4,
 		p.K_postBind6,
+		p.K_processExit,
 		p.K_sockops,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,

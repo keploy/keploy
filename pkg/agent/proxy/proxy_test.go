@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,19 +9,31 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// newTLSTestServer spins up a TLS listener with a self-signed cert. The
-// handler hook (if non-nil) receives each accepted, fully-handshaked
-// *tls.Conn. Returns the listener and a teardown that closes it.
-func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+// newTestServerTLSConfig returns a server TLS config with a fresh self-signed
+// certificate for "test.local", offering nextProtos.
+func newTestServerTLSConfig(t *testing.T, nextProtos []string) *tls.Config {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -48,6 +61,15 @@ func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []s
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   nextProtos,
 	}
+	return cfg
+}
+
+// newTLSTestServer spins up a TLS listener with a self-signed cert. The
+// handler hook (if non-nil) receives each accepted, fully-handshaked
+// *tls.Conn. Returns the listener and the server's TLS config.
+func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+	t.Helper()
+	cfg := newTestServerTLSConfig(t, nextProtos)
 
 	// Wrap with a delaying listener so we can simulate slow upstream
 	// handshake behavior (the delay fires after TCP accept, before TLS
@@ -114,7 +136,7 @@ func TestStartSpeculativeUpstreamTLS_Join_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	conn, err := s.join(ctx)
 	if err != nil {
 		t.Fatalf("join: %v", err)
@@ -143,7 +165,7 @@ func TestStartSpeculativeUpstreamTLS_Abandon_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
 	s.abandon()
 
 	// Give the background drainer a moment to run if the dial had
@@ -172,7 +194,7 @@ func TestStartSpeculativeUpstreamTLS_DialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg)
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg, nil)
 	conn, err := s.join(ctx)
 	if err == nil {
 		if conn != nil {
@@ -193,7 +215,7 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 
 	parent, cancel := context.WithCancel(context.Background())
-	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg)
+	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg, nil)
 
 	// Cancel before the handshake completes.
 	time.Sleep(50 * time.Millisecond)
@@ -210,17 +232,30 @@ func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
 	}
 }
 
-// TestSpeculativeParallelism asserts that running the speculative upstream
-// dial in parallel with a simulated MITM client-facing handshake takes
-// ~max(client, upstream) rather than the sum. This is the core
+// TestSpeculativeParallelism asserts that the speculative upstream dial runs
+// in parallel with the MITM client-facing handshake. This is the core
 // optimization — the test must fail if someone accidentally reverts the
 // parallelization.
+//
+// The test plays the upstream server itself, and only starts serving once
+// startSpeculativeUpstreamTLS has returned. Its own work — standing in for the
+// client-facing handshake — is the server half of the upstream TLS handshake,
+// which can only complete if the speculative goroutine drives the client half
+// at the same time. So a dial run inline (start would block on a server that
+// is not answering yet), one deferred into join(), or a join() that redials
+// instead of handing over the speculative conn all fail; nothing is timed.
 func TestSpeculativeParallelism(t *testing.T) {
-	const upstreamDelay = 100 * time.Millisecond
-	const clientDelay = 100 * time.Millisecond
+	srvCfg := newTestServerTLSConfig(t, []string{"h2", "http/1.1"})
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer rawLn.Close()
 
-	ln, _ := newTLSTestServer(t, upstreamDelay, []string{"h2", "http/1.1"}, nil)
-	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	_ = rawLn.(*net.TCPListener).SetDeadline(deadline)
 
 	cfg := &tls.Config{
 		InsecureSkipVerify: true, // nolint:gosec
@@ -228,31 +263,27 @@ func TestSpeculativeParallelism(t *testing.T) {
 		NextProtos:         []string{"h2", "http/1.1"},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Nobody serves TLS yet, so this returns only if the upstream handshake
+	// does not run inline.
+	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), rawLn.Addr().String(), cfg, nil)
+	defer s.abandon()
 
-	start := time.Now()
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg)
-	// Simulate the MITM client-facing handshake.
-	time.Sleep(clientDelay)
+	raw, err := rawLn.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v — no upstream dial reached the server while the caller was busy (handshake run inline in start, or deferred into join)", err)
+	}
+	defer raw.Close()
+	if err := tls.Server(raw, srvCfg).HandshakeContext(ctx); err != nil {
+		t.Fatalf("the upstream handshake did not complete before join(): %v", err)
+	}
+
 	conn, err := s.join(ctx)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
 	defer conn.Close()
-
-	// Parallel: elapsed ~= max(clientDelay, upstreamDelay) = 100ms.
-	// Serial would have been ~200ms. Tolerate ±40ms of jitter on top
-	// of the nominal 100ms upper bound (race detector adds overhead).
-	if elapsed > 160*time.Millisecond {
-		t.Fatalf("handshake took %v — serial regression? expected ~%v", elapsed, clientDelay)
-	}
-	// Lower bound sanity: it can't be faster than the upstream delay
-	// because the server waits that long before even starting the
-	// handshake.
-	if elapsed < upstreamDelay-20*time.Millisecond {
-		t.Fatalf("handshake took %v — improbably fast, mock misconfigured?", elapsed)
+	if got, want := conn.LocalAddr().String(), raw.RemoteAddr().String(); got != want {
+		t.Fatalf("join returned conn %s, not the speculatively handshaken %s", got, want)
 	}
 }
 
@@ -433,4 +464,466 @@ func TestNewSnapshotsStallGrace(t *testing.T) {
 			t.Fatalf("recordBufferStallGrace = %v, want %v", got, want)
 		}
 	})
+}
+
+// TestMockClearsThePreviousTestSetsConsumption pins the cross-process invariant
+// the CLI's per-set latch now depends on.
+//
+// Under KEPLOY_AGENT_OWNS_CONSUMED the agent filters from its own
+// consumedPersistent. The replayer treats a successful MockOutgoing — which
+// lands here — as proof that the previous test set's consumption is gone, and
+// on that basis stops sending its own map. If Mock ever stops performing the
+// reset, the CLI hands set N+1's pool to an agent still holding set N's names:
+// mock names are unique only WITHIN a set, so set N's mock-1 (Usage: Deleted)
+// drops set N+1's unrelated mock-1, and filterOutDeleted stamps set N's
+// IsFiltered/SortOrder onto its mock-2. A wrong test result, silently, with
+// every suite green.
+//
+// TestPersistentConsumed_ClearedAtTestSetBoundary pins ResetForReplaySession in
+// isolation; nothing pinned that Mock actually calls it, and it is one
+// deletable line.
+func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
+	p := New(zap.NewNop(), nil, &config.Config{})
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+	p.setMockManager(mm)
+
+	// The previous test set consumed two mocks. mock-2 is deliberately not
+	// Deleted: a clear that only swept Deleted entries would still stamp the
+	// old ordering onto the next set's same-named mock.
+	for _, st := range []models.MockState{
+		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
+		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
+	} {
+		if err := mm.flagMockAsUsed(st); err != nil {
+			t.Fatalf("flagMockAsUsed: %v", err)
+		}
+	}
+	if len(p.GetPersistentConsumed()) != 2 {
+		t.Fatalf("precondition: the previous set's consumption was not recorded")
+	}
+
+	// The test-set boundary. The error is ignored on purpose: Mock can fail
+	// later, at the nsswitch setup, and that failure is AFTER the reset — the
+	// property under test is the reset, not the call's overall success.
+	_ = p.Mock(context.Background(), models.OutgoingOptions{})
+
+	if got := p.GetPersistentConsumed(); len(got) != 0 {
+		t.Fatalf("Mock did not clear the previous test set's consumption: %#v — the replayer treats a "+
+			"successful MockOutgoing as proof that it did, and stops sending its own map, so this "+
+			"silently mis-filters the next test set", got)
+	}
+}
+
+// closeCountingConn is a connection that counts its Close calls, so a test can
+// see whether the code under test closed it, as soon as that code returns.
+type closeCountingConn struct {
+	net.Conn
+	closes atomic.Int32
+}
+
+func (c *closeCountingConn) Close() error {
+	c.closes.Add(1)
+	return c.Conn.Close()
+}
+
+// CloseWrite forwards a half-close, as the TCP connection it wraps would.
+func (c *closeCountingConn) CloseWrite() error { return util.CloseWriteIfPossible(c.Conn) }
+
+// NetConn is the connection beneath, the convention the proxy's own wrappers
+// follow, so what looks for the socket under a connection finds it here too.
+func (c *closeCountingConn) NetConn() net.Conn { return c.Conn }
+
+// acceptedConn returns both ends of a loopback TCP connection: app is the
+// application's end, and proxySide the end the proxy's listener accepted,
+// counting its closes.
+func acceptedConn(t *testing.T) (app *net.TCPConn, proxySide *closeCountingConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close(); _ = s.Close() })
+	return c.(*net.TCPConn), &closeCountingConn{Conn: s}
+}
+
+// fakeDestInfo answers handleConnection's lookup of a connection's original
+// destination the way the connect hooks would.
+type fakeDestInfo struct {
+	dest   *agent.NetworkAddress
+	getErr error
+	delErr error
+}
+
+func (f fakeDestInfo) Get(context.Context, uint16) (*agent.NetworkAddress, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	d := *f.dest // handleConnection may rewrite the port of what it gets
+	return &d, nil
+}
+
+func (f fakeDestInfo) Delete(context.Context, uint16) error { return f.delErr }
+
+// predialedTo dials addr and hands it to p as the connection pre-dialled for
+// the application end of src, the way a held handshake does, so the first
+// dial of addr takes it: a test can then count whether the proxy closed the
+// upstream connection it used.
+func predialedTo(t *testing.T, p *Proxy, src net.Conn, addr string) *closeCountingConn {
+	t.Helper()
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	counted := &closeCountingConn{Conn: c}
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(addr, connseq.NewUpstream(counted)))
+	return counted
+}
+
+// awaitEvent waits for ch to deliver. What it waits for follows from a socket
+// event the code under test causes without waiting on anything, however
+// loaded the host is, so the wait has no budget of its own: it is bounded only
+// so that code that never causes the event fails the test instead of hanging
+// the binary. Each wait may take a quarter of the time left before the test
+// binary's deadline, so one that never ends still leaves time for the waits
+// and the tests after it to report their own results.
+func awaitEvent[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	var expired <-chan time.Time
+	if dl, ok := t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case v := <-ch:
+		return v
+	case <-expired:
+		t.Fatalf("%s never happened", what)
+		panic("unreachable")
+	}
+}
+
+// Every path out of handleConnection closes the application's connection.
+// Those that returned before the cleanup was registered, or that replaced
+// the connection with nil, left the application blocked on its call until
+// its own timeout.
+func TestHandleConnectionClosesTheAppConnectionOnEveryEarlyReturn(t *testing.T) {
+	dest := ipv4Dest(t, "127.0.0.1:8443")
+	session := &agent.Session{
+		Mode: models.MODE_TEST,
+		// Mocking keeps the proxy off the destination; the MySQL probe is
+		// off so nothing waits for the application to stay silent.
+		OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
+	}
+	// A TLS record holding a ClientHello with no body: the MITM handshake
+	// reads it whole and fails on it.
+	brokenClientHello := []byte{0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00}
+
+	for _, tc := range []struct {
+		name    string
+		dest    fakeDestInfo
+		session *agent.Session
+		send    []byte
+		wantErr bool
+	}{
+		{name: "the destination lookup fails", dest: fakeDestInfo{getErr: errors.New("no redirect record")}},
+		{name: "releasing the destination record fails", dest: fakeDestInfo{dest: dest, delErr: errors.New("map delete failed")}, wantErr: true},
+		{name: "the client's TLS handshake fails", dest: fakeDestInfo{dest: dest}, session: session, send: brokenClientHello, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: tc.dest, mysqlPorts: newMysqlPortRegistry()}
+			if tc.session != nil {
+				p.setSession(tc.session)
+			}
+			if len(tc.send) > 0 {
+				if _, err := app.Write(tc.send); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := p.handleConnection(context.Background(), src)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleConnection returned %v, want an error: %v", err, tc.wantErr)
+			}
+			if src.closes.Load() == 0 {
+				t.Fatal("handleConnection returned without closing the application's connection")
+			}
+			if _, err := io.ReadAll(app); err != nil {
+				t.Fatalf("the application's end did not see its connection end cleanly: %v", err)
+			}
+		})
+	}
+}
+
+// A CONNECT tunnel the corporate proxy opened is closed when the application
+// ends its connection before sending anything through it. The proxy's
+// connection used to become dstConn only after the inner bytes were peeked,
+// so returning at that peek left it open and unreferenced.
+func TestHandleConnectionClosesTheTunnelWhenTheAppLeavesBeforeUsingIt(t *testing.T) {
+	corp, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = corp.Close() })
+	go func() {
+		c, err := corp.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		_, _ = io.Copy(io.Discard, c)
+	}()
+
+	app, src := acceptedConn(t)
+	p := &Proxy{
+		logger:     zap.NewNop(),
+		DestInfo:   fakeDestInfo{dest: ipv4Dest(t, corp.Addr().String())},
+		mysqlPorts: newMysqlPortRegistry(),
+	}
+	p.setSession(&agent.Session{
+		Mode:            models.MODE_RECORD,
+		MC:              make(chan *models.Mock, 1),
+		OutgoingOptions: models.OutgoingOptions{DisableMysqlAutoDetect: true},
+	})
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	tunnel := predialedTo(t, p, src, corp.Addr().String())
+
+	req := "CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n"
+	if _, err := app.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	resp, err := http.ReadResponse(bufio.NewReader(app), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("reading the tunnel's 200: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT answered %d, want 200", resp.StatusCode)
+	}
+	// The application leaves without sending a byte through the tunnel.
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := awaitEvent(t, done, "handleConnection returning after the application left"); err != nil {
+		t.Fatalf("handleConnection: %v", err)
+	}
+	if tunnel.closes.Load() == 0 {
+		t.Fatal("handleConnection returned without closing its connection to the corporate proxy")
+	}
+	if src.closes.Load() == 0 {
+		t.Fatal("handleConnection returned without closing the application's connection")
+	}
+}
+
+// containerAt names one address a container, as the index of the local
+// Docker daemon would for a container's published port.
+type containerAt struct {
+	addr string
+	c    containerkey.Container
+}
+
+func (r containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return r.c, dst.String() == r.addr, nil
+}
+
+func (containerAt) Bind(context.Context)               {}
+func (containerAt) Watch(context.Context, *zap.Logger) {}
+func (containerAt) Endpoint() string                   { return "unix:///fake.sock" }
+
+// probeSaw is what a parser saw of its connection's container key while the
+// proxy served it: through its context, and on a mock of its connection.
+type probeSaw struct {
+	fromCtx, stamped, connID string
+}
+
+// ctxProbe is a parser that takes every connection and reports what it saw.
+type ctxProbe struct{ saw chan probeSaw }
+
+func (ctxProbe) MatchType(context.Context, []byte) bool { return true }
+
+func (p ctxProbe) look(ctx context.Context) error {
+	connID, _ := ctx.Value(models.ClientConnectionIDKey).(string)
+	key, _ := containerkey.FromContext(ctx)
+	m := &models.Mock{ConnectionID: connID}
+	containerkey.Default.Stamp(m)
+	p.saw <- probeSaw{fromCtx: key, stamped: m.Spec.Metadata[containerkey.MetadataKey], connID: connID}
+	return nil
+}
+
+func (p ctxProbe) RecordOutgoing(ctx context.Context, _ *integrations.RecordSession) error {
+	return p.look(ctx)
+}
+
+func (p ctxProbe) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	return p.look(ctx)
+}
+
+// Under the proven switch the proxy names a container destination when it
+// accepts the connection: the parser's context carries the key, and the
+// mocks of that connection (by the connection ID the same context carries)
+// are stamped with it while it is open. Once handleConnection returns, the
+// keyer holds nothing of it. Without the switch nothing is named. The same in
+// a record (Record) and in a replay (Mock).
+func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
+	for _, tc := range []struct {
+		mode models.Mode
+		on   bool
+	}{{models.MODE_RECORD, true}, {models.MODE_RECORD, false}, {models.MODE_TEST, true}, {models.MODE_TEST, false}} {
+		mode, on := tc.mode, tc.on
+		t.Run(fmt.Sprintf("%s/proven=%v", mode, on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			upstream := keepAliveHTTPUpstream(t)
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
+				c: containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566}})
+			t.Cleanup(func() { containerkey.Default = saved })
+
+			cfg := config.New()
+			cfg.Agent.Mode = mode
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			probe := ctxProbe{saw: make(chan probeSaw, 1)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{"probe": probe}
+			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: "probe"}}
+			opts := models.OutgoingOptions{DisableMysqlAutoDetect: true}
+			if mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				// Mock can fail last, at its nsswitch setup (root's), with
+				// the session already set up.
+				opts.Mocking = true
+				_ = p.Mock(context.Background(), opts)
+			}
+
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			if _, err := io.WriteString(app, "GET /queue HTTP/1.1\r\nHost: dependency\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			saw := awaitEvent(t, probe.saw, "the parser being handed the connection")
+			awaitEvent(t, done, "handleConnection returning")
+
+			want := ""
+			if on {
+				want = "container:localstack/localstack:3.8:4566#1"
+			}
+			if saw.fromCtx != want || saw.stamped != want {
+				t.Fatalf("while open, the parser's context carried %q and its connection's mock was stamped %q, want %q", saw.fromCtx, saw.stamped, want)
+			}
+			m := &models.Mock{ConnectionID: saw.connID}
+			containerkey.Default.Stamp(m)
+			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != "" {
+				t.Fatalf("after the connection closed the keyer still stamped %q", got)
+			}
+		})
+	}
+}
+
+// sessionIndex is a container index that counts what the proxy asks of it.
+type sessionIndex struct {
+	at             map[string]containerkey.Container
+	binds, watches atomic.Int32
+}
+
+func (s *sessionIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	c, ok := s.at[dst.String()]
+	return c, ok, nil
+}
+
+func (s *sessionIndex) Bind(context.Context)               { s.binds.Add(1) }
+func (s *sessionIndex) Watch(context.Context, *zap.Logger) { s.watches.Add(1) }
+func (*sessionIndex) Endpoint() string                     { return "unix:///fake.sock" }
+
+// Only under the proven switch does the agent bind its reading of Docker to
+// its life, and a session start (Record, Mock) index the local daemon's
+// containers and number them afresh. Without the switch the proxy never
+// touches the index: no watch of the daemon (its goroutines, its connection,
+// its messages) and the numbering left as it was.
+func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			idx := &sessionIndex{at: map[string]containerkey.Container{
+				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432},
+				"172.17.0.3:5432": {ID: "b", Image: "postgres:16", Port: 5432},
+			}}
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(idx)
+			t.Cleanup(func() { containerkey.Default = saved })
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			bindContainerKeys(ctx)
+			cfg := config.New()
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			sessions := map[string]func(){
+				"Record": func() {
+					_ = p.Record(ctx, make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true})
+				},
+				// Mock can fail later, at its nsswitch setup: after the
+				// container keys' start, which is what is checked here.
+				"Mock": func() { _ = p.Mock(ctx, models.OutgoingOptions{}) },
+			}
+			for _, name := range []string{"Record", "Mock"} {
+				containerkey.Default.Reset()
+				_, a, _ := containerkey.Default.Name(nil, "a", "172.17.0.2:5432")
+				containerkey.Default.Forget("a")
+				sessions[name]()
+				_, b, _ := containerkey.Default.Name(nil, "b", "172.17.0.3:5432")
+				containerkey.Default.Forget("b")
+				want := "container:postgres:16:5432#2" // numbered after a, in the same session
+				if on {
+					want = "container:postgres:16:5432#1" // a new session
+				}
+				if a != "container:postgres:16:5432#1" || b != want {
+					t.Fatalf("around %s: a was %q and b %q, want b %q", name, a, b, want)
+				}
+			}
+			wantBinds, wantWatches := int32(0), int32(0)
+			if on {
+				wantBinds, wantWatches = 1, 2
+			}
+			if got := idx.binds.Load(); got != wantBinds {
+				t.Fatalf("the agent bound the index %d times, want %d", got, wantBinds)
+			}
+			if got := idx.watches.Load(); got != wantWatches {
+				t.Fatalf("Record and Mock watched the index %d times, want %d", got, wantWatches)
+			}
+		})
+	}
 }

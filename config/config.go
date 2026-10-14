@@ -145,7 +145,13 @@ type Record struct {
 	ChannelBindingShim bool   `json:"channelBindingShim" yaml:"channelBindingShim" mapstructure:"channelBindingShim"`
 	MemoryLimit        uint64 `json:"memoryLimit" yaml:"memoryLimit" mapstructure:"memoryLimit"`
 	GlobalPassthrough  bool   `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath  string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	// DisableHandshakeHold: by default the proxy holds each connection's
+	// handshake until the real destination answers, so a refused or
+	// unreachable dependency fails the application's connect as it would
+	// without keploy (docs/reference/recording-proxy-handshakes.md). Set it to
+	// accept every connection at once instead.
+	DisableHandshakeHold bool   `json:"disableHandshakeHold" yaml:"disableHandshakeHold" mapstructure:"disableHandshakeHold"`
+	TLSPrivateKeyPath    string `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 	// UpstreamTLS controls whether keploy authenticates the REAL upstream
 	// server when it dials out on the application's behalf. TLSPrivateKeyPath
 	// above is the client half of the same story (upstream mTLS); this is the
@@ -339,6 +345,32 @@ type MockCmd struct {
 	// RecordTimer optionally bounds a record session (e.g. "30s"); the wrapped
 	// runner exiting on its own ends recording first in almost all cases.
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	// EmitMockEvents logs one line per mock as it is first served, so a client
+	// driving keploy (an IDE, a desktop API client) can show which dependency
+	// calls came from disk while the run is still going. Off by default: the
+	// lines are for a machine reading stdout, and a human watching a terminal
+	// does not want one per database round-trip.
+	//
+	// It exists because there was previously NO per-mock signal at replay time
+	// at any log level — only aggregate counts — so every client had to infer
+	// "served" from something else and present a guess as a measurement.
+	EmitMockEvents bool `json:"emitMockEvents" yaml:"emitMockEvents" mapstructure:"emitMockEvents"`
+	// MinCoverage fails a replay whose test run covered less than this
+	// percentage of the code (0 disables it). The number is the runner's own
+	// coverage report for that run -- go test -coverprofile, lcov, Cobertura
+	// or JaCoCo -- so the floor is only as real as the report: a run that
+	// writes none fails the gate rather than passing it unmeasured.
+	MinCoverage float64 `json:"minCoverage" yaml:"minCoverage" mapstructure:"minCoverage"`
+	// CoverageReport names the coverage report the test command writes, when
+	// it is not one of the runners' default locations. Relative to the
+	// directory keploy runs in.
+	CoverageReport string `json:"coverageReport" yaml:"coverageReport" mapstructure:"coverageReport"`
+	// RecordRequests captures the app's incoming requests as test cases, on by default; needs --pass-through-ports <app port>.
+	RecordRequests bool `json:"recordRequests" yaml:"recordRequests" mapstructure:"recordRequests"`
+	// RunOnly names the only tests a replay runs (a subtest of a named test
+	// runs with it); every other test's harness is told to skip it. Empty runs
+	// every test. It takes precedence over any gate a wrapping build installs.
+	RunOnly []string `json:"runOnly" yaml:"runOnly" mapstructure:"runOnly"`
 }
 
 type Contract struct {
@@ -442,6 +474,19 @@ type Test struct {
 	SchemaMatch            bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
 	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
+	// AutoReplay marks the run as auto-replay: the pass that replays a test set
+	// immediately after recording it, against the SAME application build.
+	//
+	// Deliberately a mode flag, not a single behaviour switch: auto-replay's
+	// premise (app and recording are the same binary) invalidates a whole class
+	// of leniency, and the k8s-proxy side already grades its failures by a
+	// separate auto-replay rule. Today it disables the additive
+	// response-schema auto-pass — that pass exists for the CI shape, where the
+	// app is a NEWER build and a backward-compatible field addition is real API
+	// evolution. Auto-replay cannot have grown a field, so an addition there is
+	// nondeterminism. Left false so the CLI and cloud replay keep today's
+	// behaviour; only the auto-replay caller opts in.
+	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
 	// SchemaNoise* pair below is the previous one, kept so an existing
 	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via
@@ -457,7 +502,15 @@ type Test struct {
 	StrictMockWindow            bool          `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
 	KeepAppAlive                bool          `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
+	DisableStatefulMocks        bool          `json:"disableStatefulMocks" yaml:"disableStatefulMocks" mapstructure:"disableStatefulMocks"`                                          // Turn OFF cursor consumption of stateful data-plane mocks. Default FALSE (stateful on): repeated identical dependency requests are served successive recorded responses in record order, then saturate on the last, so a stateful sequence (a counter, a created-then-read row) replays as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first recorded response every time" behaviour. Only affects mocks classified ConsumeCursorSaturate (untagged/lax data-plane kinds); at one recorded response it is a no-op.
+	DisableMockCorrelation      bool          `json:"disableMockCorrelation" yaml:"disableMockCorrelation" mapstructure:"disableMockCorrelation"`                                    // Turn OFF request→response echo correlation. Default FALSE (on): when the app mints a random value (UUID/nonce/idempotency key), sends it to a dependency, and the dependency echoes it back, replay captures the live request value and renders it into the served response instead of replaying the stale recorded value (a mismatch) or masking it as noise (which hides regressions). Set true to serve the recorded value. Only affects mocks carrying learned correlations.
 	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
+	// SkipReasons is why a test the run skips is skipped: test set -> test case
+	// -> reason. Set at run time by whatever fills IgnoredTests with a reason
+	// (the proven model's verdicts gate), never read from keploy.yml. The
+	// replayer writes it into the IGNORED result's SkipReason under the proven
+	// switch.
+	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 // Report output formats for `keploy report --format`.

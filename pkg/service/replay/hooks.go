@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/url"
+	"strings"
+	"sync"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -20,6 +23,14 @@ type Hooks struct {
 	// so the replay HTTP transport pins a specific cert (e.g. cluster-mode
 	// replay against a short-lived pod with a self-signed keystore).
 	tlsConfig *tls.Config
+	// appAt is where the app is when the run has no agent and its base path
+	// names a host (see runsWithoutAgent): the base path, read. It is nil for
+	// every other run, a base path that is only a path prefix included. It is
+	// set once, when the hooks are made, as the replayer makes its own
+	// decision once: a command set or cleared after that changes neither.
+	appAt *url.URL
+	// Each keeps the note of its name to one line a run.
+	hostUnused, portUnused, recordedHostUnsent sync.Once
 }
 
 // SetReplayTLSConfig installs a *tls.Config that the replay HTTP client
@@ -30,11 +41,26 @@ func (h *Hooks) SetReplayTLSConfig(c *tls.Config) {
 }
 
 func NewHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrumentation) TestHooks {
-	return &Hooks{
+	return newHooks(logger, cfg, instrumentation, runsWithoutAgent(cfg))
+}
+
+// newHooks is NewHooks for a replayer that has decided whether its run has an
+// agent, so that the hooks go by the same decision.
+func newHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrumentation, noAgent bool) *Hooks {
+	h := &Hooks{
 		cfg:             cfg,
 		logger:          logger,
 		instrumentation: instrumentation,
 	}
+	if !noAgent {
+		return h
+	}
+	// A base path that cannot be read stops the run in Start, before a test
+	// is sent, and a path prefix names no host.
+	if base, err := parseBasePath(cfg.Test.BasePath); err == nil && base.Host != "" {
+		h.appAt = base
+	}
+	return h
 }
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
@@ -60,6 +86,15 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		//   3. protocol-level port overrides per protocol
 		configPort := effectiveHTTPConfigPort(tc, h.cfg.Test)
 
+		// The test's URL carries the base path, and the request goes where it
+		// says. test.host (localhost unless set), the recorded app_port and
+		// the recorded Host header are where and what an app keploy starts is,
+		// so they stay out (see pkg.SimulationConfig.TargetFromURL).
+		if h.appAt != nil {
+			h.noteHostUnused(hostToUse)
+			hostToUse = ""
+		}
+
 		cfg := pkg.SimulationConfig{
 			APITimeout:      h.cfg.Test.APITimeout,
 			ConfigPort:      configPort,
@@ -67,7 +102,13 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+			TargetFromURL:   h.appAt != nil,
 			TLSConfig:       h.tlsConfig,
+
+			AppPortReachability: h.appPortReachability(),
+		}
+		if h.appAt != nil {
+			cfg.SentTo = h.noteWhereSent
 		}
 
 		// Check if this is a streaming test case
@@ -102,6 +143,15 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			hostToUse = "localhost"
 		}
 
+		// A gRPC test has no URL for the base path to go in, so it goes to the
+		// host the base path names in place of test.host. The base path's port
+		// is the app's HTTP port: the test keeps the port it was recorded on,
+		// or test.grpcPort.
+		if h.appAt != nil {
+			h.noteHostUnused(hostToUse)
+			hostToUse = h.appAt.Hostname()
+		}
+
 		configPort := h.cfg.Test.GRPCPort
 		if ps, ok := h.cfg.Test.Protocol["grpc"]; ok && ps.Port > 0 {
 			configPort = ps.Port
@@ -115,6 +165,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
+
+			AppPortReachability: h.appPortReachability(),
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -127,6 +179,66 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// noteHostUnused says, once a run, that the test.host the user set is not where
+// the tests are sent, because the base path names the host. localhost is what
+// test.host is when nobody set it, so it is not worth a line.
+func (h *Hooks) noteHostUnused(host string) {
+	if host == "localhost" || host == h.appAt.Hostname() {
+		return
+	}
+	h.hostUnused.Do(func() {
+		h.logger.Warn("test.host is not used: a base path that names a host is where the tests are sent",
+			zap.String("host", host), zap.String("basePath", h.appAt.String()),
+			zap.String("next_step", "leave test.host (--host) unset for a run against a base path, or put the host you meant in --base-path"))
+	})
+}
+
+// noteWhereSent says, once a run each, where a request of a run against a
+// base path goes other than where the base path or the recording would have
+// it go: to another port than the one written in the base path (test.port and
+// replaceWith move it), or under another Host than the one its test was
+// recorded with. An app that checks the name it is asked for under, or writes
+// it into its answers, answers differently from its recording then, and
+// nothing else in the run says why.
+func (h *Hooks) noteWhereSent(target *url.URL, host, recordedHost string) {
+	if port := portOf(h.appAt); port != "" && portOf(target) != port {
+		h.portUnused.Do(func() {
+			h.logger.Warn("the port in the base path is not used: test.port or a replaceWith rule replaces it",
+				zap.String("port", portOf(target)), zap.String("basePathPort", port), zap.String("basePath", h.appAt.String()),
+				zap.String("next_step", "drop test.port (--port) or the replaceWith rule for a run against a base path, or put the port the app listens on in --base-path"))
+		})
+	}
+	if recordedHost != "" && recordedHost != host {
+		h.recordedHostUnsent.Do(func() {
+			h.logger.Info("the tests ask for the app under the address they are sent to, not under the Host header they were recorded with",
+				zap.String("host", host), zap.String("recordedHost", recordedHost),
+				zap.String("next_step", "if the app answers by the name it is asked for, give --base-path a name that reaches it and that it answers to"))
+		})
+	}
+}
+
+// portOf is the port a URL reaches: the one it writes, else its scheme's
+// (80 for http, 443 for https); "" for neither.
+func portOf(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
+}
+
+// appPortReachability is the instrumentation's answer to "can this address ever
+// reach the app?" when it has one (Docker mode), else nil: a refused test is
+// then re-sent as an app still starting, as before.
+func (h *Hooks) appPortReachability() pkg.AppPortReachability {
+	return appPortReachabilityOf(h.instrumentation)
 }
 
 func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {

@@ -461,7 +461,7 @@ func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	if err := setupSharedVolume(nil, logger, exportDir); err != nil {
+	if err := setupSharedVolume(nil, logger, exportDir, testCA); err != nil {
 		t.Fatalf("setupSharedVolume: %v", err)
 	}
 
@@ -474,14 +474,14 @@ func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
 	if !bytes.HasPrefix(got, []byte(systemBundleA)) {
 		t.Fatalf("merged ca.crt does not start with system bundle; got prefix %q", string(got[:min(len(got), 80)]))
 	}
-	if !bytes.HasSuffix(got, caCrt) {
-		t.Fatalf("merged ca.crt does not end with the Keploy CA; len(got)=%d len(caCrt)=%d", len(got), len(caCrt))
+	if !bytes.HasSuffix(got, testCACertPEM()) {
+		t.Fatalf("merged ca.crt does not end with the Keploy CA; len(got)=%d len(testCACertPEM())=%d", len(got), len(testCACertPEM()))
 	}
 	// The system block already has a trailing '\n'; the merger must NOT
 	// insert a second one — otherwise tools that count exact boundaries
 	// between PEM entries (rare but real) see an extra empty block.
 	expected := []byte(systemBundleA)
-	expected = append(expected, caCrt...)
+	expected = append(expected, testCACertPEM()...)
 	if !bytes.Equal(got, expected) {
 		t.Fatalf("merged bundle differs from expected; len(got)=%d len(expected)=%d", len(got), len(expected))
 	}
@@ -492,8 +492,8 @@ func TestSetupSharedVolume_MergesSystemAndKeploy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read keploy-ca.crt: %v", err)
 	}
-	if !bytes.Equal(keployOnly, caCrt) {
-		t.Fatalf("keploy-ca.crt must be keploy CA alone; len(got)=%d len(caCrt)=%d", len(keployOnly), len(caCrt))
+	if !bytes.Equal(keployOnly, testCACertPEM()) {
+		t.Fatalf("keploy-ca.crt must be keploy CA alone; len(got)=%d len(testCACertPEM())=%d", len(keployOnly), len(testCACertPEM()))
 	}
 
 	// truststore.jks is generated from the MERGED bundle (system + keploy).
@@ -524,7 +524,7 @@ func TestSetupSharedVolume_InsertsNewlineWhenSystemBundleLacksOne(t *testing.T) 
 	}
 
 	logger := zap.NewNop()
-	if err := setupSharedVolume(nil, logger, exportDir); err != nil {
+	if err := setupSharedVolume(nil, logger, exportDir, testCA); err != nil {
 		t.Fatalf("setupSharedVolume: %v", err)
 	}
 
@@ -534,7 +534,7 @@ func TestSetupSharedVolume_InsertsNewlineWhenSystemBundleLacksOne(t *testing.T) 
 	}
 	// Expect: <noTrailing> + "\n" + <keploy CA>
 	expected := append([]byte(noTrailing), '\n')
-	expected = append(expected, caCrt...)
+	expected = append(expected, testCACertPEM()...)
 	if !bytes.Equal(got, expected) {
 		t.Fatalf("missing inserted newline; len(got)=%d len(expected)=%d", len(got), len(expected))
 	}
@@ -551,7 +551,7 @@ func TestSetupSharedVolume_FallsBackWhenSystemBundleMissing(t *testing.T) {
 	loadSystemCABundleFn = func(_ *zap.Logger) ([]byte, string) { return nil, "" }
 
 	logger := zap.NewNop()
-	if err := setupSharedVolume(nil, logger, exportDir); err != nil {
+	if err := setupSharedVolume(nil, logger, exportDir, testCA); err != nil {
 		t.Fatalf("setupSharedVolume: %v", err)
 	}
 
@@ -559,8 +559,8 @@ func TestSetupSharedVolume_FallsBackWhenSystemBundleMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ca.crt: %v", err)
 	}
-	if !bytes.Equal(got, caCrt) {
-		t.Fatalf("fallback output should equal keploy CA alone; len(got)=%d len(caCrt)=%d", len(got), len(caCrt))
+	if !bytes.Equal(got, testCACertPEM()) {
+		t.Fatalf("fallback output should equal keploy CA alone; len(got)=%d len(testCACertPEM())=%d", len(got), len(testCACertPEM()))
 	}
 }
 
@@ -618,7 +618,7 @@ func TestGenerateTrustStore_MergesAllCerts(t *testing.T) {
 
 	// Compose a merged bundle: <system CA>\n<keploy CA>.
 	merged := append([]byte{}, systemCAPEM...)
-	merged = append(merged, caCrt...)
+	merged = append(merged, testCACertPEM()...)
 
 	bundlePath := filepath.Join(dir, "merged.crt")
 	if err := os.WriteFile(bundlePath, merged, 0644); err != nil {
@@ -626,7 +626,7 @@ func TestGenerateTrustStore_MergesAllCerts(t *testing.T) {
 	}
 	jksPath := filepath.Join(dir, "truststore.jks")
 
-	if err := generateTrustStore(bundlePath, jksPath); err != nil {
+	if err := generateTrustStore(bundlePath, jksPath, testCADER()); err != nil {
 		t.Fatalf("generateTrustStore: %v", err)
 	}
 
@@ -743,7 +743,7 @@ func TestGenerateTrustStore_RejectsEmptyBundle(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	jks := filepath.Join(dir, "out.jks")
-	if err := generateTrustStore(empty, jks); err == nil {
+	if err := generateTrustStore(empty, jks, nil); err == nil {
 		t.Fatal("expected generateTrustStore to error on a bundle with no CERTIFICATE blocks")
 	}
 }
@@ -775,7 +775,7 @@ func TestGenerateTrustStore_RejectsTruncatedTrailingBlock(t *testing.T) {
 	}
 
 	jksPath := filepath.Join(dir, "truncated.jks")
-	err := generateTrustStore(bundlePath, jksPath)
+	err := generateTrustStore(bundlePath, jksPath, nil)
 	if err == nil {
 		t.Fatal("expected generateTrustStore to reject a bundle with a malformed trailing -----BEGIN armour, got nil")
 	}

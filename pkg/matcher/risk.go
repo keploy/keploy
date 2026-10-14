@@ -52,6 +52,38 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	hasType := len(typeChanges) > 0
 	hasValue := len(valueChanges) > 0
 
+	// The path maps above keep one value per path, an array's elements
+	// folded into one "[]" path (the last element's value wins), so they
+	// cannot see a value, a field or an element that changed inside an array
+	// while another element still holds it, and they read a reordered array
+	// as changed values. "Only new fields were added" is decided by
+	// containment instead (JSONContainsWithNoiseControl, with the noise and
+	// the ordering the comparison applied): every recorded value is still
+	// where it was, element for element, and the answer differs only by
+	// members it added. keploy test's additive-schema auto-pass trusts this
+	// grade (Low), so it passes nothing else.
+	contains, decided, _ := JSONContainsWithNoiseControl(NewValidatedJSON(exp, act), bodyNoise, ignoreOrdering, nil)
+	samePaths := !hasAdded && !hasRemoved && !hasType && !hasValue
+	if decided && contains && !samePaths && !hasRemoved && !hasType {
+		// The values the path maps call changed are how they fold arrays
+		// (a reordered array): every recorded value is still there. A field
+		// they read as removed or retyped keeps its HIGH grade below, as on
+		// main, so neither the auto-pass nor an auto-replay's noise learning
+		// (which skips HIGH) treats it as new fields only.
+		assess.ValueChanges = nil
+		assess.Reasons = []string{"Backward-compatible: only new fields added."}
+		assess.Category = []models.FailureCategory{models.SchemaAdded}
+		assess.Risk = models.Low
+		return assess, nil
+	}
+	notContained := ""
+	switch {
+	case !decided:
+		notContained = "Not graded as only new fields: the response's arrays hold too many elements to pair one by one, so it was not verified that nothing but new fields changed."
+	case !contains:
+		notContained = "An array no longer holds what it held, element for element: a value, a field or an element of it changed."
+	}
+
 	// Build reasons (human friendly)
 	if hasRemoved {
 		assess.Reasons = append(assess.Reasons, "Removed fields: "+strings.Join(removed, ", "))
@@ -59,24 +91,25 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	if hasType {
 		assess.Reasons = append(assess.Reasons, "Type changes at: "+strings.Join(typeChanges, ", "))
 	}
-	if hasAdded && !hasRemoved && !hasType && !hasValue {
-		assess.Reasons = append(assess.Reasons, "Backward-compatible: only new fields added.")
-	}
 	if hasAdded && !hasRemoved && !hasType && hasValue {
 		assess.Reasons = append(assess.Reasons, "Backward-compatible (with value differences): new fields plus value changes on existing fields.")
 	}
 	if !hasAdded && !hasRemoved && !hasType && hasValue {
 		assess.Reasons = append(assess.Reasons, "Schema identical; only values changed.")
 	}
-	if !hasAdded && !hasRemoved && !hasType && !hasValue {
+	if samePaths && notContained == "" {
 		assess.Reasons = append(assess.Reasons, "Schema and values are identical.")
+	}
+	if notContained != "" && (!decided || (!hasRemoved && !hasType && !hasValue)) {
+		// What the path maps do not show, or that the arrays went unpaired.
+		assess.Reasons = append(assess.Reasons, notContained)
 	}
 
 	// Categorize per spec:
 	// - Schema Changes (removed/type change) -> High
 	// - Schema Same (value-only)             -> Medium
 	// - Schema Addition:
-	//     * only new fields                  -> Low
+	//     * only new fields                  -> Low (contained, above)
 	//     * new + some value changes        -> Medium
 	// - No differences at all               -> SchemaUnchanged / None
 	switch {
@@ -84,26 +117,20 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		assess.Category = []models.FailureCategory{models.SchemaBroken}
 		assess.Risk = models.High
 
-	case !hasAdded && !hasRemoved && !hasType && !hasValue:
+	case samePaths && notContained == "":
 		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.None
 
-	case !hasAdded && !hasRemoved && !hasType && hasValue:
+	case !hasAdded:
+		// Values changed: by the path maps, or inside an array they fold.
 		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.Medium
 
-	case hasAdded && !hasRemoved && !hasType && !hasValue:
-		assess.Category = []models.FailureCategory{models.SchemaAdded}
-		assess.Risk = models.Low
-
-	case hasAdded && !hasRemoved && !hasType && hasValue:
+	default:
+		// New fields, and values changed besides: by the path maps, or
+		// inside an array they fold.
 		assess.Category = []models.FailureCategory{models.SchemaAdded}
 		assess.Risk = models.Medium
-
-	default:
-		// Mixed but already-handled breaking cases (added along with removed/type change) fall here defensively.
-		assess.Category = []models.FailureCategory{models.SchemaBroken}
-		assess.Risk = models.High
 	}
 
 	return assess, nil
@@ -118,12 +145,22 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 // matched by it is excluded from the diff so re-runs don't re-report it.
 // Returns nil if either side isn't valid JSON. Paths are root-relative (no
 // "body." prefix) — callers add the prefix to match the testcase convention.
+// `typeStrict` names learned-dynamic paths: their VALUE is ignored but their
+// TYPE must still match, so a value change on them is tolerated while a type
+// change (or removal) is reported. A path is resolved under the same
+// most-specific-first ordering as `known`, so a more-specific `known` entry wins
+// over a less-specific type-strict one.
 // excludeRecordedValue, when non-nil, is consulted with the recorded
 // (expected) scalar value of each changed path — returning true drops that
 // path. This lets the proxy exclude fields the enterprise obfuscator already
 // redacted (recorded value matches a Mock.Noise regex) so secret fields are
-// not re-flagged as schema noise.
-func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, excludeRecordedValue func(string) bool) []string {
+// not re-flagged as schema noise. (Note: for a type-strict path the recorded
+// value is not captured, so excludeRecordedValue cannot apply to it.)
+// valueChangesOnly, when true, returns only fields whose VALUE drifted (same
+// type) — not type changes or removed fields. The auto-noising LEARN pass uses
+// it so a field that changed type (or vanished) is a real difference, never
+// learned as ignorable noise; enforcement passes false to see every drift.
+func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, excludeRecordedValue func(string) bool) []string {
 	if !json.Valid([]byte(expJSON)) || !json.Valid([]byte(actJSON)) {
 		return nil
 	}
@@ -137,6 +174,11 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 	}
 
 	idx := buildNoiseIndex(known, nil)
+	// typeStrict paths are LEARNED-dynamic: their VALUE is ignored but their TYPE
+	// must match. Marked on the index so they resolve under the same
+	// most-specific-first ordering as user/regex noise — a more-specific user entry
+	// still wins and keeps its own semantics. Empty => behaviour is unchanged.
+	idx.markTypeStrict(typeStrict)
 
 	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
 	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
@@ -156,8 +198,12 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, e
 		return true
 	}
 
+	groups := [][]string{valueChanges, typeChanges, removed}
+	if valueChangesOnly {
+		groups = [][]string{valueChanges}
+	}
 	out := make([]string, 0, len(valueChanges)+len(typeChanges)+len(removed))
-	for _, group := range [][]string{valueChanges, typeChanges, removed} {
+	for _, group := range groups {
 		for _, p := range group {
 			if keep(p) {
 				out = append(out, p)
@@ -260,7 +306,15 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 	keyLower := strings.ToLower(path)
-	if regs, noisy := ni.match(keyLower); noisy {
+	// matchKind resolves the winning (most-specific-first) entry. A type-strict
+	// entry records the field's TYPE but not its VALUE — so a type change is
+	// reported while a value change is tolerated — but ONLY when it is itself the
+	// most specific match; a more-specific user/regex entry still wins and keeps
+	// its full-ignore / value-regex semantics. (The learned path is also carried in
+	// the known-noise set, so non-JSON parsers, which don't consult the flag, keep
+	// fully excluding it.)
+	regs, noisy, typeStrict := ni.matchKind(keyLower)
+	if noisy && !typeStrict {
 		// An entry with no patterns ignores the whole subtree. A pattern-guarded
 		// entry ignores only the values it describes, so it must be evaluated
 		// against this value — otherwise a field the matcher just reported as a
@@ -299,16 +353,24 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		}
 	case string:
 		out.types[path] = "string"
-		out.values[path] = t
+		if !typeStrict {
+			out.values[path] = t
+		}
 	case float64:
 		out.types[path] = "number"
-		out.values[path] = fmt.Sprintf("%v", t)
+		if !typeStrict {
+			out.values[path] = fmt.Sprintf("%v", t)
+		}
 	case bool:
 		out.types[path] = "boolean"
-		out.values[path] = strconv.FormatBool(t)
+		if !typeStrict {
+			out.values[path] = strconv.FormatBool(t)
+		}
 	case nil:
 		out.types[path] = "null"
-		out.values[path] = "null"
+		if !typeStrict {
+			out.values[path] = "null"
+		}
 	default:
 		// other JSON forms won't appear here
 	}

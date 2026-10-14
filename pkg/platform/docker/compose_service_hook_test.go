@@ -125,3 +125,25 @@ func TestModifyAppServiceForKeploy_NilHookIsNoOp(t *testing.T) {
 		t.Fatalf("app service missing truststore JAVA_TOOL_OPTIONS")
 	}
 }
+
+func TestModifyAppServiceForKeploy_NamesTheMockAgentTokenWithoutItsValue(t *testing.T) {
+	var appNode *yaml.Node
+	prev := ComposeServiceHook
+	t.Cleanup(func() { ComposeServiceHook = prev })
+	ComposeServiceHook = func(serviceName string, serviceNode *yaml.Node) {
+		if serviceName == "app" {
+			appNode = serviceNode
+		}
+	}
+	idc := newImpl()
+	idc.mockAgentURL = "http://localhost:16789"
+	if err := idc.modifyAppServiceForKeploy(buildComposeForDNSMigration("app", nil), "app"); err != nil {
+		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
+	}
+	if got := envSeqValue(appNode, "KEPLOY_MOCK_AGENT"); got != "http://localhost:16789" {
+		t.Fatalf("KEPLOY_MOCK_AGENT = %q", got)
+	}
+	if got := envSeqValue(appNode, "KEPLOY_MOCK_AGENT_TOKEN"); got != "${KEPLOY_MOCK_AGENT_TOKEN}" {
+		t.Fatalf("KEPLOY_MOCK_AGENT_TOKEN = %q, want compose to fill it in from keploy's environment", got)
+	}
+}

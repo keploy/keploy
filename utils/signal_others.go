@@ -34,7 +34,7 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string) CmdError {
 	// Run the app as the user who invoked sudo
 
 	// Run through `sh -c` when a shell is available; fall back to a direct exec
@@ -46,6 +46,13 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 
 	// Set the cancel function for the command
 	cmd.Cancel = cancel(cmd)
+
+	// extraEnv is added to what the command inherits from keploy, for this
+	// command alone — a secret that one child needs is not exported to every
+	// other process keploy starts.
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = waitDelay

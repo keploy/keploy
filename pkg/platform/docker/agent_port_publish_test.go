@@ -8,12 +8,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly guards the
-// fix for the unauthenticated-agent-exposure report: the agent control-plane
-// HTTP server carries no authentication (it streams live TLS session keys on
-// /agent/pcap/keylog and accepts unauthenticated /agent/stop and
-// /agent/storemocks), so its published port must reach only the host's own
-// loopback, never every host-network interface.
+// TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly guards the fix
+// for the agent-exposure report: the agent control-plane HTTP server streams
+// live TLS session keys on /agent/pcap/keylog and accepts session-mutating
+// POSTs on /agent/stop and /agent/storemocks. Requests now carry a bearer
+// token (routes.Authenticate), and its published port must still reach only
+// the host's own loopback rather than every host-network interface.
 func TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly(t *testing.T) {
 	t.Parallel()
 
@@ -47,11 +47,30 @@ func TestGenerateKeployAgentService_PublishesAgentPortLoopbackOnly(t *testing.T)
 		t.Fatalf("agent port is also published unrestricted as %q, which re-exposes the unauthenticated control plane on every host interface; got %s", unrestricted, formatSequence(ports))
 	}
 
-	// The proxy port has no auth concern (it's the traffic-interception
-	// listener app containers are meant to reach) and must stay published on
-	// every interface.
-	wantProxyPublish := "16790:16790"
+	// The proxy port is scoped the same way, and for a reason of its own. It
+	// is the interception point for the application's outgoing dependency
+	// calls, so reaching it means being able to drive mock matching and to see
+	// what a recorded dependency answers.
+	//
+	// The application does not need the publish to get there: it runs in the
+	// agent's own network namespace (`network_mode: service:keploy-agent`) and
+	// reaches the proxy over that namespace's loopback. The DNS port, used the
+	// same way by the same container, is not published at all — which is the
+	// clearest evidence that this publish was never what made interception
+	// work.
+	wantProxyPublish := "127.0.0.1:16790:16790"
 	if !sequenceContains(ports, wantProxyPublish) {
-		t.Fatalf("expected proxy port published on all interfaces as %q, got %s", wantProxyPublish, formatSequence(ports))
+		t.Fatalf("expected proxy port published loopback-only as %q, got %s", wantProxyPublish, formatSequence(ports))
+	}
+	if unrestricted := "16790:16790"; sequenceContains(ports, unrestricted) {
+		t.Fatalf("proxy port is also published unrestricted as %q, exposing the interception listener on every host interface; got %s", unrestricted, formatSequence(ports))
+	}
+
+	// The DNS port is reached through the shared namespace and must not be
+	// published at all. If it ever is, the reasoning above stops holding.
+	for _, dns := range []string{"16791:16791", "127.0.0.1:16791:16791"} {
+		if sequenceContains(ports, dns) {
+			t.Fatalf("DNS port is published as %q; the app reaches it through the agent's network namespace and should need no publish, got %s", dns, formatSequence(ports))
+		}
 	}
 }

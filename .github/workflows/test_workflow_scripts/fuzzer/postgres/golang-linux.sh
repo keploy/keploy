@@ -7,6 +7,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
@@ -231,6 +233,7 @@ endsec
 section "Start Recording Server"
 "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
@@ -243,7 +246,7 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 if [[ -n "$REC_PID" ]]; then
@@ -252,7 +255,9 @@ else
   echo "No Keploy record process found to kill."
 fi
 
-sleep 10
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits (wait-recording.sh).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
@@ -280,17 +285,18 @@ if json_pass_supported; then
     section "Start Recording (json)"
     "$RECORD_KEPLOY_BIN" record --storage-format json -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     endsec
     section "Generate Fuzzer Traffic (json)"
     send_requests
     sleep 20
     endsec
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     if [[ -n "$REC_PID" ]]; then
         sudo kill -INT "$REC_PID" 2>/dev/null || true
     fi
-    sleep 10
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     sudo chown -R $(whoami):$(whoami) keploy/ golden/
     check_for_errors "record_json.txt"
     endsec

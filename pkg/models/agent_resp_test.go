@@ -186,3 +186,26 @@ func TestAgentResp_WireCompatAcrossVersions(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeScopeOutcome(t *testing.T) {
+	for in, want := range map[string]string{
+		"":         "",
+		"passed":   ScopeOutcomePassed,
+		" PASS ":   ScopeOutcomePassed,
+		"ok":       ScopeOutcomePassed,
+		"xpassed":  ScopeOutcomePassed,
+		"failed":   ScopeOutcomeFailed,
+		"fail":     ScopeOutcomeFailed,
+		"error":    ScopeOutcomeFailed,
+		"timedOut": ScopeOutcomeFailed,
+		"skipped":  ScopeOutcomeSkipped,
+		"pending":  ScopeOutcomeSkipped,
+		"xfail":    ScopeOutcomeSkipped,
+		"Flaky":    "flaky",
+		"a-verdict-nobody-knows-and-far-too-long-to-keep": "a-verdict-nobody-knows-and-far-t",
+	} {
+		if got := NormalizeScopeOutcome(in); got != want {
+			t.Errorf("NormalizeScopeOutcome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

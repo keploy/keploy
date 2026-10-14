@@ -4,12 +4,14 @@ package mysql
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -235,20 +237,35 @@ func (m *MySQL) recordLegacy(ctx context.Context, session *integrations.RecordSe
 func (m *MySQL) recordV2(ctx context.Context, session *integrations.RecordSession) error {
 	logger := session.Logger
 	err := recorder.RecordV2(ctx, logger, session.V2)
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode the mysql message into the yaml",
-			zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
-		)
-		return err
+	logRecordV2Error(logger, err)
+	return err
+}
+
+// logRecordV2Error logs why RecordV2 stopped. A stop the recorder reported
+// itself (supervisor.ErrReported: a connection whose packet framing was lost,
+// recorder.ErrFramingLost, including a row or definition that does not decode)
+// is not: the recorder logged it at WARN, rate-limited, where it happened, and
+// the supervisor counts what the connection carries from there. Logged again
+// here at ERROR, it was one unlimited line per connection, under a message
+// that does not say what happened.
+func logRecordV2Error(logger *zap.Logger, err error) {
+	if err == nil || errors.Is(err, supervisor.ErrReported) {
+		return
 	}
-	return nil
+	utils.LogError(logger, err, "failed to encode the mysql message into the yaml",
+		zap.String("next_step", "set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough) while investigating; the supervisor will have already fallen through to passthrough on the affected connection so user traffic continues"),
+	)
 }
 
 func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 	err := replayer.Replay(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil && err != io.EOF {
-		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
+		// A miss is not a decode failure: the replayer logs it where it
+		// finds it, and the proxy reports it with its mismatch report.
+		if !errors.Is(err, models.ErrNoMockMatched) {
+			utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
+		}
 		return err
 	}
 	return nil

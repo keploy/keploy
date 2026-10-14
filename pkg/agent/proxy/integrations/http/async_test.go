@@ -209,3 +209,30 @@ func TestMatchesLanePathRegex(t *testing.T) {
 		t.Fatal("non-numeric tenant / lower-case use-case must not match the regex lane")
 	}
 }
+
+// Under the proven switch an async lane's verdict holds a poll to the
+// recording's destination, with no path segment relaxed for its shape
+// (strict.go). Without the switch neither is checked, as before.
+func TestMatchRequestShapeStrictUnderTheSwitch(t *testing.T) {
+	h := newHTTP()
+	recorded := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll/1700000000000?cursor=1")
+	otherHost := httpMock("live", "GET", "http://notify.other.svc/v1/poll/1700000000000?cursor=1")
+	otherID := httpMock("live", "GET", "http://notify.internal.svc/v1/poll/1700000099999?cursor=1")
+	same := httpMock("live", "GET", "http://notify.internal.svc/v1/poll/1700000000000?cursor=7")
+
+	t.Setenv("KEPLOY_PROVEN", "")
+	for _, live := range []*models.Mock{otherHost, otherID, same} {
+		if ok, detail := h.MatchRequestShape(live, recorded, laneNotify()); !ok {
+			t.Fatalf("without the switch %s flagged: %s", live.Spec.HTTPReq.URL, detail)
+		}
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	for _, live := range []*models.Mock{otherHost, otherID} {
+		if ok, _ := h.MatchRequestShape(live, recorded, laneNotify()); ok {
+			t.Fatalf("under the switch %s was not flagged", live.Spec.HTTPReq.URL)
+		}
+	}
+	if ok, detail := h.MatchRequestShape(same, recorded, laneNotify()); !ok {
+		t.Fatalf("under the switch the volatile cursor flagged: %s", detail)
+	}
+}

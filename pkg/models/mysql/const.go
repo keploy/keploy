@@ -113,6 +113,10 @@ const (
 	FieldTypeBit
 )
 
+// FieldTypeVector is MySQL 9's VECTOR (MYSQL_TYPE_VECTOR): a length-encoded
+// string of float32s in a binary row.
+const FieldTypeVector FieldType = 0xf2
+
 // Additional Field Types
 const (
 	FieldTypeJSON FieldType = iota + 0xf5

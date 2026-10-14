@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -38,14 +36,12 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
-
-var TemplatizedValues = map[string]interface{}{}
-var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -317,20 +313,6 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
-// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
-// For example:
-// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
-// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
-func RemoveDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
-	}
-}
-
 func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
@@ -352,8 +334,16 @@ func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 }
 
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
+	TagName string               `json:"tag_name"`
+	Body    string               `json:"body"`
+	Assets  []GitHubReleaseAsset `json:"assets"`
+}
+
+// GitHubReleaseAsset is one file of a release. Digest is GitHub's own
+// "sha256:<hex>" of it, which `keploy update` checks the download against.
+type GitHubReleaseAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -457,18 +447,12 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		return fmt.Errorf("error opening log file: %s", err.Error())
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "Error closing log file")
-		}
-	}()
-
-	content, err := io.ReadAll(file)
+// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
+// read through its name only while that is still this run's log, never
+// whatever a symlink there points at (a root run's crash would otherwise send
+// the link's target).
+func attachLogFileToSentry(logFile *os.File) error {
+	content, err := keployLog.ReadLogFile(logFile)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -482,7 +466,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	err := attachLogFileToSentry(LogFile)
 	if err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
@@ -499,14 +483,17 @@ func Recover(logger *zap.Logger) {
 		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
 		return
 	}
-	sentry.Flush(2 * time.Second)
+	// No flush on a clean return: Recover is deferred on hot goroutines, and a
+	// flush waits on the process's one Sentry transport worker. Only a
+	// recovered panic has an event to flush (below).
 	if r := recover(); r != nil {
 		HandleRecovery(logger, r, "Recovered from panic")
+		// Before Stop: the process may exit as soon as the global context ends.
+		sentry.Flush(2 * time.Second)
 		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
 		}
-		sentry.Flush(2 * time.Second)
 	}
 }
 
@@ -559,8 +546,13 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	repoOwner := "keploy"
 	repoName := "keploy"
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	return getGitHubRelease(ctx, logger, fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName))
+}
 
+// getGitHubRelease reads the release at apiURL. Anything but a 200 carrying a
+// tag is an error: a rate-limited answer decodes to an empty release, which
+// read as a version other than the running one -- an update to "".
+func getGitHubRelease(ctx context.Context, logger *zap.Logger, apiURL string) (GitHubRelease, error) {
 	client := http.Client{
 		Timeout: 4 * time.Second,
 	}
@@ -584,9 +576,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return GitHubRelease{}, fmt.Errorf("GitHub answered %s for %s", resp.Status, apiURL)
+	}
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
+	}
+	if release.TagName == "" {
+		return GitHubRelease{}, fmt.Errorf("GitHub's answer for %s names no release", apiURL)
 	}
 	return release, nil
 }
@@ -675,18 +673,28 @@ func ExtractCommandFromArgs(args []string) string {
 	return ""
 }
 
-// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
+//
+// Podman's spellings are the same kinds: its CLI takes Docker's run and start
+// flags, and `podman compose` runs a compose provider. Which engine a command
+// runs on is engine.Detect's to say; a build that cannot drive Podman refuses
+// the command (engine.Supported), rather than running it as a native process
+// that keploy would capture nothing from.
 func FindDockerCmd(cmd string) CmdType {
 	if cmd == "" {
 		return Empty
 	}
-	// Convert command to lowercase for case-insensitive comparison
-	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
+	// Lowercased, and with its words joined by one space: `docker  run` and
+	// `docker<TAB>run` are `docker run` to the shell, and so to keploy.
+	cmdLower := strings.Join(strings.Fields(strings.ToLower(cmd)), " ")
 
 	// Define patterns for Docker and Docker Compose
-	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
-	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
-	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run",
+		"podman run", "sudo podman run", "podman container run", "sudo podman container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start",
+		"podman start", "sudo podman start", "podman container start", "sudo podman container start"}
+	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose",
+		"podman-compose", "sudo podman-compose", "podman compose", "sudo podman compose"}
 
 	// Check for Docker Compose command patterns and file extensions
 	for _, pattern := range dockerComposePatterns {
@@ -709,6 +717,46 @@ func FindDockerCmd(cmd string) CmdType {
 	return Native
 }
 
+// RunSubcommandEnd is the offset in cmd just past the run subcommand of a
+// docker or podman (by base name), taken as `run` or `container run` right
+// after the engine word, where the flags for the container it starts go; -1
+// when there is none. A docker-named word without that after it (the value of
+// sudo's -u, a directory) is passed over.
+func RunSubcommandEnd(cmd string) int {
+	type word struct {
+		text string
+		end  int
+	}
+	var words []word
+	isSpace := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+	for i := 0; i < len(cmd); {
+		for i < len(cmd) && isSpace(cmd[i]) {
+			i++
+		}
+		from := i
+		for i < len(cmd) && !isSpace(cmd[i]) {
+			i++
+		}
+		if i > from {
+			words = append(words, word{cmd[from:i], i})
+		}
+	}
+	for i, w := range words {
+		base := strings.ToLower(w.text[strings.LastIndexAny(w.text, `/\`)+1:])
+		if base = strings.TrimSuffix(base, ".exe"); base != "docker" && base != "podman" {
+			continue
+		}
+		next := i + 1
+		if next < len(words) && strings.EqualFold(words[next].text, "container") {
+			next++
+		}
+		if next < len(words) && strings.EqualFold(words[next].text, "run") {
+			return words[next].end
+		}
+	}
+	return -1
+}
+
 type CmdType string
 
 // CmdType constants
@@ -724,74 +772,6 @@ const (
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
-
-func ToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			fmt.Printf("failed to convert string to int: %v", err)
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-	case json.Number:
-		// Try int64 first
-		if i, err := v.Int64(); err == nil {
-			return int(i)
-		}
-		if f, err := v.Float64(); err == nil {
-			return int(f)
-		}
-
-	}
-	return 0
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
-}
-
-func ToFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			fmt.Printf("failed to convert string to float: %v", err)
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
 
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
@@ -1021,7 +1001,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, err := findChildPIDs(ppid)
+	children, groupOf, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
@@ -1030,7 +1010,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	uniqueProcess, err := uniqueProcessGroups(children)
+	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
@@ -1140,12 +1120,14 @@ func isProcessRunning(pid int) (bool, error) {
 	return true, nil
 }
 
-func uniqueProcessGroups(pids []int) ([]int, error) {
+// uniqueProcessGroups returns the process group of each of pids, as groupOf
+// reads it, each group once.
+func uniqueProcessGroups(pids []int, groupOf func(pid int) (int, error)) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
 
 	for _, pid := range pids {
-		pgid, err := getProcessGroupID(pid)
+		pgid, err := groupOf(pid)
 		if err != nil {
 			return nil, err
 		}
@@ -1156,89 +1138,6 @@ func uniqueProcessGroups(pids []int) ([]int, error) {
 	}
 
 	return uniqueGPIDs, nil
-}
-
-func getProcessGroupID(pid int) (int, error) {
-	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
-	statusBytes, err := os.ReadFile(statusPath)
-	if err != nil {
-		return 0, err
-	}
-
-	status := string(statusBytes)
-	for _, line := range strings.Split(status, "\n") {
-		if strings.HasPrefix(line, "NSpgid:") {
-			return extractIDFromStatusLine(line), nil
-		}
-	}
-
-	return 0, nil
-}
-
-// extractIDFromStatusLine extracts the ID from a status line in the format "Key:\tValue".
-func extractIDFromStatusLine(line string) int {
-	fields := strings.Fields(line)
-	if len(fields) == 2 {
-		id, err := strconv.Atoi(fields[1])
-		if err == nil {
-			return id
-		}
-	}
-	return -1
-}
-
-// findChildPIDs takes a parent PID and returns a slice of all descendant PIDs.
-func findChildPIDs(parentPID int) ([]int, error) {
-	var childPIDs []int
-
-	// Recursive helper function to find all descendants of a given PID.
-	var findDescendants func(int)
-	findDescendants = func(pid int) {
-		procDirs, err := os.ReadDir("/proc")
-		if err != nil {
-			return
-		}
-
-		for _, procDir := range procDirs {
-			if !procDir.IsDir() {
-				continue
-			}
-
-			childPid, err := strconv.Atoi(procDir.Name())
-			if err != nil {
-				continue
-			}
-
-			statusPath := filepath.Join("/proc", procDir.Name(), "status")
-			statusBytes, err := os.ReadFile(statusPath)
-			if err != nil {
-				continue
-			}
-
-			status := string(statusBytes)
-			for _, line := range strings.Split(status, "\n") {
-				if strings.HasPrefix(line, "PPid:") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 {
-						ppid, err := strconv.Atoi(fields[1])
-						if err != nil {
-							break
-						}
-						if ppid == pid {
-							childPIDs = append(childPIDs, childPid)
-							findDescendants(childPid)
-						}
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// Start the recursion with the initial parent PID.
-	findDescendants(parentPID)
-
-	return childPIDs, nil
 }
 
 // ephemeralPortRange reports the kernel's local port range and whether it could
@@ -1716,90 +1615,6 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 	return m, nil
 }
 
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
-// executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces by using a strict regex.
-func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	// This regex is specifically designed to match valid Keploy templates:
-	// - It must start with {{ and optional whitespace.
-	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
-	// - It MUST contain a dot (.) to indicate a field access.
-	// - It non-greedily matches characters until the closing braces.
-	// This prevents it from matching invalid syntax like {{u^2}}.
-	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
-
-	funcMap := template.FuncMap{
-		"int":    ToInt,
-		"string": ToString,
-		"float":  ToFloat,
-	}
-
-	var firstErr error
-
-	// Check if the entire input string is a single template placeholder.
-	// This is more efficient than using MatchString and FindString separately.
-	matchIndexes := re.FindStringIndex(input)
-	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
-
-	result := re.ReplaceAllStringFunc(input, func(match string) string {
-		// Only parse and execute the matched placeholder, not the entire string.
-		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
-		if err != nil {
-
-			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
-			return match
-		}
-
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, templateData)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
-			}
-			return match
-		}
-
-		if isExactPlaceholderMatch {
-			return output.String()
-		}
-
-		// Ensure the placeholder result is safe to embed inside JSON strings by
-		// escaping control characters like newlines, quotes, and backslashes.
-		// This prevents errors such as `invalid character '\n' in string literal`
-		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(logger, output.String())
-	})
-
-	return result, firstErr
-}
-
-// jsonEscapeString returns a JSON-safe representation of s suitable for
-// embedding directly inside a JSON string literal. It escapes characters
-// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
-// but does not add surrounding quotes.
-func jsonEscapeString(logger *zap.Logger, s string) string {
-	if s == "" {
-		return ""
-	}
-	b, err := json.Marshal(s)
-	// json.Marshal on a string should rarely fail, but if it does, log it
-	// and return the original string to avoid breaking the flow.
-	if err != nil {
-		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
-		return s
-	}
-
-	// The result of marshaling a string is a JSON string literal, which includes
-	// surrounding quotes. We need to strip them.
-	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
-		// This case is highly unlikely if json.Marshal succeeded without error.
-		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
-		return s
-	}
-	// Strip the surrounding quotes added by json.Marshal.
-	return string(b[1 : len(b)-1])
-}
-
 // // XMLToMap converts an XML string into a map[string]interface{}
 // func XMLToMap(data string) (map[string]any, error) {
 // 	mv, err := mxj.NewMapXml([]byte(data))
@@ -1948,7 +1763,14 @@ func GetContainerIPv4() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+	// Tagged, so the agent that cannot start without it says so in its exit
+	// status: a container with no IPv4 address but loopback's (docker
+	// --network none, an IPv6-only network) is the environment to change, not
+	// a privilege to grant. Only an agent started with --is-docker asks (its
+	// hooks, as they load): they send the connections of the applications it
+	// serves to this address. A native one is reached over loopback and needs
+	// no address of its own.
+	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 
 // GetFullCommandUsed returns the full command-line used to run the current process.

@@ -29,6 +29,9 @@ const EffectsSchemaVersion = "1"
 //	  "kind":           "Http",              // models.Kind
 //	  "status":         "FAILED",            // models.TestStatus
 //	  "failure_categories": ["DEPENDENCY_MISSING"],   // omitted when empty
+//	  "template_failures": [                          // omitted when empty
+//	    {"where": "body.id", "placeholder": "{{string .id}}", "why": "must equal ..."}
+//	  ],
 //	  "dependencies_checked":  true,
 //	  "dependencies_consumed": 7,
 //	  "effects": [
@@ -42,6 +45,12 @@ const EffectsSchemaVersion = "1"
 //	    }
 //	  ]
 //	}
+//
+// `template_failures` (optional, added within schema_version "1") names each
+// template variable place the test case failed on (TEMPLATE_VARIABLE): where
+// in the response, the placeholder, and why; for a test case refused when its
+// set loaded, the refusal. A test set refused whole (TEST_SET_REFUSED) gives
+// each test case one refusal with an empty placeholder.
 //
 // One `effects` entry per models.DepMetaResult, flattened with its parent row's
 // name and type so a consumer never has to walk a nested structure. `effects`
@@ -161,6 +170,9 @@ type testVerdict struct {
 	Kind              string   `json:"kind"`
 	Status            string   `json:"status"`
 	FailureCategories []string `json:"failure_categories,omitempty"`
+	// TemplateFailures are the template variable places the test case failed
+	// on (models.TestResult.TemplateFailures). Optional, so no schema bump.
+	TemplateFailures []models.TemplateFailure `json:"template_failures,omitempty"`
 	// DependenciesChecked says whether the per-test dependency assertion RAN
 	// for this test. Without it `effects: []` is ambiguous — see the contract
 	// note above.
@@ -211,6 +223,7 @@ func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict 
 		Kind:                 string(t.Kind),
 		Status:               string(t.Status),
 		FailureCategories:    categories,
+		TemplateFailures:     t.TemplateFailures,
 		DependenciesChecked:  t.Result.DependenciesChecked(),
 		DependenciesConsumed: t.Result.DepsConsumed,
 		Effects:              buildEffectRows(t),

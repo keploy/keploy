@@ -81,7 +81,7 @@ func TestDetectJSONDrift(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			drift, comparable := DetectJSONDrift([]byte(tc.recorded), []byte(tc.live), tc.known, nil)
+			drift, comparable := DetectJSONDrift([]byte(tc.recorded), []byte(tc.live), tc.known, nil, false, nil)
 			if comparable != tc.wantCompare {
 				t.Fatalf("comparable: got %v want %v", comparable, tc.wantCompare)
 			}
@@ -92,6 +92,36 @@ func TestDetectJSONDrift(t *testing.T) {
 	}
 }
 
+// TestEngineDetectLearnsValueOnly pins B1c: the auto-noising learn pass
+// (Engine.Detect) learns a field whose VALUE drifts (same type) but NOT one
+// whose TYPE changed. A type change is the real drift the type-enforcement
+// (StrictReject marking learned paths typeStrict) exists to catch, so learning
+// it would defeat the purpose. Non-vacuous: before B1c (valueChangesOnly=false
+// in Detect) the type-changing field was learned too, so this fails on the old
+// code.
+func TestEngineDetectLearnsValueOnly(t *testing.T) {
+	a := &fakeAdapter{body: []byte(`{"orderId":"EKL-1","updatedAt":1,"status":"OK","note":null,"tmp":"x"}`), hasBody: true}
+	// updatedAt: 1 -> 2        (value drift, same number type)      => learned.
+	// status:    "OK" -> 500   (string -> number, a TYPE change)    => NOT learned.
+	// note:      null -> "hi"  (null -> string, a TYPE change)      => NOT learned.
+	// tmp:       "x" -> absent (field removed)                      => NOT learned.
+	drift, comparable := New(a, true, false).Detect(&models.Mock{}, []byte(`{"orderId":"EKL-1","updatedAt":2,"status":500,"note":"hi"}`), nil)
+	if !comparable {
+		t.Fatalf("JSON bodies must be comparable")
+	}
+	if _, ok := drift["body.updatedAt"]; !ok {
+		t.Fatalf("a value-drifting field (same type) must be learned; got %v", drift)
+	}
+	for _, p := range []string{"body.status", "body.note", "body.tmp"} {
+		if _, ok := drift[p]; ok {
+			t.Fatalf("%s is a TYPE change (incl null<->value) or a removal -- it must NOT be learned; got %v", p, drift)
+		}
+	}
+	if len(drift) != 1 {
+		t.Fatalf("exactly one learned path (body.updatedAt) expected; got %v", drift)
+	}
+}
+
 // lineDiffer is a reference NON-JSON Diff: it proves a parser with a binary /
 // structured (non-JSON) payload can plug into the same Engine by supplying its
 // own Diff. It treats the body as newline-separated "key=value" records and
@@ -99,7 +129,7 @@ func TestDetectJSONDrift(t *testing.T) {
 // contract test for "plug-and-play for all parser categories".
 type lineDiffer struct{}
 
-func (lineDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, _ func(string) bool) (map[string][]string, bool) {
+func (lineDiffer) Diff(_ *models.Mock, recorded, live []byte, known map[string][]string, _ map[string]struct{}, _ bool, _ func(string) bool) (map[string][]string, bool) {
 	parse := func(b []byte) map[string]string {
 		out := map[string]string{}
 		for _, line := range strings.Split(string(b), "\n") {
@@ -334,5 +364,63 @@ func TestEngineStrictReject(t *testing.T) {
 	}
 	if _, ok := drift["body.tier_type"]; !ok {
 		t.Fatalf("rejection drift must name body.tier_type; got %v", drift)
+	}
+}
+
+// jsonAdapter is a JSON parser adapter for exercising the engine's type-strict
+// enforcement of learned noise end to end.
+type jsonAdapter struct {
+	JSONDiffer
+	body   []byte
+	stored map[string][]string
+}
+
+func (a *jsonAdapter) RecordedBody(*models.Mock) ([]byte, bool)              { return a.body, true }
+func (a *jsonAdapter) StoredNoise(*models.Mock) map[string][]string          { return a.stored }
+func (a *jsonAdapter) SetLearnedNoise(_ *models.Mock, m map[string][]string) { a.stored = m }
+func (a *jsonAdapter) RecordedValueIsNoise(*models.Mock) func(string) bool   { return nil }
+
+// TestLearnedFieldTypeStrict proves the learned-dynamic + type-match contract end
+// to end through the real Engine.StrictReject (PR-B / §P0b): a LEARNED body field
+// ignores a value change but a TYPE change is rejected; a non-learned field stays
+// strict; a USER full-ignore field tolerates any change (including a type change).
+func TestLearnedFieldTypeStrict(t *testing.T) {
+	recorded := []byte(`{"id":1,"name":"a"}`)
+	a := &jsonAdapter{body: recorded, stored: map[string][]string{"body.id": {}}} // id learned-dynamic
+	strict := func() *Engine { return New(a, false, true) }
+
+	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":2,"name":"a"}`), nil) {
+		t.Fatalf("learned field value drift (number->number) must be allowed")
+	}
+	if strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), nil) {
+		t.Fatalf("learned field TYPE drift (number->string) must be rejected")
+	}
+	if strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), nil) {
+		t.Fatalf("a non-learned field drift must be rejected under strict")
+	}
+	// User full-ignore of name tolerates both a value change and a type change —
+	// user noise stays full-ignore, it is NOT type-strict.
+	userIgnoreName := map[string][]string{"name": {}}
+	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":"b"}`), userIgnoreName) {
+		t.Fatalf("user full-ignore field must tolerate a value change")
+	}
+	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":1,"name":123}`), userIgnoreName) {
+		t.Fatalf("user full-ignore field must tolerate a type change (not type-strict)")
+	}
+
+	// A path that is BOTH auto-learned AND user-configured keeps the USER's
+	// full-ignore intent: a type change on it is tolerated (user wins over
+	// type-strict). Here id is learned (stored) and also user-configured.
+	if !strict().StrictAllows(&models.Mock{}, []byte(`{"id":"1","name":"a"}`), map[string][]string{"id": {}}) {
+		t.Fatalf("a user-configured path must keep full-ignore even when it was also learned")
+	}
+
+	// camelCase collision: user body noise is lowercased at ingest ("userid"),
+	// learned noise keeps the JSON case ("userId"). The user-exclusion must be
+	// case-insensitive, so a user-ignored camelCase field stays full-ignore (a type
+	// change is tolerated), not type-enforced.
+	ca := &jsonAdapter{body: []byte(`{"userId":1}`), stored: map[string][]string{"body.userId": {}}}
+	if !New(ca, false, true).StrictAllows(&models.Mock{}, []byte(`{"userId":"1"}`), map[string][]string{"userid": {}}) {
+		t.Fatalf("a user-ignored camelCase field must keep full-ignore (case-insensitive exclusion)")
 	}
 }

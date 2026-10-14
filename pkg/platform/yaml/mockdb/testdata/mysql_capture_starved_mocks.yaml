@@ -1,0 +1,496 @@
+version: api.keploy.io/v1beta1
+kind: DNS
+name: mock-1
+spec:
+    metadata:
+        name: DNS
+        qtype: A
+        type: config
+    request:
+        name: tidb.
+        qtype: 1
+        qclass: 1
+    response:
+        rcode: 0
+        authoritative: false
+        recursionAvailable: true
+        truncated: false
+        answers:
+            - "tidb.\t600\tIN\tA\t172.20.0.3"
+    reqTimestampMock: 2026-09-30T08:42:54.313816335Z
+    resTimestampMock: 2026-09-30T08:42:54.314133748Z
+---
+version: api.keploy.io/v1beta1
+kind: DNS
+name: mock-0
+spec:
+    metadata:
+        name: DNS
+        qtype: AAAA
+        type: config
+    request:
+        name: tidb.
+        qtype: 28
+        qclass: 1
+    response:
+        rcode: 0
+        authoritative: false
+        recursionAvailable: true
+        truncated: false
+    reqTimestampMock: 2026-09-30T08:42:54.313873046Z
+    resTimestampMock: 2026-09-30T08:42:54.314112068Z
+---
+version: api.keploy.io/v1beta1
+kind: MySQL
+name: mock-2
+spec:
+    metadata:
+        connID: proxyless-1669533
+        destAddr: 172.20.0.3:4000
+        requestOperation: HandshakeV10
+        responseOperation: OK
+        type: config
+    requests:
+        - header:
+            header:
+                payload_length: 218
+                sequence_id: 1
+            packet_type: HandshakeResponse41
+          message:
+            capability_flags: 1745551
+            max_packet_size: 16777215
+            character_set: 33
+            filler: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            username: root
+            database: test
+            auth_plugin_name: mysql_native_password
+            connection_attributes:
+                _client_license: GPL
+                _client_name: MySQL Connector Java
+                _client_version: 5.1.34
+                _runtime_vendor: Temurin
+                _runtime_version: 1.8.0_504
+            zstdcompressionlevel: 0
+    responses:
+        - header:
+            header:
+                payload_length: 86
+                sequence_id: 0
+            packet_type: HandshakeV10
+          message:
+            protocol_version: 10
+            server_version: 8.0.11-TiDB-v7.5.1
+            connection_id: 2097154
+            auth_plugin_data: [80, 87, 74, 54, 99, 74, 32, 24, 73, 1, 17, 19, 119, 53, 25, 125, 120, 37, 39, 42, 0]
+            filler: 0
+            capability_flags: 85698223
+            character_set: 46
+            status_flags: 2
+            auth_plugin_name: mysql_native_password
+        - header:
+            header:
+                payload_length: 7
+                sequence_id: 2
+            packet_type: OK
+          message:
+            header: 0
+            affected_rows: 0
+            last_insert_id: 0
+            status_flags: 2
+            warnings: 0
+            info: ""
+    created: 1790757774
+    reqtimestampmock: 2026-09-30T08:42:54.315391104Z
+    restimestampmock: 2026-09-30T08:42:54.347329881Z
+connectionId: proxyless-1669533
+---
+version: api.keploy.io/v1beta1
+kind: MySQL
+name: mock-3
+spec:
+    metadata:
+        connID: proxyless-1669533
+        destAddr: 172.20.0.3:4000
+        requestOperation: COM_QUERY
+        responseOperation: TextResultSet
+        type: mocks
+    requests:
+        - header:
+            header:
+                payload_length: 939
+                sequence_id: 0
+            packet_type: COM_QUERY
+          message:
+            command: 3
+            parameter_count: 0
+            null_bitmap: []
+            new_params_bind_flag: 0
+            parameters: []
+            query: '/* mysql-connector-java-5.1.34 ( Revision: jess.balint@oracle.com-20141014163213-wqbwpf1ok2kvo1om ) */SHOW VARIABLES WHERE Variable_name =''language'' OR Variable_name = ''net_write_timeout'' OR Variable_name = ''interactive_timeout'' OR Variable_name = ''wait_timeout'' OR Variable_name = ''character_set_client'' OR Variable_name = ''character_set_connection'' OR Variable_name = ''character_set'' OR Variable_name = ''character_set_server'' OR Variable_name = ''tx_isolation'' OR Variable_name = ''transaction_isolation'' OR Variable_name = ''character_set_results'' OR Variable_name = ''timezone'' OR Variable_name = ''time_zone'' OR Variable_name = ''system_time_zone'' OR Variable_name = ''lower_case_table_names'' OR Variable_name = ''max_allowed_packet'' OR Variable_name = ''net_buffer_length'' OR Variable_name = ''sql_mode'' OR Variable_name = ''query_cache_type'' OR Variable_name = ''query_cache_size'' OR Variable_name = ''license'' OR Variable_name = ''init_connect'''
+    responses:
+        - header:
+            header:
+                payload_length: 1
+                sequence_id: 1
+            packet_type: TextResultSet
+          message:
+            columnCount: 2
+            columns:
+                - header:
+                    payload_length: 35
+                    sequence_id: 2
+                  catalog: def
+                  schema: ""
+                  table: ""
+                  org_table: ""
+                  name: Variable_name
+                  org_name: ""
+                  fixed_length: 12
+                  character_set: 83
+                  column_length: 216
+                  type: 253
+                  flags: 0
+                  decimals: 0
+                  filler:
+                    - 0
+                    - 0
+                  defaultValue: ""
+                - header:
+                    payload_length: 27
+                    sequence_id: 3
+                  catalog: def
+                  schema: ""
+                  table: ""
+                  org_table: ""
+                  name: Value
+                  org_name: ""
+                  fixed_length: 12
+                  character_set: 83
+                  column_length: 25692
+                  type: 253
+                  flags: 0
+                  decimals: 0
+                  filler:
+                    - 0
+                    - 0
+                  defaultValue: ""
+            eofAfterColumns:
+                - 5
+                - 0
+                - 0
+                - 4
+                - 254
+                - 0
+                - 0
+                - 2
+                - 0
+            rows:
+                - header:
+                    payload_length: 26
+                    sequence_id: 5
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: character_set_client
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: utf8
+                      unsigned: false
+                - header:
+                    payload_length: 30
+                    sequence_id: 6
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: character_set_connection
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: utf8
+                      unsigned: false
+                - header:
+                    payload_length: 27
+                    sequence_id: 7
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: character_set_results
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: utf8
+                      unsigned: false
+                - header:
+                    payload_length: 29
+                    sequence_id: 8
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: character_set_server
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: utf8mb4
+                      unsigned: false
+                - header:
+                    payload_length: 14
+                    sequence_id: 9
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: init_connect
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: ""
+                      unsigned: false
+                - header:
+                    payload_length: 26
+                    sequence_id: 10
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: interactive_timeout
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "28800"
+                      unsigned: false
+                - header:
+                    payload_length: 27
+                    sequence_id: 11
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: license
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: Apache License 2.0
+                      unsigned: false
+                - header:
+                    payload_length: 25
+                    sequence_id: 12
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: lower_case_table_names
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "2"
+                      unsigned: false
+                - header:
+                    payload_length: 28
+                    sequence_id: 13
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: max_allowed_packet
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "67108864"
+                      unsigned: false
+                - header:
+                    payload_length: 24
+                    sequence_id: 14
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: net_buffer_length
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "16384"
+                      unsigned: false
+                - header:
+                    payload_length: 21
+                    sequence_id: 15
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: net_write_timeout
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "60"
+                      unsigned: false
+                - header:
+                    payload_length: 25
+                    sequence_id: 16
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: query_cache_size
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "1048576"
+                      unsigned: false
+                - header:
+                    payload_length: 21
+                    sequence_id: 17
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: query_cache_type
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "OFF"
+                      unsigned: false
+                - header:
+                    payload_length: 147
+                    sequence_id: 18
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: sql_mode
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION
+                      unsigned: false
+                - header:
+                    payload_length: 21
+                    sequence_id: 19
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: system_time_zone
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: UTC
+                      unsigned: false
+                - header:
+                    payload_length: 17
+                    sequence_id: 20
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: time_zone
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: SYSTEM
+                      unsigned: false
+                - header:
+                    payload_length: 38
+                    sequence_id: 21
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: transaction_isolation
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: REPEATABLE-READ
+                      unsigned: false
+                - header:
+                    payload_length: 29
+                    sequence_id: 22
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: tx_isolation
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: REPEATABLE-READ
+                      unsigned: false
+                - header:
+                    payload_length: 19
+                    sequence_id: 23
+                  values:
+                    - type: 253
+                      name: Variable_name
+                      value: wait_timeout
+                      unsigned: false
+                    - type: 253
+                      name: Value
+                      value: "28800"
+                      unsigned: false
+            FinalResponse:
+                data:
+                    - 5
+                    - 0
+                    - 0
+                    - 24
+                    - 254
+                    - 0
+                    - 0
+                    - 2
+                    - 0
+                type: EOF
+    created: 1790757774
+    reqtimestampmock: 2026-09-30T08:42:54.351257381Z
+    restimestampmock: 2026-09-30T08:42:54.359353064Z
+connectionId: proxyless-1669533
+---
+version: api.keploy.io/v1beta1
+kind: MySQL
+name: mock-5
+spec:
+    metadata:
+        connID: proxyless-1669533
+        destAddr: 172.20.0.3:4000
+        requestOperation: COM_QUERY
+        responseOperation: OK
+        type: mocks
+    requests:
+        - header:
+            header:
+                payload_length: 18
+                sequence_id: 0
+            packet_type: COM_QUERY
+          message:
+            command: 3
+            parameter_count: 0
+            null_bitmap: []
+            new_params_bind_flag: 0
+            parameters: []
+            query: SET NAMES utf8mb4
+    responses:
+        - header:
+            header:
+                payload_length: 7
+                sequence_id: 1
+            packet_type: OK
+          message:
+            header: 0
+            affected_rows: 0
+            last_insert_id: 0
+            status_flags: 2
+            warnings: 0
+            info: ""
+    created: 1790757774
+    reqtimestampmock: 2026-09-30T08:42:54.377293437Z
+    restimestampmock: 2026-09-30T08:42:54.37757136Z
+connectionId: proxyless-1669533
+---
+version: api.keploy.io/v1beta1
+kind: MySQL
+name: mock-91
+spec:
+    metadata:
+        connID: proxyless-1669533
+        destAddr: 172.20.0.3:4000
+        requestOperation: COM_QUIT
+        responseOperation: NO Response Packet
+        type: mocks
+    requests:
+        - header:
+            header:
+                payload_length: 1
+                sequence_id: 0
+            packet_type: COM_QUIT
+          message:
+            command: 1
+    responses: []
+    created: 1790757775
+    reqtimestampmock: 2026-09-30T08:42:55.012409346Z
+    restimestampmock: 2026-09-30T08:42:55.012409346Z
+connectionId: proxyless-1669533

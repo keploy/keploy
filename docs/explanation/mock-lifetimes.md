@@ -168,17 +168,19 @@ the config. Strict activation logs a one-shot Info message per
 agent process naming both escape hatches, so hunts through docs
 are unnecessary.
 
-## Observability — HitCount
+## Observability — hit counts
 
-Session- and connection-scoped mocks have a per-mock atomic
-`HitCount` exposed via `MockMemDb.SessionMockHitCounts()`. The
-counter is bumped from keploy's `MarkMockAsUsed` path, which
-matchers call after a successful match — per-parser coverage is
-rolling out as matchers adopt the new MockMemDb surface (Phase 2
-of the unification plan). Until every parser opts in, some
-categories of session matches will not be reflected in the count;
-a persistent zero on a session mock could mean either "never used"
-OR "used, but the owning parser hasn't migrated yet."
+Session- and connection-scoped mocks have a match count exposed via
+`MockMemDb.SessionMockHitCounts()`. The mock manager keeps one atomic
+counter per mock name for the whole test set, not on the mock itself
+(matchers copy pooled mocks while other connections count matches), and
+starts the counts afresh when the next test set is staged. The counter is
+bumped from keploy's `MarkMockAsUsed` path, which matchers call after a
+successful match — per-parser coverage is rolling out as matchers adopt
+the new MockMemDb surface (Phase 2 of the unification plan). Until every
+parser opts in, some categories of session matches will not be reflected
+in the count; a persistent zero on a session mock could mean either
+"never used" OR "used, but the owning parser hasn't migrated yet."
 
 Per-test mocks are consumed on match and their counter stays at 0
 or 1 — not surfaced in telemetry.
@@ -209,8 +211,8 @@ for your specific case landed in a newer release, or (b) open an
 issue with the mock's request-line and headers so the recorder can
 learn to tag it.
 
-**"Replay summary says `[session mock] hit count 0`"**
-A session mock was never matched across the entire test run. Usually
+**"A session mock's hit count is 0"**
+A session mock was never matched in its test set. Usually
 safe to re-record without it — the recording captured a one-off call
 that your app no longer makes. If it's genuinely conditional
 (matches only under certain inputs), leave it.

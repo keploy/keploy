@@ -14,9 +14,12 @@ package integration
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // stubMappingDB is a hand-rolled minimal stub. We don't pull in testify
@@ -159,4 +162,116 @@ func TestLoadMappingsForSet_MissingFile(t *testing.T) {
 			t.Fatalf("expected error when mappingDB is nil, got nil")
 		}
 	})
+}
+
+// The step's mismatch report leaves out what the replayer's dependency
+// assertion leaves out (models.ExcludedFromDependencyAssertion), from both
+// lists: DNS, and connection failures, which nothing consumes at replay yet
+// and which would otherwise always be reported expected-but-not-consumed.
+func TestMockMismatchReportLeavesOutWhatTheAssertionDoes(t *testing.T) {
+	r := &Runner{logger: zap.NewNop(), instrumentation: &paramsInstr{}}
+	setup := &testSetSetup{mockKindByName: map[string]models.Kind{
+		"mock-4": models.ConnectionFailure, // kind known only from the loaded mock
+	}}
+	got := r.checkMockMismatches(setup, []MockRef{
+		{Name: "mock-1", Kind: "Http"},
+		{Name: "mock-2", Kind: "DNS"},
+		{Name: "mock-3", Kind: "ConnectionFailure"},
+		{Name: "mock-4"},
+	}, []models.MockState{
+		{Name: "mock-1", Kind: models.HTTP},
+		{Name: "mock-5", Kind: models.ConnectionFailure},
+	})
+	want := &MockMismatch{
+		ExpectedMocks: []MockRef{{Name: "mock-1", Kind: "Http"}},
+		ConsumedMocks: []MockRef{{Name: "mock-1", Kind: "Http"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mismatch report = %+v, want %+v", got, want)
+	}
+}
+
+// setupInstr is an agent connection that accepts every set-up call, and
+// keeps what it was asked to store.
+type setupInstr struct {
+	paramsInstr
+	stored []*models.Mock
+}
+
+func (*setupInstr) MockOutgoing(context.Context, models.OutgoingOptions) error { return nil }
+func (s *setupInstr) StoreMocks(_ context.Context, f, u []*models.Mock) error {
+	s.stored = append(append(s.stored, f...), u...)
+	return nil
+}
+func (*setupInstr) MakeAgentReadyForDockerCompose(context.Context) error { return nil }
+func (*setupInstr) NotifyGracefulShutdown(context.Context) error         { return nil }
+
+// skippingMockDB reads every pool in one pass (TestSetMocksReader); its
+// decoders skipped the named documents and read the filtered mocks.
+type skippingMockDB struct {
+	skipped  map[string]models.Kind
+	filtered []*models.Mock
+}
+
+func (*skippingMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return nil, nil
+}
+func (*skippingMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return nil, nil
+}
+func (m *skippingMockDB) GetTestSetMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) (models.TestSetMocks, error) {
+	return models.TestSetMocks{Skipped: m.skipped, Filtered: m.filtered}, nil
+}
+
+// The runner stores on the agent what the agent holds: never a connection
+// failure, which this keploy does not replay (models.AgentBound).
+func TestTheRunnerStoresNoConnectionFailureOnTheAgent(t *testing.T) {
+	instr := &setupInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB: &skippingMockDB{filtered: []*models.Mock{
+			{Name: "mock-0", Kind: models.ConnectionFailure}, {Name: "mock-1", Kind: models.HTTP},
+		}},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	defer setup.cleanup()
+	if len(instr.stored) != 1 || instr.stored[0].Name != "mock-1" {
+		t.Fatalf("stored %v on the agent; want only mock-1", instr.stored)
+	}
+	if setup.mockKindByName["mock-0"] != models.ConnectionFailure {
+		t.Fatal("the connection failure's kind is still known, for the mismatch report")
+	}
+}
+
+// A mapping entry recorded without a kind can name a connection failure the
+// decoders skipped; the step's report leaves it out by that document's kind,
+// as the replayer does. Other skipped kinds are not looked up.
+func TestASkippedConnectionFailureIsLeftOutOfTheStepReportByName(t *testing.T) {
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: &setupInstr{},
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          &skippingMockDB{skipped: map[string]models.Kind{"cf-kindless": models.ConnectionFailure, "mock-acme": "Acme-Queue"}},
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	defer setup.cleanup()
+	got := r.checkMockMismatches(setup, []MockRef{{Name: "mock-1", Kind: "Http"}, {Name: "cf-kindless"}, {Name: "mock-acme"}}, nil)
+	want := []MockRef{{Name: "mock-1", Kind: "Http"}, {Name: "mock-acme"}}
+	if !reflect.DeepEqual(got.ExpectedMocks, want) {
+		t.Fatalf("expected side = %+v, want %+v", got.ExpectedMocks, want)
+	}
+	// The step's expected entries label a kind-less entry from the loaded
+	// kinds; a skipped document of another kind keeps no label, as before.
+	setup.mappings = map[string][]models.MockEntry{"step-1": {{Name: "mock-acme"}}}
+	if entries := expectedEntriesForTest(setup, "step-1"); len(entries) != 1 || entries[0].Kind != "" {
+		t.Fatalf("expected entries = %+v; the skipped mock-acme must keep no kind", entries)
+	}
 }

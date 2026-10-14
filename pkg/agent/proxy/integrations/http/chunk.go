@@ -2,7 +2,6 @@
 package http
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,68 +15,52 @@ import (
 	"go.uber.org/zap"
 )
 
-// chunkedTerminator is the last-chunk marker defined by RFC 7230 §4.1.
-// A chunked response ends with `0\r\n\r\n` (size=0 chunk + empty trailer
-// section + CRLF). The proxy loop treats this suffix as end-of-response
-// regardless of how many preceding body bytes share the same TLS record
-// with the terminator — the previous strict-equality check failed on
-// the common case where pUtil.ReadBytes returns ""<body>0\r\n\r\n" and
-// left the loop spinning until the upstream closed the idle HTTP/1.1
-// keep-alive connection (~60 s on SAP sandbox, observed on the
-// sap-demo-java /360 fanout).
-var chunkedTerminator = []byte("0\r\n\r\n")
-
-func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) error {
-
-	if hasCompleteHeaders(*finalReq) {
+// readRequestHead reads from clientConn, relaying each read to destConn when
+// it is not nil (record mode; nil at replay), until finalReq holds the
+// request's whole header section, and returns that section and where the body
+// starts in finalReq. The header section is complete when messageHead finds
+// it, not at the first "\r\n\r\n": that can be empty lines in front of the
+// request line, which are then dropped from finalReq
+// (dropEmptyLinesBeforeRequest).
+func (h *HTTP) readRequestHead(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) (head []byte, bodyStart int, err error) {
+	head, bodyStart, _, ok := messageHead(*finalReq, false)
+	if ok {
 		h.Logger.Debug("this request has complete headers in the first chunk itself.")
 	}
 
-	for !hasCompleteHeaders(*finalReq) {
+	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
 		h.Logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
 		reqHeader, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
 		if err != nil {
 			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
-			return err
+			return nil, 0, err
 		}
 		// destConn is nil in case of test mode
 		if destConn != nil {
 			_, err = destConn.Write(reqHeader)
 			if err != nil {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return nil, 0, ctx.Err()
 				}
 				utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
-				return err
+				return nil, 0, err
 			}
 		}
 
 		*finalReq = append(*finalReq, reqHeader...)
 	}
+	return head, bodyStart - dropEmptyLinesBeforeRequest(finalReq), nil
+}
 
-	lines := strings.Split(string(*finalReq), "\n")
-	var contentLengthHeader, transferEncodingHeader string
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-
-		switch key {
-		case "content-length":
-			contentLengthHeader = val
-		case "transfer-encoding":
-			transferEncodingHeader = val
-		}
+func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) error {
+	head, bodyStart, err := h.readRequestHead(ctx, finalReq, clientConn, destConn)
+	if err != nil {
+		return err
 	}
+
+	// The framing headers are read from the header section only: a body line
+	// such as a multipart part's "Content-Length: 10" is not a header.
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	//Handle chunked requests
 	if contentLengthHeader != "" {
@@ -87,8 +70,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 			return fmt.Errorf("failed to handle chunked request")
 		}
 		//Get the length of the body in the request.
-		bodyLength := len(*finalReq) - strings.Index(string(*finalReq), "\r\n\r\n") - 4
-		contentLength -= bodyLength
+		contentLength -= len(*finalReq) - bodyStart
 		if contentLength > 0 {
 			err := h.contentLengthRequest(ctx, finalReq, clientConn, destConn, contentLength)
 			if err != nil {
@@ -97,10 +79,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 		}
 	} else if transferEncodingHeader != "" {
 		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-			if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
-				return nil
-			}
-			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn, transferEncodingHeader); err != nil {
+			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn); err != nil {
 				return err
 			}
 		}
@@ -112,6 +91,9 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn, contentLength int) error {
 	// Use a larger buffer (e.g., 32KB) for better performance than 1KB
 	buf := make([]byte, 32*1024)
+	// The deadlines below bound each body read; the connection outlives this
+	// request (keep-alive), so leave no deadline behind for the next one.
+	defer func() { _ = clientConn.SetReadDeadline(time.Time{}) }()
 
 	for contentLength > 0 {
 		// 1. Check if context is already done before trying to read
@@ -163,10 +145,14 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 				return err
 			}
 
-			// Check for Timeout
+			// A timeout only bounds this read, so a cancelled ctx is noticed:
+			// a client may pause mid-body, and the rest of the body follows.
+			// Ending the request here answered (or relayed) it cut short and
+			// read the rest of its body as the next request.
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				h.Logger.Info("Stopped getting data from the conn (Timeout)", zap.Error(err))
-				break
+				h.Logger.Debug("no request body bytes before the read deadline; reading on",
+					zap.Int("remaining", contentLength), zap.Error(err))
+				continue
 			}
 
 			// Check for Context Cancel (if Read failed due to context closure wrapped in net error)
@@ -181,59 +167,98 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 	return nil
 }
 
-// Handled chunked requests when transfer-encoding is given.
-func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn, _ string) error {
-
+// chunkedRequest reads the rest of a chunked request body — finalReq already
+// holds the headers and whatever body bytes arrived with them — until the body's
+// chunked framing says it has ended, forwarding each piece to destConn when
+// there is one (record mode; nil at replay).
+//
+// The end is found by framing the chunks (chunkedBody), never by looking for
+// "0\r\n\r\n" at the end of a read: that missed a terminator split across
+// reads, which is how Java's HttpURLConnection sends a chunked-streaming
+// upload, and left replay waiting for bytes the app would never send.
+func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) error {
+	var body chunkedBody
+	// The read deadline below bounds each read so a cancelled ctx is noticed;
+	// the connection outlives this request, so leave none behind.
+	defer func() { _ = clientConn.SetReadDeadline(time.Time{}) }()
+	complete := func() (bool, error) {
+		if destConn == nil {
+			// Replay: nothing is relayed, and a body that cannot be framed
+			// cannot be answered either.
+			return body.complete(*finalReq)
+		}
+		// Record: the proxy is in the app's live path, so a peer that does
+		// not frame its body by the RFC must still get it relayed.
+		done, framingErr := body.completeOrLegacy(*finalReq)
+		if framingErr != nil {
+			h.Logger.Warn("chunked request body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" as its end, as before",
+				zap.Error(framingErr))
+		}
+		return done, nil
+	}
 	for {
-		select {
-		case <-ctx.Done():
+		done, err := complete()
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to frame the chunked request body")
+			return err
+		}
+		if done {
+			return nil
+		}
+		if ctx.Err() != nil {
 			return ctx.Err()
-		default:
-			//TODO: we have to implement a way to read the buffer chunk wise according to the chunk size (chunk size comes in hexadecimal)
-			// because it can happen that some chunks come after 5 seconds.
-			err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if err != nil {
-				utils.LogError(h.Logger, err, "failed to set the read deadline for the client conn")
-				return err
-			}
-			requestChunked, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					break
-				}
-				utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
-				return err
-			}
-
-			*finalReq = append(*finalReq, requestChunked...)
+		}
+		// A client may legitimately pause mid-body, so a timeout just reads on.
+		if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			utils.LogError(h.Logger, err, "failed to set the read deadline for the client conn")
+			return err
+		}
+		piece, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
+		// ReadBytes hands back what it read before an error along with the
+		// error; those bytes are part of the request and must be kept (dropping
+		// them on a timeout lost chunks and the terminator).
+		if len(piece) > 0 {
+			*finalReq = append(*finalReq, piece...)
 			// destConn is nil in case of test mode.
 			if destConn != nil {
-				_, err = destConn.Write(requestChunked)
-				if err != nil {
+				if _, werr := destConn.Write(piece); werr != nil {
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
 					utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
-					return err
+					return werr
 				}
 			}
-
-			//check if the initial request is completed
-			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
-				return nil
+		}
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
 			}
+			if done, ferr := complete(); ferr == nil && done {
+				return nil // the last bytes arrived together with the client closing
+			}
+			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
+			return err
 		}
 	}
 }
 
-func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn, resp []byte) error {
-
-	if hasCompleteHeaders(*finalResp) {
-		h.Logger.Debug("this response has complete headers in the first chunk itself.")
-	}
-
-	for !hasCompleteHeaders(resp) {
-		h.Logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
+// handleChunkedResponses relays and records the rest of a response whose first
+// bytes (resp, also in finalResp) have been read. reqMethod is the method of the
+// request it answers: the response to a HEAD has no body whatever its headers
+// say.
+func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn, resp []byte, reqMethod string) error {
+	var (
+		head      []byte
+		bodyStart int
+		status    int
+	)
+	for {
+		var ok bool
+		if head, bodyStart, status, ok = messageHead(resp, true); ok {
+			break // the final (non-1xx) response's header section is here
+		}
+		h.Logger.Debug("the response's header section is not complete yet; reading more")
 		respHeader, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 		if err != nil {
 			if err == io.EOF {
@@ -270,31 +295,12 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 		resp = append(resp, respHeader...)
 	}
 
-	//Getting the content-length or the transfer-encoding header
-	var contentLengthHeader, transferEncodingHeader string
-	lines := strings.Split(string(resp), "\n")
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r") // remove trailing \r if present
-		if line == "" {
-			continue
-		}
-
-		// Split key: value
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-
-		switch key {
-		case "content-length":
-			contentLengthHeader = val
-		case "transfer-encoding":
-			transferEncodingHeader = val
-		}
+	if responseHasNoBody(reqMethod, status) {
+		return nil // no body, whatever the headers say
 	}
+	// The framing headers of the final response, read from its header section
+	// only (a body line is not a header).
+	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
@@ -302,85 +308,71 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 			utils.LogError(h.Logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked response")
 		}
-		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
-		contentLength -= bodyLength
+		contentLength -= len(resp) - bodyStart
 		if contentLength > 0 {
 			err := h.contentLengthResponse(ctx, finalResp, clientConn, destConn, contentLength)
 			if err != nil {
 				return err
 			}
 		}
-	} else if transferEncodingHeader != "" {
-		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-			if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
-				return nil
-			}
-			if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
-				return err
-			}
+	} else if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+		if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// Handles chunked responses when transfer-encoding is given.
+// chunkedResponse relays the rest of a chunked response from destConn to
+// clientConn — finalResp already holds the status line, headers and whatever
+// body bytes came with them — until the body's chunked framing says it has
+// ended, or the server closes the connection.
+//
+// Like chunkedRequest it frames the chunks rather than looking for
+// "0\r\n\r\n": the suffix test replaced a strict-equality test that hung on
+// a terminator sharing a TLS record with body bytes (sap-demo-java /360), but
+// it still hung on a terminator split across reads or followed by trailers,
+// and ended a response early on chunk data that ends like a terminator.
 func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn) error {
-	isEOF := false
-ReadLoop:
+	body := chunkedBody{response: true}
 	for {
-		select {
-		case <-ctx.Done():
+		// The proxy relays this response to the app as it reads it, so a
+		// server that does not frame its body by the RFC must still have it
+		// relayed (completeOrLegacy).
+		done, framingErr := body.completeOrLegacy(*finalResp)
+		if framingErr != nil {
+			h.Logger.Warn("chunked response body is not framed per RFC 9112; relaying it and taking a trailing \"0\\r\\n\\r\\n\" or the server closing as its end, as before",
+				zap.Error(framingErr))
+		}
+		if done {
+			return nil
+		}
+		if ctx.Err() != nil {
 			return ctx.Err()
-		default:
-			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
-			if err != nil {
-				if err != io.EOF {
-					utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
-					return err
-				}
-				isEOF = true
-				h.Logger.Debug("received EOF", zap.Error(err))
-				if len(resp) == 0 {
-					h.Logger.Debug("exiting loop as response is complete")
-					break ReadLoop
-				}
-			}
-
+		}
+		resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
+		if err != nil && err != io.EOF {
+			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+			return err
+		}
+		if len(resp) > 0 {
 			*finalResp = append(*finalResp, resp...)
 			// write the response message to the user client
-			_, err = clientConn.Write(resp)
-			if err != nil {
+			if _, werr := clientConn.Write(resp); werr != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
 				utils.LogError(h.Logger, nil, "failed to write response message to the user client")
-				return err
-			}
-
-			//In some cases need to write the response to the client
-			// where there is some response before getting the true EOF
-			if isEOF {
-				break ReadLoop
-			}
-
-			// RFC 7230 §4.1 last-chunk: "0\r\n\r\n" terminates a chunked
-			// body. pUtil.ReadBytes returns whatever was in the latest
-			// TLS record (up to 1 KiB of the 16 KiB record), so the
-			// terminator is almost always concatenated with the tail
-			// of the preceding data chunk — e.g. "<...body>0\r\n\r\n".
-			// The old check `string(resp) == "0\r\n\r\n"` only matched
-			// if the terminator arrived in a dedicated Read call, which
-			// an HTTP/1.1 keep-alive upstream almost never does. The
-			// loop would then call ReadBytes again on the now-idle
-			// conn and block until the upstream's keep-alive timeout
-			// (~60 s on SAP sandbox, reproduced on sap-demo-java /360).
-			// HasSuffix correctly detects both packaging shapes.
-			if bytes.HasSuffix(resp, chunkedTerminator) {
-				return nil
+				return werr
 			}
 		}
+		if err == io.EOF {
+			// The server closed the connection: whatever it sent is the
+			// response.
+			h.Logger.Debug("received EOF from the destination server while reading a chunked response")
+			return nil
+		}
 	}
-	return nil
 }
 
 // Handled chunked responses when content-length is given.

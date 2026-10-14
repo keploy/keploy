@@ -19,7 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -154,6 +154,10 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// that was demoted, and the dependency notice below then printed
 		// directly under a line asserting it passed.
 		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
+		// A test keploy skipped for a reason says why, right under its status.
+		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
+		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
 		// whether or not --assert-dependencies was passed.
@@ -281,6 +285,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
+	}
+	// Tests keploy quarantined, with their reasons. Only a run under the
+	// proven switch writes a reason (TestResult.SkipReason), so a report
+	// without one prints exactly what it printed before.
+	quarantined := quarantinedTests(reports)
+	if len(quarantined) > 0 {
+		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
 	}
 
 	// Dependencies that the recording says a test exercises but that the test
@@ -418,12 +429,45 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		}
 	}
 
+	if len(quarantined) > 0 {
+		fmt.Fprintln(r.out, "\nQUARANTINED TEST CASES:")
+		for _, q := range quarantined {
+			fmt.Fprintf(r.out, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
+		}
+	}
+
 	fmt.Fprintln(r.out, "<=========================================>")
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in printSummary: %w", err)
 	}
 	return nil
+}
+
+// quarantinedTest is a test keploy skipped for a reason.
+type quarantinedTest struct{ set, test, reason string }
+
+// quarantinedTests are the IGNORED tests of the reports that carry a skip
+// reason, by test set and then in report order.
+func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
+	names := make([]string, 0, len(reports))
+	for name := range reports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []quarantinedTest
+	for _, name := range names {
+		rep := reports[name]
+		if rep == nil {
+			continue
+		}
+		for _, t := range rep.Tests {
+			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
+			}
+		}
+	}
+	return out
 }
 
 func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
@@ -691,11 +735,20 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 // processLegacySummary generates a summary report for legacy format
 func (r *Report) processLegacySummary(tests []models.TestResult) error {
-	total, pass, fail, obsolete := len(tests), 0, 0, 0
+	total, pass, fail, obsolete, ignored := len(tests), 0, 0, 0, 0
 	var failedCases []string
 
 	for _, t := range tests {
 		switch t.Status {
+		case models.TestStatusIgnored:
+			// Under the proven switch a skipped test is counted as skipped:
+			// it did not pass. With the switch off it is counted as passed,
+			// as before.
+			if provenswitch.On() {
+				ignored++
+				continue
+			}
+			pass++
 		case models.TestStatusFailed:
 			fail++
 			label := t.TestCaseID
@@ -711,7 +764,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 	}
 
 	totalTime := estimateDuration(tests)
-	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, totalTime, failedCases)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, ignored, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)
@@ -830,7 +883,8 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 }
 
 // shouldRenderDiff reports whether a test result is admitted to the per-test
-// detail renderer at all.
+// detail renderer at all. A test case that failed on a template variable is
+// FAILED: keploy test never demotes it to OBSOLETE.
 func shouldRenderDiff(result models.TestResult) bool {
 	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps()
 }
@@ -1002,6 +1056,27 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	// reacting to keploy's synthetic error), so lead with the root cause.
 	renderUnmatchedCalls(sb, test)
 
+	// Template variable places the answer did not satisfy. Each fails the
+	// test case on its own, so a test case can fail here with every row of
+	// the comparison below normal (a variable under noise, a capture that
+	// found nothing in a body the comparison does not read).
+	renderTemplateFailures(sb, test.TemplateFailures)
+	if refusedUnsent(test.TemplateFailures) {
+		// Refused when its set loaded: nothing was sent, so nothing was
+		// compared, and no status, header or body section may read as if
+		// it had been ("No differences found in status or headers.").
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
+	if len(test.TemplateFailures) > 0 && comparisonMatched(test) {
+		// Only its variable places failed it: empty status, header and body
+		// sections would read as if nothing had.
+		sb.WriteString("The comparison of its status, headers and body found no difference: the template variable places above failed this test case.\n")
+		renderDepResults(sb, test)
+		sb.WriteString("\n--------------------------------------------------------------------\n")
+		return nil
+	}
+
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
 
@@ -1133,9 +1208,15 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 					sb.WriteString(fmt.Sprintf("      %s: live %q, absent in recording\n", d.Path, d.Actual))
 				case models.DiffKindTypeChanged:
 					sb.WriteString(fmt.Sprintf("      %s: type changed (recorded %s, live %s)\n", d.Path, d.Expected, d.Actual))
+				case models.DiffKindVariable:
+					sb.WriteString(fmt.Sprintf("      %s: the test's variable is %q, the call sent %q\n", d.Path, d.Expected, d.Actual))
 				default:
 					sb.WriteString(fmt.Sprintf("      %s: recorded %q, live %q\n", d.Path, d.Expected, d.Actual))
 				}
+			}
+			if uc.MatchPhase == models.MatchPhaseVariable && uc.Diff != "" {
+				// It names the variable and where the test bound it.
+				sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
 			}
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
@@ -1239,6 +1320,10 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
 
+	// Template variable places the answer did not satisfy: each fails the
+	// test case on its own, also where every row below is normal.
+	renderTemplateFailures(sb, test.TemplateFailures)
+
 	// Route DiffsPrinter output into this builder (no os.Stdout)
 	localOut := &writerAdapter{sb: sb}
 	logDiffs := matcherUtils.NewDiffsPrinterOut(localOut, test.Name)
@@ -1330,30 +1415,90 @@ func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiff
 
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
-			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
-			if err != nil {
-				return fmt.Errorf("failed to render actual body value: %w", err)
-			}
-
-			expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
-			if err != nil {
-				return fmt.Errorf("failed to render expected body value: %w", err)
-			}
-
-			logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
+			// The report holds the expected body as the run resolved it:
+			// each placeholder already at the value it was compared with.
+			logDiffs.PushBodyDiff(bodyResult.Expected, bodyResult.Actual, nil)
 		}
 	}
 	return nil
 }
 
-// renderTemplateValue renders a templated value and returns the result
-func (r *Report) renderTemplateValue(value interface{}) (interface{}, error) {
-	_, renderedValue, err := tools.RenderIfTemplatized(value)
-	if err != nil {
-		r.logger.Error("failed to render template value", zap.Error(err))
-		return nil, err
+// renderTemplateFailures writes one line per template variable place a test
+// case failed on: where, the placeholder, and why. A placeholder refused when
+// the set loaded is said under its own heading: the test case was never sent,
+// so no answer was compared. So is a test set refused whole, which is no
+// placeholder's refusal (wholeSetRefusal).
+func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
+	var failed, refused, set []models.TemplateFailure
+	for _, f := range fs {
+		switch {
+		case wholeSetRefusal(f):
+			set = append(set, f)
+		case f.Refused:
+			refused = append(refused, f)
+		default:
+			failed = append(failed, f)
+		}
 	}
-	return renderedValue, nil
+	for _, s := range []struct {
+		heading string
+		fs      []models.TemplateFailure
+	}{
+		{"=== TEMPLATE VARIABLES THE ANSWER DID NOT SATISFY ===", failed},
+		{"=== TEMPLATE PLACEHOLDERS REFUSED WHEN THE TEST SET LOADED (THE TEST CASE WAS NOT SENT) ===", refused},
+		{"=== TEST SET REFUSED WHEN IT LOADED (THE TEST CASE WAS NOT SENT) ===", set},
+	} {
+		if len(s.fs) == 0 {
+			continue
+		}
+		sb.WriteString(s.heading + "\n")
+		for _, f := range s.fs {
+			sb.WriteString("  " + templateFailureLine(f) + "\n")
+		}
+		sb.WriteString("\n")
+	}
+}
+
+// comparisonMatched reports whether every row of a result's comparison is
+// normal: its status (an HTTP status, a gRPC grpc-status), each header (a
+// gRPC trailer too), each body and the body's size.
+func comparisonMatched(t models.TestResult) bool {
+	if !t.Result.StatusCode.Normal {
+		return false
+	}
+	if t.Result.BodySizeResult != (models.IntResult{}) && !t.Result.BodySizeResult.Normal {
+		return false
+	}
+	for _, h := range t.Result.HeadersResult {
+		if !h.Normal {
+			return false
+		}
+	}
+	for _, h := range t.Result.TrailerResult {
+		if !h.Normal {
+			return false
+		}
+	}
+	for _, b := range t.Result.BodyResult {
+		if !b.Normal {
+			return false
+		}
+	}
+	return true
+}
+
+// refusedUnsent reports whether a test case's template failures are refusals
+// made when its set loaded: such a test case was never sent.
+func refusedUnsent(fs []models.TemplateFailure) bool {
+	if len(fs) == 0 {
+		return false
+	}
+	for _, f := range fs {
+		if !f.Refused {
+			return false
+		}
+	}
+	return true
 }
 
 // extractTestSetIDs extracts and cleans test set IDs from config
@@ -1369,17 +1514,7 @@ func (r *Report) extractTestSetIDs() []string {
 func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 	logDiffs := matcherUtils.NewDiffsPrinter("")
 
-	actualValue, err := r.renderTemplateValue(bodyResult.Actual)
-	if err != nil {
-		return fmt.Errorf("failed to render actual value for default body diff: %w", err)
-	}
-
-	expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
-	if err != nil {
-		return fmt.Errorf("failed to render expected value for default body diff: %w", err)
-	}
-
-	logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
+	logDiffs.PushBodyDiff(bodyResult.Expected, bodyResult.Actual, nil)
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the default body diffs", zap.Error(err))

@@ -12,7 +12,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"io/fs"
 	"math"
@@ -24,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
+	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -44,7 +43,6 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
-var templateValuesMu sync.RWMutex
 
 const maxStreamTokenSize = 10 * 1024 * 1024
 
@@ -92,42 +90,6 @@ func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
 }
 
-func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
-	if len(src) == 0 {
-		return map[string]interface{}{}
-	}
-
-	dst := make(map[string]interface{}, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func snapshotTemplateState() (map[string]interface{}, map[string]interface{}) {
-	templateValuesMu.RLock()
-	defer templateValuesMu.RUnlock()
-
-	return cloneStringAnyMap(utils.TemplatizedValues), cloneStringAnyMap(utils.SecretValues)
-}
-
-func buildTemplateDataSnapshot() map[string]interface{} {
-	templatedValues, secretValues := snapshotTemplateState()
-	if len(templatedValues) == 0 && len(secretValues) == 0 {
-		return map[string]interface{}{}
-	}
-
-	templateData := make(map[string]interface{}, len(templatedValues)+1)
-	for k, v := range templatedValues {
-		templateData[k] = v
-	}
-	if len(secretValues) > 0 {
-		templateData["secret"] = secretValues
-	}
-
-	return templateData
-}
-
 func UpdateSortCounterIfHigher(val int64) {
 	for {
 		curr := atomic.LoadInt64(&SortCounter)
@@ -159,6 +121,78 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 		header[i] = strings.Join(j, ",")
 	}
 	return header
+}
+
+// ToYamlHTTPHeaderLineLengths is the other half of ToYamlHTTPHeader for a
+// header keploy will send back out: for each name that arrived on more than one
+// line, the length of each line's value, in arrival order. ToYamlHTTPHeader's
+// join cannot be undone without them (see models.HeaderLineLengths). nil when
+// every name arrived on one line, so the recording is stored as it always was.
+func ToYamlHTTPHeaderLineLengths(httpHeader http.Header) models.HeaderLineLengths {
+	var lineLengths models.HeaderLineLengths
+	for name, values := range httpHeader {
+		if len(values) < 2 {
+			continue
+		}
+		lengths := make([]int, len(values))
+		for i, value := range values {
+			lengths[i] = len(value)
+		}
+		if lineLengths == nil {
+			lineLengths = models.HeaderLineLengths{}
+		}
+		lineLengths[name] = lengths
+	}
+	return lineLengths
+}
+
+// ToWireHTTPHeader is ToHTTPHeader for a recorded header keploy sends back out:
+// a test case's request, a mock's response. A value recorded from several lines
+// goes out on those lines again, in their order, as long as it is still exactly
+// those lines joined by ","; anything else goes out as ToHTTPHeader sends it,
+// one line per name.
+func ToWireHTTPHeader(header map[string]string, lineLengths models.HeaderLineLengths) http.Header {
+	wire := ToHTTPHeader(header)
+	for name, lengths := range lineLengths {
+		value, ok := header[name]
+		if !ok {
+			continue
+		}
+		if lines, ok := splitHeaderLines(value, lengths); ok {
+			wire[name] = lines
+		}
+	}
+	return wire
+}
+
+// splitHeaderLines cuts value back into the lines ToYamlHTTPHeader joined, or
+// reports false when value is not len(lengths) lines of those lengths joined by
+// ",": a value rewritten since it was recorded (a template rendered, a secret
+// decrypted to something else, an edit) is not split by a guess.
+func splitHeaderLines(value string, lengths []int) ([]string, bool) {
+	if len(lengths) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(lengths))
+	pos := 0
+	for i, n := range lengths {
+		if n < 0 || n > len(value)-pos {
+			return nil, false
+		}
+		lines = append(lines, value[pos:pos+n])
+		pos += n
+		if i == len(lengths)-1 {
+			break
+		}
+		if pos >= len(value) || value[pos] != ',' {
+			return nil, false
+		}
+		pos++
+	}
+	if pos != len(value) {
+		return nil, false
+	}
+	return lines, true
 }
 
 // CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
@@ -223,13 +257,12 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 		// Starlette failure mode reproducible during replay even when
 		// the original client sent exactly one Accept header.
 		//
-		// Trade-off: a recording whose on-wire request actually used
-		// repeated same-name headers (rare on the request side; common
-		// only for Set-Cookie which is a response header and never
-		// built by this helper) replays as a single comma-folded
-		// header. Per RFC 7230 §3.2.2 the receiver-side parse is
-		// semantically equivalent for list-valued headers, so this
-		// folding is wire-safe for the headers that actually matter.
+		// A value that really did arrive on several lines is folded
+		// here too. That is right for comparing and matching, and wrong
+		// for sending: an app reading the first of `X-A: a` twice gets
+		// "a", and of `X-A: a,a` gets "a,a". Code that sends a
+		// recorded header uses ToWireHTTPHeader, which puts the lines
+		// back.
 		header[i] = []string{j}
 	}
 	return header
@@ -319,55 +352,167 @@ type SimulationConfig struct {
 	ConfigHost      string
 	URLReplacements map[string]string
 	PortMappings    map[uint32]uint32
+	// TargetFromURL says an HTTP test case's URL already names where the app
+	// is, as it does once test.basePath has been put in it. What the recording
+	// kept of the address the app had then is another deployment's, and is
+	// left out of the request: the recorded app_port does not replace the
+	// URL's port, and the recorded Host header is not sent, so the request
+	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
+	// a virtual host is not reached under the name it was recorded with.
+	TargetFromURL bool
+	// SentTo, when set, is told where each HTTP request goes once everything
+	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
+	// URL it is sent to, the Host it asks for, and the Host header its test
+	// was recorded with ("" when it has none).
+	SentTo func(target *url.URL, host, recordedHost string)
 	// TLSConfig, when non-nil, is applied to the http.Transport used by
 	// the replay client. Lets callers pin a specific cert (e.g. for
 	// short-lived replay pods serving a self-signed cert) without
 	// relaxing TLS verification globally. Default nil preserves the
 	// stdlib system-pool behaviour.
 	TLSConfig *tls.Config
+	// AppPortReachability, when non-nil, is asked about a test request that
+	// was refused, reset or dropped before an answer: an address the app can
+	// never be reached at fails the test at once, saying why, instead of
+	// being re-sent as an app still starting.
+	AppPortReachability AppPortReachability
+}
+
+// AppPortReachability is implemented by an instrumentation that can tell a
+// failed connection to an address the app can NEVER be reached at from one to
+// an app that is still starting. In Docker mode the host reaches the app only
+// through the ports its docker command publishes. Replay sends each test from
+// the host to the port it was recorded on, unless test.port (--port), a
+// protocol port or replaceWith sends it to another host port. That host port
+// then has to be published to where the app serves the test: the app's port
+// the test was recorded on, or, for an app that has moved since the recording,
+// the port it listens on now. A test sent to a port the command does not
+// publish is refused every time (the app calling its own in-container server
+// is recorded as ingress on such a port). A test on a published port where the
+// app listens only on 127.0.0.1 inside the container fails every time too, as
+// a dropped connection: docker accepts it, finds nothing listening on the
+// container's own address, and drops it.
+type AppPortReachability interface {
+	// UnreachableAppPort explains why a connection to host:port cannot reach
+	// the app's server on appPort, and how to fix that, as a clause that reads
+	// after the prefix UnreachableAppPortError gives it. appPort is the port the
+	// test was recorded on, where the app listened in its container then; 0
+	// when it is not known, and then port is all there is to go on. It returns
+	// "" when the address can reach the app or it cannot tell.
+	//
+	// It bounds its own wait: it is asked from a recording's insert loop, a
+	// readiness gate and a failing test, with whatever context they hold.
+	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
+}
+
+// UnreachableAppPortError is a test request that failed to connect at an
+// address the app can never be reached at. It unwraps to the refusal or reset,
+// so it still classifies as one everywhere that matters; the one thing that
+// must not act on it is a re-send (see IsUnreachableAppPort).
+type UnreachableAppPortError struct {
+	// Port is the port the request was sent to on the host.
+	Port uint16
+	// AppPort is the app's port the test was recorded on; 0 when not known.
+	AppPort uint16
+	Reason  string
+	Err     error
+}
+
+// Error names the app's port the test was recorded on and, when the request
+// went to another host port, that one too: "the app's port 8080 cannot be
+// reached from the host at port 18080: <reason>". A test that does not say its
+// app port names the host port alone.
+func (e *UnreachableAppPortError) Error() string {
+	switch {
+	case e.AppPort == 0:
+		return fmt.Sprintf("the app cannot be reached from the host at port %d: %s: %v", e.Port, e.Reason, e.Err)
+	case e.AppPort != e.Port:
+		return fmt.Sprintf("the app's port %d cannot be reached from the host at port %d: %s: %v", e.AppPort, e.Port, e.Reason, e.Err)
+	}
+	return fmt.Sprintf("the app's port %d cannot be reached from the host: %s: %v", e.Port, e.Reason, e.Err)
+}
+
+func (e *UnreachableAppPortError) Unwrap() error { return e.Err }
+
+// IsUnreachableAppPort reports whether err is a test request sent to an address
+// the app can never be reached at: re-sending it cannot help.
+func IsUnreachableAppPort(err error) bool {
+	var u *UnreachableAppPortError
+	return errors.As(err, &u)
+}
+
+// unreachableAppPort asks reach, if set, whether the address a connection
+// failed at is one the app's server on appPort (0: not known) can never be
+// reached at, and returns the error to fail with if it is.
+func unreachableAppPort(ctx context.Context, reach AppPortReachability, host, port string, appPort uint16, refused error) error {
+	if reach == nil {
+		return nil
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return nil
+	}
+	reason := reach.UnreachableAppPort(ctx, host, uint16(n), appPort)
+	if reason == "" {
+		return nil
+	}
+	return &UnreachableAppPortError{Port: uint16(n), AppPort: appPort, Reason: reason, Err: refused}
+}
+
+// urlHostPort is the host and port a request to u dials.
+func urlHostPort(u *url.URL) (string, string) {
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return u.Hostname(), port
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
 type preparedHTTPRequest struct {
 	Request *http.Request
 	Client  *http.Client
+	// AppPort is the app's port the request is for: the one its test was
+	// recorded on, which test.port or replaceWith may have sent to another
+	// host port. 0 when not known, or when the URL names where the app is
+	// (SimulationConfig.TargetFromURL).
+	AppPort uint16
+}
+
+// HostHeaderOf is the Host header a client sends for u: its host, and its port
+// unless that is the one its scheme has anyway. A front that routes by name
+// matches the header as written, and need not know "staging:443" for the
+// "staging" every client of https://staging asks it for.
+func HostHeaderOf(u *url.URL) string {
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return strings.TrimSuffix(u.Host, ":"+port)
+	}
+	return u.Host
 }
 
 // prepareHTTPRequest handles all common request preparation logic shared between
-// SimulateHTTP and SimulateHTTPStreaming: URL decoding, template rendering,
-// body loading, multipart construction, compression, and client creation.
+// SimulateHTTP and SimulateHTTPStreaming: URL decoding, body loading,
+// multipart construction, compression, and client creation.
 func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*preparedHTTPRequest, error) {
-	// case in which URL string has encoded template placeholders
-	if strings.Contains(tc.HTTPReq.URL, "%7B") {
+	// A URL that is not rendered and holds "%7B" is unescaped whole before
+	// it is sent. A URL a replay rendered (pkg/templates) has each value
+	// escaped for its place already, and unescaping it again would turn a
+	// '+' in a value into a space and a "%26" into a new query parameter: it
+	// is sent as it stands.
+	if strings.Contains(tc.HTTPReq.URL, "%7B") && !tc.HTTPReq.URLRendered {
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
 
-	// TODO: adjust this logic in the render function in order to remove the redundant code.
-	// Convert testcase to string and render template values before simulation.
-	templateData := buildTemplateDataSnapshot()
-	if len(templateData) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
-			return nil, err
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
-	}
+	// The test case arrives as it is to be sent: a replay renders its
+	// placeholders (pkg/templates) on a copy before handing it here, and
+	// nothing here reads or writes template values.
 
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
@@ -527,7 +672,11 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	// app_port < config port < replaceWith URL replacements
 	// (explicit replacement port short-circuits lower-priority port overrides)
 	// < replaceWith port mappings.
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	appPort := tc.AppPort
+	if cfg.TargetFromURL {
+		appPort = 0
+	}
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +686,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
 	}
-	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
+	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
@@ -549,9 +698,21 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
-	if hostHeader != "" {
+	if cfg.TargetFromURL {
+		// Not left to the URL as it stands: ResolveTestTarget has written the
+		// scheme's own port into it, and "staging:443" is not the name a
+		// client of https://staging asks for.
+		req.Host = HostHeaderOf(req.URL)
+	} else if hostHeader != "" {
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
+	}
+	if cfg.SentTo != nil {
+		asked := req.Host
+		if asked == "" {
+			asked = req.URL.Host
+		}
+		cfg.SentTo(req.URL, asked, hostHeader)
 	}
 
 	// Creating the client and disabling redirects
@@ -604,6 +765,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
+		AppPort: appPort,
 	}, nil
 }
 
@@ -630,11 +792,122 @@ func isPreResponseConnRefused(err error) bool {
 	return neterr.IsConnRefused(err)
 }
 
+// netHTTPServerClosedIdle is the text of net/http's errServerClosedIdle
+// (net/http/transport.go). net/http does not export the error, so its text
+// is all there is to know it by. This test provokes the real one, and fails if
+// the text changes:
+// TestIsTransportConnResetClassifiesAServerThatClosedTheConnectionFirst.
+const netHTTPServerClosedIdle = "http: server closed idle connection"
+
+// inErrorTree reports whether match holds for err or any error it wraps. It
+// walks the tree errors.Is walks: through Unwrap() error and Unwrap() []error
+// alike.
+func inErrorTree(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return inErrorTree(u.Unwrap(), match)
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if inErrorTree(e, match) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isServerClosedIdle reports whether err, or any error it wraps, is net/http's
+// errServerClosedIdle.
+func isServerClosedIdle(err error) bool {
+	return inErrorTree(err, func(e error) bool { return e.Error() == netHTTPServerClosedIdle })
+}
+
+// isTimedOut reports whether err, or any error it wraps, says it timed out
+// (a Timeout method that returns true, as net.Error has): a context's deadline
+// (context.DeadlineExceeded); net/http's client timeout, awaiting the answer's
+// headers or reading its body; a deadline on the connection ("i/o timeout");
+// a dial, a TLS handshake or a name lookup that timed out.
+func isTimedOut(err error) bool {
+	return inErrorTree(err, func(e error) bool {
+		t, ok := e.(interface{ Timeout() bool })
+		return ok && t.Timeout()
+	})
+}
+
+// isAnswerCutShort reports whether err is the connection closing part-way
+// through the app's answer, by the answer's own framing: net/http reports that
+// as io.ErrUnexpectedEOF.
+func isAnswerCutShort(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// isConnDropped reports whether err is the connection to the app dropping: a
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
+// errServerClosedIdle. One drop is reported as any of these. Which one depends
+// on timing: net/http reports a close its read loop reads before the request
+// is on the connection as errServerClosedIdle, which a request on a fresh
+// connection gets as is (on a reused one, net/http sends again a request it
+// can replay), and a close it reads after as io.EOF. By the error alone a
+// reset can also have come part-way through an answer (see
+// IsTransportConnReset). Every rule about a drop asks this one.
+func isConnDropped(err error) bool {
+	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
+		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+}
+
+// IsAppConnectionError reports whether err says a test request failed because
+// the connection to the app failed: it was refused (isPreResponseConnRefused,
+// which the refusal re-send and the gRPC dial ask), the app's host was not
+// found, it dropped (isConnDropped), or a gRPC call lost it before the server
+// answered (isGRPCConnectionLost). This is what a test result's
+// APP_CONNECTION_ERROR means, and replay asks only this to set it.
+//
+// A close part-way through an answer (isAnswerCutShort) is not one: the app
+// answered, if not completely. IsTransportConnReset takes it too, for the
+// re-send its caller gates on the mocks the request consumed, and so does
+// IsAppNoAnswer.
+func IsAppConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	return isPreResponseConnRefused(err) ||
+		(errors.As(err, &dnsErr) && dnsErr.IsNotFound) ||
+		isConnDropped(err) ||
+		isGRPCConnectionLost(err)
+}
+
+// IsAppNoAnswer reports whether err says a test request got no complete
+// answer: none came in time (isTimedOut), the request was cancelled (a stop:
+// context.Canceled), or the connection closed part-way through the answer
+// (isAnswerCutShort). grpc-go turns the end of a call's
+// context into a status and keeps no cause, so a gRPC call's is its code
+// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
+// prune and a new mappings.yaml, and replay asks only this to set it.
+//
+// It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
+// An answer that came back whole but does not decode (answerDoesNotDecode) is
+// an answer, so it is neither.
+func IsAppNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTimedOut(err) ||
+		errors.Is(err, context.Canceled) ||
+		isAnswerCutShort(err) ||
+		isGRPCNoAnswer(err)
+}
+
 // IsTransportConnReset reports whether err is a transport-level connection
-// reset / unexpected close while exchanging the request with the app — i.e.
-// "connection reset by peer" (ECONNRESET), a broken pipe (EPIPE), or a bare
-// io.EOF / io.ErrUnexpectedEOF surfaced by net/http when the peer dropped the
-// connection.
+// reset / unexpected close while exchanging the request with the app: the
+// connection dropping before any of an answer came back (isConnDropped), or
+// closing part-way through one (isAnswerCutShort).
 //
 // This class is dominated, under loaded CI replaying a DOCKER app, by docker's
 // userland proxy (docker-proxy) resetting a freshly-accepted host-side
@@ -657,30 +930,42 @@ func IsTransportConnReset(err error) bool {
 	if err == nil {
 		return false
 	}
-	if neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) {
-		return true
-	}
 	// net/http surfaces a peer-side drop during the response read as a bare
 	// io.EOF / io.ErrUnexpectedEOF (no syscall in the chain) — the docker-proxy
 	// reset frequently lands here too (see the "EOF" hits in the reproduction).
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	return false
+	return isConnDropped(err) || isAnswerCutShort(err)
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
 // pre-response connection-refused (bounded, ctx-aware backoff, request body
 // rewound via GetBody). Any other error, or a real response, returns
 // immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried.
-func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request) (*http.Response, error) {
+// the bounded retries, and a mid-response reset is never retried. A refusal,
+// reset or drop at an address reach says the app's server on appPort (the port
+// the test was recorded on, 0 when not known) can never be reached at fails at
+// once, saying why, as an *UnreachableAppPortError.
+func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
+	asked := false
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
 			return resp, nil
 		}
-		if attempt >= maxConnRefusedRetries || !isPreResponseConnRefused(err) {
+		refused := isPreResponseConnRefused(err)
+		// A reset or drop is asked about too: at a published port where the
+		// app listens only on 127.0.0.1 in its container, docker accepts the
+		// connection and drops it, every time.
+		if !asked && (refused || IsTransportConnReset(err)) {
+			asked = true
+			host, port := urlHostPort(req.URL)
+			if unreachable := unreachableAppPort(ctx, reach, host, port, appPort, err); unreachable != nil {
+				return nil, unreachable
+			}
+		}
+		if !refused {
+			return nil, err
+		}
+		if attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -705,9 +990,28 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 	}
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
-	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+// answerDoesNotDecode is the error of a test request whose answer came back,
+// whole by its own framing, but whose body does not decode as its
+// Content-Encoding says (an encoded answer with no body, such as a 204 or the
+// answer to a HEAD, or an encoded body cut short). It keeps the decoder's
+// error as text only, never wrapped: gzip reports a body with no bytes as
+// io.EOF and a short one as io.ErrUnexpectedEOF, and br reports both as
+// io.ErrUnexpectedEOF, the errors of a dropped connection and of an answer the
+// connection cut short, and the app did answer. Wrapped, they would read as a
+// drop to the reset re-send (IsTransportConnReset) and to APP_CONNECTION_ERROR
+// (IsAppConnectionError), and as no answer to replay's no-answer mark
+// (IsAppNoAnswer). A body that decodes but inflates past the cap is not one:
+// it keeps Decompress's error, which wraps ErrDecompressedTooLarge and none of
+// those.
+func answerDoesNotDecode(status int, encoding string, err error) error {
+	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
+}
 
+// SimulateHTTP sends tc's request to the app and returns its answer. It sends
+// tc as given: a test case's placeholders are rendered by the replay, on a
+// copy, before it gets here (pkg/templates), and what the app answers is
+// read for template values there too, never here.
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
 	// Prepare the HTTP request using the shared helper
@@ -720,7 +1024,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -742,11 +1046,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Decompress if needed
-	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody, MaxDecompressedSize)
+	if enc := httpResp.Header.Get("Content-Encoding"); enc != "" {
+		respBody, err = Decompress(logger, enc, respBody, MaxDecompressedSize)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
-			return nil, err
+			// A body that inflates past the cap decodes; it is only too large.
+			// It keeps Decompress's error, by which a caller tells it from a
+			// body that does not decode (ErrDecompressedTooLarge).
+			if errors.Is(err, ErrDecompressedTooLarge) {
+				return nil, err
+			}
+			return nil, answerDoesNotDecode(httpResp.StatusCode, enc, err)
 		}
 	}
 
@@ -759,22 +1069,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
-	// Centralized template update: walk the response body and headers to refresh template values.
-	// NOTE: header-only updates are important for e.g. listmonk where the login 302 has an empty
-	// body but carries a fresh Set-Cookie: session=... that every subsequent test consumes.
-	if len(respBody) > 0 || len(resp.Header) > 0 {
-		templateValuesMu.Lock()
-		defer templateValuesMu.Unlock()
-		prevTemplatedValues := cloneStringAnyMap(utils.TemplatizedValues)
-		if len(prevTemplatedValues) > 0 {
-			logger.Debug("Received response from user app", zap.Any("response", resp))
-
-			updated := updateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues, prevTemplatedValues)
-			if updated {
-				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
-			}
-		}
-	}
 	return resp, errHTTPReq
 }
 
@@ -797,7 +1091,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
-	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request)
+	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -820,6 +1114,13 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if gzErr != nil {
 			httpResp.Body.Close()
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			// A body that ended, by its own framing, before its first byte
+			// (io.EOF), or whose first bytes are not a gzip header, is the
+			// answer not decoding. Any other error may have come from reading
+			// the body off the connection, and stays as it is.
+			if errors.Is(gzErr, io.EOF) || errors.Is(gzErr, gzip.ErrHeader) {
+				return nil, answerDoesNotDecode(httpResp.StatusCode, contentEncoding, gzErr)
+			}
 			return nil, gzErr
 		}
 		// Cap decompressed output so a bomb fails the test instead of
@@ -1999,471 +2300,6 @@ func looksBinary(s string) bool {
 	return false
 }
 
-// updateTemplateValuesFromHTTPResp checks the HTTP response body and the previous
-// templatized response body and updates the template values that are currently held
-// under templateValuesMu.
-func updateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
-	// We derive template keys directly from the templated response body & headers by
-	// scanning for placeholder patterns like {{key}} (go text/template simple identifiers)
-	// and then recursively locating the same JSON path in the new response to fetch
-	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
-	// deterministic path-based updates.
-	if len(currentTemplatedValues) == 0 { // nothing to update
-		logger.Debug("no templatized values present, nothing to update")
-		return false
-	}
-
-	// Capture entire inner expression (supports: {{string .token}}, {{ .id }}, {{token}}, {{ float .price | printf "%f" }})
-	placeholderRe := regexp.MustCompile(`{{\s*([^{}]+?)\s*}}`)
-	changed := false
-
-	// --- 1. Handle JSON body path-based updates ---
-	// Problem: templated response can contain raw placeholders (e.g. array: [{{int .x}},{{int .y}}]) which is not valid JSON.
-	// Solution: produce a sanitized JSON by wrapping any unquoted placeholder token in quotes so that the body becomes parseable.
-	var templatedParsed interface{}
-	var actualParsed interface{}
-	sanitizedTemplatedBody := sanitizeTemplatedJSON(templatedResponse.Body, placeholderRe)
-	templatedIsJSON := json.Valid([]byte(sanitizedTemplatedBody))
-	actualIsJSON := json.Valid([]byte(resp.Body))
-
-	if templatedIsJSON && actualIsJSON {
-		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
-			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
-				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-					changed = true
-				}
-			}
-		}
-	} else {
-		logger.Debug("response body or templated body is not JSON, skipping body path-based template updates", zap.Bool("templatedIsJSON", templatedIsJSON), zap.Bool("actualIsJSON", actualIsJSON))
-	}
-
-	// --- 2. Handle response header updates ---
-	// The record-side (pkg/service/tools/templatize.go buildValueIndexV2) can rewrite
-	// header values (including Set-Cookie sub-components and "Authorization: Bearer <tok>")
-	// into {{.VarName}} placeholders. At replay time the live server sends fresh values
-	// for those same headers — we must pull them out so downstream test cases that
-	// consume the placeholder (e.g. Cookie: session={{.session}}) render the live value.
-	if updateTemplateValuesFromHeaders(logger, templatedResponse.Header, resp.Header, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-		changed = true
-	}
-	return changed
-}
-
-// updateTemplateValuesFromHeaders walks the recorded (templated) response headers side-by-side
-// with the live response headers. For each recorded header value that carries a {{.Var}}
-// placeholder it extracts the corresponding live substring and writes it into
-// currentTemplatedValues[Var]. Returns true if any template was updated.
-//
-// It mirrors the record-side decomposition performed in
-// pkg/service/tools/templatize.go buildValueIndexV2:
-//   - Set-Cookie lines are split into per-cookie name=value pairs; the placeholder lives in
-//     the value slot (`name={{.var}}; Path=/; HttpOnly`).
-//   - `Authorization: Bearer {{.token}}` has the Bearer prefix stripped before extracting.
-//   - Every other header is handled generically by substring-between-literals extraction.
-func updateTemplateValuesFromHeaders(
-	logger *zap.Logger,
-	templatedHeaders map[string]string,
-	liveHeaders map[string]string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-) bool {
-	changed := false
-	if len(templatedHeaders) == 0 || len(liveHeaders) == 0 {
-		return false
-	}
-
-	// Case-insensitive lookup into the live header map (HTTP header names are
-	// case-insensitive per RFC 7230 and our yaml map can preserve either casing).
-	liveByLower := make(map[string]string, len(liveHeaders))
-	for k, v := range liveHeaders {
-		liveByLower[strings.ToLower(k)] = v
-	}
-
-	for name, templatedVal := range templatedHeaders {
-		if !placeholderRe.MatchString(templatedVal) {
-			continue
-		}
-		liveVal, ok := liveByLower[strings.ToLower(name)]
-		if !ok || liveVal == "" {
-			continue
-		}
-
-		switch {
-		case strings.EqualFold(name, "Set-Cookie"):
-			if updateTemplatesFromSetCookie(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		case strings.EqualFold(name, "Authorization") && strings.HasPrefix(strings.TrimSpace(templatedVal), "Bearer "):
-			tmplToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(templatedVal), "Bearer "))
-			liveToken := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(liveVal), "Bearer "))
-			if liveToken == "" {
-				continue
-			}
-			if updateTemplateFromTokenized(logger, tmplToken, liveToken, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header.Authorization") {
-				changed = true
-			}
-		default:
-			if updateTemplateFromTokenized(logger, templatedVal, liveVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "header."+name) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// updateTemplatesFromSetCookie splits both recorded and live Set-Cookie blobs into per-cookie
-// lines, matches them by cookie name, and extracts the live value for each cookie whose
-// recorded value was a placeholder.
-func updateTemplatesFromSetCookie(
-	logger *zap.Logger,
-	templatedVal, liveVal string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-) bool {
-	changed := false
-	tmplLines := splitSetCookieLines(templatedVal)
-	liveLines := splitSetCookieLines(liveVal)
-	if len(tmplLines) == 0 || len(liveLines) == 0 {
-		return false
-	}
-
-	liveByName := make(map[string]string, len(liveLines))
-	for _, ln := range liveLines {
-		name, val := splitSetCookieNV(ln)
-		if name == "" {
-			continue
-		}
-		liveByName[name] = val
-	}
-
-	for _, ln := range tmplLines {
-		name, tmplCookieVal := splitSetCookieNV(ln)
-		if name == "" || !placeholderRe.MatchString(tmplCookieVal) {
-			continue
-		}
-		liveCookieVal, ok := liveByName[name]
-		if !ok || liveCookieVal == "" {
-			continue
-		}
-		if updateTemplateFromTokenized(logger, tmplCookieVal, liveCookieVal, placeholderRe, currentTemplatedValues, prevTemplatedValues, "Set-Cookie."+name) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-// updateTemplateFromTokenized handles a single "templated value vs live value" pair where
-// the templated value contains one or more {{.VarName}} placeholders. It supports:
-//   - Whole-value placeholder: "{{.var}}" -> var = liveVal
-//   - Prefix/suffix literal wrapping: "trace-{{.id}}-v1" -> id = substring between literals
-//   - Multi-placeholder values are best-effort: they only update when the literal separators
-//     between placeholders can unambiguously split the live value.
-func updateTemplateFromTokenized(
-	logger *zap.Logger,
-	templatedVal, liveVal string,
-	placeholderRe *regexp.Regexp,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-	debugPath string,
-) bool {
-	trim := strings.TrimSpace(templatedVal)
-	matches := placeholderRe.FindAllStringSubmatchIndex(templatedVal, -1)
-	if len(matches) == 0 {
-		return false
-	}
-
-	// Fast path: the entire (trimmed) templated value is a single placeholder.
-	if len(matches) == 1 && strings.HasPrefix(trim, "{{") && strings.HasSuffix(trim, "}}") {
-		inner := placeholderRe.FindStringSubmatch(trim)
-		if len(inner) < 2 {
-			return false
-		}
-		keys := extractTemplateKeys(inner[1])
-		if len(keys) != 1 {
-			return false
-		}
-		return applyTemplateUpdate(logger, keys[0], strings.TrimSpace(liveVal), currentTemplatedValues, prevTemplatedValues, debugPath)
-	}
-
-	// General path: split the templated value into alternating literals & placeholders,
-	// then use each literal as an anchor in liveVal to carve out each live substitution.
-	type segment struct {
-		isPlaceholder bool
-		literal       string // only set when !isPlaceholder
-		key           string // only set when isPlaceholder
-	}
-	var segs []segment
-	cursor := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		if start > cursor {
-			segs = append(segs, segment{literal: templatedVal[cursor:start]})
-		}
-		innerMatch := placeholderRe.FindStringSubmatch(templatedVal[start:end])
-		if len(innerMatch) < 2 {
-			cursor = end
-			continue
-		}
-		keys := extractTemplateKeys(innerMatch[1])
-		if len(keys) != 1 {
-			cursor = end
-			continue
-		}
-		segs = append(segs, segment{isPlaceholder: true, key: keys[0]})
-		cursor = end
-	}
-	if cursor < len(templatedVal) {
-		segs = append(segs, segment{literal: templatedVal[cursor:]})
-	}
-
-	// Walk live value consuming segments.
-	changed := false
-	pos := 0
-	for i, s := range segs {
-		if !s.isPlaceholder {
-			if !strings.HasPrefix(liveVal[pos:], s.literal) {
-				// Literal mismatch — bail out; we can't trust the alignment.
-				return changed
-			}
-			pos += len(s.literal)
-			continue
-		}
-		// placeholder: consume up to the next literal (or end-of-string).
-		var nextLit string
-		if i+1 < len(segs) && !segs[i+1].isPlaceholder {
-			nextLit = segs[i+1].literal
-		}
-		var extracted string
-		if nextLit == "" {
-			extracted = liveVal[pos:]
-			pos = len(liveVal)
-		} else {
-			idx := strings.Index(liveVal[pos:], nextLit)
-			if idx < 0 {
-				return changed
-			}
-			extracted = liveVal[pos : pos+idx]
-			pos += idx
-		}
-		if extracted == "" {
-			continue
-		}
-		if applyTemplateUpdate(logger, s.key, extracted, currentTemplatedValues, prevTemplatedValues, debugPath) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-// applyTemplateUpdate writes key=value into currentTemplatedValues, but only when the key
-// already exists (we never invent new template vars at replay time) and the value is
-// actually different from the previous one.
-func applyTemplateUpdate(
-	logger *zap.Logger,
-	key, value string,
-	currentTemplatedValues, prevTemplatedValues map[string]interface{},
-	debugPath string,
-) bool {
-	if _, ok := currentTemplatedValues[key]; !ok {
-		return false
-	}
-	prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
-	if prevStr == value {
-		return false
-	}
-	logger.Debug("updating template value from header",
-		zap.String("key", key),
-		zap.String("path", debugPath),
-		zap.String("old_value", prevStr),
-		zap.String("new_value", value),
-	)
-	currentTemplatedValues[key] = value
-	return true
-}
-
-// splitSetCookieLines decomposes a yaml-stored Set-Cookie header into individual cookie lines.
-// Mirrors the record-side splitSetCookie in pkg/service/tools/templatize.go — kept as a small,
-// duplicated helper here to avoid importing a service package into pkg/util.go.
-func splitSetCookieLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	if strings.Contains(s, "\n") {
-		lines := strings.Split(s, "\n")
-		out := make([]string, 0, len(lines))
-		for _, ln := range lines {
-			if ln = strings.TrimSpace(ln); ln != "" {
-				out = append(out, ln)
-			}
-		}
-		return out
-	}
-	raw := strings.Split(s, ",")
-	if len(raw) == 1 {
-		return []string{strings.TrimSpace(raw[0])}
-	}
-	out := []string{strings.TrimSpace(raw[0])}
-	for _, token := range raw[1:] {
-		t := strings.TrimSpace(token)
-		name, _, hasEq := strings.Cut(t, "=")
-		startsName := hasEq && name != "" && isCookieNameStart(name)
-		if startsName {
-			out = append(out, t)
-		} else {
-			out[len(out)-1] = out[len(out)-1] + "," + token
-		}
-	}
-	return out
-}
-
-func isCookieNameStart(name string) bool {
-	if name == "" {
-		return false
-	}
-	r := rune(name[0])
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '$'
-}
-
-// splitSetCookieNV extracts the cookie name and value (pre-attribute) from a single Set-Cookie
-// line. E.g. "session=abc123; Path=/; HttpOnly" -> ("session", "abc123"). Mirrors the
-// record-side splitSetCookieNameValue.
-func splitSetCookieNV(line string) (string, string) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", ""
-	}
-	head := line
-	if i := strings.IndexByte(line, ';'); i >= 0 {
-		head = line[:i]
-	}
-	name, val, ok := strings.Cut(head, "=")
-	if !ok {
-		return "", ""
-	}
-	return strings.TrimSpace(name), strings.TrimSpace(val)
-}
-
-// traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
-// Whenever it finds a string containing a placeholder, it extracts the template key(s) and updates
-// the current template values with the concrete value from the actual JSON at the same path.
-func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
-	changed := false
-	switch t := templatedNode.(type) {
-	case map[string]interface{}:
-		actMap, _ := actualNode.(map[string]interface{})
-		for k, v := range t {
-			p := k
-			if path != "" {
-				p = path + "." + k
-			}
-			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		actArr, _ := actualNode.([]interface{})
-		for i, v := range t {
-			var actElem interface{}
-			if i < len(actArr) {
-				actElem = actArr[i]
-			}
-			p := fmt.Sprintf("%s[%d]", path, i)
-			if path == "" {
-				p = fmt.Sprintf("[%d]", i)
-			}
-			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
-				changed = true
-			}
-		}
-	case string:
-		matches := placeholderRe.FindAllStringSubmatch(t, -1)
-		if len(matches) == 0 {
-			return changed
-		}
-		concrete := fmt.Sprintf("%v", actualNode)
-		if concrete == "<nil>" || concrete == "" {
-			return changed
-		}
-		trimT := strings.TrimSpace(t)
-		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
-			keys := extractTemplateKeys(m[1])
-			if len(keys) != 1 {
-				continue
-			}
-			key := keys[0]
-			if _, ok := currentTemplatedValues[key]; !ok {
-				continue
-			}
-			prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
-			if prevStr == concrete {
-				continue
-			}
-			// Update only if original value is a single placeholder expression (no static mix)
-			if !(strings.HasPrefix(trimT, "{{") && strings.HasSuffix(trimT, "}}") && len(matches) == 1) {
-				continue
-			}
-			logger.Debug("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
-			currentTemplatedValues[key] = concrete
-			changed = true
-		}
-	default:
-		// non-string primitives can't contain placeholders; nothing to do
-	}
-	return changed
-}
-
-// RenderTestCaseWithTemplates returns a copy of the provided TestCase with
-// current templated and secret values applied. This is useful for producing
-// a concrete "expected" testcase (for example expected responses) before
-// the test is executed and templates may get updated by the runtime.
-func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) {
-	templatedValues, secretValues := snapshotTemplateState()
-
-	// If there are no templated or secret values, just return a deep copy
-	if len(templatedValues) == 0 && len(secretValues) == 0 {
-		copy := *tc
-		return &copy, nil
-	}
-
-	// Marshal the testcase and execute the template with current values
-	testCaseStr, err := json.Marshal(tc)
-	if err != nil {
-		return nil, err
-	}
-
-	funcMap := template.FuncMap{
-		"int":    utils.ToInt,
-		"string": utils.ToString,
-		"float":  utils.ToFloat,
-	}
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-	if err != nil || tmpl == nil {
-		return nil, err
-	}
-
-	data := make(map[string]interface{})
-	for k, v := range templatedValues {
-		data[k] = v
-	}
-	if len(secretValues) > 0 {
-		data["secret"] = secretValues
-	}
-
-	var output bytes.Buffer
-	if err := tmpl.Execute(&output, data); err != nil {
-		return nil, err
-	}
-
-	var rendered models.TestCase
-	if err := json.Unmarshal(output.Bytes(), &rendered); err != nil {
-		return nil, err
-	}
-	return &rendered, nil
-}
-
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
@@ -2488,10 +2324,11 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 func MakeCurlCommand(tc models.HTTPReq) string {
 	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
-	header := ToHTTPHeader(tc.Header)
-
-	for k, v := range ToYamlHTTPHeader(header) {
-		if k != "Content-Length" {
+	for k, lines := range ToWireHTTPHeader(tc.Header, tc.HeaderLineLengths) {
+		if k == "Content-Length" {
+			continue
+		}
+		for _, v := range lines {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}
@@ -2767,73 +2604,230 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
-// and signals on the provided channel when the agent becomes available or unavailable.
-// It respects the context timeout and returns when the context is cancelled.
+// agentHealthFirstWait is how long the first agent health check waits for its
+// answer. An agent on the same host answers in well under a millisecond, and one
+// that is not up yet refuses the connection at once, so this keeps the local case
+// as quick as it always was.
+//
+// agentHealthMaxWait bounds the wait a run of slow answers can grow to (see
+// nextAgentHealthWait); the caller's context still bounds the whole wait.
+const (
+	agentHealthFirstWait = 500 * time.Millisecond
+	agentHealthMaxWait   = 30 * time.Second
+)
+
+// nextAgentHealthWait is how long the next agent health check waits: twice the
+// last wait when that check ran out of time, up to agentHealthMaxWait, and the
+// same wait otherwise. Only a check that timed out says the answer needs longer
+// to arrive than it was given; one refused at once (nothing listening yet) or
+// answered says nothing about the path, so it leaves the wait alone.
+//
+// A fixed wait cannot fit every path to the agent. Reached through a Kubernetes
+// port-forward, each new connection costs two stream set-ups before the request
+// is sent, so a check takes about three round trips: 735ms over a 245ms link.
+// A fixed 500ms cut every check off and the agent was never found ready.
+func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
+	if !timedOut {
+		return wait
+	}
+	if wait >= agentHealthMaxWait/2 {
+		return agentHealthMaxWait
+	}
+	return 2 * wait
+}
+
+// AgentHealthTicker checks the agent's health endpoint every checkInterval
+// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// returns when ctx ends too, and closes agentReadyCh either way, so a receive
+// that gets false means ctx ended first.
+//
+// Each check waits agentHealthFirstWait for its answer to begin with, and twice
+// as long after a check that ran out of time (nextAgentHealthWait), so an agent
+// behind a slow path is found ready instead of every check being cut off.
+//
+// When an agent first becomes healthy it also kicks off verifyControlPlaneGuarded
+// for it, off this goroutine and after the readiness signal, so the check never
+// spends the caller's readiness budget. That check can log at error level, which
+// keploy's CI treats as fatal.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+	defer close(agentReadyCh)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+		select {
+		case agentReadyCh <- true:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// AgentHealthTickerWithAnswer is AgentHealthTicker that sends, in place of
+// true, the headers of the answer that found the agent healthy (never nil),
+// so the caller reads what that same answer said, with no second request that
+// an agent which has since stopped answering, or a budget that has since run
+// out, could fail. A receive that gets nil means ctx ended first.
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+	defer close(answers)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+		select {
+		case answers <- header:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// agentHealthTicker is the loop of the two above: it checks the agent's health
+// every checkInterval until an answer finds it healthy, hands that answer's
+// headers to ready, which reports whether it delivered them (false when ctx
+// ended first), and returns; or it returns when ctx ends.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
-	defer close(agentReadyCh)
 
-	client := &http.Client{
-		Timeout: 500 * time.Millisecond, // short timeout for health checks
-	}
-	agentStarted := false
+	// No client-wide timeout: each check waits as long as `wait` (below).
+	client := &http.Client{}
+	wait := agentHealthFirstWait
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			isHealthy := isAgentHealthy(ctx, logger, client, agentURI)
-
-			if isHealthy && !agentStarted {
-				// Agent became healthy
-				agentStarted = true
-				select {
-				case agentReadyCh <- true:
-					return
-				case <-ctx.Done():
-					return
-				}
-			} else if !isHealthy && agentStarted {
-				// Agent became unhealthy
-				agentStarted = false
-				select {
-				case agentReadyCh <- false:
-				case <-ctx.Done():
-					return
-				}
+			checkCtx, cancel := context.WithTimeout(ctx, wait)
+			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			cancel()
+			if next := nextAgentHealthWait(wait, timedOut); next != wait {
+				logger.Debug("agent health check ran out of time; the next one waits longer",
+					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+				wait = next
 			}
+			if header == nil {
+				continue
+			}
+			if ready(header) {
+				// Only now, and off this goroutine. The check is a
+				// diagnostic: every caller races this signal against a
+				// readiness deadline, and spending any of that budget on it
+				// could fail the user's run with "did not become ready"
+				// against an agent that had just answered its health check.
+				// Detached from ctx for the same reason it runs at all --
+				// the caller cancels this context as soon as it has its
+				// answer, which would cancel the check before it could
+				// report anything.
+				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+			}
+			return
 		}
 	}
 }
 
-// isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) bool {
+// agentHealthAnswer checks whether the agent is running and healthy by calling
+// its /agent/health endpoint, and returns the headers of a healthy (200)
+// answer, never nil, or nil when there was none: no answer, or an answer
+// other than 200, whose headers say nothing about the agent.
+func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
 	logger.Debug("Checking agent health", zap.String("url", healthURL))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		logger.Debug("Failed to create health check request", zap.Error(err))
-		return false
+		return nil
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Debug("Failed to read agent health response body", zap.Error(err))
-		return false
+		return nil
 	}
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	if resp.Header == nil {
+		// A RoundTripper other than net/http's may leave it nil; healthy is
+		// never nil.
+		return http.Header{}
+	}
+	return resp.Header
+}
+
+// TestSetMocksReader is an optional extension of the mock store a replay, the
+// runner or the mock service loads a test set's mocks from: both of its pools,
+// the session pool before the mapping prune, and the per-test candidates
+// before the prune and the window filter, from ONE read of the set's mock file
+// (models.TestSetMocks). A store without it is asked for each pool
+// separately, and *mockdb.MockYaml reads and decodes the whole file for each.
+type TestSetMocksReader interface {
+	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
+// ConsumedScopeReader is an optional extension of the instrumentation a replay
+// or a runner talks to the agent through: whether the agent has said it reads
+// the consumed-mock history only for the per-test mocks it stages
+// (models.ConsumedScopeHeader), so filter params may carry just their entries
+// (ConsumedForAgent). Without it the whole history is sent.
+type ConsumedScopeReader interface {
+	AgentReadsConsumedPerTestOnly() bool
+}
+
+// PerTestRegion is the set of names of the per-test mocks a test set hands the
+// agent: the filtered half of its StoreMocks.
+func PerTestRegion(filtered []*models.Mock) map[string]struct{} {
+	region := make(map[string]struct{}, len(filtered))
+	for _, m := range filtered {
+		if m != nil {
+			region[m.Name] = struct{}{}
+		}
+	}
+	return region
+}
+
+// ConsumedForAgent narrows a test set's consumed-mock history to the entries
+// the agent can read: those of the per-test mocks in region.
+//
+// The agent consults MockFilterParams.TotalConsumedMocks in one place,
+// filterOutDeleted, and only for the per-test mocks it is about to stage, every
+// one of which comes from the per-test half of the set's StoreMocks (resident,
+// parked on disk, or carried over). An entry for any other mock, such as each
+// session, connection or config mock the replay served, is never looked up.
+// Sending those entries anyway re-encoded the whole history for every test, so
+// the payload grew with each test; in a replay whose data mocks are reusable
+// (lax-mode MySQL) all of it was dead weight. The agent's verdict is the same
+// with the narrowed map. Only send it to an agent that says it reads the
+// history that way (models.ConsumedScopeHeader): agents from v3.0.0-beta1
+// through v3.3.22 also applied it to the session pool.
+//
+// A nil region means the per-test half is not known: total is returned as is.
+func ConsumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
+	if region == nil || total == nil {
+		return total
+	}
+	out := make(map[string]models.MockState, min(len(total), len(region)))
+	if len(region) < len(total) {
+		for name := range region {
+			if st, ok := total[name]; ok {
+				out[name] = st
+			}
+		}
+		return out
+	}
+	for name, st := range total {
+		if _, ok := region[name]; ok {
+			out[name] = st
+		}
+	}
+	return out
 }
 
 // FilterTcsMocks applies the per-test time-window filter to candidate
@@ -2963,7 +2957,7 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 // rev3,rev4,rev1,rev2.
 //
 // That matters because downstream reads this pool as a SEQUENCE, not a set. The
-// slice order becomes TestModeInfo.SortOrder in MockManager.setUnFilteredMocks,
+// slice order becomes TestModeInfo.SortOrder in MockManager.buildTier,
 // which keys the RB-tree that GetUnFilteredMocksByKind walks in order — so a
 // replayer that walks a recorded revision sequence (a cluster-config poll, a
 // bootstrap handshake) is handed it backwards.
@@ -3177,7 +3171,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 
 	strict := strictWindowEnabled(strictPerCall)
 	isNonKeploy := false
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
 	for _, mock := range m {
 		if mock == nil {
@@ -3188,6 +3182,21 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// A window-bound mock (a connection failure) is served from its own
+		// window or the startup band and nowhere else, in both modes — see
+		// placeWindowBound. Routed before every rule below, each of which can
+		// otherwise hand it to every test: the untimed branch, the session
+		// short-circuit, the config/connection tag fallback, lax promotion.
+		if models.WindowBound(p.Kind) {
+			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
+				droppedWindowBound++
+				continue
+			}
+			p.TestModeInfo.Lifetime = models.LifetimePerTest
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3356,11 +3365,12 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("filterByTimeStamp tier-aware outcome (see separate counts for reasons)",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Bool("strict", strict),
 			zap.Time("after", afterTime),
 			zap.Time("before", beforeTime),
@@ -3424,6 +3434,13 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			}
 			p := mk.DeepCopy()
 			lt := effectiveLifetimeForRouting(p)
+			if models.WindowBound(p.Kind) {
+				// Never a reusable pool, whatever its tag says (see
+				// placeWindowBound). With no window there is nothing to place
+				// it in, so it goes where every per-test mock goes.
+				lt = models.LifetimePerTest
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+			}
 			switch lt {
 			case models.LifetimeSession:
 				p.TestModeInfo.IsFiltered = false
@@ -3440,7 +3457,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
-	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup int
+	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 	isNonKeploy := false
 
 	for _, mk := range m {
@@ -3450,6 +3467,23 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		p := mk.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
+		}
+		// Window-bound: own window or startup band only, in both modes. Same
+		// rule, same reason, as in filterByTimeStampTierAware.
+		if models.WindowBound(p.Kind) {
+			switch placeWindowBound(p, afterTime, beforeTime, firstWindowStart) {
+			case windowBoundInWindow:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				filtered = append(filtered, p)
+			case windowBoundStartup:
+				p.TestModeInfo.Lifetime = models.LifetimePerTest
+				p.TestModeInfo.IsFiltered = true
+				startup = append(startup, p)
+			default:
+				droppedWindowBound++
+			}
+			continue
 		}
 		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing",
@@ -3532,11 +3566,12 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 	}
 
-	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 {
+	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
 		logger.Debug("FilterByTimeStampThreeTier outcome",
 			zap.Int("dropped_out_of_window", droppedOutOfWindow),
 			zap.Int("dropped_invalid_timestamp_order", droppedInvalidOrder),
 			zap.Int("preserved_startup_pre_first_window", preservedStartup),
+			zap.Int("dropped_window_bound_outside_own_window", droppedWindowBound),
 			zap.Int("perTest", len(filtered)),
 			zap.Int("session", len(unfiltered)),
 			zap.Int("startup", len(startup)),
@@ -3549,6 +3584,39 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filtered, unfiltered, startup
+}
+
+// windowBoundPlace is where the filters put a window-bound mock.
+type windowBoundPlace int
+
+const (
+	windowBoundDropped windowBoundPlace = iota
+	windowBoundInWindow
+	windowBoundStartup
+)
+
+// placeWindowBound places a models.WindowBound mock (a connection failure) for
+// the test window [afterTime, beforeTime]: in the window when its request time
+// is inside it; in the startup band when it predates firstWindowStart (app
+// boot, before any test); dropped in every other case, strict mode or lax.
+//
+// Lax mode promotes an out-of-window per-test mock to the session pool, which
+// every later test reads; a window-bound mock without both timestamps, or with
+// its response before its request, cannot be placed in any window at all and
+// would otherwise go to the per-test pool of every test. Either way a failure
+// recorded in one test would fail connects in others, so neither happens.
+func placeWindowBound(p *models.Mock, afterTime, beforeTime, firstWindowStart time.Time) windowBoundPlace {
+	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() || res.Before(req) {
+		return windowBoundDropped
+	}
+	if !req.Before(afterTime) && !req.After(beforeTime) {
+		return windowBoundInWindow
+	}
+	if !firstWindowStart.IsZero() && req.Before(firstWindowStart) {
+		return windowBoundStartup
+	}
+	return windowBoundDropped
 }
 
 // effectiveLifetimeForRouting resolves a mock's Lifetime for
@@ -3859,109 +3927,6 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 	return data, nil
 }
 
-// extractTemplateKeys parses the inner segment of a template placeholder and returns variable keys.
-// Supports patterns like:
-//
-//	token
-//	.token
-//	string .token
-//	int .id
-//	float .price
-//	.user.id  (returns last path segment id)
-//
-// Only the first pipeline segment is considered (text before |).
-func extractTemplateKeys(inner string) []string {
-	inner = strings.TrimSpace(inner)
-	if inner == "" {
-		return nil
-	}
-	if idx := strings.Index(inner, "|"); idx >= 0 {
-		inner = inner[:idx]
-	}
-	parts := strings.Fields(inner)
-	if len(parts) == 0 {
-		return nil
-	}
-	funcNames := map[string]struct{}{"int": {}, "string": {}, "float": {}}
-	varToken := parts[0]
-	if _, isFunc := funcNames[varToken]; isFunc {
-		if len(parts) < 2 {
-			return nil
-		}
-		varToken = parts[1]
-	}
-	varToken = strings.TrimSpace(varToken)
-	if varToken == "" {
-		return nil
-	}
-	varToken = strings.TrimLeft(varToken, ".")
-	if varToken == "" {
-		return nil
-	}
-	segs := strings.Split(varToken, ".")
-	key := segs[len(segs)-1]
-	return []string{key}
-}
-
-// sanitizeTemplatedJSON makes a JSON string containing go-template placeholders parseable by wrapping
-// any placeholder tokens that appear in value positions without surrounding quotes with quotes.
-// Example: {"arr":[{{int .a}},{{int .b}}]} => {"arr":["{{int .a}}","{{int .b}}"]}
-// This lets us unmarshal while still preserving the placeholder text for later extraction.
-func sanitizeTemplatedJSON(raw string, placeholderRe *regexp.Regexp) string {
-	if raw == "" {
-		return raw
-	}
-	// Precompute which byte positions are inside JSON string literals.
-	inString := make([]bool, len(raw))
-	escaped := false
-	inside := false
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		if c == '\\' && !escaped { // potential escape for next char
-			escaped = true
-			if inside {
-				inString[i] = true
-			}
-			continue
-		}
-		if c == '"' && !escaped { // toggle string state
-			inside = !inside
-			inString[i] = inside
-			continue
-		}
-		if inside {
-			inString[i] = true
-		}
-		escaped = false
-	}
-
-	matches := placeholderRe.FindAllStringIndex(raw, -1)
-	if len(matches) == 0 {
-		return raw
-	}
-
-	// Build sanitized output.
-	var b strings.Builder
-	last := 0
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		// Determine if this placeholder starts inside a string literal.
-		insideString := start < len(inString) && inString[start]
-		b.WriteString(raw[last:start])
-		if !insideString {
-			// Insert quotes to force valid JSON token.
-			b.WriteByte('"')
-			b.WriteString(raw[start:end])
-			b.WriteByte('"')
-		} else {
-			b.WriteString(raw[start:end])
-		}
-		last = end
-	}
-	b.WriteString(raw[last:])
-	return b.String()
-}
-
 // LooksLikeJSON checks if a string appears to be JSON by checking for opening and closing brackets/braces.
 // It trims whitespace and returns false for empty strings.
 func LooksLikeJSON(s string) bool {
@@ -4144,3 +4109,96 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	logger.Debug("Final resolved target", zap.String("target", finalTarget))
 	return finalTarget, nil
 }
+
+// controlPlaneProbed records the agents that have already given a conclusive
+// answer to the check below, keyed by the launch that started each one.
+//
+// Per agent, not per process: a docker-compose `keploy test` restarts the agent
+// for each test-set. A process-wide latch would check the first agent and none
+// of the others, and a handoff that breaks on a later agent and not the first
+// would go unseen. Per launch rather than per address, because those agents
+// share one: the port is fixed in the compose file generated once for the
+// session, so keyed by address alone each later agent would inherit its
+// predecessor's answer and never be checked. The app records a launch every
+// time it runs compose (App.withAgentToken in pkg/client/app).
+var controlPlaneProbed sync.Map
+
+// verifyControlPlaneGuarded checks that an agent this process launched is
+// really enforcing the control-plane token it was handed.
+//
+// A token that never reaches the agent fails OPEN rather than closed: an agent
+// started with no --token-file natively, or whose docker or compose client did
+// not pass the variable through to the container, has no token, and serves its
+// whole control plane — live TLS session keys included — to anything that can
+// reach the port, while this process keeps sending a header nothing checks.
+// Every request still succeeds, so nothing downstream notices and no test of a
+// working flow can tell.
+//
+// One request settles it: a token that is wrong by construction must be
+// refused. It runs here, at the readiness gate, because this is the one point
+// every mode passes through — native, `docker run` and docker compose, where
+// the agent is a service in the compose project keploy rewrites and is started
+// by the user's own `docker compose up`, not by this process directly.
+//
+// Only for an agent this process launched (token.Launched). A process that
+// drives an agent something else started — a sidecar k8s-proxy injected, whose
+// token (if it has one) k8s-proxy put in its pod spec, or a pinned agent image
+// that predates the token — made no handoff of its own, and blaming one that
+// never happened is a false alarm at error level. A sidecar without a token
+// says for itself that it is running unauthenticated; an image that predates
+// the token says nothing, as it checks nothing.
+//
+// Reported rather than fatal: an agent that could not be given a token still
+// records and replays, and refusing to run would be the worse outcome. It is
+// logged at error level so that it reaches the operator and fails keploy's own
+// CI, which treats any ERROR in a run as fatal.
+func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI string) {
+	launch, launched := token.Launched(agentURI)
+	if !launched {
+		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
+			zap.String("agent", agentURI))
+		return
+	}
+	key := fmt.Sprintf("%s#%d", agentURI, launch)
+	if _, done := controlPlaneProbed.Load(key); done {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
+	if err != nil {
+		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		return
+	}
+	// Wrong by construction, and a bare client: a request carrying the real
+	// token would be accepted by a guarded agent and prove nothing.
+	req.Header.Set("Authorization", "Bearer not-the-session-token")
+
+	resp, err := (&http.Client{Timeout: controlPlaneProbeTimeout}).Do(req)
+	if err != nil {
+		// The agent answered its health check a moment ago, so a failure here
+		// is not evidence either way. Saying nothing beats crying wolf with an
+		// error that fails CI — and this attempt is deliberately NOT recorded,
+		// so a later readiness gate for the same agent tries again.
+		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Only an answer counts. Marking earlier would let an attempt that proved
+	// nothing retire the check for this agent.
+	controlPlaneProbed.Store(key, struct{}{})
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		return
+	}
+
+	utils.LogError(logger, nil, "the agent is NOT enforcing control-plane authentication: it accepted a request carrying an invalid token",
+		zap.Int("probe_status", resp.StatusCode),
+		zap.String("impact", "/agent/pcap/keylog streams live TLS session keys and /agent/stop and /agent/storemocks alter this session; any local user or neighbouring container that can reach the agent port can use them"),
+		zap.String("next_step", "the token this keploy process handed to the agent did not reach it — check that the agent was started with --token-file (native), or that "+token.Env+" reached the docker or docker compose client's environment (docker; a doas in front of docker compose resets that environment unless its doas.conf rule has keepenv or setenv { "+token.Env+" }), and report this if you did not change how keploy starts its agent"))
+}
+
+// controlPlaneProbeTimeout bounds the check above. Generous: the agent answered
+// a health check with a 500ms budget immediately before it runs.
+const controlPlaneProbeTimeout = 5 * time.Second

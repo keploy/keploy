@@ -62,6 +62,19 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 	if strings.Contains(alias, unrestricted) {
 		t.Errorf("linux getAlias also published the agent control port on all host interfaces (%q).\ngot: %s", unrestricted, alias)
 	}
+
+	// The proxy port is scoped the same way. It is the interception point for
+	// the application's outgoing dependency calls, and the application reaches
+	// it through the agent's network namespace (the app container is started
+	// with --network=container:<keploy container>, see pkg/client/app), not
+	// through this publish.
+	wantProxy := fmt.Sprintf("-p 127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort)
+	if !strings.Contains(alias, wantProxy) {
+		t.Errorf("linux getAlias must publish the proxy port to the host's loopback only (want %q).\ngot: %s", wantProxy, alias)
+	}
+	if unrestrictedProxy := fmt.Sprintf("-p %d:%d", opts.ProxyPort, opts.ProxyPort); strings.Contains(alias, unrestrictedProxy) {
+		t.Errorf("linux getAlias also published the proxy port on all host interfaces (%q).\ngot: %s", unrestrictedProxy, alias)
+	}
 }
 
 // TestGetAlias_EveryPlatformBranchPublishesAgentPortViaHelper covers the four
@@ -157,13 +170,17 @@ func forEachAliasReturningBranch(t *testing.T, fn func(*testing.T, token.Positio
 	}
 }
 
-// stmtCallsFunc reports whether stmt contains a call to the named function.
-// Unlike the literal checks below this deliberately descends into nested
-// blocks: a call is unambiguous, and a nested arm is walked as its own list
-// anyway.
+// stmtCallsFunc reports whether stmt contains a call to the named function,
+// outside any block nested in it. A nested arm (the colima `if` inside the
+// windows and darwin cases) is walked as its own list, so descending into it
+// let that arm's call answer for the default arm around it: deleting the call
+// from either Docker Desktop default arm went unnoticed.
 func stmtCallsFunc(stmt ast.Stmt, name string) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BlockStmt); ok && ast.Node(b) != ast.Node(stmt) {
+			return false
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true

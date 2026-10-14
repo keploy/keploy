@@ -39,13 +39,20 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string) CmdError {
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
 
 	// Set the custom cancel function for the command
 	cmd.Cancel = cancel(cmd)
+
+	// extraEnv is added to what the command inherits from keploy, for this
+	// command alone — a secret that one child needs is not exported to every
+	// other process keploy starts.
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 
 	// cmd.WaitDelay is ignored on Windows, but we set it for consistency with the signature.
 	cmd.WaitDelay = waitDelay

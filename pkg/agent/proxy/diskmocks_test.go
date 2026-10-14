@@ -374,3 +374,41 @@ func TestClose_FailsSubsequentOps(t *testing.T) {
 		t.Fatalf("LoadWindow after Close must error, not silently mis-serve")
 	}
 }
+
+// TestSpilledResponsesCountsTheResponsesKeptApart: the agent's mock residency
+// log reports SpilledResponses, and CI's strict mock-window replay of
+// http-pokeapi requires it to be non-zero, so that phase fails, rather than
+// passing without serving one, if the store stops keeping responses apart.
+func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).UTC()
+	big := bigMockAt("big", base, responseSpillMinBytes)
+	big.TestModeInfo.Lifetime = models.LifetimePerTest
+	small := bigMockAt("small", base.Add(time.Second), responseSpillMinBytes-1)
+	small.TestModeInfo.Lifetime = models.LifetimePerTest
+	mongo := perTestMockAt("mongo", 1_700_000_002)
+	mongo.Kind = models.Mongo
+	mongo.Spec.MongoResponses = []models.MongoResponse{{}}
+	noResp := perTestMockAt("no-response", 1_700_000_003)
+
+	d := newDiskWith(t, big, small, mongo, noResp)
+	defer d.Close()
+	if got := d.Len(); got != 4 {
+		t.Fatalf("precondition: %d mocks on disk, want 4", got)
+	}
+	if got := d.SpilledResponses(); got != 2 {
+		t.Fatalf("SpilledResponses = %d, want 2 (the %d-byte HTTP body and the Mongo responses)", got, responseSpillMinBytes)
+	}
+	win, err := d.LoadWindow(base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("LoadWindow: %v", err)
+	}
+	if len(win) != 4 {
+		t.Fatalf("LoadWindow returned %d mocks, want all 4", len(win))
+	}
+	for _, m := range win {
+		elided := m.Spec.HTTPResp == nil && len(m.Spec.MongoResponses) == 0 && m.HasSpilledResponse()
+		if want := m.Name == "big" || m.Name == "mongo"; elided != want {
+			t.Fatalf("mock %s: response kept apart = %v, want %v", m.Name, elided, want)
+		}
+	}
+}

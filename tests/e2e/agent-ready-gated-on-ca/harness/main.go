@@ -45,8 +45,13 @@ func main() {
 	}()
 
 	r := chi.NewRouter()
-	// Mount the real DefaultRoutes so we exercise the production
-	// routing (and the real MakeAgentReady handler) end-to-end.
+	// Mount the real DefaultRoutes so we exercise the production routing (and
+	// the real MakeAgentReady handler) end-to-end.
+	//
+	// Without routes.Authenticate in front, unlike the production agent: this
+	// harness is about CA readiness gating, and a token here would only mean
+	// teaching the probe to authenticate. Every request below is therefore
+	// unauthenticated, which the middleware would refuse.
 	routes.ActiveHooks.New(r, nil, logger)
 
 	logger.Info("harness: listening", zap.String("addr", *addr))

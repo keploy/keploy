@@ -66,6 +66,14 @@ testdata
 # directory at a time, when a fixture actually needs it.
 !pkg/service/report/testdata/
 !pkg/service/report/testdata/**
+# Real coverage reports written by go test, node --test, pytest-cov and JaCoCo:
+# the parser is tested against what the runners actually emit.
+!pkg/platform/coverage/report/testdata/
+!pkg/platform/coverage/report/testdata/**
+# Mocks as the recorder writes them (a production-shape recording's): the
+# in-place YAML encoder must write them byte for byte as EncodeMock did.
+!pkg/platform/yaml/mockdb/testdata/
+!pkg/platform/yaml/mockdb/testdata/**
 
 #Ignore the c and header files
 *.c

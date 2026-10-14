@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/xml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"strings"
 	"testing"
 
@@ -318,5 +319,53 @@ func TestBuildJUnitSuite_NonFailureBodyIsEmptyWhenNothingIsMissing(t *testing.T)
 	if !strings.Contains(string(data), `<skipped message="obsolete test case">`) &&
 		!strings.Contains(string(data), `<skipped message="obsolete test case"></skipped>`) {
 		t.Errorf("the obsolete skip element changed:\n%s", data)
+	}
+}
+
+// Under the proven switch a test failed by its calls says which: each call
+// that got no recorded answer (DNS left out) and each recorded call it did not
+// make, by mock, with the sibling that made it when one did. With the switch
+// off the body is as before.
+func TestBuildFailureNamesTheProvenEvidence(t *testing.T) {
+	r := models.TestResult{
+		Kind:   models.HTTP,
+		Status: models.TestStatusFailed,
+		Result: models.Result{StatusCode: models.IntResult{Normal: true}},
+		FailureInfo: models.FailureInfo{
+			UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charges", Destination: "pay:443"}, {Protocol: "DNS", ActualSummary: "A x.internal"}},
+			UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-7", Kind: "Http", ConsumedBy: "test-2"}},
+		},
+	}
+	t.Setenv(provenswitch.Env, "")
+	if body := buildFailure(r).Text; strings.Contains(body, "no recorded answer") || strings.Contains(body, "mock-7") {
+		t.Fatalf("switch off: the body changed:\n%s", body)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	body := buildFailure(r).Text
+	for _, want := range []string{"call with no recorded answer: HTTP POST /charges (to pay:443)", "recorded call not made: mock mock-7 (Http); test-2 consumed it"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body does not say %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "x.internal") {
+		t.Fatalf("a DNS miss is named, though it fails nothing:\n%s", body)
+	}
+}
+
+// Under the switch a gRPC failure's assessment reasons are in the JUnit body:
+// a protoscope reorder says so, with the proto-files way out for a map. With
+// the switch off the body is as before.
+func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
+	const reason = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
+	res := models.TestResult{Kind: models.GRPC_EXPORT, Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{Assessment: &models.FailureAssessment{Reasons: []string{reason}}}}
+	for _, on := range []bool{false, true} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "")
+		}
+		if got := strings.Contains(buildFailure(res).Text, "--proto-file"); got != on {
+			t.Fatalf("switch %v: the body names the proto-files way out %v, want %v", on, got, on)
+		}
 	}
 }

@@ -118,6 +118,17 @@ type strictGate struct {
 	rejected    int
 	closestMock string
 	fieldDiffs  []models.MockFieldDiff
+
+	// verdicts keeps StrictReject's answer per candidate. The verdict depends
+	// only on the candidate and the live body, both fixed for the command, so a
+	// candidate the scan meets again (another of its packets, or the full scan
+	// after the in-window pass) is not diffed or logged a second time.
+	verdicts map[*models.Mock]gateVerdict
+}
+
+type gateVerdict struct {
+	allowed bool
+	drift   map[string][]string
 }
 
 func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
@@ -137,8 +148,15 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	if !g.engine.StrictEnabled() || !g.liveBodyOK {
 		return true
 	}
-	allowed, drift := g.engine.StrictReject(mock, g.liveBody, g.userBodyNoise)
-	if allowed {
+	v, seen := g.verdicts[mock]
+	if !seen {
+		v.allowed, v.drift = g.engine.StrictReject(mock, g.liveBody, g.userBodyNoise)
+		if g.verdicts == nil {
+			g.verdicts = make(map[*models.Mock]gateVerdict)
+		}
+		g.verdicts[mock] = v
+	}
+	if v.allowed {
 		return true
 	}
 	g.rejected++
@@ -151,15 +169,23 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(g.liveBody), known, "body.", 96)
 		}
 	}
-	paths := make([]string, 0, len(drift))
-	for p := range drift {
-		paths = append(paths, p)
+	if !seen {
+		paths := make([]string, 0, len(v.drift))
+		for p := range v.drift {
+			paths = append(paths, p)
+		}
+		g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
+			zap.String("mock", mock.Name),
+			zap.String("request_type", g.requestType),
+			zap.Strings("drifted_fields", paths))
 	}
-	g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
-		zap.String("mock", mock.Name),
-		zap.String("request_type", g.requestType),
-		zap.Strings("drifted_fields", paths))
 	return false
+}
+
+// resetDiagnostics clears the rejection diagnostics for a scan that starts over
+// on the same command, keeping the verdicts: they still hold.
+func (g *strictGate) resetDiagnostics() {
+	g.rejected, g.closestMock, g.fieldDiffs = 0, "", nil
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every

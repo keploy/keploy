@@ -31,6 +31,38 @@ type mockMemDb struct {
 	updateUnFilteredReturn  bool
 	deletedFiltered         *models.Mock
 	deleteFilteredReturn    bool
+	cursors                 map[string]int // backs MockCursorIndex/AdvanceMockCursor for cursor tests
+}
+
+// MockCursorIndex / AdvanceMockCursor give the double the optional
+// stateful-cursor capability (peek + commit) so cursorPick can advance through
+// identical-request recordings in tests.
+func (m *mockMemDb) MockCursorIndex(key string, n int) int {
+	if n <= 1 {
+		return 0
+	}
+	cur := m.cursors[key]
+	if cur > n-1 {
+		cur = n - 1
+	}
+	return cur
+}
+
+func (m *mockMemDb) AdvanceMockCursor(key string, servedIdx, n int) {
+	if n <= 1 {
+		return
+	}
+	if m.cursors == nil {
+		m.cursors = make(map[string]int)
+	}
+	next := servedIdx + 1
+	if cur := m.cursors[key]; cur > next {
+		next = cur
+	}
+	if next > n {
+		next = n
+	}
+	m.cursors[key] = next
 }
 
 func (m *mockMemDb) GetUnFilteredMocks() ([]*models.Mock, error) { return m.mocks, m.err }

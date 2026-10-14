@@ -52,7 +52,9 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 	}
 	var fallback *models.Mock
 	for _, m := range candidates {
-		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.Spec.HTTPResp == nil {
+		// A response the agent's disk store kept apart is loaded below, once
+		// the request gates have passed.
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || (m.Spec.HTTPResp == nil && !m.HasSpilledResponse()) {
 			continue
 		}
 		if m.Spec.HTTPReq.Method != models.Method(input.method) {
@@ -76,14 +78,27 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		if !mockQueryMatches(m.Spec.HTTPReq, input.url, queryKeys) {
 			continue
 		}
+		loaded, err := withResponse(m)
+		if err != nil {
+			// The caller falls back to a synthetic 200 when no recorded mock
+			// serves, so say once per mock name why this one did not.
+			if _, warned := h.ptLoadWarned.LoadOrStore(m.Name, struct{}{}); !warned {
+				h.Logger.Warn("pass-through: the recorded response of this mock could not be loaded from the agent's on-disk mock store, so it is skipped; if no other recorded response serves the call, the application gets the default empty 200. Re-run the test set, and if this repeats, report it with this log",
+					zap.String("mock", m.Name), zap.Error(err))
+			}
+			continue
+		}
+		if loaded.Spec.HTTPResp == nil {
+			continue
+		}
 		// Prefer a 2xx response (a warmup error may also have been recorded
 		// before the first success under recordOne's first-2xx policy).
-		if isSuccessStatus(m.Spec.HTTPResp.StatusCode) {
-			if out, err := h.buildMockResponseBytes(m); err == nil {
+		if isSuccessStatus(loaded.Spec.HTTPResp.StatusCode) {
+			if out, err := h.buildMockResponseBytes(loaded); err == nil {
 				return out
 			}
 		} else if fallback == nil {
-			fallback = m
+			fallback = loaded
 		}
 	}
 	if fallback != nil {

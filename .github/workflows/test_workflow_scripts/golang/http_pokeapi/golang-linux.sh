@@ -108,6 +108,33 @@ if json_pass_supported; then
     record_iterations "--storage-format json"
 fi
 
+# The strict mock-window replay further down runs only for a replay binary
+# from a build artifact (download-binary's build/keploy or
+# build-no-race/keploy): a published release on the cross-version matrix may
+# predate what it checks. The WSL lanes copy their binaries elsewhere and skip
+# it.
+strict_phase=false
+case "${REPLAY_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy) strict_phase=true ;;
+esac
+
+# Keep the recordings as recorded for that replay. They have no mappings
+# file: this build's keploy record writes the test-mock mappings only with
+# --sync, and this lane records without it. The default replay below then
+# creates one from the mocks each test consumed under the default tiers, where
+# get-api-locations-2, which repeats get-api-locations-1's call, consumes that
+# test's session mock. That mapping gives both tests one mock, which a strict
+# replay lets only one of them consume.
+if [ "$strict_phase" = true ]; then
+    rm -rf ./strict-run
+    mkdir ./strict-run
+    cp -a ./keploy ./strict-run/keploy
+    # And a copy for the in-order phase further down (KEPLOY_PROVEN=1).
+    rm -rf ./proven-order-run
+    mkdir ./proven-order-run
+    cp -a ./keploy ./proven-order-run/keploy
+fi
+
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
 
@@ -148,6 +175,130 @@ done
 if [ "$all_passed" != true ]; then
     cat "test_logs.txt"
     exit 1
+fi
+
+# The same recordings under strict mock windows. KEPLOY_STRICT_MOCK_WINDOW=1
+# gates off DeriveLifetime's lax promotion, so the recorder's HTTP_CLIENT tag
+# makes these HTTP mocks per-test, and the agent parks per-test mocks on disk
+# with every response of 8 KiB or more (here the 14.8-16 KB body of the one
+# location area each set fetches) stored apart from its mock, to be loaded
+# when it is served. A replay that served such a mock without loading its
+# response gave the application no reply, and the test that made the call
+# failed.
+if [ "$strict_phase" = true ]; then
+    KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./strict-run --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_strict.txt
+    if grep "ERROR" "test_logs_strict.txt"; then
+        echo "::error::Error found in the strict mock-window replay"
+        cat "test_logs_strict.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "test_logs_strict.txt"; then
+        echo "::error::Race condition detected in the strict mock-window replay"
+        cat "test_logs_strict.txt"
+        exit 1
+    fi
+    shopt -s nullglob
+    strict_reports=( ./strict-run/keploy/reports/test-run-0/test-set-*-report.yaml )
+    shopt -u nullglob
+    if [ ${#strict_reports[@]} -eq 0 ]; then
+        echo "::error::the strict mock-window replay wrote no yaml test-set report under ./strict-run/keploy/reports/test-run-0/"
+        cat "test_logs_strict.txt"
+        exit 1
+    fi
+    # The phase asserts nothing unless the agent really kept a response
+    # apart from its mock in every test set. That needs the per-test tier
+    # and a body of 8 KiB or more, so a change to the tier rule, to how the
+    # lifetime reaches the agent, or to what the sample records shows up
+    # here first. The agent logs its mock residency once per test set
+    # while its disk store is engaged, so a count of residency lines, or of
+    # lines with spilledResponses above 0, other than the number of test-set
+    # reports fails the phase.
+    residency_lines=$(grep -c 'per-test mocks parked on disk' test_logs_strict.txt || true)
+    spilled_sets=$(grep -Ec 'per-test mocks parked on disk.*"spilledResponses": [1-9]' test_logs_strict.txt || true)
+    if [ "${spilled_sets:-0}" -ne ${#strict_reports[@]} ] || [ "${residency_lines:-0}" -ne ${#strict_reports[@]} ]; then
+        echo "::error::with KEPLOY_STRICT_MOCK_WINDOW=1 the agent kept a response apart from its mock in ${spilled_sets:-0} of ${#strict_reports[@]} test sets (${residency_lines:-0} mock residency lines), so this replay did not serve such a response in every set. The recorded HTTP mocks should be per-test under strict windows (DeriveLifetime's lax promotion is gated off) and each set should record a body of 8 KiB or more: check that rule, that the CLI still sends each mock's lifetime to the agent, and the sizes of the recorded bodies."
+        grep -n "mock residency\|on-disk mock" test_logs_strict.txt || true
+        exit 1
+    fi
+    for report_file in "${strict_reports[@]}"; do
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        echo "strict mock-window report $(basename "$report_file"): $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            echo "::error::$(basename "$report_file") is $test_status under strict mock windows. A likely cause is a mock whose response the agent kept on disk being served without it; see the replay log below (test_logs_strict.txt)."
+            cat "test_logs_strict.txt"
+            exit 1
+        fi
+    done
+else
+    echo "REPLAY_BIN ($REPLAY_BIN) is not a build or build-no-race artifact; skipping the strict mock-window replay"
+fi
+
+# Response arrays in order under the proven switch (KEPLOY_PROVEN=1, the
+# proven model's staging gate). /api/locations answers {"location":[...]}; the
+# recorded order of that array is reversed in a copy of the recordings, so the
+# app's live answer has the recorded elements in another order. With the switch
+# off, test.ignoreOrdering (on by default) compares arrays as multisets and the
+# set passes: that replay is the control. With it on, arrays are compared in
+# order, so exactly the edited tests fail and every other test still passes.
+if [ "$strict_phase" = true ]; then
+    reordered_tests=()
+    shopt -s nullglob
+    for tc in ./proven-order-run/keploy/test-set-*/tests/*.yaml; do
+        if [ "$(yq '.spec.req.url' "$tc")" != "http://localhost:8080/api/locations" ]; then
+            continue
+        fi
+        body=$(yq '.spec.resp.body' "$tc")
+        if [ "$(echo "$body" | jq '.location | length')" -lt 2 ]; then
+            continue
+        fi
+        REVERSED=$(echo "$body" | jq -c '.location |= reverse') yq -i '.spec.resp.body = strenv(REVERSED)' "$tc"
+        # Test names repeat across test sets: key each by its set.
+        reordered_tests+=("$(basename "$(dirname "$(dirname "$tc")")")/$(yq '.name' "$tc")")
+    done
+    shopt -u nullglob
+    if [ ${#reordered_tests[@]} -eq 0 ]; then
+        echo "::error::no recorded /api/locations test with a location array of two or more elements to reorder; the in-order phase would assert nothing"
+        exit 1
+    fi
+    echo "reversed the recorded location array of: ${reordered_tests[*]}"
+
+    for phase in off on; do
+        rm -rf ./proven-order-run/keploy/reports
+        if [ "$phase" = on ]; then
+            KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./proven-order-run --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs_order_${phase}.txt"
+        else
+            "$REPLAY_BIN" test -c "./http-pokeapi" --path ./proven-order-run --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs_order_${phase}.txt"
+        fi
+        if grep "WARNING: DATA RACE" "test_logs_order_${phase}.txt"; then
+            echo "::error::Race condition detected in the in-order replay (switch ${phase})"
+            exit 1
+        fi
+        shopt -s nullglob
+        order_reports=( ./proven-order-run/keploy/reports/test-run-0/test-set-*-report.yaml )
+        shopt -u nullglob
+        if [ ${#order_reports[@]} -eq 0 ]; then
+            echo "::error::the in-order replay (switch ${phase}) wrote no yaml test-set report"
+            cat "test_logs_order_${phase}.txt"
+            exit 1
+        fi
+        for report_file in "${order_reports[@]}"; do
+            set_id=$(basename "$report_file" -report.yaml)
+            while IFS=$'\t' read -r tcid status; do
+                want=PASSED
+                if [ "$phase" = on ]; then
+                    for r in "${reordered_tests[@]}"; do
+                        [ "$r" = "$set_id/$tcid" ] && want=FAILED
+                    done
+                fi
+                if [ "$status" != "$want" ]; then
+                    echo "::error::$(basename "$report_file"): $tcid is $status with KEPLOY_PROVEN ${phase}; want $want. Reversed: ${reordered_tests[*]}. With the switch off test.ignoreOrdering forgives the reorder; with it on response arrays are compared in order."
+                    cat "test_logs_order_${phase}.txt"
+                    exit 1
+                fi
+            done < <(yq -r '.tests[] | [.test_case_id, .status] | @tsv' "$report_file")
+        done
+        echo "✓ in-order phase, switch ${phase}: every test has the expected verdict"
+    done
 fi
 
 if json_pass_supported; then

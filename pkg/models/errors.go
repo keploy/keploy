@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type AppError struct {
@@ -47,6 +48,10 @@ const (
 	DiffKindTypeChanged   MockFieldDiffKind = "type_changed"    // same field, different JSON type
 	DiffKindMissingInLive MockFieldDiffKind = "missing_in_live" // recorded mock has it, live request doesn't
 	DiffKindMissingInMock MockFieldDiffKind = "missing_in_mock" // live request has it, recorded mock doesn't
+	// DiffKindVariable: a place that holds a test variable holds another value
+	// than the variable's this run (Expected: the variable's value; Actual: the
+	// live value).
+	DiffKindVariable MockFieldDiffKind = "variable"
 )
 
 // MockFieldDiff is one field-level difference between the live request and the
@@ -67,11 +72,16 @@ type MockFieldDiff struct {
 // right remediation (re-record vs add noise vs fix candidate selection).
 const (
 	MatchPhaseNoMocks    = "no_mocks"             // no mocks were available to compare for this protocol: the pool is empty, or none survived filtering
-	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys
+	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys (and, under the proven switch, the host)
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
 	MatchPhaseExhausted  = "no_match"             // full cascade ran and nothing matched
 	MatchPhaseProtoError = "protocol_error"       // matching aborted on a protocol/decode error
+	// MatchPhaseVariable: a recorded call fit this one except that a test
+	// variable it carries does not hold (proven switch): the call sent another
+	// value than the one the variable was bound to this run, used it before
+	// the call that binds it, or the mock declares a place keploy cannot follow.
+	MatchPhaseVariable = "variable_mismatch"
 )
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
@@ -178,13 +188,14 @@ func RenderOutOfScopeDestinationCauses(prefix string) string {
 // and the platform/UI APIs. Protocol parsers should build it via
 // pkg/agent/proxy/integrations/mismatch so vocabulary stays uniform.
 type MockMismatchReport struct {
-	Protocol      string // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
-	ActualSummary string // Brief description of the actual request
-	Destination   string // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
-	ClosestMock   string // Name of the closest mock (empty if none)
-	Diff          string // Human-readable diff (protocol-specific)
-	NextSteps     string // Actionable suggestion for the user
-	MatchPhase    string // how far the match cascade got (MatchPhase* constants)
+	At            time.Time // when the call missed
+	Protocol      string    // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
+	ActualSummary string    // Brief description of the actual request
+	Destination   string    // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
+	ClosestMock   string    // Name of the closest mock (empty if none)
+	Diff          string    // Human-readable diff (protocol-specific)
+	NextSteps     string    // Actionable suggestion for the user
+	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a
@@ -203,6 +214,11 @@ type MockMismatchReport struct {
 	// are redacted by the producing parser before they land here.
 	ClosestMockReq string // rendered request of the closest mock
 	ReceivedReq    string // rendered request the app actually sent
+	// Differs names the compared fields in which the call differs from the
+	// closest recording (host, header.<name>, body.<path>, ...), never a
+	// value: the reason keploy gives for a failed test names them (proven
+	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
+	Differs []string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
@@ -211,10 +227,32 @@ type MockMismatchReport struct {
 // infrastructure/decode failures when building UnmatchedCalls for reports.
 var ErrNoMockMatched = errors.New("no matching mock found")
 
+// ErrUnmatchedCallsUnread says a read of a test's unmatched calls is
+// incomplete: the agent could not vouch that every call no mock answered
+// reached the list it returned (its error drain stopped, the read was given up,
+// or a miss could not be queued), or the list could not be fetched at all. It
+// comes back WITH whatever was read, so a caller that only reports misses keeps
+// them, while one that judges must treat the test's evidence as unknown: under
+// the proven switch the replayer marks the test FailureInfo.UnmatchedCallsUnread
+// and its test set is not judged. Only an agent with the proven switch on
+// reports it.
+var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
+
+// UnreadCause is why a read of the unmatched calls was incomplete: the text
+// err carries after ErrUnmatchedCallsUnread's own ("…: <cause>"), or all of it
+// when it carries none.
+func UnreadCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimPrefix(err.Error(), ErrUnmatchedCallsUnread.Error()+": ")
+}
+
 type ParserError struct {
 	ParserErrorType ParserErrorType
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
+	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
 }
 
 type ParserErrorType string

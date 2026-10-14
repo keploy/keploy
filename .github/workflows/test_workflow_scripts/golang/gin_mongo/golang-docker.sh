@@ -2,11 +2,11 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker_pull_retry mongo
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+start_mongo --net keploy-network || exit 1
 
 config_file="./keploy.yml"
 # Keploy's config now carries only the settings that DIFFER from its

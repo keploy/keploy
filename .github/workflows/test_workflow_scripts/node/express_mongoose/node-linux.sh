@@ -5,13 +5,16 @@ set -Eeuo pipefail
 set -o errtrace
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
-  echo "== docker ps =="; docker ps || true
+  # -a: start_mongo runs MongoDB without --rm, so one that exited mid-run is
+  # still there, and only -a lists it, with its exit code.
+  echo "== docker ps -a =="; docker ps -a || true
   echo "== mongo logs (complete) =="; docker logs mongoDb || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
@@ -22,43 +25,32 @@ die() {
 }
 trap die ERR
 
-wait_for_mongo() {
-  section "Wait for Mongo readiness"
-  for i in {1..90}; do
-    if docker exec mongoDb mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1; then
-      echo "Mongo responds to ping."
-      endsec; return 0
-    fi
-    if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
-      echo "Mongo TCP port open."
-      endsec; return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Mongo did not become ready in time"
-  endsec
-  return 1
-}
-
-wait_for_http() {
-  local url="$1" tries="${2:-60}"
-  for _ in $(seq 1 "$tries"); do
-    if curl -fsS "$url" >/dev/null; then return 0; fi
-    sleep 1
-  done
-  return 1
+# The app is up once it answers /students with a success. curl asks again
+# while the connection is refused (the app is not listening yet) or the answer
+# is one curl counts as transient: HTTP 408, 429, 500, 502, 503 or 504, or a
+# timeout. It does so for up to 120 s. Any other answer ends the wait, and it
+# must be a success.
+#
+# When the app cannot reach MongoDB, /students answers 400 once mongoose's 10 s
+# buffering timeout runs out. That 400 is final: the app connects to MongoDB
+# once, as it starts, and mongoose does not try a failed first connection
+# again, so asking again cannot turn it into a success. The loop this replaces
+# asked 120 times, each answer held 10 s by that timeout, and gave up after
+# 21 minutes with what the first 400 already said. The error now quotes the
+# app's answer.
+wait_for_app() {
+  local url="$1" body
+  if ! body=$(curl -sS --fail-with-body --retry 120 --retry-delay 1 --retry-max-time 120 --retry-connrefused "$url"); then
+    echo "::error::the app did not answer $url with a success; its answer: ${body:-<none>}"
+    return 1
+  fi
 }
 
 send_request() {
   local kp_pid="$1"
 
-  if ! wait_for_http "http://localhost:8000/students" 120; then
-    echo "::error::App did not become healthy at /students"
-    # Let the pipeline fail by returning non-zero
-    return 1
-  else
-    echo "good! App started"
-  fi
+  wait_for_app "http://localhost:8000/students"
+  echo "good! App started"
 
   # Drive a bit of traffic (best-effort)
   curl -sS --request POST --url http://localhost:8000/students \
@@ -84,9 +76,9 @@ send_request() {
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 section "Start Mongo"
-docker_pull_retry mongo
-docker run --name mongoDb --rm -p 27017:27017 -d mongo
-wait_for_mongo
+# start_mongo prints MongoDB's state and logs when it fails; die would print
+# the logs again.
+start_mongo || { endsec; exit 1; }
 endsec
 
 section "Prepare app"

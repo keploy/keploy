@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"net"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -109,6 +112,52 @@ func TestHandleConnectTunnel_RecordMode(t *testing.T) {
 	// Verify DstReader is set (tunnel connection metadata preserved).
 	if result.DstReader == nil {
 		t.Error("DstReader is nil; tunnel proxy reader not preserved")
+	}
+}
+
+// A client must take any number of interim (1xx) responses before the final
+// one (RFC 9110 15.2), and keploy is the corporate proxy's client: the tunnel
+// is up at the 200 that follows them. net/http's ReadResponse returns the
+// first interim response as if it were the answer, which was taken as the
+// proxy turning the CONNECT down.
+func TestHandleConnectTunnel_RecordModeTakesInterimResponses(t *testing.T) {
+	appClient, appServer := net.Pipe()
+	defer appClient.Close()
+	defer appServer.Close()
+	proxyClient, proxyServer := net.Pipe()
+	defer proxyClient.Close()
+	defer proxyServer.Close()
+
+	var wg sync.WaitGroup
+	var appResponse bytes.Buffer
+	wg.Add(2)
+	go func() { // the corporate proxy
+		defer wg.Done()
+		reader := bufio.NewReader(proxyClient)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		_, _ = proxyClient.Write([]byte("HTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 200 Connection established\r\n\r\n"))
+	}()
+	go func() { // the app
+		defer wg.Done()
+		_, _ = appClient.Write([]byte("CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n"))
+		_, _ = http.ReadResponse(bufio.NewReader(io.TeeReader(appClient, &appResponse)), nil)
+	}()
+
+	result, err := handleConnectTunnel(testLogger(), appServer, proxyServer, false)
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("the tunnel was refused: %v; the app got %q", err, appResponse.String())
+	}
+	if result.TargetAddr != "api.example.com:443" {
+		t.Errorf("TargetAddr = %q, want %q", result.TargetAddr, "api.example.com:443")
+	}
+	if want := "HTTP/1.1 200 Connection Established\r\n\r\n"; appResponse.String() != want {
+		t.Errorf("app received %q, want %q", appResponse.String(), want)
 	}
 }
 

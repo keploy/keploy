@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,6 +19,12 @@ type MockEntry struct {
 	Timestamp        int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	// Key is, for a start-up (pool) mock recorded under the proven switch,
+	// the key of the claim active when it was recorded: replay serves it
+	// only while a test process of that key holds the run and no test is
+	// open. Empty means PoolKeyNone.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -70,6 +77,19 @@ type Mapping struct {
 	// omitempty so an existing mappings.yaml round-trips byte-identically until a
 	// startup mock is actually recorded; every older reader ignores the key.
 	Startup []MockEntry `json:"startup,omitempty" yaml:"startup,omitempty" bson:"startup,omitempty"`
+	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
+	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
+	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+}
+
+type BootSpec struct {
+	Dir     string      `json:"dir" yaml:"dir" bson:"dir"`
+	Key     string      `json:"key" yaml:"key" bson:"key"`
+	Program string      `json:"program" yaml:"program" bson:"program"`
+	Place   string      `json:"place" yaml:"place" bson:"place"`
+	N       int         `json:"n" yaml:"n" bson:"n"`
+	Ready   bool        `json:"ready" yaml:"ready" bson:"ready"`
+	Mocks   []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers
@@ -94,16 +114,42 @@ func (m *Mapping) StartupMockNames() []string {
 type MappedTestCase struct {
 	ID    string      `json:"id" yaml:"id" bson:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+	// Cases names the test cases this test produced when its record captured incoming requests.
+	Cases     []string            `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
+	CaseMocks map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty" bson:"case_mocks,omitempty"`
+	CaseSteps map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty" bson:"case_steps,omitempty"`
+	Dir       string              `json:"dir,omitempty" yaml:"dir,omitempty" bson:"dir,omitempty"`
+	Starts    int                 `json:"starts,omitempty" yaml:"starts,omitempty" bson:"starts,omitempty"`
+	// At is when the test began in its recording: the clock its replay runs
+	// on while it is open (design v14 §3.4). Written and read only under the
+	// proven switch; zero in recordings made before keploy kept it, and in
+	// those made without the switch.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
 }
 
 type persistedTestFormat struct {
-	ID          string      `json:"id" yaml:"id"`
-	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	ID          string              `json:"id" yaml:"id"`
+	MockEntries []MockEntry         `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+	Cases       []string            `json:"cases,omitempty" yaml:"cases,omitempty"`
+	CaseMocks   map[string][]string `json:"case_mocks,omitempty" yaml:"case_mocks,omitempty"`
+	CaseSteps   map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty"`
+	Dir         string              `json:"dir,omitempty" yaml:"dir,omitempty"`
+	Starts      int                 `json:"starts,omitempty" yaml:"starts,omitempty"`
+}
+
+// writtenTestFormat is how a test entry is written: the persisted format and
+// the test's recorded begin, last and omitted when zero, so an entry without
+// one is written as it was before keploy kept it. The begin stays out of
+// persistedTestFormat, which also picks the shape an entry is read in.
+type writtenTestFormat struct {
+	persistedTestFormat `yaml:",inline"`
+	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 }
 
 type structuredTestFormat struct {
 	ID    string      `json:"id" yaml:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks"`
+	Cases []string    `json:"cases,omitempty" yaml:"cases,omitempty"`
 }
 
 type stringSliceTestFormat struct {
@@ -112,11 +158,45 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return tc.persistedFormat(), nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(tc.persistedFormat())
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At})
+}
+
+// errRecordedBegin is a test entry whose at: is not a time.
+const errRecordedBegin = "a test's recorded begin (at) is not a time: %w"
+
+// recordedBeginYAML is a test entry's at: under the proven switch. One that is
+// not a time is an error, never a reason to read the entry in another shape and
+// lose its mocks. With the switch off the entry reads as it did before keploy
+// kept the begin: at: is not read.
+func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
+	if !provenswitch.On() || !nodeHasField(node, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `yaml:"at"`
+	}
+	if err := node.Decode(&at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
+}
+
+// recordedBeginJSON is recordedBeginYAML for a JSON entry.
+func recordedBeginJSON(data []byte) (time.Time, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(data, &at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -138,33 +218,55 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 //	      - name: mock-1
 //	        kind: Redis
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
+	at, err := recordedBeginYAML(node)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalYAMLEntry(node); err != nil {
+		return err
+	}
+	tc.At = at
+	return nil
+}
+
+// unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
+// format's other fields, in whichever shape the entry has.
+func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
-	if err := node.Decode(&persisted); err == nil && nodeHasField(node, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	perr := node.Decode(&persisted)
+	if perr == nil && (nodeHasField(node, "mock_entries") || ((nodeHasField(node, "dir") || nodeHasField(node, "starts") || nodeHasField(node, "cases")) && !nodeHasField(node, "mocks"))) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
-		ID    string `yaml:"id"`
-		Mocks string `yaml:"mocks"`
+		ID    string   `yaml:"id"`
+		Mocks string   `yaml:"mocks"`
+		Cases []string `yaml:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := node.Decode(&structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	// Accept a string slice too so intermediate/custom fixtures remain readable.
 	var stringSlice stringSliceTestFormat
 	if err := node.Decode(&stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -174,31 +276,52 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
+	at, err := recordedBeginJSON(data)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalJSONEntry(data); err != nil {
+		return err
+	}
+	tc.At = at
+	return nil
+}
+
+// unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
+func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
 	var persisted persistedTestFormat
-	if err := json.Unmarshal(data, &persisted); err == nil && jsonContainsField(data, "mock_entries") {
-		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+	perr := json.Unmarshal(data, &persisted)
+	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
+		tc.extras(persisted)
 		return nil
+	}
+	if perr != nil {
+		persisted = persistedTestFormat{}
 	}
 
 	type legacyTestFormat struct {
-		ID    string `json:"id"`
-		Mocks string `json:"mocks"`
+		ID    string   `json:"id"`
+		Mocks string   `json:"mocks"`
+		Cases []string `json:"cases"`
 	}
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
-		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks, legacy.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := json.Unmarshal(data, &structured); err == nil {
-		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "", structured.Cases)
+		tc.extras(persisted)
 		return nil
 	}
 
 	var stringSlice stringSliceTestFormat
 	if err := json.Unmarshal(data, &stringSlice); err == nil {
-		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "", nil)
 		return nil
 	}
 
@@ -218,11 +341,22 @@ func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 	return persistedTestFormat{
 		ID:          tc.ID,
 		MockEntries: append([]MockEntry(nil), tc.Mocks...),
+		Cases:       append([]string(nil), tc.Cases...),
+		CaseMocks:   tc.CaseMocks,
+		CaseSteps:   tc.CaseSteps,
+		Dir:         tc.Dir,
+		Starts:      tc.Starts,
 	}
 }
 
-func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
+func (tc *MappedTestCase) extras(p persistedTestFormat) {
+	tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = p.CaseMocks, p.CaseSteps, p.Dir, p.Starts
+}
+
+func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string, cases []string) {
 	tc.ID = id
+	tc.Cases = append([]string(nil), cases...)
+	tc.CaseMocks, tc.CaseSteps, tc.Dir, tc.Starts = nil, nil, "", 0
 	tc.Mocks = nil
 	if len(mockEntries) > 0 {
 		tc.Mocks = append([]MockEntry(nil), mockEntries...)
@@ -347,4 +481,10 @@ func MergeStartupMockNames(perTest []MockEntry, startup []string) []string {
 		add(n)
 	}
 	return out
+}
+
+type SuiteSpan struct {
+	Dir   string    `json:"dir" yaml:"dir" bson:"dir"`
+	Start time.Time `json:"start" yaml:"start" bson:"start"`
+	End   time.Time `json:"end" yaml:"end" bson:"end"`
 }

@@ -2,9 +2,11 @@ package replayer
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -32,6 +34,30 @@ func (f *fakeMockDb) GetConnectionMocks(string) ([]*models.Mock, error) {
 	return nil, nil
 }
 func (f *fakeMockDb) CurrentTestWindow() (time.Time, time.Time) { return f.winStart, f.winEnd }
+
+// GetSessionMocksInWindow implements integrations.SessionWindowReader the way
+// the manager defines it: GetSessionMocks narrowed to [start, end] and undated.
+func (f *fakeMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.Mock, error) {
+	var out []*models.Mock
+	for _, m := range f.session {
+		at := m.Spec.ReqTimestampMock
+		if at.IsZero() || (!at.Before(start) && !at.After(end)) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// RangeSessionMocksWithKey implements integrations.SessionKeyReader the way the
+// manager defines it: GetSessionMocks narrowed to the mocks ix files under key.
+func (f *fakeMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	for _, m := range f.session {
+		if slices.Contains(ix.Keys(m), key) && !fn(m) {
+			break
+		}
+	}
+	return nil
+}
 
 // --- remaining MockMemDb surface: inert stubs ---
 func (f *fakeMockDb) GetFilteredMocks() ([]*models.Mock, error)         { return nil, nil }

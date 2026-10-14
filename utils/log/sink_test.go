@@ -20,8 +20,7 @@ import (
 // `keploy report --format junit --json --disable-ansi` printed INFO lines
 // above the XML because --disable-ansi ran after the redirect.
 func TestRedirectToStderrSurvivesEveryLoggerRebuild(t *testing.T) {
-	orig := PrimarySink()
-	t.Cleanup(func() { setPrimarySink(orig) })
+	t.Cleanup(TestOnlyResetSink)
 
 	setPrimarySink(os.Stdout)
 	LogCfg = zap.Config{}
@@ -64,9 +63,7 @@ func TestRedirectToStderrSurvivesEveryLoggerRebuild(t *testing.T) {
 // from LogCfg.Level, and the zero zap.AtomicLevel carries a nil *atomic.Int32
 // that panics on the logger's first write — at the caller, not here.
 func TestLoggerRebuildsAreSafeWithAnUninitialisedConfig(t *testing.T) {
-	orig := PrimarySink()
-	origCfg := LogCfg
-	t.Cleanup(func() { setPrimarySink(orig); LogCfg = origCfg })
+	t.Cleanup(TestOnlyResetSink)
 
 	rebuilds := map[string]func() (*zap.Logger, error){
 		"RedirectToStderr":    RedirectToStderr,

@@ -7,6 +7,17 @@ name: Schema Noise Detection On Linux
 #   --schema-noise-detection -> detect the drifting field (body.created_at) and
 #                               persist it under noise.req on the ES mock.
 #   test.schemaNoiseStrict    -> a drift on a NON-noise field is rejected.
+#
+# Phases D and E of the same script also guard --remove-unused-mocks: a replay
+# where a request got no answer (client timeout), or one stopped mid-set (the
+# keploy agent stopped), must not prune any recorded mock or create
+# mappings.yaml, a clean replay must still prune an unused mock, and a full
+# replay after the stop must pass every test and map every one of them.
+#
+# Phase F guards both rewrites (--remove-unused-mocks and the noise write-back):
+# mock documents this keploy cannot decode (an enterprise-only kind, a
+# ConnectionFailure from a newer format) must be kept byte for byte, not
+# dropped, and the replay's results must not change.
 
 on:
   push:
@@ -18,6 +29,8 @@ on:
       - 'pkg/models/http.go'
       - 'pkg/models/mock.go'
       - 'pkg/platform/yaml/mockdb/**'
+      - 'pkg/platform/yaml/mockreader.go'
+      - 'pkg/models/connfailure.go'
       - 'pkg/service/replay/**'
       - 'cli/provider/cmd.go'
       - 'config/config.go'
@@ -30,6 +43,8 @@ on:
       - 'pkg/models/http.go'
       - 'pkg/models/mock.go'
       - 'pkg/platform/yaml/mockdb/**'
+      - 'pkg/platform/yaml/mockreader.go'
+      - 'pkg/models/connfailure.go'
       - 'pkg/service/replay/**'
       - 'cli/provider/cmd.go'
       - 'config/config.go'

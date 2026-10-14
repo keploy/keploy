@@ -6,9 +6,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # sends through an HTTP CONNECT proxy (corporate proxy pattern).
 #
 # Architecture during record:
-#   [curl] → [app:8080] --CONNECT→ [tinyproxy:3128] --TLS→ [httpbin.org]
+#   [curl] → [app:8080] --CONNECT→ [keploy proxy] --CONNECT→ [connect-proxy:3128]
+#          --TLS→ [local HTTPS upstream:8443]
 # Architecture during replay:
 #   [keploy replayer] → [app:8080] --CONNECT→ [keploy proxy] → mock response
+#
+# Nothing here leaves the runner. The upstream used to be https://httpbin.org,
+# so the lane's verdict was httpbin's health, not keploy's: when httpbin reset
+# or stalled the handshake, the lane went red on PRs that had nothing to do
+# with it, or went green having recorded nothing through the tunnel at all.
 
 set -Eeuo pipefail
 
@@ -17,10 +23,32 @@ echo "REPLAY_BIN=$REPLAY_BIN"
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
+# The upstream's name is under .test (RFC 6761), so it can never resolve
+# publicly, and it is deliberately not in /etc/hosts or DNS: only the CONNECT
+# proxy knows where it lives, the way a corporate proxy reaches hosts its
+# clients cannot resolve. The request can therefore only succeed through the
+# tunnel. It must not be localhost or an IP literal either: Go's
+# ProxyFromEnvironment never proxies those, and the tunnel would be skipped.
+UPSTREAM_HOST="upstream.connect-tunnel.test"
+UPSTREAM_PORT=8443
+TARGET_URL="https://${UPSTREAM_HOST}:${UPSTREAM_PORT}/get"
+UPSTREAM_CA_FILE=/tmp/connect-upstream-ca.crt
+UPSTREAM_CA_TRUST_PATH=/usr/local/share/ca-certificates/keploy-connect-tunnel-e2e.crt
+
 cleanup() {
-    if [ -n "${PROXY_PID:-}" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
-        kill "$PROXY_PID" 2>/dev/null || true
-        wait "$PROXY_PID" 2>/dev/null || true
+    local pid
+    for pid in "${PROXY_PID:-}" "${UPSTREAM_PID:-}"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    # Its key died with the upstream, but a trust anchor should not outlive
+    # the run that needed it. --fresh, because a plain update-ca-certificates
+    # drops the CA from the bundle yet leaves its /etc/ssl/certs links dangling.
+    if [ -n "${UPSTREAM_CA_INSTALLED:-}" ]; then
+        sudo rm -f "$UPSTREAM_CA_TRUST_PATH" || true
+        sudo update-ca-certificates --fresh >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
@@ -31,9 +59,155 @@ if [ -f "./keploy.yml" ]; then
 fi
 rm -rf keploy/
 
+# ── Start a local HTTPS upstream ──
+# Serves https://$UPSTREAM_HOST:$UPSTREAM_PORT/get with a certificate issued by
+# a CA it mints at startup. Only the CA certificate is written out, for this
+# lane to trust; the CA's private key never leaves the process.
+cat > /tmp/connect-upstream.go <<'EOF'
+package main
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"time"
+)
+
+// connect-upstream <listen-addr> <server-name> <ca-cert-out>
+func main() {
+	if len(os.Args) != 4 {
+		log.Fatal("usage: connect-upstream <listen-addr> <server-name> <ca-cert-out>")
+	}
+	listenAddr, serverName, caOut := os.Args[1], os.Args[2], os.Args[3]
+	notBefore, notAfter := time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour)
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	check(err)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          serial(),
+		Subject:               pkix.Name{CommonName: "keploy connect-tunnel e2e CA"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		MaxPathLenZero:        true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		// Even while the runner trusts it, this CA can vouch for no name
+		// but the upstream's.
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         []string{serverName},
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	check(err)
+	caCert, err := x509.ParseCertificate(caDER)
+	check(err)
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	check(err)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: serial(),
+		Subject:      pkix.Name{CommonName: serverName},
+		DNSNames:     []string{serverName},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	check(err)
+
+	mux := http.NewServeMux()
+	// Shaped like httpbin's /get: the sample reports the "url" it gets back,
+	// which makes this response's arrival visible in the recorded test case.
+	mux.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("upstream served %s %s for Host %s", r.Method, r.URL.Path, r.Host)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": "https://" + r.Host + r.URL.Path})
+	})
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}},
+		},
+	}
+
+	ln, err := net.Listen("tcp", listenAddr)
+	check(err)
+	// Written only once the socket is bound, and renamed into place, so the
+	// file appearing is the readiness signal: the lane never has to probe the
+	// TLS port with a connection that is not a TLS handshake.
+	check(os.WriteFile(caOut+".tmp", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o644))
+	check(os.Rename(caOut+".tmp", caOut))
+	log.Printf("HTTPS upstream for %s listening on %s", serverName, listenAddr)
+	log.Fatal(srv.ServeTLS(ln, "", ""))
+}
+
+func serial() *big.Int {
+	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	check(err)
+	return n
+}
+
+func check(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+EOF
+
+go build -o /tmp/connect-upstream /tmp/connect-upstream.go
+rm -f "$UPSTREAM_CA_FILE"
+/tmp/connect-upstream "127.0.0.1:${UPSTREAM_PORT}" "$UPSTREAM_HOST" "$UPSTREAM_CA_FILE" &
+UPSTREAM_PID=$!
+echo "HTTPS upstream started (PID: $UPSTREAM_PID)"
+
+for attempt in {1..20}; do
+    if [ -s "$UPSTREAM_CA_FILE" ]; then
+        echo "HTTPS upstream is ready on :$UPSTREAM_PORT"
+        break
+    fi
+    if ! kill -0 "$UPSTREAM_PID" 2>/dev/null; then
+        echo "::error::HTTPS upstream exited before it became ready"
+        exit 1
+    fi
+    sleep 1
+done
+if [ ! -s "$UPSTREAM_CA_FILE" ]; then
+    echo "::error::HTTPS upstream failed to start on port $UPSTREAM_PORT"
+    exit 1
+fi
+
+# Trust the upstream's CA in the OS trust store, which is where every verifier
+# of the upstream's certificate reads its roots: curl below, the app itself
+# (Go's crypto/x509 system roots) whenever it reaches the upstream without
+# keploy in between, and keploy's agent, which verifies the upstream against
+# the system roots because keploy.yml below turns record.upstreamTls.verify on.
+# No -k and no InsecureSkipVerify anywhere: the chain has to be genuinely valid.
+sudo install -m 0644 "$UPSTREAM_CA_FILE" "$UPSTREAM_CA_TRUST_PATH"
+UPSTREAM_CA_INSTALLED=1
+sudo update-ca-certificates >/dev/null
+
 # ── Start a local CONNECT proxy ──
 # Avoid apt/tinyproxy in CI. GitHub-hosted apt mirrors can stall, while Go is
 # already provisioned for this workflow.
+#
+# It reaches exactly one upstream: CONNECT to the authority in its first
+# argument is dialled at the address in its second, and every other target
+# gets 403. An app request aimed anywhere else therefore fails instead of
+# quietly depending on a public host, and the recording checks below fail the
+# lane. (keploy's own telemetry also honours HTTPS_PROXY and is refused here
+# too, which keploy tolerates.)
 cat > /tmp/connect-proxy.go <<'EOF'
 package main
 
@@ -44,11 +218,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
 
 func main() {
+	if len(os.Args) != 3 {
+		log.Fatal("usage: connect-proxy <connect-authority> <dial-address>")
+	}
+	allowed, dialAddr := os.Args[1], os.Args[2]
 	ln, err := net.Listen("tcp", "127.0.0.1:3128")
 	if err != nil {
 		log.Fatal(err)
@@ -60,11 +239,11 @@ func main() {
 			log.Println(err)
 			continue
 		}
-		go handle(conn)
+		go handle(conn, allowed, dialAddr)
 	}
 }
 
-func handle(client net.Conn) {
+func handle(client net.Conn, allowed, dialAddr string) {
 	defer client.Close()
 
 	reader := bufio.NewReader(client)
@@ -81,8 +260,13 @@ func handle(client net.Conn) {
 	if !strings.Contains(target, ":") {
 		target += ":443"
 	}
+	if target != allowed {
+		log.Printf("refusing CONNECT to %s: only %s is reachable through this proxy", target, allowed)
+		fmt.Fprint(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
+		return
+	}
 
-	upstream, err := net.DialTimeout("tcp", target, 10*time.Second)
+	upstream, err := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 	if err != nil {
 		fmt.Fprint(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
@@ -104,7 +288,7 @@ func handle(client net.Conn) {
 EOF
 
 go build -o /tmp/connect-proxy /tmp/connect-proxy.go
-/tmp/connect-proxy &
+/tmp/connect-proxy "${UPSTREAM_HOST}:${UPSTREAM_PORT}" "127.0.0.1:${UPSTREAM_PORT}" &
 PROXY_PID=$!
 echo "CONNECT proxy started (PID: $PROXY_PID)"
 
@@ -125,22 +309,41 @@ if ! (echo > /dev/tcp/127.0.0.1/3128) >/dev/null 2>&1; then
     exit 1
 fi
 
+# Prove the route and the certificate chain before keploy is involved: the same
+# request the app will make, through the proxy, verified against the system
+# trust store.
+if ! curl -fsS --max-time 10 --proxy http://127.0.0.1:3128 "$TARGET_URL"; then
+    echo "::error::$TARGET_URL is not reachable through the CONNECT proxy with a verified certificate chain"
+    exit 1
+fi
+echo ""
+
 # ── Build the app ──
 go_retry build -o connect-tunnel
 echo "Go binary built."
 
 # ── Generate keploy config with noise rules ──
 config_file="./keploy.yml"
-  # httpbin.org returns dynamic fields — mark them as noise
+  # The app's Date header changes on every response — mark it as noise.
   # Keploy's config now carries only the settings that DIFFER from its
   # defaults, so patching a default value out of the generated file with
   # `sed` silently patched nothing: the noise rule vanished and every
   # replay diffed on the fields it was meant to mask. Write what this
   # test needs instead of editing what the generator happened to print.
+  #
+  # record.upstreamTls.verify: keploy terminates the app's TLS inside the
+  # tunnel and opens its own TLS session to the upstream, so keploy's agent is
+  # the only party that ever sees the upstream's certificate. It skips that
+  # check by default, which would let this lane pass against a chain nothing
+  # had verified. The app (Go's default client) verifies its upstream, so
+  # verifying on its behalf is exactly as strict as the app, not stricter.
   cat > "$config_file" <<'KEPLOY_CFG'
+record:
+  upstreamTls:
+    verify: true
 test:
   globalNoise:
-      global: {"header": {"Date":[], "Content-Length":[]}, "body": {"origin":[], "headers.X-Amzn-Trace-Id":[]}}
+      global: {"header": {"Date":[], "Content-Length":[]}}
 KEPLOY_CFG
 
 stop_recording() {
@@ -199,7 +402,7 @@ for i in 1 2; do
     app_name="connect-tunnel_${i}"
     send_request &
     REQ_PID=$!
-    if ! timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+    if ! timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
         "$RECORD_BIN" record -c "./connect-tunnel" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"; then
         echo "::error::connect-tunnel recording iteration $i failed or timed out"
         stop_recording
@@ -232,7 +435,7 @@ if json_pass_supported; then
         app_name="connect-tunnel_json_${i}"
         send_request &
         REQ_PID=$!
-        if ! timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+        if ! timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
             "$RECORD_BIN" record --storage-format json -c "./connect-tunnel" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"; then
             echo "::error::connect-tunnel json recording iteration $i failed or timed out"
             stop_recording
@@ -262,18 +465,61 @@ echo "Recording complete. Test sets:"
 ls -la keploy/*/tests/ 2>/dev/null || echo "No test sets found"
 ls -la keploy/*/mocks/ 2>/dev/null || echo "No mocks found"
 
-# ── Stop CONNECT proxy before replay ──
-# This ensures replay uses mocks, not the real proxy.
-echo "Stopping CONNECT proxy for replay..."
-kill "$PROXY_PID" 2>/dev/null || true
+# ── keploy's agent must have verified the upstream, not skipped the check ──
+# record.upstreamTls.verify fails OPEN by design: an agent that cannot load its
+# trust anchors logs why and records without verifying, so a green recording
+# alone does not show the chain was checked. The agent logs this line once it
+# has resolved its trust pool and turned verification on.
+for rec_log in connect-tunnel_*.txt; do
+    if ! grep -q "upstream TLS certificate verification is enabled" "$rec_log"; then
+        echo "::error::$rec_log: keploy's agent never reported upstream TLS verification enabled — record.upstreamTls.verify did not reach it, or loading its trust anchors failed and it fell back to skipping the check"
+        grep -n -i "upstream tls" "$rec_log" || echo "(no upstream TLS lines in $rec_log)"
+        exit 1
+    fi
+done
+
+# ── Every test set must hold the tunnelled HTTPS exchange ──
+# Without this, an upstream that failed the handshake recorded /via-proxy as a
+# 502 with no mock (or, when it stalled, recorded no /via-proxy test at all),
+# and the variants that use the released binary still passed on /health
+# alone: green without the CONNECT tunnel ever being exercised.
+# TARGET_URL is echoed back only in the upstream's own response body, so it
+# appears in a mock only when keploy decrypted and captured the exchange
+# inside the tunnel, and in a test case only when the app received it.
+test_sets_checked=0
+for test_set in ./keploy/test-set-*/; do
+    [ -d "$test_set" ] || continue
+    test_sets_checked=$((test_sets_checked + 1))
+    if ! grep -rqsF "$TARGET_URL" "${test_set}tests/"; then
+        echo "::error::$(basename "$test_set") has no /via-proxy test case that received the upstream's response"
+        ls -la "${test_set}" "${test_set}tests/" 2>/dev/null || true
+        exit 1
+    fi
+    if ! grep -qsF "$TARGET_URL" "${test_set}"mocks.*; then
+        echo "::error::$(basename "$test_set") has no mock of the HTTPS exchange inside the CONNECT tunnel"
+        ls -la "${test_set}" 2>/dev/null || true
+        exit 1
+    fi
+    echo "$(basename "$test_set"): recorded the tunnelled HTTPS exchange with $TARGET_URL"
+done
+if [ "$test_sets_checked" -eq 0 ]; then
+    echo "::error::No test sets were recorded"
+    exit 1
+fi
+
+# ── Stop CONNECT proxy and upstream before replay ──
+# This ensures replay uses mocks, not the real proxy or upstream.
+echo "Stopping CONNECT proxy and HTTPS upstream for replay..."
+kill "$PROXY_PID" "$UPSTREAM_PID" 2>/dev/null || true
 wait "$PROXY_PID" 2>/dev/null || true
+wait "$UPSTREAM_PID" 2>/dev/null || true
 sleep 2
 
 # ── Replay phase ──
 # Allow non-zero exit from replay (some tests may fail with latest binary).
 # We validate results from the report files below.
 set +e
-timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
     "$REPLAY_BIN" test -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs.txt
 replay_rc=${PIPESTATUS[0]}
 set -e
@@ -337,7 +583,7 @@ if [ "$both_build" = true ]; then
 
     if json_pass_supported; then
         set +e
-        timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+        timeout --kill-after=30s 8m env HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 TARGET_URL="$TARGET_URL" \
             "$REPLAY_BIN" test --storage-format json -c "./connect-tunnel" --delay 7 --generateGithubActions=false 2>&1 | tee test_logs_json.txt
         replay_rc_json=${PIPESTATUS[0]}
         set -e

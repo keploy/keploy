@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
@@ -57,6 +58,11 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	// binary TLS shims, time-freeze, secret obfuscation — applies to
 	// `keploy mock` unchanged. OSS uses the file-backed store.
 	mockSvc := mock.New(logger, commonServices.Instrumentation, commonServices.YamlMockDb, commonServices.YamlMappingDb, mock.FileStore{}, nil, cfg)
+	if cfg.Mock.RecordRequests {
+		if s, ok := mockSvc.(mock.TestDBSetter); ok {
+			s.SetTestDB(commonServices.YamlTestDB)
+		}
+	}
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	diffSvc := diff.New(logger, commonServices.YamlReportDb, commonServices.YamlTestDB)
@@ -148,6 +154,11 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	var err error
 
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
+		// Before the client: preparing an engine can be what gives it an
+		// Engine API endpoint to talk to.
+		if err := engine.Prepare(ctx, logger, engine.Detect(c.Command)); err != nil {
+			return nil, err
+		}
 		client, err = docker.New(logger, c)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")

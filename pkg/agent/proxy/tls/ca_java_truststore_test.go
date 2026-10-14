@@ -20,7 +20,7 @@ import (
 // keploy root and the system roots, and it never clobbers an existing value.
 func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 	t.Setenv(EnvJavaToolOptions, "-Xmx256m") // a pre-existing value must survive
-	if err := setupJavaTrustStoreEnv(zap.NewNop()); err != nil {
+	if err := setupJavaTrustStoreEnv(zap.NewNop(), testCACertPEM()); err != nil {
 		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
 	}
 	got := os.Getenv(EnvJavaToolOptions)
@@ -85,7 +85,7 @@ func TestJavaTrustsServerViaTrustStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	jks := filepath.Join(dir, "trust.jks")
-	if err := generateTrustStore(certPEM, jks); err != nil {
+	if err := generateTrustStore(certPEM, jks, srv.Certificate().Raw); err != nil {
 		t.Fatalf("generateTrustStore: %v", err)
 	}
 
@@ -141,13 +141,13 @@ func TestGenerateTrustStore_SkipsNonCertSequence(t *testing.T) {
 	// A valid cert (keploy CA) + a bogus but structurally-valid SEQUENCE wrapped
 	// in a CERTIFICATE PEM block.
 	bogus := pemEncodeCert([]byte{0x30, 0x03, 0x02, 0x01, 0x05}) // SEQUENCE{ INTEGER 5 }
-	bundle := append(append([]byte{}, caCrt...), bogus...)
+	bundle := append(append([]byte{}, testCACertPEM()...), bogus...)
 	bp := filepath.Join(dir, "b.pem")
 	if err := os.WriteFile(bp, bundle, 0644); err != nil {
 		t.Fatal(err)
 	}
 	jks := filepath.Join(dir, "t.jks")
-	if err := generateTrustStore(bp, jks); err != nil {
+	if err := generateTrustStore(bp, jks, testCADER()); err != nil {
 		t.Fatalf("generateTrustStore: %v", err)
 	}
 	// If keytool is present, the store must LOAD (proving the bogus entry was
@@ -197,7 +197,7 @@ func TestJavaTrustStorePathIsPerUser(t *testing.T) {
 	}
 
 	logger := zap.NewNop()
-	if err := setupJavaTrustStoreEnv(logger); err != nil {
+	if err := setupJavaTrustStoreEnv(logger, testCACertPEM()); err != nil {
 		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
 	}
 

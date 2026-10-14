@@ -1,5 +1,5 @@
 {
-    "source" : ["./dist/keploy-mac-universal_darwin_all/keploy"],
+    "source" : ["./dist/keploy_darwin_arm64/keploy"],
     "bundle_id" : "io.keploy.server",
     "apple_id": {
         "username" : "shubhamkjain@outlook.com"

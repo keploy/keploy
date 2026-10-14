@@ -7,6 +7,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -205,6 +207,7 @@ endsec
 section "Start Recording Server"
 "$RECORD_KEPLOY_BIN" record -c "$MYSQL_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
@@ -217,12 +220,14 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-sleep 5
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits (wait-recording.sh).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
@@ -255,15 +260,16 @@ if json_pass_supported; then
     section "Start Recording (json)"
     "$RECORD_KEPLOY_BIN" record --storage-format json -c "$MYSQL_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     endsec
     section "Generate Fuzzer Traffic (json)"
     send_requests "$KEPLOY_PID"
     sleep 20
     endsec
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     check_for_errors "record_json.txt"
     endsec
 fi

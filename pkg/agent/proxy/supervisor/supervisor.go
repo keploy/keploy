@@ -87,7 +87,10 @@ type Supervisor struct {
 	// parser's blocked reads unblock with ErrClosed.
 	//
 	// Set it before calling Run. The supervisor calls it synchronously
-	// on the abort path, so the callback must not block.
+	// on the abort path, so the callback must not block. It calls it
+	// before it logs or reports why it aborts: the parser is dead or
+	// retired from that moment, and what the connection carries while the
+	// supervisor writes a panic's stack, say, is captured for no one.
 	//
 	// Go cannot forcibly kill a goroutine: the best we can do is
 	// cancel its context and shut the FakeConns so I/O-bound code
@@ -147,7 +150,15 @@ func New(cfg Config) *Supervisor {
 // to a FakeConn or an Ack is delivered. It resets the watchdog
 // timer. Cheap; a single atomic store.
 func (s *Supervisor) BumpActivity() {
-	s.lastProgressNano.Store(time.Now().UnixNano())
+	s.bumpActivityAt(time.Now())
+}
+
+// bumpActivityAt records progress as of now. Split out from BumpActivity so
+// the watchdog's reset behaviour can be exercised against a synthetic clock
+// (see TestHangResetOnActivity) instead of racing two wall-clock timers under
+// load, which is inherently flaky.
+func (s *Supervisor) bumpActivityAt(now time.Time) {
+	s.lastProgressNano.Store(now.UnixNano())
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
@@ -252,7 +263,17 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 	go func() {
 		var ret fnReturn
 		defer func() {
-			if r := recover(); r != nil {
+			r := recover()
+			if r != nil || ret.err != nil {
+				// The parser is gone, and nothing records what its
+				// connection carries from here on: stamp the session's
+				// stop (Session.StoppedAt) here, where the supervisor
+				// learns it, before the stack is taken and the return
+				// handed on to be logged. A parser that returns nil has
+				// recorded what it read, and is not stopped here.
+				sess.StoppedAt()
+			}
+			if r != nil {
 				ret = fnReturn{
 					panicked: true,
 					panicVal: r,
@@ -269,6 +290,9 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		return s.classifyReturn(ctx, r.panicked, r.panicVal, r.stack, r.err)
 
 	case <-s.hungCh:
+		// Abort first: the parser is retired from here, and the abort
+		// stops its capture (SessionOnAbort).
+		s.fireOnAbort()
 		// Debug-level: hang abort is a designed control-flow path —
 		// the dispatcher's FallthroughToPassthrough handling picks it
 		// up and the relay keeps forwarding bytes. Operators who want
@@ -277,7 +301,6 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 			zap.Duration("hang_budget", s.cfg.HangBudget),
 			zap.String("next_step", "raise supervisor.Config.HangBudget for slow-but-legitimate workloads (long LLM replies, pg_sleep), or set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely (raw passthrough)"),
 		)
-		s.fireOnAbort()
 		runCancel()
 		return Result{
 			Status:                   StatusHung,
@@ -293,10 +316,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		select {
 		case r := <-done:
 			if r.panicked {
+				s.fireOnAbort()
 				if s.cfg.PanicReporter != nil {
 					s.reportPanic(r.panicVal, r.stack)
 				}
-				s.fireOnAbort()
 				return Result{
 					Status:                   StatusPanicked,
 					Err:                      wrapPanic(r.panicVal),
@@ -336,13 +359,16 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 // the supervisor's sticky abort flags to a Result.
 func (s *Supervisor) classifyReturn(outerCtx context.Context, panicked bool, panicVal any, stack []byte, fnErr error) Result {
 	if panicked {
+		// Abort first: the parser is dead, and the abort stops its capture
+		// (SessionOnAbort). Logged first, the stack and the report took
+		// their time while the connection's bytes were captured for no one.
+		s.fireOnAbort()
 		s.cfg.Logger.Error("parser panicked",
 			zap.Any("panic", panicVal),
 			zap.ByteString("stack", stack),
 			zap.String("next_step", "the supervisor is falling through to raw passthrough so user traffic continues unaffected; file the panic with the parser owner using the captured stack, and set KEPLOY_DISABLE_PARSING=1 / SIGUSR1 to disable parser dispatch entirely until the root cause is fixed"),
 		)
 		s.reportPanic(panicVal, stack)
-		s.fireOnAbort()
 		return Result{
 			Status:                   StatusPanicked,
 			Err:                      wrapPanic(panicVal),
@@ -417,6 +443,27 @@ func (s *Supervisor) Close() {
 	<-s.wdDone
 }
 
+// hangExceeded reports whether the no-progress budget has been exceeded as of
+// now, given the current pending/suspended/activity state. It is the single
+// decision the watchdog makes on each tick, factored out so the reset
+// behaviour can be verified deterministically against a synthetic clock (see
+// TestHangResetOnActivity) rather than by racing two wall-clock timers.
+func (s *Supervisor) hangExceeded(now time.Time) bool {
+	if !s.pending.Load() {
+		return false
+	}
+	// A poll-lane connection is expected to make no byte progress for a long
+	// time; do not treat that as a hang.
+	if s.suspended.Load() {
+		return false
+	}
+	last := s.lastProgressNano.Load()
+	if last == 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, last)) > s.cfg.HangBudget
+}
+
 // watchdogLoop polls the activity clock. Closes hungCh when budget
 // exceeded while pending work is outstanding.
 func (s *Supervisor) watchdogLoop() {
@@ -434,19 +481,7 @@ func (s *Supervisor) watchdogLoop() {
 		case <-s.wdStop:
 			return
 		case <-t.C:
-			if !s.pending.Load() {
-				continue
-			}
-			// A poll-lane connection is expected to make no byte
-			// progress for a long time; do not treat that as a hang.
-			if s.suspended.Load() {
-				continue
-			}
-			last := s.lastProgressNano.Load()
-			if last == 0 {
-				continue
-			}
-			if time.Since(time.Unix(0, last)) > s.cfg.HangBudget {
+			if s.hangExceeded(time.Now()) {
 				s.hungOnce.Do(func() { close(s.hungCh) })
 				return
 			}

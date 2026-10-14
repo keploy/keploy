@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 set -Eeuxo pipefail
 
 # Ensure jq is installed
 if ! command -v jq &> /dev/null; then
-    sudo timeout 600 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 && sudo timeout 600 apt-get install -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 -y jq
+    bash "$(dirname "${BASH_SOURCE[0]}")/../../apt-install.sh" jq
 fi
 
 # --- Helper Functions ---
@@ -100,6 +101,7 @@ echo "Starting Recording..."
 # Run keploy in background with tee
 sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-test" --generateGithubActions=false 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
 # Wait briefly for Keploy to initialize
 sleep 5
 endsec
@@ -108,11 +110,13 @@ send_request
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
-sleep 5
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits (wait-recording.sh).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
@@ -125,16 +129,17 @@ if json_pass_supported; then
     echo "Starting json-format Recording..."
     sudo -E env PATH=$PATH "$RECORD_BIN" record --storage-format json -c "./dns-test" --generateGithubActions=false 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's sudo: it passes the signal on to keploy
     sleep 5
     endsec
 
     send_request
 
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     echo "$REC_PID Keploy PID"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     check_for_errors "record_json.txt"
     echo "Recording (json) stopped."
     endsec

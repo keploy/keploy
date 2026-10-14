@@ -455,3 +455,27 @@ func TestHTTPResp_YAML_NonUTF8SSEFieldNameSurvivesFallback(t *testing.T) {
 		"the non-UTF-8 SSE field name was mangled to U+FFFD by strings.ToLower in the flat-body fallback")
 	assert.NotContains(t, got.Body, "�", "replacement characters appeared in the body")
 }
+
+// A response body, or a stream chunk's value, that a block scalar cannot
+// carry (YAMLBlockScalarUnsafe) is written double-quoted and reads back
+// exactly. Body went through Node.Encode, which wrote it as a block and
+// failed to parse that back: the mock or test case was lost.
+func TestHTTPResp_MarshalYAML_BodyABlockScalarCannotCarry(t *testing.T) {
+	for _, body := range []string{"\t{\n\t\"a\": 1\n}", "\n\thello", " a\nb"} {
+		out, err := yamlLib.Marshal(map[string]any{"list": []HTTPResp{{StatusCode: 200, Body: body}}})
+		require.NoError(t, err, "body %q", body)
+		var back map[string][]HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &back), "body %q:\n%s", body, out)
+		assert.Equal(t, body, back["list"][0].Body)
+	}
+	chunk := "\tindented\nevent"
+	resp := HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/event-stream"},
+		StreamBody: []HTTPStreamChunk{{TS: time.Unix(1, 0).UTC(), Data: []HTTPStreamDataField{{Key: "data", Value: chunk}}}}}
+	out, err := yamlLib.Marshal(map[string]any{"list": []HTTPResp{resp}})
+	require.NoError(t, err)
+	var back map[string][]HTTPResp
+	require.NoError(t, yamlLib.Unmarshal(out, &back), "%s", out)
+	require.Len(t, back["list"][0].StreamBody, 1)
+	v, _ := back["list"][0].StreamBody[0].ValueByKey("data")
+	assert.Equal(t, chunk, v)
+}

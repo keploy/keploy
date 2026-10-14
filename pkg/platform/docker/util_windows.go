@@ -20,6 +20,10 @@ func PrepareDockerCommand(ctx context.Context, keployAlias string) (*exec.Cmd, e
 		"cmd.exe",
 		args...,
 	)
+	// The alias names the control-plane token without a value; see getAlias.
+	if extra := AgentTokenEnv(); len(extra) > 0 {
+		cmd.Env = append(os.Environ(), extra...)
+	}
 
 	return cmd, nil
 }

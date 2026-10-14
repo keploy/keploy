@@ -484,6 +484,7 @@ func (p *Proxy) probeMysql(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
+	pre *util.Predialed, // the connection dialled while the handshake was held, or nil
 	port uint32,
 	mode models.Mode,
 	opts models.OutgoingOptions,
@@ -642,26 +643,53 @@ func (p *Proxy) probeMysql(
 	// port; the negative cache makes it exactly once. A server-speaks-
 	// first protocol simply re-greets on the fresh connection, so
 	// discarding this one loses nothing.
-	dstConn, err := util.DialDestination(ctx, logger, "tcp", util.DialTarget{Addr: dstAddr})
+	//
+	// Except when the dial takes the connection opened while the
+	// application's handshake was held (util.Predialed): that one is the
+	// application's own connection to the destination, not a probe. A
+	// negative verdict hands it back — re-armed for generic dispatch's
+	// dial, and watched again for the destination closing it — instead of
+	// closing it, and a destination that closes it during the look, while
+	// the application is still silent, has closed the application's
+	// connection, so the application's end is closed too.
+	dstConn, err := util.DialDestination(ctx, logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: pre})
 	if err != nil {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "upstream-dial-failed"}, err
 	}
+	predialed := pre.Is(dstConn)
 	dstAdopted := false
 	defer func() {
 		if !dstAdopted {
 			_ = dstConn.Close()
 		}
 	}()
+	handBack := func(read []byte) {
+		var replay net.Conn
+		if len(read) > 0 {
+			replay = replayConn(dstConn, read, logger)
+		}
+		if predialed && pre.Return(dstConn, replay) {
+			dstAdopted = true
+		}
+	}
 
 	greeting, err := readGreetingWithin(ctx, dstConn, serverGreetingWindow(), p.Integrations[integrations.MYSQL])
 	if len(greeting) == 0 {
 		if err != nil && !isTimeout(err) {
 			logger.Debug("upstream produced no greeting; not classifying as mysql",
 				zap.String("dstAddr", dstAddr), zap.Error(err))
+			// The destination closed the application's own connection
+			// while it was silent: close the application's end, as the
+			// destination would have. An application that spoke meanwhile
+			// keeps its connection; generic dispatch dials afresh.
+			if predialed && util.ReceivedNothing(srcConn) {
+				_ = srcConn.Close()
+			}
 			return notMysql("upstream-read-error", srcConn), nil
 		}
 		// Both ends silent. mysqld greets immediately on accept, so a
 		// full greeting window of silence rules MySQL out.
+		handBack(nil)
 		return notMysql("no-greeting", srcConn), nil
 	}
 
@@ -674,10 +702,12 @@ func (p *Proxy) probeMysql(
 		// there anyway. Don't cache a negative — this says nothing about
 		// the port, only about the build.
 		logger.Debug("mysql parser not registered; skipping content detection")
+		handBack(greeting)
 		return &mysqlProbe{SrcConn: srcConn, Reason: "mysql-parser-unregistered"}, nil
 	}
 
 	if !parser.MatchType(ctx, greeting) {
+		handBack(greeting)
 		return notMysql("greeting-not-mysql", srcConn), nil
 	}
 

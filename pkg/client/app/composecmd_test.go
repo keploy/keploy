@@ -2,8 +2,13 @@ package app
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // SetupCompose can only splice `-f <generated>.yaml` into a command that is a
@@ -87,4 +92,107 @@ func TestComposeLaunchPlan(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestAgentTokenCommand: `sudo docker compose up` is a spelling keploy
+// recognises as compose, and sudo's env_reset (or doas's) drops the
+// control-plane token the generated agent service asks compose for. A root
+// keploy needs no sudo, so it drops a plain one and runs compose with the
+// token itself. Any other keploy tells sudo to keep that one variable.
+func TestAgentTokenCommand(t *testing.T) {
+	const keep = "sudo --preserve-env=KEPLOY_AGENT_TOKEN "
+	for _, tc := range []struct {
+		in          string
+		root        bool
+		want        string
+		wantViaSudo bool
+	}{
+		{in: "sudo docker compose up", want: keep + "docker compose up", wantViaSudo: true},
+		{in: "sudo -E docker compose up", want: keep + "-E docker compose up", wantViaSudo: true},
+		{in: "  sudo docker-compose up", want: "  " + keep + "docker-compose up", wantViaSudo: true},
+		{in: "sudo\tdocker compose up", want: keep + "docker compose up", wantViaSudo: true},
+		{in: "doas docker compose up", want: "doas docker compose up"},
+		{in: "docker compose up", want: "docker compose up"},
+		{in: "sudoku up", want: "sudoku up"},
+		{in: "sudo", want: "sudo"},
+
+		{in: "sudo docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -E docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo --preserve-env -E  docker compose up", root: true, want: "docker compose up"},
+		{in: "  sudo\tdocker-compose up", root: true, want: "  docker-compose up"},
+		{in: "doas docker compose up", root: true, want: "docker compose up"},
+		{in: "docker compose up", root: true, want: "docker compose up"},
+		{in: "sudoku up", root: true, want: "sudoku up"},
+		// Options that do nothing for root either: no password to ask for,
+		// on a terminal (-n) or on stdin (-S), and the end of the options.
+		{in: "sudo -n docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -S docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo --non-interactive --stdin docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -- docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -n -- docker compose up", root: true, want: "docker compose up"},
+		{in: "sudo -EnS docker compose up", root: true, want: "docker compose up"},
+		{in: "doas -n docker compose up", root: true, want: "docker compose up"},
+		{in: "doas -- docker compose up", root: true, want: "docker compose up"},
+		// Not a plain elevation to root: kept, and told to keep the token.
+		{in: "sudo -u app docker compose up", root: true, want: keep + "-u app docker compose up", wantViaSudo: true},
+		{in: "sudo -nu app docker compose up", root: true, want: keep + "-nu app docker compose up", wantViaSudo: true},
+		{in: "sudo -H docker compose up", root: true, want: keep + "-H docker compose up", wantViaSudo: true},
+		{in: "sudo - docker compose up", root: true, want: keep + "- docker compose up", wantViaSudo: true},
+		{in: "sudo --preserve-env=HOME docker compose up", root: true, want: keep + "--preserve-env=HOME docker compose up", wantViaSudo: true},
+		{in: "sudo -E", root: true, want: keep + "-E", wantViaSudo: true},
+		{in: "sudo -n --", root: true, want: keep + "-n --", wantViaSudo: true},
+		{in: "doas -u app docker compose up", root: true, want: "doas -u app docker compose up"},
+		{in: "doas -E docker compose up", root: true, want: "doas -E docker compose up"},
+		// Not root: every sudo is needed, whatever its options.
+		{in: "sudo -n -- docker compose up", want: keep + "-n -- docker compose up", wantViaSudo: true},
+		{in: "doas -n docker compose up", want: "doas -n docker compose up"},
+	} {
+		got, viaSudo := agentTokenCommand(tc.in, tc.root, token.Env)
+		if got != tc.want || viaSudo != tc.wantViaSudo {
+			t.Errorf("agentTokenCommand(%q, root=%v) = %q, %v; want %q, %v", tc.in, tc.root, got, viaSudo, tc.want, tc.wantViaSudo)
+		}
+	}
+}
+
+// TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken: under compose
+// the app command is what starts the agent, so it must carry the token its
+// compose file names — through a leading sudo too. Under every other kind the
+// app command is the application under test, which is handed nothing.
+func TestWithAgentToken_OnlyTheComposeCommandIsGivenTheAgentToken(t *testing.T) {
+	setEffectiveUID(t, 1000)
+	const cmd = "sudo docker compose -f docker-compose-tmp.yaml up"
+	gotCmd, gotEnv := (&App{kind: utils.DockerCompose}).withAgentToken(cmd)
+	if want := []string{token.Env + "=" + token.Session()}; !slices.Equal(gotEnv, want) {
+		t.Errorf("compose command env = %v, want %v", gotEnv, want)
+	}
+	if want := "sudo --preserve-env=" + token.Env + " docker compose -f docker-compose-tmp.yaml up"; gotCmd != want {
+		t.Errorf("compose command = %q, want %q: sudo would drop the token before compose could fill it in", gotCmd, want)
+	}
+	for _, kind := range []utils.CmdType{utils.Native, utils.DockerRun, utils.DockerStart, utils.FromContainer} {
+		gotCmd, gotEnv := (&App{kind: kind}).withAgentToken(cmd)
+		if gotEnv != nil {
+			t.Errorf("%s: the application under test was handed %v", kind, gotEnv)
+		}
+		if gotCmd != cmd {
+			t.Errorf("%s: the application's command was rewritten to %q", kind, gotCmd)
+		}
+	}
+}
+
+func TestWithAgentTokenKeepsTheMockTokenThroughSudo(t *testing.T) {
+	mock := models.SetupOptions{MockMode: true}
+	gotCmd, _ := (&App{kind: utils.DockerCompose, opts: mock}).withAgentToken("sudo docker compose up")
+	if want := "sudo --preserve-env=" + token.Env + "," + token.MockAgentTokenEnv + " docker compose up"; gotCmd != want {
+		t.Errorf("compose command = %q, want %q", gotCmd, want)
+	}
+	gotCmd, gotEnv := (&App{kind: utils.DockerRun, opts: mock}).withAgentToken("sudo docker run --rm e2e")
+	if want := "sudo --preserve-env=" + token.MockAgentTokenEnv + " docker run --rm e2e"; gotCmd != want || gotEnv != nil {
+		t.Errorf("docker run command = %q, env %v, want %q", gotCmd, gotEnv, want)
+	}
+	if gotCmd, _ := (&App{kind: utils.DockerRun}).withAgentToken("sudo docker run --rm e2e"); gotCmd != "sudo docker run --rm e2e" {
+		t.Errorf("outside mock mode docker run was rewritten to %q", gotCmd)
+	}
+	if got, _ := agentTokenCommand("sudo docker run x", false); got != "sudo docker run x" {
+		t.Errorf("nothing to keep, yet rewritten to %q", got)
+	}
 }

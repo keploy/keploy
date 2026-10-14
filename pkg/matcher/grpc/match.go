@@ -10,13 +10,34 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
+// MatchOption tunes Match without changing its signature.
+type MatchOption func(*matchOptions)
+
+type matchOptions struct {
+	noPassLine bool
+}
+
+// WithoutPassLine says the caller has already failed the test case on its
+// own (a template variable's place the answer does not satisfy): a
+// comparison that matches then prints no "Testrun passed" line for it.
+func WithoutPassLine() MatchOption {
+	return func(o *matchOptions) { o.noPassLine = true }
+}
+
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool, opts ...MatchOption) (bool, *models.Result) {
+	var mo matchOptions
+	for _, opt := range opts {
+		opt(&mo)
+	}
+	// Under the proven switch response arrays are compared in order.
+	ignoreOrdering = matcher.ResponseIgnoreOrdering(ignoreOrdering)
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -210,10 +231,18 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	expectedDecodedData := ""
 	actualDecodedData := ""
 	var jsonComparisonResult matcher.JSONComparisonResult
+	// reorderedOnly: every message that differs differs only in a repeated
+	// field's order, and the stream has as many messages as recorded. One
+	// message with a real change makes the body a real change, whichever
+	// message differed first.
+	reorderedOnly := len(expMsgs) == len(actMsgs)
 
 	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
 		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
 			differences, result, bodyNoise, ignoreOrdering, logger)
+		if !cmp.decodedNormal && !cmp.reorderedOnly {
+			reorderedOnly = false
+		}
 		if !cmp.decodedNormal && decodedDataNormal {
 			// first mismatch wins
 			decodedDataNormal = false
@@ -319,6 +348,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 							logDiffs.SetHasarrayIndexMismatch(true)
 							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 						}
+						if diff.Message == reorderedRepeatedMessage {
+							// Only the order of a repeated field differs: say so.
+							logDiffs.PushFooterDiff(reorderedRepeatedMessage)
+						}
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					default:
 						// Any other body differences
@@ -343,7 +376,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
 		}
-	} else {
+	} else if !mo.noPassLine {
 		// Display success message
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false
@@ -366,6 +399,19 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			} else {
 				currentRisk = models.High
 				currentCategories = append(currentCategories, models.InternalFailure)
+			}
+		} else if reorderedOnly {
+			// Only a repeated field's order differs (protoscope, under the
+			// proven switch): the schema and the values are the recorded
+			// ones, as a reordered JSON array is graded. The reason, with
+			// the proto-files way out for a map, is persisted with the
+			// result, so the report and JUnit say it, not only the console.
+			currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+			currentCategories = append(currentCategories, models.SchemaUnchanged)
+			bodyAssessment = &models.FailureAssessment{
+				Category: []models.FailureCategory{models.SchemaUnchanged},
+				Risk:     models.Medium,
+				Reasons:  []string{reorderedRepeatedMessage},
 			}
 		} else {
 			// non-JSON payload mismatch → Broken
@@ -423,6 +469,9 @@ type msgComparison struct {
 	expected      string
 	actual        string
 	json          matcher.JSONComparisonResult
+	// reorderedOnly: the decoded data differs only in the order of a
+	// repeated field's elements (protoscope, under the proven switch).
+	reorderedOnly bool
 }
 
 // isAllDigits reports whether s is a non-empty run of ASCII digits, i.e. a
@@ -506,6 +555,7 @@ func compareGrpcMessage(
 	// Compare decoded data — JSON comparison when both sides are valid JSON,
 	// canonicalization otherwise.
 	decodedDataNormal := true
+	decodedMessage := "decoded data mismatch"
 	expectedDecodedData := expMsg.DecodedData
 	actualDecodedData := actMsg.DecodedData
 	var jsonComparisonResult matcher.JSONComparisonResult
@@ -542,9 +592,20 @@ func compareGrpcMessage(
 
 		// Per-message only. Canonicalizing a whole stream would sort across
 		// message boundaries and let a reordered stream match.
-		expCanon := CanonicalizeTopLevelBlocks(expectedDecodedData)
-		actCanon := CanonicalizeTopLevelBlocks(actualDecodedData)
+		//
+		// Under the proven switch a repeated field's elements are compared
+		// in order (CanonicalizeKeepingRepeatedOrder); a reorder alone is
+		// then said as one.
+		canonicalize := CanonicalizeTopLevelBlocks
+		if provenswitch.On() {
+			canonicalize = CanonicalizeKeepingRepeatedOrder
+		}
+		expCanon := canonicalize(expectedDecodedData)
+		actCanon := canonicalize(actualDecodedData)
 		decodedDataNormal = expCanon == actCanon
+		if !decodedDataNormal && provenswitch.On() && CanonicalizeTopLevelBlocks(expectedDecodedData) == CanonicalizeTopLevelBlocks(actualDecodedData) {
+			decodedMessage = reorderedRepeatedMessage
+		}
 		expectedDecodedData = expCanon
 		actualDecodedData = actCanon
 	}
@@ -553,7 +614,7 @@ func compareGrpcMessage(
 		differences[key("decoded_data")] = grpcDiff{
 			Expected: expectedDecodedData,
 			Actual:   actualDecodedData,
-			Message:  "decoded data mismatch",
+			Message:  decodedMessage,
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
@@ -581,6 +642,7 @@ func compareGrpcMessage(
 		expected:      expectedDecodedData,
 		actual:        actualDecodedData,
 		json:          jsonComparisonResult,
+		reorderedOnly: decodedMessage == reorderedRepeatedMessage,
 	}
 }
 
@@ -596,3 +658,10 @@ func compareGrpcMessage(
 func useIndexedKeys(expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) bool {
 	return len(expMsgs) > 1 || len(actMsgs) > 1
 }
+
+// reorderedRepeatedMessage says a gRPC message's decoded data differs only in
+// the order of a repeated field's elements, which the proven switch compares
+// in order. Protoscope text carries no schema, so a map field's entries are
+// compared in order too: with proto files configured the message is compared
+// as JSON, where a map is an object.
+const reorderedRepeatedMessage = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"

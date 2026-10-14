@@ -1,8 +1,10 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -118,6 +120,95 @@ type ScopeReq struct {
 	// (Design A). Optional: 0/omitted falls back to the single global scope
 	// (correct for sequential single-worker runs and suite-level).
 	Pid int `json:"pid,omitempty"`
+	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
+	At    time.Time `json:"at,omitzero"`
+	Dir   string    `json:"dir,omitempty"`
+	Suite bool      `json:"suite,omitempty"`
+	// Outcome is the test's own verdict, sent with /agent/scope/end by a
+	// harness that knows it (ScopeOutcomePassed / Failed / Skipped; common
+	// spellings such as "pass", "fail", "pending" are accepted, see
+	// NormalizeScopeOutcome). Optional: without it the replay knows what the
+	// test used and missed, not whether it passed.
+	Outcome string `json:"outcome,omitempty"`
+	// CanSkip, sent with /agent/scope/begin, says the harness skips a test it
+	// is told to (ScopeBeginResp.Action). Only such a begin is gated: a harness
+	// that cannot skip would run the test anyway, against a pool the gate never
+	// narrowed for it.
+	CanSkip bool `json:"canSkip,omitempty"`
+	// File and Project qualify the test's ID under the proven wire (TestID):
+	// the test file a harness names, and its project (a Jest displayName).
+	// A Go test sends neither; its instance's key is the path.
+	File    string `json:"file,omitempty"`
+	Project string `json:"project,omitempty"`
+}
+
+// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
+// which the agent records for a test the replay told not to run.
+const (
+	ScopeOutcomePassed  = "passed"
+	ScopeOutcomeFailed  = "failed"
+	ScopeOutcomeSkipped = "skipped"
+	ScopeOutcomeGated   = "gated"
+)
+
+// maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
+const maxScopeOutcome = 32
+
+// NormalizeScopeOutcome maps a harness's verdict onto ScopeOutcomePassed,
+// Failed or Skipped, accepting the spellings test runners use (go test's
+// pass/fail, jest's pending, pytest's error and xfail). Anything else is
+// returned lower-cased and cut to a bounded length, so a policy matching
+// "passed" never proves it; "" stays "".
+func NormalizeScopeOutcome(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "", ScopeOutcomePassed, ScopeOutcomeFailed, ScopeOutcomeSkipped:
+		return v
+	case "pass", "ok", "success", "succeeded", "xpassed":
+		return ScopeOutcomePassed
+	case "fail", "error", "errored", "broken", "timedout", "timeout", "interrupted":
+		return ScopeOutcomeFailed
+	case "skip", "pending", "todo", "disabled", "ignored", "xfail", "xfailed":
+		return ScopeOutcomeSkipped
+	}
+	if len(v) > maxScopeOutcome {
+		v = v[:maxScopeOutcome]
+	}
+	return v
+}
+
+// ScopeBeginResp answers POST /agent/scope/begin. A test the replay gated out
+// (see ScopeGateReq), begun by a harness that can skip (ScopeReq.CanSkip),
+// gets Action ScopeActionSkip and the Reason; its harness skips it and sends
+// no end for it. Every other answer is exactly
+// {"status":"ok"}, as before, so a harness that predates gating — or decodes
+// the answer as strings — is unaffected, and a missing action means "run".
+type ScopeBeginResp struct {
+	// V is ScopeProtocolVersion under the proven wire, absent otherwise.
+	V      int    `json:"v,omitempty"`
+	Status string `json:"status"`
+	Action string `json:"action,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
+const ScopeActionSkip = "skip"
+
+// ScopeGateReq is the body of POST /agent/replay/gate: the replay CLI names the
+// only tests that should run this replay (for instance, the ones a previous
+// replay proved pass with every dependency mocked). Any other test — other
+// than a subtest of a named one — is answered ScopeActionSkip at
+// /agent/scope/begin, with Reason. A nil Run removes the gate: every test runs,
+// the default. The gate applies in replay only, and ends with the replay
+// session.
+type ScopeGateReq struct {
+	Run    []string `json:"run"`
+	Reason string   `json:"reason,omitempty"`
+	// Skip is the proven model's gate (design v14 §6.1): the tests keploy
+	// skips, by ID, each with the reason its harness skips it with. It is a
+	// deny list: every test it does not name runs. Read under the proven
+	// switch, where it replaces Run.
+	Skip map[string]string `json:"skip,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -132,15 +223,93 @@ type ScopeWindow struct {
 	// record attributes a captured mock to this window if the mock's own source
 	// PID resolves (up the /proc tree) to this worker — exact even when windows
 	// from parallel workers overlap in time.
-	PID uint32 `json:"pid,omitempty"`
+	PID     uint32    `json:"pid,omitempty"`
+	Dir     string    `json:"dir,omitempty"`
+	Suite   bool      `json:"suite,omitempty"`
+	App     bool      `json:"app,omitempty"`
+	Port    uint16    `json:"port,omitempty"`
+	Program string    `json:"program,omitempty"`
+	Place   string    `json:"place,omitempty"`
+	N       int       `json:"n,omitempty"`
+	Ready   time.Time `json:"ready,omitzero"`
+	Ref     string    `json:"ref,omitempty"`
+	Worker  uint32    `json:"worker,omitempty"`
+	// Outcome is the verdict the test's harness reported when it ended the
+	// scope (ScopeReq.Outcome); "" when it reported none.
+	Outcome string `json:"outcome,omitempty"`
+	// Evidence is, under the proven wire, what keploy saw that failed the
+	// test at its end in a replay; nil when nothing did.
+	Evidence *ScopeEvidence `json:"evidence,omitempty"`
+	// Claim, under the proven wire, makes this no test's window but a claim:
+	// from Start on, the run's test process is the one that claimed it with
+	// this key (POST /agent/instance), until the next claim. A call made
+	// while no test is open belongs to the pool slice of that key (design
+	// v14 §5.2).
+	Claim string `json:"claim,omitempty"`
+	// Refused, under the proven wire, makes this no test's window but a
+	// refusal keploy made at Start (RunRefusal).
+	Refused *RunRefusal `json:"refused,omitempty"`
+	// Live and Mocked, under the proven wire, make this no test's window
+	// but one row of where the run's calls to local listeners went
+	// (LiveRow, MockedRow), first seen at Start.
+	Live   *LiveRow   `json:"live,omitempty"`
+	Mocked *MockedRow `json:"mocked,omitempty"`
 }
+
+// PoolKeyNone is the pool slice of calls made before any test process
+// claimed the run, and the slice a pool mock recorded without a key serves
+// (design v14 U21).
+const PoolKeyNone = "-"
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
 type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
+	Root     string              `json:"root,omitempty"`
+	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// Pool is, under the proven switch, each key's pool slice: the names of
+	// the mocks recorded while no test was open, by the key of the claim
+	// then (PoolKeyNone for none, and for a mock recorded without a key).
+	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
+	// between tests"; only a nil one is left out (with the switch off).
+	Pool map[string][]string `json:"pool,omitzero"`
 }
+
+// TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
+// CLI sends: when each test of the replayed recording began
+// (MappedTestCase.At), by test name. Under the proven switch the agent moves
+// the clock of the run's processes to a test's begin while the test is open,
+// and back to the run's start time after it (design v14 §3.4).
+type TestBeginsReq struct {
+	Begins map[string]time.Time `json:"begins"`
+}
+
+type SetTable struct {
+	Boots  map[string][]string `json:"boots,omitempty"`
+	Tests  map[string][]Owned  `json:"tests,omitempty"`
+	Runner []string            `json:"runner,omitempty"`
+	Start  time.Time           `json:"start,omitzero"`
+}
+
+type Owned struct {
+	Name  string `json:"name"`
+	Start string `json:"start,omitempty"`
+}
+
+// ErrMockStatsUnsupported reports that an agent cannot answer /agent/mock/stats
+// at all — it predates the route, or its service does not implement the reader.
+// It lives here, not in the HTTP client, so the replay service can recognise the
+// condition without importing the concrete client it otherwise reaches only
+// through its Instrumentation interface.
+//
+// Callers must treat it as "unknown", never as "no mocks stored": a caller that
+// conflates the two reads an unreportable agent as a replaced one.
+var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
+// ErrScopeGateUnsupported is returned for an agent that cannot gate which
+// tests run (one that predates POST /agent/replay/gate).
+var ErrScopeGateUnsupported = errors.New("agent cannot gate which tests run")
 
 // MockStats is the body of GET /agent/mock/stats — a non-draining snapshot of
 // the mock session for the runner or the CLI end-of-run summary.
@@ -162,6 +331,17 @@ type StoreMocksReq struct {
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
+// MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
+// stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
+// /health response (RFC 7694), and the client compresses only for such an agent:
+// an older one would read the compressed bytes as gob and fail the upload.
+const MockStreamEncodingZstd = "zstd"
+
+// MockStreamZstdWindow is the zstd window both ends of a /storemocks stream use.
+// The client encodes with it and the agent refuses a stream that needs more, so
+// a stream cannot make the agent allocate more than this for its window.
+const MockStreamZstdWindow = 8 << 20
+
 // MockStreamHeader is the first gob value on a /storemocks body; the counts
 // pre-size the agent's slices and split the following mocks into filtered then
 // unfiltered.
@@ -172,6 +352,11 @@ type MockStreamHeader struct {
 
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
+	// ExactMapping makes MockMapping the test's whole recording even when
+	// it is empty: a test recorded with no call is served no per-test mock,
+	// only the reusable tier. Without it an empty mapping means "none
+	// supplied", which leaves the whole pool armed.
+	ExactMapping bool `json:"exactMapping,omitempty"`
 	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
 	// in the set being staged, which the replayer knows because it loads test
 	// cases sorted by request timestamp. The agent seeds the manager's
@@ -182,9 +367,19 @@ type MockFilterParams struct {
 	// Zero means "not supplied"; the cutoff then falls back to the fired
 	// windows, which is the pre-existing behaviour.
 	FirstRecordedTestStart time.Time `json:"firstRecordedTestStart,omitempty"`
-	BeforeTime             time.Time `json:"beforeTime,omitempty"`
-	MockMapping            []string  `json:"mockMapping,omitempty"`
-	UseMappingBased        bool      `json:"useMappingBased"`
+	// RecordedWindows is the [request, response] window of EVERY recorded test
+	// of the set being staged, the unselected and ignored ones included. Sent
+	// on the staging call only, beside FirstRecordedTestStart; the agent
+	// applies it through the proxy's optional SeedRecordedWindows capability,
+	// so traffic the test windows do not pace by themselves (a broker's server
+	// push, and what the application publishes while handling it) can be
+	// released by the recorded window it belongs to (models.WindowSchedule).
+	// Empty means "not supplied": everything is then released at once, which
+	// is the pre-existing behaviour.
+	RecordedWindows []TestWindow `json:"recordedWindows,omitempty"`
+	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
+	MockMapping     []string     `json:"mockMapping,omitempty"`
+	UseMappingBased bool         `json:"useMappingBased"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase
@@ -202,7 +397,34 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+
+	// Variables are the test variables the test's own request carries (its
+	// test case's template values), under the proven switch: a mock filter
+	// starts a test, and the agent binds these as the test begins, so a
+	// dependency call that uses one is asserted to send that value. Empty for
+	// every other caller.
+	Variables []VariableBinding `json:"variables,omitempty"`
 }
+
+// ConsumedScopeHeader is the /updatemockparams response header in which an agent
+// says how it reads MockFilterParams.TotalConsumedMocks. ConsumedScopePerTest
+// means only for the per-test mocks it stages, all of which the client handed
+// it as the filtered half of StoreMocks; a client may then send just their
+// entries. An agent that does not send the header, which includes every agent
+// released before it, may read entries of other mocks too and must be sent the
+// whole history: agents from v3.0.0-beta1 through v3.3.22 also applied it to the
+// session pool.
+const (
+	ConsumedScopeHeader  = "X-Keploy-Consumed-Scope"
+	ConsumedScopePerTest = "per-test"
+)
+
+// UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
+// agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
+// why. The body is still the list that was read, so a client that does not know
+// the header reads it as before. Only an agent with the proven switch on sends
+// it.
+const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
@@ -237,4 +459,98 @@ type AfterTestRunReq struct {
 	TestRunID  string       `json:"testRunID"`
 	TestSetIDs []string     `json:"testSetIDs"`
 	Coverage   TestCoverage `json:"coverage"`
+}
+
+type AppStart struct {
+	At   time.Time `json:"at"`
+	PID  uint32    `json:"pid"`
+	Port uint16    `json:"port"`
+}
+
+type AppStartReq struct {
+	Port int       `json:"port"`
+	Pid  int       `json:"pid,omitempty"`
+	At   time.Time `json:"at,omitzero"`
+}
+
+// BacklogVerdict is what the agent answers when a recording's stop asks
+// whether it may still hand over something captured before the stop
+// (GET /agent/record/pending, AgentBacklog). It has three values, and a fourth
+// for an agent that can never tell: an answer that did not come is never read
+// as "nothing pending".
+type BacklogVerdict int
+
+const (
+	// BacklogCannotTell: no answer came (a timeout, a transport error, an
+	// error status, a body that does not decode). The agent may still hold
+	// something; the stop keeps waiting while it can. The zero value, so an
+	// answer that was never filled in is never taken for BacklogClear.
+	BacklogCannotTell BacklogVerdict = iota
+	// BacklogPending: the agent may still hand over something captured
+	// before the stop.
+	BacklogPending
+	// BacklogClear: the agent holds nothing more captured before the stop:
+	// its capture, parsers and test-case queue are through it. What it has
+	// already handed on and the client has not received yet (in its mock
+	// manager's channel, the stream's encoder, the socket) is not counted:
+	// clear is not delivered.
+	BacklogClear
+	// BacklogUnsupported: the agent cannot tell, and never will (it predates
+	// the route, or its capture has no watermark). The stop goes by its
+	// streams' quiet alone.
+	BacklogUnsupported
+)
+
+func (v BacklogVerdict) String() string {
+	switch v {
+	case BacklogPending:
+		return "pending"
+	case BacklogClear:
+		return "clear"
+	case BacklogUnsupported:
+		return "unsupported"
+	}
+	return "cannot tell"
+}
+
+// AgentBacklog is the agent's answer to whether it may still hand over a test
+// case or a mock captured before a time.
+type AgentBacklog struct {
+	Verdict BacklogVerdict
+	// Progress is a count that moves whenever the agent's capture gets
+	// further: with BacklogPending, a stop tells a backlog being worked
+	// through from one that is not moving. Zero from an agent that predates
+	// it.
+	Progress uint64
+	// WaitingOn says what is pending, when the agent can tell.
+	WaitingOn string
+}
+
+// DrainsAfterStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it after a recording's stop and closes it
+// before it stops the agent, and is the only thing that stops the agent: it
+// started it (natively, or in a container it runs). `keploy record` and
+// `keploy mock record` send it then. A stop signal the agent gets meanwhile
+// (a `pkill -INT keploy`, or a stop of its container, that reaches it too)
+// waits for such streams (utils.SetSignalHold). An agent something else
+// stops (docker compose, with the project the client waits on; kubelet, with
+// a sidecar's pod) gets no header, and stops on the signal as it always has:
+// held for the client, it would only be killed at that stop's timeout.
+const DrainsAfterStopHeader = "Keploy-Drains-After-Stop"
+
+type drainsAfterStopKey struct{}
+
+// WithDrainsAfterStop marks the agent frame streams opened on ctx as ones
+// their client drains after the stop and closes before it stops the agent.
+// The agent client sends DrainsAfterStopHeader for them when it started the
+// agent itself. On the agent, the graceful-shutdown ctx carries it while such
+// a client holds a stream: that client stops the app it started first.
+func WithDrainsAfterStop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, drainsAfterStopKey{}, true)
+}
+
+// DrainsAfterStop reports whether ctx was marked with WithDrainsAfterStop.
+func DrainsAfterStop(ctx context.Context) bool {
+	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
+	return v
 }

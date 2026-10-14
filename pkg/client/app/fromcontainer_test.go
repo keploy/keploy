@@ -248,7 +248,7 @@ func TestMountsFromCarriesAnonymousVolumesByName(t *testing.T) {
 		},
 	}
 
-	got := mountsFrom(src, nil)
+	got := MountsFrom(src, nil)
 
 	byTarget := map[string]mount.Mount{}
 	for _, m := range got {
@@ -281,12 +281,34 @@ func TestMountsFromDoesNotDuplicateDeclaredTargets(t *testing.T) {
 	src := container.InspectResponse{
 		Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: "other", Destination: "/data", RW: true}},
 	}
-	got := mountsFrom(src, declared)
+	got := MountsFrom(src, declared)
 	if len(got) != 1 {
 		t.Fatalf("got %d mounts for one destination: %+v", len(got), got)
 	}
 	if got[0].Source != "chosen" {
 		t.Errorf("Source = %q, want the declared mount to win", got[0].Source)
+	}
+}
+
+// An anonymous volume is DECLARED with no source at all - compose writes
+// `- /data` as {Type: volume, Target: /data} - and its generated name appears
+// only in the live mounts. Keeping the declared entry verbatim hands the
+// container a brand new empty volume and orphans everything in the old one.
+func TestMountsFromNamesADeclaredAnonymousVolume(t *testing.T) {
+	declared := []mount.Mount{{Type: mount.TypeVolume, Target: "/data", VolumeOptions: &mount.VolumeOptions{}}}
+	src := container.InspectResponse{
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeVolume, Name: "9f2c1ab4de77", Destination: "/data", RW: true},
+		},
+	}
+
+	got := MountsFrom(src, declared)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d mounts for one destination: %+v", len(got), got)
+	}
+	if got[0].Source != "9f2c1ab4de77" {
+		t.Errorf("Source = %q, want the volume the container is actually using", got[0].Source)
 	}
 }
 
@@ -341,7 +363,7 @@ func TestMountsFromCarriesBindPropagation(t *testing.T) {
 		},
 	}
 	byTarget := map[string]mount.Mount{}
-	for _, m := range mountsFrom(src, nil) {
+	for _, m := range MountsFrom(src, nil) {
 		byTarget[m.Target] = m
 	}
 
