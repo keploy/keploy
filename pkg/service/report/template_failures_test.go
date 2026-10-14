@@ -249,7 +249,7 @@ func TestReports_SayEveryTemplateFailureAndARefusal(t *testing.T) {
 			if c.name == "a refusal" && !strings.Contains(junit, "template variable request body: {{capture string .id}}") {
 				t.Errorf("JUnit does not say a refused placeholder is a template variable's: %q", junit)
 			}
-			data, err := json.Marshal(buildTestVerdict("run", "set", c.test))
+			data, err := json.Marshal(buildTestVerdict("run", "set", c.test, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -313,7 +313,7 @@ func TestReports_SayEveryTemplateFailureAndARefusal(t *testing.T) {
 			}
 		})
 	}
-	plain, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed}))
+	plain, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
