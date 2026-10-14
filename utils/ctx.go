@@ -58,20 +58,22 @@ func RegisterPreCancelHook(fn func()) {
 
 // signalHold, when set, is what the first stop signal waits on before it
 // cancels the root context (SetSignalHold).
-var signalHold atomic.Pointer[func(stopNow <-chan struct{})]
+var signalHold atomic.Pointer[func()]
 
 // SetSignalHold has the first SIGINT, SIGTERM or SIGHUP NewCtx receives wait,
 // before it cancels the root context, until hold returns: what the process is
-// still doing for someone else finishes first. A second signal while it waits
-// closes stopNow, and hold must then return at once; that signal is counted
-// too (RepeatInterrupts). nil removes the hold.
+// still doing for someone else finishes first. A signal while it waits is
+// counted (RepeatInterrupts) and cuts nothing short: it may be the first
+// signal again, as sudo hands it on (holdUntilDone). Once the root context is
+// cancelled some other way (ExecCancel), the stop no longer waits for hold.
+// nil removes the hold.
 //
 // The keploy agent holds so: a recording's client (the CLI) owns its
 // lifetime, and the same signal often reaches both (`pkill -INT keploy`, a
 // container stop). Cancelled at once, the agent closed the streams the client
 // was still draining, and what its parsers still held from before the stop
 // was lost with it.
-func SetSignalHold(hold func(stopNow <-chan struct{})) {
+func SetSignalHold(hold func()) {
 	if hold == nil {
 		signalHold.Store(nil)
 		return
@@ -444,22 +446,10 @@ func NewCtx() context.Context {
 		}
 
 		// What the process still does for someone else (SetSignalHold)
-		// finishes before the cancel; a second signal cuts it short.
+		// finishes before the cancel; a repeated signal does not cut it
+		// short (holdUntilDone).
 		if h := signalHold.Load(); h != nil {
-			stopNow := make(chan struct{})
-			held := make(chan struct{})
-			go func() {
-				defer close(held)
-				(*h)(stopNow)
-			}()
-			select {
-			case <-held:
-			case sig2 := <-sigs:
-				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
-				MarkInterruptedAgain()
-				close(stopNow)
-				<-held
-			}
+			holdUntilDone(ctx, *h, sigs)
 		}
 
 		// After the hold, before the hooks and the cancel: see
@@ -506,6 +496,47 @@ func NewCtx() context.Context {
 	}()
 
 	return ctx
+}
+
+// holdUntilDone runs hold, what the process still does for someone else, and
+// returns once it has: the first stop signal's cancel waits on it. A signal
+// that comes while it runs is counted (MarkInterruptedAgain) and said, and
+// cuts nothing short. The wait ends on events alone: hold returns (the
+// agent's recording client has closed its streams, or dropped them as it
+// died), or the root context is cancelled some other way (ExecCancel: the
+// agent's stop over its API, its escalation signal). The process then stops
+// as that asked, and the wait no longer holds up its stop; hold ends with the
+// streams it waits on.
+//
+// One stop can arrive twice. An agent a non-root CLI starts with `sudo -n`
+// runs under sudo, and `sudo pkill -INT -f keploy` signals the agent, and
+// sudo, which hands its own copy on: the copy comes as the first does, or, if
+// sudo or the agent is starved or frozen, any time later. Taken for a second
+// Ctrl+C, it cut the agent's hold short, and the agent closed the frame
+// streams its recording's client was still draining: what the client had not
+// received yet was lost, and the recording failed. No time tells a copy from
+// a second signal, as Go gives a signal's sender to no one. And none is
+// needed: the user's Ctrl+C reaches the CLI, not the agent (it runs in a
+// process group of its own); a second one there ends the CLI's drain, which
+// closes the streams this hold waits on; and a CLI that must stop the agent
+// regardless asks it over its API, or escalates (DieOnEscalation).
+func holdUntilDone(ctx context.Context, hold func(), sigs <-chan os.Signal) {
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		hold()
+	}()
+	for {
+		select {
+		case <-held:
+			return
+		case <-ctx.Done():
+			return
+		case sig2 := <-sigs:
+			fmt.Printf("Signal received again: %s; Keploy stops once its client has saved what it still holds for it (to stop sooner, stop the keploy command it serves)\n", sig2)
+			MarkInterruptedAgain()
+		}
+	}
 }
 
 // notifyHangups has a hang-up stop keploy as SIGTERM does: NewCtx takes the
