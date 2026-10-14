@@ -3531,6 +3531,12 @@ func TestRunTestSet_ASetAnInterruptedTemplatizeLeftIsRefused(t *testing.T) {
 		res.TemplateFailures[0].Where != "test set test-set-0" || !strings.Contains(res.TemplateFailures[0].Why, steps) || res.FailureInfo.Risk != models.High {
 		t.Fatalf("test-1's result %+v; want FAILED, refused, at test set test-set-0, with the steps, HIGH", res)
 	}
+	// A refused set is no template variable's failure: its own category, so
+	// a report or dashboard grouping by category does not file it there.
+	if !slices.Equal(res.FailureInfo.Category, []models.FailureCategory{models.TestSetRefused}) ||
+		!slices.Equal(res.Result.FailureInfo.Category, []models.FailureCategory{models.TestSetRefused}) {
+		t.Fatalf("test-1's categories %v (result %v); want only TEST_SET_REFUSED", res.FailureInfo.Category, res.Result.FailureInfo.Category)
+	}
 	if len(rep.Tests) != 1 || rep.Tests[0].TestCaseID != "test-1" || rep.HighRisk != 1 {
 		t.Fatalf("the set's report holds %d result(s), high risk %d; want test-1's, high risk 1", len(rep.Tests), rep.HighRisk)
 	}

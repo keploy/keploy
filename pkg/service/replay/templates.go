@@ -550,7 +550,7 @@ func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID str
 	utils.LogError(r.logger, refusalError(refusals), "failed the test without sending it",
 		zap.String("testcase", tc.Name),
 		zap.String("next_step", nextStepRefused))
-	res := r.refusedResult(testSetID, tc, reportRefusals(refusals))
+	res := r.refusedResult(testSetID, tc, reportRefusals(refusals), models.TemplateVariable)
 	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
 		utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
 		return err
@@ -559,8 +559,11 @@ func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID str
 }
 
 // refusedResult is the result of a test case refused unsent, with failures,
-// each a refusal, as its template failures (failRefusedTest).
-func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures []models.TemplateFailure) *models.TestResult {
+// each a refusal, as its template failures, graded HIGH and filed under
+// category: TEMPLATE_VARIABLE for a placeholder the test case cannot run with
+// (failRefusedTest), TEST_SET_REFUSED for a set keploy refused whole
+// (refuseInterruptedSet).
+func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures []models.TemplateFailure, category models.FailureCategory) *models.TestResult {
 	now := time.Now().UTC()
 	res := &models.TestResult{
 		Kind:             tc.Kind,
@@ -586,7 +589,8 @@ func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures
 	default:
 		res.Req = tc.HTTPReq
 	}
-	markTemplateFailures(&res.Result)
+	res.Result.FailureInfo.Category = appendCategoryUnique(res.Result.FailureInfo.Category, category)
+	res.Result.FailureInfo.Risk = models.High
 	res.FailureInfo.Risk, res.FailureInfo.Category = res.Result.FailureInfo.Risk, res.Result.FailureInfo.Category
 	return res
 }
@@ -605,7 +609,8 @@ type interruptedSets interface {
 // recording, so a run would replay a set nobody wrote. The error names each
 // file left and the steps that put the set in one state, the steps keploy
 // templatize prints. It is logged once, and each test case of the set gets a
-// FAILED result refused unsent with it as the reason (refusedResult), so
+// FAILED result refused unsent with it as the reason (refusedResult, filed
+// under TEST_SET_REFUSED: no template variable failed), so
 // every report format, the run's totals and --must-pass read the set as
 // failed and refused: none of its test cases is removed. It reports whether
 // it refused the set. Any other error of the store's (a set directory it
@@ -633,7 +638,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	}}
 	results := make([]models.TestResult, 0, len(testCases))
 	for _, tc := range testCases {
-		res := r.refusedResult(testSetID, tc, refusal)
+		res := r.refusedResult(testSetID, tc, refusal, models.TestSetRefused)
 		if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
 			utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
 			return true, err

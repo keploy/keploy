@@ -390,6 +390,11 @@ const (
 	// placeholder it cannot run with, and never sent.
 	// TestResult.TemplateFailures names each place and why.
 	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
+	// TestSetRefused means keploy refused the test case's whole test set and
+	// ran none of it: an interrupted keploy templatize left the set
+	// half-written. The set's failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files and what to do.
+	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.
