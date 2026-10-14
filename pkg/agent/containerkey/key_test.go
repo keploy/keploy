@@ -9,11 +9,10 @@ import (
 
 func TestKeyStringAndParseRoundTrip(t *testing.T) {
 	for _, k := range []Key{
-		{Image: "postgres:16-alpine", Port: 5432, N: 1},
-		{Image: "localstack/localstack:3.8", Port: 4566, N: 2},
-		{Image: "localhost:5000/team/app:1.2", Port: 8080, N: 10},
-		{Image: "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Port: 6379, N: 1},
-		{Image: "redis:7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Port: 6379, N: 3},
+		{Repo: "postgres", Port: 5432, Fingerprint: "0123456789ab"},
+		{Repo: "localstack/localstack", Port: 4566, Fingerprint: "ffffffffffff"},
+		{Repo: "localhost:5000/team/app", Port: 8080, Fingerprint: "a1b2c3d4e5f6"},
+		{Repo: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Port: 6379, Fingerprint: "000000000000"},
 	} {
 		s := k.String()
 		got, err := Parse(s)
@@ -24,8 +23,39 @@ func TestKeyStringAndParseRoundTrip(t *testing.T) {
 			t.Fatalf("Parse(%q) = %+v, want %+v", s, got, k)
 		}
 	}
-	if got := (Key{Image: "postgres:16", Port: 5432, N: 1}).String(); got != "container:postgres:16:5432#1" {
+	if got := (Key{Repo: "postgres", Port: 5432, Fingerprint: "0123456789ab"}).String(); got != "container:postgres:5432@0123456789ab" {
 		t.Fatalf("String() = %q", got)
+	}
+}
+
+// KeyOf names a container by its repository, port and fingerprint: another
+// tag of the image is the same key; a container whose configuration is not
+// read yet has none.
+func TestKeyOfIsTheRepositoryPortAndFingerprint(t *testing.T) {
+	a, ok := KeyOf(Container{ID: "c1", Image: "postgres:15", Port: 5432, Fingerprint: "0123456789ab"})
+	b, _ := KeyOf(Container{ID: "c2", Image: "docker.io/library/postgres:16", Port: 5432, Fingerprint: "0123456789ab"})
+	if !ok || a != b || a.String() != "container:postgres:5432@0123456789ab" {
+		t.Fatalf("KeyOf = %v %v, %v", a, ok, b)
+	}
+	if _, ok := KeyOf(Container{ID: "c3", Image: "postgres:16", Port: 5432}); ok {
+		t.Fatal("a container whose configuration is unread has a key")
+	}
+}
+
+// A listing names a container by its key, or, while its configuration is
+// unread, by its repository and port with no fingerprint, which Parse refuses
+// as a key: it names no recording.
+func TestLabelIsTheKeyOrTheRepositoryAndPort(t *testing.T) {
+	read := Container{ID: "c1", Image: "postgres:16", Port: 5432, Fingerprint: "aaaaaaaaaaaa"}
+	if got := Label(read); got != "container:postgres:5432@aaaaaaaaaaaa" {
+		t.Fatalf("Label = %q", got)
+	}
+	unread := Container{ID: "c1", Image: "postgres:16", Port: 5432}
+	if got := Label(unread); got != "container:postgres:5432" {
+		t.Fatalf("Label = %q", got)
+	}
+	if _, err := Parse(Label(unread)); err == nil {
+		t.Fatal("an unread container's label parsed as a key")
 	}
 }
 
@@ -33,16 +63,17 @@ func TestParseRefusesWhatIsNotAKey(t *testing.T) {
 	for _, s := range []string{
 		"",
 		"127.0.0.1:5432",
-		"container:postgres:16:5432",    // no #n
-		"container:postgres:16:5432#0",  // numbers start at 1
-		"container:postgres:16:5432#01", // not as String writes it
-		"container:postgres:16:5432#x",
-		"container:postgres#1",          // no port
-		"container::5432#1",             // no image
-		"container:postgres:0#1",        // no port 0
-		"container:postgres:65536#1",    // not a port
-		"container:postgres:05432#1",    // not as String writes it
-		"container:postgres:16:5432#-1", // negative
+		"container:postgres:16:5432#1",          // the first format's number
+		"container:postgres:5432",               // no fingerprint
+		"container:postgres:5432@",              // empty fingerprint
+		"container:postgres:5432@0123456789",    // too short
+		"container:postgres:5432@0123456789abc", // too long
+		"container:postgres:5432@0123456789AB",  // not as String writes it
+		"container:postgres@0123456789ab",       // no port
+		"container::5432@0123456789ab",          // no repository
+		"container:postgres:0@0123456789ab",     // no port 0
+		"container:postgres:65536@0123456789ab",
+		"container:postgres:05432@0123456789ab",
 	} {
 		if _, err := Parse(s); !errors.Is(err, ErrNotKey) {
 			t.Fatalf("Parse(%q) error = %v, want ErrNotKey", s, err)
@@ -85,7 +116,7 @@ func TestRepositoryDropsTagAndDigest(t *testing.T) {
 	if got := Repository("sha256:0123456789abcdef"); got != "sha256:0123456789abcdef" {
 		t.Fatalf("Repository of an image ID = %q, want the ID", got)
 	}
-	if got := (Key{Image: "redis:7", Port: 6379, N: 1}).Repository(); got != "redis" {
+	if got := (Key{Repo: "redis", Port: 6379, Fingerprint: "0123456789ab"}).Repository(); got != "redis" {
 		t.Fatalf("Key.Repository() = %q", got)
 	}
 }
@@ -97,8 +128,8 @@ func TestRecordedReadsTheMockMetadata(t *testing.T) {
 	if _, ok := Recorded(&models.Mock{}); ok {
 		t.Fatal("a mock without metadata has a key")
 	}
-	m := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{MetadataKey: "container:redis:7:6379#1"}}}
-	if k, ok := Recorded(m); !ok || k != "container:redis:7:6379#1" {
+	m := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{MetadataKey: "container:redis:6379@0123456789ab"}}}
+	if k, ok := Recorded(m); !ok || k != "container:redis:6379@0123456789ab" {
 		t.Fatalf("Recorded = %q, %v", k, ok)
 	}
 }

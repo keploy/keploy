@@ -101,8 +101,10 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	// result means the single candidate matched.
 	// Under the proven switch the destination is compared as every HTTP
 	// call's is, and no path segment or query value is relaxed for its shape
-	// (strict.go). The verdict only counts a flag: the engine serves the
-	// recorded epoch either way (async.Engine.decideServe), as a lane the
+	// (strict.go). The live call here carries no connection, so it is
+	// compared as a call that reached no container (sameDestination). The
+	// verdict only counts a flag: the engine serves
+	// the recorded epoch either way (async.Engine.decideServe), as a lane the
 	// user declared asks.
 	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
 	if err != nil {

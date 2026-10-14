@@ -154,10 +154,9 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 			},
 		}
 		// A capture never passes the sync manager, which stamps every other
-		// recorded mock with its connection's container key (containerkey).
-		if key, ok := containerkey.FromContext(ctx); ok {
-			captured.Spec.Metadata[containerkey.MetadataKey] = key
-		}
+		// recorded mock with its connection's container (containerkey): its
+		// key, instance and scope, as a recorded mock carries them.
+		containerkey.StampFromContext(ctx, captured)
 		appendCaptured(captured)
 	}
 	return true, nil

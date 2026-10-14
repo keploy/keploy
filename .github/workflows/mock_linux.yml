@@ -22,9 +22,10 @@ name: Mock Mode Regression (Linux)
 # consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
 # agent's PID map holds between two calls and asserts both are recorded, then
 # replayed without reaching the dependency. Another records, under the
-# proven switch, three containers of one image on random published ports and
-# asserts each call's mock names its container (the suite's #1, each test's
-# own #2), again with new containers on new ports, and for one test alone.
+# proven switch, three containers of one image, configured apart, on random
+# published ports and asserts each call's mock names its container by its
+# key (repository, port and configuration's fingerprint), the same again with
+# new containers on new ports, and for one test alone.
 # Another holds more LIVE processes than the agent's PID map holds while a
 # call is made, and asserts record keeps nothing and replay fails, both saying
 # the agent could not track a process (and the pid_map_overflow job runs the
@@ -50,8 +51,8 @@ name: Mock Mode Regression (Linux)
 # (an id an app mints) through its dependency calls under the proven switch,
 # and asserts a read-back of another id fails with the variable as evidence.
 # Another replays keploy #4686's request-drift app under the proven switch and
-# asserts a call to another host fails naming it, while a container's key is
-# recorded.
+# asserts a call to another host or container fails naming it, while a
+# container configured the same on a new random port is matched by its key.
 on:
   workflow_call:
     inputs:
@@ -157,7 +158,7 @@ jobs:
       # Container keys, without the switch: a recording made without it
       # carries none. (Its switched half runs in mock_linux_proven: the proven
       # model names a dependency that runs in a container by the container,
-      # container:<image>:<port>#<n>, the suite's #1 and each test's own #2,
+      # container:<repository>:<port>@<fingerprint of its configuration>,
       # the same on new ports or for one test alone.)
       - name: Run mock-mode container-keys e2e
         env:
@@ -427,11 +428,11 @@ jobs:
   # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
   # request-drift app: its response never shows where or what its dependency
   # call sent, so only the call can show it. Replayed under the switch, a call
-  # to another authority (another host, or a container on another random
-  # port) or with another body value must fail the test naming the field, and
-  # a recording of a container carries its key; without the switch every case
-  # passes, as on main. Its own job: the mock-mode job above is near its
-  # timeout.
+  # to another host, to a container configured otherwise or of another
+  # repository, or with another body value must fail the test naming the
+  # field, while a container configured the same on a new random port is
+  # matched by its key; without the switch every case passes, as on main. Its
+  # own job: the mock-mode job above is near its timeout.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}

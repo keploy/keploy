@@ -7,8 +7,8 @@
 #     project's network), and
 #   - under `docker run`, by its container name on a user network,
 # must record each of the app's calls with the dependency's container key:
-#   container:python:3.11-alpine:9411#1
-# (the dependency's image is not the app's, so a key naming the app fails)
+#   container:python:9411@<fingerprint of its configuration>
+# (the dependency's port is not the app's, so a key naming the app fails)
 # and a record without the switch has none, and gives the agent no list.
 # (`keploy mock` refuses docker commands under the switch in this release, so
 # this lane records with `keploy record`. compose-dep-retry-linux.sh's last
@@ -207,10 +207,23 @@ expect_keys() {
   diff -u keys.want keys.txt || { echo "FAIL: $what"; FAIL=1; }
 }
 
-want="container:$DEP_IMAGE:9411#1"
+# dep_key WHAT: the key both /price mocks carry, which must be the
+# dependency's: its repository (no tag), its port and its configuration's
+# fingerprint. It fails (1) otherwise: run in a command substitution, it
+# cannot set FAIL itself, so its caller does.
+dep_key() {
+  local k
+  k=$(keys_of | awk '{ print $2 }' | sort -u)
+  echo "$k"
+  if ! grep -qxE "container:${DEP_IMAGE%%:*}:9411@[0-9a-f]{12}" <<<"$k"; then
+    echo "FAIL: $1: the /price mocks carry '$k', want one key of the dependency's port 9411" >&2
+    return 1
+  fi
+}
 
 echo "== 1. record a compose project under the proven switch =="
 LISTED="ckc-dep-$ID" KEPLOY_LANE_LOG=/w/compose.log record compose 1 "docker compose up" "ckc-app-$ID"
+want=$(dep_key "compose") || FAIL=1
 expect_keys "the compose dependency was not recorded with its container's key" \
   "/price/aapl $want" "/price/msft $want"
 cleanup
@@ -219,6 +232,7 @@ echo "== 2. record a docker run app under the proven switch =="
 sudo docker network create "ckn-$ID" >/dev/null || { echo "FAIL: cannot create the network"; exit 1; }
 sudo docker run -d --name "ckd-dep-$ID" --network "ckn-$ID" -v "$PWD:/w:z" -w /w "$DEP_IMAGE" python dep.py >/dev/null || { echo "FAIL: cannot start the dependency"; exit 1; }
 record run 1 "docker run --rm --name ckd-app-$ID --network ckn-$ID -p $PORT:8080 -v $PWD:/w:z -w /w -e DEP_URL=http://ckd-dep-$ID:9411 -e LISTED=ckd-dep-$ID -e KEPLOY_LANE_LOG=/w/run.log $IMAGE python app.py" "ckd-app-$ID"
+want=$(dep_key "docker run") || FAIL=1
 expect_keys "the docker run dependency was not recorded with its container's key" \
   "/price/aapl $want" "/price/msft $want"
 cleanup

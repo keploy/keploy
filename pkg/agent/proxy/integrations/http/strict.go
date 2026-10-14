@@ -3,9 +3,11 @@ package http
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
@@ -15,31 +17,74 @@ import (
 // "every call keploy mocks is held"): a recorded request answers a live one
 // only when it went to the same place.
 //
-// The place is the authority the client sent: the Host header, or the URL's
-// host for a request without one, with its port. Two upstreams behind one
-// address (a gateway or LocalStack routing by virtual host) are two places,
-// and so are two services that share a path ("/v1/charge" on two hosts). The
-// authority is compared as sent, lowercased: "example.com" and
-// "example.com:80", or a name with a trailing dot, are not one place. The
-// same app and configuration send the same bytes in record and replay; a
-// configuration that changes them misses, naming the host.
+// The place is the container the request reached, by its container key
+// (containerkey: repository, container port and the container's own
+// configuration), when the live call and the recording both reached a
+// container: a container on a random published port (Testcontainers) is the
+// same place across runs while its address is not, and a container of
+// another version of the image is the same dependency. Behind one container
+// the hostname the client sent must agree too (a gateway or LocalStack
+// routing by virtual host), unless either side reached it by an IP literal
+// or as localhost, which say nothing of where it routes.
 //
-// The container a request reached is not compared yet. Its key (package
-// containerkey) is recorded on the mock, but it numbers an image's
-// containers by their first use, which concurrent first uses can swap. Until
-// the key names a container by its own configuration instead, a container
-// reached on a port Docker publishes at random (Testcontainers) is another
-// authority each run, and its recordings miss under the switch.
+// A container's key names no recording where it cannot tell containers
+// apart: two containers configured the same, both used in one scope, live
+// (containerkey.Withheld) or in the recording (RecordedAmbiguous); or a
+// container whose configuration could not be read. Such a call matches no
+// recording of a container, and such a recording answers no call, by key or
+// by address: Docker can give a container this run the port another one had
+// in the recording, so an address says nothing of which container it is.
+// (A recording made without keys, which names no container, is compared by
+// its authority, as every call to it is.)
+//
+// Otherwise (a recording made without keys, a destination that is no
+// container) the place is the authority the client sent: the Host header,
+// or the URL's host for a request without one, with its port, lowercased.
+// Two upstreams behind one address are two places, and so are two services
+// that share a path. "example.com" and "example.com:80", or a name with a
+// trailing dot, are not one place: the same app and configuration send the
+// same bytes in record and replay.
 
 // destination is where an HTTP request went, as the strict matcher compares
-// it: its authority, lowercased.
+// it.
 type destination struct {
+	// host is the authority, lowercased.
 	host string
+	// container: the request reached a container (live: the keyer named its
+	// connection's destination; recorded: the mock carries its container's
+	// instance). key is that container's key, "" when it names no
+	// recording: withheld live, ambiguous or unreadable in the recording.
+	container bool
+	key       string
 }
 
-// liveDestination is where the live request goes: the authority it sent.
-func liveDestination(input *req) destination {
+// liveDestKey carries, on a request's context, its destination as decode
+// read it when the request came (withLiveDestination).
+type liveDestKey struct{}
+
+// withLiveDestination is ctx carrying d, the destination of the request it is
+// matched for: every later reading of it (each recording compared, the
+// variable pass, the miss report) sees the one read once, when the request
+// came, in the scope open then.
+func withLiveDestination(ctx context.Context, d destination) context.Context {
+	return context.WithValue(ctx, liveDestKey{}, d)
+}
+
+// liveDestination is where the live request goes: the one decode read when
+// the request came (withLiveDestination), or else the container key of its
+// connection's destination (containerkey.StateFromContext: a use of the
+// container in the scope open now) and the authority it sent.
+func liveDestination(ctx context.Context, input *req) destination {
+	if d, ok := ctx.Value(liveDestKey{}).(destination); ok {
+		return d
+	}
 	d := destination{}
+	switch key, st := containerkey.StateFromContext(ctx); st {
+	case containerkey.Keyed:
+		d.container, d.key = true, key
+	case containerkey.Withheld:
+		d.container = true
+	}
 	if input.header != nil {
 		d.host = input.header.Get("Host")
 	}
@@ -50,12 +95,21 @@ func liveDestination(input *req) destination {
 	return d
 }
 
-// recordedDestination is where a recorded request went: its recorded
-// authority (models.Mock.RecordedDestination). A recording whose authority
-// cannot be read (no Host, a path-only URL: an HTTP/1.0 call without one) is
-// at "", which only a live call that sent none matches.
+// recordedDestination is where a recorded request went: its container, by
+// its key unless the recording's key is ambiguous (two containers configured
+// the same answered one scope of it), and its recorded authority
+// (models.Mock.RecordedDestination). A recording whose authority cannot be
+// read (no Host, a path-only URL: an HTTP/1.0 call without one) is at "",
+// which only a live call that sent none matches.
 func recordedDestination(m *models.Mock) destination {
-	d := destination{}
+	d := destination{container: containerkey.RecordedContainer(m)}
+	if d.container && !containerkey.Default.RecordedAmbiguous(m) {
+		if key, ok := containerkey.Recorded(m); ok {
+			if _, err := containerkey.Parse(key); err == nil {
+				d.key = key
+			}
+		}
+	}
 	if host, ok := m.RecordedDestination(); ok {
 		d.host = strings.ToLower(host)
 	}
@@ -63,19 +117,72 @@ func recordedDestination(m *models.Mock) destination {
 }
 
 // sameDestination reports whether a recorded request went where the live one
-// goes: to the same authority.
+// goes: to the same container, under the same virtual host, when both
+// reached a container; to the same authority when neither did, when only the
+// recording did and it names its container by a key (a fixed-port
+// dependency CI runs natively), or when only the live call did (a recording
+// made without keys, which says nothing of containers). A recording whose
+// container its key cannot name (ambiguous, or unreadable) answers no call:
+// by address it could be any container Docker gave that address.
 func sameDestination(live, rec destination) bool {
+	switch {
+	case rec.container && rec.key == "":
+		return false
+	case live.container && rec.container:
+		return live.key != "" && live.key == rec.key && sameVirtualHost(live.host, rec.host)
+	}
 	return live.host == rec.host
 }
 
+// sameVirtualHost reports whether two authorities name the same host behind
+// one container: their hostnames, without ports (the key names the port), are
+// equal, or both are addresses (an IP literal or localhost), which name no
+// virtual host: a container reached at another address or random port.
+func sameVirtualHost(a, b string) bool {
+	ha, hb := hostOnly(a), hostOnly(b)
+	return ha == hb || (isAddress(ha) && isAddress(hb))
+}
+
+// isAddress reports whether a host is an address, not a name: empty, an IP
+// literal, or localhost. A name under .localhost (api.localhost) is a name:
+// a gateway on this host routes by it.
+func isAddress(h string) bool {
+	if h == "" || h == "localhost" {
+		return true
+	}
+	_, err := netip.ParseAddr(h)
+	return err == nil
+}
+
 // destinationDiff is the field difference a report shows when the closest
-// recording went elsewhere, nil when it went to live: "host", the authority.
+// recording went elsewhere, nil when it went to live: "container" when the
+// recording's container is named by no key, or both reached a container and
+// the keys differ (or the live one's names none); "host" when the authority
+// (or, behind one container, the virtual host) does.
 func destinationDiff(live destination, m *models.Mock) []models.MockFieldDiff {
 	rec := recordedDestination(m)
 	if sameDestination(live, rec) {
 		return nil
 	}
-	return []models.MockFieldDiff{{Path: "host", Kind: models.DiffKindValueChanged, Expected: rec.host, Actual: live.host}}
+	diff := func(path, expected, actual string) []models.MockFieldDiff {
+		return []models.MockFieldDiff{{Path: path, Kind: models.DiffKindValueChanged, Expected: expected, Actual: actual}}
+	}
+	// The container differs: the recording's names none by its key, or both
+	// reached one and their keys differ (or the live one's names none).
+	if rec.container && (rec.key == "" || live.container && live.key != rec.key) {
+		expected, actual := rec.key, live.key
+		if expected == "" {
+			expected = "a container the recording does not name by its configuration (another configured the same answered its scope, or its configuration was not read)"
+		}
+		switch {
+		case !live.container:
+			actual = "no container: the call went to " + live.host
+		case actual == "":
+			actual = "a container keploy does not name by its configuration (another configured the same is in use, or its configuration was not read)"
+		}
+		return diff("container", expected, actual)
+	}
+	return diff("host", rec.host, live.host)
 }
 
 // sameDestinationMocks are the mocks recorded for live's destination.
@@ -99,7 +206,7 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // connection took the recording first; comparedPool is the set the miss
 // report says was compared.
 func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
-	live := liveDestination(input)
+	live := liveDestination(ctx, input)
 	var fits []*models.Mock
 	var closest *models.Mock
 	var closestDiffs []strictField
@@ -147,11 +254,12 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 }
 
 // routeMatches reports whether a recording that differs by diffs is of the
-// live request's route: the same method, destination (host) and path.
+// live request's route: the same method, destination (host or container)
+// and path.
 func routeMatches(diffs []strictField) bool {
 	for _, d := range diffs {
 		switch d.diff.Path {
-		case "method", "host", "path":
+		case "method", "host", "container", "path":
 			return false
 		}
 	}

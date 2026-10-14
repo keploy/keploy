@@ -749,9 +749,12 @@ func (r containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, e
 	return r.c, dst.String() == r.addr, nil
 }
 
-func (containerAt) Bind(context.Context)               {}
-func (containerAt) Watch(context.Context, *zap.Logger) {}
-func (containerAt) Endpoint() string                   { return "unix:///fake.sock" }
+func (containerAt) Bind(context.Context)                               {}
+func (containerAt) Watch(context.Context, *zap.Logger)                 {}
+func (containerAt) Endpoint() string                                   { return "unix:///fake.sock" }
+func (containerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (containerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (containerAt) AwaitReadsOf(context.Context, []string)             {}
 
 // probeSaw is what a parser saw of its connection's container key while the
 // proxy served it: through its context, and on a mock of its connection.
@@ -802,7 +805,7 @@ func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
 			upstream := keepAliveHTTPUpstream(t)
 			saved := containerkey.Default
 			containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
-				c: containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566}})
+				c: containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: "0123456789ab"}})
 			t.Cleanup(func() { containerkey.Default = saved })
 
 			cfg := config.New()
@@ -835,15 +838,23 @@ func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
 
 			want := ""
 			if on {
-				want = "container:localstack/localstack:3.8:4566#1"
+				want = "container:localstack/localstack:4566@0123456789ab"
 			}
 			if saw.fromCtx != want || saw.stamped != want {
 				t.Fatalf("while open, the parser's context carried %q and its connection's mock was stamped %q, want %q", saw.fromCtx, saw.stamped, want)
 			}
+			// A mock handed over after the connection closed is still
+			// stamped; a new session forgets the connection.
 			m := &models.Mock{ConnectionID: saw.connID}
 			containerkey.Default.Stamp(m)
+			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != want {
+				t.Fatalf("after the connection closed the keyer stamped %q, want %q", got, want)
+			}
+			containerkey.Default.Reset()
+			m = &models.Mock{ConnectionID: saw.connID}
+			containerkey.Default.Stamp(m)
 			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != "" {
-				t.Fatalf("after the connection closed the keyer still stamped %q", got)
+				t.Fatalf("after a new session the keyer still stamped %q", got)
 			}
 		})
 	}
@@ -860,15 +871,18 @@ func (s *sessionIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool,
 	return c, ok, nil
 }
 
-func (s *sessionIndex) Bind(context.Context)               { s.binds.Add(1) }
-func (s *sessionIndex) Watch(context.Context, *zap.Logger) { s.watches.Add(1) }
-func (*sessionIndex) Endpoint() string                     { return "unix:///fake.sock" }
+func (s *sessionIndex) Bind(context.Context)                             { s.binds.Add(1) }
+func (s *sessionIndex) Watch(context.Context, *zap.Logger)               { s.watches.Add(1) }
+func (*sessionIndex) Endpoint() string                                   { return "unix:///fake.sock" }
+func (*sessionIndex) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (*sessionIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (*sessionIndex) AwaitReadsOf(context.Context, []string)             {}
 
 // Only under the proven switch does the agent bind its reading of Docker to
 // its life, and a session start (Record, Mock) index the local daemon's
-// containers and number them afresh. Without the switch the proxy never
-// touches the index: no watch of the daemon (its goroutines, its connection,
-// its messages) and the numbering left as it was.
+// containers and start their scopes afresh. Without the switch the proxy
+// never touches the index: no watch of the daemon (its goroutines, its
+// connection, its messages) and the scopes left as they were.
 func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
@@ -878,8 +892,8 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 				t.Setenv("KEPLOY_PROVEN", "")
 			}
 			idx := &sessionIndex{at: map[string]containerkey.Container{
-				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432},
-				"172.17.0.3:5432": {ID: "b", Image: "postgres:16", Port: 5432},
+				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"},
+				"172.17.0.3:5432": {ID: "b", Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"},
 			}}
 			saved := containerkey.Default
 			containerkey.Default = containerkey.NewKeyer(idx)
@@ -899,19 +913,25 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 				// container keys' start, which is what is checked here.
 				"Mock": func() { _ = p.Mock(ctx, models.OutgoingOptions{}) },
 			}
+			use := func(connID, dst string) containerkey.State {
+				containerkey.Default.Name(nil, connID, dst)
+				_, st := containerkey.StateFromContext(containerkey.WithConn(ctx, containerkey.Default, connID))
+				containerkey.Default.Forget(connID)
+				return st
+			}
 			for _, name := range []string{"Record", "Mock"} {
 				containerkey.Default.Reset()
-				_, a, _ := containerkey.Default.Name(nil, "a", "172.17.0.2:5432")
-				containerkey.Default.Forget("a")
+				a := use("a", "172.17.0.2:5432")
 				sessions[name]()
-				_, b, _ := containerkey.Default.Name(nil, "b", "172.17.0.3:5432")
-				containerkey.Default.Forget("b")
-				want := "container:postgres:16:5432#2" // numbered after a, in the same session
+				// b is configured as a is: in a's scope it cannot be told
+				// apart from it, in a new session's it can.
+				b := use("b", "172.17.0.3:5432")
+				want := containerkey.Withheld
 				if on {
-					want = "container:postgres:16:5432#1" // a new session
+					want = containerkey.Keyed
 				}
-				if a != "container:postgres:16:5432#1" || b != want {
-					t.Fatalf("around %s: a was %q and b %q, want b %q", name, a, b, want)
+				if a != containerkey.Keyed || b != want {
+					t.Fatalf("around %s: a was %v and b %v, want b %v", name, a, b, want)
 				}
 			}
 			wantBinds, wantWatches := int32(0), int32(0)

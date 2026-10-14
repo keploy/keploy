@@ -407,7 +407,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		// literal. It is this call's evidence when the call is to the mock's
 		// route: its destination (strict.go), method and URL path, a segment
 		// it declares a variable's aside.
-		if !sameRoute(live, rec, m) || !sameDestination(liveDestination(input), recordedDestination(m)) {
+		if !sameRoute(live, rec, m) || !sameDestination(liveDestination(ctx, input), recordedDestination(m)) {
 			return nil, nil
 		}
 		return nil, &varProblem{
@@ -614,7 +614,7 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 // variables are checked at their places apart from it, so a noise entry over
 // a variable's place never excuses a wrong value there.
 func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	return len(strictDiff(asRecorded, liveDestination(asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
+	return len(strictDiff(asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
 // pickHit chooses the hit that answers: the first of hits, and among the

@@ -9,20 +9,35 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
 // Default is the agent's keyer: the proxy names each connection with it, the
-// scope routes open and close its test scopes, and the sync manager stamps
-// recorded mocks with it.
+// scope routes open and close its test scopes, the sync manager stamps
+// recorded mocks with it, and the agent tells it, from each test set's mocks,
+// which recorded keys are ambiguous.
 var Default = NewKeyer(newDockerIndex())
 
 // resolver finds the container behind a destination from its index, without
 // waiting on anything. err says the daemon cannot be read.
 type resolver interface {
 	Lookup(dst netip.AddrPort) (c Container, ok bool, err error)
+	// Fingerprint is container id's fingerprint, waiting while the index is
+	// reading it; ok is false when the index does not hold it, or ctx ends.
+	Fingerprint(ctx context.Context, id string) (fp string, ok bool)
+	// Pending says whether a container could be at dst by the index (none
+	// is at a docker-mode agent's loopback, the app container's own), and
+	// which containers it is placing now: ones an event started or moved,
+	// whose addresses it does not hold yet. It never waits.
+	Pending(dst netip.AddrPort) (placing []string, could bool)
+	// AwaitReadsOf waits until none of the containers ids is still being
+	// placed, or ctx ends: a container Docker started a moment before a
+	// connection to it was accepted is then placed. Placing a container
+	// never waits for its configuration's read.
+	AwaitReadsOf(ctx context.Context, ids []string)
 	// Bind makes ctx, the agent's own, the bound of the index's reading of
 	// Docker, so it stops with the agent.
 	Bind(ctx context.Context)
@@ -33,45 +48,145 @@ type resolver interface {
 	Endpoint() string
 }
 
-// Keyer numbers container destinations and holds each open container
-// connection's key.
+// State is what the keyer says of a connection's destination when a call on
+// it is matched.
+type State int
+
+const (
+	// NotContainer: the destination is no container the index holds.
+	NotContainer State = iota
+	// Keyed: the destination is a container named by its key.
+	Keyed
+	// Withheld: the destination is a container, but its key names it for no
+	// recording: another container configured the same (the same key) is in
+	// use in the scope, or its configuration could not be read. Its calls
+	// match no recording of a container, by key or by address.
+	Withheld
+)
+
+// Keyer names container destinations and holds each open container
+// connection's container.
 //
-// A key's number counts the image's containers by their first connection
-// within the scope (design §3.1): the open test, or, outside tests, the
-// instance, which is the test process that claimed the run (one at a time in
-// this release). Each instance starts from the numbers given before the run's
-// first claim, so a test process numbers the same whether the processes
-// before it ran or not. A test scope starts from the numbers its instance
-// gave before the test began, so a container the suite set up keeps its
-// number inside every test, and one the test starts itself is numbered after
-// it: the same in a run of that one test as in a run of all of them.
+// A key names a container by its repository, port and configuration (Key),
+// which do not depend on the order the tests start or use containers in.
+// Two containers configured the same have one key, and cannot be told apart:
+// where both are used in one scope (the open test, or, outside tests, the
+// instance: the test process that claimed the run), the keyer withholds the
+// key from every use of either from then on, and a recording whose scope used
+// two such containers is ambiguous for the matcher (RecordedAmbiguous), so a
+// call to either misses rather than takes the other's answer. A scope starts
+// with no container used: a container the suite set up and one a test starts
+// configured the same are told apart only where one scope uses both.
 //
-// A connection is named once, when the proxy accepts it, from the index, in
-// the scope open then; the key holds for the connection's life and goes when
-// it closes (Forget). Nothing waits: a connection to a container the index
-// has not read yet (one Docker started a moment before) is named by its
-// address, as without the switch.
+// A connection is named when the proxy accepts it, from the index, which
+// never waits on Docker; its key is taken at its first use (a call matched,
+// a mock stamped), waiting, if it must, for the index's read of its
+// container's configuration.
 type Keyer struct {
 	mu sync.Mutex
 	// res is the index: the local daemon's, or, in a docker-mode agent, the
 	// list its CLI gives it (UsePushed).
 	res resolver
-	// run numbers the containers outside tests: the instance's, or the
-	// run's before its first claim; test, while a test is open, numbers that
-	// test's. unclaimed is the run's numbers at its first claim, which each
-	// instance starts from; nil before it.
-	run, test, unclaimed *numbering
-	// conns holds each open container connection's key, by the connection ID
-	// its mocks carry.
-	conns map[string]string
+	// run is the scope outside tests: the instance's, or the run's before
+	// its first claim; test, while a test is open, that test's.
+	run, test *scope
+	// scopes counts the scopes this session began, for their tokens.
+	scopes int
+	// spans are the session's scopes, in the order they began, with when
+	// they began and ended: Stamp files a recorded mock under the scope its
+	// request was sent in, which may have ended by the time it is stamped.
+	spans []span
+	// conns holds each connection's container, by the connection ID its
+	// mocks carry, while it is open and for the closed ones a late mock may
+	// still be stamped for (closed, oldest first, at most keptClosed).
+	conns  map[string]Container
+	closed []string
+	// unplaced holds the open connections to a destination where a
+	// container could be (a loopback, private, link-local or unspecified
+	// address, couldBeContainer, by the index: Pending) that the index did
+	// not place when they were accepted: each is looked up again once, at
+	// its first use (or at its accept, in a run whose mock.real lists
+	// container: entries: Placed), after the containers the index was
+	// placing at its accept are placed, so a container Docker started a
+	// moment before is still named.
+	unplaced map[string]*pendingConn
+	// recorded is, for the test set the agent was given, the recorded
+	// groups (a key in one scope) whose mocks came from two or more
+	// containers: SetRecorded.
+	recorded map[recordedGroup]bool
 	// warned: this session already said Docker cannot be read.
 	warned bool
+	// session bounds what waits for a container's configuration outside a
+	// call (Stamp): the keyer's own, from one Watch (a session's start) to
+	// the next, or Reset, within the agent's (bound, Bind's); nil before a
+	// session. endSession ends it.
+	session    context.Context
+	endSession context.CancelFunc
+	bound      context.Context
 }
+
+// pendingConn is an open connection the index did not place at its accept
+// (Keyer.unplaced).
+type pendingConn struct {
+	ap netip.AddrPort
+	// placingAtAccept is the containers the index was placing at the
+	// accept: its first use waits for those only.
+	placingAtAccept []string
+	// lookedUp closes when its one look-up again is over; nil until its
+	// first use begins one.
+	lookedUp chan struct{}
+}
+
+// keptClosed bounds how many closed connections a keyer keeps for mocks
+// stamped after their connection closed.
+const keptClosed = 4096
+
+// scope is one scope: its token, and the containers used in it, by key.
+type scope struct {
+	token string
+	used  map[string]map[string]bool
+}
+
+// span is when a scope was open; to is zero while it is. test says whether it
+// is a test's scope, which wins over the run's it began in.
+type span struct {
+	token    string
+	from, to time.Time
+	test     bool
+}
+
+// recordedGroup is the mocks of one key in one recorded scope.
+type recordedGroup struct{ key, scope string }
 
 // NewKeyer is a keyer that asks res, which is never nil, which destinations
 // are containers.
 func NewKeyer(res resolver) *Keyer {
-	return &Keyer{res: res, run: newNumbering(), conns: map[string]string{}}
+	k := &Keyer{res: res, conns: map[string]Container{}, unplaced: map[string]*pendingConn{}}
+	k.run = k.beginLocked(false, time.Now())
+	return k
+}
+
+// beginLocked starts a scope at, as a test's when test; k.mu is held.
+func (k *Keyer) beginLocked(test bool, at time.Time) *scope {
+	k.scopes++
+	s := &scope{token: "s" + strconv.Itoa(k.scopes), used: map[string]map[string]bool{}}
+	k.spans = append(k.spans, span{token: s.token, from: at, test: test})
+	return s
+}
+
+// endLocked ends scope s's span at; k.mu is held.
+func (k *Keyer) endLocked(s *scope, at time.Time) {
+	if s == nil {
+		return
+	}
+	for i := len(k.spans) - 1; i >= 0; i-- {
+		if k.spans[i].token == s.token {
+			if k.spans[i].to.IsZero() {
+				k.spans[i].to = at
+			}
+			return
+		}
+	}
 }
 
 // Watch starts reading Docker for a session, if k can, and returns once the
@@ -82,8 +197,40 @@ func NewKeyer(res resolver) *Keyer {
 func (k *Keyer) Watch(ctx context.Context, logger *zap.Logger) {
 	k.mu.Lock()
 	res := k.res
+	k.endSessionLocked()
+	parent := k.bound
+	if parent == nil {
+		parent = context.Background()
+	}
+	// The session's own context, not ctx: ctx may be the request that
+	// started the session (the replay's), which ends as soon as it is
+	// answered.
+	k.session, k.endSession = context.WithCancel(parent)
 	k.mu.Unlock()
 	res.Watch(ctx, logger)
+}
+
+// endSessionLocked ends the session's context, if one is open: what waits
+// in it for a container's configuration (Stamp) stops. k.mu is held.
+func (k *Keyer) endSessionLocked() {
+	if k.endSession != nil {
+		k.endSession()
+		k.endSession = nil
+	}
+}
+
+// sessionCtx is the context of the session open now, which bounds a wait
+// for a container's configuration that no call bounds (Stamp): a read that
+// never ends, or a docker-mode agent whose list never comes, holds a parser
+// no longer than its session (to the next session's start, or the agent's
+// end).
+func (k *Keyer) sessionCtx() context.Context {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.session == nil {
+		return context.Background()
+	}
+	return k.session
 }
 
 // Bind makes ctx, the agent's own, the bound of k's reading of Docker, so it
@@ -92,28 +239,33 @@ func (k *Keyer) Watch(ctx context.Context, logger *zap.Logger) {
 func (k *Keyer) Bind(ctx context.Context) {
 	k.mu.Lock()
 	res := k.res
+	k.bound = ctx
 	k.mu.Unlock()
 	res.Bind(ctx)
 }
 
 // Reset starts a new session (a record or a replay of one test set): every
-// number goes, and so does every connection the last session left open.
+// scope goes, and so does every connection the last session left open. What
+// SetRecorded said of the test set's mocks stays: the agent is given the
+// set's mocks around the session's start, in either order.
 func (k *Keyer) Reset() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.run, k.test, k.unclaimed, k.conns, k.warned = newNumbering(), nil, nil, map[string]string{}, false
+	k.scopes, k.spans, k.test = 0, nil, nil
+	k.run = k.beginLocked(false, time.Now())
+	k.conns, k.closed, k.unplaced, k.warned = map[string]Container{}, nil, map[string]*pendingConn{}, false
+	k.endSessionLocked()
 }
 
-// BeginInstance starts a test process's numbering outside its tests, when it
-// claims the run: from the numbers the run gave before its first claim, not
-// from what the processes before it numbered.
+// BeginInstance starts a test process's scope outside its tests, when it
+// claims the run.
 func (k *Keyer) BeginInstance() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.unclaimed == nil {
-		k.unclaimed = k.run.clone()
-	}
-	k.run, k.test = k.unclaimed.clone(), nil
+	now := time.Now()
+	k.endLocked(k.test, now)
+	k.endLocked(k.run, now)
+	k.run, k.test = k.beginLocked(false, now), nil
 }
 
 // BeginTest opens a test's scope; a scope already open is replaced, since a
@@ -121,21 +273,30 @@ func (k *Keyer) BeginInstance() {
 func (k *Keyer) BeginTest() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.test = k.run.clone()
+	now := time.Now()
+	k.endLocked(k.test, now)
+	k.test = k.beginLocked(true, now)
 }
 
 // EndTest closes the open test's scope: connections from here on are the
-// run's again.
+// run's again, in a scope of their own until the next test (the setup
+// between two tests is a scope, not the run's whole time outside tests: a
+// suite that starts one container per test, configured the same, does not
+// make them ambiguous by the traffic of its fixtures).
 func (k *Keyer) EndTest() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	now := time.Now()
+	k.endLocked(k.test, now)
 	k.test = nil
+	k.endLocked(k.run, now)
+	k.run = k.beginLocked(false, now)
 }
 
 // Name names the connection connID, accepted for the address the proxy dials
-// (ip:port), in the scope open now, when the index knows its destination as
-// a container, and returns the container and key. It never waits, and logs
-// only after letting go of k.
+// (ip:port), when the index knows its destination as a container, and
+// returns the container and, when its configuration is in, its key. It never
+// waits, and logs only after letting go of k.
 //
 // When Docker cannot be read, the connection is named by its address and the
 // session says so once: its container destinations are then compared by
@@ -147,7 +308,11 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 	if err != nil {
 		return Container{}, "", false
 	}
-	got, key, ok, warn := k.name(connID, ap)
+	got, ok, warn := k.name(connID, ap)
+	key := ""
+	if kk, in := KeyOf(got); ok && in {
+		key = kk.String()
+	}
 	if logger == nil {
 		return got, key, ok
 	}
@@ -168,13 +333,13 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 		}
 	}
 	if ok {
-		logger.Debug("named a container destination", zap.String("destination", ap.String()), zap.String("containerKey", key))
+		logger.Debug("named a container destination", zap.String("destination", ap.String()), zap.String("containerKey", key), zap.String("image", got.Image))
 	}
 	return got, key, ok
 }
 
 // Lookup is the container dst (ip:port) reaches by the index, read with no
-// effect on k: no number is given, no key held, and nothing said, so a caller
+// effect on k: no connection is held, no key used, and nothing said, so a caller
 // that only asks, before the proxy accepts and names the connection (the
 // handshake hold), changes nothing Name later gives or says. err says the
 // daemon cannot be read.
@@ -189,8 +354,23 @@ func (k *Keyer) Lookup(dst string) (Container, bool, error) {
 	return res.Lookup(ap)
 }
 
+// Placed is the container connection connID reaches: the one Name gave it,
+// or the one its look-up again finds (place), after the containers the index
+// was placing at its accept are placed. It never waits for a container's
+// configuration, nor for a container started since. ok is false when the
+// connection reaches none, or ctx ends first.
+func (k *Keyer) Placed(ctx context.Context, connID string) (Container, bool) {
+	k.mu.Lock()
+	c, ok := k.conns[connID]
+	k.mu.Unlock()
+	if ok {
+		return c, true
+	}
+	return k.place(ctx, connID)
+}
+
 // name is Name under k.mu; warn is the error to tell, once per session.
-func (k *Keyer) name(connID string, ap netip.AddrPort) (got Container, key string, ok bool, warn error) {
+func (k *Keyer) name(connID string, ap netip.AddrPort) (got Container, ok bool, warn error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	got, ok, err := k.res.Lookup(ap)
@@ -199,20 +379,79 @@ func (k *Keyer) name(connID string, ap netip.AddrPort) (got Container, key strin
 			k.warned = true
 			warn = err
 		}
-		return Container{}, "", false, warn
+		return Container{}, false, warn
 	}
 	if !ok {
-		return Container{}, "", false, nil
+		if connID != "" && couldBeContainer(ap.Addr()) {
+			if placing, could := k.res.Pending(ap); could {
+				k.unplaced[connID] = &pendingConn{ap: ap, placingAtAccept: placing}
+			}
+		}
+		return Container{}, false, nil
 	}
-	s := k.run
-	if k.test != nil {
-		s = k.test
-	}
-	key = Key{Image: got.Image, Port: got.Port, N: s.number(got)}.String()
 	if connID != "" {
-		k.conns[connID] = key
+		k.conns[connID] = got
 	}
-	return got, key, true, nil
+	return got, true, nil
+}
+
+// couldBeContainer reports whether a container could be at a: a loopback
+// (a published port), private or link-local address (a container's own),
+// or an unspecified one.
+func couldBeContainer(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsUnspecified()
+}
+
+// place looks up again an open connection the index did not place when it
+// was accepted, once, at its first use (or Placed): after the containers the
+// index was placing at its accept are placed (not those started since, which
+// would hold every call while containers keep starting; nor any container's
+// configuration's read, which a container Docker holds can wedge), and names
+// it if the index places it now. A use while that look-up runs waits for it;
+// a later use takes its outcome.
+func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
+	k.mu.Lock()
+	p := k.unplaced[connID]
+	if p == nil {
+		// Placed by another use since this one looked (key), or never
+		// unplaced.
+		c, ok := k.conns[connID]
+		k.mu.Unlock()
+		return c, ok
+	}
+	if p.lookedUp != nil {
+		lookedUp := p.lookedUp
+		k.mu.Unlock()
+		select {
+		case <-lookedUp:
+		case <-ctx.Done():
+			return Container{}, false
+		}
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		c, ok := k.conns[connID]
+		return c, ok
+	}
+	p.lookedUp = make(chan struct{})
+	res := k.res
+	k.mu.Unlock()
+	if len(p.placingAtAccept) > 0 {
+		res.AwaitReadsOf(ctx, p.placingAtAccept)
+	}
+	got, ok, err := res.Lookup(p.ap)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	defer close(p.lookedUp)
+	if k.unplaced[connID] != p {
+		return Container{}, false // closed, or the session reset, meanwhile
+	}
+	delete(k.unplaced, connID)
+	if err != nil || !ok {
+		return Container{}, false
+	}
+	k.conns[connID] = got
+	return got, true
 }
 
 // endpoint names the Docker endpoint k reads, for messages.
@@ -223,25 +462,88 @@ func (k *Keyer) endpoint() string {
 	return res.Endpoint()
 }
 
-// Forget drops a connection that closed.
+// Forget marks a connection closed. Its container is kept for a mock stamped
+// late, until keptClosed connections closed after it.
 func (k *Keyer) Forget(connID string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	delete(k.conns, connID)
+	delete(k.unplaced, connID)
+	if _, ok := k.conns[connID]; !ok {
+		return
+	}
+	k.closed = append(k.closed, connID)
+	if len(k.closed) > keptClosed {
+		delete(k.conns, k.closed[0])
+		k.closed = k.closed[1:]
+	}
 }
 
-// key is the key of the open connection connID, "" for one that is not a
-// container.
-func (k *Keyer) key(connID string) string {
+// key is the key of connection connID's container, waiting, if it must, for
+// the index's read of its configuration; ok is false for a connection that
+// is no container's, and key is "" for a container whose configuration
+// could not be read.
+func (k *Keyer) key(ctx context.Context, connID string) (c Container, key string, ok bool) {
+	k.mu.Lock()
+	c, ok = k.conns[connID]
+	res := k.res
+	k.mu.Unlock()
+	if !ok {
+		if c, ok = k.place(ctx, connID); !ok {
+			return Container{}, "", false
+		}
+	}
+	if c.Fingerprint == "" {
+		fp, in := res.Fingerprint(ctx, c.ID)
+		if !in {
+			return c, "", true
+		}
+		c.Fingerprint = fp
+		k.mu.Lock()
+		if held, still := k.conns[connID]; still && held.ID == c.ID {
+			k.conns[connID] = c
+		}
+		k.mu.Unlock()
+	}
+	kk, _ := KeyOf(c)
+	return c, kk.String(), true
+}
+
+// use is a use of connection connID's destination in the scope open now:
+// its key, and whether the keyer gives it (Keyed) or withholds it.
+func (k *Keyer) use(ctx context.Context, connID string) (string, State) {
+	c, key, ok := k.key(ctx, connID)
+	switch {
+	case !ok:
+		return "", NotContainer
+	case key == "":
+		return "", Withheld
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.conns[connID]
+	s := k.run
+	if k.test != nil {
+		s = k.test
+	}
+	ids := s.used[key]
+	if ids == nil {
+		ids = map[string]bool{}
+		s.used[key] = ids
+	}
+	ids[c.ID] = true
+	if len(ids) > 1 {
+		return key, Withheld
+	}
+	return key, Keyed
 }
 
-// Stamp writes the key of the connection a recorded mock came from into its
-// metadata (MetadataKey). The sync manager stamps each mock as a parser hands
-// it over, while its connection is open. A mock of any other connection is
-// left as it is.
+// Stamp writes, into a recorded mock's metadata, the key of the container its
+// connection reached (MetadataKey), the container's instance (InstanceKey)
+// and the scope its request was sent in (ScopeKey): the matcher tells from
+// them whether two containers configured the same answered one scope's
+// calls (RecordedAmbiguous). A container whose configuration could not be
+// read is stamped with its instance and scope only: a container's, whose key
+// no call has. A mock of any other connection is left as it is. The sync
+// manager stamps each mock as a parser hands it over.
 func (k *Keyer) Stamp(m *models.Mock) {
 	if m == nil {
 		return
@@ -253,10 +555,33 @@ func (k *Keyer) Stamp(m *models.Mock) {
 	if id == "" {
 		return
 	}
-	key := k.key(id)
-	if key == "" {
+	k.stampConn(id, m)
+}
+
+// StampFromContext stamps m as Stamp does, for the connection ctx carries
+// (WithConn): a mock no parser hands the sync manager, such as a call served
+// from the real dependency on a miss and captured.
+func StampFromContext(ctx context.Context, m *models.Mock) {
+	ref, ok := ctx.Value(ctxKey{}).(connRef)
+	if !ok || ref.k == nil || m == nil {
 		return
 	}
+	ref.k.stampConn(ref.id, m)
+}
+
+// stampConn stamps m for connection id (Stamp).
+func (k *Keyer) stampConn(id string, m *models.Mock) {
+	c, key, ok := k.key(k.sessionCtx(), id)
+	if !ok {
+		return
+	}
+	at := m.Spec.ReqTimestampMock
+	if at.IsZero() {
+		at = time.Now()
+	}
+	k.mu.Lock()
+	scopeToken := k.scopeAtLocked(at)
+	k.mu.Unlock()
 	// A copy: a parser may hand several mocks one metadata map, and the
 	// outgoing stream may be encoding an earlier one while this one is
 	// stamped.
@@ -264,49 +589,32 @@ func (k *Keyer) Stamp(m *models.Mock) {
 	if md == nil {
 		md = map[string]string{}
 	}
-	md[MetadataKey] = key
+	if key != "" {
+		md[MetadataKey] = key
+	}
+	md[InstanceKey] = instanceToken(c.ID)
+	md[ScopeKey] = scopeToken
 	m.Spec.Metadata = md
 }
 
-// numbering is one scope's numbers: per image, each container's number, and
-// how many the image has.
-type numbering struct {
-	byImage map[string]*imageNumbers
-}
-
-type imageNumbers struct {
-	of    map[string]int // container ID -> its number
-	count int
-}
-
-func newNumbering() *numbering { return &numbering{byImage: map[string]*imageNumbers{}} }
-
-// number is c's number in this scope, giving it the image's next one on its
-// first connection here.
-func (s *numbering) number(c Container) int {
-	im := s.byImage[c.Image]
-	if im == nil {
-		im = &imageNumbers{of: map[string]int{}}
-		s.byImage[c.Image] = im
-	}
-	if n, ok := im.of[c.ID]; ok {
-		return n
-	}
-	im.count++
-	im.of[c.ID] = im.count
-	return im.count
-}
-
-func (s *numbering) clone() *numbering {
-	out := newNumbering()
-	for image, im := range s.byImage {
-		of := make(map[string]int, len(im.of))
-		for id, n := range im.of {
-			of[id] = n
+// scopeAtLocked is the token of the scope open at: the test's open then, else
+// the run's; k.mu is held. The spans are in the order they began, so it
+// reads them from the newest: a mock is stamped soon after its request.
+func (k *Keyer) scopeAtLocked(at time.Time) string {
+	for i := len(k.spans) - 1; i >= 0; i-- {
+		s := k.spans[i]
+		if s.from.After(at) {
+			continue
 		}
-		out.byImage[image] = &imageNumbers{of: of, count: im.count}
+		if s.test && !s.to.IsZero() && !at.Before(s.to) {
+			continue // a test that had ended: the run's span after it, or before
+		}
+		return s.token
 	}
-	return out
+	if len(k.spans) > 0 {
+		return k.spans[0].token // sent before the session began
+	}
+	return ""
 }
 
 // noDaemonSaid: this agent said at Info that it found no Docker daemon.
@@ -326,15 +634,24 @@ func WithConn(ctx context.Context, k *Keyer, connID string) context.Context {
 	return context.WithValue(ctx, ctxKey{}, connRef{k: k, id: connID})
 }
 
-// FromContext is the container key of the connection a parser serves, if its
-// destination is a container and the proven switch is on.
-func FromContext(ctx context.Context) (string, bool) {
+// StateFromContext is a use, in the scope open now, of the destination of
+// the connection a parser serves: its container's key, and whether the keyer
+// gives it. It may wait for the index's read of the container's
+// configuration, at most as long as ctx.
+func StateFromContext(ctx context.Context) (string, State) {
 	ref, ok := ctx.Value(ctxKey{}).(connRef)
 	if !ok || ref.k == nil {
-		return "", false
+		return "", NotContainer
 	}
-	key := ref.k.key(ref.id)
-	return key, key != ""
+	return ref.k.use(ctx, ref.id)
+}
+
+// FromContext is the container key of the connection a parser serves, if its
+// destination is a container the keyer gives a key (StateFromContext) and
+// the proven switch is on.
+func FromContext(ctx context.Context) (string, bool) {
+	key, st := StateFromContext(ctx)
+	return key, st == Keyed
 }
 
 // parseAddrPort reads ip:port, IPv6 in brackets, an IPv4-mapped IPv6 address

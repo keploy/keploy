@@ -39,10 +39,11 @@ type MockedRow struct {
 	// Addr is the address the call was made to.
 	Addr string `json:"addr" yaml:"addr"`
 	// Container names a container destination by its container key
-	// (container:<image>:<containerPort>#<n>, containerkey), the name its
-	// recording carries: the image it was created from, its own port, and
-	// its number among that image's containers in the scope. Empty for any
-	// other destination.
+	// (container:<repository>:<containerPort>@<fingerprint>, containerkey),
+	// the name its recording carries: its image's repository, its own port,
+	// and its configuration's fingerprint; without @<fingerprint> while
+	// keploy has not read its configuration. Empty for any other
+	// destination.
 	Container string `json:"container,omitempty" yaml:"container,omitempty"`
 	// PID and Exe are a host listener's process and its program; zero and
 	// "" for a container, for a destination nothing listens at (a recorded

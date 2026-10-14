@@ -1797,8 +1797,8 @@ func bindContainerKeys(ctx context.Context) {
 }
 
 // startContainerKeys starts a session's container keys under the proven
-// switch: a fresh numbering, and the local daemon's containers indexed before
-// the app runs (containerkey). Without the switch it does nothing.
+// switch: fresh scopes, and the local daemon's containers indexed before the
+// app runs (containerkey). Without the switch it does nothing.
 func (p *Proxy) startContainerKeys(ctx context.Context) {
 	if provenswitch.On() {
 		containerkey.Default.Reset()
@@ -2417,15 +2417,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// below has waited for the parsers, so every mock they record is stamped
 	// first.
 	proven := provenswitch.On()
-	// ctrKey is the connection's container key (topology's MOCKED rows);
-	// containerRepo the image repository of the container it reaches, which
-	// a mock.real container: entry names (realdeps.go).
+	// ctrKey is the connection's container key, or its label while its
+	// configuration is unread (topology's MOCKED rows); containerRepo the
+	// image repository of the container it reaches, which a mock.real
+	// container: entry names (realdeps.go).
 	var ctrKey, containerRepo string
 	if proven {
 		connID := fmt.Sprint(clientConnID)
-		var c containerkey.Container
-		var ok bool
-		if c, ctrKey, ok = containerkey.Default.Name(p.logger, connID, dstAddr); ok {
+		if c, _, isContainer := containerkey.Default.Name(p.logger, connID, dstAddr); isContainer {
+			// Its key, or, while its configuration is unread, its
+			// repository and port: a container either way, never a host
+			// listener (containerkey.Label).
+			ctrKey = containerkey.Label(c)
 			containerRepo = containerkey.Repository(c.Image)
 		}
 		defer containerkey.Default.Forget(connID)

@@ -84,8 +84,12 @@ func TestServeOnMissAnswersWithTheFinalResponse(t *testing.T) {
 type containerAt string
 
 func (a containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
-	return containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566}, dst.String() == string(a), nil
+	return containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: "0123456789ab"}, dst.String() == string(a), nil
 }
+
+func (containerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (containerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (containerAt) AwaitReadsOf(context.Context, []string)             {}
 
 func (containerAt) Bind(context.Context)               {}
 func (containerAt) Watch(context.Context, *zap.Logger) {}
@@ -109,7 +113,7 @@ func TestServeOnMissCapturesTheContainerKey(t *testing.T) {
 		ctx  context.Context
 		want string
 	}{
-		{containerkey.WithConn(context.Background(), k, "c1"), "container:localstack/localstack:3.8:4566#1"},
+		{containerkey.WithConn(context.Background(), k, "c1"), "container:localstack/localstack:4566@0123456789ab"},
 		{context.Background(), ""}, // the switch off: no connection on the context
 	} {
 		reqBuf := []byte("GET /queue HTTP/1.1\r\nHost: dep.local\r\n\r\n")
@@ -136,6 +140,11 @@ func TestServeOnMissCapturesTheContainerKey(t *testing.T) {
 		mocks := DrainCaptured()
 		if len(mocks) != 1 || mocks[0].Spec.Metadata[containerkey.MetadataKey] != conn.want {
 			t.Fatalf("captured %+v, want one mock keyed %q", mocks, conn.want)
+		}
+		// Stamped as a recorded mock is: with its container's instance and
+		// scope, so a next run matches it by key.
+		if inst := mocks[0].Spec.Metadata[containerkey.InstanceKey]; (conn.want != "") != (inst != "") {
+			t.Fatalf("captured instance %q for key %q", inst, conn.want)
 		}
 	}
 }

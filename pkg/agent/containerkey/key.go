@@ -1,28 +1,40 @@
 // Package containerkey names a container destination the way the proven
-// model's recordings and matchers do (design §3.1): by the container, not by
-// the address the app happened to reach it at.
+// model's recordings and matchers do: by the container, not by the address
+// the app happened to reach it at.
 //
 // A dependency the tests reach through a container's published port, or at a
 // container's own IP, gets an address that changes from run to run:
 // Testcontainers publishes on a random host port, and Docker hands out
 // container IPs as it pleases. Its key does not change:
 //
-//	container:<image>:<containerPort>#<n>
+//	container:<repository>:<containerPort>@<fingerprint>
 //
-// <image> is the image reference the container was created from, in Docker's
-// short form with its tag (NormalizeImage); <containerPort> is the container's
-// own port; n numbers that image's containers by their first connection
-// within the scope, counting from 1 (Keyer). The agent names each connection
-// from an index of the local daemon's containers that Docker's event stream
-// keeps (dockerIndex), so naming never waits on Docker.
+// <repository> is the image the container was created from, without its tag
+// or digest, in Docker's short form (Repository): a container of another
+// version of the image (postgres:15 recorded, postgres:16 replayed) is the
+// same dependency. <containerPort> is the container's own port. <fingerprint>
+// names the container's own configuration (Fingerprint): its environment,
+// command, entrypoint and labels, apart from its image's defaults and from
+// the labels a tool gives each run (a Testcontainers session ID). Two
+// containers of one image configured differently are two dependencies, in
+// whatever order the tests start them. Two configured the same cannot be
+// told apart: where both are in use in one scope, neither is named by its key
+// (Keyer), so their calls miss rather than take each other's recordings.
+// (Founder decision 19 supersedes design §3.1's first-use number "#n", which
+// concurrent first uses could swap.)
 //
-// The key is recorded on the mock (its metadata, MetadataKey) and handed to
-// the parsers with the connection (FromContext). It is meant to stand in for
-// the address wherever a matcher compares one: in place of a compared Host or
-// :authority (S1) and in the learn step's operation key (L); nothing compares
-// it yet. A recording made without the proven switch, or of a destination
-// that is not a container, has no key, and is compared by its address as
-// before.
+// The agent names each connection from an index of the local daemon's
+// containers that Docker's event stream keeps (dockerIndex), so naming never
+// waits on Docker; a key waits only for its own container's configuration to
+// be read, when a call is matched or a mock stamped before the read is in.
+//
+// The key is recorded on the mock (its metadata, MetadataKey), with the
+// container's instance and the scope it was used in (InstanceKey,
+// ScopeKey), and handed to the parsers with the connection (FromContext).
+// It stands in for the address where a matcher compares one: S1 compares it
+// in place of the Host. A recording made without the proven switch, or of a
+// destination that is not a container, has no key, and is compared by its
+// address as before.
 package containerkey
 
 import (
@@ -40,6 +52,19 @@ import (
 // destination, do not have it.
 const MetadataKey = "containerKey"
 
+// InstanceKey and ScopeKey are the mock metadata fields that say which
+// container a mock of a container destination came from (an opaque token, not
+// its ID, the same for every mock of that container in one recording) and in
+// which scope it was used (an opaque token, the same for every mock of one
+// test, or of the run outside tests). A recording's mocks of one key from two
+// instances in one scope are of two containers configured the same, which
+// the key cannot tell apart (RecordedAmbiguity). A mock with an instance and
+// no key came from a container whose key could not be read.
+const (
+	InstanceKey = "containerInstance"
+	ScopeKey    = "containerScope"
+)
+
 // prefix starts every key, and every `container:` entry of mock.real.
 const prefix = "container:"
 
@@ -53,54 +78,77 @@ type Container struct {
 	Image string
 	// Port is the container's own port the connection reached.
 	Port uint16
+	// Fingerprint names the container's own configuration (Fingerprint); ""
+	// until the index has read it.
+	Fingerprint string
 }
 
 // Key is a parsed container key.
 type Key struct {
-	Image string
-	Port  uint16
-	// N numbers the image's containers within a scope, from 1.
-	N int
+	// Repo is the image's repository, in the form Repository gives.
+	Repo string
+	Port uint16
+	// Fingerprint names the container's own configuration (Fingerprint).
+	Fingerprint string
+}
+
+// Label names container c in a listing (the topology's mocked rows): its key,
+// or, while its configuration is unread, its repository and port without a
+// fingerprint (container:<repository>:<port>), which names no recording.
+func Label(c Container) string {
+	if k, ok := KeyOf(c); ok {
+		return k.String()
+	}
+	return prefix + Repository(c.Image) + ":" + strconv.Itoa(int(c.Port))
+}
+
+// KeyOf is c's key; ok is false while its configuration is unread.
+func KeyOf(c Container) (Key, bool) {
+	if c.Fingerprint == "" {
+		return Key{}, false
+	}
+	return Key{Repo: Repository(c.Image), Port: c.Port, Fingerprint: c.Fingerprint}, true
 }
 
 // String is the key as recordings and matchers carry it.
 func (k Key) String() string {
-	return prefix + k.Image + ":" + strconv.Itoa(int(k.Port)) + "#" + strconv.Itoa(k.N)
+	return prefix + k.Repo + ":" + strconv.Itoa(int(k.Port)) + "@" + k.Fingerprint
 }
 
-// Repository is the key's image without its tag or digest, which is what a
-// mock.real `container:<repo>` entry names.
-func (k Key) Repository() string { return Repository(k.Image) }
+// Repository is the key's repository, which is what a mock.real
+// `container:<repo>` entry names.
+func (k Key) Repository() string { return k.Repo }
 
 // ErrNotKey is what Parse returns for a string that is not a container key.
 var ErrNotKey = errors.New("not a container key")
 
-// Parse reads a key String wrote. An image reference has no '#', and its
-// last ':' before the '#' is the one String put before the port, so a tag
-// (postgres:16), a registry port (localhost:5000/app) or a digest never makes
-// the parse ambiguous.
+// Parse reads a key String wrote. A repository has no '@', and its last ':'
+// before the '@' is the one String put before the port, so a registry port
+// (localhost:5000/app) never makes the parse ambiguous. A key of the first
+// format ("container:<image>:<port>#<n>") is not one: its number named a
+// container by the order of first use, which this format replaced.
 func Parse(s string) (Key, error) {
 	rest, ok := strings.CutPrefix(s, prefix)
 	if !ok {
 		return Key{}, fmt.Errorf("%w: %q has no %q prefix", ErrNotKey, s, prefix)
 	}
-	hash := strings.LastIndexByte(rest, '#')
-	if hash < 0 {
-		return Key{}, fmt.Errorf("%w: %q has no #<n>", ErrNotKey, s)
+	at := strings.LastIndexByte(rest, '@')
+	if at < 0 {
+		return Key{}, fmt.Errorf("%w: %q has no @<fingerprint>", ErrNotKey, s)
 	}
-	n, err := strconv.Atoi(rest[hash+1:])
-	if err != nil || n < 1 || strconv.Itoa(n) != rest[hash+1:] {
-		return Key{}, fmt.Errorf("%w: %q has no number from 1 after its #", ErrNotKey, s)
+	fp := rest[at+1:]
+	if !isFingerprint(fp) {
+		return Key{}, fmt.Errorf("%w: %q has no fingerprint after its @", ErrNotKey, s)
 	}
-	colon := strings.LastIndexByte(rest[:hash], ':')
+	colon := strings.LastIndexByte(rest[:at], ':')
 	if colon <= 0 {
-		return Key{}, fmt.Errorf("%w: %q has no image and port", ErrNotKey, s)
+		return Key{}, fmt.Errorf("%w: %q has no repository and port", ErrNotKey, s)
 	}
-	port, err := strconv.ParseUint(rest[colon+1:hash], 10, 16)
-	if err != nil || port == 0 || strconv.FormatUint(port, 10) != rest[colon+1:hash] {
+	port, err := strconv.ParseUint(rest[colon+1:at], 10, 16)
+	if err != nil || port == 0 || strconv.FormatUint(port, 10) != rest[colon+1:at] {
 		return Key{}, fmt.Errorf("%w: %q has no port", ErrNotKey, s)
 	}
-	return Key{Image: rest[:colon], Port: uint16(port), N: n}, nil
+	return Key{Repo: rest[:colon], Port: uint16(port), Fingerprint: fp}, nil
 }
 
 // NormalizeImage writes an image reference the way Docker's short form does,
