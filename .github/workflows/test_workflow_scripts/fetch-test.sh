@@ -3,14 +3,16 @@
 #
 #   bash .github/workflows/test_workflow_scripts/fetch-test.sh
 #
-# No network: go, python3, git and (for the backoff case) sleep are stubs on
-# PATH that record how they were called and fail as a case says. Checked:
-# each subcommand retries what it should and still fails what persists; Go goes
-# through GOPROXY="https://proxy.golang.org|direct" unless the caller chose one;
-# a failure the pipe reports as the module origin's ("invalid version: git
-# ls-remote") is retried, a compile error is not; a clone starts every attempt
-# from an empty directory and never prints the credentials in its URL; pip gets
-# its idle timeout and resume setting; the backoff is attempt x 10 s.
+# No network: go, python3, git, docker and (for the backoff cases) sleep are
+# stubs on PATH that record how they were called and fail as a case says.
+# Checked: each subcommand retries what it should and still fails what
+# persists; Go goes through GOPROXY="https://proxy.golang.org|direct" unless the
+# caller chose one; a failure the pipe reports as the module origin's ("invalid
+# version: git ls-remote") is retried, a compile error is not; a clone starts
+# every attempt from an empty directory and never prints the credentials in its
+# URL; pip gets its idle timeout and resume setting; the backoff is attempt x
+# 10 s; and docker-build-retry.sh retries a build or pull that failed on a
+# fetch's transport on the same schedule, and nothing else.
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -157,6 +159,51 @@ for sub in modules pip; do
   else bad "backoff $sub" "rc=$rc sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
   rm -rf "$t"
 done
+
+echo "docker-build-retry.sh (a fetch inside an image build, an image pull):"
+# A docker that fails its first FAILURES builds or pulls printing MESSAGE, and
+# has no image locally; sleep records the waits. docker_build_retry exits the
+# shell it gives up in, so each case runs in a subshell.
+# dbr DIR FAILURES MESSAGE FUNCTION ARGS...: sets rc, leaves DIR/out.
+dbr() {
+  local dir=$1 failures=$2 msg=$3
+  shift 3
+  cat >"$dir/docker" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = image ] && exit 1
+echo "\$*" >>"$dir/docker.calls"
+n=\$(wc -l <"$dir/docker.calls")
+if [ "\$n" -le $failures ]; then cat "$dir/msg"; exit 1; fi
+exit 0
+STUB
+  printf '%s\n' "$msg" >"$dir/msg"
+  printf '#!/usr/bin/env bash\nprintf "%%s " "$1" >>"%s/sleeps"\n' "$dir" >"$dir/sleep"
+  chmod +x "$dir/docker" "$dir/sleep"
+  rc=0
+  (cd "$dir" && PATH="$dir:$PATH" && source "$HERE/docker-build-retry.sh" && "$@") >"$dir/out" 2>&1 || rc=$?
+}
+for c in \
+  "2|0|3|10 20 |$RESET|the keploy#4791 reset stream" \
+  "1|0|2|10 |  ERROR: Exception: ... pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Read timed out.|a pip read that timed out" \
+  "1|0|2|10 |go: reading https://proxy.golang.org/example.com/m/@v/list: 502 Bad Gateway|a proxy 5xx" \
+  "9|1|5|10 20 30 40 |$RESET|a reset that never clears, failed after 5 attempts" \
+  "9|1|1||$COMPILE|a compile error, on the first attempt" \
+  "9|1|1||./main.go:9:1: syntax error: unexpected EOF, expected }|a bare unexpected EOF (a syntax error), on the first attempt" \
+  "9|1|1||ERROR: Could not find a version that satisfies the requirement nosuchpkg==9.9|a missing pip package, on the first attempt"; do
+  IFS='|' read -r failures want_rc want_calls want_sleeps msg what <<<"$c"
+  t=$(mktemp -d)
+  dbr "$t" "$failures" "$msg" docker_build_retry docker build .
+  if [[ $rc == "$want_rc" && $(calls "$t/docker.calls") == "$want_calls" && "$(cat "$t/sleeps" 2>/dev/null)" == "$want_sleeps" ]]; then
+    ok "a build: $what (waits [${want_sleeps% }])"
+  else bad "build: $what" "rc=$rc calls=$(calls "$t/docker.calls") sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
+  rm -rf "$t"
+done
+t=$(mktemp -d)
+dbr "$t" 2 "Error response from daemon: Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout" docker_pull_retry alpine:3.20
+if [[ $rc == 0 && $(calls "$t/docker.calls") == 3 && "$(cat "$t/sleeps" 2>/dev/null)" == "10 20 " ]]; then
+  ok "an image pull that timed out is retried on the same schedule (waits [10 20])"
+else bad "pull" "rc=$rc calls=$(calls "$t/docker.calls") sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
+rm -rf "$t"
 
 echo "usage:"
 for args in "" "clone onlyurl" "modules a b" "go" "pip" "bogus"; do
