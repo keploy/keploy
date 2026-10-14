@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -55,6 +56,9 @@ func TestStrictMatchesOnlyARequestToTheRecordedHost(t *testing.T) {
 	}
 	if diag == nil || diag.phase != models.MatchPhaseSchema {
 		t.Fatalf("diag = %+v, want the schema phase", diag)
+	}
+	if diag.live == nil || diag.live.host != "c.example" {
+		t.Fatalf("the miss does not name where the call went: %+v", diag.live)
 	}
 
 	t.Setenv("KEPLOY_PROVEN", "")
@@ -129,5 +133,62 @@ func TestStrictDropsTheAutoDynamicPass(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	if got, _ := matchOnce(t, context.Background(), live, path); got != nil {
 		t.Fatalf("under the switch an id-shaped segment was relaxed: served %s", got.Name)
+	}
+}
+
+// Under the switch each destination's repeated recordings have a cursor of
+// their own: a call to one host never moves another host's turn, in the
+// strict pass (its pick: each recording's served mark).
+func TestStrictEachHostHasItsOwnCursor(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Unix(1_700_000_000, 0)
+	cm := func(name, host string, ts time.Time) *models.Mock {
+		m := onHost(name, "/counter", host)
+		m.TestModeInfo.Consume = models.ConsumeCursorSaturate
+		m.Spec.ReqTimestampMock = ts
+		return m
+	}
+	a1, a2 := cm("a1", "a.example", base), cm("a2", "a.example", base.Add(time.Second))
+	b1, b2 := cm("b1", "b.example", base.Add(2*time.Second)), cm("b2", "b.example", base.Add(3*time.Second))
+	db := &mockMemDb{mocks: []*models.Mock{a1, a2, b1, b2}, updateUnFilteredReturn: true}
+	h := newHTTP()
+	call := func(host string) string {
+		ok, stub, _, err := h.match(context.Background(), getTo("/counter", host), db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || !ok {
+			t.Fatalf("call to %s: ok=%v err=%v", host, ok, err)
+		}
+		return stub.Name
+	}
+	for i, want := range []struct{ host, name string }{{"a.example", "a1"}, {"b.example", "b1"}, {"a.example", "a2"}, {"b.example", "b2"}} {
+		if got := call(want.host); got != want.name {
+			t.Fatalf("call %d to %s served %s, want %s", i+1, want.host, got, want.name)
+		}
+	}
+
+	for _, pickWith := range []struct {
+		name string
+		pick func(group []*models.Mock, db *mockMemDb) (*models.Mock, func())
+	}{
+		{"the strict pass's pick", func(g []*models.Mock, db *mockMemDb) (*models.Mock, func()) { return h.strictCursorPick(g, db, true) }},
+	} {
+		t.Run(pickWith.name, func(t *testing.T) {
+			pickDb := &mockMemDb{}
+			pick := func(group ...*models.Mock) string {
+				m, commit := pickWith.pick(group, pickDb)
+				if commit != nil {
+					commit()
+				}
+				return m.Name
+			}
+			if got := pick(a1, a2); got != "a1" {
+				t.Fatalf("host a's first pick %s, want a1", got)
+			}
+			if got := pick(b1, b2); got != "b1" {
+				t.Fatalf("host b's first pick %s, want b1: host a's pick moved host b's cursor", got)
+			}
+			if got := pick(a1, a2); got != "a2" {
+				t.Fatalf("host a's second pick %s, want a2", got)
+			}
+		})
 	}
 }

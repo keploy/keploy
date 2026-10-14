@@ -405,9 +405,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	refuse := func(why string) (*varHit, *varProblem) {
 		// A declaration keploy cannot follow is refused, never served as
 		// literal. It is this call's evidence when the call is to the mock's
-		// route: its method and URL path, a segment it declares a variable's
-		// aside.
-		if !sameRoute(live, rec, m) {
+		// route: its destination (strict.go), method and URL path, a segment
+		// it declares a variable's aside.
+		if !sameRoute(live, rec, m) || !sameDestination(liveDestination(input), recordedDestination(m)) {
 			return nil, nil
 		}
 		return nil, &varProblem{
