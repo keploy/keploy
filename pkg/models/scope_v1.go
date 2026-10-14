@@ -138,7 +138,7 @@ type ScopeEvidence struct {
 	// Unread: keploy could not read everything the test did (its misses,
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
-	Unread bool `json:"unread,omitempty"`
+	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
