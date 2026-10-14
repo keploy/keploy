@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -655,4 +656,148 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 	require.Error(t, gp.KeepRealDeps(ctx, nil), "global passthrough is refused, kept or not")
 	t.Setenv(provenswitch.Env, "")
 	require.Error(t, fresh.KeepRealDeps(ctx, nil))
+}
+
+// In a record, a connect to a container: entry's container the index was
+// still placing at the handshake is dialled with no label. Refused, the app's
+// connect is answered at once, never held for the placing; the placing is
+// waited for off that path, and the open test's REAL row counts the failure
+// once it ends. One whose placing does not end is capture_incomplete: never a
+// silent miss.
+func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refused := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	for _, placed := range []bool{true, false} {
+		p := realProxy(t, []string{"container:redis"}, nil)
+		p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+		f := placingContainer{addr: refused, c: containerkey.Container{ID: "r", Image: "redis:7", Port: 6379},
+			placed: make(chan struct{}), awaiting: make(chan struct{}, 1)}
+		k := containerkey.NewKeyer(f)
+		session, end := context.WithCancel(context.Background())
+		k.Bind(session)
+		k.Watch(session, zap.NewNop())
+		containerkey.Default = k
+		resolved := make(chan struct{}, 1)
+		p.realDialResolved = func() { resolved <- struct{}{} }
+		p.realTracker.BeginTest()
+
+		// Answered at once: the decision returns before the placing ends.
+		d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+		require.Equal(t, synhold.Refuse, d.Outcome, "placed=%v", placed)
+		<-f.awaiting // the placing is waited for, off the decision's path
+		if placed {
+			close(f.placed)
+		} else {
+			end()
+		}
+		<-resolved
+		end()
+		uses, inc := p.realTracker.EndTest()
+		if placed {
+			require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses)
+			require.Empty(t, inc)
+			continue
+		}
+		require.Empty(t, uses)
+		require.Len(t, inc, 1)
+		require.Equal(t, refused, inc[0].Destination)
+		require.Contains(t, inc[0].Why, "could not place the containers there")
+	}
+}
+
+// A failed connect while Docker cannot be read, or where nothing is being
+// placed, is a dependency's: it charges nothing, and it is answered at once.
+func TestARefusedDialWithNothingBeingPlacedChargesNothing(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refused := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	for name, index := range map[string]*containerkey.Keyer{
+		"unreadable":      containerkey.NewKeyer(unreadableDocker{}),
+		"nothing placing": containerkey.NewKeyer(placingContainer{addr: "x", placed: closedChan(), awaiting: make(chan struct{}, 1)}),
+	} {
+		containerkey.Default = index
+		p := realProxy(t, []string{"container:redis"}, nil)
+		p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+		p.realDialResolved = func() { t.Errorf("%s: a failed connect was waited on", name) }
+		p.realTracker.BeginTest()
+		d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+		require.Equal(t, synhold.Refuse, d.Outcome, name)
+		uses, inc := p.realTracker.EndTest()
+		require.Empty(t, uses, name)
+		require.Empty(t, inc, name)
+	}
+}
+
+func closedChan() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}
+
+// placedOnPending is an index whose placing ends the moment its placings are
+// read: between the index being asked what it places and the destination
+// being looked up. Its wait never ends on its own.
+type placedOnPending struct{ placingContainer }
+
+func (f placedOnPending) Pending(dst netip.AddrPort) ([]string, bool) {
+	ids, could := f.placingContainer.Pending(dst)
+	select {
+	case <-f.placed:
+	default:
+		close(f.placed)
+	}
+	return ids, could
+}
+
+func (f placedOnPending) AwaitReadsOf(ctx context.Context, _ []string) {
+	f.awaiting <- struct{}{}
+	<-ctx.Done()
+}
+
+// A container whose placing ends just as a failed connect to it is decided
+// is found placed, and the failure counts at once: the placings are read
+// before the destination is looked up, so the end of one is never missed.
+func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refused := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	p := realProxy(t, []string{"container:redis"}, nil)
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+	f := placedOnPending{placingContainer{addr: refused, c: containerkey.Container{ID: "r", Image: "redis:7", Port: 6379},
+		placed: make(chan struct{}), awaiting: make(chan struct{}, 1)}}
+	k := containerkey.NewKeyer(f)
+	session, end := context.WithCancel(context.Background())
+	t.Cleanup(end)
+	k.Bind(session)
+	k.Watch(session, zap.NewNop())
+	containerkey.Default = k
+	p.realTracker.BeginTest()
+	d := p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, refused)})(context.Background(), appEnd, proxyEnd)
+	require.Equal(t, synhold.Refuse, d.Outcome)
+	uses, inc := p.realTracker.EndTest()
+	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses, "the failure was not counted when it was decided")
+	require.Empty(t, inc)
+}
+
+// A refused connect to a localhost entry's IPv4 loopback written the
+// dual-stack way ([127.0.0.1]:p) tries the other loopback family, as one
+// written 127.0.0.1:p does.
+func TestOtherLoopbackReadsADualStackDestination(t *testing.T) {
+	dec := realdeps.Decision{Verdict: realdeps.Real, Label: "localhost:5432"}
+	p := realProxy(t, []string{"localhost:5432"}, nil)
+	for _, dst := range []string{"127.0.0.1:5432", "[127.0.0.1]:5432"} {
+		other, ok := p.otherLoopback(dec, dst, syscall.ECONNREFUSED)
+		require.True(t, ok, dst)
+		require.Equal(t, "[::1]:5432", other, dst)
+	}
 }

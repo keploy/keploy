@@ -273,3 +273,78 @@ func TestATestLeftOpenGivesTheRunItsEvidence(t *testing.T) {
 	require.Len(t, run.Incomplete, 1)
 	require.Equal(t, "in the test left open", run.Incomplete[0].Why)
 }
+
+// A connect that failed while keploy could not yet tell whether its
+// destination is a mock.real container (the index still placing it) is a
+// finished event of the test it failed in, and only of it: told REAL while
+// that test is open, its REAL row counts the failure; that test ending first
+// is charged with it as capture_incomplete; no other test ever is. A
+// dependency's charges nothing. One that failed while no test was open, or
+// whose test never ended, is the run's.
+func TestAFailedConnectStillUndecidedIsChargedOnlyToItsTest(t *testing.T) {
+	tr := newTracker()
+	tr.BeginTest()
+	tr.FailedUndecided("127.0.0.1:6379")("container:redis", false)
+	uses, inc := tr.EndTest()
+	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, uses)
+	require.Empty(t, inc)
+
+	// Its test ends first: charged to it, never to the next.
+	tr.BeginTest()
+	resolve := tr.FailedUndecided("127.0.0.1:6379")
+	_, inc = tr.EndTest()
+	require.Len(t, inc, 1, "undecided when its test ended")
+	require.Contains(t, inc[0].Why, "not yet placed when the test ended")
+	tr.BeginTest()
+	_, inc = tr.EndTest()
+	require.Empty(t, inc, "a test that began after it failed is never charged")
+	tr.BeginTest()
+	resolve("container:redis", false)
+	uses, inc = tr.EndTest()
+	require.Empty(t, uses, "told REAL during a later test: not its")
+	require.Empty(t, inc)
+
+	tr.BeginTest()
+	tr.FailedUndecided("10.0.0.9:5432")("", false)
+	uses, inc = tr.EndTest()
+	require.Empty(t, uses, "a dependency's failed connect")
+	require.Empty(t, inc)
+
+	// Told unresolved while its test is open: that test's.
+	tr.BeginTest()
+	tr.FailedUndecided("10.0.0.9:6379")("", true)
+	_, inc = tr.EndTest()
+	require.Len(t, inc, 1)
+
+	// Failed between tests: the next test ending before the tell is not
+	// charged; told unresolved, or found untold by a read, it is the run's.
+	between := tr.FailedUndecided("10.0.0.8:6379")
+	tr.BeginTest()
+	_, inc = tr.EndTest()
+	require.Empty(t, inc, "a connect that failed between tests is no test's")
+	between("", true)
+	tr.FailedUndecided("10.0.0.7:6379")
+	run := tr.Run()
+	require.Len(t, run.Incomplete, 2)
+	require.Equal(t, "10.0.0.8:6379", run.Incomplete[0].Destination)
+	require.Contains(t, run.Incomplete[1].Why, "results were read")
+
+	// Its test never ended: told REAL during the next test, it does not
+	// count there.
+	tr.BeginTest()
+	left := tr.FailedUndecided("127.0.0.1:6379")
+	tr.BeginTest() // the last was left open
+	left("container:redis", false)
+	uses, inc = tr.EndTest()
+	require.Empty(t, uses, "a test that never ended keeps its failure off the next test's row")
+	require.Empty(t, inc)
+
+	// A new run drops the last run's failed connects.
+	old := tr.FailedUndecided("127.0.0.1:6379")
+	tr.Reset()
+	tr.BeginTest()
+	old("", true)
+	_, inc = tr.EndTest()
+	require.Empty(t, inc)
+	require.Empty(t, tr.Run().Incomplete)
+}
