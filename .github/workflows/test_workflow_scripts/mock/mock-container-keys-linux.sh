@@ -28,7 +28,7 @@ sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.ke
 
 if ! python3 -c "import pytest" 2>/dev/null; then
   python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
-  python3 -m pip install --quiet --disable-pip-version-check pytest
+  bash "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/fetch.sh" pip --quiet --disable-pip-version-check pytest
 fi
 
 RECORD_BIN="${RECORD_BIN:-keploy}"

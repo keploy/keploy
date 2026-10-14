@@ -265,14 +265,20 @@ Write-Host "Chosen container name: $containerName"
 #      clearing it. It is a mitigation, not a cure: a retry cannot
 #      manufacture pull budget.
 #
-# Only a rate limit is retried. Retrying every failure would turn a
-# genuine 30-second compile break into a multi-minute one and push the
-# compiler error far up the log, so anything else throws on attempt 1.
+# Two failures are retried, and nothing else: the rate limit above, and a
+# registry fetch inside the build that failed on the network -- the sample's
+# `go mod download` reset by proxy.golang.org ("stream error: stream ID 175;
+# INTERNAL_ERROR; received from peer", keploy#4791), or a pip download that
+# timed out. Their patterns are go-retry.ps1's transport set plus pip's, matched
+# on wording. Retrying every failure would turn a genuine 30-second compile
+# break into a multi-minute one and push the compiler error far up the log, so
+# anything else throws on attempt 1. The schedule is the lanes' shared fetch
+# rule (fetch.sh): at most 5 attempts, attempt x 10 s between them.
 function Invoke-DockerBuildWithRetry {
   param(
     [string[]]$BuildArgs = @('compose', 'build'),
-    [int]$MaxAttempts = 4,
-    [int]$InitialBackoffSec = 15
+    [int]$MaxAttempts = 5,
+    [int]$InitialBackoffSec = 10
   )
 
   $backoff = $InitialBackoffSec
@@ -318,17 +324,27 @@ function Invoke-DockerBuildWithRetry {
     # Match the wording, never a bare "429": those digits also appear in
     # ISO-8601 timestamps and layer byte counts in this same output, and
     # matching them would reclassify real breakage as a rate limit.
+    $fetchFailure = 'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|read "https?://[^"]*": unexpected EOF|ReadTimeoutError|incomplete-download|Max retries exceeded'
+    if ($output -match $fetchFailure -and $output -notmatch 'toomanyrequests|too\s+many\s+requests|pull\s+rate\s+limit|rate\s+limit\s+exceeded') {
+      if ($attempt -lt $MaxAttempts) {
+        $backoff = $InitialBackoffSec * $attempt
+        Write-Warning "A registry fetch inside the build failed on the network (exit $rc). Retrying in ${backoff}s…"
+        Start-Sleep -Seconds $backoff
+        continue
+      }
+      throw "docker $($BuildArgs -join ' ') failed after $MaxAttempts attempts: a registry fetch inside the build kept failing on the network (the last failure is above)."
+    }
     if ($output -match 'toomanyrequests|too\s+many\s+requests|pull\s+rate\s+limit|rate\s+limit\s+exceeded') {
       if ($attempt -lt $MaxAttempts) {
+        $backoff = $InitialBackoffSec * $attempt
         Write-Warning "Docker Hub pull rate limit hit (exit $rc). Retrying in ${backoff}s…"
         Start-Sleep -Seconds $backoff
-        $backoff = $backoff * 2
         continue
       }
       throw "docker $($BuildArgs -join ' ') failed after $MaxAttempts attempts: the Docker Hub pull rate limit (HTTP 429) did not clear. This is an infrastructure limit on the runner's egress IP, not a defect in the change under test."
     }
 
-    throw "docker $($BuildArgs -join ' ') failed with exit code $rc. The output above is the build error; this is not a Docker Hub rate limit, so it was not retried."
+    throw "docker $($BuildArgs -join ' ') failed with exit code $rc. The output above is the build error; it is neither a Docker Hub rate limit nor a registry fetch failing on the network, so it was not retried."
   }
 }
 

@@ -11,7 +11,7 @@ docker_compose_pull_retry
 docker compose up -d
 
 # Install dependencies
-python -m pip install -r requirements.txt
+FETCH_PYTHON=python bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip -r requirements.txt
 
 # Setup environment
 export PYTHON_PATH=./venv/lib/python3.10/site-packages/django

@@ -56,7 +56,7 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: pip install flask
+        run: bash .github/workflows/test_workflow_scripts/fetch.sh pip flask
 
       - id: record
         uses: ./.github/actions/download-binary

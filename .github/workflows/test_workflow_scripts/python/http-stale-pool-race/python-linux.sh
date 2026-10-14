@@ -52,8 +52,8 @@ trap cleanup EXIT
 cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/http-stale-pool-race"
 
 echo "=== install python deps ==="
-python -m pip install --upgrade pip >/dev/null
-python -m pip install -r requirements.txt
+FETCH_PYTHON=python bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip --upgrade pip >/dev/null
+FETCH_PYTHON=python bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip -r requirements.txt
 
 echo "=== generate keploy config ==="
 # Only when the sample does not ship one. `config --generate` used to do
