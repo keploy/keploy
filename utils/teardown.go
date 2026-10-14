@@ -34,7 +34,12 @@ type TeardownProgress struct {
 	// without a step is reported as work in progress (BeginTeardownWork).
 	Beat uint64 `json:"beat"`
 	// Busy says a stage the agent must not be killed in the middle of is in
-	// progress (BeginTeardownWork): no check counts as one without progress.
+	// progress and making progress (BeginTeardownWork): no check counts as one
+	// without progress. Where the agent sees a stage's progress (Linux,
+	// TeardownProgressSeen), a stage that has stopped making any -- wedged
+	// in a removal the kernel does not finish -- is not reported so, and its
+	// checks count like any other; elsewhere a stage counts as making
+	// progress until it ends.
 	Busy bool `json:"busy"`
 	// Steps says the agent records its teardown's steps (DeclareTeardownSteps),
 	// so a teardown that takes none is one that has stopped: only such an
@@ -43,6 +48,9 @@ type TeardownProgress struct {
 	// Done says the agent has detached everything it attached
 	// (MarkDetachDone): nothing a kill can cut short is left.
 	Done bool `json:"done"`
+	// Pid is the agent's own process id, by which a CLI that cannot kill it
+	// itself (sudo runs it as root) sees it has been killed and is dying.
+	Pid int `json:"pid,omitempty"`
 }
 
 // TeardownBeat is how often the reporter beats once the teardown has begun.
@@ -52,13 +60,9 @@ const TeardownBeat = time.Second
 var teardownBeat = TeardownBeat
 
 var (
-	teardownSeq atomic.Uint64
-	// teardownWorkMu orders the start of teardown work against the
-	// escalation's check that none is in progress (DieOnEscalation).
-	teardownWorkMu sync.Mutex
-	teardownWork   atomic.Int64
-	teardownSteps  atomic.Bool
-	teardownDone   atomic.Bool
+	teardownSeq   atomic.Uint64
+	teardownSteps atomic.Bool
+	teardownDone  atomic.Bool
 	// teardownKick wakes the reporter to write a step or the end at once.
 	teardownKick = make(chan struct{}, 1)
 )
@@ -79,37 +83,6 @@ func TeardownStep() {
 	kickTeardownReport()
 }
 
-// BeginTeardownWork records the start of a stage of the teardown the agent
-// must not be killed in the middle of, and which can take long without a
-// step: removing what it attached to the kernel, a CA tool rewriting a trust
-// store. While one is in progress the CLI counts no check as one without
-// progress (TeardownProgress.Busy). The stage's start and its end -- the
-// returned func, which ends it once however often it is called -- are each a
-// step.
-func BeginTeardownWork() (end func()) { return beginTeardownWork(nil) }
-
-// beginTeardownWork is BeginTeardownWork, whose end runs between (tests; nil
-// otherwise) after its step and before the work is over.
-func beginTeardownWork(between func()) (end func()) {
-	teardownWorkMu.Lock()
-	teardownWork.Add(1)
-	teardownWorkMu.Unlock()
-	TeardownStep()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			// The step before the work is over: a report, which loads Busy
-			// before Seq (snapshotTeardown), that reads the work as over
-			// reads this step too.
-			TeardownStep()
-			if between != nil {
-				between()
-			}
-			teardownWork.Add(-1)
-		})
-	}
-}
-
 // DeclareTeardownSteps says this agent records the steps of its whole
 // teardown (TeardownStep, BeginTeardownWork) through to MarkDetachDone, so
 // the CLI may take a teardown that takes none for one that has stopped, and
@@ -120,10 +93,6 @@ func DeclareTeardownSteps() {
 	teardownSteps.Store(true)
 	kickTeardownReport()
 }
-
-// TeardownBusy reports whether a stage of the teardown begun with
-// BeginTeardownWork is in progress: what the reporter writes as Busy.
-func TeardownBusy() bool { return teardownWork.Load() > 0 }
 
 // TeardownSteps returns how many teardown steps have been recorded
 // (TeardownStep): what the reporter writes as Seq.
@@ -297,12 +266,12 @@ func reportTeardownProgress(ctx context.Context, logger *zap.Logger, sink progre
 // reads the work as over reads the step that ended it too. It runs between
 // (tests; nil otherwise) after its load of Busy and before its load of Seq.
 func snapshotTeardown(beat uint64, between func()) TeardownProgress {
-	busy := teardownWork.Load() > 0
+	busy := progressingWork.Load() > 0
 	if between != nil {
 		between()
 	}
 	return TeardownProgress{Seq: teardownSeq.Load(), Beat: beat, Busy: busy,
-		Steps: teardownSteps.Load(), Done: teardownDone.Load()}
+		Steps: teardownSteps.Load(), Done: teardownDone.Load(), Pid: os.Getpid()}
 }
 
 // pathSink writes to a path the agent chose itself.
