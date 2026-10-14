@@ -1059,7 +1059,8 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, and the call's shape
+// the matcher's next step, when it happened, why it missed (the learn step's
+// reason, in record's full round), and the call's shape
 // (models.MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?". No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
@@ -1071,7 +1072,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned}
+		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.

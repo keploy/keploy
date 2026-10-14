@@ -259,6 +259,9 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
