@@ -421,15 +421,15 @@ func TestStart_TakesT0FromTheCaptureStartNotTheProcessStart(t *testing.T) {
 	 *
 	 * A send on f.incoming completes when the FORWARDER takes it, one
 	 * hop before the consumer -- so a single send proves nothing about
-	 * whether Start got past its own gate. `cancel()` could then beat
-	 * the `if ctx.Err() != nil` check that runs immediately after
-	 * GetTestAndMockChans returns (record.go, beside `captureStart`),
+	 * whether Start's consumers were running. `cancel()` could then beat
+	 * the `if ctx.Err() != nil` check that ran immediately after
+	 * GetTestAndMockChans returned (since removed: a stop there now drains),
 	 * and Start exited with context.Canceled before spawning a consumer
 	 * at all: no ports observed, no annotation, and the failure landed
 	 * on `require.NoError` below rather than on anything about T0.
 	 *
-	 * MEASURED at 8 runs in 400 (2%) under load, and deterministically
-	 * with a 200ms sleep inserted before that gate -- which is the
+	 * MEASURED, while that check existed, at 8 runs in 400 (2%) under load,
+	 * and deterministically with a 200ms sleep before it -- which is the
 	 * oracle this fix has to satisfy, because three green suite passes
 	 * at 2% are a coin flip, not evidence.
 	 *
@@ -486,7 +486,7 @@ func TestStart_TakesT0FromTheCaptureStartNotTheProcessStart(t *testing.T) {
 	 * THIS ASSERTION HAS NEVER BEEN THE ONE THAT FAILS. The flake in this
 	 * test was `require.NoError` on Start's return, 38 lines above,
 	 * reporting context.Canceled because the test's single send raced
-	 * Start's own gate; the three-send loop up there is the fix. Worth
+	 * Start's since-removed post-open check; the three-send loop up there is the fix. Worth
 	 * saying because the T0 comparison is the obvious suspect and is not
 	 * the culprit.
 	 */
@@ -1257,7 +1257,7 @@ func TestAPortIsObservedEvenWhenItsTestCaseFailsToPersist(t *testing.T) {
 	/*
 	 * NOT cancellable, deliberately. See the note at the close() below:
 	 * the failing insert is what ends this recording, and holding a
-	 * cancel func here is what lets a test race Start's own gate.
+	 * cancel func here is what let a test race Start's since-removed post-open check.
 	 */
 	ctx := context.Background()
 	done := make(chan error, 1)
@@ -1305,14 +1305,14 @@ func TestAPortIsObservedEvenWhenItsTestCaseFailsToPersist(t *testing.T) {
 	 * it into insertTestErrChan and Start's terminating select returns --
 	 * so this test never needed to cancel anything.
 	 *
-	 * Cancelling anyway raced Start's own gate. A send on f.incoming
+	 * Cancelling anyway raced Start's post-open check (since removed: a stop there now drains). A send on f.incoming
 	 * completes when the FORWARDER takes it, one hop before the consumer,
-	 * so `cancel()` could beat the `if ctx.Err() != nil` check that runs
-	 * just after GetTestAndMockChans returns. Start then exited with
+	 * so `cancel()` could beat the `if ctx.Err() != nil` check that ran
+	 * just after GetTestAndMockChans returned. Start then exited with
 	 * context.Canceled before spawning a consumer at all, the forwarder
 	 * wedged on its unconditional hand-off, and this test failed at
 	 * "Start did not return" after the full 30s drain. MEASURED at 1 run
-	 * in 200, and deterministically with a 200ms sleep before that gate.
+	 * in 200, and deterministically with a 200ms sleep before that check.
 	 *
 	 * Reordering the sends removed a DIFFERENT race on the
 	 * same line and left this one. TestNoTestCasePersistedLeavesNoPhantom
@@ -1328,12 +1328,12 @@ func TestAPortIsObservedEvenWhenItsTestCaseFailsToPersist(t *testing.T) {
 		 * Start ENDS ON THE INSERT ERROR, and that is the point: it
 		 * reports "error while inserting test case into db, hence
 		 * stopping keploy" rather than context.Canceled. A cancellation
-		 * here would mean the test had raced Start's own gate instead of
+		 * here would mean the test had raced Start's consumers starting instead of
 		 * exercising the insert-failure path it is named for.
 		 */
 		require.Error(t, err, "Start should end on the insert error")
 		require.NotErrorIs(t, err, context.Canceled,
-			"Start ended on cancellation, so this test raced its gate rather than "+
+			"Start ended on cancellation, so this test raced Start's consumers starting rather than "+
 				"exercising the insert-failure path")
 	case <-time.After(mappingIdleGrace + 10*time.Second):
 		t.Fatal("Start did not return")
@@ -1459,7 +1459,7 @@ func TestAPortIsObservedWhenTheInsertFailsDuringShutdown(t *testing.T) {
 	}
 
 	// The consumer is now parked inside the gated insert, which means it is
-	// past the observe() call site and Start is long past its gate. Both
+	// past the observe() call site and Start is long past its consumers starting. Both
 	// facts are what make the cancel below deterministic rather than a race.
 	select {
 	case <-testDB.entered:

@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -54,9 +55,22 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 		return w
 	}
 	w.reader = reader
-	// No deadline of its own (rule 15): the agent's answer, the connection's
-	// close or ctx ends it.
-	base, err := reader.GetCaptureLosses(ctx)
+	// No deadline of its own (rule 15): the agent's answer, or the
+	// connection's close, ends it. Not the stop: from here a stop drains what
+	// the agent captured (Start), and each test case it saves is checked
+	// against this count, so a stop that cut the read short would fail the
+	// recording the user stopped as "not verified". A second interrupt, which
+	// gives the drain up, ends it.
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRead()
+	go func() {
+		select {
+		case <-utils.StopNow():
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
+	base, err := reader.GetCaptureLosses(readCtx)
 	switch {
 	case errors.Is(err, models.ErrCaptureLossesUnsupported):
 		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))

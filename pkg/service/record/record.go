@@ -1963,10 +1963,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
-		case <-ctx.Done():
-			// Parent context cancelled (user pressed Ctrl+C)
-			return ctx.Err()
 		case <-agentCtx.Done():
+			// agentCtx is ctx's: a stop (Ctrl+C) ends it too, and a stop is
+			// no agent that never got ready, and no failure.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			stopReason = "keploy-agent did not become ready in time"
 			utils.LogError(r.logger, nil, stopReason)
 			return errors.New(stopReason)
@@ -2018,6 +2020,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// spin on a mock that will never arrive, and so it can revoke the owning
 	// test rather than replay it with a short mock pool.
 	var droppedMockIDs droppedMockSet
+	// A stop before the agent's streams open finds nothing captured: end here
+	// rather than open them only to drain them.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -2056,9 +2063,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 *
 	 * The consumers that drain them are spawned three
 	 * hundred lines below, and between here and there is exactly ONE
-	 * return: the ctx.Err() gate on the next line. On that path the
-	 * forwarders are alive with nobody reading, and each one ends by
-	 * handing over the item it has already taken from the agent. That
+	 * return: the agent's refusal of this keploy's proven switch. On that
+	 * path the forwarders are alive with nobody reading, and each one ends
+	 * by handing over the item it has already taken from the agent. That
 	 * hand-over used to park forever: a 30s DrainErrGroup timeout on Ctrl+C
 	 * and a goroutine held for the process lifetime, re-leaked per session
 	 * in the DaemonSet embedding. MEASURED deterministically on all three.
@@ -2091,9 +2098,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}()
 
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
+	// A stop that comes from here on (ctx done) finds the agent capturing,
+	// and goes the way of any stop: through the consumers below, and the
+	// stop's drain of what the agent captured before it. Returning here, as
+	// this once did, abandoned the agent's streams; under docker compose,
+	// whose stack (the agent in it) is up by now, the stop then took the
+	// stack down with all the agent held -- lost, said by no one. A busy
+	// host stretches the window between the agent's streams opening and the
+	// consumers running.
 
 	// Kick off the pcap + keylog streams. GetTestAndMockChans above
 	// has already triggered Proxy.Record() on the agent, which
@@ -2120,7 +2132,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	if r.config.CommandType == string(utils.DockerCompose) {
+	// Not once the recording is stopping: the app the agent would release
+	// is being stopped.
+	if r.config.CommandType == string(utils.DockerCompose) && ctx.Err() == nil {
 
 		r.logger.Debug("Making keploy-agent ready for docker compose...")
 
@@ -2136,7 +2150,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	r.logger.Info("Keploy agent is ready to record test cases and mocks.")
+	if ctx.Err() == nil {
+		r.logger.Info("Keploy agent is ready to record test cases and mocks.")
+	}
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
@@ -2439,7 +2455,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// this line without the defer above firing.
 	consumersStarted = true
 
-	if r.config.CommandType != string(utils.DockerCompose) {
+	// Not once the recording is stopping: an app started now would only be
+	// stopped again.
+	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
@@ -2451,7 +2469,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	}
 
 	// setting a timer for recording
-	if r.config.Record.RecordTimer != 0 {
+	if r.config.Record.RecordTimer != 0 && ctx.Err() == nil {
 		errGrp.Go(func() error {
 			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
 			timer := time.After(r.config.Record.RecordTimer)
@@ -2999,8 +3017,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					 * cancelled only once the stream has been quiet for
 					 * mappingIdleGrace after the frame drains ended, and not
 					 * during a hand-over, while Abandon fires the moment
-					 * Start returns -- which on the no-consumer path is
-					 * immediately, at its gate. So the outer arm below wins
+					 * Start returns -- which on the no-consumer path (the
+					 * agent's refusal of this keploy's proven switch) is
+					 * immediately. So the outer arm below wins
 					 * every time, and the wedge table cannot drive this one
 					 * without a state the current ordering cannot produce.
 					 *
