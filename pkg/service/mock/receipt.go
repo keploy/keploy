@@ -275,8 +275,8 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 const RecordTestsReceiptFile = "last-record-tests.yaml"
 
 // writeRecordTestsReceipt writes RecordTestsReceiptFile: the verdict each
-// top-level test of the record reported as it ended, whether or not the
-// recording was kept. It makes the set's directory when the record kept
+// top-level test of the record reported as it ended, with the evidence the
+// proven wire left on its window, whether or not the recording was kept. It makes the set's directory when the record kept
 // nothing, since a test that failed against real infra is judged too.
 func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt, windows []models.ScopeWindow) {
 	set := r.Set
@@ -284,7 +284,14 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		r.Tests = append(r.Tests, TestReceipt{Name: w.Name, Outcome: w.Outcome})
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome}
+		// What keploy could not capture while the test ran (a record's
+		// window carries no misses): a verdict against real infra keploy
+		// did not see whole is no basis for judging the recording.
+		if ev := w.Evidence; ev != nil && (!ev.Empty() || ev.Reason != "") {
+			tr.Evidence = ev
+		}
+		r.Tests = append(r.Tests, tr)
 	}
 	dir := filepath.Join(keployDir, set)
 	if !r.empty() {

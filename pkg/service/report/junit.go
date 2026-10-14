@@ -482,11 +482,16 @@ func fmtTestTime(timeTaken string) string {
 	return fmtSeconds(dur)
 }
 
-// provenEvidenceLines are a failed test's calls that got no recorded answer
-// (DNS left out, as the verdict leaves it out) and its unconsumed test mocks,
-// one line each, under the proven switch.
+// provenEvidenceLines are what keploy's agent could not capture while a failed
+// test or one before it ran, its calls that got no recorded answer (DNS left
+// out, as the verdict leaves it out) and its unconsumed test mocks, one line
+// each, under the proven switch.
 func provenEvidenceLines(fi models.FailureInfo) []string {
 	var lines []string
+	if t := fi.CaptureIncomplete.Text(); t != "" {
+		// First: it says why the rest of the evidence may be short.
+		lines = append(lines, t)
+	}
 	for _, c := range fi.UnmatchedCalls {
 		if strings.EqualFold(c.Protocol, "DNS") {
 			continue

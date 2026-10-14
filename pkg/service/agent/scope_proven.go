@@ -82,6 +82,9 @@ type provenWire struct {
 	// topology is where the run's calls to local listeners went (LIVE and
 	// mocked-local rows, NoteLive and NoteMocked).
 	topology topologyRows
+	// losses is the run's capture-loss counts at its start, which each
+	// test's end counts from (capture_loss.go).
+	losses captureLossMark
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -170,8 +173,11 @@ func (a *Agent) resetSession(ctx context.Context) error {
 		return fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
 	}
 	a.resetScopeState()
+	// What the run's tests count their capture losses from: read before
+	// provenMu, which is never held while calling into the hooks.
+	losses := a.markCaptureLosses(ctx)
 	a.provenMu.Lock()
-	a.proven = provenWire{}
+	a.proven = provenWire{losses: losses}
 	a.provenMu.Unlock()
 	return nil
 }
@@ -579,7 +585,9 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		return models.ScopeEndResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
-	if !ev.Empty() {
+	// Record instances never answer fail (design v14 §5.3): a record's
+	// evidence (capture losses) is for judging, on the window.
+	if a.replaying() && ev != nil && (!ev.Empty() || ev.Reason != "") {
 		return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionFail, Reason: ev.Reason}, nil
 	}
 	return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
@@ -635,6 +643,8 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 			outcome = models.ScopeOutcomeFailed
 		}
 	}
+	// Before why: why goes in front of whatever reason the evidence gives.
+	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil)
 	if why != "" {
 		if ev == nil {
 			ev = &models.ScopeEvidence{}
@@ -661,6 +671,50 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 		}
 	}
 	return ev, readErr
+}
+
+// chargeCaptureLosses adds to a test's evidence what the agent could not
+// capture since the run began (design v14 §3.2): a loss taints the test open
+// when it happened and every later one. In a replay the test then fails, with
+// the losses in its reason; a record keeps the evidence on the window for
+// judging and answers as before (record instances never fail a test). A read
+// of the losses that failed is a test keploy cannot judge: failed in a
+// replay, and said on the window in a record.
+//
+// fromEvidence says ev's reason, if any, is keploy's text for its evidence
+// (evidenceReason), which is then written again with the losses in it; any
+// other reason (a read that failed) keeps its text, after the losses'.
+func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool) (*models.ScopeEvidence, string) {
+	a.provenMu.Lock()
+	mark := a.proven.losses
+	a.provenMu.Unlock()
+	lost, err := a.captureLossesSince(ctx, mark)
+	if err == nil && len(lost) == 0 {
+		return ev, outcome
+	}
+	if ev == nil {
+		ev = &models.ScopeEvidence{}
+	}
+	if err != nil {
+		ev.Reason = strings.TrimSpace("keploy: keploy could not tell whether every call of " + id + " was captured: " + err.Error() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		// As a test whose evidence could not be read: no verdict of its own.
+		ev.Unread = true
+		if a.replaying() {
+			outcome = models.ScopeOutcomeFailed
+		}
+		return ev, outcome
+	}
+	ev.CaptureIncomplete = lost
+	switch {
+	case a.replaying() && fromEvidence:
+		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
+	default:
+		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+	}
+	if a.replaying() {
+		outcome = models.ScopeOutcomeFailed
+	}
+	return ev, outcome
 }
 
 // failClosedWindow marks the latest closed window of id failed, with why.
@@ -1101,6 +1155,17 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	sort.Strings(unmade)
 	for _, n := range unmade {
 		what = append(what, "recorded call "+mockText(n, mocks[n])+" was never made")
+	}
+	if t := ev.CaptureIncomplete.Text(); t != "" {
+		if len(what) == 0 {
+			// Failed only for what keploy could not capture: re-recording
+			// or quarantining the test would hide keploy's own loss, so
+			// neither is offered; the loss's text says what was lost and
+			// why.
+			return "keploy: " + t + "."
+		}
+		// First: it says why the rest of the evidence may be short.
+		what = append([]string{t}, what...)
 	}
 	const most = 5
 	if len(what) > most {
