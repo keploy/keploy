@@ -1,7 +1,9 @@
-//go:build linux && pidmap_integration
+//go:build linux && proxyconns_integration
 
-// Root-only, like pidmaps_integration_linux_test.go: it loads keploy's BPF
-// object and attaches k_sockops, so it is behind the pidmap_integration tag.
+// Root-only: it loads keploy's BPF object and attaches k_sockops. Behind its
+// own tag, apart from pidmap_integration: it links the proxy and the agent,
+// whose package initialisation opens sockets that the PID-map test's count of
+// refused inserts would see.
 
 package linux
 
@@ -408,13 +410,12 @@ func TestANATedConnectionIsNotVerified(t *testing.T) {
 	if err := unix.Connect(app, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unix.Write(app, []byte("GET / HTTP/1.1\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
 	// The proxy accepts its side (numbered, the canary's after it) and,
-	// with no pair, refuses it: the application's read ends.
-	if _, err := unix.Read(app, make([]byte, 1)); err != nil && !errors.Is(err, unix.ECONNRESET) {
-		t.Fatalf("the application's read on the refused connection: %v", err)
+	// with no pair, refuses it before the application sent anything: a FIN,
+	// not a reset, so the application's connection is still alive
+	// (CLOSE_WAIT).
+	if n, err := unix.Read(app, make([]byte, 1)); n != 0 || err != nil {
+		t.Fatalf("the application's read on the refused connection: %d, %v; want EOF", n, err)
 	}
 	c, err := a.ProxyConns(ctx)
 	if err != nil || c.AppConns != 1 || c.AppSettled != 0 || c.Accepted != 2 {
@@ -427,8 +428,11 @@ func TestANATedConnectionIsNotVerified(t *testing.T) {
 	if !unpaired {
 		t.Fatalf("the proxy's capture losses %+v: want the unpaired connection", p.CaptureLosses())
 	}
-	// The application closes: its connection, which sent its call, is
-	// lost, never settled as the proxy's.
+	// The application sends its call on it and closes: its connection, which
+	// sent its call, is lost, never settled as the proxy's.
+	if _, err := unix.Write(app, []byte("GET / HTTP/1.1\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
 	_ = unix.Close(app)
 	if err := a.WaitProxySettled(ctx, c); err != nil {
 		t.Fatalf("WaitProxySettled after the close: %v", err)

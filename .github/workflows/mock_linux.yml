@@ -494,9 +494,10 @@ jobs:
   # the hooks count it (GET /agent/pidmaps) and WARN once. And the kernel's
   # count of the connections completed to the proxy's listener agrees with the
   # proxy's count of its accepts, through the proxy's real accept loop and the
-  # agent's wait (what a test's end waits on). Root-only, so it is
-  # behind the pidmap_integration tag and never in `go test ./...`. amd64 and
-  # arm64: each runs its own architecture's object.
+  # agent's wait (what a test's end waits on). Root-only, so they are
+  # behind the pidmap_integration and proxyconns_integration tags (two
+  # binaries) and never in `go test ./...`. amd64 and arm64: each runs its
+  # own architecture's object.
   pid_map_overflow:
     if: ${{ inputs.jobs_to_run == 'all' }}
     timeout-minutes: 15
@@ -524,12 +525,23 @@ jobs:
       - name: Build the PID map integration test
         run: go test -c -tags 'viper_bind_struct pidmap_integration' -o /tmp/pidmap.test ./pkg/agent/hooks/linux/
 
-      # A -run that matches nothing exits 0, so the test's PASS line is
+      # The proxy's counts against the same object, in a binary of their own:
+      # it links the proxy, whose package initialisation opens sockets that
+      # the PID-map test's count would see.
+      - name: Build the proxy connection integration test
+        run: go test -c -tags 'viper_bind_struct proxyconns_integration' -o /tmp/proxyconns.test ./pkg/agent/hooks/linux/
+
+      # A -run that matches nothing exits 0, so each test's PASS line is
       # required explicitly.
-      - name: Run the PID map integration test (root)
+      - name: Run the PID map and proxy connection integration tests (root)
         run: |
           set -o pipefail
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified' -test.v | tee /tmp/pidmap.out
+          # Both binaries run, whichever fails: one's failure does not hide
+          # the other's results.
+          rc=0
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified' -test.v | tee -a /tmp/pidmap.out || rc=1
           for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified; do
-            grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; exit 1; }
+            grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
+          exit $rc
