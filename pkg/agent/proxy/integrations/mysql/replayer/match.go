@@ -148,8 +148,14 @@ func matchSSLRequest(_ context.Context, _ *zap.Logger, expected, actual mysql.Pa
 	//Don't match the header, because the payload length can be different.
 
 	// Match the payload
-	expectedMessage, _ := expected.Message.(*mysql.SSLRequestPacket)
-	actualMessage, _ := actual.Message.(*mysql.SSLRequestPacket)
+	expectedMessage, ok := expected.Message.(*mysql.SSLRequestPacket)
+	if !ok {
+		return fmt.Errorf("the recorded SSL request cannot be read: it holds a %T", expected.Message)
+	}
+	actualMessage, ok := actual.Message.(*mysql.SSLRequestPacket)
+	if !ok {
+		return fmt.Errorf("the client's SSL request cannot be read: it holds a %T", actual.Message)
+	}
 
 	// Match the MaxPacketSize
 	if expectedMessage.MaxPacketSize != actualMessage.MaxPacketSize {
@@ -179,11 +185,16 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 
 	// Match the payload
 
-	//Get the packet type from both the packet bundles
-	// we don't need to do type assertion because its already done in the caller function
-
-	exp := expected.Message.(*mysql.HandshakeResponse41Packet)
-	act := actual.Message.(*mysql.HandshakeResponse41Packet)
+	// The header says HandshakeResponse41; a recorded message of another
+	// type (a malformed recording) is no match, not a panic.
+	exp, ok := expected.Message.(*mysql.HandshakeResponse41Packet)
+	if !ok {
+		return fmt.Errorf("the recorded handshake response cannot be read: it holds a %T", expected.Message)
+	}
+	act, ok := actual.Message.(*mysql.HandshakeResponse41Packet)
+	if !ok {
+		return fmt.Errorf("the client's handshake response cannot be read: it holds a %T", actual.Message)
+	}
 
 	// Match the MaxPacketSize
 	if exp.MaxPacketSize != act.MaxPacketSize {

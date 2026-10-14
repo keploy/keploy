@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -618,6 +618,13 @@ func TestEveryUnansweredHandshakeStepIsAMiss(t *testing.T) {
 		phase   string
 		diff    string
 	}{{
+		name:    "a recorded handshake response that cannot be read",
+		session: []*models.Mock{unreadableHR41()},
+		client:  nativeLogin,
+		summary: "connection phase: HandshakeResponse41",
+		phase:   models.MatchPhaseExhausted,
+		diff:    "cannot be read",
+	}, {
 		name: "a recorded verdict that cannot be encoded",
 		session: []*models.Mock{fastAuthHandshake(mysql.Response{PacketBundle: bundle(3, mysql.StatusToString(mysql.OK),
 			&mysql.AuthNextFactorPacket{PacketType: mysql.AuthNextFactor, PluginName: "x"})})}, // an OK header on another packet
@@ -801,18 +808,25 @@ func TestHandshakesServedAtOnceAreNotRewritten(t *testing.T) {
 	full := fullAuthHandshake(okAnswer(6))
 	full.Name = "mock-full"
 	db := &fakeMockDb{session: []*models.Mock{refused, ok, full}}
-	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if got := login(t, db, fastAuthLogin); got != mysql.OK {
-				t.Errorf("a connection read %#x; want the recorded OK", got)
-			}
-		}()
-	}
-	wg.Wait()
+	t.Run("at once", func(t *testing.T) {
+		for i := 0; i < 6; i++ {
+			t.Run(fmt.Sprintf("connection %d", i+1), func(t *testing.T) {
+				t.Parallel()
+				if got := login(t, db, fastAuthLogin); got != mysql.OK {
+					t.Errorf("read %#x; want the recorded OK", got)
+				}
+			})
+		}
+	})
 	if more := ok.Spec.MySQLResponses[1].Message.(*mysql.AuthMoreDataPacket); more.Data != mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess) {
 		t.Fatalf("serving the handshake rewrote its recorded mechanism to %q", more.Data)
 	}
+}
+
+// unreadableHR41 is a recorded handshake whose HandshakeResponse41 holds a
+// message of another type.
+func unreadableHR41() *models.Mock {
+	m := nativeHandshake()
+	m.Spec.MySQLRequests[0].Message = &mysql.OKPacket{}
+	return m
 }
