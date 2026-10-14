@@ -37,6 +37,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -131,6 +132,11 @@ type Proxy struct {
 	// predials are the upstream connections dialled while their application's
 	// handshake was held (handshake_hold.go), until handleConnection takes them.
 	predials predials
+	// real is the run's mock.real, under the proven switch: nil until the
+	// CLI hands a list (realdeps.go). realTracker keeps what the run's REAL
+	// connections did.
+	real        atomic.Pointer[realState]
+	realTracker realdeps.Tracker
 	// agentMode is the mode the agent was started in (--mode); with
 	// GlobalPassthrough it decides what happens to a connection that arrives
 	// while there is no session (no_session.go). noSessionDests are the
@@ -2411,10 +2417,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// below has waited for the parsers, so every mock they record is stamped
 	// first.
 	proven := provenswitch.On()
-	var ctrKey string
+	// ctrKey is the connection's container key (topology's MOCKED rows);
+	// containerRepo the image repository of the container it reaches, which
+	// a mock.real container: entry names (realdeps.go).
+	var ctrKey, containerRepo string
 	if proven {
 		connID := fmt.Sprint(clientConnID)
-		_, ctrKey, _ = containerkey.Default.Name(p.logger, connID, dstAddr)
+		var c containerkey.Container
+		var ok bool
+		if c, ctrKey, ok = containerkey.Default.Name(p.logger, connID, dstAddr); ok {
+			containerRepo = containerkey.Repository(c.Image)
+		}
 		defer containerkey.Default.Forget(connID)
 	}
 
@@ -2518,6 +2531,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
 	if served {
 		return err
+	}
+
+	// A mock.real destination (proven switch only) is decided here, before
+	// the MySQL probe or anything else reads the connection, and relayed to
+	// the real thing (design v14 §4). Anything else continues below, reading
+	// any bytes keploy read to name the connection from the returned conn.
+	if handled, conn, err := p.serveReal(parserCtx, srcConn, dstAddr, containerRepo, clientConnID, predialed); handled {
+		return err
+	} else {
+		srcConn = conn
 	}
 
 	// Opportunistic TLS intercept: a separate passthrough variant

@@ -1552,6 +1552,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
+		// keploy record and keploy test do not reach mock.real's
+		// destinations yet: under the proven switch they would record and
+		// mock them, so a list for them is refused instead.
+		if err := refuseRealOutsideMock(c.cfg, cmd.Name()); err != nil {
+			utils.LogError(c.logger, err, "refusing mock.real outside keploy mock")
+			return err
+		}
+
 		// Before the command type: refusing an engine does not depend on it,
 		// and the --cmd-type checks would otherwise answer a podman command
 		// with a docker message. A base path sets the command aside below:
@@ -2687,7 +2695,18 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		utils.LogError(c.logger, err, "failed to read pass-through-ports")
 		return errors.New("failed to read pass-through-ports")
 	}
-	config.SetByPassPorts(c.cfg, bypassPorts)
+	if provenswitch.On() {
+		// keploy.yml's settings that made calls live go, mock.real replacing
+		// them (U18); the command's own --pass-through-ports, which keeps
+		// the app's ingress port off the proxy until the ingress row (PR 4),
+		// is kept.
+		dropPassthroughKeys(c.logger, c.cfg)
+		if cmd.Flags().Changed("pass-through-ports") {
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
+	} else {
+		config.SetByPassPorts(c.cfg, bypassPorts)
+	}
 
 	// Mock-set name.
 	if err := c.readMockSetName(cmd); err != nil {

@@ -705,7 +705,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		if ptHost == "" && req.URL != nil {
 			ptHost = req.URL.Host
 		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil, nil

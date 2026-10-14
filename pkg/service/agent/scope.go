@@ -236,7 +236,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
 		meta := a.scopeMeta[k]
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence, Real: meta.real})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -401,6 +401,8 @@ type scopeMeta struct {
 	suite    bool
 	outcome  string
 	evidence *models.ScopeEvidence
+	// real are the mock.real destinations the test used while open.
+	real []models.RealUse
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

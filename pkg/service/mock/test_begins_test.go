@@ -37,11 +37,12 @@ func TestStampBeginsKeepsEachTestsFirstBegin(t *testing.T) {
 type beginsPusher struct {
 	Instrumentation
 	begins map[string]time.Time
+	real   map[string][]string
 	calls  int
 }
 
-func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time) error {
-	p.begins = begins
+func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
+	p.begins, p.real = begins, real
 	p.calls++
 	return nil
 }
@@ -63,6 +64,9 @@ func TestPushTestBeginsSendsTheRecordingsBegins(t *testing.T) {
 	}
 	if len(p.begins) != 2 || !p.begins["pkg::TestA"].Equal(t0.Add(time.Minute)) || !p.begins["pkg::TestB"].Equal(t0) {
 		t.Fatalf("pushed begins %v", p.begins)
+	}
+	if p.real != nil {
+		t.Fatalf("a recording with no REAL test pushed %v", p.real)
 	}
 
 	p = &beginsPusher{}

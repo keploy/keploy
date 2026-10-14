@@ -3802,14 +3802,14 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[strin
 // are given again to a restarted agent, like the scope table. An agent that
 // cannot take them is an error: the tests would run on another clock than
 // their recording's.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time) (retErr error) {
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded := maps.Clone(begins)
-			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded) })
+			recorded, recordedReal := maps.Clone(begins), maps.Clone(real)
+			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded, recordedReal) })
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins})
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

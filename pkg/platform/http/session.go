@@ -68,6 +68,7 @@ type sessionStep struct {
 // They are made again in the order the kinds were first made in, except
 // readiness, which releases the app and so goes last.
 const (
+	stepRealDeps     = "real-deps"
 	stepTestSetHook  = "before-test-set-compose"
 	stepMockOutgoing = "mock-outgoing"
 	stepStoreMocks   = "store-mocks"

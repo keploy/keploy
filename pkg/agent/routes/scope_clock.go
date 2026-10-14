@@ -15,7 +15,7 @@ import (
 )
 
 type testBeginsSetter interface {
-	SetTestBegins(ctx context.Context, begins map[string]time.Time) error
+	SetTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
 }
 
 // HandleTestBegins installs when each test of the replayed recording began
@@ -47,9 +47,9 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this keploy agent cannot move the clock per test", http.StatusNotImplemented)
 		return
 	}
-	if err := s.SetTestBegins(r.Context(), req.Begins); err != nil {
+	if err := s.SetTestBegins(r.Context(), req.Begins, req.Real); err != nil {
 		code := http.StatusInternalServerError
-		if errors.Is(err, agent.ErrNoTestClock) {
+		if errors.Is(err, agent.ErrNoTestClock) || errors.Is(err, agent.ErrNoRealTestClock) {
 			code = http.StatusNotImplemented
 		}
 		http.Error(w, err.Error(), code)
