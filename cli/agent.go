@@ -244,15 +244,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
-				utils.LogError(logger, err, "failed to setup agent")
-				if agentFailed(ctx, err) {
-					// The specific code when the failure carries one: the CLI
-					// that launched this agent reads it back as its own
-					// (pkg/platform/http AgentClient.Setup), which is how a
-					// user is told "grant privileges" apart from "mount
-					// tracefs".
-					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+				if !agentFailed(ctx, err) {
+					// Stopped, not failed (agentFailed): Setup said so.
+					return nil
 				}
+				utils.LogError(logger, err, "failed to setup agent")
+				// The specific code when the failure carries one: the CLI
+				// that launched this agent reads it back as its own
+				// (pkg/platform/http AgentClient.Setup), which is how a user
+				// is told "grant privileges" apart from "mount tracefs".
+				utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 				return nil
 			}
 

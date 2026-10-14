@@ -232,6 +232,10 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 	return instrumentation
 }
 
+// agentReadyFile is kdocker.AgentReadyFile, which Setup removes: a variable
+// only so that a test running Setup leaves the host's alone.
+var agentReadyFile = kdocker.AgentReadyFile
+
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
@@ -240,7 +244,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	// CLI has stored mocks on the agent. The file is re-created later
 	// by the MakeAgentReady HTTP handler in pkg/agent/routes/record.go
 	// once setup is complete.
-	if err := os.Remove(kdocker.AgentReadyFile); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(agentReadyFile); err != nil && !os.IsNotExist(err) {
 		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
 	}
 
@@ -254,8 +258,22 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	mismatch.SetMockMode(a.config.Agent.MockMode)
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	// Setup returns only once what it started is torn down, however it
+	// returns: Hook's teardown (the proxy's, which restores nsswitch.conf and
+	// removes the CA from the trust store, then the hooks' unload) runs on
+	// the group, and the process exits as soon as Setup returns (main). A
+	// stop that came before the port handoff, or while Hook was loading,
+	// returned at once and so cut that teardown short. stop ends the run
+	// whatever ctx does, for a Setup that returns before ctx is done.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+	tearDown := func() error {
+		stop()
+		a.logger.Debug("waiting for the agent's teardown before Setup returns")
+		return errGrp.Wait()
+	}
 
 	// Capture the process-lifetime ctx (with errgroup attached) so
 	// StartIncomingProxy can keep the ingress listener alive across
@@ -278,7 +296,17 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		Rules:         rules,
 	})
 	if err != nil {
-		a.logger.Error("failed to hook into the app", zap.Error(err))
+		if ctx.Err() != nil {
+			// The stop came while the agent was starting: nothing failed.
+			a.logger.Info("The agent was stopped while it was starting; stopping what it had started", zap.Error(err))
+		} else {
+			a.logger.Error("failed to hook into the app", zap.Error(err))
+		}
+		// What Hook loaded or started before it failed, or before the stop
+		// that ended it, is torn down before the process exits.
+		if terr := tearDown(); terr != nil && !errors.Is(terr, context.Canceled) {
+			utils.LogError(a.logger, terr, "error while tearing down a failed agent setup")
+		}
 		return err
 	}
 
@@ -292,11 +320,14 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():
 		a.logger.Info("Context cancelled before agent becomes healthy. Stopping the agent.")
+		if terr := tearDown(); terr != nil && !errors.Is(terr, context.Canceled) {
+			utils.LogError(a.logger, terr, "error while stopping the agent before it became healthy")
+		}
 		return nil
 	}
 
 	<-ctx.Done()
-	err = errGrp.Wait()
+	err = tearDown()
 	if err != nil && !errors.Is(err, context.Canceled) {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
@@ -692,15 +723,31 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
 	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
+	// The body below adds the proxy's goroutines (start(), whose shutdown
+	// removes the CA) and the hooks' (their unload) to their groups. The
+	// teardown waits on those groups only once the body is over: a stop that
+	// came while it ran found them still empty, returned at once, and left
+	// the work the body added after it to no one, cut short by the exit.
+	bodyDone := make(chan struct{})
+	defer close(bodyDone)
+	// startErr is the proxy's failure to start, which the body reports: the
+	// teardown, which reads it once the body is over, does not report it
+	// again as a failure to stop.
+	var startErr error
 	parentErrGrp.Go(func() error {
 		<-ctx.Done()
 
 		// Each stage of the teardown is a step of its progress, which the
 		// CLI that stopped this agent reads (utils.TeardownStep).
 		utils.TeardownStep()
+		// Cancelled first: what the body is waiting on in the proxy ends.
 		proxyCtxCancel()
+		<-bodyDone
 		err := proxyErrGrp.Wait()
-		if err != nil {
+		switch {
+		case err != nil && startErr != nil:
+			a.logger.Debug("the proxy's group ended with its failed start", zap.Error(err))
+		case err != nil:
 			utils.LogError(a.logger, err, "failed to stop the proxy")
 		}
 		utils.TeardownStep()
@@ -713,6 +760,19 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		utils.TeardownStep()
 		return nil
 	})
+
+	// The start below -- the hooks' load, the proxy's start, its CA install
+	// -- is teardown work while a stop waits for it (bodyDone): it runs on
+	// this goroutine, and a stop that came while it ran is kept from killing
+	// the agent part way only while it makes progress here
+	// (utils.BeginTeardownWork). It ends before bodyDone closes.
+	// Where that progress cannot be seen (utils.TeardownProgressSeen), the
+	// start is not marked so: it would count as progress throughout, and a
+	// start wedged against the hooks' contract would never be killed.
+	if utils.TeardownProgressSeen() {
+		starting := utils.BeginTeardownWork()
+		defer starting()
+	}
 
 	// load hooks if the mode changes ..
 	hookCfg := coreAgent.HookCfg{
@@ -728,7 +788,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to load hooks")
+		if ctx.Err() != nil {
+			a.logger.Debug("the hooks' load ended with the stop", zap.Error(err))
+		} else {
+			utils.LogError(a.logger, err, "failed to load hooks")
+		}
 		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
@@ -766,7 +830,12 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	})
 
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to start proxy")
+		startErr = err
+		if ctx.Err() != nil {
+			a.logger.Debug("the proxy's start ended with the stop", zap.Error(err))
+		} else {
+			utils.LogError(a.logger, err, "failed to start proxy")
+		}
 		// StartProxy may have spawned proxy goroutines before the
 		// failure point (TCP accept loop, TCP DNS, UDP DNS) — they
 		// stay live until proxyCtx is cancelled. Before this fix

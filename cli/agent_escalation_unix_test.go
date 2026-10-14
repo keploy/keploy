@@ -18,8 +18,8 @@ import (
 )
 
 // The agent's CLI forces a stop with utils.EscalationSignal: the agent
-// command's PreRunE makes it kill a stopping agent once no teardown work is in
-// progress (utils.DieOnEscalation).
+// command's PreRunE makes it kill a stopping agent once no teardown work in
+// progress is making progress (utils.DieOnEscalation).
 func TestAgentDiesOfTheEscalationSignal(t *testing.T) {
 	dir, agent, out, exited := startHangupAgent(t, true)
 	if err := agent.Process.Signal(syscall.SIGTERM); err != nil {

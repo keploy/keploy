@@ -3,10 +3,8 @@
 package utils
 
 import (
-	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -20,6 +18,7 @@ func TestEscalationHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
+	helperExitsWithParent()
 	stopping, stop := context.WithCancel(context.Background())
 	stop() // its stop has begun
 	DieOnEscalation(stopping)
@@ -34,16 +33,7 @@ func TestEscalationHelper(t *testing.T) {
 // forces the stop of an agent sudo runs as root, which it may not signal.
 func TestDieOnEscalation(t *testing.T) {
 	dir := t.TempDir()
-	helper := exec.Command(os.Args[0], "-test.run=^TestEscalationHelper$")
-	helper.Env = append(os.Environ(), "KEPLOY_TEST_ESCALATION="+dir)
-	var out bytes.Buffer
-	helper.Stdout, helper.Stderr = &out, &out
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- helper.Wait() }()
-	t.Cleanup(func() { _ = helper.Process.Kill() })
+	helper, exited, out := startHelper(t, "TestEscalationHelper", "KEPLOY_TEST_ESCALATION="+dir)
 	hung := time.After(time.Minute) // only turns a hang into a failure
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
@@ -151,6 +141,7 @@ func TestEscalationWhileBusyHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
+	helperExitsWithParent()
 	stopping, stop := context.WithCancel(context.Background())
 	stop() // its stop has begun
 	DieOnEscalation(stopping)
@@ -174,16 +165,7 @@ func TestEscalationWhileBusyHelper(t *testing.T) {
 // has ended: the CLI judged from a report a moment old.
 func TestTheEscalationWaitsForTeardownWork(t *testing.T) {
 	dir := t.TempDir()
-	helper := exec.Command(os.Args[0], "-test.run=^TestEscalationWhileBusyHelper$")
-	helper.Env = append(os.Environ(), "KEPLOY_TEST_ESCALATION_BUSY="+dir)
-	var out bytes.Buffer
-	helper.Stdout, helper.Stderr = &out, &out
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- helper.Wait() }()
-	t.Cleanup(func() { _ = helper.Process.Kill() })
+	helper, exited, out := startHelper(t, "TestEscalationWhileBusyHelper", "KEPLOY_TEST_ESCALATION_BUSY="+dir)
 	hung := time.After(time.Minute) // only turns a hang into a failure
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
@@ -226,6 +208,7 @@ func TestEscalationBeforeTheStopHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
+	helperExitsWithParent()
 	root, cancel := context.WithCancel(context.Background())
 	SetCancel(cancel)
 	DieOnEscalation(root)
@@ -245,16 +228,7 @@ func TestEscalationBeforeTheStopHelper(t *testing.T) {
 // an agent with its CA installed. Once the stop has begun, it kills.
 func TestTheEscalationBeforeTheStopBeginsIt(t *testing.T) {
 	dir := t.TempDir()
-	helper := exec.Command(os.Args[0], "-test.run=^TestEscalationBeforeTheStopHelper$")
-	helper.Env = append(os.Environ(), "KEPLOY_TEST_ESCALATION_EARLY="+dir)
-	var out bytes.Buffer
-	helper.Stdout, helper.Stderr = &out, &out
-	if err := helper.Start(); err != nil {
-		t.Fatal(err)
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- helper.Wait() }()
-	t.Cleanup(func() { _ = helper.Process.Kill() })
+	helper, exited, out := startHelper(t, "TestEscalationBeforeTheStopHelper", "KEPLOY_TEST_ESCALATION_EARLY="+dir)
 	await := func(name string) {
 		t.Helper()
 		hung := time.After(time.Minute) // only turns a hang into a failure
