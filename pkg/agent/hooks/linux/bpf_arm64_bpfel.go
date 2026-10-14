@@ -26,6 +26,7 @@ const (
 	bpfMapOrigDstByCookie             = "orig_dst_by_cookie"
 	bpfMapPendingBinds                = "pending_binds"
 	bpfMapPidMapInsertFailures        = "pid_map_insert_failures"
+	bpfMapProxyConnsEstablished       = "proxy_conns_established"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfProgK_bind4                    = "k_bind4"
@@ -118,6 +119,7 @@ type bpfMapSpecs struct {
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
+	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
@@ -158,6 +160,7 @@ type bpfMaps struct {
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
+	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
@@ -174,6 +177,7 @@ func (m *bpfMaps) Close() error {
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.PidMapInsertFailures,
+		m.ProxyConnsEstablished,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)
