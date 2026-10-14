@@ -36,6 +36,11 @@ const (
 	// (the per-connection cap, memory pressure), so the call they belong to
 	// was not recorded whole.
 	CaptureLossDropped CaptureLossKind = "capture_dropped"
+	// CaptureLossUnixSocket (4c a): a process of the application connected
+	// to a Unix socket no process of it owns, and that is not allowlisted (a
+	// bus, the journal, the Docker daemon, a name service): a call over it
+	// goes nowhere keploy's proxy sees, neither recorded nor mocked.
+	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -106,6 +111,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s)' parser stopped taking what keploy captured, and what was still queued for it was abandoned, neither recorded nor mocked", c.Count)
 	case CaptureLossDropped:
 		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
+	case CaptureLossUnixSocket:
+		return fmt.Sprintf("the application made %d connect(s) to Unix sockets keploy does not see, so calls over them were neither recorded nor mocked; reach such a dependency over a TCP address", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

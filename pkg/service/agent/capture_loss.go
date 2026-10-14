@@ -23,6 +23,10 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if proxyCounts && a.Proxy != nil {
 		out = append(out, proxy.CaptureLosses()...)
 	}
+	// The hooks' own (an AF_UNIX connect to a socket no member owns).
+	if hooks, ok := a.Hooks.(coreAgent.CaptureLossReporter); ok && a.Hooks != nil {
+		out = append(out, hooks.CaptureLosses()...)
+	}
 	refusals, err := a.PIDMapRefusals(ctx)
 	switch {
 	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
