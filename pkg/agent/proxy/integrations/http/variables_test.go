@@ -798,10 +798,10 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	ctx := context.Background()
 	x, y := liveReq("POST", "/orders", `{"id":"x"}`), liveReq("POST", "/orders", `{"id":"y"}`)
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
-	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, db.table.Gen(), nil, nil, nil)
-	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, db.table.Gen(), nil, nil, nil)
-	hx, _ := h.pickHit(hitsX, db, true)
-	hy, _ := h.pickHit(hitsY, db, true)
+	hitsX, fitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hitsY, fitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hx, _ := h.pickHit(hitsX, fitsX, db, true)
+	hy, _ := h.pickHit(hitsY, fitsY, db, true)
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
@@ -828,7 +828,7 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ctx := context.Background()
 	pool, _ := splitVariableMocks(db.perTest)
-	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, db.table.Gen(), nil, nil, nil)
 	if len(hits) == 0 {
 		t.Fatal("the straggler should fit")
 	}
@@ -856,7 +856,7 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	}
 	pool, _ := splitVariableMocks(db.perTest)
 	read := liveReq("GET", "/orders/l1", "")
-	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _, _ := h.variablePass(ctx, read, pool, &db.table, db.table.Gen(), nil, nil, nil)
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
@@ -1119,5 +1119,143 @@ func TestVariables_AValueThatDiffersIsTheEvidence(t *testing.T) {
 	p := wantProblem(t, ok, diag, "this call sent")
 	if p.mock != "mock-a" || p.expected != "u_live" || p.actual != "u_wrong" {
 		t.Fatalf("evidence %+v", p)
+	}
+}
+
+// pollAt is a reusable recording of POST /poll carrying token T: repeated,
+// the stateful cursor walks the recordings in record order.
+func pollAt(name string, seq int, answer string, vars models.MockVariables) *models.Mock {
+	return reusable(at(varMock(name, "POST", "http://svc/poll", `{"token":"T"}`, 200, `{"status":"`+answer+`"}`, vars), seq))
+}
+
+func servedNames(t *testing.T, h *HTTP, db *varDb, live string, calls int) []string {
+	t.Helper()
+	var got []string
+	for i := 0; i < calls; i++ {
+		ok, stub, diag := matchVar(t, h, db, liveReq("POST", "http://svc/poll", live))
+		if !ok {
+			t.Fatalf("call %d missed: %+v", i+1, diag)
+		}
+		got = append(got, stub.Name)
+	}
+	return got
+}
+
+// A repeated call takes the recordings in record order, as one without
+// variables does: the recording that uses the token the first one binds is
+// still the second call's, although the first call came before its bind.
+func TestVariables_ARepeatedCallTakesTheRecordingsInRecordOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name   string
+		v1, v2 models.MockVariables
+		live   string
+	}{
+		{"without variables", nil, nil, `{"token":"T"}`},
+		{"bind, then use", models.MockVariables{"token": bindV("T", "body.token")}, models.MockVariables{"token": useV("T", []string{"body.token"})}, `{"token":"L"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &varDb{session: []*models.Mock{pollAt("a-1", 1, "pending", tc.v1), pollAt("a-2", 2, "done", tc.v2)}}
+			if got := servedNames(t, newHTTP(), db, tc.live, 3); strings.Join(got, " ") != "a-1 a-2 a-2" {
+				t.Fatalf("served %v, want a-1 a-2 a-2", got)
+			}
+		})
+	}
+}
+
+// When the cursor is at a recording whose variables do not hold (here one of
+// a variable no call binds), the next recording in record order that holds
+// answers, and the call counts.
+func TestVariables_TheCursorPassesARecordingWhoseVariablesDoNotHold(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	db := &varDb{session: []*models.Mock{
+		pollAt("r-1", 1, "one", models.MockVariables{"token": bindV("T", "body.token")}),
+		pollAt("r-2", 2, "two", models.MockVariables{"other": useV("T", []string{"body.token"})}),
+		pollAt("r-3", 3, "three", models.MockVariables{"token": useV("T", []string{"body.token"})}),
+	}}
+	if got := servedNames(t, newHTTP(), db, `{"token":"L"}`, 3); strings.Join(got, " ") != "r-1 r-3 r-3" {
+		t.Fatalf("served %v, want r-1 r-3 r-3", got)
+	}
+}
+
+// meAt is a reusable recording of GET /me whose X-Tok header carries the
+// token its test logged in with (recorded as rec): the recordings of every
+// test are one request for the stateful cursor.
+func meAt(name string, seq int, rec string) *models.Mock {
+	m := varMock(name, "GET", "http://svc/me", "", 200, `{"me":"`+name+`"}`,
+		models.MockVariables{"token": useV(rec, []string{"header.X-Tok"})})
+	m.Spec.HTTPReq.Header["X-Tok"] = rec
+	return reusable(at(m, seq))
+}
+
+// loginAs begins a test that logs in: its token, recorded as rec, is live.
+func loginAs(t *testing.T, h *HTTP, db *varDb, rec, live string) {
+	t.Helper()
+	db.table.Reset()
+	db.perTest = []*models.Mock{at(varMock("login-"+rec, "POST", "http://svc/login", `{"tok":"`+rec+`"}`, 200, `{}`,
+		models.MockVariables{"token": bindV(rec, "body.tok")}), 0)}
+	if ok, _, diag := matchVar(t, h, db, liveReq("POST", "http://svc/login", `{"tok":"`+live+`"}`)); !ok {
+		t.Fatalf("the login missed: %+v", diag)
+	}
+}
+
+func getMe(t *testing.T, h *HTTP, db *varDb, live string, calls int) string {
+	t.Helper()
+	var got []string
+	for i := 0; i < calls; i++ {
+		r := liveReq("GET", "http://svc/me", "")
+		r.header.Set("X-Tok", live)
+		ok, stub, diag := matchVar(t, h, db, r)
+		if !ok {
+			t.Fatalf("call %d missed: %+v", i+1, diag)
+		}
+		got = append(got, stub.Name)
+	}
+	return strings.Join(got, " ")
+}
+
+// Two tests repeat one request, each with its own token: each takes its own
+// recordings in record order, the other test's holding their places.
+func TestVariables_EachTestTakesItsRecordingsInRecordOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{session: []*models.Mock{meAt("a-1", 1, "tA"), meAt("a-2", 2, "tA"), meAt("b-1", 3, "tB"), meAt("b-2", 4, "tB")}}
+	loginAs(t, h, db, "tA", "LA")
+	a := getMe(t, h, db, "LA", 2)
+	loginAs(t, h, db, "tB", "LB")
+	if b := getMe(t, h, db, "LB", 2); a != "a-1 a-2" || b != "b-1 b-2" {
+		t.Fatalf("test A took %s, test B %s; want a-1 a-2, b-1 b-2", a, b)
+	}
+}
+
+// A test whose recordings come after another test's that did not run takes
+// its own in order: the cursor advances from the recording served, not from
+// the other test's it passed.
+func TestVariables_ATestPassesAnotherTestsRecordings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{session: []*models.Mock{meAt("a-1", 1, "tA"), meAt("b-1", 2, "tB"), meAt("b-2", 3, "tB")}}
+	loginAs(t, h, db, "tB", "LB")
+	if got := getMe(t, h, db, "LB", 2); got != "b-1 b-2" {
+		t.Fatalf("test B took %s, want b-1 b-2", got)
+	}
+	db = &varDb{session: []*models.Mock{meAt("r-1", 1, "tA"), meAt("r-2", 2, "tB"), meAt("r-3", 3, "tB"), meAt("r-4", 4, "tA"), meAt("r-5", 5, "tA")}}
+	loginAs(t, h, db, "tA", "LA")
+	if got := getMe(t, h, db, "LA", 3); got != "r-1 r-4 r-5" {
+		t.Fatalf("took %s, want r-1 r-4 r-5", got)
+	}
+}
+
+// A call past the last of a test's recordings stays on its last, as a
+// saturating cursor does, and does not take the next test's place.
+func TestVariables_AnExtraCallStaysOnTheTestsLastRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{session: []*models.Mock{meAt("a-1", 1, "tA"), meAt("a-2", 2, "tA"), meAt("b-1", 3, "tB"), meAt("b-2", 4, "tB")}}
+	loginAs(t, h, db, "tA", "LA")
+	a := getMe(t, h, db, "LA", 3)
+	loginAs(t, h, db, "tB", "LB")
+	if b := getMe(t, h, db, "LB", 2); a != "a-1 a-2 a-2" || b != "b-1 b-2" {
+		t.Fatalf("test A took %s, test B %s; want a-1 a-2 a-2, b-1 b-2", a, b)
 	}
 }

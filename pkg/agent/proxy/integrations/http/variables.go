@@ -362,19 +362,24 @@ type varHit struct {
 }
 
 // variablePass returns the mocks of pool (in its order) that the live call
-// fits and whose variables hold, and otherwise the evidence of the first that
-// fits but whose variables do not hold, if any.
+// fits and whose variables hold, with every mock of pool the call fits (its
+// variables holding or not), and otherwise the evidence of the first that fits
+// but whose variables do not hold, if any.
 //
 // gen is the variables' scope the caller read before it fetched pool.
-func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, gen uint64, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
+func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, gen uint64, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, []*models.Mock, *varProblem, error) {
 	live := liveView(input)
 	var hits []*varHit
+	var fits []*models.Mock
 	var first *varProblem
 	for _, m := range pool {
 		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+			return nil, nil, nil, ctx.Err()
 		}
-		hit, problem := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
+		hit, problem, fit := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
+		if fit {
+			fits = append(fits, m)
+		}
 		switch {
 		case hit != nil:
 			hit.gen = gen
@@ -386,17 +391,18 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 		}
 	}
 	if len(hits) > 0 {
-		return hits, nil, nil
+		return hits, fits, nil, nil
 	}
-	return nil, first, nil
+	return nil, nil, first, nil
 }
 
 // fitVariables reads the live call against one mock. It returns a hit, or the
 // evidence why a mock the call fits cannot answer it, or neither when the call
-// is not this mock's.
-func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (*varHit, *varProblem) {
+// is not this mock's; fits is true when the call, with the recorded values put
+// back, is the recording, whether or not its variables hold.
+func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *models.Mock, table *variables.Table, headerNoise, userBodyNoise map[string][]string, urlNoise []string) (hit *varHit, problem *varProblem, fits bool) {
 	if m.Spec.HTTPReq == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 	decls, bad := readDecls(m)
 	rec, ok := recordedView(m.Spec.HTTPReq)
@@ -417,8 +423,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			next: "the variables block of " + m.Name + " is not one keploy can follow; re-record the test (or remove that block to replay the call as recorded)",
 		}
 	}
+	notFit := func(hit *varHit, p *varProblem) (*varHit, *varProblem, bool) { return hit, p, false }
 	if bad != "" {
-		return refuse(bad)
+		return notFit(refuse(bad))
 	}
 
 	// The variables' places, read on both sides; then the recorded values put
@@ -430,14 +437,14 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		for _, vp := range d.requestPlaces() {
 			r, ok := rec.read(vp.place)
 			if !ok {
-				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
+				return notFit(refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name)))
 			}
 			if !variables.SameValue(d.recorded, r.value, r.number()) {
-				return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded))
+				return notFit(refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded)))
 			}
 			l, ok := live.read(vp.place)
 			if !ok {
-				return nil, nil // the call has no such place: it is not this mock's call
+				return nil, nil, false // the call has no such place: it is not this mock's call
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
 				typeChange = &varProblem{
@@ -447,7 +454,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				}
 			}
 			if asRecorded, ok = asRecorded.putBack(vp.place, r); !ok {
-				return nil, nil
+				return nil, nil, false
 			}
 			liveAt[vp.place.String()] = l
 		}
@@ -455,15 +462,25 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 
 	// 1. The call, with the recorded values put back, is the recording.
 	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
-		return nil, nil
+		return nil, nil, false
 	}
+	// From here the call fits the recording, whatever its variables say: it
+	// holds its place among the recordings of this request (pickHit).
 	if typeChange != nil {
-		return nil, typeChange
+		return nil, typeChange, true
 	}
 	if table == nil {
-		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
+		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}, true
 	}
+	hit, problem = holdVariables(m, decls, liveAt, table, refuse)
+	return hit, problem, true
+}
 
+// holdVariables checks the variables of m on a call that fits its recording
+// (liveAt holds the call's values at m's places): it returns the hit and what
+// it binds, or the evidence why they do not hold, or neither when the call is
+// another test's.
+func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
@@ -631,19 +648,50 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 
 // pickHit chooses the hit that answers: the first in record order, and among
 // repeated recordings of that very request, the one the stateful cursor is at.
-// commit advances the cursor once the call is answered (nil when none).
-func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
-	mocks := make([]*models.Mock, len(hits))
+// The cursor counts the call among every recording it fits (fits), their
+// variables holding or not: a recording whose variable is not yet bound (its
+// use comes before its bind), or another test's, still holds its place in
+// record order, as it does for a call without variables. When the cursor is
+// at a recording whose variables do not hold, the nearest hit after it in
+// record order answers, else the nearest before it (a call past the last of
+// its recordings stays on the last), and the cursor advances from the one
+// served. commit advances the cursor once the call is answered (nil when
+// none).
+func (h *HTTP) pickHit(hits []*varHit, fits []*models.Mock, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
 	byMock := make(map[*models.Mock]*varHit, len(hits))
-	for i, hit := range hits {
-		mocks[i] = hit.mock
+	for _, hit := range hits {
 		byMock[hit.mock] = hit
 	}
-	picked, commit := h.cursorPick(hits[0].mock, mocks, mockDb, statefulMocks)
+	picked, commit := h.cursorPick(hits[0].mock, fits, mockDb, statefulMocks)
 	if hit, ok := byMock[picked]; ok {
 		return hit, commit
 	}
-	return hits[0], nil
+	// The cursor is at a recording whose variables do not hold (cursorPick
+	// returns hits[0] itself whenever no cursor applies).
+	group, key := cursorGroup(hits[0].mock, fits)
+	at := -1
+	for i, m := range group {
+		if m == picked {
+			at = i
+		}
+	}
+	served := -1
+	for i := at + 1; at >= 0 && i < len(group) && served < 0; i++ {
+		if byMock[group[i]] != nil {
+			served = i
+		}
+	}
+	for i := at - 1; i >= 0 && served < 0; i-- {
+		if byMock[group[i]] != nil {
+			served = i
+		}
+	}
+	cs, ok := mockDb.(integrations.MockCursor)
+	if served < 0 || !ok {
+		return hits[0], nil
+	}
+	n := len(group)
+	return byMock[group[served]], func() { cs.AdvanceMockCursor(key, served, n) }
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its

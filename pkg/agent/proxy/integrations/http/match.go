@@ -162,12 +162,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			withVars, rest := splitVariableMocks(unfilteredMocks)
 			if len(withVars) > 0 {
 				table := varTable
-				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
+				hits, fits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
 				if err != nil {
 					return false, nil, nil, err
 				}
 				if len(hits) > 0 {
-					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					hit, commitCursor := h.pickHit(hits, fits, mockDb, statefulMocks)
 					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
 					if err != nil {
 						return false, nil, nil, err
@@ -383,47 +383,59 @@ func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, 
 	if !ok {
 		return bestMatch, nil
 	}
-	wantMethod := bestMatch.Spec.HTTPReq.Method
-	wantURL := bestMatch.Spec.HTTPReq.URL
-	wantBody := bestMatch.Spec.HTTPReq.Body
-	group := make([]*models.Mock, 0, 4)
-	for _, m := range schemaMatched {
-		if m == nil || m.Spec.HTTPReq == nil {
-			continue
-		}
-		// Same request = same ConsumeCursorSaturate class, method, URL and body.
-		// Method+URL matter because the auto-dynamic URL pass can schema-match
-		// recordings of DIFFERENT endpoints that share a body; grouping those
-		// would cursor across unrelated resources.
-		if m.TestModeInfo.Consume == models.ConsumeCursorSaturate &&
-			m.Spec.HTTPReq.Method == wantMethod &&
-			m.Spec.HTTPReq.URL == wantURL &&
-			m.Spec.HTTPReq.Body == wantBody {
-			group = append(group, m)
-		}
-	}
+	group, key := cursorGroup(bestMatch, schemaMatched)
 	if len(group) <= 1 {
 		return bestMatch, nil // single recording: nothing to advance through
 	}
-	// Record order: request timestamp is stable across replay; SortOrder is
-	// mutated on every match so it cannot be used here. ID then Name break ties.
-	sort.SliceStable(group, func(i, j int) bool {
-		ti, tj := group[i].Spec.ReqTimestampMock, group[j].Spec.ReqTimestampMock
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		if group[i].TestModeInfo.ID != group[j].TestModeInfo.ID {
-			return group[i].TestModeInfo.ID < group[j].TestModeInfo.ID
-		}
-		return group[i].Name < group[j].Name
-	})
-	key := cursorKey(string(wantMethod), wantURL, wantBody)
 	idx := cs.MockCursorIndex(key, len(group))
 	if idx < 0 || idx >= len(group) {
 		return bestMatch, nil
 	}
 	n := len(group)
 	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+}
+
+// cursorGroup returns the recordings of schemaMatched that are bestMatch's
+// request for the stateful cursor, in record order, and the cursor's key.
+func cursorGroup(bestMatch *models.Mock, schemaMatched []*models.Mock) ([]*models.Mock, string) {
+	group := make([]*models.Mock, 0, 4)
+	for _, m := range schemaMatched {
+		if sameCursorRequest(m, bestMatch) {
+			group = append(group, m)
+		}
+	}
+	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i], group[j]) })
+	return group, cursorKey(string(bestMatch.Spec.HTTPReq.Method), bestMatch.Spec.HTTPReq.URL, bestMatch.Spec.HTTPReq.Body)
+}
+
+// sameCursorRequest reports whether m is a recording of want's request for the
+// stateful cursor: both ConsumeCursorSaturate, with the same method, URL and
+// body. Method+URL matter because the auto-dynamic URL pass can schema-match
+// recordings of DIFFERENT endpoints that share a body; grouping those would
+// cursor across unrelated resources.
+func sameCursorRequest(m, want *models.Mock) bool {
+	if m == nil || m.Spec.HTTPReq == nil || want == nil || want.Spec.HTTPReq == nil {
+		return false
+	}
+	return m.TestModeInfo.Consume == models.ConsumeCursorSaturate &&
+		m.TestModeInfo.Consume == want.TestModeInfo.Consume &&
+		m.Spec.HTTPReq.Method == want.Spec.HTTPReq.Method &&
+		m.Spec.HTTPReq.URL == want.Spec.HTTPReq.URL &&
+		m.Spec.HTTPReq.Body == want.Spec.HTTPReq.Body
+}
+
+// recordedBefore orders recordings as they were recorded: the request
+// timestamp is stable across replay (SortOrder is mutated on every match, so
+// it cannot be used); ID then Name break ties.
+func recordedBefore(a, b *models.Mock) bool {
+	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
+	if !ta.Equal(tb) {
+		return ta.Before(tb)
+	}
+	if a.TestModeInfo.ID != b.TestModeInfo.ID {
+		return a.TestModeInfo.ID < b.TestModeInfo.ID
+	}
+	return a.Name < b.Name
 }
 
 // cursorKey builds a stable per-request key so repeated identical requests share
