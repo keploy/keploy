@@ -539,10 +539,10 @@ func TestStrictARedactedFormValueMayChange(t *testing.T) {
 	}
 }
 
-// Only recordings consumed by a cursor share one, in their record order: a
-// recording served once is not in the group, and the pool's order is not the
-// record's.
-func TestStrictTheCursorGroupIsTheCallsRecordingsInRecordOrder(t *testing.T) {
+// Only stateful recordings take turns, in their record order: a recording
+// replayed as it is (ConsumeReuse) takes none, and the pool's order is not
+// the record's.
+func TestStrictTheCallsRecordingsTakeTurnsInRecordOrder(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	base := time.Unix(1_700_000_000, 0)
 	cm := func(name string, ts time.Time, consume models.ConsumeMode) *models.Mock {
@@ -715,9 +715,9 @@ func TestStrictALearnedQueryValueIsOneValue(t *testing.T) {
 	}
 }
 
-// A recording that is served once (not consumed by a cursor) answers as it
-// is, ahead of cursor-consumed ones: no cursor applies to it.
-func TestStrictARecordingServedOnceTakesNoCursor(t *testing.T) {
+// A recording replayed as it is (ConsumeReuse) answers as it is, ahead of
+// stateful ones: it takes no turn.
+func TestStrictARecordingReplayedAsItIsTakesNoTurn(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	base := time.Unix(1_700_000_000, 0)
 	once := onHost("once", "/counter", "api.example")
@@ -734,7 +734,7 @@ func TestStrictARecordingServedOnceTakesNoCursor(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		m, commit := h.strictCursorPick([]*models.Mock{once, c1, c2}, db, true)
 		if commit != nil || m.Name != "once" {
-			t.Fatalf("pick %d = %s (commit %v), want once with no cursor", i+1, m.Name, commit != nil)
+			t.Fatalf("pick %d = %s (commit %v), want once with no turn", i+1, m.Name, commit != nil)
 		}
 	}
 }

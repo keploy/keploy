@@ -108,7 +108,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and
-	// replay is declared or learned, never guessed from how it looks.
+	// replay is declared or learned, never guessed from how it looks. (The
+	// variable and strict passes answer every call before the passes below;
+	// this holds if one is ever reached under the switch.)
 	if provenswitch.On() {
 		autoURLDynamic = false
 	}
