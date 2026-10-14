@@ -33,6 +33,9 @@ name: Mock Mode Regression (Linux)
 # this build and once by the released keploy. Another follows a test variable
 # (an id an app mints) through its dependency calls under the proven switch,
 # and asserts a read-back of another id fails with the variable as evidence.
+# Another replays keploy #4686's request-drift app under the proven switch and
+# asserts a call to another host fails naming it, while a container's key is
+# recorded.
 on:
   workflow_call:
     inputs:
@@ -257,3 +260,38 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
+
+  # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
+  # request-drift app: its response never shows where its dependency call
+  # went, so only the call can show it. Replayed under the switch, a call to
+  # another authority (another host, or a container on another random port)
+  # must fail the test naming the host, and a recording of a container
+  # carries its key; without the switch every case passes, as on main. Its
+  # own job: the mock-mode job above is near its timeout.
+  proven_strict_http_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven strict-HTTP (record_replay_build)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run proven strict-HTTP e2e (request drift)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"

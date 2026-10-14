@@ -324,6 +324,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
+				// Under the proven switch it names the destination too
+				// (strict.go).
+				if diag != nil && provenswitch.On() {
+					live := liveDestination(input)
+					diag.live = &live
+				}
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
