@@ -122,6 +122,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// could not track; a session during which one was refused is capture
 		// incomplete. See pkg/agent/routes/pidmaps.go.
 		r.Get("/pidmaps", a.HandlePIDMapRefusals)
+		// Every kind of capture loss, for the per-test taint under the
+		// proven switch. See pkg/agent/routes/capturelosses.go.
+		r.Get("/capturelosses", a.HandleCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct

@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
@@ -257,6 +258,10 @@ type Proxy struct {
 	// themselves via their own defers / context cancellation; we do
 	// not need references to force-close them.
 	activeConns sync.WaitGroup
+
+	// losses counts the calls the proxy intercepted and could not record or
+	// mock (CaptureLosses).
+	losses captureloss.Counter
 
 	Listener net.Listener
 
@@ -2947,6 +2952,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if speculativeDial != nil {
 				speculativeDial.abandon()
 				speculativeDial = nil
+			}
+			// The call behind this handshake is neither recorded nor
+			// mocked: a capture loss, charged to the test running now
+			// and every later one under the proven switch. One that a
+			// stopping agent cut short is no loss of a test's.
+			if ctx.Err() == nil {
+				p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
 			}
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err

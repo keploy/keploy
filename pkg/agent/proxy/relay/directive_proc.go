@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -58,7 +59,12 @@ func (r *Relay) processDirectives(ctx context.Context, stopping <-chan struct{})
 func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	switch d.Kind {
 	case directive.KindUpgradeTLS:
-		return r.handleUpgradeTLS(ctx, stopping, d)
+		ack := r.handleUpgradeTLS(ctx, stopping, d)
+		if !ack.OK && r.cfg.OnCaptureLoss != nil && ctx.Err() == nil {
+			// What follows on this connection is not parsed.
+			r.cfg.OnCaptureLoss(models.CaptureLossSTARTTLS, "a TLS upgrade the parser asked for")
+		}
+		return ack
 	case directive.KindPauseDir:
 		return r.handlePauseDir(d)
 	case directive.KindResumeDir:

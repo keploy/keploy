@@ -464,6 +464,9 @@ type Replayer struct {
 	// pidMark is where the next test set's refused PID map inserts are
 	// counted from (pidmaps.go).
 	pidMark pidMapMark
+	// lossMark is, under the proven switch, where the next test set's tests
+	// count the agent's capture losses from (pidmaps.go).
+	lossMark captureLossMark
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -4318,6 +4321,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// status, but holds the prune and mappings.yaml the same way: a consumed
 	// set nothing shows is complete is no basis for deleting recorded mocks.
 	pidVerdict := r.pidMapCaptureIncomplete(ctx, testSetID)
+	// The next test set's tests count capture losses from here.
+	r.markCaptureLosses(context.WithoutCancel(ctx))
 	captureIncomplete, captureUnverified := pidVerdict.incomplete, pidVerdict.unverified
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed

@@ -140,3 +140,55 @@ func TestHooksThatNeverCountLeaveTheTestsAsTheyWere(t *testing.T) {
 	claimSelf(t, a)
 	require.Empty(t, endPassed(t, a, "TestA").Action)
 }
+
+// lossProxy reports the calls it could not capture, as the proxy does.
+type lossProxy struct {
+	*wireProxy
+	losses models.CaptureLosses
+}
+
+func (p lossProxy) CaptureLosses() models.CaptureLosses { return p.losses }
+
+// The agent's losses are the hooks' and the proxy's together; a proxy that
+// counts is enough for an agent whose hooks cannot.
+func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
+	ctx := context.Background()
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
+	a, p := wireAgent(models.MODE_TEST)
+	a.Proxy = lossProxy{wireProxy: p, losses: models.CaptureLosses{tls}}
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2}}
+	got, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, tls, got[0])
+	require.Equal(t, models.CaptureLossPIDMap, got[1].Kind)
+	require.Equal(t, uint64(2), got[1].Count)
+
+	a.Hooks = loadedHooks{}
+	got, err = a.CaptureLosses(ctx)
+	require.NoError(t, err, "a proxy that counts is enough")
+	require.Equal(t, models.CaptureLosses{tls}, got)
+
+	a.Proxy = p
+	_, err = a.CaptureLosses(ctx)
+	require.ErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}
+
+// A TLS handshake a client aborted against keploy's CA fails the replayed
+// test running then, through the proxy's count.
+func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
+	a, p := wireAgent(models.MODE_TEST)
+	lp := lossProxy{wireProxy: p}
+	a.Proxy = lp
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	lp.losses = models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}
+	a.Proxy = lp
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "TLS handshake(s) with keploy's proxy failed")
+}

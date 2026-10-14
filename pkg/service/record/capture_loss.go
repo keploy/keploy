@@ -12,17 +12,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// PIDMapReader is an optional Instrumentation extension: the inserts into the
-// agent's PID maps the kernel has refused since its hooks loaded, each of them
-// a process the hooks could not track (models.PIDMapRefusals).
-type PIDMapReader interface {
-	GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error)
+// CaptureLossReader is an optional Instrumentation extension: every kind of
+// capture loss the agent has counted since it started (models.CaptureLosses).
+type CaptureLossReader interface {
+	GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
 // captureWatch is, under the proven switch, keploy record's account of what
-// the agent could not capture (design v14 §3.2, rule 12): the processes the
-// kernel refused a place in the agent's PID maps, counted from the moment
-// the agent began capturing. A loss taints the test case being recorded when
+// the agent could not capture (design v14 §3.2, rule 12): processes the
+// kernel refused a place in the agent's PID maps, client-side TLS handshakes
+// that failed against keploy's CA, TLS upgrades keploy could not make,
+// counted from the moment the agent began capturing. A loss taints the test case being recorded when
 // it happened and every later one, so each test case is checked as it is
 // saved: the first whose check sees a loss and every one after it are named
 // at the end, and the recording fails. A test case whose check could not be
@@ -30,9 +30,9 @@ type PIDMapReader interface {
 // off, or an agent that cannot count, it does nothing.
 type captureWatch struct {
 	logger *zap.Logger
-	reader PIDMapReader
+	reader CaptureLossReader
 	off    bool
-	base   models.PIDMapRefusals
+	base   models.CaptureLosses
 	// baseErr is why the count could not be read when capture began; every
 	// test case is then unverified.
 	baseErr error
@@ -40,7 +40,7 @@ type captureWatch struct {
 	mu         sync.Mutex
 	tainted    []string
 	unverified []string
-	lost       models.PIDMapRefusals
+	lost       models.CaptureLosses
 	readErr    error
 }
 
@@ -48,7 +48,7 @@ type captureWatch struct {
 // against. Called once the agent is capturing and before the app starts.
 func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumentation) *captureWatch {
 	w := &captureWatch{logger: logger}
-	reader, ok := instr.(PIDMapReader)
+	reader, ok := instr.(CaptureLossReader)
 	if !provenswitch.On() || !ok {
 		w.off = true
 		return w
@@ -56,10 +56,10 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	w.reader = reader
 	// No deadline of its own (rule 15): the agent's answer, the connection's
 	// close or ctx ends it.
-	base, err := reader.GetPIDMapRefusals(ctx)
+	base, err := reader.GetCaptureLosses(ctx)
 	switch {
-	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
-		logger.Debug("the agent cannot say whether it tracked every process of the application; capture completeness is not checked", zap.Error(err))
+	case errors.Is(err, models.ErrCaptureLossesUnsupported):
+		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))
 		w.off = true
 	case err != nil:
 		w.baseErr = err
@@ -80,7 +80,7 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.mu.Unlock()
 		return
 	}
-	now, err := w.reader.GetPIDMapRefusals(context.WithoutCancel(ctx))
+	now, err := w.reader.GetCaptureLosses(context.WithoutCancel(ctx))
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err != nil {
@@ -90,9 +90,9 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		}
 		return
 	}
-	if refused := now.Since(w.base); refused.Any() {
+	if lost := now.Since(w.base); len(lost) > 0 {
 		w.tainted = append(w.tainted, name)
-		w.lost = refused
+		w.lost = lost
 	}
 }
 
@@ -108,11 +108,11 @@ func (w *captureWatch) finish(testSetID string) bool {
 	failed := false
 	if len(w.tainted) > 0 {
 		failed = true
-		w.logger.Error("the recording is incomplete: the agent could not track every process the application ran, so these test cases' calls may be missing from the mocks ("+provenswitch.Env+"=1)",
+		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.tainted),
-			zap.String("reason", w.lost.CaptureIncomplete()),
-			zap.String("next_step", "re-record these test cases with fewer live processes on the machine, or run the app in Docker so the agent sees only its container"))
+			zap.String("reason", w.lost.Text()),
+			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
 	}
 	if len(w.unverified) > 0 {
 		failed = true
@@ -120,10 +120,10 @@ func (w *captureWatch) finish(testSetID string) bool {
 		if why == nil {
 			why = w.readErr
 		}
-		w.logger.Error("the recording is not verified: keploy could not read whether the agent tracked every process the application ran while these test cases were recorded ("+provenswitch.Env+"=1)",
+		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call while these test cases were recorded ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.unverified),
-			zap.String("reason", models.CaptureUnverified(why)),
+			zap.Error(why),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
 	return failed

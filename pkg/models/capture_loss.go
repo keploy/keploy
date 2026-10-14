@@ -18,6 +18,14 @@ const (
 	// intercepted (target_namespace_pids), or its children's calls were
 	// taken for the app's (excluded_pids).
 	CaptureLossPIDMap CaptureLossKind = "pid_map_refused"
+	// CaptureLossTLSAbort: a client aborted the TLS handshake keploy's proxy
+	// answered with a certificate from keploy's CA (it does not trust that
+	// CA, or the handshake failed): its call was neither recorded nor mocked.
+	CaptureLossTLSAbort CaptureLossKind = "tls_handshake_failed"
+	// CaptureLossSTARTTLS: a parser asked to upgrade a connection to TLS
+	// (STARTTLS, Postgres SSLRequest) and keploy could not make the upgrade,
+	// so what followed was not parsed.
+	CaptureLossSTARTTLS CaptureLossKind = "starttls_failed"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -80,6 +88,10 @@ func captureLossText(c CaptureLoss) string {
 	switch c.Kind {
 	case CaptureLossPIDMap:
 		return fmt.Sprintf("the kernel refused %d insert(s) into keploy's PID maps, so a process's calls were not intercepted while this test or one before it ran", c.Count)
+	case CaptureLossTLSAbort:
+		return fmt.Sprintf("%d TLS handshake(s) with keploy's proxy failed on the client's side (a client that does not trust keploy's CA aborts it), so those calls were neither recorded nor mocked", c.Count)
+	case CaptureLossSTARTTLS:
+		return fmt.Sprintf("keploy could not make %d STARTTLS upgrade(s), so what followed on those connections was not parsed", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

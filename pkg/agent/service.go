@@ -51,6 +51,13 @@ type PIDMapReporter interface {
 	PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error)
 }
 
+// CaptureLossReporter is the optional extension implemented by a proxy that
+// counts the calls it intercepted and could not record or mock
+// (models.CaptureLosses). The agent adds these counts to the hooks' own.
+type CaptureLossReporter interface {
+	CaptureLosses() models.CaptureLosses
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }

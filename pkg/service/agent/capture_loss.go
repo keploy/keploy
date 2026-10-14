@@ -5,26 +5,36 @@ import (
 	"errors"
 	"fmt"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // CaptureLosses counts every kind of capture loss the agent can see, each
-// only ever growing for its life (models.CaptureLosses). Today that is the
-// processes the kernel refused a place in the PID maps; each later source
-// (design v14 §3.2) adds its kind here. Hooks that cannot count give
-// models.ErrCaptureLossesUnsupported, "unknown"; a count that could not be
-// read is its own error.
+// only ever growing for its life (models.CaptureLosses): the processes the
+// kernel refused a place in the PID maps (the hooks), and the calls the proxy
+// intercepted and could not record or mock (a client-side TLS handshake that
+// failed against keploy's CA, a TLS upgrade it could not make). Each later
+// source (design v14 §3.2) adds its kind here. With neither source able to
+// count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
+// could not be read is its own error.
 func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
-	refusals, err := a.PIDMapRefusals(ctx)
-	if errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
-		return nil, fmt.Errorf("%w: %v", models.ErrCaptureLossesUnsupported, err)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read the PID map refusals: %w", err)
-	}
 	var out models.CaptureLosses
-	if n := refusals.Target + refusals.Excluded; n > 0 {
-		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: n, What: pidMapExample(refusals)})
+	proxy, proxyCounts := a.Proxy.(coreAgent.CaptureLossReporter)
+	if proxyCounts && a.Proxy != nil {
+		out = append(out, proxy.CaptureLosses()...)
+	}
+	refusals, err := a.PIDMapRefusals(ctx)
+	switch {
+	case errors.Is(err, models.ErrPIDMapRefusalsUnsupported):
+		if !proxyCounts {
+			return nil, fmt.Errorf("%w: %v", models.ErrCaptureLossesUnsupported, err)
+		}
+	case err != nil:
+		return nil, fmt.Errorf("read the PID map refusals: %w", err)
+	default:
+		if n := refusals.Target + refusals.Excluded; n > 0 {
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: n, What: pidMapExample(refusals)})
+		}
 	}
 	return out, nil
 }

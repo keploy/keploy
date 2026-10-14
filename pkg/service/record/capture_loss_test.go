@@ -13,26 +13,30 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// countingInstr is an Instrumentation whose agent counts refused PID-map
-// inserts: each read answers the next of answers (the last repeating), or
-// errAt[n] for the nth read (from 1).
+// countingInstr is an Instrumentation whose agent counts capture losses: each
+// read answers the next of answers (the last repeating), or errAt[n] for the
+// nth read (from 1).
 type countingInstr struct {
 	Instrumentation
-	answers []models.PIDMapRefusals
+	answers []models.CaptureLosses
 	errAt   map[int]error
 	reads   int
 }
 
-func (c *countingInstr) GetPIDMapRefusals(context.Context) (models.PIDMapRefusals, error) {
+func (c *countingInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
 	c.reads++
 	if err := c.errAt[c.reads]; err != nil {
-		return models.PIDMapRefusals{}, err
+		return nil, err
 	}
 	i := c.reads - 1
 	if i >= len(c.answers) {
 		i = len(c.answers) - 1
 	}
 	return c.answers[i], nil
+}
+
+func pid(n uint64) models.CaptureLosses {
+	return models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: n}}
 }
 
 func record3(t *testing.T, instr Instrumentation) (*captureWatch, bool, *observer.ObservedLogs) {
@@ -49,7 +53,7 @@ func record3(t *testing.T, instr Instrumentation) (*captureWatch, bool, *observe
 // later one are named, and the recording fails; the one before is not.
 func TestARecordingThatLostACaptureNamesTheTestCasesFromTheLossOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	instr := &countingInstr{answers: []models.PIDMapRefusals{{Target: 1}, {Target: 1}, {Target: 4, LastTargetErr: -7}}}
+	instr := &countingInstr{answers: []models.CaptureLosses{pid(1), pid(1), pid(4)}}
 	w, failed, logs := record3(t, instr)
 	if !failed || w.String() != "tainted=[test-2,test-3] unverified=[]" {
 		t.Fatalf("failed %v, %s; want test-2 and test-3 tainted and the recording failed", failed, w)
@@ -70,8 +74,8 @@ func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 		instr *countingInstr
 		want  string
 	}{
-		{"at the start", &countingInstr{answers: []models.PIDMapRefusals{{}}, errAt: map[int]error{1: errors.New("connection refused")}}, "tainted=[] unverified=[test-1,test-2,test-3]"},
-		{"at one test case", &countingInstr{answers: []models.PIDMapRefusals{{}}, errAt: map[int]error{3: errors.New("connection reset")}}, "tainted=[] unverified=[test-2]"},
+		{"at the start", &countingInstr{answers: []models.CaptureLosses{nil}, errAt: map[int]error{1: errors.New("connection refused")}}, "tainted=[] unverified=[test-1,test-2,test-3]"},
+		{"at one test case", &countingInstr{answers: []models.CaptureLosses{nil}, errAt: map[int]error{3: errors.New("connection reset")}}, "tainted=[] unverified=[test-2]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, failed, logs := record3(t, tc.instr)
@@ -87,7 +91,7 @@ func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 
 func TestARecordingThatLostNothingPasses(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	w, failed, logs := record3(t, &countingInstr{answers: []models.PIDMapRefusals{{Target: 3}}})
+	w, failed, logs := record3(t, &countingInstr{answers: []models.CaptureLosses{pid(3)}})
 	if failed || w.String() != "tainted=[] unverified=[]" || logs.Len() != 0 {
 		t.Fatalf("failed %v, %s, %d ERRORs; want nothing (refusals before capture began are not the recording's)", failed, w, logs.Len())
 	}
@@ -97,12 +101,12 @@ func TestARecordingThatLostNothingPasses(t *testing.T) {
 // nothing fails.
 func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
-	off := &countingInstr{answers: []models.PIDMapRefusals{{}, {Target: 9}}}
+	off := &countingInstr{answers: []models.CaptureLosses{nil, pid(9)}}
 	if _, failed, _ := record3(t, off); failed || off.reads != 0 {
 		t.Fatalf("switch off: failed %v after %d reads; want no read and no failure", failed, off.reads)
 	}
 	t.Setenv(provenswitch.Env, "1")
-	unsupported := &countingInstr{answers: []models.PIDMapRefusals{{}}, errAt: map[int]error{1: models.ErrPIDMapRefusalsUnsupported}}
+	unsupported := &countingInstr{answers: []models.CaptureLosses{nil}, errAt: map[int]error{1: models.ErrCaptureLossesUnsupported}}
 	if _, failed, _ := record3(t, unsupported); failed || unsupported.reads != 1 {
 		t.Fatalf("an agent that cannot count: failed %v after %d reads; want one read and no failure", failed, unsupported.reads)
 	}

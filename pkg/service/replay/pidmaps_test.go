@@ -495,17 +495,41 @@ func TestWithCaptureIncomplete(t *testing.T) {
 	}
 }
 
-// Under the proven switch a process the PID map refused taints the test
-// running when it happened and every later test of the set (design v14 §3.2):
-// each is FAILED with CAPTURE_INCOMPLETE and what was lost, and the test
-// before it is not. With the switch off the per-test reads are not made.
+// prLossInstr is the RunTestSet harness's agent, counting capture losses: each
+// read answers the next of answers, the last one repeating, or errAt[n] for
+// the nth read (from 1).
+type prLossInstr struct {
+	*prInstr
+
+	lmu     sync.Mutex
+	answers []models.CaptureLosses
+	errAt   map[int]error
+	reads   int
+}
+
+func (f *prLossInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	f.lmu.Lock()
+	defer f.lmu.Unlock()
+	f.reads++
+	if err := f.errAt[f.reads]; err != nil {
+		return nil, err
+	}
+	i := f.reads - 1
+	if i >= len(f.answers) {
+		i = len(f.answers) - 1
+	}
+	return f.answers[i], nil
+}
+
+// Under the proven switch a capture loss taints the test running when it
+// happened and every later test of the set (design v14 §3.2): each is FAILED
+// with CAPTURE_INCOMPLETE and what was lost, and the test before it is not.
 func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newPartialRunHarness(t, 3, 0) // every test passes
-	// The mark, then one read as each test ends, then the set's own read.
-	instr := &prPIDMapInstr{prInstr: h.instr, answers: []models.PIDMapRefusals{
-		{}, {}, {Target: 2, LastTargetErr: -7}, {Target: 2, LastTargetErr: -7}, {Target: 2, LastTargetErr: -7},
-	}}
+	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 2, What: "to 10.0.0.9:443"}}
+	// The mark, then one read as each test ends, then the set end's re-mark.
+	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, tls}}
 	h.replayer.instrumentation = instr
 	h.replayer.markPIDMaps(context.Background())
 
@@ -524,9 +548,8 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 		if r.Status != models.TestStatusFailed {
 			t.Fatalf("%s: %s, want FAILED: the loss taints the test running and every later one", id, r.Status)
 		}
-		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0].Count != 2 ||
-			!strings.Contains(r.FailureInfo.CaptureIncomplete[0].What, "target_namespace_pids") {
-			t.Fatalf("%s: capture evidence %+v, want 2 refused inserts into target_namespace_pids", id, r.FailureInfo.CaptureIncomplete)
+		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+			t.Fatalf("%s: capture evidence %+v, want %+v", id, r.FailureInfo.CaptureIncomplete, tls)
 		}
 		found := false
 		for _, c := range r.FailureInfo.Category {
@@ -536,14 +559,19 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 			t.Fatalf("%s: categories %v lack %s", id, r.FailureInfo.Category, models.CaptureIncompleteCategory)
 		}
 	}
+	// The next test set counts from the end of this one.
+	if instr.reads != 5 || len(h.replayer.lossMark.at) != 1 {
+		t.Fatalf("%d reads, mark %+v; want the mark, three tests and the end's re-mark, the mark at the loss", instr.reads, h.replayer.lossMark)
+	}
 }
 
 // Under the proven switch a per-test read that fails leaves that test without
-// a verdict, and its set unjudged, like a miss list not read whole.
+// a verdict, and its set unjudged, like a miss list not read whole; an agent
+// that cannot count leaves the tests as they were.
 func TestUnderTheSwitchAPerTestCaptureReadThatFailsLeavesTheSetUnjudged(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newPartialRunHarness(t, 3, 0)
-	instr := &prPIDMapInstr{prInstr: h.instr, answers: []models.PIDMapRefusals{{}}, errAt: map[int]error{3: errors.New("connection reset")}}
+	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}, errAt: map[int]error{3: errors.New("connection reset")}}
 	h.replayer.instrumentation = instr
 	h.replayer.markPIDMaps(context.Background())
 	status := h.run(t)
@@ -558,5 +586,13 @@ func TestUnderTheSwitchAPerTestCaptureReadThatFailsLeavesTheSetUnjudged(t *testi
 	}
 	if len(unread) != 1 || unread[0] != "test-2" {
 		t.Fatalf("tests without a verdict %v, want [test-2] (the read as it ended failed)", unread)
+	}
+
+	h = newPartialRunHarness(t, 3, 0)
+	instr = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}, errAt: map[int]error{1: fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported)}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+	if status := h.run(t); status != models.TestSetStatusPassed || instr.reads != 2 {
+		t.Fatalf("an agent that cannot count: %s after %d reads; want PASSED, with only the mark and the end's re-mark read", status, instr.reads)
 	}
 }

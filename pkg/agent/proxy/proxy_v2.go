@@ -224,7 +224,8 @@ func (p *Proxy) recordViaSupervisor(
 	defer stopRecordingStamp()
 
 	relayCfg := relay.Config{
-		Logger: logger,
+		Logger:        logger,
+		OnCaptureLoss: p.losses.Add,
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
 		// captured once per connection: the relay calls the returned fn with
 		// no options in hand. With the flag unset this is the historic

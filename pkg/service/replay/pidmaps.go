@@ -71,6 +71,7 @@ type pidMapVerdict struct {
 // (pidMapCaptureIncomplete), so that every refusal of the run falls in exactly
 // one test set.
 func (r *Replayer) markPIDMaps(ctx context.Context) {
+	r.markCaptureLosses(ctx)
 	r.pidMark = pidMapMark{}
 	reader, ok := r.instrumentation.(PIDMapReader)
 	if !ok {
@@ -177,37 +178,72 @@ func withCaptureIncomplete(captureIncomplete, reason string) string {
 	return captureIncomplete + "; " + reason
 }
 
+// CaptureLossReader is an optional Instrumentation extension: every kind of
+// capture loss the agent has counted since it started (models.CaptureLosses).
+type CaptureLossReader interface {
+	GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
+}
+
+// captureLossMark is, under the proven switch, the agent's capture-loss counts
+// a test set's tests are counted from. known is false when they could not be
+// read; err says why (models.ErrCaptureLossesUnsupported for an agent that
+// cannot count, which leaves the tests as they were).
+type captureLossMark struct {
+	at    models.CaptureLosses
+	known bool
+	err   error
+}
+
+// markCaptureLosses reads, under the proven switch, the counts the next test
+// set's tests are counted from: where the PID maps are marked, and again at
+// each test set's end, so a loss between two test sets is the next one's.
+func (r *Replayer) markCaptureLosses(ctx context.Context) {
+	r.lossMark = captureLossMark{}
+	if !provenswitch.On() {
+		return
+	}
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	if !ok {
+		r.lossMark.err = models.ErrCaptureLossesUnsupported
+		return
+	}
+	at, err := readCaptureLosses(ctx, reader)
+	if err != nil {
+		r.lossMark.err = err
+		return
+	}
+	r.lossMark = captureLossMark{at: at, known: true}
+}
+
+// readCaptureLosses reads the agent's counts with no deadline of its own (the
+// proven switch's reads: the answer, the connection's close or ctx ends it).
+func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.CaptureLosses, error) {
+	return reader.GetCaptureLosses(ctx)
+}
+
 // testCaptureLosses is, under the proven switch, what the agent could not
-// capture since the test set's mark, read as one of its tests ends: the
-// processes the kernel refused a place in the agent's PID maps. A loss taints
-// the test running when it happened and every later test of the set (design
-// v14 §3.2); the count only grows, so every later read carries it. An agent
-// that cannot count leaves every test as it was, as the set's own check does;
-// one that counts but could not be read now, or at the mark, is an error: the
-// test's capture cannot be told.
+// capture since the test set's mark, read as one of its tests ends: processes
+// the kernel refused a place in the agent's PID maps, client-side TLS
+// handshakes that failed against keploy's CA, TLS upgrades keploy could not
+// make. A loss taints the test running when it happened and every later test
+// of the set (design v14 §3.2); the counts only grow, so every later read
+// carries it. An agent that cannot count leaves every test as it was, as the
+// set's own check does; one that counts but could not be read now, or at the
+// mark, is an error: the test's capture cannot be told.
 func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
-	reader, ok := r.instrumentation.(PIDMapReader)
-	if !ok || (!r.pidMark.known && r.pidMark.unreadable == nil) {
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	if !ok || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
 		return nil, nil
 	}
-	if !r.pidMark.known {
-		return nil, fmt.Errorf("at the start of the test set: %w", r.pidMark.unreadable)
+	if !r.lossMark.known {
+		if r.lossMark.err == nil {
+			return nil, errors.New("keploy did not read the agent's capture-loss counts when the test set began")
+		}
+		return nil, fmt.Errorf("at the start of the test set: %w", r.lossMark.err)
 	}
-	now, err := readPIDMapRefusals(ctx, reader)
+	now, err := readCaptureLosses(ctx, reader)
 	if err != nil {
 		return nil, err
 	}
-	refused := now.Since(r.pidMark.at)
-	if !refused.Any() {
-		return nil, nil
-	}
-	what := "target_namespace_pids"
-	cause := models.PIDMapRefusalCause(refused.LastTargetErr)
-	if refused.Target == 0 {
-		what, cause = "excluded_pids", models.PIDMapRefusalCause(refused.LastExcludedErr)
-	}
-	if cause != "" {
-		what += ": " + cause
-	}
-	return models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: refused.Target + refused.Excluded, What: what}}, nil
+	return now.Since(r.lossMark.at), nil
 }
