@@ -1286,6 +1286,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
 	var insertedMu sync.Mutex
+	// Under the proven switch a recording made without --sync writes its
+	// mappings.yaml at the end, derived from its test windows; nil otherwise.
+	windowMaps := r.newWindowMappings()
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -1453,6 +1456,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 				r.logger.Warn("deferred-orphan revoke: testDB does not support DeleteTests; leaving orphaned test cases in the set",
 					zap.Int("count", len(toDelete)))
 			}
+		}
+
+		// The test cases the set keeps are final: map them (a no-op unless
+		// this recording derives its mappings from its test windows).
+		if recordingStarted && newTestSetID != "" {
+			windowMaps.write(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly)
 		}
 
 		/*
@@ -2041,6 +2050,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
+				windowMaps.addTest(testCase)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
@@ -2222,6 +2232,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 					})
 				}
+				windowMaps.addMock(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()

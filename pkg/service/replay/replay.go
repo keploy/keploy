@@ -1705,6 +1705,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// returns those, so every count of what the agent holds (the compose
 	// guard's among them) agrees with what was sent. The compose and the
 	// native path both load through it.
+	// winUse is, under the proven switch, what the tests consume of their
+	// recorded windows: a run that left one of those mocks unconsumed creates
+	// no mappings.yaml (proven_window_mappings.go). Nil with the switch off.
+	winUse := newWindowUse()
 	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
 		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		mocksThatHaveMappings := make(map[string]bool)
@@ -1751,6 +1755,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
+		winUse.load(testCases, filtered, unfiltered)
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
@@ -2947,6 +2952,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
 			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
+			winUse.observe(testCase.Name, consumedMocks)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -3889,6 +3895,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
 			carryAttr.mapConsumed(actualTestMockMappings, tc.Name, tcReqTimeStream, tcRespTimeStream, consumedMocks)
+			winUse.observe(tc.Name, consumedMocks)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -4572,6 +4579,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	holdMappings := ""
 	// holdQuietly: a hold that is the expected outcome, logged at Debug.
 	holdQuietly := false
+	// windowLeft and windowUnseen name, under the proven switch, the tests
+	// that left a mock of their recorded window unconsumed and those that own
+	// one and whose consumption this run did not read.
+	var windowLeft, windowUnseen []string
 	// Whether the run had anything to write at all, before the verdicts took
 	// their part: what the holds below are about.
 	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
@@ -4601,6 +4612,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				holdMappings = "no test consumed a mock, so a new file would map no test"
 				holdQuietly = true
 			}
+		}
+	case winUse != nil:
+		// Under the proven switch a new file is made only from a run in which
+		// every test consumed every mock recorded in its window. Every case
+		// above that matches without holding has found a file that exists.
+		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
+			holdMappings, windowLeft, windowUnseen = winUse.holdCreate(testCases, consumptionUnread)
 		}
 	}
 	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""
@@ -4633,6 +4651,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		fields := []zap.Field{zap.String("testSetID", testSetID), zap.String("reason", holdMappings)}
 		if n := len(keptRecorded); n > 0 && len(mappingDoc.TestCases) == 0 {
 			fields = append(fields, zap.Int("count", n), zap.Strings("testsNotCountedAsPassing", keptRecorded[:min(n, 20)]))
+		}
+		if n := len(windowLeft); n > 0 {
+			fields = append(fields, zap.Int("leftCount", n), zap.Strings("testsThatLeftARecordedCallUnconsumed", windowLeft[:min(n, 20)]))
+		}
+		if n := len(windowUnseen); n > 0 {
+			fields = append(fields, zap.Int("notReadCount", n), zap.Strings("testsWhoseConsumptionWasNotRead", windowUnseen[:min(n, 20)]))
 		}
 		logHold("not writing mappings.yaml", fields...)
 	} else if !shouldWriteMappings && r.mappingDB != nil && len(mappingDoc.Startup) > 0 {
@@ -5020,18 +5044,11 @@ func recordedTestWindows(testCases []*models.TestCase) []models.TestWindow {
 	return out
 }
 
-// testWindowOf is the [req, res] window the per-test agent call opens for tc.
+// testWindowOf is the [req, res] window the per-test agent call opens for tc
+// (models.RecordedWindow).
 func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
-	if tc == nil {
-		return time.Time{}, time.Time{}
-	}
-	switch tc.Kind {
-	case models.HTTP:
-		return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
-	case models.GRPC_EXPORT:
-		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
-	}
-	return time.Time{}, time.Time{}
+	w := models.RecordedWindow(tc)
+	return w.Start, w.End
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
