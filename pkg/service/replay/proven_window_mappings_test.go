@@ -69,6 +69,8 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 		update   bool
 		// streamed names the tests replayed in the streaming pass.
 		streamed []string
+		// ignored names the tests the run skips.
+		ignored []string
 		// wantOff is the file the run creates with the switch off; wantOn
 		// with it on (nil: no file).
 		wantOff, wantOn map[string][]string
@@ -134,6 +136,18 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 			wantOn:  map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}},
 		},
 		{
+			// An ignored test gets no entry in the file the run creates, as
+			// a test that did not pass gets none: what it recorded is not
+			// cut down, so it holds nothing.
+			name:    "test-2 is ignored and owns a call",
+			ignored: []string{"test-2"},
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-1", 1010)},
+			},
+			wantOff: map[string][]string{"test-1": {"mock-1"}},
+			wantOn:  map[string][]string{"test-1": {"mock-1"}},
+		},
+		{
 			name: "--update-test-mapping creates no file either",
 			consumed: map[string][]models.MockState{
 				"test-1": {mongoAt("mock-1", 1010)},
@@ -157,6 +171,9 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 				h.replayer.logger = zap.New(core)
 				h.replayer.config.Test.UpdateTestMapping = tc.update
 				h.streaming(tc.streamed...)
+				if tc.ignored != nil {
+					h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": tc.ignored}
+				}
 				// The recording: a DNS lookup and a handshake in test-1's
 				// window are not test mocks, and nothing consumes them here.
 				lookup := mongoMockAt("lookup", 1005)
@@ -229,12 +246,12 @@ func TestRunTestSetUnderTheProvenSwitchARecordedMappingStaysAsFailedTestsKeepIt(
 	}
 }
 
-// windowUse's own rule: a test that owns a mock of its recorded window and
-// whose consumption the run did not read (it did not run, or the read failed)
-// holds the create as surely as one whose attributed consumption lacks the
-// mock; a carried-over mock its window recorded counts as consumed when the
-// run attributes it to the test, whoever consumed it; a test that owns none
-// never holds it; and a set whose mocks were not read cannot show anything.
+// windowUse's own rule: a test that ran, owns a mock of its recorded window,
+// and whose consumption could not be read holds the create as surely as one
+// whose attributed consumption lacks the mock; a carried-over mock its window
+// recorded counts as consumed when the run attributes it to the test, whoever
+// consumed it; a test that did not run (ignored, not selected) or owns none
+// holds nothing; and a set whose mocks were not read cannot show anything.
 // With the switch off it holds nothing.
 func TestWindowUseHoldCreate(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -258,10 +275,10 @@ func TestWindowUseHoldCreate(t *testing.T) {
 	}
 	w.load(cases, mocks)
 	w.ran("test-1")
-	// test-3 owns nothing; not running it holds nothing.
-	reason, left, unseen := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}}))
-	if reason == "" || left != nil || !reflect.DeepEqual(unseen, []string{"test-2"}) {
-		t.Fatalf("test-2 did not run: reason %q, left %v, unseen %v; want test-2 unseen", reason, left, unseen)
+	// test-2 owns mock-2 and did not run (ignored, or not selected): a file
+	// this run creates gives it no entry, so it holds nothing.
+	if reason, left, unseen := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}})); reason != "" {
+		t.Fatalf("test-2 did not run and held the create: reason %q, left %v, unseen %v", reason, left, unseen)
 	}
 	w.ran("test-2")
 	if _, left, _ := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}})); !reflect.DeepEqual(left, []string{"test-2"}) {

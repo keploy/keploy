@@ -76,13 +76,18 @@ func (w *windowUse) ran(test string) {
 }
 
 // holdCreate says why the run must not create mappings.yaml, or "" when every
-// test consumed every test mock of its recorded window. A test's consumption
-// is what the run attributes to it (actual: carryOverAttribution.mapConsumed),
-// so a carried-over mock its window recorded counts as its own wherever it was
-// consumed. unread names the tests whose consumption could not be read. left
-// names, in testCases order, the tests that left a test mock of their window
-// unconsumed; unseen those that own one and whose consumption the run did not
-// read (not run, or the read failed).
+// test it ran consumed every test mock of its recorded window. A test's
+// consumption is what the run attributes to it (actual:
+// carryOverAttribution.mapConsumed), so a carried-over mock its window
+// recorded counts as its own wherever it was consumed. unread names the tests
+// whose consumption could not be read. left names, in testCases order, the
+// tests that ran and left a test mock of their window unconsumed; unseen those
+// that ran, own one, and whose consumption could not be read.
+//
+// A test the run did not run (ignored, or not selected) gets no entry in a
+// file the run creates, as a test that did not pass gets none (#4773): what it
+// recorded is not cut down, so it holds nothing. A run that did not score
+// every test it loaded is held before this (allTestsGotAVerdict).
 func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string, actual *models.Mapping) (reason string, left, unseen []string) {
 	if w == nil {
 		return "", nil, nil
@@ -109,7 +114,10 @@ func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string, ac
 		if tc == nil || len(w.owned[tc.Name]) == 0 {
 			continue
 		}
-		if !w.seen[tc.Name] || isUnread[tc.Name] {
+		if !w.seen[tc.Name] {
+			continue
+		}
+		if isUnread[tc.Name] {
 			unseen = appendOnce(unseen, tc.Name)
 			continue
 		}
@@ -123,5 +131,5 @@ func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string, ac
 	if len(left) == 0 && len(unseen) == 0 {
 		return "", nil, nil
 	}
-	return "a test left a mock recorded in its window unconsumed, or did not run, so a mappings.yaml made from this run would leave that call out of the test's mapping for good (KEPLOY_PROVEN=1); keploy record writes the mappings of a recording made under the switch", left, unseen
+	return "a test left a mock recorded in its window unconsumed, or what it consumed could not be read, so a mappings.yaml made from this run could leave a call out of the test's mapping for good (KEPLOY_PROVEN=1); keploy record writes the mappings of a recording made under the switch", left, unseen
 }

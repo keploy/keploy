@@ -59,8 +59,13 @@ type winRecording struct {
 	cancel  context.CancelFunc
 }
 
-func startWinRecording(t *testing.T, cfg *config.Config, mappingDB MappingDb) *winRecording {
+// startWinRecording starts a recording against a fake agent. logger, nil for
+// none, is the recorder's: it is set before Start runs, which reads it.
+func startWinRecording(t *testing.T, cfg *config.Config, mappingDB MappingDb, logger *zap.Logger) *winRecording {
 	t.Helper()
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	f := &fakeInstr{
 		mappings: make(chan models.TestMockMapping),
 		incoming: make(chan *models.TestCase),
@@ -72,7 +77,7 @@ func startWinRecording(t *testing.T, cfg *config.Config, mappingDB MappingDb) *w
 		mappingDB = w.mapping
 	}
 	w.r = &Recorder{
-		logger:          zap.NewNop(),
+		logger:          logger,
 		testDB:          w.testDB,
 		mockDB:          w.mockDB,
 		mappingDb:       mappingDB,
@@ -174,7 +179,7 @@ func keepExitCode(t *testing.T) {
 func TestStart_ProvenRecordWithoutSyncMapsEachTestFromItsWindow(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
-	w := startWinRecording(t, &config.Config{}, nil)
+	w := startWinRecording(t, &config.Config{}, nil, nil)
 
 	async := winMock("lane-delivery", models.HTTP, "", 1060)
 	async.Spec.Async = &models.AsyncMeta{Lane: "events", Seq: 1}
@@ -241,7 +246,7 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Record.Synchronous = tc.sync
 			cfg.DisableMapping = tc.disable
-			w := startWinRecording(t, cfg, nil)
+			w := startWinRecording(t, cfg, nil, nil)
 			w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 			w.test(t, winTest("test-1", 1000, 1100))
 			var want []map[string][]string
@@ -265,7 +270,7 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 func TestStart_ProvenWindowMappingsLeaveARevokedTestOut(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
-	w := startWinRecording(t, &config.Config{}, nil)
+	w := startWinRecording(t, &config.Config{}, nil, nil)
 	w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 	w.mock(t, winMock("rates-2", models.HTTP, "", 2060))
 	w.mock(t, winMock("rates-3", models.HTTP, "", 2200))
@@ -298,8 +303,7 @@ func TestStart_ProvenWindowMappingsWriteFailureFailsTheRecording(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
 	core, logs := observer.New(zap.ErrorLevel)
-	w := startWinRecording(t, &config.Config{}, &failingMappingDB{})
-	w.r.logger = zap.New(core)
+	w := startWinRecording(t, &config.Config{}, &failingMappingDB{}, zap.New(core))
 	w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 	w.test(t, winTest("test-1", 1000, 1100))
 	w.stop(t, 1, 1)
@@ -371,8 +375,7 @@ func TestStart_ProvenWindowMappingsYieldToMappingsTheAgentStreamed(t *testing.T)
 	t.Setenv(provenswitch.Env, "1")
 	keepExitCode(t)
 	core, logs := observer.New(zap.InfoLevel)
-	w := startWinRecording(t, &config.Config{}, nil)
-	w.r.logger = zap.New(core)
+	w := startWinRecording(t, &config.Config{}, nil, zap.New(core))
 	w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 	w.mock(t, winMock("rates-2", models.HTTP, "", 2030))
 	w.test(t, winTest("test-1", 1000, 1100))
@@ -504,7 +507,29 @@ func TestStart_ProvenWindowMappingsKeepTheWindowOfATestThatFailedToPersist(t *te
 	if len(mappingDB.batches) != 1 {
 		t.Fatalf("want one batch, got %v", mappingDB.batches)
 	}
-	if got := mappingDB.batches[0]; len(got) != 1 || len(got["kept"]) != 0 {
+	if got, ok := mappingDB.batches[0]["kept"]; len(mappingDB.batches[0]) != 1 || !ok || len(got) != 0 {
 		t.Fatalf("mapped %v; want kept with no mock: the call was recorded inside the window of the test case that failed to persist", got)
+	}
+}
+
+// A test case that came back from its insert without a name keeps its window,
+// as one that failed to persist does: the call recorded inside it goes to no
+// test rather than to a later-started one, and no entry is written under "".
+func TestWindowMappingsATestWithoutANameKeepsItsWindow(t *testing.T) {
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addTest(winTest("", 1000, 1500))
+	w.addTest(winTest("later", 1200, 1300))
+	w.addMock(winMock("call", models.HTTP, "", 1210))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	if len(db.batches) != 1 {
+		t.Fatalf("want one batch, got %v", db.batches)
+	}
+	got := db.batches[0]
+	if _, named := got[""]; named {
+		t.Fatalf("wrote an entry with no test name: %v", got)
+	}
+	if later, ok := got["later"]; len(got) != 1 || !ok || len(later) != 0 {
+		t.Fatalf("mapped %v; want later with no mock: the call was recorded inside the unnamed test case's window", got)
 	}
 }
