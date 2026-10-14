@@ -26,6 +26,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
@@ -1731,8 +1732,28 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	return nil
 }
 
+// bindContainerKeys makes ctx, the agent's, the bound of its reading of
+// Docker for container keys (containerkey), so it stops with the agent. Only
+// under the proven switch: without it the agent never reads Docker.
+func bindContainerKeys(ctx context.Context) {
+	if provenswitch.On() {
+		containerkey.Default.Bind(ctx)
+	}
+}
+
+// startContainerKeys starts a session's container keys under the proven
+// switch: a fresh numbering, and the local daemon's containers indexed before
+// the app runs (containerkey). Without the switch it does nothing.
+func (p *Proxy) startContainerKeys(ctx context.Context) {
+	if provenswitch.On() {
+		containerkey.Default.Reset()
+		containerkey.Default.Watch(ctx, p.logger)
+	}
+}
+
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
+	bindContainerKeys(ctx)
 
 	// Skip the TCP listener if configured. DNS + parsers + session still run.
 	if agent.SkipProxyListener {
@@ -2334,6 +2355,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
 
+	// The proven model names a container destination by its container key,
+	// not by the address it was reached at (containerkey): in the scope open
+	// now, from the index of the local daemon's containers, which never waits
+	// on Docker. The entry goes when this function returns, after the cleanup
+	// below has waited for the parsers, so every mock they record is stamped
+	// first.
+	proven := provenswitch.On()
+	if proven {
+		connID := fmt.Sprint(clientConnID)
+		containerkey.Default.Name(p.logger, connID, dstAddr)
+		defer containerkey.Default.Forget(connID)
+	}
+
 	// Create a local copy of OutgoingOptions to avoid data race when multiple
 	// goroutines handle connections concurrently and modify DstCfg/Synchronous
 	outgoingOpts := rule.OutgoingOptions
@@ -2374,6 +2408,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	if proven {
+		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
+	}
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
 	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
@@ -3711,6 +3748,7 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	recorded.reset()
+	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the
@@ -3763,8 +3801,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	return nil
 }
 
-func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	recorded.reset()
+	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate
 	// the schema-noise -> mock-noise rename and therefore sets only the

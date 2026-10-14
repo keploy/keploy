@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/config/loader"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
@@ -167,6 +168,16 @@ type CmdConfigurator struct {
 // a test can see the call without pinning the switch for the rest of its
 // process, since a pin cannot be undone; a test pins this default.
 var pinProvenSwitch = provenswitch.Pin
+
+// setDockerHost is what the agent's --docker-host flag decides: the Docker
+// endpoint its container keys are resolved through. A variable so a test can
+// see the call.
+var setDockerHost = containerkey.SetDockerHost
+
+// disableContainerKeys is what a docker-mode agent does at start: it has no
+// Docker socket, so it names no container destination. A variable so a test
+// can see the call.
+var disableContainerKeys = func() { containerkey.Default.Disable() }
 
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
@@ -383,6 +394,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
+		// Internal orchestrator→agent flag: the Docker endpoint the client
+		// uses (its DOCKER_HOST), which sudo drops, for naming container
+		// destinations (containerkey.AgentArgs). Passed only under the proven
+		// switch; without it the agent asks the environment's endpoint.
+		cmd.Flags().String(containerkey.AgentFlag, "", "Internal: the Docker endpoint of the keploy client that starts this agent, for naming container destinations. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(containerkey.AgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -2079,6 +2096,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.logger.Warn("KEPLOY_PROVEN in the agent's own environment is ignored: an agent takes the proven switch only from the --proven flag of the keploy that starts it",
 				zap.String("value", v), zap.Bool("proven", provenswitch.On()))
 		}
+		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
+			setDockerHost(host)
+		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
@@ -2120,6 +2140,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.IsDocker = isdocker
+		if isdocker && provenswitch.On() {
+			// keploy's agent container has no Docker socket to name
+			// container destinations by (containerkey).
+			disableContainerKeys()
+			c.logger.Info("keploy's agent runs in a container here and cannot read the Docker daemon, so this run names container destinations by their address; HTTP calls to compose services are still matched by the service names the app uses")
+		}
 
 		enableTesting, err := cmd.Flags().GetBool("enable-testing")
 		if err != nil {

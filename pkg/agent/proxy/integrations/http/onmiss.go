@@ -14,6 +14,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -123,7 +124,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 
 	// record policy: capture the exchange for the CLI to persist.
 	if opts.OnMiss.RecordsOnMiss() {
-		appendCaptured(&models.Mock{
+		captured := &models.Mock{
 			Version: models.GetVersion(),
 			Name:    "mocks",
 			Kind:    models.HTTP,
@@ -151,7 +152,13 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 				ReqTimestampMock: reqTs,
 				ResTimestampMock: resTs,
 			},
-		})
+		}
+		// A capture never passes the sync manager, which stamps every other
+		// recorded mock with its connection's container key (containerkey).
+		if key, ok := containerkey.FromContext(ctx); ok {
+			captured.Spec.Metadata[containerkey.MetadataKey] = key
+		}
+		appendCaptured(captured)
 	}
 	return true, nil
 }

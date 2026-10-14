@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -262,12 +263,18 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	}
 	a.provenMu.Lock()
 	a.proven.claim = me
-	if prev != me || a.proven.key != key {
+	newClaim := prev != me || a.proven.key != key
+	if newClaim {
 		now := time.Now()
 		a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: key, Start: now, End: now})
 	}
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
+	if newClaim {
+		// The instance numbers its own containers outside its tests
+		// (containerkey).
+		containerkey.Default.BeginInstance()
+	}
 	if a.replaying() {
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {
@@ -466,6 +473,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Lock()
 	a.proven.open, a.proven.atBegin = id, counts
 	a.provenMu.Unlock()
+	// The test's own containers are numbered from here, after the run's
+	// (containerkey); closeOpen goes back to the run's numbering however the
+	// test closes.
+	containerkey.Default.BeginTest()
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
@@ -516,10 +527,16 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, atBegin map[string]uint64, why string) (*models.ScopeEvidence, error) {
 	defer func() {
 		a.provenMu.Lock()
-		if a.proven.open == id {
+		closed := a.proven.open == id
+		if closed {
 			a.proven.open, a.proven.atBegin = "", nil
 		}
 		a.provenMu.Unlock()
+		if closed {
+			// Connections from here on are numbered by the run again
+			// (containerkey).
+			containerkey.Default.EndTest()
+		}
 	}()
 	return a.endTest(ctx, id, outcome, at, atBegin, why)
 }

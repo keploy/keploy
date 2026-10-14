@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -35,9 +36,32 @@ func TestNativeAgentArgs_CarryTheProvenSwitch(t *testing.T) {
 		t.Fatalf("switch off, yet the native agent argv carries %s: %v", flag, args)
 	}
 
+	// With DOCKER_HOST set the launcher does not ask the host's docker CLI
+	// for its context (containerkey.AgentArgs).
+	t.Setenv("DOCKER_HOST", "unix:///run/test-docker.sock")
 	t.Setenv(provenswitch.Env, "1")
 	if args := a.nativeAgentArgs(opts); !slices.Contains(args, flag) {
 		t.Fatalf("KEPLOY_PROVEN=1, yet the native agent argv lacks %s, so the agent's parsers run the old paths: %v", flag, args)
+	}
+}
+
+// sudo drops DOCKER_HOST too, so under the switch the native agent is told
+// the client's Docker endpoint, where it resolves container keys; with the
+// switch off its argv does not change.
+func TestNativeAgentArgs_CarryTheDockerEndpointUnderTheSwitch(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	flag := "--" + containerkey.AgentFlag + "=unix:///run/user/1000/docker.sock"
+	a := New(zap.NewNop(), nil, &config.Config{})
+	opts := models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797, AgentURI: "http://localhost:26795/agent", Mode: models.MODE_TEST}
+	t.Setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
+
+	t.Setenv(provenswitch.Env, "")
+	if args := a.nativeAgentArgs(opts); slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--"+containerkey.AgentFlag) }) {
+		t.Fatalf("switch off, yet the native agent argv carries the Docker endpoint: %v", args)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	if args := a.nativeAgentArgs(opts); !slices.Contains(args, flag) {
+		t.Fatalf("KEPLOY_PROVEN=1 and DOCKER_HOST set, yet the native agent argv lacks %s: %v", flag, args)
 	}
 }
 

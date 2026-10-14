@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/log"
 )
@@ -193,5 +194,59 @@ func agentSaysItsSwitchIsOn(t *testing.T, args []string, want bool) {
 	}
 	if provenswitch.On() != want {
 		t.Fatalf("the agent's switch is on: %v, want %v", provenswitch.On(), want)
+	}
+}
+
+// A native agent is told its client's Docker endpoint (sudo drops
+// DOCKER_HOST), through a hidden flag, and resolves container keys there.
+func TestAgentDockerHostFlagSetsTheEndpoint(t *testing.T) {
+	var got []string
+	prev := setDockerHost
+	setDockerHost = func(h string) { got = append(got, h) }
+	t.Cleanup(func() { setDockerHost = prev })
+
+	runAgentFlags(t, "--"+containerkey.AgentFlag+"=unix:///run/user/1000/docker.sock")
+	if len(got) != 1 || got[0] != "unix:///run/user/1000/docker.sock" {
+		t.Fatalf("--%s set the endpoint %q; want it once", containerkey.AgentFlag, got)
+	}
+	got = nil
+	runAgentFlags(t)
+	if len(got) != 0 {
+		t.Fatalf("without the flag the endpoint was set to %q", got)
+	}
+
+	viper.Reset()
+	cmd, _ := newAgentCmdForTest(t, config.New())
+	if f := cmd.Flags().Lookup(containerkey.AgentFlag); f == nil || !f.Hidden {
+		t.Fatalf("`keploy agent` has no hidden --%s flag: %+v", containerkey.AgentFlag, f)
+	}
+}
+
+// An agent in keploy's container has no Docker socket, so under the switch it
+// names no container destination instead of asking, and warning, on every
+// session.
+func TestDockerModeAgentDisablesContainerKeys(t *testing.T) {
+	calls := 0
+	prev := disableContainerKeys
+	disableContainerKeys = func() { calls++ }
+	t.Cleanup(func() { disableContainerKeys = prev })
+
+	// runAgentFlags does not pin the real switch, so the agent's argv
+	// carries --proven as its launcher passes it, and the switch is on in
+	// this process's environment too.
+	t.Setenv(provenswitch.Env, "1")
+	runAgentFlags(t, "--"+provenswitch.AgentFlag, "--is-docker")
+	if calls != 1 {
+		t.Fatalf("a docker-mode agent disabled container keys %d times, want once", calls)
+	}
+	runAgentFlags(t, "--"+provenswitch.AgentFlag)
+	if calls != 1 {
+		t.Fatal("a native agent disabled container keys")
+	}
+	// Without the switch nothing is touched.
+	t.Setenv(provenswitch.Env, "")
+	runAgentFlags(t, "--is-docker")
+	if calls != 1 {
+		t.Fatal("a docker-mode agent without the switch touched container keys")
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/token"
 
 	"github.com/docker/docker/api/types/container"
@@ -1669,6 +1670,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)
+	// And the Docker endpoint the tests' containers run on, which sudo drops
+	// too, so the agent can name container destinations (containerkey).
+	args = append(args, containerkey.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native

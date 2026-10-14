@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -1206,6 +1208,12 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	// downstream code to call DeriveLifetime defensively.
 	if mock != nil {
 		mock.DeriveLifetime()
+		// The proven model's container key of the connection the mock came
+		// from (containerkey). Stamped here, as the parser hands the mock
+		// over, while its connection is still open.
+		if provenswitch.On() {
+			containerkey.Default.Stamp(mock)
+		}
 	}
 	m.mu.Lock()
 	if m.memoryPause {
