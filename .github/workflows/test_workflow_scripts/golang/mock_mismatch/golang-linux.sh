@@ -937,6 +937,45 @@ for phase in off on; do
 done
 echo "✓ KEPLOY_PROVEN=1: a test that no longer makes a recorded call fails, with the call named, and nothing else does"
 
+# 12d. A SET WITHOUT mappings.yaml OWNS NOTHING (S12). Under the switch each
+#      test case is served exactly the mocks its mapping lists, so in a copy of
+#      the unmutated recording with its mappings.yaml removed, a test case
+#      that makes a dependency call is answered by no mock and fails, one
+#      that makes none passes, and the replay creates no mappings.yaml: only
+#      record writes it. (Without the switch the same copy replays green on
+#      the time windows: step 12c's control shows the windows serve it.)
+rm -rf ./nomap-run
+mkdir ./nomap-run
+cp -a ./pristine-run/keploy ./nomap-run/keploy
+rm -rf ./nomap-run/keploy/reports
+nm_mappings=$(ls ./nomap-run/keploy/test-set-*/mappings.yaml | head -n 1)
+# The test cases that recorded a dependency call: those the pristine mapping
+# gives a non-DNS mock.
+callers=$(yq -o=json '[.tests[] | select((.mock_entries // []) | map(select(.kind != "DNS")) | length > 0) | .id]' "$nm_mappings")
+rm -f "$nm_mappings"
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./nomap-run --delay 7 --generateGithubActions=false 2>&1 | tee nomap_logs.txt
+nm_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" nomap_logs.txt; then
+    echo "::error::Race condition detected in the run without mappings.yaml"
+    exit 1
+fi
+"$REPLAY_BIN" report --format json --path ./nomap-run > ndjson_nomap.txt 2>/dev/null
+if ! CALLERS="$callers" jq -es '(env.CALLERS | fromjson) as $c | length > 0 and ($c | length) > 0 and all(if (.test_case_id | IN($c[])) then .status == "FAILED" else .status == "PASSED" end)' ndjson_nomap.txt > /dev/null; then
+    echo "::error::under KEPLOY_PROVEN=1 a set without mappings.yaml owns nothing: every test case that makes a dependency call ($callers) must fail, and every other must pass"
+    jq -s 'map({test_case_id, status})' ndjson_nomap.txt
+    tail -40 nomap_logs.txt
+    exit 1
+fi
+if [ "$nm_rc" -eq 0 ]; then
+    echo "::error::under KEPLOY_PROVEN=1 the run without mappings.yaml failed tests and must exit non-zero"
+    exit 1
+fi
+if ls ./nomap-run/keploy/test-set-*/mappings.yaml > /dev/null 2>&1; then
+    echo "::error::under KEPLOY_PROVEN=1 the replay created mappings.yaml; only record writes it"
+    exit 1
+fi
+echo "✓ KEPLOY_PROVEN=1: a set without mappings.yaml owns nothing, its callers fail, and the replay writes no mappings.yaml"
+
 # 13. STRICT FAILURE UNDER THE PROVEN SWITCH (KEPLOY_PROVEN=1, the proven
 #     model's staging gate). Step 9's run, unchanged except for the switch: no
 #     --assert-dependencies and no --strict-failure. Step 11a/11b proved that
@@ -977,6 +1016,8 @@ echo "    exit code 0 -> non-zero, which no knob-independent label can fake;"
 echo "  - under KEPLOY_PROVEN=1 a test owns every data-plane mock its mapping"
 echo "    lists: the unmutated recording replays green, and a test fails when it"
 echo "    does not make a call it recorded or a call got no recorded answer."
+echo "  - under KEPLOY_PROVEN=1 a set without mappings.yaml owns nothing: a test"
+echo "    case that makes a call fails, and the replay writes no mappings.yaml."
 echo "  - under KEPLOY_PROVEN=1 strict failure is on for everyone: the same run"
 echo "    FAILED its tests instead of demoting them to OBSOLETE, and went red."
 exit 0
