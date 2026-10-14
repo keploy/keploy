@@ -169,10 +169,10 @@ runs:
           # stderr stays suppressed: a missing ref is the ordinary case and its
           # error is noise. go_retry matches on its own captured copy, not on
           # this stream, so the retry still works.
-          # A 1s backoff, not go_retry's default 5s: stderr is suppressed here,
+          # A 1s backoff, not go_retry's default 10s: stderr is suppressed here,
           # so a retry is invisible, and a speculative fetch should not stall
           # the step for seconds with nothing in the log to explain it.
-          if GOPRIVATE=github.com/keploy/integrations GO_RETRY_MAX_ATTEMPTS=2 GO_RETRY_BACKOFF=1 GO_RETRY_DIRECT_FROM=99 \
+          if GOPRIVATE=github.com/keploy/integrations GO_RETRY_MAX_ATTEMPTS=2 GO_RETRY_BACKOFF=1 \
             go_retry get "github.com/keploy/integrations@${ref}" 2>/dev/null; then
             echo "✓ Fetched integrations@${ref}"
             FETCHED=1
@@ -214,13 +214,12 @@ runs:
             exit 1
           fi
           echo "Fetching private integrations dependency via SSH (INTEGRATION_REF=${INTEGRATION_REF})..."
-          # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY.
-          # The module itself is GOPRIVATE and always comes from git, so the
-          # proxy schedule cannot help it — but attempts 3-4 would otherwise
-          # flip its TRANSITIVE dependencies to `direct`, which is strictly
-          # riskier (a renamed or retagged upstream fails permanently direct
-          # where the proxy still serves it).
-          GOPRIVATE=github.com/keploy/integrations GO_RETRY_DIRECT_FROM=99 \
+          # The module itself is GOPRIVATE and always comes from git; its
+          # TRANSITIVE dependencies come through go_retry's pipe proxy list
+          # (proxy first on every attempt, the origin only on a proxy error),
+          # so a renamed or retagged upstream the proxy still serves keeps
+          # coming from the proxy.
+          GOPRIVATE=github.com/keploy/integrations \
             go_retry get "github.com/keploy/integrations@${INTEGRATION_REF}"
         fi
 
@@ -371,14 +370,14 @@ runs:
         # private module over SSH, every transitive dependency through the
         # proxy — so it is the second most likely network call in this action.
         #
-        # GO_RETRY_DIRECT_FROM=99 pins every attempt to the default GOPROXY, as
-        # the fetch above does and as the pwsh arm does. Letting attempts 3-4
-        # flip a WHOLE graph to `direct` is the case check-deprecated-deps.sh
-        # pins the same flag for: one renamed or retagged upstream then fails
-        # permanently where the proxy would still have served it.
+        # Through go_retry's pipe proxy list, as the fetch above and the pwsh
+        # arm: every attempt asks the proxy first and goes to a module's origin
+        # only on a proxy error, so the graph never flips to `direct` as a
+        # whole and a renamed or retagged upstream the proxy still serves keeps
+        # coming from the proxy.
         # shellcheck source=/dev/null
         source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/go-retry.sh"
-        GO_RETRY_DIRECT_FROM=99 go_retry mod tidy
+        go_retry mod tidy
 
     # FIX 2: Explicitly use pwsh on Windows to avoid 'bash' invoking WSL
     - name: Add any missing Go modules (Windows)

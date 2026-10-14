@@ -20,15 +20,16 @@ direct_deps=$(go mod edit -json | jq -r '.Require[] | select(.Indirect == null) 
 # (github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0, an indirect dependency,
 # for about an hour after its release: "verifying go.mod: ... not found:
 # unknown revision").
-# Proxy-only retry: a stream error here kills the lint job the same way it
-# kills a sample lane — but GO_RETRY_DIRECT_FROM is pushed past max attempts:
-# under direct, one renamed, deleted or retagged upstream fails permanently
-# where the proxy would still serve it. A just-published tag of a DIRECT
+# Retried: a stream error here kills the lint job the same way it kills a
+# sample lane. go_retry's pipe proxy list asks the proxy first on every attempt
+# and a module's origin only on a proxy error, so a renamed, deleted or
+# retagged upstream the proxy still serves keeps coming from the proxy. A
+# just-published tag of a DIRECT
 # dependency that the checksum database cannot resolve yet can still fail this
 # step: reading its deprecation and retractions means verifying its newest
 # go.mod, which is what this check exists to do.
 # shellcheck disable=SC2086 # one argument per module path, on purpose
-output=$(GO_RETRY_DIRECT_FROM=99 go_retry list -m -u $direct_deps)
+output=$(go_retry list -m -u $direct_deps)
 
 found_deprecated=false
 

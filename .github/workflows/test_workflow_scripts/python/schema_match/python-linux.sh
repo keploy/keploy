@@ -26,7 +26,7 @@ cleanup_keploy() {
 trap cleanup_keploy EXIT
 
 # Install dependencies if not already present
-pip3 install flask
+bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip flask
 
 # remove old keploy folder and reports to ensure fresh start
 rm -rf keploy/ reports/

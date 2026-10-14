@@ -18,7 +18,7 @@
 # patterns that file was originally written for — `go get` on a private module
 # still resolves its transitive dependencies through the proxy, so a windows
 # lane would otherwise hard-fail on the exact class every linux lane retries.
-$GoRetryTransient = 'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF|permission denied \(publickey\)|kex_exchange_identification|connection closed by remote host'
+$GoRetryTransient = 'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF|permission denied \(publickey\)|kex_exchange_identification|connection closed by remote host|invalid version: git ls-remote|invalid version: unknown revision|unrecognized import path'
 
 # Invoke-GoWithRetry runs `go @GoArgs`, retrying only transient failures.
 # Returns $true on success and $false otherwise; callers decide whether a
@@ -31,17 +31,16 @@ $GoRetryTransient = 'stream error: stream id|INTERNAL_ERROR; received from peer|
 # missing go means the action itself is broken, and no number of retries will
 # find it.
 #
-# Deliberately never switches GOPROXY to direct, which is where this differs
-# from go-retry.sh's default schedule. Every command wrapped here resolves a
-# whole module graph, and flipping all of it to direct makes a renamed,
-# deleted or retagged upstream fail PERMANENTLY where the proxy would still
-# serve it — the same reason check-deprecated-deps.sh pins
-# GO_RETRY_DIRECT_FROM=99 for its `go list -m -u` of the direct dependencies.
+# The lanes' shared fetch rule, as in go-retry.sh (read it for why): at most 5
+# attempts, attempt x 10 s between them, and GOPROXY="https://proxy.golang.org|direct"
+# for the go command unless the caller set GOPROXY -- each attempt asks the
+# proxy first and falls back to the module's origin on any proxy error, so the
+# proxy still serves whatever it has, a renamed upstream included.
 function Invoke-GoWithRetry {
   param(
     [string[]]$GoArgs,
-    [int]$MaxAttempts = 4,
-    [int]$BackoffSeconds = 5,
+    [int]$MaxAttempts = 5,
+    [int]$BackoffSeconds = 10,
     [string]$What = "go command",
     # Suppresses go's own output, for speculative calls whose failure is the
     # ordinary case. Retry notices are still printed: a silent stall is what
@@ -65,7 +64,11 @@ function Invoke-GoWithRetry {
   }
 
   $attempt = 1
-  $backoff = $BackoffSeconds
+  # The pipe list for this call only, unless the caller chose a GOPROXY; the
+  # caller's environment is restored however the call ends.
+  $callerProxy = $env:GOPROXY
+  if (-not $callerProxy) { $env:GOPROXY = 'https://proxy.golang.org|direct' }
+  try {
   while ($true) {
     # Reset explicitly. Tee-Object -Variable does NOT clear the variable when
     # the pipeline produces nothing, so an attempt that fails silently would
@@ -104,9 +107,12 @@ function Invoke-GoWithRetry {
       Write-Host "$annotate$What failed after $MaxAttempts attempts"
       return $false
     }
+    $backoff = $BackoffSeconds * $attempt
     Write-Host "$What attempt $attempt failed transiently; retrying in $backoff s (attempt $($attempt + 1)/$MaxAttempts)"
     Start-Sleep -Seconds $backoff
-    $backoff = $backoff * 2
     $attempt = $attempt + 1
+  }
+  } finally {
+    $env:GOPROXY = $callerProxy
   }
 }

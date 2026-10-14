@@ -191,11 +191,14 @@ endsec
 # Clone the private go-fuzzers repository and navigate to the mongo directory
 section "Cloning go-fuzzers Repository"
 echo "Cloning keploy/go-fuzzers using PRO_ACCESS_TOKEN..."
+# The lanes' shared fetch rule (fetch.sh): retried, a stalled transfer given up
+# on progress, and the token kept out of what it prints.
+FETCH_SH="${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/fetch.sh"
 if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
-  git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git
+  bash "$FETCH_SH" clone "https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git" go-fuzzers
 else
   echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth (will fail for private repo)"
-  git clone https://github.com/keploy/go-fuzzers.git
+  bash "$FETCH_SH" clone https://github.com/keploy/go-fuzzers.git go-fuzzers
 fi
 cd go-fuzzers/mongo
 echo "Now in directory: $(pwd)"
