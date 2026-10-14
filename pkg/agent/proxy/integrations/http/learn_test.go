@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // learnDb is a mock store with a test's own mocks (consumed when served) and
@@ -838,5 +839,44 @@ func TestWhatFLearnsReplaysWithNoiseBesideAVariable(t *testing.T) {
 			}
 			inCI(t, mocks, tc.ci)
 		})
+	}
+}
+
+// givenDb is a learnDb whose test case gave values (keploy test's template
+// keys, #4789), bound in its variable table.
+type givenDb struct {
+	*learnDb
+	table variables.Table
+}
+
+func (d *givenDb) Variables() *variables.Table { return &d.table }
+
+// A value the test case's request gave is its key's variable: the call that
+// carries it uses the key, with no bind, and is answered with this run's
+// value. A value merely recorded equal to a key's is not the key's, and no
+// other variable takes the key's name.
+func TestLearnMatchAValueTheTestCaseGaveIsItsKey(t *testing.T) {
+	h, n, opts := learnOn(t)
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{recorded("mock-0", 0, "GET", "/v1/users/u-1", "", nil, `{"id":"u-1","name":"a"}`)}}}
+	db.table.Start([]variables.Binding{{Name: "userId", Value: "u-9", Recorded: "u-1", Mock: "test case get-user-1", Place: "url.path[2]", Given: true}})
+	served, miss, _ := h.learnMatch(context.Background(), live("GET", "/v1/users/u-9", "", nil), db, n, opts)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"id":"u-9","name":"a"}` {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"userId": {Recorded: "u-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Variables, want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Variables, want)
+	}
+
+	// Recorded equal to the key's value, but another value now: an echo of
+	// its own, which does not take the key's name.
+	db = &givenDb{learnDb: &learnDb{perTest: []*models.Mock{recorded("mock-0", 0, "POST", "/v1/orders", `{"id":"1"}`, nil, `{"id":"1"}`)}}}
+	db.table.Start([]variables.Binding{{Name: "id", Value: "7", Recorded: "1", Mock: "test case create-1", Place: "body.id", Given: true}})
+	served, miss, _ = h.learnMatch(context.Background(), live("POST", "/v1/orders", `{"id":"5"}`, nil), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	got := db.consumed[0].Spec.Variables
+	if _, took := got["id"]; took || len(got) != 1 || got["id-2"].Echo != true {
+		t.Fatalf("variables %+v: the order's own echo, not the key's name", got)
 	}
 }

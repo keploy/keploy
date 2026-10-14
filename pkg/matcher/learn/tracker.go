@@ -107,12 +107,17 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 }
 
 // Name is the name of test number n's variable bound at place of mock: the
-// same for every call that uses it, and no other variable's in the test
-// (variables are named per test). ok is false when that test has ended. A
-// nil tracker, which knows of no test, names a variable by its place alone.
-func (t *Tracker) Name(n uint64, mock, place string) (name string, ok bool) {
+// same for every call that uses it, no other variable's in the test
+// (variables are named per test), and none of reserved (the test case's
+// template keys). ok is false when that test has ended. A nil tracker,
+// which knows of no test, names a variable by its place alone.
+func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
-		return varName(place), true
+		name = varName(place)
+		for i := 2; reserved[name]; i++ {
+			name = varName(place) + "-" + strconv.Itoa(i)
+		}
+		return name, true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -128,7 +133,7 @@ func (t *Tracker) Name(n uint64, mock, place string) (name string, ok bool) {
 	}
 	base := varName(place)
 	name = base
-	for i := 2; t.taken[name]; i++ {
+	for i := 2; t.taken[name] || reserved[name]; i++ {
 		name = base + "-" + strconv.Itoa(i)
 	}
 	t.names[key], t.taken[name] = name, true

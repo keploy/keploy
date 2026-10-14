@@ -598,7 +598,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			earlier := earlierThan(earlier, m)
 			learned := learn.Classify(res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
 				earlierRaw(m, served, sc.visible, earlier), respLeaves(m.Spec.HTTPResp))
-			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier)
+			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -653,9 +653,18 @@ type pairing struct {
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier) (pairing, string) {
+//   - A value the test case's request gave (given: its template keys, which
+//     keploy test binds for the test, #4789) is that key's variable, used
+//     here under the key's name with no bind, whatever else Classify found:
+//     the test case is earlier than any call it makes. Its name is the key's
+//     alone in the test: no other variable takes it.
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
+	reserved := make(map[string]bool, len(given))
+	for _, g := range given {
+		reserved[g.Name] = true
+	}
 	answers := func(l learn.Learned, from []learn.Leaf) []string {
 		var out []string
 		for _, a := range from {
@@ -671,6 +680,22 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	echoed := map[string]string{} // recorded value -> its echo variable
 	for _, l := range learned {
 		r := l.Recorded
+		if g, ok := givenFor(r, l.Live, given); ok {
+			// The test case gave this value: a use of its key, no bind.
+			place, placeable := learn.VarPlace(r, jsonReq)
+			switch {
+			case !placeable:
+				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
+			case !own:
+				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
+			}
+			v := p.vars[g.Name]
+			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
+			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			p.vars[g.Name] = v
+			p.values[g.Name] = g
+			continue
+		}
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
@@ -694,7 +719,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
-			name, ok := tracker.Name(test, from.Mock, from.Var)
+			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
@@ -733,7 +758,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.vars[name] = v
 				continue
 			}
-			name, ok := tracker.Name(test, m.Name, place)
+			name, ok := tracker.Name(test, m.Name, place, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
@@ -743,6 +768,36 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 	}
 	return p, ""
+}
+
+// givenBindings are the values the running test case's request gave
+// (variables.Binding.Given), as keploy test bound them for the test: none
+// for a store that keeps no variables.
+func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
+	table := variableTable(mockDb)
+	if table == nil {
+		return nil
+	}
+	var out []variables.Binding
+	for _, b := range table.Snapshot() {
+		if b.Given {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// givenFor is the given value the drifted leaf carries: the key's value
+// when recorded (r) and in this run (live). An equal recorded value alone is
+// not the key's (two counters both at 1 when recorded are two values).
+func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, bool) {
+	number := r.Type == learn.Number
+	for _, g := range given {
+		if r.Value != "" && variables.SameValue(g.Recorded, r.Value, number) && variables.SameValue(g.Value, live.Value, number) {
+			return g, true
+		}
+	}
+	return variables.Binding{}, false
 }
 
 // respLeavesOf are the leaves of m's recorded answer.
