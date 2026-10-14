@@ -151,9 +151,21 @@ func TestReportTeardownProgressWithoutAPath(t *testing.T) {
 	}
 }
 
+// withoutWorkChecks has the stages of teardown work a test begins go
+// unchecked (newWorkProbe), as where their progress cannot be seen: they then
+// count as making progress throughout, and take no steps but their start and
+// end, which a test that counts steps relies on.
+func withoutWorkChecks(t *testing.T) {
+	t.Helper()
+	old := newWorkProbe
+	newWorkProbe = func() workProbe { return nil }
+	t.Cleanup(func() { newWorkProbe = old })
+}
+
 // Work in progress is reported as such until it ends, and its start and end
 // are each a step.
 func TestTeardownWorkIsReportedBusy(t *testing.T) {
+	withoutWorkChecks(t)
 	defer func(b time.Duration) { teardownBeat = b }(teardownBeat)
 	teardownBeat = 5 * time.Millisecond
 	path := filepath.Join(t.TempDir(), "teardown.json")
@@ -176,6 +188,7 @@ func TestTeardownWorkIsReportedBusy(t *testing.T) {
 // then the end of the work). Either way the report reads the work in progress
 // or the step that ended it.
 func TestATeardownReportIsNeverTorn(t *testing.T) {
+	withoutWorkChecks(t)
 	if TeardownBusy() {
 		t.Fatal("teardown work an earlier test began is still in progress: every report reads busy, and this test would prove nothing")
 	}

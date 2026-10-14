@@ -106,11 +106,12 @@ func TerminateCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 // KillAgentCommand ends the agent cmd started, for a stop that has to be
 // forced (the CLI's stopWatch in pkg/platform/http). The agent is sent
 // keployutils.EscalationSignal, on which it kills itself once no teardown work
-// is in progress (utils.DieOnEscalation): the CLI judged from a report a
-// moment old. now -- the user pressed Ctrl+C again -- sends SIGKILL instead,
-// where it can: to an agent started directly. One started through sudo runs
-// as root, which the user who ran keploy may not signal; sudo keeps that
-// user's uid and hands the escalation signal on to the agent. Through
+// in progress is making progress (utils.DieOnEscalation): the CLI judged from
+// a report a moment old. now -- the user pressed Ctrl+C again -- sends SIGKILL
+// instead, where it can: to an agent started directly. One started through
+// sudo runs as root, which the user who ran keploy may not signal; sudo keeps
+// that user's uid and hands the escalation signal on to the agent, now or not
+// (KillAgentReach), and the stop then waits for it to exit. Through
 // cmd.Process, so an agent already reaped is never signalled. A process that
 // has already exited is not an error.
 func KillAgentCommand(cmd *exec.Cmd, logger *zap.Logger, now bool) error {

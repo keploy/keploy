@@ -17,6 +17,13 @@ import (
 type Hooks interface {
 	// AppInfo
 	DestInfo
+	// Load loads the hooks; what it leaves running goes on the errgroup ctx
+	// carries (models.ErrGroupKey) and ends once ctx is cancelled. Load itself
+	// must return without waiting for ctx to be cancelled: the agent's
+	// teardown cancels it only once Load has returned (Agent.Hook). It runs as
+	// teardown work while a stop waits for it, where its progress can be seen
+	// (Linux, utils.TeardownProgressSeen; utils.BeginTeardownWork): what it
+	// waits for on another goroutine must be teardown work of its own there.
 	Load(ctx context.Context, cfg HookCfg, setupOpts config.Agent) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 }
@@ -204,6 +211,15 @@ type InFlightReader interface {
 }
 
 type AuxiliaryProxyHook interface {
+	// AfterStart runs once the proxy has started, ordered against
+	// BeforeTeardown: a teardown that comes while it runs waits for it. Where
+	// its progress can be seen (Linux, utils.TeardownProgressSeen) it runs as
+	// teardown work (utils.BeginTeardownWork), and keeps the stopping agent
+	// from being killed in its middle only while it makes progress on its own
+	// goroutine -- what it waits for on another goroutine must be teardown
+	// work of its own there. Elsewhere it is not teardown work, and a stop
+	// that waits for it is killed for want of progress. It must return once
+	// ctx is cancelled.
 	AfterStart(ctx context.Context, proxy Proxy) error
 }
 
@@ -220,10 +236,25 @@ type AuxiliaryProxyHook interface {
 // removal return -EINTR and leak the uprobe (and the int3) into every process
 // mapping the probed file. Running the teardown here removes that race.
 //
-// ctx is the proxy context and is already cancelled when this is called
-// (shutdown is what triggers it), so an implementation that needs to make a
-// context-bound call during teardown should derive a fresh one with
-// context.WithoutCancel.
+// It is also called when the proxy fails to start after the CA install --
+// its listener cannot bind -- and AfterStart has then not run, nor will: an
+// implementation removes whatever it holds, and nothing more. It runs once,
+// never before an AfterStart in flight has returned, and no AfterStart
+// begins after it (the proxy orders the two).
+//
+// It runs as teardown work (utils.BeginTeardownWork). Where its progress can
+// be seen (Linux, utils.TeardownProgressSeen), the stopping agent is kept
+// from being killed in the middle of it only while it makes progress on its
+// own goroutine: what it waits for on another goroutine -- a uprobe
+// registration, say -- shows no progress of its, and must be teardown work of
+// its own, begun on that goroutine. Elsewhere it counts as making progress
+// until it returns.
+//
+// ctx is the proxy context, cancelled when shutdown is what triggers the call
+// and possibly not when a failed start is, so an implementation that needs to
+// make a context-bound call during teardown should derive a fresh one with
+// context.WithoutCancel, and none should infer from ctx's state why it was
+// called.
 type TeardownableProxyHook interface {
 	BeforeTeardown(ctx context.Context) error
 }

@@ -102,7 +102,7 @@ func TestStdinGateEndsTheCopyOnceTheTerminalIsRestored(t *testing.T) {
 }
 
 // KillAgentCommand sends the agent the escalation signal, on which it kills
-// itself once no teardown work is in progress
+// itself once no teardown work in progress is making progress
 // (keployutils.EscalationSignal); at once (now), SIGKILL -- but not to sudo,
 // whose agent is root, which the user may not signal: sudo is sent the
 // escalation signal and hands it on. Here the stand-ins are scripts named
