@@ -953,8 +953,9 @@ func servableVerdict(m *models.Mock, useSSL bool) (servable, refuses bool) {
 			return false, false
 		}
 	}
-	// The verdict's message must be the packet its header names, or it
-	// cannot be encoded.
+	// The verdict's message must be the packet its header names: the encoder
+	// chooses by message type, so another one would be written as some other
+	// packet, or fail to encode.
 	switch resp[at].Header.Type {
 	case mysql.StatusToString(mysql.OK):
 		_, ok := resp[at].Message.(*mysql.OKPacket)

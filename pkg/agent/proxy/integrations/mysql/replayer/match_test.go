@@ -148,3 +148,21 @@ func TestAnEmptyPoolAnswersAsAPoolWithNoMatchingMock(t *testing.T) {
 		})
 	}
 }
+
+// A recorded SSLRequest whose message is not an SSLRequest packet is no
+// match, not a panic: the parser's recover hid one, closing the connection
+// with no miss.
+func TestAnSSLRequestThatCannotBeReadIsNoMatch(t *testing.T) {
+	header := &mysql.PacketInfo{Header: &mysql.Header{SequenceID: 1}, Type: mysql.SSLRequest}
+	recorded := mysql.PacketBundle{Header: header, Message: &mysql.OKPacket{}}
+	live := mysql.PacketBundle{Header: header, Message: &mysql.SSLRequestPacket{MaxPacketSize: 1 << 24, CharacterSet: 0x21}}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), recorded, live); err == nil {
+		t.Fatal("a recorded SSLRequest holding another packet matched")
+	}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), live, recorded); err == nil {
+		t.Fatal("a live SSLRequest holding another packet matched")
+	}
+	if err := matchSSLRequest(context.Background(), zap.NewNop(), live, live); err != nil {
+		t.Fatalf("an SSLRequest did not match itself: %v", err)
+	}
+}

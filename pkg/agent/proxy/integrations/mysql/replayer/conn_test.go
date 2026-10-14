@@ -301,12 +301,13 @@ func TestAnUnservableMockDoesNotShadowAServableHandshake(t *testing.T) {
 	fullAuthCutShort := handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), // no public key, no OK
 		{PacketBundle: bundle(4, mysql.AuthStatusToString(mysql.AuthMoreData), &mysql.AuthMoreDataPacket{StatusTag: mysql.AuthMoreData, Data: "PUBLIC KEY"})}})
 	for name, first := range map[string]*models.Mock{
-		"a greeting that is not the first response":         greetingLater,
-		"a greeting and nothing more":                       greetingOnly,
-		"a verdict replay does not serve":                   nextFactor,
-		"an AuthMoreData with nothing recorded after it":    cutShort,
-		"a full authentication cut short before its answer": fullAuthCutShort,
-		"a greeting with no header":                         headerlessGreeting(),
+		"a greeting that is not the first response":          greetingLater,
+		"a greeting and nothing more":                        greetingOnly,
+		"a verdict replay does not serve":                    nextFactor,
+		"an AuthMoreData with nothing recorded after it":     cutShort,
+		"a full authentication cut short before its answer":  fullAuthCutShort,
+		"a greeting with no header":                          headerlessGreeting(),
+		"a verdict whose message is not its header's packet": mismatchedVerdict(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			first.Name = "mock-unservable"
@@ -828,5 +829,13 @@ func TestHandshakesServedAtOnceAreNotRewritten(t *testing.T) {
 func unreadableHR41() *models.Mock {
 	m := nativeHandshake()
 	m.Spec.MySQLRequests[0].Message = &mysql.OKPacket{}
+	return m
+}
+
+// mismatchedVerdict is a recorded handshake whose verdict says OK but holds
+// another packet.
+func mismatchedVerdict() *models.Mock {
+	m := nativeHandshake()
+	m.Spec.MySQLResponses[1].Message = &mysql.ERRPacket{Header: mysql.ERR, ErrorCode: 1045}
 	return m
 }
