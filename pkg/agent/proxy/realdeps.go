@@ -326,8 +326,9 @@ func (p *Proxy) containerRepoOfConn(ctx context.Context, st *realState, addr str
 // before the connection is accepted, and naming it there would hold the
 // connection in the keyer before it is one and spend the session's one
 // warning that Docker cannot be read. It never waits: a container the index
-// is still placing is no container's yet to the hold, which then makes no
-// dial ahead for it (its accept waits, containerRepoOfConn, and relays it).
+// is still placing is no container's yet to the hold, which dials it ahead,
+// if at all, as a dependency (its accept waits, containerRepoOfConn, and
+// relays it).
 // While the index cannot be read, the run's container: entries match
 // nothing, and the run says so once.
 func (p *Proxy) containerRepoAt(st *realState, addr string) string {
