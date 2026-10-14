@@ -14,6 +14,9 @@ package http_test
 import (
 	"context"
 	"errors"
+	"go.keploy.io/server/v3/pkg/service/mock"
+	"go.keploy.io/server/v3/pkg/service/record"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -98,4 +101,13 @@ func TestGetPIDMapRefusalsKeepsARealFailureAnError(t *testing.T) {
 	if errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
 		t.Fatalf("a failed read is not \"this agent cannot count\": %v", err)
 	}
+}
+
+// The CLI's agent client is what each command's PID-map check type-asserts
+// for: were the method renamed, every check would quietly turn itself off.
+func TestTheAgentClientServesEveryPIDMapCheck(t *testing.T) {
+	c := newClient(t, agentWith(t, pidMapSvc{}))
+	var _ mock.PIDMapReader = c
+	var _ replay.PIDMapReader = c
+	var _ record.PIDMapReader = c
 }

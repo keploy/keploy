@@ -1250,6 +1250,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var mockCountMapMu sync.Mutex
 	domainSet := telemetry.NewDomainSet()
 	var recordingStarted bool
+	// capWatch checks, under the proven switch, each saved test case against
+	// what the agent could not capture (capture_loss.go); nil until the agent
+	// is capturing, and then its methods are no-ops with the switch off.
+	var capWatch *captureWatch
 	/*
 	 * WHEN CAPTURE ACTUALLY BEGAN, which is not when Start was entered.
 	 *
@@ -1586,6 +1590,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 				zap.String("next_step", "the error above says why (the agent made no progress, or went away before it said it had handed everything over); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
+		// Under the proven switch: test cases recorded while the agent could
+		// not capture every call, or that could not be checked, fail the run.
+		if capWatch.finish(newTestSetID) {
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			incomplete = true
+		}
 		if recordingStarted || stopReason != "" {
 			status := "completed"
 			reason := stopReason
@@ -1848,6 +1858,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 	// Stamped HERE, beside the flag, because they mean the same thing:
 	// GetTestAndMockChans has returned, so the agent is capturing.
 	captureStart = time.Now()
+	// What the agent could not capture is counted from here: the agent is
+	// capturing, and a native app has not started.
+	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
 
 	/*
 	 * THE FORWARDERS NOW OUTLIVE THIS FUNCTION, so every path out of it has
@@ -2041,6 +2054,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
 				insertedMu.Unlock()
+				capWatch.afterTestCase(ctx, testCase.Name)
 				r.telemetry.RecordedTestAndMocks()
 				if hookErr := r.hooks.AfterTestCaseInsert(ctx, &TestCaseContext{
 					TestCase: testCase, TestSetID: newTestSetID,
