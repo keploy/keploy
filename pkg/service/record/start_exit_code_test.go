@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -115,6 +117,19 @@ func (i *interruptAtFramesInstr) GetIncoming(ctx context.Context, o models.Incom
 	return i.fakeInstr.GetIncoming(ctx, o)
 }
 
+// interruptAtComposeWaitInstr is a docker compose stack whose agent never gets
+// ready, and the user's Ctrl+C lands as the recording waits for it.
+type interruptAtComposeWaitInstr struct {
+	*fakeInstr
+	interrupt context.CancelFunc
+}
+
+func (i *interruptAtComposeWaitInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	i.interrupt()
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
 // interruptedSetupFailsInstr's Setup fails because the user stopped it.
 type interruptedSetupFailsInstr struct {
 	*fakeInstr
@@ -130,16 +145,33 @@ func (i *interruptedSetupFailsInstr) Setup(ctx context.Context, _ string, _ mode
 // an error for the stop: no exit code is armed. Start ends ctx itself as it
 // returns, so the stop has to be told from a failure before that.
 func TestStart_AStoppedRecordingIsNotAFailure(t *testing.T) {
-	t.Run("stopped as its frames opened", func(t *testing.T) {
+	t.Run("stopped as it waited for its compose agent", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		r := exitCodeRecorder(&interruptAtFramesInstr{fakeInstr: newFakeInstr(), interrupt: cancel})
+		agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable) // never ready
+		}))
+		defer agent.Close()
+		r := exitCodeRecorder(&interruptAtComposeWaitInstr{fakeInstr: newFakeInstr(), interrupt: cancel})
+		r.config.CommandType = string(utils.DockerCompose)
+		r.config.Agent.AgentURI = agent.URL
 		err, code := startForExitCode(t, ctx, r)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Start returned %v; the test needs the path that returns the stop as an error", err)
 		}
 		if code != 0 {
 			t.Fatalf("exit code %d, want 0: the user stopped this recording", code)
+		}
+	})
+	// Once the agent's frame streams are open, a stop drains what it
+	// captured, as any stop does, and Start returns nil.
+	t.Run("stopped as its frames opened", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := exitCodeRecorder(&interruptAtFramesInstr{fakeInstr: newFakeInstr(), interrupt: cancel})
+		err, code := startForExitCode(t, ctx, r)
+		if err != nil || code != 0 {
+			t.Fatalf("Start returned %v with exit code %d, want nil and 0: the user stopped this recording", err, code)
 		}
 	})
 	// Start returns nil for this stop and never reaches the arming; pinned so
