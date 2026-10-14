@@ -1189,6 +1189,11 @@ func fieldShapes(fields []string) []string {
 	}
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
+		if name, ok := strings.CutPrefix(f, "header."); ok && !strings.Contains(name, ".") {
+			// A header's name is the protocol's, never a value the app sent.
+			out = append(out, f)
+			continue
+		}
 		parts := strings.Split(f, ".")
 		for i, p := range parts {
 			base, suffix := p, ""
