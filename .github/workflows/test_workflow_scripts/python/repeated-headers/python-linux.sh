@@ -26,6 +26,13 @@
 # watermark, /agent/record/pending) and the agent holds each test case until
 # its mocks are in: otherwise the /login test is saved without its mock, and
 # its replay, with the upstream gone, fails.
+#
+# And once more lagging, recorded by a non-root CLI, which runs its agent with
+# `sudo -n`, the stop delivered as `sudo pkill -INT -f keploy` delivers it: to
+# keploy, its agent, and the sudo that runs the agent, which hands its own copy
+# on, so the agent gets the stop twice. The agent holds the first until its
+# client has drained it; the copy, taken for a second Ctrl+C, cut that short,
+# and the recording lost what the client had not drained and failed.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -49,9 +56,12 @@ stop_upstream() {
         upstream_pid=""
     fi
 }
+# The non-root run's agent runs under sudo, whose env_reset would drop the lag.
+SUDOERS_LAG=/etc/sudoers.d/keploy-repeated-headers-lag
 cleanup() {
     echo "cleanup..."
     sudo pkill -9 keploy 2>/dev/null || true
+    sudo rm -f "$SUDOERS_LAG"
     stop_upstream
     sleep 1
 }
@@ -113,6 +123,11 @@ drive_requests() {
     # lag run stops it at once, with the agent's parsers still behind.
     sleep "${STOP_AFTER:-5}"
     sudo pkill -INT keploy 2>/dev/null || true
+    if [ -n "${STOP_COPY:-}" ]; then
+        # What `sudo pkill -INT -f keploy` also signals: the sudo that runs
+        # the agent, which hands the agent its own copy of the stop.
+        sudo pkill -INT -f "^sudo -n [^ ]*keploy agent" 2>/dev/null || true
+    fi
     return $failed
 }
 
@@ -122,16 +137,29 @@ drive_requests() {
 PARSER_LAG=8s
 
 run_format() {
-    # mode: "" for a normal run, "lag" for the run with the capture lagging.
-    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5
+    # mode: "" for a normal run, "lag" for the run with the capture lagging,
+    # "sudo_lag" for that run recorded by a non-root CLI (its agent under
+    # sudo), stopped as `sudo pkill -INT -f keploy` stops it.
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy=""
     [ "$format" = json ] && fmt_flag=(--storage-format json)
-    if [ "$mode" = lag ]; then
+    if [ "$mode" = lag ] || [ "$mode" = sudo_lag ]; then
         lag_env=(KEPLOY_DEBUG_PARSER_LAG="$PARSER_LAG")
         stop_after=0
-        format="${format}_lag"
+        format="${format}_${mode}"
+    fi
+    if [ "$mode" = sudo_lag ]; then
+        as_root=()
+        stop_copy=1
+        echo 'Defaults env_keep += "KEPLOY_DEBUG_PARSER_LAG"' | sudo tee "$SUDOERS_LAG" >/dev/null
+        sudo chmod 0440 "$SUDOERS_LAG"
+        if ! sudo -n true; then
+            echo "::error::the non-root run needs passwordless sudo, as the agent's sudo -n does"
+            return 1
+        fi
     fi
     echo "=================== $format ==================="
-    rm -rf keploy/ keploy.yml
+    # sudo: an earlier run's replay ran as root, and wrote its reports so.
+    sudo rm -rf keploy/ keploy.yml
     # The app's http.server stamps each response with the current Date.
     cat > keploy.yml <<'KEPLOY_CFG'
 test:
@@ -143,9 +171,9 @@ KEPLOY_CFG
     upstream_pid=$!
     wait_for_port "$UPSTREAM_PORT" upstream || return 1
 
-    STOP_AFTER=$stop_after drive_requests > "driver_logs_${format}.txt" 2>&1 &
+    STOP_AFTER=$stop_after STOP_COPY=$stop_copy drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    sudo -E env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" \
+    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
@@ -167,14 +195,29 @@ KEPLOY_CFG
     # client then stops it: an agent already on its way out is waited for,
     # not signalled again, unless it is still running past a grace (a busy
     # runner's slow teardown can be), and then it has nothing left unsaved.
-    # So no stop may say that what it was still saving is not saved: it said
-    # so at the end of every recording, which had lost nothing.
-    if grep -q 'what Keploy was still saving is not saved' "record_logs_${format}.txt"; then
-        echo "::error::a clean stop said that what Keploy was still saving is not saved ($format)"
-        grep -n 'Signal received\|agent stop\|has not exited' "record_logs_${format}.txt"
+    # So no stop may give up on what it was still saving: neither the
+    # client's drain, nor the agent's hold (as one before this lane cut it
+    # short at a copy of the stop).
+    if grep -qE 'what Keploy was still saving is not saved|stopped saving what the agent captured before the stop' "record_logs_${format}.txt"; then
+        echo "::error::a stop gave up on what Keploy was still saving ($format)"
+        grep -nE 'Signal received|not saved|stopped saving|agent stop|has not exited' "record_logs_${format}.txt"
         return 1
     fi
-    if [ "$mode" = lag ]; then
+    if [ "$mode" = sudo_lag ]; then
+        # The run tested a copy of the stop only if the agent held for its
+        # client, and the copy came while it did.
+        if ! grep -q "a recording's client is still saving what this agent captured before the stop" "record_logs_${format}.txt"; then
+            echo "::error::the agent did not hold its stop for its client: the run tested nothing of a copy of the stop ($format)"
+            grep -n 'Signal received' "record_logs_${format}.txt"
+            return 1
+        fi
+        if ! grep -q 'Keploy stops once its client has saved what it still holds for it' "record_logs_${format}.txt"; then
+            echo "::error::the agent did not get a copy of the stop while it held it: the run tested nothing of one ($format)"
+            grep -n 'Signal received' "record_logs_${format}.txt"
+            return 1
+        fi
+    fi
+    if [ -n "$mode" ]; then
         # The lag was really induced: the agent says so at WARN when it is.
         if ! grep -q 'KEPLOY_DEBUG_PARSER_LAG is set' "record_logs_${format}.txt"; then
             echo "::error::the agent did not run its parsers behind the traffic: KEPLOY_DEBUG_PARSER_LAG had no effect ($format)"
@@ -266,4 +309,6 @@ fi
 echo "PASS: repeated headers replay on their recorded lines"
 run_format yaml lag || exit 1
 echo "PASS: a recording whose capture lags its traffic keeps every test case and its mocks"
+run_format yaml sudo_lag || exit 1
+echo "PASS: a non-root CLI's recording keeps every test case and its mocks when its agent gets the stop twice"
 exit 0

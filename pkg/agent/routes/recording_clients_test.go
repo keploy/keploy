@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,18 +17,15 @@ import (
 )
 
 // A stop signal waits while a recording's client holds a frame stream open,
-// and goes on once every one is closed, or at once when told to stop now.
+// and goes on once every one is closed.
 func TestWaitForRecordingClients(t *testing.T) {
-	stop := make(chan struct{})
-	if !WaitForRecordingClients(stop) {
-		t.Fatal("waited with no client attached")
-	}
+	WaitForRecordingClients() // no client attached: it does not wait
 	a, b := attachRecordingClient(), attachRecordingClient()
 	if n := RecordingClients(); n != 2 {
 		t.Fatalf("%d clients, want 2", n)
 	}
-	done := make(chan bool, 1)
-	go func() { done <- WaitForRecordingClients(stop) }()
+	done := make(chan struct{})
+	go func() { WaitForRecordingClients(); close(done) }()
 	a()
 	a() // idempotent
 	select {
@@ -36,25 +35,9 @@ func TestWaitForRecordingClients(t *testing.T) {
 	}
 	b()
 	select {
-	case ok := <-done:
-		if !ok {
-			t.Fatal("the wait says it was cut short")
-		}
-	case <-time.After(30 * time.Second):
+	case <-done:
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
 		t.Fatal("the wait did not end once every stream closed")
-	}
-
-	c := attachRecordingClient()
-	defer c()
-	go func() { done <- WaitForRecordingClients(stop) }()
-	close(stop)
-	select {
-	case ok := <-done:
-		if ok {
-			t.Fatal("the wait says every stream closed")
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("stopNow did not end the wait")
 	}
 }
 
@@ -152,6 +135,62 @@ func TestStreamHandlersHoldOnlyForAClientThatDrains(t *testing.T) {
 				t.Errorf("%s (drains=%v): %d clients held for once its stream ended, want %d", s.name, drains, n, before)
 			}
 		}
+	}
+}
+
+// A client that dies while it holds its streams -- killed, crashed --
+// drops them: each handler notices its request end, and the stop the agent
+// holds for the client goes on. Nothing else ends that hold (no repeated
+// signal does: utils.SetSignalHold), so a stream whose handler did not notice
+// would keep the agent, its hooks and its ports, up for good. The streams are
+// as the CLI opens them: the bodies it sends, the header, and frames the
+// agent still has to hand over (its channels stay open).
+func TestAGoneClientsStreamsEndTheHold(t *testing.T) {
+	body := func(v any) func() io.Reader {
+		return func() io.Reader {
+			b, err := json.Marshal(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return bytes.NewReader(b)
+		}
+	}
+	svc := streamsSvc{tc: make(chan *models.TestCase), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	for _, s := range []struct {
+		name    string
+		handler http.HandlerFunc
+		body    func() io.Reader
+	}{
+		{"incoming", a.HandleIncoming, body(models.IncomingReq{})},
+		{"outgoing", a.HandleOutgoing, body(models.OutgoingReq{})},
+		{"mappings", a.HandleMappings, func() io.Reader { return nil }},
+	} {
+		before := RecordingClients()
+		srv := httptest.NewServer(s.handler)
+		ctx, cancel := context.WithCancel(context.Background())
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, s.body())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(models.DrainsAfterStopHeader, "true")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := RecordingClients(); n != before+1 {
+			t.Fatalf("%s: setup: %d clients held for, want %d", s.name, n, before+1)
+		}
+		cancel() // the client dies: its connection drops
+		resp.Body.Close()
+		deadline := time.Now().Add(30 * time.Second) // only turns a hang into a failure
+		for RecordingClients() != before {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: a gone client's stream is still held for: the agent's stop would wait for it for good", s.name)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		srv.Close() // waits for the handler to return
 	}
 }
 
