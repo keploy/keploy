@@ -227,14 +227,17 @@ func (c *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 
 // Under docker compose the agent is a service of the app's stack. The stop must
 // drain what it holds before taking the stack down: taking it down first lost
-// the mocks of 1,655 of 3,300 tests at 110 req/s.
+// the mocks of 1,655 of 3,300 tests at 110 req/s. Its agent says what it still
+// holds, as the real one does, so the drain ends on that and not on the
+// stream's quiet: the test's gaps between mocks are no bound on it.
 func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	f := &fakeInstr{
 		mappings: make(chan models.TestMockMapping),
 		incoming: make(chan *models.TestCase),
 		outgoing: make(chan *models.Mock),
 	}
-	instr := &composeInstr{fakeInstr: f, stackDown: make(chan struct{})}
+	const queued = 20
+	instr := &backlogComposeInstr{composeInstr: &composeInstr{fakeInstr: f, stackDown: make(chan struct{})}, held: queued + 1}
 	mockDB := &recMockDB{unencodable: map[string]bool{}}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK) // the compose agent's health check
@@ -262,6 +265,7 @@ func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	send := func(name string) bool {
 		select {
 		case f.outgoing <- mockAt(name, captured):
+			instr.taken.Add(1)
 			return true
 		case <-instr.stackDown:
 			return false
@@ -276,7 +280,6 @@ func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	cancel()
 	// The agent still holds mocks captured before the stop: they must reach the
 	// sink while the stack, and the agent in it, is still up.
-	const queued = 20
 	for i := 0; i < queued; i++ {
 		if !send(fmt.Sprintf("queued-%d", i)) {
 			t.Fatalf("the stack (and the agent) went down with %d of %d queued mocks still to hand over", queued-i, queued)
