@@ -13,17 +13,22 @@
 #   2. KEPLOY_PROVEN=1, the same call to http://localhost:9099: the set fails,
 #      though every response matches, and the report names the host.
 #   3. Switch off, the same: the set passes, as on main.
+#   4. KEPLOY_PROVEN=1, AMOUNT=250 (recorded 100): the set fails, naming
+#      body.amount as what differs, with no value in the reason's field list
+#      (differs).
+#   5. Switch off, AMOUNT=250: the set passes, as on main (the lenient matcher
+#      serves the recording).
 #
 # A container on a random published port, as Testcontainers runs one
 # (recorded under the switch):
-#   4. The recording carries the container's key (containerkey); nothing
+#   6. The recording carries the container's key (containerkey); nothing
 #      compares it yet.
-#   5. KEPLOY_PROVEN=1, a new container of the image on another random port:
+#   7. KEPLOY_PROVEN=1, a new container of the image on another random port:
 #      the set fails, naming the host. Its authority changed, and until the
 #      key names a container by its own configuration it is not matched by
 #      its key: the known limit of this step.
-#   6. Switch off, the same: the set passes, as on main.
-#   7. No data race in any log.
+#   8. Switch off, the same: the set passes, as on main.
+#   9. No data race in any log.
 #
 # Readiness is the app's listening port while recording, a container's own
 # "ready" line, and keploy's own probe of the app (--health-path, any HTTP
@@ -167,6 +172,7 @@ expect_miss() {
     fi
     grep -q 'unmatched_calls:' "$(REPORT)" || fail "$1: the report lists no call that got no recorded answer"
     grep -A40 'unmatched_calls:' "$(REPORT)" | grep -qE "path: $2\$" || fail "$1: the report's field diffs do not name $2"
+    grep -A60 'unmatched_calls:' "$(REPORT)" | grep -A6 'differs:' | grep -qE -- "- $2\$" || fail "$1: the report's differs do not name $2"
 }
 
 for p in "$APP" "$DEP"; do
@@ -202,6 +208,15 @@ echo "== 3. switch off, the call to localhost: passes =="
 replay hostoff 100 "http://localhost:$DEP"
 expect_pass "step 3"
 
+echo "== 4. KEPLOY_PROVEN=1, AMOUNT=250: fails naming body.amount =="
+replay drift 250 "http://127.0.0.1:$DEP" KEPLOY_PROVEN=1
+expect_miss "step 4" body.amount
+grep -A60 'unmatched_calls:' "$(REPORT)" | grep -A6 'differs:' | grep -q '250' && fail "step 4: differs holds a value"
+
+echo "== 5. switch off, AMOUNT=250: passes, as on main =="
+replay driftoff 250 "http://127.0.0.1:$DEP"
+expect_pass "step 5"
+
 echo "== record a container on a random port (KEPLOY_PROVEN=1, $IMAGE) =="
 docker pull -q "$IMAGE" >/dev/null || { echo "::error::cannot pull $IMAGE"; exit 1; }
 start_payments "$IMAGE" python3 -c "$SERVER"
@@ -209,8 +224,8 @@ REC_CID=$CID
 REC_PORT=$PORT
 record 1 "http://127.0.0.1:$REC_PORT"
 
-echo "== 4. the recording carries the container's key =="
-grep -q "containerKey: container:${IMAGE}:${DEP}#1" keploy/test-set-0/mocks.yaml || fail "step 4: the charge calls were not recorded with their container's key"
+echo "== 6. the recording carries the container's key =="
+grep -q "containerKey: container:${IMAGE}:${DEP}#1" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
 
 # The new container starts while the recorded one still holds its port, so
 # Docker gives it another.
@@ -218,17 +233,17 @@ start_payments "$IMAGE" python3 -c "$SERVER"
 docker rm -f "$REC_CID" >/dev/null 2>&1
 [ "$PORT" != "$REC_PORT" ] || { echo "::error::Docker published two running containers on port $PORT"; exit 1; }
 
-echo "== 5. KEPLOY_PROVEN=1, a new container on another port: fails naming the host =="
+echo "== 7. KEPLOY_PROVEN=1, a new container on another port: fails naming the host =="
 replay newcontainer 100 "http://127.0.0.1:$PORT" KEPLOY_PROVEN=1
-expect_miss "step 5" host
+expect_miss "step 7" host
 
-echo "== 6. switch off, the same: passes, as on main =="
+echo "== 8. switch off, the same: passes, as on main =="
 replay newcontaineroff 100 "http://127.0.0.1:$PORT"
-expect_pass "step 6"
+expect_pass "step 8"
 stop_containers
 
-echo "== 7. no data race =="
-for f in record-off.log record-1.log unchanged.log host.log hostoff.log newcontainer.log newcontaineroff.log; do
+echo "== 9. no data race =="
+for f in record-off.log record-1.log unchanged.log host.log hostoff.log drift.log driftoff.log newcontainer.log newcontaineroff.log; do
     grep -q 'WARNING: DATA RACE' "$f" 2>/dev/null && fail "data race in $f"
 done
 
@@ -236,4 +251,4 @@ if [ "$FAIL" -ne 0 ]; then
     echo "proven strict-HTTP e2e: $FAIL failure(s); work dir $WORK"
     exit 1
 fi
-echo "PASS: under KEPLOY_PROVEN=1 a call to another authority gets no recorded answer and fails the test, naming the host; a container's key is recorded; without the switch nothing changes"
+echo "PASS: under KEPLOY_PROVEN=1 a call to another authority, or with another body value, gets no recorded answer and fails the test, naming the field; a container's key is recorded; without the switch nothing changes"

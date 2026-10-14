@@ -1033,6 +1033,43 @@ s1_case() {
 # 14a. The host: the same request to another authority is another dependency.
 s1_case host '.header.Host = "pokeapi.invalid"' 'Host: pokeapi.invalid' host
 
+# 14b. A header value: another client (the User-Agent's product) is another
+#      caller.
+s1_case user-agent '.header["User-Agent"] = "curl/8.4.0"' 'User-Agent: curl/8.4.0' header.user-agent
+
+# 14c. A credential (design v14 §7.2 item 8): without the switch Authorization
+#      is on the static noise list, so a recording made with a token the app
+#      does not send still answers; with it, the credential is compared.
+s1_case credential '.header.Authorization = "Bearer recorded-token"' 'Authorization: Bearer recorded-token' header.authorization
+
+# 14d. NOT a difference: the same client in another version. The User-Agent
+#      is compared by its first product token's name, so this recording still
+#      answers under the switch (a false red here would fail every upgrade).
+rm -rf ./s1-ua-version-run
+mkdir ./s1-ua-version-run
+cp -a ./pristine-run/keploy ./s1-ua-version-run/keploy
+rm -rf ./s1-ua-version-run/keploy/reports
+for mf in ./s1-ua-version-run/keploy/test-set-*/mocks.yaml; do
+    yq -i '(select(.kind == "Http") | .spec.req.header["User-Agent"]) |= sub("/.*$"; "/99.0")' "$mf"
+done
+if ! grep -q 'User-Agent: .*/99.0' ./s1-ua-version-run/keploy/test-set-*/mocks.yaml; then
+    echo "::error::S1 case ua-version changed no recorded User-Agent"
+    exit 1
+fi
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./s1-ua-version-run --delay 7 --generateGithubActions=false 2>&1 | tee s1_ua_version_logs.txt
+ua_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" s1_ua_version_logs.txt; then
+    echo "::error::Race condition detected in S1 case ua-version"
+    exit 1
+fi
+"$REPLAY_BIN" report --format json --path ./s1-ua-version-run > ndjson_s1_ua_version.txt 2>/dev/null
+if [ "$ua_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson_s1_ua_version.txt > /dev/null; then
+    echo "::error::S1 case ua-version: under KEPLOY_PROVEN=1 a recording made by another version of the same client must still answer (exit $ua_rc)"
+    jq -s 'map({test_case_id, status})' ndjson_s1_ua_version.txt
+    exit 1
+fi
+echo "✓ S1 ua-version: another version of the same client still matches under KEPLOY_PROVEN=1"
+
 echo "mock-mismatch e2e passed:"
 echo "  - the forced HTTP /api/v2/ unmatched call was reported;"
 echo "  - with the tier as an ordinary recording leaves it, every dependency is"
@@ -1049,5 +1086,7 @@ echo "    does not make a call it recorded or a call got no recorded answer."
 echo "  - under KEPLOY_PROVEN=1 strict failure is on for everyone: the same run"
 echo "    FAILED its tests instead of demoting them to OBSOLETE, and went red."
 echo "  - under KEPLOY_PROVEN=1 HTTP matching is strict (S1): a recorded call to"
-echo "    another host answers nothing, and the report names the field."
+echo "    another host, from another client or with a credential the app does not"
+echo "    send answers nothing, and the report names the field; another version"
+echo "    of the same client still answers."
 exit 0

@@ -75,6 +75,11 @@ type matchDiag struct {
 	// live is where the live request went, set under the proven switch
 	// (strict.go), so the report can name a destination that differs.
 	live *destination
+	// closest and differs are, under the proven switch, the recording the
+	// strict comparison found closest to the call and the fields in which
+	// it differs (strictServe): the report diffs against that, with those.
+	closest *models.Mock
+	differs []strictField
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -203,7 +208,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 					// A recording fit this call but its variables did not
 					// hold: only an exact recording of this very call may
 					// still answer it, never a lenient pass.
-					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, urlNoise, statefulMocks)
+					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
 					if err != nil {
 						return false, nil, nil, err
 					}
@@ -222,6 +227,24 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
 				}
 			}
+		}
+
+		// Under the proven switch the rest are answered only by a recording
+		// of this very call, outside known noise (strict.go,
+		// strict_compare.go): no lenient pass, no closest match and no fuzzy
+		// fallback below (design v14 row S1).
+		if provenswitch.On() {
+			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if retry {
+				continue
+			}
+			if served == nil {
+				return false, nil, diag, nil
+			}
+			return true, served, nil, nil
 		}
 
 		// Matching process
@@ -1831,6 +1854,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	//  1. a schema-match survivor (method+path+keys already matched — the
 	//     interesting drift is in query values, headers, or the body)
 	//  2. the lowest-Levenshtein "METHOD path" mock from the pool.
+	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
+		// Under the proven switch: the strict comparison's closest recording,
+		// and the fields it found differ.
+		return strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount)
+	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
 		// Under the proven switch the closest recorded request is one to
