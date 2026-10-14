@@ -2938,9 +2938,10 @@ func (e *agentContainerExit) ExitCode() int { return e.code }
 //
 // Under compose the agent is a service in the project, and when it stops
 // first, compose aborts the project over it: the exit that reaches keploy is
-// compose reporting the dependency it lost, or the test command's code after
-// compose stopped it, and neither is the test command's verdict. The agent's
-// container, read before keploy's teardown removes it, says which it was.
+// compose reporting the dependency it lost, or the app's code after compose
+// stopped it (the test command's, under keploy mock), and neither is the
+// app's own verdict. The agent's container, read before keploy's teardown
+// removes it, says which it was. keploy mock and keploy record both ask.
 //
 // An agent that stopped before the app ever started could not start at all,
 // and its exit status says why, exactly as a native agent's does
@@ -2968,7 +2969,47 @@ func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
 	if !stopped.AppStarted() {
 		return a.agentStoppedBeforeReady(exit, true)
 	}
-	return fmt.Errorf("the keploy agent stopped while the test command was running: %w", exit)
+	return fmt.Errorf("the keploy agent stopped while the app was running: %w", exit)
+}
+
+// ComposeEndAfterReady is what ended a docker compose run keploy saw its
+// agent ready in, when the app's own end does not stand: the keploy agent
+// having crashed -- under the running app, or before compose started it --
+// as keploy's own failure; or the project stopping before compose ever
+// started the app, though compose reported 0, as the project's failure, not
+// a clean end. nil when the app's own end stands. keploy record asks it once
+// its recording is under way; appExit is the app's exit as keploy got it,
+// which stands in for the app's container when docker could not say how that
+// ended (StoppedAgent.AgentDiedAfterReady).
+func (a *AgentClient) ComposeEndAfterReady(appExit int) error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return nil
+	}
+	return composeEndAfterReady(stopped, appExit)
+}
+
+// composeEndAfterReady is ComposeEndAfterReady for what keploy read from the
+// stopped agent's container.
+func composeEndAfterReady(stopped app.StoppedAgent, appExit int) error {
+	if stopped.AgentDiedAfterReady(appExit) {
+		exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}
+		if stopped.AppNeverStarted() {
+			return fmt.Errorf("the keploy agent stopped before compose started the app: %w", exit)
+		}
+		return fmt.Errorf("the keploy agent stopped while the app was running: %w", exit)
+	}
+	// Compose reports 0 for an app it never started, in a race (see
+	// App.run): another of the project's services failed first, and nothing
+	// ran to be recorded.
+	if appExit == 0 && stopped.AppNeverStarted() {
+		return errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
+	}
+	return nil
 }
 
 // ComposeDownOnSetupFailure tears down the managed docker-compose stack so a

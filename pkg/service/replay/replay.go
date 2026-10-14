@@ -758,6 +758,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
+		// The error Start returns stays flat (#4792), so the code the setup's
+		// failure is tagged with (an agent that lacked privileges: 3) is
+		// armed here, while the tag is still in hand; armRunExitCode keeps it.
+		utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 		return fmt.Errorf("%s", stopReason)
 	}
 
@@ -1330,13 +1334,20 @@ func replayRunOutcome(testRunResult bool, keepAliveAppErr *models.AppError) (int
 // no tests to run -- which is what testRunResult is for.
 //
 // A code already armed is left alone. It is more specific than this one:
-// a wrapped runner's own status, or one of Keploy's (utils/exitcodes.go).
-// That is a deliberate change from the unconditional `utils.ErrCode = 1` this
-// replaces: nothing arms a code before Start finishes today, so no reachable
-// behaviour differs, and when something does its code is the better answer.
+// a wrapped runner's own status, or one of Keploy's (utils/exitcodes.go) --
+// the agent client arms an agent's 3 or 6, and Start arms the code a failed
+// setup is tagged with before it flattens that error. That is a deliberate
+// change from the unconditional `utils.ErrCode = 1` this replaces.
+//
+// A run that ended with an error that still carries its tag (one Start
+// returns as it is, such as a run the errgroup cancelled) ends with the code
+// that tag calls for (utils.ExitCodeFor), not a bare 1.
 func armRunExitCode(runErr error, testRunResult bool, failedTests int) {
-	if runErr != nil || !testRunResult || failedTests > 0 {
-		utils.SetExitCodeOnce(1)
+	switch {
+	case runErr != nil:
+		utils.SetExitCodeOnce(utils.ExitCodeFor(runErr))
+	case !testRunResult || failedTests > 0:
+		utils.SetExitCodeOnce(utils.ExitKeployError)
 	}
 }
 
@@ -1369,7 +1380,8 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		// Keep the cause: a setup the user's cancel ended (context.Canceled,
 		// from the agent's readiness wait, the retry's backoff, or the docker
 		// setup hooks, which get the run's ctx) is the run's cancellation,
-		// which Start does not log as a failure.
+		// which Start does not log as a failure; and an agent that could not
+		// start is named, with the tag its exit code is read from.
 		return &InstrumentState{}, fmt.Errorf("%s: %w", stopReason, err)
 	}
 	return &InstrumentState{}, nil
