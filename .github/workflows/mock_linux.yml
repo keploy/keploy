@@ -15,6 +15,12 @@ name: Mock Mode Regression (Linux)
 # proven switch, three containers of one image on random published ports and
 # asserts each call's mock names its container (the suite's #1, each test's
 # own #2), again with new containers on new ports, and for one test alone.
+# Another holds more LIVE processes than the agent's PID map holds while a
+# call is made, and asserts record keeps nothing and replay fails, both saying
+# the agent could not track a process (and the pid_map_overflow job runs the
+# hooks' side of that against keploy's BPF object, as root). Another does the
+# same to `keploy test --remove-unused-mocks`, and asserts the test set fails
+# and the recording loses no mock for the calls the agent did not see.
 # Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
@@ -140,6 +146,30 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-container-keys-linux.sh"
+
+      # More LIVE processes than the agent's PID map holds (10240) leave the
+      # next process untracked: its calls go to the real dependency. Record
+      # must keep nothing and replay must fail, both exiting non-zero and
+      # saying why, where both used to exit 0 with nothing said.
+      - name: Run mock-mode PID map overflow e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-pid-map-overflow-linux.sh"
+
+      # The same overflow under `keploy test --remove-unused-mocks`: the app's
+      # dependency calls are made by processes the full map refuses, so they
+      # reach the real dependency and their tests pass. The test set must fail
+      # as capture incomplete, and the mocks recorded for those calls, which
+      # nobody consumed, must not be pruned from the recording (they were, and
+      # the run exited 0).
+      - name: Run test-mode PID map overflow e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-pid-map-overflow-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:
@@ -310,3 +340,45 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
+
+  # The hooks' side of a full PID map, against keploy's own BPF object on the
+  # runner's kernel: live processes fill target_namespace_pids (loaded small,
+  # so the test's own processes fill it), the kernel refuses the next one, and
+  # the hooks count it (GET /agent/pidmaps) and WARN once. Root-only, so it is
+  # behind the pidmap_integration tag and never in `go test ./...`. amd64 and
+  # arm64: each runs its own architecture's object.
+  pid_map_overflow:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    name: mock-mode PID map overflow (hooks, root, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
+
+      # Compiled as the runner user, run as root: the test loads BPF programs
+      # and creates a PID namespace.
+      - name: Build the PID map integration test
+        run: go test -c -tags 'viper_bind_struct pidmap_integration' -o /tmp/pidmap.test ./pkg/agent/hooks/linux/
+
+      # A -run that matches nothing exits 0, so the test's PASS line is
+      # required explicitly.
+      - name: Run the PID map integration test (root)
+        run: |
+          set -o pipefail
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out
+          grep -q -- "--- PASS: TestAProcessThePIDMapRefusesIsReported" /tmp/pidmap.out ||
+            { echo "::error::TestAProcessThePIDMapRefusesIsReported did not pass"; exit 1; }

@@ -29,6 +29,10 @@ type drainInstrumentation struct {
 	captureCtx context.Context
 	emitAfter  time.Duration
 	wg         sync.WaitGroup
+	// onRun, when set, runs as the test command starts (a user stopping the
+	// recording, say); runErr is how the test command ends.
+	onRun  func()
+	runErr models.AppError
 }
 
 func (d *drainInstrumentation) Setup(context.Context, string, models.SetupOptions) error { return nil }
@@ -66,6 +70,9 @@ func (d *drainInstrumentation) send(m *models.Mock) bool {
 func (d *drainInstrumentation) Run(_ context.Context, _ models.RunOptions) models.AppError {
 	// One mock captured while the runner was alive.
 	d.send(&models.Mock{Name: "mock-0", Kind: models.HTTP})
+	if d.onRun != nil {
+		d.onRun()
+	}
 
 	// ...and one whose agent-side parse completes just after the runner exits.
 	// Emitted from a goroutine so Run returns first, exactly like the real race.
@@ -79,7 +86,7 @@ func (d *drainInstrumentation) Run(_ context.Context, _ models.RunOptions) model
 		d.send(&models.Mock{Name: "mock-1", Kind: models.HTTP})
 		close(d.out)
 	}()
-	return models.AppError{}
+	return d.runErr
 }
 
 func (d *drainInstrumentation) NotifyGracefulShutdown(context.Context) error { return nil }

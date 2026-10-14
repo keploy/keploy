@@ -40,6 +40,17 @@ type ProxyAddressReporter interface {
 	ProxyIPv4() string
 }
 
+// PIDMapReporter is the optional extension implemented by hooks that count
+// the inserts into their per-process maps the kernel refused, each of them a
+// process they could not track (models.PIDMapRefusals). The agent
+// type-asserts for it, as for ProxyAddressReporter; with hooks that do not
+// implement it the agent answers "unknown"
+// (models.ErrPIDMapRefusalsUnsupported), never "none refused".
+type PIDMapReporter interface {
+	// PIDMapRefusals is only meaningful once Load has returned.
+	PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error)
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }

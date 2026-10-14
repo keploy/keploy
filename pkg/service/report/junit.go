@@ -21,12 +21,26 @@ type junitTestSuites struct {
 }
 
 type junitTestSuite struct {
-	Name     string          `xml:"name,attr"`
-	Tests    int             `xml:"tests,attr"`
-	Failures int             `xml:"failures,attr"`
-	Skipped  int             `xml:"skipped,attr"`
-	Time     string          `xml:"time,attr"`
-	Cases    []junitTestCase `xml:"testcase"`
+	Name     string `xml:"name,attr"`
+	Tests    int    `xml:"tests,attr"`
+	Failures int    `xml:"failures,attr"`
+	Skipped  int    `xml:"skipped,attr"`
+	Time     string `xml:"time,attr"`
+	// Properties carries suite-level facts that are not per-testcase. Emitted
+	// only when there is one, so a report without any stays byte-identical
+	// (the backward-compat contract this file documents). Today the only one
+	// is capture verification: whether the agent tracked every process.
+	Properties *junitProperties `xml:"properties,omitempty"`
+	Cases      []junitTestCase  `xml:"testcase"`
+}
+
+type junitProperties struct {
+	Property []junitProperty `xml:"property"`
+}
+
+type junitProperty struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 type junitTestCase struct {
@@ -202,7 +216,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		suiteDur = estimateDuration(rep.Tests)
 	}
 
-	return junitTestSuite{
+	suite := junitTestSuite{
 		Name:     name,
 		Tests:    rep.Total,
 		Failures: failures,
@@ -210,7 +224,44 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		Time:     fmtSeconds(suiteDur),
 		Cases:    cases,
 	}
+	// Capture verification is a suite-level fact, so it is a property, emitted
+	// only when the run found something (a capture that was incomplete, or one
+	// that could not be verified): a report without it stays byte-identical.
+	//
+	// An incomplete capture failed the test set while its tests may all have
+	// passed (keploy cannot tell which test's calls the untracked process
+	// made). A JUnit consumer gates on <failure> elements, not on properties,
+	// so the suite gets one more test case, "keploy capture", failed with the
+	// reason: a FAILED set is never a green JUnit file. "unverified" adds no
+	// test case; the property says it. (Under the proven switch the set is
+	// also not judged; JUnit, which reads the tests and not the set's
+	// status, shows that as it shows every not-judged set.)
+	if cv := rep.CaptureVerification; cv != nil {
+		suite.Properties = &junitProperties{Property: []junitProperty{
+			{Name: "keploy.capture_verification", Value: string(cv.Status)},
+			{Name: "keploy.capture_verification.reason", Value: cv.Reason},
+		}}
+		if cv.Status == models.CaptureIncompleteStatus {
+			suite.Tests++
+			suite.Failures++
+			suite.Cases = append(suite.Cases, junitTestCase{
+				Name:      junitCaptureCase,
+				Classname: name,
+				Time:      fmtSeconds(0),
+				Failure: &junitFailure{
+					Message: "capture incomplete",
+					Type:    "CaptureIncomplete",
+					Text:    cv.Reason,
+				},
+			})
+		}
+	}
+	return suite
 }
+
+// junitCaptureCase is the test case a suite whose capture was incomplete
+// carries, failed with the reason (buildJUnitSuite).
+const junitCaptureCase = "keploy capture"
 
 func buildFailure(t models.TestResult) *junitFailure {
 	var parts []string

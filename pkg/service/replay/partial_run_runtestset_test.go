@@ -538,10 +538,22 @@ func (p *prRun) streaming(names ...string) {
 
 func (p *prRun) run(t *testing.T) models.TestSetStatus {
 	t.Helper()
+	return p.runTestSet(t, false)
+}
+
+// runServing runs the test set as one of several an agent serves (serveTest:
+// the agent and the application outlive the test set).
+func (p *prRun) runServing(t *testing.T) models.TestSetStatus {
+	t.Helper()
+	return p.runTestSet(t, true)
+}
+
+func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	p.cancel = cancel
-	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", serveTest)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
 	}

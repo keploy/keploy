@@ -288,6 +288,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		}
 	}
 
+	// 6a. What the agent had already refused a place in its PID maps before
+	//     the test command runs: the run's own refusals are what it grows by
+	//     (PIDMapReader). Read here, with the compose app still parked.
+	pidBase := m.pidMapBaseline(ctx, "replay")
+
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
 	if err := m.releaseComposeApp(ctx); err != nil {
@@ -424,6 +429,33 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// that passed.
 		runnerExit, failedBy = -1, FailedByKeploy
 	}
+	// A process the agent could not track -- the kernel refused it a place in
+	// its PID map -- made calls the agent never saw: not mocked, not
+	// counted as missed, answered by the real dependency if it was up. Nothing
+	// else in this run can show that, and every other gate passes on it, so it
+	// fails the run first and is what the receipt names, ahead even of a
+	// failing runner, which it may be the cause of (the runner's own exit code
+	// is kept, and stays in RunnerExitCode). Keploy's failure, not the
+	// suite's: returned, like an unverifiable --strict run.
+	var keployFailure error
+	captureIncomplete, captureUnverified := "", ""
+	pidCheck := m.pidMapRefusedDuring(ctx, pidBase, "replay")
+	if refused := pidCheck.refused; pidCheck.known && refused.Any() {
+		captureIncomplete = refused.CaptureIncomplete()
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy != FailedByKeploy {
+			failedBy = FailedByCaptureIncomplete
+		}
+		keployFailure = errors.New(captureIncomplete)
+		msg := "replay failed: the agent could not track every process the test command ran, so their calls were not mocked"
+		if refused.Target == 0 {
+			msg = "replay failed: the agent could not exclude every process that predates the test command, so their children's calls may have been mocked as the test command's"
+		}
+		m.logger.Error(msg, append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", captureIncomplete))...)
+	}
+
 	// --strict means "fail unless every recorded call was matched". An
 	// unreadable miss list is not proof of that, so it fails too: a
 	// verification flag that passes when it could not verify is worse than no
@@ -433,7 +465,6 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// returned error is how a caller -- the enterprise run result, and the
 	// editor reading it -- tells keploy's own 1 from a test command's. Left as
 	// a bare exit 1, an unverifiable run read as a failing suite.
-	var keployFailure error
 	if m.config.Mock.Strict && !missesKnown && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
@@ -477,6 +508,32 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.String("next_step", "check the test command actually makes the recorded dependency calls, and that the recording is not stale -- re-record it with keploy mock record if it is"))
 	}
 
+	// Last, because it is the weakest evidence: a count of untracked
+	// processes that could not be read, from an agent that counts them (one
+	// that never does is "unknown" and passes, as before), proves neither a
+	// loss nor its absence. A reported miss or a run that verified nothing
+	// claims the failure first and keeps its name. Only --strict fails on it;
+	// without --strict it is said, and the receipt does not certify the run
+	// as isolated (below).
+	if pidCheck.unreadable != nil {
+		captureUnverified = models.CaptureUnverified(pidCheck.unreadable)
+		if m.config.Mock.Strict && utils.ErrCode == 0 { // a failure already decided keeps its name
+			utils.ErrCode = 1
+			failedBy = FailedByStrict
+			keployFailure = errors.New("--strict could not verify this replay: " + captureUnverified)
+			m.logger.Error("replay failed under --strict: keploy could not read whether the agent tracked every process the test command ran, so a clean run could not be proven",
+				zap.String("mock-set", name), zap.Error(pidCheck.unreadable),
+				zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why its count could not be read"))
+		} else {
+			next := "check the agent logs for why its count could not be read, and for a WARN about its PID maps"
+			if !m.config.Mock.Strict {
+				next += "; --strict fails such a run"
+			}
+			m.logger.Warn("this replay is not verified: keploy could not read whether the agent tracked every process the test command ran, so a call may have reached the real dependency unmocked",
+				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
+		}
+	}
+
 	// 12. What the run proved -- decided once, so the log line below and the
 	//     receipt cannot disagree -- then how much of the code it exercised,
 	//     from the runner's own report, and the --min-coverage floor.
@@ -495,6 +552,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// Isolated holds for every call the tests that ran made; it says
 		// nothing about the tests that did not run.
 		isolationNote = fmt.Sprintf("isolated for the tests that ran: %d test(s) were gated and did not run", tests.Gated)
+	}
+	if captureIncomplete != "" {
+		// Calls of an untracked process reached the real dependency.
+		isolated, isolationNote = false, captureIncomplete
+	} else if captureUnverified != "" && isolated {
+		// Nothing shows they did, and nothing shows they did not.
+		isolated, isolationNote = false, captureUnverified
 	}
 	var keployErr string
 	if failedBy == FailedByKeploy {

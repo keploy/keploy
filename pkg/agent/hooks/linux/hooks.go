@@ -101,9 +101,21 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return errors.New("failed to get the error group from the context")
 	}
 
+	// A process the kernel refuses a place in the PID maps is not tracked,
+	// and nothing else would say so (pidmaps.go). Its last read, as ctx
+	// ends, comes before unLoad closes the counters.
+	watched := make(chan struct{})
+	g.Go(func() error {
+		defer close(watched)
+		defer utils.Recover(h.logger)
+		watchPIDMapRefusals(ctx, h.logger, h.pidMapCounts, pidMapPollInterval)
+		return nil
+	})
+
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
+		<-watched
 		h.unLoad(ctx, opts)
 
 		// deleting in order to free the memory on shutdown.
@@ -277,7 +289,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
 	// and it takes every process in the agent's PID namespace, the whole host
 	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
-	// nothing recorded or mocked and nothing said. Attached in every mode,
+	// nothing recorded or mocked. (A refused insert is counted and reported,
+	// pidmaps.go; with this hook it takes more live processes than the map
+	// holds.) Attached in every mode,
 	// DaemonSet and per-container targeting included: it only removes TGIDs
 	// of processes that no longer exist, whoever added them. A raw
 	// tracepoint, so it needs no tracefs. Attached before sys_enter_socket so
