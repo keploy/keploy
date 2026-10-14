@@ -161,8 +161,9 @@ func init() { ResetInterruptedAgain() }
 // later -- unless sudo is held from handing it on (starved, or stopped), which
 // no time can tell from a press, as Go gives a signal's sender to no one. So
 // what a press after an offer does must be safe for a copy too: a drain that
-// gives up fails its run loudly, and an agent's stop has the agent die only
-// once no teardown work is in progress at the first press.
+// gives up fails its run loudly, and an agent's stop answers a first offer by
+// having the agent die between teardown steps (as at a stall verdict), never
+// in one.
 //
 // next is closed by the first interrupt after this offer: a wait that must
 // hear only an interrupt given to it (an agent's stop, after the drains, where

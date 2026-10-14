@@ -31,13 +31,16 @@ import (
 //     that does not count. One stop is often delivered twice (`sudo pkill -f
 //     keploy` signals both sudo and keploy, and sudo hands its signal on), and
 //     the copy comes with the first; and a press that ended a recording's
-//     drain is no press to kill the agent mid-teardown. A press escalates one
-//     step: the first has the agent die once no teardown work is in progress
-//     (as the verdicts below do), and only one after a second offer, or after
-//     a verdict, kills it at once. A copy that sudo was held from handing on
-//     until after an offer -- sudo starved, or stopped -- can only be told from
-//     a press by its time, which the copy's delay can outlast: taken for a
-//     press, it costs no teardown work.
+//     drain is no press to kill the agent mid-teardown. A press does what the
+//     offer it answers said: the first offer's has the agent die once no
+//     teardown work is in progress (as the verdicts below do); only the offer
+//     that comes after the agent was told so -- a whole period after the
+//     press, or the verdict, that told it -- kills it at once. A copy that
+//     sudo was held from handing on until after an offer -- sudo starved, or
+//     stopped -- can only be told from a press by its time, which the copy's
+//     delay can outlast. Taken for a press, it costs what a stall verdict
+//     does: the agent dies between teardown steps, never in one (no uprobe is
+//     left half removed), and the steps it had not taken are not taken.
 //
 // A check is one of the agent's own beats (utils.TeardownBeat), not a tick of
 // the CLI's clock: an agent the host does not schedule at all does not beat.
@@ -123,9 +126,10 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 // -- and goes on waiting for the exit; and at the user's Ctrl+C once it has
 // said that a press stops the agent (a utils.StopNowNotice, paced on its
 // polls: a whole stopWatchOffer after the stop's signal was seen, or after the
-// press before). The first press kills as a verdict does; one after the agent
-// was told to die so kills it at once, kill(true), where the CLI can, after
-// which the watch waits no more. reported, when set, is closed at the agent's
+// press or verdict before). A press does what the offer it answers said: the
+// first kills as a verdict does; one after the agent was told to die so kills
+// it at once, kill(true), where the CLI can, after which the watch waits no
+// more. reported, when set, is closed at the agent's
 // first report: its teardown has begun.
 //
 // While the agent reports that it records its steps (Steps) and keeps
@@ -153,9 +157,11 @@ type stopWatch struct {
 var holdStale = time.Duration(stallChecks) * utils.TeardownBeat
 
 // stopWatchOffer is how long after the stop's signal was seen (or after the
-// press before) a stopWatch says Ctrl+C stops the agent, and from when a press
-// does: longer than a copy of that signal (sudo's) takes to come, unless sudo
-// is held from handing it on, which the escalation of each press makes safe.
+// press or verdict before) a stopWatch says Ctrl+C stops the agent, and from
+// when a press does: longer than a copy of that signal (sudo's) takes to come,
+// unless sudo is held from handing it on. A copy that late is taken for a
+// press, and costs what the first press does: the agent dies between teardown
+// steps, as at a stall verdict, never in one.
 var stopWatchOffer = 5 * time.Second
 
 // run returns once the agent has exited (false), or once it has been killed
@@ -284,9 +290,15 @@ func (w stopWatch) run() bool {
 			continue
 		}
 		// It dies once no teardown work is in progress; a press kills it at
-		// once.
+		// once -- one that answers an offer saying so: a standing offer said
+		// a press would have it die once idle, so it is withdrawn, and the
+		// next comes a whole period from now, saying what a press does now.
 		killed = true
 		hold(false)
+		if offering {
+			notice.Withdraw()
+			notice, offering = utils.NewStopNowNotice(stopWatchOffer), false
+		}
 	}
 }
 

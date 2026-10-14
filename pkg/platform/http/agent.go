@@ -112,9 +112,10 @@ type AgentClient struct {
 // an agent by asking it, or by SIGTERM, and waits for it (gone) while its
 // teardown makes progress -- killing it only once that stops, or it has
 // detached everything and not exited, or the user presses Ctrl+C once keploy
-// has said a press stops it (stopWatch: the first press has it die once no
-// teardown work is in progress, a later one kills it at once); never on a
-// timer, never by a hang-up from closing its terminal
+// has said a press stops it (stopWatch: a press answering the first offer has
+// it die once no teardown work is in progress, one answering a later offer
+// kills it at once); never on a timer, never by a hang-up from closing its
+// terminal
 // (endAgent, stopAgentContainerFor). That holds before the agent answers too:
 // it attaches its uprobes first.
 //
@@ -2088,8 +2089,9 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // for while its teardown makes progress, and killed (kill) only once it has
 // stopped making any, or has detached everything and not exited -- kill(false),
 // on which it dies once no teardown work is in progress -- or at the user's
-// Ctrl+C once the stop has said a press stops it: kill(false) at the first,
-// kill(true), at once, at one after that (stopWatch).
+// Ctrl+C once the stop has said a press stops it, as that offer says:
+// kill(false) until the agent has been told to die so, kill(true), at once,
+// at an offer that comes after (stopWatch).
 // An agent already reaped is never signalled: its pid may be another
 // process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, read func(context.Context) (utils.TeardownProgress, bool)) {
@@ -3069,8 +3071,9 @@ var dockerStopPoll = time.Second
 // making any, or has detached everything and not exited -- with the
 // escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
 // teardown work is in progress -- or at the user's Ctrl+C once the stop has
-// said a press stops it: the escalation signal at the first, and at once
-// (`kill`, SIGKILL) at one after that (stopWatch). Not `stop`, whose
+// said a press stops it, as that offer says: the escalation signal until the
+// agent has been told to die so, and at once (`kill`, SIGKILL) at an offer
+// that comes after (stopWatch). Not `stop`, whose
 // grace period (10 s by default) ends in a SIGKILL however the teardown is
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent

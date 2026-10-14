@@ -418,6 +418,58 @@ func TestStopWatchDoesNotTakeACopyOfTheStopForCtrlC(t *testing.T) {
 	}
 }
 
+// A press does what the offer it answers said. The watch offers while the
+// agent progresses (a press then has it die once no teardown work is in
+// progress); a stall verdict then tells it so, and it stays in the middle of
+// teardown work. That offer is withdrawn: a press answering it -- or a copy
+// of the stop sudo was held from handing on until after it -- does not kill
+// the agent at once, mid-work. The offer to kill it at once comes a whole
+// period after the verdict, and only a press after that does.
+func TestStopWatchAPressAnswersTheOfferItWasMadeFor(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
+	defer func(n uint64) { stallChecks = n }(stallChecks)
+	stallChecks = 2
+	core, logs := observer.New(zapcore.InfoLevel)
+	f := newFakeAgent()
+	f.busy = true // removing what it attached to the kernel
+	f.set(p(1, 0, false))
+	w := &watching{finished: make(chan struct{})}
+	sw := stopWatch{logger: zap.New(core), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond}
+	go func() { w.killed.Store(sw.run()); close(w.finished) }()
+	t.Cleanup(f.exited)
+	const onceIdle = "Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress"
+	const atOnce = "Press Ctrl+C again to stop the keploy agent at once"
+	within(t, "the offer", func() {
+		for logs.FilterMessage(onceIdle).Len() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	// It stalls: no step across stallChecks beats, and the verdict tells it
+	// to die once idle.
+	for beat := uint64(1); f.killed.Load() == 0; beat++ {
+		f.set(p(1, beat, false))
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.now.Load() {
+		t.Fatal("setup: the verdict killed at once")
+	}
+	utils.MarkInterruptedAgain() // the press the first offer asked for (or a late copy)
+	within(t, "the offer to kill at once", func() {
+		for logs.FilterMessageSnippet(atOnce).Len() == 0 && f.killed.Load() == 1 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if f.killed.Load() != 1 || f.now.Load() {
+		t.Fatalf("a press answering %q killed the agent at once, mid teardown work (kills %d, now %v)", onceIdle, f.killed.Load(), f.now.Load())
+	}
+	ctrlCWhileWaited(t) // the press the offer to kill at once asked for
+	if !awaitWatch(t, w) || f.killed.Load() != 2 || !f.now.Load() {
+		t.Fatalf("the press after the offer to kill at once did not (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+}
+
 // An agent that reports nothing -- one that predates the report -- is never
 // killed for want of progress: the watch waits for its exit.
 func TestStopWatchNeverKillsAnAgentThatReportsNothing(t *testing.T) {

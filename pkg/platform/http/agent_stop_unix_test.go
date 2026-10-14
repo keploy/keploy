@@ -39,35 +39,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// hangBound turns a regression that would hang a test into a failure. It is
-// not part of any assertion: every positive assertion waits on its event, and
-// this bound is only how long a test gives that event before saying it never
-// came.
-const hangBound = 2 * time.Minute
-
-// within runs f and fails the test if it has not returned within hangBound.
-func within(t *testing.T, what string, f func()) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() { f(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(hangBound):
-		t.Fatalf("%s did not return within %v", what, hangBound)
-	}
-}
-
-// returnsWithin reports whether done is closed within d. It asserts only that
-// something has NOT happened yet; every positive assertion waits on the event.
-func returnsWithin(done <-chan struct{}, d time.Duration) bool {
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
-}
-
 // closedAgentURL is the URL of an agent API nothing listens on: a stop
 // request to it is refused, as one to an agent that cannot be asked is.
 func closedAgentURL(t *testing.T) string {
