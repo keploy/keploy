@@ -2,6 +2,7 @@ package replay
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
@@ -60,6 +61,14 @@ func TestArmRunExitCode(t *testing.T) {
 	armRunExitCode(errors.New("no test sets found"), true, 0)
 	if utils.ErrCode != 1 {
 		t.Errorf("a run that never started exited %d, want 1", utils.ErrCode)
+	}
+
+	// A run whose error still carries a tag ends with that tag's code, not a
+	// bare 1.
+	utils.ErrCode = 0
+	armRunExitCode(fmt.Errorf("%w: the keploy agent could not start", utils.ErrPrivilegeRequired), true, 0)
+	if utils.ErrCode != utils.ExitPrivilegeRequired {
+		t.Errorf("a run whose agent lacked privileges exited %d, want %d", utils.ErrCode, utils.ExitPrivilegeRequired)
 	}
 
 	// A code already armed is MORE specific than this one -- a wrapped
