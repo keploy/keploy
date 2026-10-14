@@ -422,6 +422,13 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 	}
+	// The calls the application made before this begin are settled first
+	// (settle_proven.go): they are the pool's, or the previous test's, never
+	// this test's.
+	if err := a.settle(ctx, a.replaying()); err != nil {
+		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
+	}
 	a.NoteScope(id, 0, dir, false)
 	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
 		a.abandonWindow(id)
@@ -522,6 +529,11 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The test's calls are settled before it is judged (settle_proven.go):
+	// a call it made that the proxy has not yet taken or answered is its
+	// own, whatever the load. One keploy cannot settle leaves the test
+	// unjudged, and failed.
+	settleErr := a.settle(ctx, a.replaying())
 	if a.replaying() {
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
 		switch {
@@ -534,6 +546,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		case !ev.Empty():
 			ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
 			outcome = models.ScopeOutcomeFailed
+		}
+	}
+	if settleErr != nil {
+		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
+		if why == "" {
+			why = note
+		} else {
+			why += "; " + note
+		}
+		if readErr == nil {
+			readErr = settleErr
 		}
 	}
 	if why != "" {

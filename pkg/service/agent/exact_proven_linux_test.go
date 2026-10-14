@@ -30,6 +30,9 @@ import (
 // matcher reports, each filed as the proxy files it (models.Miss*).
 type realProxy struct {
 	coreAgent.Proxy
+	// The calls each test makes are answered before its end (the tests'
+	// calls are synchronous): every call is in hand when a test settles.
+	settledProxy
 	mm     *proxyPkg.MockManager
 	mu     sync.Mutex
 	misses []models.UnmatchedCall
@@ -377,4 +380,48 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 	}
 	code, _ := p.call(t, "/ping")
 	require.Equal(t, 502, code, "a test case's mock answered between test cases")
+}
+
+// A test's end waits until its calls are settled: a call the application
+// makes after the test's harness said it ended, while the proxy still holds
+// the test's work, is the test's own, and the end judges it so, whatever the
+// load. Without the wait the end would judge the mock unconsumed.
+func TestAnEndJudgesTheCallsStillInFlight(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/audit", "ok", t0)},
+		map[string][]string{"o::TestAsync": {"mock-1"}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestAsync"))
+	require.Nil(t, serr)
+	p.set(0, 1) // the application's call is in the proxy's hands
+	ended := make(chan models.ScopeEndResp, 1)
+	go func() {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestAsync", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+		ended <- e
+	}()
+	code, _ := p.call(t, "/audit")
+	require.Equal(t, 200, code)
+	select {
+	case e := <-ended:
+		t.Fatalf("the end judged while the test's call was in flight: %+v", e)
+	default:
+	}
+	p.set(0, 0) // answered: nothing in the proxy's hands
+	e := <-ended
+	require.Empty(t, e.Action, e.Reason)
+}
+
+// A test whose calls keploy cannot count is not judged settled: its end
+// fails it, and says why.
+func TestAnEndThatCannotCountFailsTheTest(t *testing.T) {
+	a, _ := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	a.Hooks.(*countHooks).err = models.ErrProxyConnsUnsupported
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr)
+	w := evidenceOf(t, a, "o::TestA")
+	require.Contains(t, w.Reason, "could not tell that every call of o::TestA reached it")
 }

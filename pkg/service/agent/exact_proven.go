@@ -164,6 +164,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		return err
 	}
 	ex := params.Exact
+	// A test case opens, or ends, once the calls made before are settled
+	// (settle_proven.go): they are the pool's, or the test case's own.
+	if !ex.Stage {
+		if err := a.settle(ctx, true); err != nil {
+			return err
+		}
+	}
 	switch {
 	case ex.Stage:
 		staging := params

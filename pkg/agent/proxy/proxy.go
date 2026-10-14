@@ -260,6 +260,10 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	// inflight keeps, under the proven switch, every accepted connection, so
+	// a test's end can tell when none holds its calls (inflight.go).
+	inflight inflight
+
 	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
 	// IPv4-only cluster service yields an AAAA NODATA here, so an un-deduped
@@ -2206,8 +2210,16 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// panics in some interleavings. Done() still runs in
 			// the goroutine's deferred cleanup.
 			p.activeConns.Add(1)
+			// Under the proven switch the connection is kept from its
+			// accept on, so a test's end sees what it holds (inflight.go).
+			var tracked *trackedConn
+			if provenswitch.On() {
+				tracked = p.inflight.track(clientConn)
+				clientConn = tracked
+			}
 			clientConnErrGrp.Go(func() error {
 				defer p.activeConns.Done()
+				defer p.inflight.forget(tracked)
 				// A connection's end is a step of the agent's teardown once it
 				// is stopping: the CLI that stopped it reads them as it drains
 				// (utils.TeardownStep). Before, it counts nothing anyone reads.
