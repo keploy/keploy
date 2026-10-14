@@ -71,10 +71,28 @@ type ListenerCounter interface {
 	// connections' sockets from a TCP socket of its own that the mark never
 	// reaches.
 	MarkProxyListener(rc syscall.RawConn) error
-	// ProxyConnSeq is the sequence number the kernel gave the accepted
-	// connection rc as it counted it: 1 for the first connection completed
-	// to the marked listener, and so on. A connection with none is an error.
-	ProxyConnSeq(rc syscall.RawConn) (uint64, error)
+	// ProxyConnPair is what the kernel left in the accepted connection rc's
+	// socket as it counted it (ProxyConnPairing): its sequence number, and
+	// the application connection it pairs with, with that one's original
+	// destination. A connection with no number is an error.
+	ProxyConnPair(rc syscall.RawConn) (ProxyConnPairing, error)
+}
+
+// ProxyConnPairing is an accepted connection of the proxy's marked listener,
+// as the kernel counted it.
+type ProxyConnPairing struct {
+	// Seq is its number among the connections completed to the listener:
+	// 1, 2, ...
+	Seq uint64
+	// AppSeq is the number of the application's connection it is the
+	// proxy's side of, 0 when the kernel could tie it to none (not one of
+	// the application's redirected connections, or one the proxy sees at
+	// other addresses: a NAT between them).
+	AppSeq uint64
+	// Dst is that application connection's original destination, set with
+	// AppSeq: where the connection is going, its own, whatever any other
+	// connection on the same port was doing.
+	Dst *NetworkAddress
 }
 
 // ProxyConnsReporter is the optional extension implemented by hooks that
@@ -89,6 +107,21 @@ type ProxyConnsReporter interface {
 	// grows, for the life of the hooks. It fails until a listener has been
 	// marked.
 	ProxyConnsEstablished(ctx context.Context) (uint64, error)
+	// AppConnsEstablished is the count of the application's own connections
+	// to the proxy (the ones keploy redirected) whose connect() has
+	// returned, the highest number the kernel gave them. A connection is in
+	// it before its final ACK reaches the proxy's side. It fails as
+	// ProxyConnsEstablished does, and once the kernel had no room for one of
+	// its events.
+	AppConnsEstablished(ctx context.Context) (uint64, error)
+	// AppConnsSettled is the highest n such that every application
+	// connection numbered 1..n is resolved: paired with the proxy's side of
+	// it (then counted by ProxyConnsEstablished), or lost (it closed, or its
+	// port was reused, first: a capture loss).
+	AppConnsSettled() (uint64, error)
+	// WaitAppConnsSettled returns once AppConnsSettled() >= n, or with ctx's
+	// error, or when the count is unknown. No deadline of its own.
+	WaitAppConnsSettled(ctx context.Context, n uint64) error
 }
 
 // ListenerCountTaker is the optional extension implemented by proxies that can
@@ -119,23 +152,28 @@ type AcceptCounter interface {
 }
 
 // ProxyConnCounter is what the agent offers a test's begin and end (S12): the
-// connections the kernel completed to the proxy's listener, numbered, and a
-// wait for the proxy to have accepted every one up to a number. begin and end
-// read ProxyConns, then WaitProxyAccepted(ctx, counts.Established), then go on
-// to the bytes and requests the proxy holds; a test whose ListenDrops differ
-// between its begin and its end is not verified.
+// connections to the proxy, numbered on both sides, and a wait for every call
+// the application had started by a read to be in the proxy's hands. begin and
+// end read ProxyConns, then WaitProxySettled(ctx, counts), then go on to the
+// bytes and requests the proxy holds; a test whose ListenDrops differ between
+// its begin and its end is not verified, and an application connection lost
+// before the proxy got it is a capture loss (CaptureLossAppConnLost).
 //
 // The counts only ever grow for the life of the agent process. An agent that
 // cannot count answers an error wrapping models.ErrProxyConnsUnsupported
-// ("unknown", never 0). ProxyConns is cheap (a locked map lookup, a locked
-// read and a getsockopt): a watchdog may call it at every wake-up to see the
-// wait progress.
+// ("unknown", never 0). ProxyConns is cheap (a few locked map lookups, a
+// locked read and a getsockopt): a watchdog may call it at every wake-up to see
+// the wait progress.
 type ProxyConnCounter interface {
 	ProxyConns(ctx context.Context) (models.ProxyConnCounts, error)
+	// WaitProxySettled returns once every application connection counts
+	// numbered (AppConns) is resolved, and the proxy has accepted every
+	// connection the kernel completed to it by then; or with ctx's error.
+	// Connections made after counts was read cannot hold it back. No
+	// deadline of its own; it looks again at each resolution and accept.
+	WaitProxySettled(ctx context.Context, counts models.ProxyConnCounts) error
 	// WaitProxyAccepted returns once the proxy has accepted every connection
-	// the kernel numbered 1..n, or with ctx's error. Connections numbered
-	// later cannot hold it back. No deadline of its own; it looks again at
-	// each accept.
+	// the kernel numbered 1..n on its side, or with ctx's error.
 	WaitProxyAccepted(ctx context.Context, n uint64) error
 }
 

@@ -3,9 +3,13 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 
 	"strings"
 	"sync"
@@ -34,6 +38,9 @@ type fakeCounter struct {
 	markErr   error
 	seqErr    error
 	next      uint64
+	// dst is the destination the kernel gives every application
+	// connection after the canary; nil pairs none.
+	dst *agent.NetworkAddress
 }
 
 func (f *fakeCounter) MarkProxyListener(rc syscall.RawConn) error {
@@ -55,14 +62,21 @@ func (f *fakeCounter) MarkProxyListener(rc syscall.RawConn) error {
 	return f.markErr
 }
 
-func (f *fakeCounter) ProxyConnSeq(syscall.RawConn) (uint64, error) {
+func (f *fakeCounter) ProxyConnPair(syscall.RawConn) (agent.ProxyConnPairing, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.seqErr != nil {
-		return 0, f.seqErr
+		return agent.ProxyConnPairing{}, f.seqErr
 	}
 	f.next++
-	return f.next, nil
+	p := agent.ProxyConnPairing{Seq: f.next}
+	// The canary is the first: none of the application's. The rest are
+	// paired with dst when it is set.
+	if f.next > 1 && f.dst != nil {
+		p.AppSeq = f.next - 1
+		p.Dst = f.dst
+	}
+	return p, nil
 }
 
 // teardownGate is an auxiliary hook whose teardown says it began, then waits
@@ -406,3 +420,120 @@ type rawConnOf int
 func (r rawConnOf) Control(f func(uintptr)) error  { f(uintptr(r)); return nil }
 func (r rawConnOf) Read(func(uintptr) bool) error  { return errors.New("not used") }
 func (r rawConnOf) Write(func(uintptr) bool) error { return errors.New("not used") }
+
+// namedUpstream is an HTTP dependency whose every answer is name.
+func namedUpstream(t *testing.T, name string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, name)
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// callThrough makes one HTTP call through the proxy at addr and returns the
+// body, "" when the proxy closed the connection instead.
+func callThrough(t *testing.T, addr string) string {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: dependency\r\nConnection: close\r\n\r\n"); err != nil {
+		return ""
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil) // no deadline but -timeout
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
+}
+
+// A connection the kernel paired with the application's is taken where its
+// own socket says it is going, never where the by-port map says: a stale
+// entry, or one another connection on the same port wrote, cannot misroute
+// it.
+func TestAPairedConnectionGoesWhereItsOwnSocketSays(t *testing.T) {
+	right := namedUpstream(t, "right")
+	wrong := namedUpstream(t, "wrong")
+	f := &fakeCounter{dst: ipv4Dest(t, right)}
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	cfg.Agent.Mode = models.MODE_RECORD // with no session yet: a call passes through
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, wrong)}, cfg)
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.SetListenerCounter(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan error, 1), make(chan error, 1)
+	go func() { done <- p.Serve(ctx, ready) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	if got := callThrough(t, p.Listener.Addr().String()); got != "right" {
+		t.Fatalf("the paired connection reached %q, want the destination its own socket carries (\"right\")", got)
+	}
+}
+
+// A connection the kernel tied to no connection of the application's (a NAT
+// between them, among the causes) is refused, a capture loss with a WARN:
+// never sent where a by-port entry says.
+func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
+	wrong := namedUpstream(t, "wrong")
+	f := &fakeCounter{} // pairs none
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	cfg.Agent.Mode = models.MODE_RECORD // with no session yet: a call passes through
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, wrong)}, cfg)
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.SetListenerCounter(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan error, 1), make(chan error, 1)
+	go func() { done <- p.Serve(ctx, ready) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	if got := callThrough(t, p.Listener.Addr().String()); got != "" {
+		t.Fatalf("the unpaired connection reached %q, want it refused", got)
+	}
+	losses := p.CaptureLosses()
+	if len(losses) != 1 || losses[0].Kind != models.CaptureLossUnpairedConn || losses[0].Count != 1 {
+		t.Fatalf("CaptureLosses = %+v, want one unpaired connection", losses)
+	}
+}
+
+// The marked listener has no TCP Fast Open, even one its socket was given
+// before listen(): a Fast Open connection would never pair.
+func TestTheMarkedListenerHasNoFastOpen(t *testing.T) {
+	ln, markErr, err := ListenMarked(context.Background(), "127.0.0.1:0", func(rc syscall.RawConn) error {
+		var serr error
+		if err := rc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN, 16) }); err != nil {
+			return err
+		}
+		return serr
+	})
+	if err != nil || markErr != nil {
+		t.Fatalf("ListenMarked: %v, %v", err, markErr)
+	}
+	defer ln.Close()
+	rc, err := ln.(*net.TCPListener).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qlen int
+	var gerr error
+	if err := rc.Control(func(fd uintptr) { qlen, gerr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN) }); err != nil || gerr != nil {
+		t.Fatalf("read TCP_FASTOPEN: %v %v", err, gerr)
+	}
+	if qlen != 0 {
+		t.Fatalf("the marked listener's Fast Open queue is %d, want 0", qlen)
+	}
+}

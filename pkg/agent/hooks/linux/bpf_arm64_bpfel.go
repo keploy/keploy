@@ -16,6 +16,11 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	bpfMapAppConnEvents               = "app_conn_events"
+	bpfMapAppConnEventsDropped        = "app_conn_events_dropped"
+	bpfMapAppConns                    = "app_conns"
+	bpfMapAppConnsEstablished         = "app_conns_established"
+	bpfMapAppConnsOn                  = "app_conns_on"
 	bpfMapAppPortInfo                 = "app_port_info"
 	bpfMapBindEvents                  = "bind_events"
 	bpfMapExcludedPids                = "excluded_pids"
@@ -110,6 +115,11 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
+	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
+	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
+	AppConnsEstablished         *ebpf.MapSpec `ebpf:"app_conns_established"`
+	AppConnsOn                  *ebpf.MapSpec `ebpf:"app_conns_on"`
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
@@ -152,6 +162,11 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
+	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
+	AppConns                    *ebpf.Map `ebpf:"app_conns"`
+	AppConnsEstablished         *ebpf.Map `ebpf:"app_conns_established"`
+	AppConnsOn                  *ebpf.Map `ebpf:"app_conns_on"`
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
@@ -170,6 +185,11 @@ type bpfMaps struct {
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.AppConnEvents,
+		m.AppConnEventsDropped,
+		m.AppConns,
+		m.AppConnsEstablished,
+		m.AppConnsOn,
 		m.AppPortInfo,
 		m.BindEvents,
 		m.ExcludedPids,

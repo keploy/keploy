@@ -283,6 +283,9 @@ type Proxy struct {
 	// canary accepted before its own connection, for the accept loop.
 	listenerCounter agent.ListenerCounter
 	early           []net.Conn
+	// pairs holds each accepted connection's pairing (countAccept) until
+	// handleConnection takes its destination (pairedDest).
+	pairs sync.Map
 
 	Listener net.Listener
 
@@ -2392,29 +2395,45 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
-	if err != nil {
-		// Gracefully handle untracked connections (eBPF lookup failed)
-		// This can happen when:
-		// 1. A new connection was opened after test completion (e.g., driver health check)
-		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
-		// 3. The entry was already deleted before this lookup
-		//
-		// Instead of failing with an error (which causes the app to see a broken connection),
-		// we close the connection gracefully. The client will see "connection refused" or EOF,
-		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
-			zap.Int("Source port", sourcePort), zap.Error(err))
-		return nil
-	}
+	// Under the proven switch, a connection the kernel paired with the
+	// application's carries its own destination; one it paired with none
+	// is refused. Never a destination by source port, which another
+	// connection may share (accepts.go).
+	var err error
+	destInfo, counted := p.pairedDest(srcConn)
+	if counted {
+		if destInfo == nil {
+			p.refuseUnpaired(srcConn)
+			return nil
+		}
+		// The by-port entry is this connection's too: taken, so the
+		// shared map never fills. It may be gone already.
+		_ = p.DestInfo.Delete(ctx, uint16(sourcePort))
+	} else {
+		destInfo, err = p.DestInfo.Get(ctx, uint16(sourcePort))
+		if err != nil {
+			// Gracefully handle untracked connections (eBPF lookup failed)
+			// This can happen when:
+			// 1. A new connection was opened after test completion (e.g., driver health check)
+			// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
+			// 3. The entry was already deleted before this lookup
+			//
+			// Instead of failing with an error (which causes the app to see a broken connection),
+			// we close the connection gracefully. The client will see "connection refused" or EOF,
+			// which is cleaner than a partial/broken connection that causes "already closed" errors.
+			p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
+				zap.Int("Source port", sourcePort), zap.Error(err))
+			return nil
+		}
 
-	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
+		p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
-		return err
+		// releases the occupied source port when done fetching the destination info
+		err = p.DestInfo.Delete(ctx, uint16(sourcePort))
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
+			return err
+		}
 	}
 	seeProcess(destInfo.KernelPid)
 

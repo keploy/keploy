@@ -4,11 +4,14 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Hooks that are not loaded mark nothing and count nothing: each says so,
@@ -30,8 +33,21 @@ func TestProxyConnsBeforeLoadAreErrors(t *testing.T) {
 	if err := h.MarkProxyListener(rc); err == nil || !strings.Contains(err.Error(), "not loaded") {
 		t.Fatalf("unloaded hooks marked a listener: %v, want a not-loaded error", err)
 	}
-	if n, err := h.ProxyConnSeq(rc); err == nil || !strings.Contains(err.Error(), "not loaded") {
-		t.Fatalf("unloaded hooks read a sequence number %d: %v, want a not-loaded error", n, err)
+	if p, err := h.ProxyConnPair(rc); err == nil || !strings.Contains(err.Error(), "not loaded") {
+		t.Fatalf("unloaded hooks read a pairing %+v: %v, want a not-loaded error", p, err)
+	}
+	// The application's side, before any mark: unknown, never 0.
+	if n, err := h.AppConnsEstablished(context.Background()); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("AppConnsEstablished before a mark = %d, %v; want unknown", n, err)
+	}
+	if n, err := h.AppConnsSettled(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("AppConnsSettled before a mark = %d, %v; want unknown", n, err)
+	}
+	if err := h.WaitAppConnsSettled(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("WaitAppConnsSettled before a mark: %v, want unknown", err)
+	}
+	if lost := h.CaptureLosses(); lost != nil {
+		t.Fatalf("CaptureLosses before a mark: %+v, want none", lost)
 	}
 }
 
