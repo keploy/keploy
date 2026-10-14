@@ -4577,6 +4577,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Differs:          parserErr.MismatchReport.Differs,
+					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

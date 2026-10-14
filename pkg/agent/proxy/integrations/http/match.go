@@ -1806,15 +1806,15 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		// same order the matcher saw. Per-test FIRST, session second.
 		perTestMocks, err := mockDb.GetPerTestMocksInWindow()
 		if err != nil {
-			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
 		}
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
-			return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 				WithDestination(dest).
-				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build()
+				WithNextSteps("Failed to read mock database. Check logs for errors and retry.").Build(), request, nil, nil, variableTable(mockDb))
 		}
 		mocks := make([]*models.Mock, 0, len(perTestMocks)+len(sessionMocks))
 		mocks = append(mocks, perTestMocks...)
@@ -1823,7 +1823,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	}
 
 	if diag != nil && diag.variable != nil {
-		return variableMismatchReport(request, liveBody, dest, actualKey, diag, httpMocks)
+		// A variable's place counts the segments of the escaped path
+		// (variables.go), so this miss names its path escaped too: a %2F
+		// stays inside its segment, and the place names the segment the
+		// miss's shape writes {} (models.MissShape).
+		return variableMismatchReport(request, liveBody, dest, request.Method+" "+request.URL.EscapedPath(), diag, httpMocks, variableTable(mockDb))
 	}
 
 	phase := models.MatchPhaseExhausted
@@ -1840,9 +1844,9 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	}
 
 	if candidateCount == 0 && len(schemaSurvivors) == 0 {
-		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
-			WithPhase(models.MatchPhaseNoMocks, 0).Build()
+			WithPhase(models.MatchPhaseNoMocks, 0).Build(), request, nil, nil, variableTable(mockDb))
 	}
 
 	// Does anything the matcher just compared against even target this
@@ -1870,7 +1874,8 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	if diag != nil && diag.closest != nil && diag.closest.Spec.HTTPReq != nil {
 		// Under the proven switch: the strict comparison's closest recording,
 		// and the fields it found differ.
-		return strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount)
+		return withRoutePlaces(strictMismatchReport(request, liveBody, dest, actualKey, diag, comparedDests, phase, candidateCount),
+			request, diag.closest, comparedPool, variableTable(mockDb))
 	}
 	closestPool := httpMocks
 	if diag != nil && diag.live != nil {
@@ -1883,10 +1888,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	}
 	closestMock := pickClosestCandidate(request, schemaSurvivors, closestPool)
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
-		return mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
 			WithDestination(dest).
 			WithComparedDestinations(comparedDests).
-			WithPhase(phase, candidateCount).Build()
+			WithPhase(phase, candidateCount).Build(), request, nil, comparedPool, variableTable(mockDb))
 	}
 	// The call the field diffs are computed from: under the proven switch a
 	// closest mock with variables is diffed with its recorded values at their
@@ -1965,7 +1970,7 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		// of the misleading legacy "headers or body differ".
 		b = b.WithDiff(fmt.Sprintf("closest mock %q has no field-level differences; match stopped at phase %q", closestMock.Name, phase))
 	}
-	return b.Build()
+	return withRoutePlaces(b.Build(), request, closestMock, comparedPool, variableTable(mockDb))
 }
 
 // comparedDestinations returns the upstream authority of every mock in the
