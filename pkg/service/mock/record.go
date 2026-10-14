@@ -196,7 +196,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		// otherwise, they would recreate a fresh set's folder a failed
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
-			writeRecordTestsReceipt(m.logger, m.config.Path, name, started.UTC().Truncate(time.Second), recordTests, m.refusals)
+			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked,
+			}, recordTests)
 		}
 	}()
 	saveSet := m.saveSet
@@ -671,19 +673,31 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 	if err != nil {
 		return nil, err
 	}
+	return m.takeRunWindows(all), nil
+}
+
+// takeRunWindows returns the windows of the run's tests, and keeps the
+// windows that are no test's apart: the claims (m.claims), the refusals
+// (m.refusals) and where the run's calls to local listeners went (m.live,
+// m.mocked). Every reader of a run's windows goes through it.
+func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWindow {
 	windows := all[:0:0]
-	m.claims, m.refusals = nil, nil
+	m.claims, m.refusals, m.live, m.mocked = nil, nil, nil, nil
 	for _, w := range all {
 		switch {
 		case w.Refused != nil:
 			m.refusals = append(m.refusals, *w.Refused)
 		case w.Claim != "":
 			m.claims = append(m.claims, w)
+		case w.Live != nil:
+			m.live = append(m.live, *w.Live)
+		case w.Mocked != nil:
+			m.mocked = append(m.mocked, *w.Mocked)
 		default:
 			windows = append(windows, w)
 		}
 	}
-	return windows, nil
+	return windows
 }
 
 // claimKeyAt is the key of the claim a call made at at belongs to: the

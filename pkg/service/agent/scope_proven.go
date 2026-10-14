@@ -79,6 +79,9 @@ type provenWire struct {
 	// closed: the run's windows were read at its end; nothing more is
 	// claimed or begun until the next session resets the wire.
 	closed bool
+	// topology is where the run's calls to local listeners went (LIVE and
+	// mocked-local rows, NoteLive and NoteMocked).
+	topology topologyRows
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -344,13 +347,14 @@ func (a *Agent) applyPool(ctx context.Context) error {
 	return a.UpdateMockParams(ctx, params)
 }
 
-// claimWindows is the session's claims and refusals, as windows
-// (models.ScopeWindow.Claim, .Refused).
+// claimWindows is the session's claims, refusals and topology rows, as
+// windows (models.ScopeWindow.Claim, .Refused, .Live, .Mocked).
 func (a *Agent) claimWindows() []models.ScopeWindow {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	out := append([]models.ScopeWindow(nil), a.proven.claims...)
-	return append(out, a.proven.refusals...)
+	out = append(out, a.proven.refusals...)
+	return append(out, a.proven.topology.windows...)
 }
 
 // maxRefusals bounds the refusals a session keeps: past it, a harness that

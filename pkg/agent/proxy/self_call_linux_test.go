@@ -55,7 +55,7 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if served || err != nil {
 		t.Fatalf("a recorded outside dependency must stay on the mock path (served=false), got served=%v err=%v", served, err)
 	}
@@ -93,7 +93,7 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 
 	servedCh := make(chan bool, 1)
 	go func() {
-		served, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		served, _, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 		servedCh <- served
 	}()
 
@@ -134,7 +134,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if !served || err != nil {
 		t.Fatalf("a down, unrecorded local port is closed (served=true, nil err), got served=%v err=%v", served, err)
 	}
@@ -173,7 +173,7 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 		_ = cli.Close()
 		done := make(chan error, 1)
 		go func() {
-			served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 			if err == nil && !served {
 				err = fmt.Errorf("not passed through")
 			}
@@ -261,7 +261,7 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	defer cli.Close()
 	done := make(chan struct{})
 	go func() {
-		_, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 		close(done)
 	}()
 	if pid := awaitEvent(t, seen, "OnProcess being told the listener's owner"); pid != uint32(os.Getpid()) {

@@ -538,6 +538,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		At:          started.UTC().Truncate(time.Second),
 		MocksDigest: digest,
 		Tests:       counts.tests,
+		Live:        m.live,
+		Mocked:      m.mocked,
 	})
 	return keployFailure
 }
@@ -891,7 +893,7 @@ func (m *mockService) replayWindows(ctx context.Context) ([]models.ScopeWindow, 
 			m.logger.Debug("no per-test windows: the keploy-agent container left no replay outcome", zap.Error(err))
 			return nil, nil
 		}
-		return outcome.Windows, nil
+		return m.takeRunWindows(outcome.Windows), nil
 	}
 	if provenswitch.On() {
 		return m.readWindows(ctx)

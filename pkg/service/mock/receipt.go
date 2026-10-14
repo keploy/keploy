@@ -181,6 +181,22 @@ type TestsReceipt struct {
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// Live and Mocked are, under the proven switch, where the run's calls to
+	// local listeners went, each row naming the test open then (none:
+	// outside every test): a listener of the run's own process tree, called
+	// live (models.LiveRow), and any other local listener, recorded and
+	// mocked (models.MockedRow). keploy's summary lists them.
+	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
+	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
+}
+
+// empty reports whether the run reported no test and keploy refused
+// nothing: such a run leaves no per-test file, whatever rows it saw. A
+// record's file is what says the record reported its tests (judging reads a
+// missing one as "the record reported no test"), so rows alone, which a
+// suite without keploy's integration still makes, never write one.
+func (r TestsReceipt) empty() bool {
+	return len(r.Tests) == 0 && len(r.Refusals) == 0
 }
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
@@ -258,8 +274,8 @@ const RecordTestsReceiptFile = "last-record-tests.yaml"
 // top-level test of the record reported as it ended, whether or not the
 // recording was kept. It makes the set's directory when the record kept
 // nothing, since a test that failed against real infra is judged too.
-func writeRecordTestsReceipt(logger *zap.Logger, keployDir, set string, at time.Time, windows []models.ScopeWindow, refusals []models.RunRefusal) {
-	r := TestsReceipt{Set: set, At: at, Refusals: refusals}
+func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt, windows []models.ScopeWindow) {
+	set := r.Set
 	for _, w := range windows {
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
@@ -267,7 +283,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir, set string, at time.
 		r.Tests = append(r.Tests, TestReceipt{Name: w.Name, Outcome: w.Outcome})
 	}
 	dir := filepath.Join(keployDir, set)
-	if len(r.Tests) > 0 || len(r.Refusals) > 0 {
+	if !r.empty() {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			logger.Warn("could not write what each test did in this record", zap.String("dir", dir), zap.Error(err))
 			return
@@ -291,7 +307,7 @@ func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
 // one when the run named no tests: it would describe an earlier run.
 func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsReceipt) {
 	path := filepath.Join(dir, file)
-	if len(r.Tests) == 0 && len(r.Refusals) == 0 {
+	if r.empty() {
 		_ = os.Remove(path)
 		return
 	}

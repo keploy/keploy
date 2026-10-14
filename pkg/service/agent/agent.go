@@ -201,6 +201,11 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 	if coreAgent.ProxyHook != nil && proxy != nil {
 		proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
+	// Where the run's calls to local listeners went, which the proxy tells
+	// under the proven switch only (topology_proven.go).
+	if s, ok := proxy.(topologySinkSetter); ok {
+		s.SetTopologySink(instrumentation)
+	}
 	coreAgent.RegisterIncomingProxy(ip)
 	// Propagate the connection-pool idle retention from config into
 	// the MockManager package default. Reset unconditionally — whether
