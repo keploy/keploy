@@ -35,9 +35,10 @@ import (
 //     before the call that binds it does not hold. An echo variable belongs
 //     to this call alone.
 //  3. Among the mocks that fit and hold, the first in record order answers;
-//     repeated recordings of one request answer in record order (the stateful
-//     cursor). It is consumed as any mock, its binds are committed, and it is
-//     served with each answer place holding its variable's value.
+//     reusable recordings of one call answer in record order, each once, then
+//     the last again (served marks, pickHit). It is consumed as any mock, its
+//     binds are committed, and it is served with each answer place holding
+//     its variable's value.
 //
 // No later pass sees such a mock. When one fits but its variables do not
 // hold, only an exact recording of this very call may still answer it;
@@ -96,10 +97,7 @@ func splitVariableMocks(pool []*models.Mock) (withVars, rest []*models.Mock) {
 		if tier(a) != tier(b) {
 			return tier(a) < tier(b)
 		}
-		if !a.Spec.ReqTimestampMock.Equal(b.Spec.ReqTimestampMock) {
-			return a.Spec.ReqTimestampMock.Before(b.Spec.ReqTimestampMock)
-		}
-		return a.Name < b.Name
+		return recordedBefore(a, b)
 	})
 	return withVars, rest
 }
@@ -627,7 +625,8 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 // from one call to the next (an added header) carries on through them; and
 // two callers whose calls fit two sets of recordings (two tokens) each take
 // theirs in order. A recording whose variables do not hold (its variable not
-// yet bound, or another test's) is passed over and keeps its turn. commit
+// yet bound, or another test's) is passed over and keeps its turn. Record
+// order is recordedBefore's, as splitVariableMocks orders a tier. commit
 // marks the answer served once the call is answered (nil when no mark
 // applies).
 func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
