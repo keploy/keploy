@@ -38,7 +38,7 @@ REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
-cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {

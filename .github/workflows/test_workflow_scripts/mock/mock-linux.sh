@@ -66,8 +66,8 @@ PY
 # test with its file and canSkip, and end it with its outcome), failing a test
 # on any answer it cannot trust. An agent without the proven switch has no
 # claim route; the harness then speaks the scope API as it was (keploy_v1.py).
-cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py
-cp "$MOCK_DIR/conftest_v1.py" conftest.py
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
+cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 # outcome_of NAME: the verdict the last replay gives a test (per-test file).
 outcome_of() {

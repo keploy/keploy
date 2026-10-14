@@ -42,7 +42,7 @@ WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 PORT=18877
 FAIL=0
-cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > dep.py <<'PY'
 import http.server, socketserver, sys

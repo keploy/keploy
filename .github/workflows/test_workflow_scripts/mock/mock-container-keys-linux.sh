@@ -149,8 +149,8 @@ PY
 # collects, then begin each test with its file and canSkip, and end it with
 # its outcome), failing on any answer it cannot trust. Without the switch the
 # agent has no claim route, and the harness speaks the scope API as it was.
-cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py
-cp "$MOCK_DIR/conftest_v1.py" conftest.py
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
+cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > test_containers.py <<'PY'
 from deps import get, note, start
