@@ -1449,23 +1449,12 @@ func formBodiesMatchModuloNoise(mockBody, reqBody string, nc *util.NoiseChecker)
 // mock to serve, m or a copy of it with the response loaded, and claimed=false
 // when another connection took m first.
 func (h *HTTP) claim(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
-	return h.claimLearned(ctx, m, mockDb, detectedNoise, nil, bindings)
-}
-
-// claimLearned is claim, also recording the correlations the learn step
-// learned on m (learned): they ride on the consumed mock's state, as learned
-// noise does, and are rendered into this answer along with m's own.
-func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, learned []models.FieldCorrelation, bindings map[string]string) (served *models.Mock, claimed bool, err error) {
 	served, err = withResponse(m)
 	if err != nil {
 		return nil, false, err
 	}
-	if !h.updateMockLearned(ctx, m, mockDb, detectedNoise, learned) {
+	if !h.updateMock(ctx, m, mockDb, detectedNoise) {
 		return nil, false, nil
-	}
-	if len(learned) > 0 {
-		served = served.ShallowCopy()
-		served.Spec.Correlations = append(append([]models.FieldCorrelation(nil), m.Spec.Correlations...), learned...)
 	}
 	// Honor request→response correlations: render the live values captured from
 	// this request into the served response (on a copy; never the pooled mock).
@@ -1487,13 +1476,19 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 // match.go:723-725). We build a fresh copy, mutate the copy, and pass
 // (old=matchedMock, new=&updatedMock) to the mock DB — which already
 // takes treesMu internally to swap the pointer atomically.
-func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
-	return h.updateMockLearned(ctx, matchedMock, mockDb, detectedNoise, nil)
+func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+	return h.consumeWith(matchedMock, mockDb, func(spec *models.MockSpec) {
+		if len(detectedNoise) > 0 {
+			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, detectedNoise)
+		}
+	})
 }
 
-// updateMockLearned is updateMock, also attaching the correlations the learn
-// step learned on the mock (learned), the way detected noise is attached.
-func (h *HTTP) updateMockLearned(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string, learned []models.FieldCorrelation) bool {
+// consumeWith is updateMock with what this match attaches to the consumed
+// mock's state written by attach, onto the copies it hands the mock DB
+// (never the shared pooled mock): detected noise, or what the learn step
+// learned.
+func (h *HTTP) consumeWith(matchedMock *models.Mock, mockDb integrations.MockMemDb, attach func(spec *models.MockSpec)) bool {
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
@@ -1503,13 +1498,7 @@ func (h *HTTP) updateMockLearned(_ context.Context, matchedMock *models.Mock, mo
 	// flagMockAsUsed reads updatedMock.Spec.ReqBodyNoise to carry it out on the
 	// MockState; mockdb.UpdateMocks persists it. Stored on the kind-agnostic
 	// MockSpec.ReqBodyNoise, same as every other parser.
-	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = mergeReqBodyNoise(updatedMock.Spec.ReqBodyNoise, detectedNoise)
-	}
-	// Learned correlations go onto a fresh slice the same way.
-	if len(learned) > 0 {
-		updatedMock.Spec.Correlations = append(append([]models.FieldCorrelation(nil), updatedMock.Spec.Correlations...), learned...)
-	}
+	attach(&updatedMock.Spec)
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
 	rawConfig := false
@@ -1535,12 +1524,7 @@ func (h *HTTP) updateMockLearned(_ context.Context, matchedMock *models.Mock, mo
 	// matchedMock has no noise, and updatedMock's mutated TestModeInfo wouldn't
 	// match the tree node).
 	deleteMock := *matchedMock
-	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = mergeReqBodyNoise(deleteMock.Spec.ReqBodyNoise, detectedNoise)
-	}
-	if len(learned) > 0 {
-		deleteMock.Spec.Correlations = updatedMock.Spec.Correlations
-	}
+	attach(&deleteMock.Spec)
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}

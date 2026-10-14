@@ -5,10 +5,15 @@
 // from, and every value that drifted is learned as one of three things:
 //
 //   - noise: not compared from then on, its type still enforced;
-//   - a correlation: the mock's answer echoes the value, so the live value is
-//     rendered into the answer wherever the recorded one was;
+//   - an echo: the mock's answer echoes the value, so it is a variable of
+//     that call alone, bound at the request and answered with the live value
+//     where the recorded answer held it;
 //   - a variable: the value appeared earlier in the test's recording, and is
 //     followed from that earlier place (bound there, asserted here).
+//
+// Echoes and variables are written as the mock's variables
+// (models.MockVariables), which every replay after F follows (the HTTP
+// parser's variable pass).
 //
 // Nothing is decided by a value's shape. F replays the build that made the
 // recording, so whatever F sees change is non-determinism, never a
@@ -83,8 +88,7 @@ type Shape struct {
 }
 
 // Known says which leaves a comparison excuses: noise keploy.yml declares,
-// noise learned onto the mock earlier, and the mock's correlations (whose
-// values are captured, not compared).
+// and noise learned onto the mock earlier.
 type Known interface {
 	// Excused reports whether the leaf is not compared by value, and whether
 	// its type is still enforced (typed). leaf is the recorded leaf, or the
@@ -269,19 +273,25 @@ type Result struct {
 //     the same types.
 //  5. The candidate whose drift set is the unique minimum is paired: the set
 //     of fewest drifted leaves, which no other candidate's set of that size
-//     differs from. Candidates that share it (a call recorded several times,
-//     each time with another value in the same place) are told apart by
-//     nothing the request carries, and the first, in recorded order, is
-//     taken: a test's mocks are consumed in recorded order. Otherwise the
-//     request is a miss: request_changed when some candidate had its key,
-//     unmocked_call when none did. When the closest candidate is one the
-//     order rule refused, it is unstable_order, and nothing is learned from
-//     that array.
+//     differs from. Every candidate with the key and no difference in more
+//     than values competes, pairable or not: a closer recording L may not
+//     learn onto (another test's, or the pool's in a partial record) is
+//     still the closest, and the request is then a miss, never paired with
+//     a farther one. Candidates that share the minimum set (a call recorded
+//     several times, each time with another value in the same place) are
+//     told apart by nothing the request carries, and the first pairable
+//     one, in recorded order, is taken: a test's mocks are consumed in
+//     recorded order. Otherwise the request is a miss: request_changed when
+//     some candidate had its key, unmocked_call when none did. When the
+//     closest candidate is one the order rule refused and nothing else
+//     drifted, it is unstable_order, and nothing is learned from that
+//     array.
 func Pair(live Shape, cands []Candidate) Result {
 	type scored struct {
-		i     int
-		d     Diff
-		drift []string // outside the reordered arrays
+		i        int
+		d        Diff
+		drift    []string // outside the reordered arrays
+		pairable bool
 	}
 	var pairable []scored
 	keyed, closest := false, Result{Outcome: Miss, Index: -1}
@@ -294,16 +304,13 @@ func Pair(live Shape, cands []Candidate) Result {
 		if d.Structural == "" && d.count() == 0 && len(d.Reordered) == 0 {
 			return Result{Outcome: Exact, Index: i, Diff: d}
 		}
-		if !c.Pairable {
-			continue
-		}
 		if d.Structural != "" {
-			if closest.Index < 0 {
+			if c.Pairable && closest.Index < 0 {
 				closest.Index, closest.Diff = i, d
 			}
 			continue
 		}
-		pairable = append(pairable, scored{i: i, d: d, drift: d.outside()})
+		pairable = append(pairable, scored{i: i, d: d, drift: d.outside(), pairable: c.Pairable})
 	}
 	if !keyed {
 		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}
@@ -332,9 +339,26 @@ func Pair(live Shape, cands []Candidate) Result {
 				Why: fmt.Sprintf("%d recorded calls differ from it as much, in different places, so none can be told apart as its recording", len(tied)+1)}
 		}
 	}
+	// Among recordings that drift alike, the first one L may learn onto.
+	if !best.pairable {
+		for _, t := range tied {
+			if t.pairable {
+				best = t
+				break
+			}
+		}
+	}
 	if len(best.d.Reordered) > 0 {
+		if len(best.drift) > 0 {
+			return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissRequestChanged,
+				Why: strings.Join(best.d.Reordered, ", ") + " has the recorded elements in another order, and " + strings.Join(best.drift, ", ") + " changed too"}
+		}
 		return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissUnstableOrder,
 			Why: strings.Join(best.d.Reordered, ", ") + " has the recorded elements in another order"}
+	}
+	if !best.pairable {
+		return Result{Outcome: Miss, Index: best.i, Diff: best.d, Reason: models.MissRequestChanged,
+			Why: "its closest recorded call is not one the learn step may learn onto (another test's, or the pool's outside a full record): " + strings.Join(best.drift, ", ") + " changed"}
 	}
 	return Result{Outcome: Paired, Index: best.i, Diff: best.d}
 }

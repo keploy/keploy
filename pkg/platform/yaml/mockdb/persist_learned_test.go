@@ -3,7 +3,6 @@ package mockdb
 import (
 	"context"
 	"reflect"
-	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -11,10 +10,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// What the learn step learned (noise in every part of a request, and
-// correlations) is written onto the recording, said per mock, read back, and
-// never added twice; in every storage format.
-func TestPersistLearnedWritesNoiseAndCorrelations(t *testing.T) {
+// What the learn step learned is written onto the recording, said per mock,
+// read back, and never added twice, in every storage format: noise in every
+// part of a request, a variable's use, and its bind at the earlier call
+// (carried by the later call's state), which turns that call's echo into the
+// variable's bind and drops the noise learned at the place before it was
+// known to flow on.
+func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 		t.Run(string(f), func(t *testing.T) {
 			dir := t.TempDir()
@@ -30,19 +32,26 @@ func TestPersistLearnedWritesNoiseAndCorrelations(t *testing.T) {
 			if err := ys.Close(); err != nil {
 				t.Fatal(err)
 			}
-			corr := models.FieldCorrelation{RequestPath: "body.key", ResponsePaths: []string{"body.idempotency_key"}, RecordedValue: "k-1"}
 			states := map[string]models.MockState{
-				"mock-0": {Name: "mock-0", ReqBodyNoise: map[string][]string{"header.x-trace": {}, "url.path.1": {}}, Correlations: []models.FieldCorrelation{corr}},
-				"mock-1": {Name: "mock-1"},
+				"mock-0": {Name: "mock-0",
+					ReqBodyNoise: map[string][]string{"header.x-trace": {}, "url.path.1": {}, "body.key": {}},
+					Variables:    models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true}}},
+				"mock-1": {Name: "mock-1",
+					Variables: models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}},
+					Binds:     map[string]models.MockVariables{"mock-0": {"key": {Recorded: "k-1", Bind: "body.key"}}}},
 			}
 			added, err := ys.PersistLearned(ctx, set, states)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := map[string][]string{"mock-0": {"body.key (correlation)", "header.x-trace (noise)", "url.path.1 (noise)"}}
+			want := map[string][]string{
+				"mock-0": {"body.key (variable key: bind)", "header.x-trace (noise)", "url.path.1 (noise)"},
+				"mock-1": {"url.query.key (variable key: use)"},
+			}
 			if !reflect.DeepEqual(added, want) {
 				t.Fatalf("added %v, want %v", added, want)
 			}
+			byName := map[string]*models.Mock{}
 			mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -51,20 +60,21 @@ func TestPersistLearnedWritesNoiseAndCorrelations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var m0 *models.Mock
 			for _, m := range append(mocks, filtered...) {
-				if m.Name == "mock-0" {
-					m0 = m
-				}
+				byName[m.Name] = m
 			}
-			if m0 == nil {
-				t.Fatal("mock-0 is gone")
+			m0, m1 := byName["mock-0"], byName["mock-1"]
+			if m0 == nil || m1 == nil {
+				t.Fatalf("mocks read back %v", byName)
 			}
-			if !reflect.DeepEqual(m0.Spec.Correlations, []models.FieldCorrelation{corr}) {
-				t.Fatalf("correlations read back %+v", m0.Spec.Correlations)
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}}}); !reflect.DeepEqual(m0.Spec.Variables, want) {
+				t.Fatalf("mock-0's variables read back %+v: another call uses the value, so it is no echo", m0.Spec.Variables)
 			}
 			if !reflect.DeepEqual(m0.Spec.ReqBodyNoise, map[string][]string{"header.x-trace": {}, "url.path.1": {}}) {
-				t.Fatalf("noise read back %v", m0.Spec.ReqBodyNoise)
+				t.Fatalf("mock-0's noise read back %v: a variable's place is never noise", m0.Spec.ReqBodyNoise)
+			}
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(m1.Spec.Variables, want) {
+				t.Fatalf("mock-1's variables read back %+v", m1.Spec.Variables)
 			}
 			again, err := ys.PersistLearned(ctx, set, states)
 			if err != nil || len(again) != 0 {
@@ -74,17 +84,18 @@ func TestPersistLearnedWritesNoiseAndCorrelations(t *testing.T) {
 	}
 }
 
-// A mock that carries no correlation is written as before: no key.
-func TestEncodeMockWithoutCorrelationsWritesNoKey(t *testing.T) {
-	doc, err := EncodeMock(noiseTestMock(`{"a":1}`), zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
+// Two declarations of one variable in one call are one: a bind from either,
+// every use and answer, and an echo only when both say so.
+func TestMergeVariable(t *testing.T) {
+	got := mergeVariable(
+		models.MockVariable{Recorded: "v", Bind: "body.id", Answer: []string{"body.id"}, Echo: true},
+		models.MockVariable{Recorded: "v", Use: []string{"url.path[1]"}, Answer: []string{"header.x-id", "body.id"}},
+	)
+	want := models.MockVariable{Recorded: "v", Bind: "body.id", Use: []string{"url.path[1]"}, Answer: []string{"body.id", "header.x-id"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged %+v, want %+v", got, want)
 	}
-	b, err := yaml.MarshalDoc(yaml.FormatYAML, doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "correlations") {
-		t.Fatalf("a mock without correlations writes the key:\n%s", b)
+	if got := mergeVariable(models.MockVariable{}, models.MockVariable{Recorded: "v", Bind: "body.id", Echo: true}); !got.Echo {
+		t.Fatal("an echo merged into nothing stays an echo")
 	}
 }

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -36,8 +37,9 @@ func TestServedCountsCountEveryAnswer(t *testing.T) {
 }
 
 // The served observer (the learn step's earlier places of any kind) is told
-// of a mock a parser was served, and only of one: a call that served nothing
-// tells it nothing, and an observer taken away is told nothing more.
+// of a mock before a parser's claim takes it out of the pool, a claim that
+// fails included (another connection served it), never of a call that names
+// no mock, and an observer taken away is told nothing more.
 func TestServedObserverIsToldOfEveryServedMock(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	defer mm.Close()
@@ -50,16 +52,19 @@ func TestServedObserverIsToldOfEveryServedMock(t *testing.T) {
 	if mm.MarkMockAsUsed(models.Mock{}) {
 		t.Fatal("a mock with no name was marked as used")
 	}
-	if mm.DeleteFilteredMock(models.Mock{Name: "absent", Kind: models.HTTP}) {
+	if mm.DeleteFilteredMock(models.Mock{Name: "taken", Kind: models.HTTP}) {
 		t.Fatal("a mock the manager does not hold was consumed")
 	}
-	if len(told) != 1 || told[0] != "pg-1" {
-		t.Fatalf("observer told %v, want [pg-1]", told)
+	mm.DeleteUnFilteredMock(models.Mock{Name: "session-1", Kind: models.HTTP})
+	mm.DeleteStartupMock(models.Mock{Name: "startup-1", Kind: models.HTTP})
+	mm.UpdateUnFilteredMock(&models.Mock{Name: "reused-1"}, &models.Mock{Name: "reused-1", Kind: models.HTTP})
+	if want := []string{"pg-1", "taken", "session-1", "startup-1", "reused-1"}; !reflect.DeepEqual(told, want) {
+		t.Fatalf("observer told %v, want %v", told, want)
 	}
 
 	mm.SetServedObserver(nil)
 	mm.MarkMockAsUsed(models.Mock{Name: "redis-1", Kind: models.REDIS})
-	if len(told) != 1 {
-		t.Fatalf("an observer taken away was told %v", told[1:])
+	if len(told) != 5 {
+		t.Fatalf("an observer taken away was told %v", told[5:])
 	}
 }

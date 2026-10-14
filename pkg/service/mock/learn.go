@@ -33,7 +33,7 @@ type learnedPersister interface {
 // persistLearned writes what the learn step learned onto the set's mocks, so
 // the recording the record commits carries it, says per test what was
 // learned (design §7.2 step 10), and returns it by test, each field as
-// "<mock> <path> (<kind>)". With config.Test.LearnTests set it writes only
+// "<mock> <what mockdb's PersistLearned added>". With config.Test.LearnTests set it writes only
 // onto the mocks of those tests (and onto the pool's with LearnPool): a test
 // the record did not record again keeps its recording as it is. expected is
 // each test's own mocks, by its mapping.
@@ -52,6 +52,14 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 	for _, st := range consumed {
 		if !m.learnsOnto(owner[st.Name]) {
 			continue
+		}
+		// A variable is bound at an earlier call of the same test, which the
+		// record made too; one bound at a recording it did not make cannot
+		// be written whole.
+		for target := range st.Binds {
+			if !m.learnsOnto(owner[target]) {
+				return nil, fmt.Errorf("the learn step learned a variable of %s bound at %s, a recording this record did not make", st.Name, target)
+			}
 		}
 		states[st.Name] = st
 	}

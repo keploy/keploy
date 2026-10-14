@@ -195,6 +195,29 @@ func TestPair(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
+	t.Run("a closer candidate that is not pairable is a miss, not a farther pairing", func(t *testing.T) {
+		live := body(t, "k", `{"user":"alice","ts":9}`)
+		r := Pair(live, []Candidate{
+			cand(body(t, "k", `{"user":"bob","ts":2}`), true),    // the test's own: user and ts drift
+			cand(body(t, "k", `{"user":"alice","ts":1}`), false), // the pool's, in a partial record: only ts
+		})
+		if r.Outcome != Miss || r.Reason != models.MissRequestChanged || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("recordings that drift alike pair the first pairable one", func(t *testing.T) {
+		live := body(t, "k", `{"id":"z","x":1}`)
+		r := Pair(live, []Candidate{cand(body(t, "k", `{"id":"a","x":1}`), false), cand(body(t, "k", `{"id":"b","x":1}`), true)})
+		if r.Outcome != Paired || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a reorder with other drift is request_changed, not unstable_order", func(t *testing.T) {
+		r := Pair(body(t, "k", `{"l":[2,1],"amount":6}`), []Candidate{cand(body(t, "k", `{"l":[1,2],"amount":5}`), true)})
+		if r.Outcome != Miss || r.Reason != models.MissRequestChanged || !strings.Contains(r.Why, "body.amount changed too") {
+			t.Fatalf("%+v", r)
+		}
+	})
 	t.Run("the order rule is applied before pairing: the reordered candidate is the closest", func(t *testing.T) {
 		live := body(t, "k", `{"l":[2,1],"a":"x","b":"y"}`)
 		r := Pair(live, []Candidate{
@@ -219,14 +242,17 @@ func TestClassify(t *testing.T) {
 		respLeaves = append(respLeaves, l)
 	}
 	earlier := []Earlier{
-		{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
+		{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 			// A string here, a number at the drifted leaf: the value flowed
 			// whatever its type.
-			{Side: Response, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "12345"}, Live: "12345"},
+			{Side: Request, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: "12345"}, Live: "54321", Place: "body.ref"},
+			// F saw this place hold its recorded value: nothing that drifted
+			// came from it.
+			{Side: Response, Leaf: Leaf{Path: "body.count", Noise: "body.count", Type: Number, Value: "5"}, Live: "5"},
 			// F saw another value here than the request sends: the
 			// recorded value still came from here, and is asserted.
-			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "o-1"}, Live: "o-7"},
-			{Side: Response, Leaf: Leaf{Path: "body.token", Noise: "body.token", Type: String, Value: "tok-A"}, Live: "tok-A"},
+			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "o-1"}, Live: "o-7", Place: "body.id"},
+			{Side: Request, Leaf: Leaf{Path: "body.token", Noise: "body.token", Type: String, Value: "tok-A"}, Live: "tok-B", Place: "body.token"},
 		}},
 	}
 	raw := []Raw{
@@ -244,20 +270,26 @@ func TestClassify(t *testing.T) {
 		from[l.Recorded.Path] = l.From
 	}
 	want := map[string]Kind{
-		"body.order":   KindVariable,    // recorded earlier, whatever F saw there
-		"body.n":       KindVariable,    // a number that appeared earlier as a string
-		"body.tok":     KindVariable,    // tok-A appeared earlier, and is a token here
-		"body.db":      KindVariable,    // in an earlier mock of another kind
-		"body.nonce":   KindCorrelation, // the answer echoes it, whole and as a token
-		"body.tags[0]": KindCorrelation, // echoed by the answer's items[0].tag
-		"body.ts":      KindNoise,       // only a mock recorded after it holds it
-		"body.empty":   KindNoise,       // an empty recorded value carries nothing to follow
+		"body.order":   KindVariable, // recorded earlier, whatever F saw there
+		"body.n":       KindVariable, // a number that appeared earlier as a string
+		"body.tok":     KindVariable, // tok-A appeared earlier, and is a token here
+		"body.db":      KindVariable, // in an earlier mock of another kind
+		"body.nonce":   KindEcho,     // the answer echoes it, whole and as a token
+		"body.tags[0]": KindEcho,     // echoed by the answer's items[0].tag
+		"body.ts":      KindNoise,    // only a mock recorded after it holds it
+		"body.empty":   KindNoise,    // an empty recorded value carries nothing to follow
 	}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("kinds %v, want %v", kinds, want)
 	}
-	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id"}) {
+	// The place says what binding it needs: the variable place, the value F
+	// saw there, that the value was whole there, and that the mock is the
+	// test's own.
+	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id", Var: "body.id", Live: "o-7", Whole: true, Own: true}) {
 		t.Fatalf("body.order from %+v", from["body.order"])
+	}
+	if f := from["body.tok"]; f.Whole || f.Path != "body.token" {
+		t.Fatalf("body.tok from %+v: a word of a longer value is not whole", f)
 	}
 	if from["body.db"] != (Place{Mock: "pg-3"}) {
 		t.Fatalf("body.db from %+v: a raw mock's place has no leaf", from["body.db"])
@@ -298,46 +330,67 @@ func TestTokens(t *testing.T) {
 			t.Errorf("ContainsToken(%q, %q) = %v", tc.s, tc.v, got)
 		}
 	}
-	if got, ok := ReplaceTokens("/v1/orders/1?n=1&m=11", "1", "2"); !ok || got != "/v1/orders/2?n=2&m=11" {
-		t.Fatalf("ReplaceTokens = %q %v", got, ok)
+}
+
+func TestWholeEcho(t *testing.T) {
+	r := Leaf{Type: String, Value: "42"}
+	for _, tc := range []struct {
+		a    Leaf
+		want bool
+	}{
+		{Leaf{Type: String, Value: "42"}, true},
+		{Leaf{Type: Number, Value: "42"}, true}, // an id sent as text, answered as a number
+		{Leaf{Type: String, Value: "id-42"}, false},
+		{Leaf{Type: Null}, false},
+		{Leaf{Type: String, Value: "42", Unnamed: true}, false},
+	} {
+		if got := WholeEcho(r, tc.a); got != tc.want {
+			t.Errorf("WholeEcho(%+v) = %v", tc.a, got)
+		}
+	}
+	if WholeEcho(Leaf{Type: String}, Leaf{Type: String}) {
+		t.Error("an empty value echoes nothing")
 	}
 }
 
-func TestRenderJSON(t *testing.T) {
-	in := "{\n  \"id\": \"n-1\",\n  \"other\": \"n-1\",\n  \"loc\": \"/o/n-1\",\n  \"count\": 7,\n  \"list\": [{\"id\": \"n-1\"}],\n  \"ok\": true\n}"
-	out, ok := RenderJSON(in, map[string]bool{"body.id": true, "body.loc": true, "body.list[0].id": true}, "n-1", "n-9")
-	want := "{\n  \"id\": \"n-9\",\n  \"other\": \"n-1\",\n  \"loc\": \"/o/n-9\",\n  \"count\": 7,\n  \"list\": [{\"id\": \"n-9\"}],\n  \"ok\": true\n}"
-	if !ok || out != want {
-		t.Fatalf("got %v\n%s\nwant\n%s", ok, out, want)
+func TestVarPlaces(t *testing.T) {
+	for _, tc := range []struct {
+		leaf  Leaf
+		json  bool
+		place string
+	}{
+		{Leaf{Path: "url.path.2"}, false, "url.path[2]"},
+		{Leaf{Path: "url.query.page"}, false, "url.query.page"},
+		{Leaf{Path: "header.x-request-id"}, false, "header.x-request-id"},
+		{Leaf{Path: "body.items[0].id"}, true, "body.items[0].id"},
+		{Leaf{Path: `body.a"b`}, true, `body["a\"b"]`},
+		{Leaf{Path: "body.id"}, false, ""},                // a form or multipart field
+		{Leaf{Path: "body"}, true, ""},                    // a whole body
+		{Leaf{Path: "body.a.b", Unnamed: true}, true, ""}, // no path names it alone
+	} {
+		got, ok := VarPlace(tc.leaf, tc.json)
+		if got != tc.place || ok != (tc.place != "") {
+			t.Errorf("VarPlace(%+v, %v) = %q %v, want %q", tc.leaf, tc.json, got, ok, tc.place)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		back, ok := LeafPath(got)
+		if !ok || back != tc.leaf.Path {
+			t.Errorf("LeafPath(%q) = %q %v, want %q", got, back, ok, tc.leaf.Path)
+		}
 	}
-	// A number is rewritten as a number, only where it is the whole value.
-	out, ok = RenderJSON(`{"count":7,"other":7}`, map[string]bool{"body.count": true}, "7", "8")
-	if !ok || out != `{"count":8,"other":7}` {
-		t.Fatalf("number: %v %s", ok, out)
+	if p, ok := LeafPath("header.X-Request-Id"); !ok || p != "header.x-request-id" {
+		t.Errorf("a header place names the lowercased leaf: %q %v", p, ok)
 	}
-	// A string live value never turns a number leaf into a string.
-	if out, ok := RenderJSON(`{"count":7}`, map[string]bool{"body.count": true}, "7", "x"); ok || out != `{"count":7}` {
-		t.Fatalf("type kept: %v %s", ok, out)
-	}
-	// A root scalar, and a body that is not JSON.
-	if out, ok := RenderJSON(`"n-1"`, map[string]bool{"body": true}, "n-1", "n-2"); !ok || out != `"n-2"` {
-		t.Fatalf("root: %v %s", ok, out)
-	}
-	if out, ok := RenderJSON(`not json`, map[string]bool{"body": true}, "json", "x"); ok || out != `not json` {
-		t.Fatalf("not json: %v %s", ok, out)
-	}
-	// Only the element the path names.
-	if out, ok := RenderJSON(`{"l":[{"id":"n-1"},{"id":"n-1"}]}`, map[string]bool{"body.l[1].id": true}, "n-1", "n-2"); !ok || out != `{"l":[{"id":"n-1"},{"id":"n-2"}]}` {
-		t.Fatalf("one element: %v %s", ok, out)
-	}
-	// HTML characters are not escaped into the answer.
-	if out, ok := RenderJSON(`{"u":"<a>n-1</a>"}`, map[string]bool{"body.u": true}, "n-1", "n-2"); !ok || out != `{"u":"<a>n-2</a>"}` {
-		t.Fatalf("escape: %v %s", ok, out)
+	if _, ok := LeafPath("nowhere"); ok {
+		t.Error("a place that does not parse names no leaf")
 	}
 }
 
 func TestTracker(t *testing.T) {
-	tr := NewTracker(nil)
+	tr := NewTracker()
 	if tr.Open() {
 		t.Fatal("no test is open before the first begins")
 	}
@@ -363,14 +416,37 @@ func TestTracker(t *testing.T) {
 	if _, e, m := tr.Test(); len(e) != 0 || len(m) != 0 {
 		t.Fatalf("a new test starts with nothing earlier, and a previous test's request does not leak into it: %v %v", e, m)
 	}
-	if tr.Variables().Follow("m", Leaf{}, Place{}) {
-		t.Fatal("without a variable runtime nothing is followed")
+	// Variables are named per test, by where each is bound.
+	n, _, _ = tr.Test()
+	id, ok := tr.Name(n, "mock-1", "body.id")
+	if !ok || id != "id" {
+		t.Fatalf("Name = %q %v", id, ok)
+	}
+	if again, _ := tr.Name(n, "mock-1", "body.id"); again != id {
+		t.Fatal("a variable has one name in its test")
+	}
+	if other, _ := tr.Name(n, "mock-2", "body.order.id"); other != "id-2" {
+		t.Fatalf("another variable gets another name: %q", other)
+	}
+	if seg, _ := tr.Name(n, "mock-2", "url.path[1]"); seg != "path1" {
+		t.Fatalf("a URL segment's variable: %q", seg)
+	}
+	if _, ok := tr.Name(n-1, "mock-3", "body.id"); ok {
+		t.Fatal("a test that ended names nothing")
+	}
+	tr.Begin()
+	n, _, _ = tr.Test()
+	if fresh, _ := tr.Name(n, "mock-2", "body.order.id"); fresh != "id" {
+		t.Fatalf("names are per test: %q", fresh)
 	}
 	var nilTracker *Tracker
 	nilTracker.Begin()
 	nilTracker.End()
 	nilTracker.Served(0, Earlier{})
 	nilTracker.ServedMock(&models.Mock{})
+	if name, ok := nilTracker.Name(0, "m", "header.x-request-id"); !ok || name != "x-request-id" {
+		t.Fatalf("a nil tracker names a variable by its place: %q %v", name, ok)
+	}
 	if n, e, m := nilTracker.Test(); n != 0 || e != nil || m != nil || !nilTracker.Open() {
 		t.Fatal("a nil tracker is inert, and knows of no test boundary")
 	}

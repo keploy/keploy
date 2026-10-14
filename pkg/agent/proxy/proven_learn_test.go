@@ -74,7 +74,7 @@ func post(body string) string {
 func TestALearnStepMissCarriesItsReason(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
-	p.learnTracker = learn.NewTracker(nil)
+	p.learnTracker = learn.NewTracker()
 	p.ContinueTestErrorCapture()
 	resp, _, _ := learnCall(t, p, batchMock(), post(`{"rid":"r-1","ids":[3,1,2]}`))
 	if resp.StatusCode != http.StatusBadGateway {
@@ -98,7 +98,7 @@ func TestALearnStepMissCarriesItsReason(t *testing.T) {
 func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
-	p.learnTracker = learn.NewTracker(nil)
+	p.learnTracker = learn.NewTracker()
 	p.ContinueTestErrorCapture()
 	resp, body, mm := learnCall(t, p, batchMock(), post(`{"rid":"r-2","ids":[1,2,3]}`))
 	if resp.StatusCode != http.StatusOK || body != `{"ok":true,"rid":"r-2"}` {
@@ -111,8 +111,74 @@ func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
 	if len(consumed) != 1 {
 		t.Fatalf("consumed %+v", consumed)
 	}
-	want := []models.FieldCorrelation{{RequestPath: "body.rid", ResponsePaths: []string{"body.rid"}, RecordedValue: "r-1"}}
-	if !reflect.DeepEqual(consumed[0].Correlations, want) {
-		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Correlations)
+	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true}}
+	if !reflect.DeepEqual(consumed[0].Variables, want) {
+		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Variables)
+	}
+}
+
+// A value one call of the test sent and a later call uses is followed as a
+// variable: the later call is answered with it, and its consumed state says
+// where it is used and where it is bound (Binds), which the replay writes onto
+// both recordings.
+func TestALearnStepFollowsAVariableAcrossCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	p.ContinueTestErrorCapture()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	now := time.Now()
+	call := func(name string, at time.Duration, method, target, body, resp string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": models.HTTPClient},
+			HTTPReq:          &models.HTTPReq{Method: models.Method(method), URL: "http://deps.example" + target, Header: map[string]string{"Host": "deps.example", "Content-Type": "application/json"}, Body: body},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Content-Length": strconv.Itoa(len(resp))}, Body: resp},
+			ReqTimestampMock: now.Add(at),
+		}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest}}
+	}
+	mm.SetMocksWithWindow([]*models.Mock{
+		call("mock-a", 0, "POST", "/orders", `{"order":"o-1"}`, `{}`),
+		call("mock-b", time.Second, "GET", "/orders/o-1", "", `{"id":"o-1"}`),
+	}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+	send := func(request string) (int, string) {
+		app, agentEnd := net.Pipe()
+		ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+		ctx = learn.WithTracker(ctx, p.learnTracker)
+		defer app.Close()
+		go func() {
+			_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{Learn: true})
+			_ = agentEnd.Close()
+		}()
+		if _, err := app.Write([]byte(request)); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, string(b)
+	}
+	body := `{"order":"o-9"}`
+	if code, _ := send("POST /orders HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body); code != http.StatusOK {
+		t.Fatalf("the create got %d", code)
+	}
+	if code, got := send("GET /orders/o-9 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"); code != http.StatusOK || got != `{"id":"o-9"}` {
+		t.Fatalf("the read got %d %s", code, got)
+	}
+	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {
+		t.Fatalf("misses %+v", misses)
+	}
+	states := map[string]models.MockState{}
+	for _, st := range mm.GetConsumedMocks() {
+		states[st.Name] = st
+	}
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
+		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
+	}
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
 	}
 }

@@ -400,6 +400,12 @@ type MockSpec struct {
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
 
+	// Binds are, on a mock the learn step of record's full round just paired
+	// (agent side, in memory), the variables it learned that are bound at an
+	// earlier mock of the same test, by that mock's name; they ride out on
+	// the consumed mock's state (MockState.Binds). Never written or read.
+	Binds map[string]MockVariables `json:"-" yaml:"-" bson:"-"`
+
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
 	// block — kept OUT of the flat parser Metadata above. Serialized as a
@@ -1009,11 +1015,15 @@ type MockState struct {
 	// window's test, and kept from the prune whatever the running test's
 	// verdict — instead of to the test that happened to be running.
 	CarryOver bool `json:"carryOver,omitempty"`
-	// Correlations carries the correlations the learn step learned on the
-	// mock (MockSpec.Correlations) back from the agent, as ReqBodyNoise
-	// carries its learned noise, so the replay can write them onto the
-	// recording.
-	Correlations []FieldCorrelation `json:"correlations,omitempty"`
+	// Variables carries the mock's variables (MockSpec.Variables) back from
+	// the agent under the proven switch, as ReqBodyNoise carries its learned
+	// noise: those the learn step of record's full round learned on it are
+	// written onto the recording.
+	Variables MockVariables `json:"variables,omitempty"`
+	// Binds are the variables the learn step learned, while answering this
+	// mock, that are bound at an earlier mock of the same test (MockSpec.Binds),
+	// by that mock's name: the replay writes them onto that mock.
+	Binds map[string]MockVariables `json:"binds,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

@@ -19,12 +19,14 @@ const (
 )
 
 // Seen is one value of an exchange F served earlier in the test: the leaf
-// the recording holds there, and the value F saw there (the live request's,
-// or the answer keploy served, with its correlations rendered).
+// the recording holds there, the value F saw there (the live request's, or
+// the answer keploy served, with its variables' values), and the leaf's
+// variable place ("" when no variable place names it: VarPlace).
 type Seen struct {
-	Side Side
-	Leaf Leaf
-	Live string
+	Side  Side
+	Leaf  Leaf
+	Live  string
+	Place string
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -32,7 +34,10 @@ type Seen struct {
 type Earlier struct {
 	Mock string
 	// At is when the mock's request was recorded.
-	At   time.Time
+	At time.Time
+	// Own: the mock is one of the test's own, not the pool's. Only a test's
+	// own mocks carry its variables.
+	Own  bool
 	Seen []Seen
 }
 
@@ -50,13 +55,14 @@ type Raw struct {
 // Kind is what a drifted leaf is learned as.
 type Kind string
 
-// The three kinds (design §7.2 step 6). They never collapse into each other:
-// noise is not compared, a correlation is captured and rendered into the
-// answer, a variable is asserted equal to the value at its earlier place.
+// The three kinds (design §7.2 step 6; an echo is the design's
+// correlation). They never collapse into each other: noise is not compared,
+// an echo is bound at the request and answered, a variable is asserted equal
+// to the value at its earlier place.
 const (
-	KindNoise       Kind = "noise"
-	KindCorrelation Kind = "correlation"
-	KindVariable    Kind = "variable"
+	KindNoise    Kind = "noise"
+	KindEcho     Kind = "echo"
+	KindVariable Kind = "variable"
 )
 
 // Place is where a value is: a mock, and, when a leaf names it, a side and
@@ -66,6 +72,15 @@ type Place struct {
 	Side  Side
 	Path  string
 	Noise string
+	// Var is the leaf's variable place, "" when it has none (Seen.Place).
+	Var string
+	// Live is the value F saw at the leaf.
+	Live string
+	// Whole: the leaf held the value whole (not as a word of a longer
+	// value), so the value can be bound there.
+	Whole bool
+	// Own: the mock is one of the test's own (Earlier.Own).
+	Own bool
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -75,7 +90,7 @@ type Learned struct {
 	Live     Leaf
 	// From is a variable's earlier place, where it is bound.
 	From Place
-	// Echo are a correlation's places in the paired mock's recorded answer.
+	// Echo are an echo's places in the paired mock's recorded answer.
 	Echo []Leaf
 }
 
@@ -91,8 +106,8 @@ type Learned struct {
 //     that earlier place, wherever F saw what: a value that came from
 //     somewhere is never stopped being compared. The earliest place a leaf
 //     names binds it; failing that, the first raw mock holding it.
-//   - Correlation: the recorded answer echoes the recorded value (a leaf
-//     equal to it, or a string holding it as a token).
+//   - Echo: the recorded answer echoes the recorded value (a scalar equal to
+//     it, or a string holding it as a token).
 //   - Noise otherwise: not compared, its type still enforced.
 //
 // An empty recorded value is never followed: it carries nothing to follow.
@@ -107,7 +122,7 @@ func Classify(drift []string, live, rec Shape, at time.Time, earlier []Earlier, 
 			if from, ok := appeared(searched(r.Value, l.Value), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
 			} else if echo := echoes(r, resp); len(echo) > 0 {
-				ln.Kind, ln.Echo = KindCorrelation, echo
+				ln.Kind, ln.Echo = KindEcho, echo
 			}
 		}
 		out = append(out, ln)
@@ -141,13 +156,22 @@ func words(s string) []string {
 
 // appeared is the earlier place of the test's recording that holds one of
 // values: a leaf of an HTTP mock F served before (every one of them came
-// earlier in the test), else a raw mock served before or recorded before at.
+// earlier in the test) that F saw drift, else a raw mock served before or
+// recorded before at (of which F saw no live value).
 func appeared(values []string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	for _, e := range served {
 		for _, s := range e.Seen {
-			for _, v := range values {
+			// A place F saw hold its recorded value did not drift: the
+			// value there is the same every run, and a value that drifted
+			// here did not come from it (a "00" of a timestamp is not the
+			// "00" of an earlier Date header).
+			if s.Live == s.Leaf.Value {
+				continue
+			}
+			for i, v := range values {
 				if s.Leaf.Value == v || s.Leaf.Type == String && ContainsToken(s.Leaf.Value, v) {
-					return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise}, true
+					return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+						Var: s.Place, Live: s.Live, Whole: i == 0 && s.Leaf.Value == v, Own: e.Own}, true
 				}
 			}
 		}
@@ -165,14 +189,14 @@ func appeared(values []string, at time.Time, served []Earlier, raw []Raw) (Place
 	return Place{}, false
 }
 
-// echoes are the answer leaves that hold r's recorded value: equal to it,
-// or a string holding it as a token.
+// echoes are the answer leaves that hold r's recorded value: a scalar equal
+// to it (WholeEcho), or a string holding it as a token.
 func echoes(r Leaf, resp []Leaf) []Leaf {
 	var out []Leaf
 	for _, a := range resp {
 		switch {
 		case a.Unnamed:
-		case a.Type == r.Type && a.Value == r.Value:
+		case WholeEcho(r, a):
 			out = append(out, a)
 		case a.Type == String && ContainsToken(a.Value, r.Value):
 			out = append(out, a)
@@ -181,12 +205,26 @@ func echoes(r Leaf, resp []Leaf) []Leaf {
 	return out
 }
 
+// WholeEcho reports whether answer leaf a holds r's recorded value as its
+// whole value, a string, a number or a boolean (an id sent as text may come
+// back as a number): a place the value can be answered at.
+func WholeEcho(r, a Leaf) bool {
+	if a.Unnamed || r.Value == "" || a.Value != r.Value {
+		return false
+	}
+	switch a.Type {
+	case String, Number, Bool:
+		return true
+	}
+	return false
+}
+
 // payloadKeys are the fields of a mock's spec that say where and when it was
 // recorded, not what it carried: a value found in them did not flow from the
 // mock.
 var payloadKeys = map[string]bool{
 	"metadata": true, "created": true, "reqtimestampmock": true, "restimestampmock": true,
-	"reqbodynoise": true, "correlations": true, "timestamp": true, "async": true,
+	"reqbodynoise": true, "correlations": true, "variables": true, "timestamp": true, "async": true,
 }
 
 // RawOf is a mock as Classify reads it when no leaf names its values: its

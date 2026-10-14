@@ -1005,7 +1005,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	warnIfRemovedRelayKnobSet(logger)
 	proxy := &Proxy{
 		logger:                    logger,
-		learnTracker:              learn.NewTracker(nil),
+		learnTracker:              learn.NewTracker(),
 		Port:                      opts.ProxyPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789

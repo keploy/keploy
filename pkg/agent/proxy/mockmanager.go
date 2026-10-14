@@ -54,9 +54,9 @@ import (
 
 type MockManager struct {
 	// servedObserver, when set, is told of every mock a parser is served
-	// (consumed or reused), after the manager's own locks are released:
-	// under the proven switch, the learn step's earlier places of the test's
-	// recording (learn.Tracker.ServedMock).
+	// (consumed or reused), before the claim takes it out of the pool and
+	// outside the manager's own locks: under the proven switch, the learn
+	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
 	servedObserver atomic.Pointer[func(*models.Mock)]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
@@ -2350,12 +2350,8 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 	}
 }
 
-func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) (served bool) {
-	defer func() {
-		if served {
-			m.observeServed(new)
-		}
-	}()
+func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	m.observeServed(new)
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
@@ -2471,12 +2467,8 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) (
 	return updatedGlobal
 }
 
-func (m *MockManager) DeleteFilteredMock(mock models.Mock) (served bool) {
-	defer func() {
-		if served {
-			m.observeServed(&mock)
-		}
-	}()
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	m.observeServed(&mock)
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
@@ -2539,7 +2531,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) (served bool) {
 	// Returning true here keeps the caller contract ("consumed, stop looping")
 	// exactly as it was, while the mock that actually gets consumed is now the
 	// one the caller matched instead of whatever shared its key.
-	if m.DeleteStartupMock(mock) {
+	if m.deleteStartupMock(mock) {
 		return true
 	}
 	// Last, the carry-over tier (RegisterCarryOver kinds only): a mock
@@ -2574,12 +2566,8 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) (served bool) {
 	return false
 }
 
-func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) (served bool) {
-	defer func() {
-		if served {
-			m.observeServed(&mock)
-		}
-	}()
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	m.observeServed(&mock)
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
@@ -2661,12 +2649,14 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) (served bool) {
 // was never in the startup tree (e.g. it was a filtered/session/
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
-func (m *MockManager) DeleteStartupMock(mock models.Mock) (served bool) {
-	defer func() {
-		if served {
-			m.observeServed(&mock)
-		}
-	}()
+func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
+	m.observeServed(&mock)
+	return m.deleteStartupMock(mock)
+}
+
+// deleteStartupMock is DeleteStartupMock without telling the served
+// observer: for a caller that told it already.
+func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
 		return false
 	}
@@ -2889,12 +2879,8 @@ func (m *MockManager) signalWindowChange() {
 // reuse telemetry surfaced by SessionMockHitCounts; for per-test mocks it
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
-func (m *MockManager) MarkMockAsUsed(mock models.Mock) (served bool) {
-	defer func() {
-		if served {
-			m.observeServed(&mock)
-		}
-	}()
+func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+	m.observeServed(&mock)
 	if mock.Name == "" {
 		return false
 	}
@@ -3096,8 +3082,16 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// observeServed tells the served observer of mock before a parser's claim
+// takes it out of the pool, so a request reading the pool and then the
+// observer's record never finds it in neither (the learn step's earlier
+// places). A claim that then fails was another connection's serve of the
+// same mock: the observer is told of a mock that was served either way.
 func (m *MockManager) observeServed(mock *models.Mock) {
-	if f := m.servedObserver.Load(); f != nil && mock != nil {
+	if mock == nil || mock.Name == "" {
+		return
+	}
+	if f := m.servedObserver.Load(); f != nil {
 		(*f)(mock)
 	}
 }

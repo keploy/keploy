@@ -30,7 +30,7 @@ type learnedPersister interface {
 }
 
 // persistLearned writes what the learn step learned in a test set's replay
-// (the consumed mocks' learned noise and correlations) onto the set's
+// (the consumed mocks' learned noise and variables) onto the set's
 // recording, and says per test what it learned: "Record prints every field
 // it learned, per test" (design §7.2 step 10). A mock no test consumed is
 // named on its own.

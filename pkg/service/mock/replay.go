@@ -392,13 +392,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
-	m.propagateExit(appErr, "replay")
+	// The learn step's findings not kept means keploy did not complete the
+	// round, whatever the test command did: that is the exit, and the
+	// receipt's.
 	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
-		// The learn step's findings were not kept: keploy did not complete
-		// the round, whatever the test command did.
 		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
 	}
+	m.propagateExit(appErr, "replay")
 	// WHOSE failure this is, from what the runner reported -- not from the
 	// global exit code. keploy's own internal failure (a panic in the app
 	// runner) also lands in utils.ErrCode, and recording that as

@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -285,33 +286,24 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 }
 
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
-// noise, the noise learned onto m, m's correlations, and m's obfuscated
-// values (Mock.Noise).
+// noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	k := httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
-	if len(m.Spec.Correlations) > 0 {
-		k.correlated = make(map[string]bool, len(m.Spec.Correlations))
-		for _, c := range m.Spec.Correlations {
-			k.correlated[c.RequestPath] = true
-		}
-	}
-	return k
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
 }
 
 type httpKnown struct {
-	n          learnNoise
-	learned    map[string][]string
-	correlated map[string]bool
-	values     *util.NoiseChecker
+	n       learnNoise
+	learned map[string][]string
+	values  *util.NoiseChecker
 }
 
-// Excused implements learn.Known. Learned noise and correlations keep their
-// type; keploy.yml's noise and obfuscated values excuse type and presence.
+// Excused implements learn.Known. Learned noise keeps its type; keploy.yml's
+// noise and obfuscated values excuse type and presence.
 // What the learn step learned names a leaf by its exact path, an array
 // position included; noise learned before it (by the request-body learner
 // it replaces) names it in the request matcher's dialect.
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	if learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise) || k.correlated[l.Path] {
+	if learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise) {
 		return true, true
 	}
 	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
@@ -352,7 +344,7 @@ func learnedCovers(learned map[string][]string, path string) bool {
 	return false
 }
 
-// respLeaves are the leaves of a mock's recorded answer a correlation can
+// respLeaves are the leaves of a mock's recorded answer an echo can
 // echo into: its header values (but Content-Length) and its body's scalars,
 // or its whole body when that is not JSON.
 func respLeaves(r *models.HTTPResp) []learn.Leaf {
@@ -380,21 +372,6 @@ func respLeaves(r *models.HTTPResp) []learn.Leaf {
 	return out
 }
 
-// bindings are the live values a request gives the correlations of the mock
-// it matched: each one's request leaf, by its exact path.
-func bindings(live learn.Shape, corrs []models.FieldCorrelation) map[string]string {
-	if len(corrs) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(corrs))
-	for _, c := range corrs {
-		if l, ok := live.Leaves[c.RequestPath]; ok {
-			out[c.RequestPath] = l.Value
-		}
-	}
-	return out
-}
-
 // learnMiss is a request the learn step left unanswered.
 type learnMiss struct {
 	res     learn.Result
@@ -409,6 +386,7 @@ type learnMiss struct {
 type scope struct {
 	cands   []learn.Candidate
 	mocks   []*models.Mock // the candidates' mocks
+	own     []bool         // whether each candidate is one of the test's own
 	http    []*models.Mock // every HTTP mock offered
 	visible []*models.Mock // every mock offered, of any kind
 }
@@ -438,7 +416,10 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
-		if m == nil || m.Spec.HTTPReq == nil {
+		// A recording that declares variables is the variable pass's
+		// (variables.go): it is served only where its variables hold, and
+		// the learn step neither serves it nor learns onto it.
+		if m == nil || m.Spec.HTTPReq == nil || hasVariables(m) {
 			continue
 		}
 		rp := recordedParts(m)
@@ -447,23 +428,36 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own := open && i < len(httpPerTest)
+		// A test's own mock is pairable while its test is open. The pool's
+		// is pairable only in a full record (pool), and a mock is the pool's
+		// only when the store can say so: in a view that scopes the pool to
+		// a test, a visible mock that test does not own; anywhere else, the
+		// session tier. A per-test mock outside its open test (between
+		// tests every test's are visible) is never paired.
+		perTestTier := i < len(httpPerTest)
+		own, poolsOwn := open && perTestTier, !perTestTier
 		if owner != nil {
 			owned, known := owner.OwnedByTest(m)
 			own = open && known && owned
+			if known {
+				poolsOwn = !owned
+			}
 		}
 		c := learn.Candidate{
 			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
-			Pairable: !m.IsProtocolPhase() && (own || pool),
+			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn),
 		}
 		if own {
-			sc.cands, sc.mocks = append(sc.cands, c), append(sc.mocks, m)
+			sc.cands, sc.mocks, sc.own = append(sc.cands, c), append(sc.mocks, m), append(sc.own, true)
 		} else {
 			poolCands, poolMocks = append(poolCands, c), append(poolMocks, m)
 		}
 	}
 	sc.cands, sc.mocks = append(sc.cands, poolCands...), append(sc.mocks, poolMocks...)
+	for range poolCands {
+		sc.own = append(sc.own, false)
+	}
 	return sc, nil
 }
 
@@ -483,19 +477,39 @@ func exactGroup(live learn.Shape, sc scope) []*models.Mock {
 	return out
 }
 
+// earlierThan are the exchanges F served earlier in the test but those of
+// the paired mock itself (a reusable mock served before is not an earlier
+// place of its own values).
+func earlierThan(earlier []learn.Earlier, paired *models.Mock) []learn.Earlier {
+	out := make([]learn.Earlier, 0, len(earlier))
+	for _, e := range earlier {
+		if e.Mock != paired.Name {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
 // values: every mock any parser served earlier in the test, and every mock
-// the scope shows that was recorded before it. The paired mock is not one.
-func earlierRaw(paired *models.Mock, served, visible []*models.Mock) []learn.Raw {
+// the scope shows that was recorded before it. The paired mock is not one,
+// and neither is an exchange the learn step served (earlier): its leaves,
+// with what F saw at each, are read instead.
+func earlierRaw(paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) []learn.Raw {
+	leafed := make(map[string]bool, len(earlier)+1)
+	leafed[paired.Name] = true
+	for _, e := range earlier {
+		leafed[e.Mock] = true
+	}
 	var out []learn.Raw
 	for _, m := range served {
-		if m != nil && m.Name != paired.Name {
+		if m != nil && !leafed[m.Name] {
 			out = append(out, learn.RawOf(m, true))
 		}
 	}
 	for _, m := range visible {
-		if m != nil && m.Name != paired.Name && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
+		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
 			out = append(out, learn.RawOf(m, false))
 		}
 	}
@@ -526,11 +540,11 @@ func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.Mo
 // proven switch) with the learn step (design §7.2): the first mock that
 // matches it exactly, modulo what is known, is served; otherwise the unique
 // closest unconsumed mock it drifted from is served, and what drifted is
-// learned onto that mock (noise, a correlation, or a variable); otherwise it
-// is a miss with its reason. It returns the mock to serve, or the miss.
+// learned onto that mock (noise or a variable, an echo included: learnPlan);
+// otherwise it is a miss with its reason. It returns the mock to serve, or
+// the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
-	test, earlier, served := tracker.Test()
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
 	for {
@@ -541,6 +555,11 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		if err != nil {
 			return nil, nil, err
 		}
+		// What the test served so far is read after the scope: a mock a
+		// concurrent call consumed before the scope was read is gone from
+		// the scope, and the mock manager told the tracker of it before it
+		// left (MockManager.observeServed), so it is in one of the two.
+		test, earlier, served := tracker.Test()
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -550,7 +569,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			// answer in turn (cursorPick), among the recordings it matches
 			// exactly, as outside the learn step.
 			picked, commit := h.cursorPick(m, exactGroup(liveShape, sc), mockDb, !opts.DisableStatefulMocks)
-			out, claimed, err := h.claimLearned(ctx, picked, mockDb, nil, nil, bindings(liveShape, picked.Spec.Correlations))
+			out, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -561,37 +580,36 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				commit()
 			}
 			rec := sc.cands[res.Index].Shape
+			own := sc.own[res.Index]
 			if picked != m {
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
+				for i, c := range sc.mocks {
+					if c == picked {
+						own = sc.own[i]
+					}
+				}
 			}
-			tracker.Served(test, earlierOf(picked, rec, liveShape, out))
+			tracker.Served(test, earlierOf(picked, rec, liveShape, out, own))
 			return out, nil, nil
 
 		case learn.Paired:
-			m, c := sc.mocks[res.Index], sc.cands[res.Index]
+			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			earlier := earlierThan(earlier, m)
 			learned := learn.Classify(res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
-				earlierRaw(m, served, sc.visible), respLeaves(m.Spec.HTTPResp))
-			noise := map[string][]string{}
-			var corrs []models.FieldCorrelation
-			for _, l := range learned {
-				switch l.Kind {
-				case learn.KindVariable:
-					if !tracker.Variables().Follow(m.Name, l.Live, l.From) {
-						res.Outcome, res.Reason = learn.Miss, models.MissRequestChanged
-						res.Why = l.Recorded.Path + " carries a value an earlier call of the test (" + l.From.Mock + ") recorded, and keploy cannot follow it from there yet"
-						return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
-					}
-				case learn.KindCorrelation:
-					corrs = append(corrs, models.FieldCorrelation{RequestPath: l.Recorded.Path, ResponsePaths: leafPaths(l.Echo), RecordedValue: l.Recorded.Value})
-				default:
-					noise[l.Recorded.Path] = []string{}
-				}
+				earlierRaw(m, served, sc.visible, earlier), respLeaves(m.Spec.HTTPResp))
+			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier)
+			if why != "" {
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
-			all := append(append([]models.FieldCorrelation(nil), m.Spec.Correlations...), corrs...)
-			out, claimed, err := h.claimLearned(ctx, m, mockDb, noise, corrs, bindings(liveShape, all))
+			out, claimed, why, err := h.claimLearned(ctx, m, mockDb, plan)
 			if err != nil {
 				return nil, nil, err
+			}
+			if why != "" {
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
 				continue
@@ -600,7 +618,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			tracker.Served(test, earlierOf(m, c.Shape, liveShape, out))
+			tracker.Served(test, earlierOf(m, c.Shape, liveShape, out, own))
 			return out, nil, nil
 		}
 		miss := &learnMiss{res: res, pool: sc.http}
@@ -609,6 +627,205 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		return nil, miss, nil
 	}
+}
+
+// pairing is what the learn step learned on a paired mock: its noise, its
+// variables (an echo included), the variables of the test bound at an earlier
+// mock that it uses (binds, by that mock), and each variable's value in this
+// call, for its answer.
+type pairing struct {
+	noise  map[string][]string
+	vars   models.MockVariables
+	binds  map[string]models.MockVariables
+	values map[string]variables.Binding
+}
+
+// learnPlan turns what Classify learned about mock m (paired as rec; own: one
+// of the test's own mocks) into what is written onto the recording, or says
+// why the request cannot be answered (request_changed). A value never
+// becomes noise when it flowed from an earlier place of the test (a
+// variable) or comes back in the answer (an echo): when keploy cannot follow
+// it as a variable, the request is refused instead.
+//
+//   - A variable is bound at its earlier place, a request place of one of
+//     the test's own HTTP mocks F served, which held the value whole, and is
+//     used here: it holds when the live value here is the one F saw there.
+//   - An echo is a variable of this call alone (echo: true), bound here and
+//     answered where the recorded answer holds the value whole. Leaves of
+//     this call that drifted from the same recorded value are one variable.
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier) (pairing, string) {
+	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+	jsonReq := rec.Fixed["body"] == "json"
+	answers := func(l learn.Learned, from []learn.Leaf) []string {
+		var out []string
+		for _, a := range from {
+			if !learn.WholeEcho(l.Recorded, a) {
+				continue
+			}
+			if place, ok := learn.VarPlace(a, true); ok {
+				out = append(out, place)
+			}
+		}
+		return out
+	}
+	echoed := map[string]string{} // recorded value -> its echo variable
+	for _, l := range learned {
+		r := l.Recorded
+		switch l.Kind {
+		case learn.KindNoise:
+			p.noise[r.Path] = []string{}
+
+		case learn.KindVariable:
+			from := l.From
+			switch {
+			case from.Side == "":
+				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+			case from.Side != learn.Request:
+				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
+			case !from.Whole || from.Var == "":
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+			case !own || !from.Own:
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
+			}
+			use, ok := learn.VarPlace(r, jsonReq)
+			if !ok {
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+			}
+			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
+				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+			}
+			name, ok := tracker.Name(test, from.Mock, from.Var)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			v := p.vars[name]
+			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
+			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			p.vars[name] = v
+			b := p.binds[from.Mock]
+			if b == nil {
+				b = models.MockVariables{}
+				p.binds[from.Mock] = b
+			}
+			bv := b[name]
+			bv.Recorded, bv.Bind = r.Value, from.Var
+			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
+			b[name] = bv
+			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+
+		case learn.KindEcho:
+			place, ok := learn.VarPlace(r, jsonReq)
+			if !ok {
+				return p, r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)"
+			}
+			at := answers(l, l.Echo)
+			if len(at) == 0 {
+				return p, r.Path + " is echoed in the answer only inside a longer value, which keploy cannot answer with this run's value"
+			}
+			if name, ok := echoed[r.Value]; ok {
+				// One recorded value is one variable only while the call
+				// sends one value for it.
+				if !variables.SameValue(p.values[name].Value, l.Live.Value, r.Type == learn.Number) {
+					return p, r.Path + " and " + p.values[name].Place + " held one value when recorded and two now, so they are not one value the answer echoes"
+				}
+				v := p.vars[name]
+				v.Use = appendNew(v.Use, place)
+				p.vars[name] = v
+				continue
+			}
+			name, ok := tracker.Name(test, m.Name, place)
+			if !ok {
+				return p, "the test ended before " + r.Path + " was learned"
+			}
+			echoed[r.Value] = name
+			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
+			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
+		}
+	}
+	return p, ""
+}
+
+// respLeavesOf are the leaves of m's recorded answer.
+func respLeavesOf(m *models.Mock) []learn.Leaf { return respLeaves(m.Spec.HTTPResp) }
+
+// earlierAnswers are the answer places of the earlier mock that hold r's
+// recorded value whole: where a variable bound in its request is answered.
+func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) []string {
+	var out []string
+	for _, e := range earlier {
+		if e.Mock != mock {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == learn.Response && s.Place != "" && learn.WholeEcho(r, s.Leaf) {
+				out = appendNew(out, s.Place)
+			}
+		}
+	}
+	return out
+}
+
+// appendNew appends to list each of vs it does not hold yet.
+func appendNew(list []string, vs ...string) []string {
+	for _, v := range vs {
+		dup := false
+		for _, have := range list {
+			if have == v {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			list = append(list, v)
+		}
+	}
+	return list
+}
+
+// claimLearned serves mock m the learn step paired: its answer holds each of
+// the variables it learned with this run's value (renderAnswers), and the
+// mock is consumed with what was learned on its state (the noise, its
+// variables, and the variables it uses that are bound at earlier mocks), as
+// detected noise rides. why says why the answer cannot hold a variable's
+// value (nothing is consumed then); claimed is false when another connection
+// took m first.
+func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, p pairing) (served *models.Mock, claimed bool, why string, err error) {
+	served, err = withResponse(m)
+	if err != nil {
+		return nil, false, "", err
+	}
+	if len(p.vars) > 0 {
+		decls, problem := readDecls(&models.Mock{Name: m.Name, Spec: models.MockSpec{Variables: p.vars}})
+		if problem != "" {
+			return nil, false, problem, nil
+		}
+		// local holds every variable this call answers; the empty table
+		// guards renderAnswers' table lookup all the same.
+		rendered, vp := h.renderAnswers(served, &varHit{mock: m, decls: decls, local: p.values}, &variables.Table{})
+		if vp != nil {
+			return nil, false, vp.why, nil
+		}
+		served = rendered
+	}
+	claimed = h.consumeWith(m, mockDb, func(spec *models.MockSpec) {
+		if len(p.noise) > 0 {
+			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
+		}
+		if len(p.vars) > 0 {
+			vars := spec.Variables.Clone()
+			if vars == nil {
+				vars = models.MockVariables{}
+			}
+			for name, v := range p.vars {
+				vars[name] = v
+			}
+			spec.Variables = vars
+		}
+		if len(p.binds) > 0 {
+			spec.Binds = p.binds
+		}
+	})
+	return served, claimed, "", nil
 }
 
 // inRecordedOrder is mocks in the order they were recorded.
@@ -638,13 +855,16 @@ func leafPaths(ls []learn.Leaf) []string {
 	return out
 }
 
-// earlierOf is the exchange F just served from m, as a later request of the
-// test reads it: each recorded leaf of its request with the live value, and
-// each recorded leaf of its answer with the value served.
-func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock) learn.Earlier {
-	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock}
+// earlierOf is the exchange F just served from m (own: one of the test's own
+// mocks), as a later request of the test reads it: each recorded leaf of its
+// request with the live value, and each recorded leaf of its answer with the
+// value served, each with its variable place.
+func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
+	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own}
+	jsonReq := rec.Fixed["body"] == "json"
 	for p, r := range rec.Leaves {
-		e.Seen = append(e.Seen, learn.Seen{Side: learn.Request, Leaf: r, Live: live.Leaves[p].Value})
+		place, _ := learn.VarPlace(r, jsonReq)
+		e.Seen = append(e.Seen, learn.Seen{Side: learn.Request, Leaf: r, Live: live.Leaves[p].Value, Place: place})
 	}
 	sent := map[string]string{}
 	if served != nil {
@@ -653,7 +873,9 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock) learn
 		}
 	}
 	for _, r := range respLeaves(m.Spec.HTTPResp) {
-		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path]})
+		// respLeaves names body scalars only of a JSON answer.
+		place, _ := learn.VarPlace(r, true)
+		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place})
 	}
 	sort.Slice(e.Seen, func(i, j int) bool {
 		if e.Seen[i].Side != e.Seen[j].Side {
@@ -665,14 +887,14 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock) learn
 }
 
 // learnedMatch serves, under the proven switch outside record's full round, a
-// request whose first exact match, modulo what is known, carries what the
-// learn step learned (noise or correlations): the replays after F honour what
-// F learned, in every part of the request (its path, query, headers and
-// body), and render each correlation where F found its echo. The test's own
+// request whose first exact match, modulo what is known, carries noise the
+// learn step learned: the replays after F honour what F learned, in every
+// part of the request (its path, query, headers and body). The test's own
 // mocks come first, in recorded order, as in F; a request recorded several
 // times answers with each recorded answer in turn (cursorPick). A request
 // whose first exact match learned nothing, or that matches none, goes on to
-// the matcher as before.
+// the matcher as before, and so does every recording that declares
+// variables: the matcher's variable pass serves it (variables.go).
 func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, error) {
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -689,11 +911,11 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 			return nil, nil
 		}
 		hit := group[0]
-		if len(hit.Spec.ReqBodyNoise) == 0 && len(hit.Spec.Correlations) == 0 {
+		if len(hit.Spec.ReqBodyNoise) == 0 {
 			return nil, nil
 		}
 		picked, commit := h.cursorPick(hit, group, mockDb, !opts.DisableStatefulMocks)
-		served, claimed, err := h.claim(ctx, picked, mockDb, nil, bindings(liveShape, picked.Spec.Correlations))
+		served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 		if err != nil {
 			return nil, err
 		}

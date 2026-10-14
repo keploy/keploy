@@ -10,7 +10,7 @@ import (
 func TestLearnedByTest(t *testing.T) {
 	added := map[string][]string{
 		"mock-1": {"body.id (noise)"},
-		"mock-2": {"body.key (correlation)", "header.x (noise)"},
+		"mock-2": {"body.key (echo key)", "header.x (noise)"},
 		"mock-9": {"url.path.1 (noise)"},
 	}
 	mapping := &models.Mapping{TestCases: []models.MappedTestCase{
@@ -21,7 +21,7 @@ func TestLearnedByTest(t *testing.T) {
 	got := learnedByTest(added, mapping)
 	want := []learnedLine{
 		{test: "test-1", fields: []string{"mock-1 body.id (noise)"}},
-		{test: "test-2", fields: []string{"mock-2 body.key (correlation)", "mock-2 header.x (noise)"}},
+		{test: "test-2", fields: []string{"mock-2 body.key (echo key)", "mock-2 header.x (noise)"}},
 		{fields: []string{"mock-9 url.path.1 (noise)"}},
 	}
 	if !reflect.DeepEqual(got, want) {

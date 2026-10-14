@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -453,6 +454,36 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		}
 	}
 
+	// What the learn step learned as noise at one exact place of this call
+	// (a path segment, a query value, a header value, one element of an
+	// array) is not compared either: its recorded value is put back there
+	// too, the place's presence and JSON type still required.
+	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
+	for k := range m.Spec.ReqBodyNoise {
+		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
+		if !ok {
+			continue // a body path in the matcher's dialect: the body noise
+		}
+		place, err := variables.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if _, isVar := liveAt[place.String()]; isVar {
+			continue
+		}
+		r, ok := rec.read(place)
+		if !ok {
+			continue
+		}
+		l, ok := live.read(place)
+		if !ok || l.body && l.kind != r.kind {
+			return nil, nil
+		}
+		if asRecorded, ok = asRecorded.putBack(place, r); !ok {
+			return nil, nil
+		}
+	}
+
 	// 1. The call, with the recorded values put back, is the recording.
 	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
 		return nil, nil
@@ -618,6 +649,11 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 	}
 	var noise variables.Noise
 	for k, regs := range m.Spec.ReqBodyNoise {
+		// The learn step's header and URL entries are no body path (they
+		// were put back at their places: fitVariables).
+		if strings.HasPrefix(k, "header.") || strings.HasPrefix(k, "url.") {
+			continue
+		}
 		noise.Add(k, regs)
 	}
 	for k, regs := range userBodyNoise {
