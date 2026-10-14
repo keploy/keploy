@@ -32,6 +32,32 @@ $register = Join-Path $here 'register-job-compose-project.ps1'
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
 $work = Join-Path ([IO.Path]::GetTempPath()) ("reap-tests-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
+# PowerShell 7 on Linux and macOS keeps a JIT startup profile in
+# $XDG_CACHE_HOME/powershell (~/.cache/powershell by default). Every
+# PowerShell process reads it as it starts and writes it again as it exits,
+# in place: it truncates the file and writes thousands of small records into
+# it, with no lock. Two processes that exit at the same moment can interleave
+# their records, and PowerShells started on the file they leave then die
+# before they run a line ("Unhandled exception. System.IO.FileLoadException:
+# The given assembly name was invalid", exit 134), until one exits cleanly
+# and writes the file whole again (PowerShell/PowerShell#26528). The
+# fake docker is a PowerShell process per call, and the race cases below
+# start two runners side by side, whose first calls start and end together
+# (in run 38612607763 and run 38433217356 their last lines carry the same
+# millisecond). Both runs failed so: every docker call either runner made
+# for the next minute died that way, and the runner that restarted the fake
+# Docker Desktop failed "Docker did not become ready". So the processes this
+# file starts get a cache directory of their own, here, and so does each
+# runner that Start-Ensure starts in a process of its own, for it and its
+# docker calls. The processes that share one then never write it at once: a
+# runner's own PowerShell reads it before its first docker call starts and
+# writes it after its last one has ended, and its calls run one after
+# another (one that hangs is killed first, and a killed PowerShell writes
+# nothing). On Windows, PowerShell reads no XDG_CACHE_HOME, and the runtime
+# there opens that file so that no other process can open it while it is
+# written.
+$savedCacheHome = $env:XDG_CACHE_HOME
+$env:XDG_CACHE_HOME = Join-Path $work 'cache'
 $fake = Join-Path $work 'fake-docker.ps1'
 $stateFile = Join-Path $work 'state.json'
 
@@ -80,12 +106,14 @@ Set-Content -Path $fake -Encoding ASCII -Value @'
 # drops docker's stderr. Anything that throws here ends the call the same
 # way, with exit 3.
 # FAKE_DOCKER_CALLS, when set, gets a line per call as it starts (the call,
-# its process, and whether <state>.up was there) and an indented one as it
-# ends: its exit code, the daemonDown and psDown it read from the state, and
-# why when it failed. A failing case can then tell a call that found the
-# daemon down from one that threw, and a call with no end line died on the
-# way: killed, or its PowerShell never got that far. A case may be reading
-# that file as a call writes it, hence Add-Line, from the file beside this.
+# its process, whether <state>.up was there, and its XDG_CACHE_HOME, which
+# in a process of its own on Linux or macOS is the cache its PowerShell
+# started on) and an indented one as it ends: its exit code, the daemonDown
+# and psDown it read from the state, and why when it failed. A failing case
+# can then tell a call that found the daemon down from one that threw, and a
+# call with no end line died on the way: killed, or its PowerShell never got
+# that far. A case may be reading that file as a call writes it, hence
+# Add-Line, from the file beside this.
 $ownProcess = $MyInvocation.CommandOrigin -eq 'Runspace'
 . (Join-Path $PSScriptRoot 'add-line.ps1')
 # Not read yet. Run inside the calling script, an unset $state would be the
@@ -106,7 +134,7 @@ function Exit-Fake([int]$code, [string]$why = '') {
 }
 trap { Exit-Fake 3 "fake docker threw: $_" }
 if ($env:FAKE_DOCKER_CALLS) {
-    Add-Line $env:FAKE_DOCKER_CALLS ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
+    Add-Line $env:FAKE_DOCKER_CALLS ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3}, cache {4})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"), $env:XDG_CACHE_HOME)
 }
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
@@ -1574,7 +1602,16 @@ exit $drvCode
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
+        # A PowerShell startup cache of this runner's own, for it and the
+        # docker calls it makes: see XDG_CACHE_HOME at the top. Put in this
+        # process's environment for the start, which the new process
+        # inherits, not in $psi.EnvironmentVariables: under Windows
+        # PowerShell 5.1, .NET Framework fills that from the environment on
+        # first use with Add, which throws when two names differ only in case
+        # (Path and PATH).
+        $sharedCache = $env:XDG_CACHE_HOME
+        $env:XDG_CACHE_HOME = Join-Path $dir 'cache'
+        try { $p = [System.Diagnostics.Process]::Start($psi) } finally { $env:XDG_CACHE_HOME = $sharedCache }
         [pscustomobject]@{ Proc = $p; Log = $log; StdOut = $p.StandardOutput.ReadToEndAsync(); Err = $p.StandardError.ReadToEndAsync() }
     }
     function Get-Events([string]$file) { @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ }) }
@@ -1845,6 +1882,15 @@ function Set-Content {
             if (($ev -join ',') -ne $race.Want) { $problems += "together did [$($ev -join ',')], want [$($race.Want)]" }
             $left = Get-Markers $lockDir
             if ($left.Count) { $problems += "left $($left -join ', ')" }
+            # Each run's docker calls started on a PowerShell startup cache of
+            # that run's own, never on the other's (XDG_CACHE_HOME at the top).
+            $cacheOf = @{}
+            foreach ($id in 'a', 'b') {
+                $c = @(Get-Calls (Join-Path $barrierDir "calls-$id") | ForEach-Object { if ($_ -match ', cache (.*)\)$') { $Matches[1] } } | Sort-Object -Unique)
+                if (($c.Count -ne 1) -or (-not $c[0])) { $problems += "run $id's docker calls started on PowerShell caches [$($c -join ', ')], want one of its own" }
+                else { $cacheOf[$id] = $c[0] }
+            }
+            if (($cacheOf.Count -eq 2) -and ($cacheOf['a'] -eq $cacheOf['b'])) { $problems += "both runs' docker calls started on one PowerShell cache ($($cacheOf['a']))" }
         } finally {
             foreach ($bg in $bgs) { Stop-Background $bg }
         }
@@ -2370,6 +2416,7 @@ jobs:
     Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @($bp)
 } finally {
     $env:KEPLOY_WINDOWS_SCRIPT_TESTS = $savedTestsFlag
+    $env:XDG_CACHE_HOME = $savedCacheHome
     Remove-Item -Recurse -Force -Path $work -ErrorAction SilentlyContinue
 }
 
