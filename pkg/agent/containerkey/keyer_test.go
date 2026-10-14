@@ -901,7 +901,11 @@ func TestKeyerPlacedWaitsForThePlacingsAtTheAccept(t *testing.T) {
 		c, _ := k.Placed(context.Background(), "late")
 		got <- c
 	}()
-	<-f.awaitedCh // Placed waits for the placing in flight at the accept
+	select {
+	case <-f.awaitedCh: // Placed waits for the placing in flight at the accept
+	case c := <-got:
+		t.Fatalf("Placed did not wait for the placing in flight at the accept (got %+v)", c)
+	}
 	f.mu.Lock()
 	f.at["127.0.0.1:40090"] = redis
 	f.mu.Unlock()
