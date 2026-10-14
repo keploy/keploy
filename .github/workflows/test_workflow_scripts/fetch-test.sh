@@ -80,7 +80,7 @@ rm -rf "$t"
 
 t=$(mktemp -d)
 stub "$t" go 9 "$COMPILE"
-run "$t" go build ./...
+run "$t" go install ./cmd/x
 if [[ $rc != 0 && $(calls "$t/go.calls") == 1 ]] && grep -q "does not look transient" "$t/out"; then
   ok "a compile error is not retried"
 else bad "compile" "rc=$rc calls=$(calls "$t/go.calls"): $(cat "$t/out")"; fi
@@ -106,8 +106,8 @@ t=$(mktemp -d)
 stub "$t" python3 1 "ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Read timed out."
 run "$t" pip -r requirements.txt
 if [[ $rc == 0 && $(calls "$t/python3.calls") == 2 ]] &&
-  grep -q "^-m pip install -r requirements.txt|.*|PIP_TIMEOUT=30|PIP_RESUME_RETRIES=5|" "$t/python3.calls"; then
-  ok "python3 -m pip install ARGS, retried, with a 30 s idle timeout and resume"
+  grep -q "^-m pip install -r requirements.txt|.*|PIP_TIMEOUT=|PIP_RESUME_RETRIES=5|" "$t/python3.calls"; then
+  ok "python3 -m pip install ARGS, retried, with resume and pip's own idle timeout"
 else bad "pip" "rc=$rc: $(cat "$t/python3.calls" "$t/out" 2>&1)"; fi
 rm -rf "$t"
 
@@ -157,6 +157,25 @@ for sub in modules pip; do
   (cd "$t" && PATH="$t:$PATH" bash "$FETCH" "${args[@]}") >"$t/out" 2>&1 || rc=$?
   if [[ $rc == 0 && "$(cat "$t/sleeps" 2>/dev/null)" == "10 20 30 " ]]; then ok "$sub waits attempt x 10 s between attempts (10 20 30), none after the last"
   else bad "backoff $sub" "rc=$rc sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
+  rm -rf "$t"
+done
+
+# Run out: five attempts, the waits between them and none after the last, and
+# the last status (pip: retry_count; Go: go_retry).
+for sub in modules pip; do
+  t=$(mktemp -d)
+  stub "$t" go 9 "$RESET"
+  stub "$t" python3 9 "ReadTimeoutError"
+  printf '#!/usr/bin/env bash\nprintf "%%s " "$1" >>"%s/sleeps"\n' "$t" >"$t/sleep"
+  chmod +x "$t/sleep"
+  rc=0
+  args=(modules)
+  [ "$sub" = pip ] && args=(pip x)
+  (cd "$t" && PATH="$t:$PATH" bash "$FETCH" "${args[@]}") >"$t/out" 2>&1 || rc=$?
+  n=$(calls "$t/go.calls"); [ "$sub" = pip ] && n=$(calls "$t/python3.calls")
+  if [[ $rc == 1 && $n == 5 && "$(cat "$t/sleeps" 2>/dev/null)" == "10 20 30 40 " ]]; then
+    ok "$sub gives up after 5 attempts with the last status, having waited 10 20 30 40 and not after the last"
+  else bad "backoff to the end ($sub)" "rc=$rc calls=$n sleeps=[$(cat "$t/sleeps" 2>/dev/null)]: $(cat "$t/out")"; fi
   rm -rf "$t"
 done
 
@@ -224,7 +243,7 @@ for mod in "$ROOT"/.github/tools/*/go.mod; do
 done
 
 echo "usage:"
-for args in "" "clone onlyurl" "modules a b" "go" "pip" "bogus"; do
+for args in "" "clone onlyurl" "modules a b" "go" "go test ./..." "go build ." "go mod vendor" "pip" "bogus"; do
   rc=0
   # shellcheck disable=SC2086 # the argument list is the case
   bash "$FETCH" $args >/dev/null 2>&1 || rc=$?

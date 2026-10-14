@@ -5,7 +5,9 @@
 #   bash fetch.sh clone URL DIR [REF]   shallow fetch of REF (a commit, branch
 #                                       or tag; default: the default branch)
 #   bash fetch.sh modules [DIR]         go mod download in DIR (default .)
-#   bash fetch.sh go ARGS...            go ARGS, through go_retry (go-retry.sh)
+#   bash fetch.sh go ARGS...            go ARGS, through go_retry (go-retry.sh), for
+#                                       a fetch only: mod download, mod tidy, get
+#                                       or install (a build or test is a usage error)
 #   bash fetch.sh pip ARGS...           $FETCH_PYTHON -m pip install ARGS
 #                                       (FETCH_PYTHON: python3, or a venv's python)
 #
@@ -20,10 +22,10 @@
 #     keeps moving. Exhausting the attempts fails loudly with the last status.
 #   * A transfer that stops moving is given up on progress, never on time: git
 #     abandons an attempt whose transfer stayed under 1000 B/s for 30 s
-#     (http.lowSpeedLimit/lowSpeedTime); pip abandons a connection that
-#     delivered nothing for 30 s (its socket timeout) and, from pip 25.1,
-#     resumes a cut download instead of restarting it (PIP_RESUME_RETRIES;
-#     older pips ignore the variable).
+#     (http.lowSpeedLimit/lowSpeedTime); pip keeps its own idle cut, a
+#     connection that delivers nothing for 15 s (its default socket timeout),
+#     and from pip 25.1 resumes a cut download instead of restarting it
+#     (PIP_RESUME_RETRIES; older pips ignore the variable).
 #   * Go modules come through GOPROXY="https://proxy.golang.org|direct" (see
 #     go-retry.sh): a pipe falls back to the module's origin on any proxy
 #     error, where Go's default comma list falls back only on 404/410, so a
@@ -34,7 +36,9 @@
 #
 # A fetch is idempotent and its failure mode is the network, so retrying it
 # cannot hide a regression: a package or module that does not exist fails
-# every attempt. Never wrap a test or an assertion in this.
+# every attempt. Never wrap a test or an assertion in this. Nor does it ride
+# out an outage longer than the attempts span (100 s of waits): only content a
+# cache already holds can.
 #
 # FETCH_ATTEMPTS / FETCH_BASE_DELAY override the count and the backoff base for
 # clone and pip in the unit test (fetch-test.sh); no lane sets them.
@@ -103,6 +107,10 @@ case ${1:-} in
   go)
     [ $# -ge 2 ] || usage
     shift
+    case "$1 ${2:-}" in
+      "mod download" | "mod tidy" | get\ * | install\ *) ;;
+      *) usage ;;
+    esac
     # shellcheck source=go-retry.sh
     source "$HERE/go-retry.sh"
     go_retry "$@"
@@ -110,7 +118,7 @@ case ${1:-} in
   pip)
     [ $# -ge 2 ] || usage
     shift
-    export PIP_TIMEOUT="${PIP_TIMEOUT:-30}" PIP_RESUME_RETRIES="${PIP_RESUME_RETRIES:-5}"
+    export PIP_RESUME_RETRIES="${PIP_RESUME_RETRIES:-5}"
     retry_count "pip install $*" "${FETCH_PYTHON:-python3}" -m pip install "$@"
     ;;
   *)
