@@ -120,7 +120,10 @@ type TemplateFailure struct {
 	// refusal, why the placeholder cannot run and the edit to make.
 	Why string `json:"why" yaml:"why"`
 	// Refused marks a placeholder refused when the test set loaded: the test
-	// case was never sent, and there is no answer to accept.
+	// case was never sent, and there is no answer to accept. A refusal with
+	// no Placeholder refuses the test case's whole test set (one an
+	// interrupted keploy templatize left half-written; category
+	// TEST_SET_REFUSED), not a placeholder of it.
 	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
