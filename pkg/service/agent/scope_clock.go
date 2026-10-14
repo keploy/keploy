@@ -224,6 +224,23 @@ func beginClock(ctx context.Context, c TestClock, test string, at time.Time, rea
 	return ErrNoRealTestClock
 }
 
+// BeginRealTestCase puts the run's clock on real time for a keploy test case
+// whose recording lists a mock.real destination, in place of freezing it at
+// the case's recorded request (design v14 §3.4, F3): through the build's
+// RealTestClock. A build that freezes nothing has no clock to move; one that
+// freezes the run and cannot is refused (ErrNoRealTestClock), so the case is
+// never run at its recorded time against a dependency that answers at real
+// time.
+func BeginRealTestCase(ctx context.Context, name string) error {
+	if rc, ok := ActiveHooks.(RealTestClock); ok {
+		return rc.BeginRealTestClock(ctx, name)
+	}
+	if TimeFile() == "" {
+		return nil
+	}
+	return ErrNoRealTestClock
+}
+
 // lostScope is a test that held the run's clock and whose worker exited
 // (beginTestClock): its key, and its worker's start time, which tells that
 // worker's open tests from those of a new process on its pid.

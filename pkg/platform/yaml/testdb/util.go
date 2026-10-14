@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -110,6 +111,7 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
 	}
 	switch tc.Kind {
 	case models.HTTP:
@@ -144,6 +146,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
 	}
 
 	switch tc.Kind {
@@ -347,6 +350,11 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
 	}
+	if provenswitch.On() {
+		// The mock.real destinations the case's recording used (design v14
+		// §4): not read without the switch.
+		tc.Real = yamlTestcase.Real
+	}
 
 	switch tc.Kind {
 	case models.HTTP:
@@ -446,6 +454,9 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		LastUpdated: doc.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+	}
+	if provenswitch.On() {
+		tc.Real = doc.Real
 	}
 
 	switch tc.Kind {

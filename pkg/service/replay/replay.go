@@ -32,6 +32,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -198,6 +199,10 @@ type runShape struct {
 	// notJudged is why an otherwise judged set is INTERNAL_ERR: evidence its
 	// verdict needs could not be read (proven switch). Empty otherwise.
 	notJudged string
+	// realWhy is why mock.real fails the set (realSetFailure): a destination
+	// its recordings list that its run never reached, or that never
+	// answered. Empty otherwise.
+	realWhy string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -244,7 +249,7 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 		if shape.stoppedEarly {
 			return partialRunReason
 		}
-		return ""
+		return shape.realWhy
 	case models.TestSetStatusInternalErr:
 		if shape.notJudged != "" {
 			return withUnverifiedNote(shape.notJudged, shape)
@@ -339,6 +344,24 @@ func (r *Replayer) agentConsumedHistoryUnusable() bool {
 // that MockOutgoing is a repair, not a set boundary, and its own latch must
 // stay set across it.
 func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.OutgoingOptions) error {
+	// Under the proven switch the agent is handed mock.real before each set
+	// (design v14 §4): its destinations are reached for real. Only the run's
+	// first push starts the agent's REAL bookkeeping afresh: what came
+	// between two sets (a pooled connection's bytes, a connection keploy
+	// could not capture) belongs to the run.
+	if !r.noAgent {
+		push := realclient.Push
+		if r.realPushed.Load() {
+			// The same run's next set: an agent that holds the list keeps
+			// what the run saw; a replacement (a compose stack restarted
+			// per set) is handed it afresh.
+			push = realclient.Keep
+		}
+		if err := push(ctx, r.logger, r.instrumentation, r.mockReal()); err != nil {
+			return err
+		}
+		r.realPushed.Store(true)
+	}
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
 	}
@@ -399,8 +422,10 @@ type Replayer struct {
 	config          *config.Config
 	instrument      bool
 	noAgent         bool // runsWithoutAgent, decided once in NewReplayer and handed to its hooks
-	isLastTestSet   bool
-	isLastTestCase  bool
+	// realPushed: this run's agent holds its mock.real (mockOutgoingForTestSet).
+	realPushed     atomic.Bool
+	isLastTestSet  bool
+	isLastTestCase bool
 
 	// exact is the set being replayed's exact serving, under the proven
 	// switch (exact.go); nil otherwise.
@@ -584,6 +609,18 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 		armRunExitCode(runErr, testRunResult, failed)
 	}()
+
+	// A mock.real keploy cannot read is refused before anything runs (proven
+	// switch only). This run's first push starts the agent's REAL
+	// bookkeeping afresh.
+	if err := realclient.Check(r.mockReal()); err != nil {
+		utils.LogError(r.logger, err, "keploy cannot read keploy.yml mock.real")
+		return err
+	}
+	r.realPushed.Store(false)
+	if r.noAgent && len(r.mockReal()) > 0 {
+		r.logger.Info("this run reaches the app at its base path with no keploy agent, so mock.real is not checked: no REAL rows, and no destination is required to be reached")
+	}
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -4272,6 +4309,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// otherwise the loop's status stands. A set whose tests' consumption could
 	// not all be read has no verdict at all.
 	notJudged := ""
+	// realRun is what the set's run saw of mock.real beyond its test cases;
+	// realListed the destinations the recordings of the test cases that ran
+	// list; realWhy why they fail the set (proven switch).
+	var realRun *models.RealRun
+	var realListed []string
+	realWhy, realUncaptured := "", ""
 	if provenswitch.On() {
 		var held []string
 		scored := len(testCaseResults)
@@ -4290,6 +4333,37 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		tally := tallyFromVerdicts(setTally{success, failure, obsolete, ignored, testSetStatus}, testCaseResults, resultsComplete)
 		success, failure, obsolete, ignored, testSetStatus = tally.success, tally.failure, tally.obsolete, tally.ignored, tally.status
+		// mock.real (design v14 §4, §8.2): what the set's run reached, and
+		// what keploy could not capture outside its test cases.
+		var realErr error
+		if !r.noAgent {
+			// A run with no agent (a base path) has no REAL bookkeeping.
+			realRun, realErr = realclient.Run(context.WithoutCancel(runTestSetCtx), r.instrumentation, r.mockReal())
+		}
+		switch {
+		case realErr != nil && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed):
+			notJudged = "keploy could not read the set's mock.real destinations from its agent: " + realErr.Error()
+			r.logger.Error("test-set is not judged: keploy could not read which mock.real destinations its run reached; the run goes on to the next test-set",
+				zap.String("test-set", testSetID), zap.Error(realErr))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		case realRun != nil:
+			realListed = realListedBy(testCases, testCaseResults)
+			if h, ok := r.hookImpl.(RealRunHook); ok {
+				h.SetRealRun(testSetID, realRun, realListed)
+			}
+			if why := realSetFailure(realRun, realListed, realUsedBy(testCaseResults)); why != "" {
+				realWhy = why
+				r.logger.Error("test-set failed: "+why, zap.String("test-set", testSetID))
+				if testSetStatus == models.TestSetStatusPassed {
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
+			// What keploy could not capture outside every test case is the
+			// set's capture verdict (rule 2), with the set's other losses
+			// below: it fails the set, holds the prune, and fails JUnit.
+			realUncaptured = models.RealUncapturedLosses(realRun.Incomplete).Text()
+		}
 		if len(consumedUnread) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
 			notJudged = consumedUnreadReason(consumedUnread)
 			r.logger.Error("test-set is not judged: what some of its tests consumed could not be read from keploy's agent; the run goes on to the next test-set",
@@ -4474,7 +4548,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
 	// next test set's tests count from here.
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
-	if t := late.Text(); t != "" {
+	for _, t := range []string{late.Text(), realUncaptured} {
+		if t == "" {
+			continue
+		}
 		if captureIncomplete == "" {
 			captureIncomplete = t
 		} else {
@@ -4551,7 +4628,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged})),
+		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy})),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -4559,6 +4636,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		CmdUsed:       r.config.Test.CmdUsed,
 
 		CaptureVerification: captureVerification,
+		Real:                realRun,
+		RealListed:          realListed,
+		RealFailure:         realWhy,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -5465,6 +5545,11 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, testSetID, r.firstRun); err != nil {
 		utils.LogError(r.logger, err, "failed to re-run BeforeTestSetCompose hook on the replacement agent")
 	}
+	// A replacement agent knows no list: it is handed it again.
+	if err := realclient.Keep(ctx, r.logger, r.instrumentation, r.mockReal()); err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and handing it test set %q's mock.real failed: %w", testSetID, err)
+	}
+	r.realPushed.Store(true)
 	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at MockOutgoing: %w", testSetID, err)
 	}
@@ -6815,6 +6900,13 @@ type testMisses struct {
 	// could not be told.
 	lost    models.CaptureLosses
 	lostErr error
+	// real are the test's REAL rows, under the proven switch with a
+	// mock.real list (readRealTest); realLost the connections keploy could
+	// neither capture nor relay as real while it ran, as a capture loss
+	// (models.RealUncapturedLosses), and realErr why they could not be read.
+	real     []models.RealUse
+	realLost models.CaptureLosses
+	realErr  error
 }
 
 // readMockErrors reads, once, the calls of the test just run that no mock
@@ -6830,6 +6922,7 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
 	}
+	r.readRealTest(ctx, &read)
 	return read
 }
 
@@ -6837,6 +6930,9 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName string, result *models.TestResult) {
 	if !read.asked {
 		return
+	}
+	if len(read.real) > 0 && result != nil {
+		result.Real = read.real
 	}
 	mockErrors, err := read.calls, read.err
 	if err != nil && !provenswitch.On() {
@@ -6880,6 +6976,19 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
 	case len(read.lost) > 0 && result != nil:
 		result.FailureInfo.CaptureIncomplete = read.lost
+	}
+	// The connections keploy could neither capture nor relay as real while
+	// the test ran: capture incomplete, as a loss is, so the test fails with
+	// CAPTURE_INCOMPLETE and what to change, never as a miss.
+	switch {
+	case read.realErr != nil:
+		if result != nil {
+			result.FailureInfo.CaptureUnread = true
+		}
+		r.logger.Error("could not read from keploy's agent which mock.real connections it could not capture while this test ran; its test set is not judged",
+			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.realErr))
+	case len(read.realLost) > 0 && result != nil:
+		result.FailureInfo.CaptureIncomplete = append(append(models.CaptureLosses(nil), result.FailureInfo.CaptureIncomplete...), read.realLost...)
 	}
 }
 

@@ -43,6 +43,7 @@ type relayRig struct {
 	client, dest *net.TCPConn
 	sent         atomic.Int64
 	h2           atomic.Bool
+	h2Sends      atomic.Int64
 	mu           sync.Mutex
 	refused      []string
 	done         chan error
@@ -59,7 +60,7 @@ func newRig(t *testing.T, check *Check) *relayRig {
 	relay := &Relay{
 		Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest, Check: check,
 		Sent: func(n int) { r.sent.Add(int64(n)) },
-		H2:   func() { r.h2.Store(true) },
+		H2:   func() { r.h2.Store(true); r.h2Sends.Add(1) },
 		Refused: func(why string) {
 			r.mu.Lock()
 			r.refused = append(r.refused, why)
@@ -192,6 +193,18 @@ func TestRelayChecksTheSNI(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, byte(0x16), head[0])
 	require.True(t, r.h2.Load(), "an h2 offer is noted for the REAL row")
+	// Every later send on the connection says h2 too: a pooled h2
+	// connection's later bytes are other tests'.
+	rest := make([]byte, int(head[3])<<8|int(head[4]))
+	_, err = io.ReadFull(r.server, rest)
+	require.NoError(t, err)
+	before := r.h2Sends.Load()
+	_, err = r.app.Write([]byte("more"))
+	require.NoError(t, err)
+	more := make([]byte, 4)
+	_, err = io.ReadFull(r.server, more)
+	require.NoError(t, err)
+	require.Greater(t, r.h2Sends.Load(), before, "a later send on an h2 connection is not noted h2")
 	r.cancel()
 	<-r.done
 
@@ -310,6 +323,15 @@ func TestRelayOfH2CAndOfHTTPItCannotRead(t *testing.T) {
 	_, err = io.ReadFull(r.server, got)
 	require.NoError(t, err)
 	require.True(t, r.h2.Load())
+	// A pooled h2 connection's later bytes are another test's: each send
+	// says h2, so that test's row does too.
+	before := r.h2Sends.Load()
+	_, err = r.app.Write([]byte("frame"))
+	require.NoError(t, err)
+	got = make([]byte, len("frame"))
+	_, err = io.ReadFull(r.server, got)
+	require.NoError(t, err)
+	require.Greater(t, r.h2Sends.Load(), before, "a later send on an h2 connection is not noted h2")
 	r.cancel()
 	<-r.done
 
@@ -403,4 +425,72 @@ func TestRelayOfAWordAndOfAHalfClosedStart(t *testing.T) {
 		<-r.done
 		require.Len(t, r.refusals(), 1)
 	}
+}
+
+// Each answer of the destination is told; a write alone tells nothing.
+func TestRelayTellsEachAnswer(t *testing.T) {
+	app, client := tcpPair(t)
+	dest, server := tcpPair(t)
+	var answered atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Relay{Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest,
+			Answered: func() { answered.Add(1) }}).Run(ctx)
+	}()
+	_, err := app.Write([]byte("q"))
+	require.NoError(t, err)
+	b := make([]byte, 1)
+	_, err = io.ReadFull(server, b)
+	require.NoError(t, err)
+	require.Zero(t, answered.Load(), "a write is no answer")
+	_, err = server.Write([]byte("a1"))
+	require.NoError(t, err)
+	_, err = io.ReadFull(app, make([]byte, 2))
+	require.NoError(t, err)
+	_, err = server.Write([]byte("a2"))
+	require.NoError(t, err)
+	_, err = io.ReadFull(app, make([]byte, 2))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, answered.Load(), int32(2), "each answer is told")
+	cancel()
+	<-done
+}
+
+// A pooled REAL connection reaches its destination again in every read of
+// the run's bookkeeping in which the destination answers it: keploy test's
+// later test sets on a connection the first one dialled.
+func TestAPooledRelayReachesItsDestinationInEveryRead(t *testing.T) {
+	app, client := tcpPair(t)
+	dest, server := tcpPair(t)
+	tr := newTracker()
+	tr.Dialed(1, "db:5432", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Relay{Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest,
+			Sent:     func(int) { tr.Sent(1, "db:5432") },
+			Answered: func() { tr.Answered("db:5432") }}).Run(ctx)
+	}()
+	exchange := func() {
+		t.Helper()
+		_, err := app.Write([]byte("q"))
+		require.NoError(t, err)
+		_, err = io.ReadFull(server, make([]byte, 1))
+		require.NoError(t, err)
+		_, err = server.Write([]byte("a"))
+		require.NoError(t, err)
+		_, err = io.ReadFull(app, make([]byte, 1))
+		require.NoError(t, err)
+	}
+	exchange()
+	require.Equal(t, []string{"db:5432"}, tr.Run().Reached, "the first set")
+	tr.BeginTest()
+	exchange()
+	_, _ = tr.EndTest()
+	require.Equal(t, []string{"db:5432"}, tr.Run().Reached, "the next set, on the same connection")
+	cancel()
+	<-done
 }

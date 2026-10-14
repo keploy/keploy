@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -437,5 +438,22 @@ func TestStart_AnAgentThatDiesUnderComposeFailsTheRecording(t *testing.T) {
 				t.Fatalf("exit code %d, want the app's own %d", code, tc.want)
 			}
 		})
+	}
+}
+
+// A mock.real keploy cannot read refuses the recording before anything runs
+// (proven switch), and ends the process non-zero, as a recording whose agent
+// cannot start does: never a green CI job that recorded nothing.
+func TestStart_AnUnreadableMockRealFailsTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	cfg := &config.Config{}
+	cfg.Mock.Real = []string{"http://db:5432"}
+	r := &Recorder{logger: zap.NewNop(), config: cfg, instrumentation: newFakeInstr()}
+	err, code := startForExitCode(t, context.Background(), r)
+	if err == nil || !strings.Contains(err.Error(), "mock.real") {
+		t.Fatalf("Start returned %v, want the refusal of mock.real", err)
+	}
+	if code == 0 {
+		t.Fatal("a recording keploy refused for its mock.real exits 0")
 	}
 }

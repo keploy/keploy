@@ -248,6 +248,15 @@ func TestAReplayThatCannotReadItsTestsFails(t *testing.T) {
 	instr.windowsErr = errors.New("connection reset by peer")
 	err := replayErr(t, instr, utils.Native)
 	require.ErrorContains(t, err, "keploy could not read what each test did from its agent: connection reset by peer")
+	// The test command ran, and passed: the receipt says keploy failed
+	// after it, never that it did not run.
+	wd, werr := os.Getwd() // replayErr ran it in its repo
+	require.NoError(t, werr)
+	r := mustReceipt(t, filepath.Join(wd, "keploy"))
+	require.Equal(t, FailedByKeploy, r.FailedBy)
+	require.Equal(t, 0, r.RunnerExitCode)
+	require.Equal(t, 1, r.ExitCode)
+	require.Equal(t, "the test command ran; keploy could not read what it did", r.IsolationNote)
 }
 
 // When keploy had already failed under the test command (its agent died),

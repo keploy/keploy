@@ -714,3 +714,19 @@ func TestSetTestBeginsRefusesARealTestABuildCannotUnfreeze(t *testing.T) {
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
 	require.Empty(t, h.moves, "a REAL test keeps the real clock it is on")
 }
+
+// A keploy test case that uses mock.real runs on the real clock (F3) through
+// the build's RealTestClock; a build that freezes nothing has no clock to
+// move; one that freezes and cannot is refused.
+func TestBeginRealTestCase(t *testing.T) {
+	ctx := context.Background()
+	h := &realClockHooks{clockHooks{file: "/tmp/kclk1/t"}}
+	useHooks(t, h)
+	require.NoError(t, BeginRealTestCase(ctx, "test-1"))
+	require.Equal(t, []string{"real test-1"}, h.moves)
+
+	useHooks(t, &AgentHook{})
+	require.NoError(t, BeginRealTestCase(ctx, "test-1"), "a build that freezes nothing has nothing to move")
+	useHooks(t, &fileOnlyHooks{})
+	require.ErrorIs(t, BeginRealTestCase(ctx, "test-1"), ErrNoRealTestClock)
+}

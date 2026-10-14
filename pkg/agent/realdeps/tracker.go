@@ -1,6 +1,7 @@
 package realdeps
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -26,14 +27,23 @@ type Tracker struct {
 	open bool
 	// uses are the open test's REAL uses, by destination.
 	uses map[string]*use
-	// reached are the destinations the run connected to; outside, those it
-	// first reached while no test was open.
+	// reached are the destinations the run reached since the last read (Run);
+	// outside, those it first reached in that time while no test was open.
 	reached, outside map[string]bool
 	// events are capture_incomplete evidence since the last test ended, for
 	// the next test's end; run is the run's own.
 	events, run []models.CaptureIncomplete
 	// pending are the connections whose name is still being read.
 	pending map[int64]*pendingConn
+	// used is, per REAL destination, when the run's connections used it (a
+	// send, or a dial that failed), in the order they were told: keploy
+	// record names a test case's REAL destinations by them (UsedDuring), as
+	// it names its mocks, by time. Unix nanoseconds, the run's whole length.
+	used map[string][]int64
+	// keepUses counts who keeps used (keploy record's incoming streams: a
+	// reconnect's stream may open before the last one closes); with none,
+	// none is kept: a replay names no test case by time.
+	keepUses int
 	// now is the clock evidence is stamped with; time.Now when nil.
 	now func() time.Time
 }
@@ -66,6 +76,7 @@ func (t *Tracker) Reset() {
 	t.open, t.uses = false, nil
 	t.reached, t.outside = nil, nil
 	t.events, t.run = nil, nil
+	t.used = nil
 	for _, p := range t.pending {
 		p.reported = false
 	}
@@ -158,7 +169,28 @@ func (t *Tracker) Run() models.RealRun {
 	}
 	out.Incomplete = append(t.run, t.undecidedLocked("the run's results were read")...)
 	t.run = nil
+	// What was reached is since the last read: keploy test reads each test
+	// set's, keploy mock and keploy record their run's once.
+	t.reached, t.outside = nil, nil
 	return out
+}
+
+// KeepUses starts (keep) or ends (!keep) one keeper of the run's uses for
+// UsedDuring: keploy record's incoming stream, whose test cases they name.
+// They are kept while any keeper is; when the last ends, nothing reads them,
+// and those kept go.
+func (t *Tracker) KeepUses(keep bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case keep:
+		t.keepUses++
+	case t.keepUses > 0:
+		t.keepUses--
+	}
+	if t.keepUses == 0 {
+		t.used = nil
+	}
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -211,8 +243,15 @@ func (t *Tracker) Dialed(id int64, dest string, ok bool) {
 		if t.open {
 			t.useLocked(dest).failed++
 		}
+		t.usedLocked(dest)
 		return
 	}
+	t.reachedLocked(dest)
+}
+
+// reachedLocked notes that the run reached dest: by a dial that connected,
+// or by an answer on a connection to it.
+func (t *Tracker) reachedLocked(dest string) {
 	if t.reached == nil {
 		t.reached = map[string]bool{}
 	}
@@ -234,14 +273,69 @@ func (t *Tracker) Sent(id int64, dest string) {
 	if t.open {
 		t.useLocked(dest).conns[id] = struct{}{}
 	}
+	t.usedLocked(dest)
 }
 
-// H2 notes that a connection to dest offered h2 while the open test used it.
+// Answered notes that dest answered a connection: it is reached, as by a dial
+// that connected (a pooled connection dialled before the last read reaches
+// it again only when it answers, not when bytes are written to it).
+func (t *Tracker) Answered(dest string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.reachedLocked(dest)
+}
+
+// usedLocked notes that dest was used now, keeping its uses in time order:
+// told under t.mu they come in order, except when the wall clock steps back.
+func (t *Tracker) usedLocked(dest string) {
+	if t.keepUses == 0 {
+		return
+	}
+	if t.used == nil {
+		t.used = map[string][]int64{}
+	}
+	at, now := t.used[dest], t.stamp().UnixNano()
+	if n := len(at); n == 0 || at[n-1] <= now {
+		t.used[dest] = append(at, now)
+		return
+	}
+	t.used[dest] = slices.Insert(at, sort.Search(len(at), func(i int) bool { return at[i] > now }), now)
+}
+
+// UsedDuring is the REAL destinations the run used from from to to, both
+// included, sorted: those a keploy record test case whose request came at
+// from and whose response went at to used (TestCase.Real). A use is told
+// before its bytes reach the destination, so every use the request caused
+// is told by the time its response is.
+func (t *Tracker) UsedDuring(from, to time.Time) []string {
+	if from.IsZero() || to.IsZero() || to.Before(from) {
+		return nil
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for dest, at := range t.used {
+		if i := sort.Search(len(at), func(i int) bool { return at[i] >= lo }); i < len(at) && at[i] <= hi {
+			out = append(out, dest)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// H2 notes that the open test sent dest bytes over a connection that offered
+// h2 (Relay.H2, told after Sent): other names may share it. A test that has
+// not sent dest bytes (one that began between the send and this) gets no
+// row from it: its own sends say h2.
 func (t *Tracker) H2(dest string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.open {
-		t.useLocked(dest).h2 = true
+	if !t.open {
+		return
+	}
+	if u := t.uses[dest]; u != nil && len(u.conns) > 0 {
+		u.h2 = true
 	}
 }
 

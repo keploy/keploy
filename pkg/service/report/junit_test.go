@@ -263,3 +263,22 @@ func TestBuildJUnitSuites_CaptureVerification(t *testing.T) {
 		})
 	}
 }
+
+// A test set mock.real's rule 4 failed, every test of it passed, is never a
+// green JUnit file: the suite carries a failed "keploy mock.real" case with
+// the reason.
+func TestBuildJUnitSuites_RealFailure(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	why := "mock.real destination db:5432, which its test cases' recordings list, was never reached"
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, RealFailure: why}}).Suites[0]
+	if s.Tests != 2 || s.Failures != 1 {
+		t.Fatalf("suite tests %d failures %d; want 2 and 1", s.Tests, s.Failures)
+	}
+	last := s.Cases[len(s.Cases)-1]
+	if last.Name != junitRealCase || last.Failure == nil || last.Failure.Text != why {
+		t.Fatalf("last case %+v, want %q failed with the reason", last, junitRealCase)
+	}
+	if s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "PASSED", Tests: passed}}).Suites[0]; s.Tests != 1 || s.Failures != 0 {
+		t.Fatalf("a set mock.real did not fail has %d cases, %d failed", s.Tests, s.Failures)
+	}
+}
