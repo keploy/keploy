@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // skipPusher records the proven gate a replay pushes.
@@ -348,12 +349,16 @@ func TestASetWithoutMappingsOwnsNothingUnderTheSwitch(t *testing.T) {
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	core, logs := observer.New(zap.WarnLevel)
+	require.NoError(t, New(zap.New(core), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	runs, _ := instr.counts()
 	require.Equal(t, 1, runs, "the test command ran")
 	require.NotNil(t, instr.table, "an empty table is pushed, not left out")
 	require.Empty(t, instr.table)
 	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-0"}}, instr.pool)
+	said := logs.FilterMessageSnippet("no test of this mock set owns a recorded call").All()
+	require.Len(t, said, 1, "the set owns nothing, and keploy says so once with the fix")
+	require.Contains(t, said[0].ContextMap()["next_step"], "keploy mock record")
 }
 
 // Under the switch a mapping that names a mock the recording does not have
@@ -625,4 +630,24 @@ func TestTheRunsWindowsAreSplitOnEveryPath(t *testing.T) {
 		require.NoError(t, err)
 		check(t, m, got)
 	})
+}
+
+// The per-test table the agent gets names only mocks it holds: a mock the
+// set decoded that keploy never hands the agent (a connection failure) is no
+// test's, so the agent does not refuse the begin of the test that lists it.
+func TestTheTableNamesOnlyMocksTheAgentHolds(t *testing.T) {
+	got := heldOnly(map[string][]string{"o::TestA": {"mock-0", "mock-cf"}, "o::TestB": {"mock-cf"}, "o::TestC": {}}, named("mock-0").mocks)
+	require.Equal(t, map[string][]string{"o::TestA": {"mock-0"}, "o::TestB": {}, "o::TestC": {}}, got)
+}
+
+// A test owns a test mock only if a mock its mapping lists is held and
+// data-plane: a mapping of handshakes and DNS lookups alone owns none.
+func TestOwnsTestMocks(t *testing.T) {
+	data := &models.Mock{Name: "mock-0", Kind: models.HTTP}
+	cfg := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
+	dns := &models.Mock{Name: "mock-2", Kind: models.DNS}
+	loaded := []*models.Mock{data, cfg, dns}
+	require.True(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-0"}}, loaded))
+	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}}, loaded))
+	require.False(t, ownsTestMocks(map[string][]string{}, loaded))
 }

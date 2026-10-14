@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // containerPrefix starts a container entry.
@@ -287,6 +288,97 @@ func (l *List) named(host string, port uint16) (string, bool) {
 	}
 	label, ok := l.byName[h][port]
 	return label, ok
+}
+
+// covers is the label of the address or name entry that host at port is:
+// host an IP literal (an address entry), localhost (an address entry, as
+// parseEntry reads one), or a name (a name entry).
+func (l *List) covers(host string, port uint16) (string, bool) {
+	if l == nil || port == 0 {
+		return "", false
+	}
+	h := strings.Trim(host, "[]")
+	if a, err := netip.ParseAddr(h); err == nil {
+		return l.address(netip.AddrPortFrom(a, port))
+	}
+	if strings.EqualFold(strings.TrimSuffix(h, "."), "localhost") {
+		// Which loopback localhost reached is not known: it is listed only
+		// when both are, as a localhost entry lists them.
+		v4, ok4 := l.address(netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), port))
+		_, ok6 := l.address(netip.AddrPortFrom(netip.IPv6Loopback(), port))
+		if !ok4 || !ok6 {
+			return "", false
+		}
+		return v4, true
+	}
+	return l.named(h, port)
+}
+
+// Recorded is the entry a recorded mock's destination is: the one the
+// accept decided the connection the mock was recorded on by, read from what
+// the recording kept of that connection:
+//
+//   - its container key (containerkey.MetadataKey): a container entry of
+//     the key's image repository;
+//   - metadata.destAddr, the address and port the app connected to (the
+//     agent stamps it on each mock of keploy mock record): an address entry
+//     of that address, and the port a name entry is read at;
+//   - the name an HTTP mock's request carries (models.Mock.
+//     RecordedDestination: its Host, else its URL's authority): a name entry
+//     of that name, at destAddr's port, else at the port the name is written
+//     with.
+//
+// A recording that keeps no port for its call decides nothing (ok false),
+// and its test still owns the mock: a port is never taken from a scheme. A
+// Host with no port is written alike for http's 80 and https's 443, and the
+// recorder writes an origin-form URL ("/token"), with no scheme at all.
+func (l *List) Recorded(m *models.Mock) (string, bool) {
+	if l.Empty() || m == nil {
+		return "", false
+	}
+	if key, ok := containerkey.Recorded(m); ok {
+		if k, err := containerkey.Parse(key); err == nil {
+			if label, ok := l.container(k.Repository()); ok {
+				return label, true
+			}
+		}
+	}
+	host, port, connected := splitPort(m.Spec.Metadata["destAddr"])
+	if connected {
+		if label, ok := l.covers(host, port); ok {
+			return label, true
+		}
+	}
+	dest, ok := m.RecordedDestination()
+	if !ok {
+		return "", false
+	}
+	name, written, ok := splitPort(dest)
+	if !ok {
+		name, written = strings.Trim(dest, "[]"), 0
+	}
+	if connected {
+		// The connection decides the address and the port; the request
+		// adds only a name. An IP literal Host names nothing (Check.Allows).
+		if CanonicalName(name) == "" {
+			return "", false
+		}
+		return l.named(name, port)
+	}
+	return l.covers(name, written)
+}
+
+// splitPort splits "host:port" into its host and a port from 1 to 65535.
+func splitPort(hostport string) (string, uint16, bool) {
+	h, p, err := net.SplitHostPort(strings.TrimSpace(hostport))
+	if err != nil {
+		return "", 0, false
+	}
+	n, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || n == 0 {
+		return "", 0, false
+	}
+	return h, uint16(n), true
 }
 
 // hostsOn are the names listed at port.

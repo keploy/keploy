@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -69,7 +70,13 @@ func TestRunTestSet_ATestCaseSendsTheAgentTheVariablesItsRequestCarries(t *testi
 			var sent [][]models.VariableBinding
 			instr.mu.Lock()
 			for _, p := range instr.allParams {
-				if !p.AfterTime.Equal(models.BaseTime) {
+				perTest := !p.AfterTime.Equal(models.BaseTime)
+				if p.Exact != nil {
+					// Under the switch: the filter that opens the test case
+					// (exact serving), not the pool after it or the staging.
+					perTest = p.Exact.Test != ""
+				}
+				if perTest {
 					sent = append(sent, p.Variables)
 				}
 			}
@@ -347,5 +354,67 @@ func TestRequestVariables_AGRPCTestCaseGivesNone(t *testing.T) {
 	tc.Kind = models.HTTP
 	if got := requestVariables(run, tc); len(got) != 1 || !got[0].Given {
 		t.Fatalf("an HTTP test case gave %+v", got)
+	}
+}
+
+// routeVarInstr is a stand-in agent that keeps its test variables as the
+// agent's route does (pkg/agent/routes/replay.go UpdateMockParams): under the
+// switch a filter that begins a test's variables (BeginsTestVariables)
+// starts the table with the values it gives; exact serving's pool call
+// begins none.
+type routeVarInstr struct {
+	*prInstr
+	tbl *variables.Table
+}
+
+func (v *routeVarInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	if err := v.prInstr.UpdateMockParams(ctx, params); err != nil {
+		return err
+	}
+	if provenswitch.On() && params.BeginsTestVariables() {
+		v.tbl.Start(params.Variables)
+	}
+	return nil
+}
+
+func (v *routeVarInstr) TestVariables(context.Context) ([]models.VariableBinding, error) {
+	return v.tbl.Snapshot(), nil
+}
+
+// Under exact serving keploy test serves the pool again right after a test
+// case's response, before it reads what the test case's dependency calls
+// bound: that pool call must not forget them. An app that stores one id in
+// its dependency and answers another fails.
+func TestRunTestSet_ThePoolCallKeepsWhatTheTestCaseBound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tbl := &variables.Table{}
+	tmpl := map[string]interface{}{"id": "u_rec_0001"}
+	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+		mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			// The app's dependency call, as the agent's matcher binds it.
+			tbl.Bind(models.VariableBinding{Name: "id", Value: "u_other_0003", Recorded: "u_rec_0001", Mock: "mock-3", Place: "body.id"})
+			writeJSON(w, http.StatusCreated, `{"id":"u_live_0002"}`)
+		})
+		mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+			s := a.record(r)
+			writeJSON(w, http.StatusOK, `{"id":"`+strings.TrimPrefix(s.path, "/users/")+`"}`)
+		})
+	})
+	cases := []*models.TestCase{
+		tmplCase(1, app.addr, "POST", "/users", map[string]string{"Content-Type": "application/json"}, `{"name":"a"}`,
+			recorded(201, nil, `{"id":"{{capture string .id}}"}`, tmpl)),
+		tmplCase(2, app.addr, "GET", "/users/{{string .id}}", nil, "",
+			recorded(200, nil, `{"id":"{{string .id}}"}`, tmpl)),
+	}
+	h := newTmplHarness(t, &tmplConf{stored: models.TestSet{Template: tmpl}}, cases, nil)
+	h.r.instrumentation = &routeVarInstr{prInstr: h.r.instrumentation.(*prInstr), tbl: tbl}
+	h.run(t)
+	r := h.result(t, "test-1")
+	if r.Status != models.TestStatusFailed {
+		t.Fatalf("the app answered u_live_0002 but sent u_other_0003 to its dependency; the create is %s (%+v)", r.Status, r.Variables)
+	}
+	if len(r.TemplateFailures) != 1 || !strings.Contains(r.TemplateFailures[0].Why, `sent "u_other_0003" as id to its dependency (mock-3 body.id)`) {
+		t.Fatalf("the failure does not name the dependency's value: %+v", r.TemplateFailures)
 	}
 }

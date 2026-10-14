@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -136,4 +138,48 @@ func TestLoadAsyncMocksFlushesTheVerdictAtTheBoundary(t *testing.T) {
 			"reader attributes the previous set's numbers to the set just announced",
 			scope)
 	}
+}
+
+// Under exact serving (KEPLOY_PROVEN, S12) keploy test opens each test case
+// with ServeExactTest instead of a per-test SetMocksWithWindow: the async
+// lanes advance just as they did, so an epoch recorded as effective after
+// test 1 is served once test 1 completed (round-3 review).
+func TestExactServingAdvancesTheAsyncLanesAsPerTestWindowsDid(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	run := func(exact bool) (int, string) {
+		lane := models.AsyncLane{Name: "L", Type: "fake"}
+		eng := async.NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]async.AsyncParser{"fake": fakeAsyncParser{}})
+		p := &Proxy{logger: zap.NewNop(), asyncEngine: eng, dnsCache: newDNSCache()}
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		p.setMockManager(mm)
+		later := asyncMock("L", 2, "after-test-1")
+		later.Spec.Async.AnchorPos = 1
+		p.LoadAsyncMocks([]*models.Mock{asyncMock("L", 1, "boot"), later})
+		if exact {
+			require.NoError(t, p.ServeExactPool(models.PoolKeyNone, nil))
+		}
+		require.NoError(t, p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()))
+		for i, tc := range []string{"test-1", "test-2", "test-3"} {
+			if exact {
+				require.NoError(t, p.ServeExactTest(tc, nil))
+				require.NoError(t, p.ServeExactPool(models.PoolKeyNone, nil))
+				continue
+			}
+			at := t0.Add(time.Duration(i) * time.Minute)
+			require.NoError(t, p.SetMocksWithWindow(ctx, nil, nil, at, at.Add(time.Second)))
+		}
+		rec, _, _ := eng.Decide(ctx, lane, &models.Mock{})
+		body := "<keep-alive>"
+		if rec != nil {
+			body = rec.Spec.HTTPResp.Body
+		}
+		return eng.CompletedForTest(), body
+	}
+	wantN, wantBody := run(false)
+	gotN, gotBody := run(true)
+	require.Equal(t, "after-test-1", wantBody, "the per-test windows control")
+	require.Equal(t, wantN, gotN, "exact serving advanced the lanes a different number of times")
+	require.Equal(t, wantBody, gotBody)
 }

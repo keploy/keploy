@@ -584,8 +584,9 @@ func TestAReusedComposeStackIsMarkedByTheFirstTestSetToReachItsAgent(t *testing.
 // Under the proven switch, a set whose PID-map count could not be read has no
 // verdict: neither PASSED nor FAILED, the reason in the report, and the run
 // goes on to the next test set rather than ending after this one. With the
-// switch off the set keeps its status. Either way the prune it holds names
-// the lost count, not an INTERNAL_ERR of keploy's own.
+// switch off the set keeps its status, and the prune it holds names the lost
+// count, not an INTERNAL_ERR of keploy's own; under the switch a run prunes
+// nothing at all (removeUnusedMocks is ignored, S12).
 func TestUnderTheSwitchASetWhoseCountIsLostIsNotJudged(t *testing.T) {
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	// A set that FAILED on its own is not judged either: its failures rest
@@ -621,7 +622,11 @@ func TestUnderTheSwitchASetWhoseCountIsLostIsNotJudged(t *testing.T) {
 			status := h.run(t)
 			judged := !h.replayer.notJudged("test-set-0")
 			skipped := logs.FilterMessageSnippet("skipping mock pruning").All()
-			if len(skipped) != 1 || skipped[0].ContextMap()["reason"] != "capture_unverified" {
+			if on {
+				if len(skipped) != 0 || h.mocks.pruneCalls() != 0 {
+					t.Fatalf("under the switch the run prunes nothing: %d prune calls, %+v", h.mocks.pruneCalls(), skipped)
+				}
+			} else if len(skipped) != 1 || skipped[0].ContextMap()["reason"] != "capture_unverified" {
 				t.Fatalf("want one \"skipping mock pruning\" line with reason capture_unverified, got %+v", skipped)
 			}
 			if !on {
@@ -835,9 +840,10 @@ func TestUnderTheSwitchALossAfterTheLastTestFailsTheSet(t *testing.T) {
 	}
 }
 
-// Under the proven switch, a call keploy lost while a test ran was answered by
-// no mock, so the mock recorded for it looks unused: the set neither prunes
-// against what its tests consumed nor writes mappings.yaml from it.
+// Under the proven switch a run neither prunes mocks nor writes mappings.yaml
+// (removeUnusedMocks is ignored and only record writes mappings, S12), lost
+// calls or not: a call keploy lost while a test ran, answered by no mock,
+// can never cut a recording down.
 func TestUnderTheSwitchALossWhileATestRanHoldsThePruneAndMappings(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
@@ -845,17 +851,14 @@ func TestUnderTheSwitchALossWhileATestRanHoldsThePruneAndMappings(t *testing.T) 
 	for _, tc := range []struct {
 		name    string
 		answers []models.CaptureLosses
-		want    int // UpdateMocks calls, and mappings.yaml writes
 	}{
 		// The mark, then one read as each test ends: lost while test-2 ran.
 		{name: "lost while a test ran", answers: []models.CaptureLosses{nil, nil, tls}},
-		{name: "nothing lost", answers: []models.CaptureLosses{nil}, want: 1},
+		{name: "nothing lost", answers: []models.CaptureLosses{nil}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			core, logs := observer.New(zapcore.WarnLevel)
 			h := newPartialRunHarness(t, 4, 0)
 			h.replayer.config.Test.Mocking = true
-			h.replayer.logger = zap.New(core)
 			h.replayer.hookImpl = prHooks{consumed: session}
 			h.replayer.config.Test.RemoveUnusedMocks = true
 			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: tc.answers}
@@ -863,22 +866,11 @@ func TestUnderTheSwitchALossWhileATestRanHoldsThePruneAndMappings(t *testing.T) 
 
 			_ = h.run(t)
 
-			if got := h.mocks.pruneCalls(); got != tc.want {
-				t.Fatalf("the run made %d UpdateMocks calls, want %d", got, tc.want)
+			if got := h.mocks.pruneCalls(); got != 0 {
+				t.Fatalf("the run made %d UpdateMocks calls, want none", got)
 			}
-			if got := h.mappings.insertCalls(); got != tc.want {
-				t.Fatalf("the run wrote mappings.yaml %d times, want %d", got, tc.want)
-			}
-			if tc.want != 0 {
-				return
-			}
-			skipped := logs.FilterMessageSnippet("skipping mock pruning").All()
-			if len(skipped) != 1 || skipped[0].ContextMap()["reason"] != "capture_incomplete" {
-				t.Fatalf("want one \"skipping mock pruning\" line with reason capture_incomplete, got %+v", skipped)
-			}
-			held := logs.FilterMessage("not writing mappings.yaml").All()
-			if len(held) != 1 || !strings.Contains(fmt.Sprint(held[0].ContextMap()["reason"]), "could not capture every call") {
-				t.Fatalf("want one \"not writing mappings.yaml\" line saying a call was lost, got %+v", held)
+			if got := h.mappings.insertCalls(); got != 0 {
+				t.Fatalf("the run wrote mappings.yaml %d times, want none", got)
 			}
 		})
 	}

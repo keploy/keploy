@@ -40,6 +40,10 @@ import (
 type exactView struct {
 	// test is the open test's ID; "" while no test is open.
 	test string
+	// gen is the test view's own number: each copy it serves carries it
+	// (TestModeInfo.ServedIn), so a copy read in an earlier view, a previous
+	// attempt of the same test, cannot answer for this one.
+	gen uint64
 	// owned are the open test's test mocks, the manager's own copies, in
 	// recorded order; index is each one's position, by name. session marks
 	// those staged in the session tier (their kind derives a reusable
@@ -53,6 +57,9 @@ type exactView struct {
 	poolKey string
 
 	mu sync.Mutex
+	// closed: another view replaced this one; nothing consumes in it after
+	// (installExact), so what it says it consumed is final.
+	closed bool
 	// consumed says which owned mock has answered; order lists their
 	// positions in the order they did.
 	consumed []bool
@@ -73,10 +80,22 @@ type exactState struct {
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
 	fired atomic.Bool
+	// last is the latest test view, open or ended: its outcome is read after
+	// the test stops being served (ExactTestOutcome).
+	last atomic.Pointer[exactView]
+	// gen numbers the test views.
+	gen atomic.Uint64
 }
 
 // exactView returns the view exact serving shows, nil when it is off.
 func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
+
+// ExactServing reports whether the manager serves each test exactly its own
+// mocks (KEPLOY_PROVEN, S12): every read shows one view, which changes as a
+// test begins and ends, and a consume the view refuses returns false. A
+// parser that keeps an index across reads (Postgres v3's tier engines) reads
+// it at each dispatch: exact serving can begin after a connection opened.
+func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer
@@ -84,7 +103,7 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // The manager serves copies of them; owned is not written. A test opened
 // again (a retry) starts with all its test mocks unanswered.
 func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
-	v := &exactView{test: test, index: make(map[string]int, len(owned))}
+	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned))}
 	for _, mk := range owned {
 		if mk == nil || mk.Name == "" {
 			continue
@@ -103,12 +122,14 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		c.TestModeInfo.IsFiltered = true
 		c.TestModeInfo.ID = len(v.owned)
 		c.TestModeInfo.SortOrder = int64(len(v.owned)) + 1
+		c.TestModeInfo.ServedIn = v.gen
 		c.MarkPooled()
 		v.index[c.Name] = len(v.owned)
 		v.owned = append(v.owned, c)
 	}
 	v.consumed = make([]bool, len(v.owned))
 	m.exact.fired.Store(true)
+	m.exact.last.Store(v)
 	m.installExact(v)
 }
 
@@ -127,6 +148,11 @@ func (m *MockManager) ServeExactPool(key string, names []string) {
 // and so does the window signal.
 func (m *MockManager) installExact(v *exactView) {
 	prev := m.exact.view.Swap(v)
+	if prev != nil {
+		prev.mu.Lock()
+		prev.closed = true
+		prev.mu.Unlock()
+	}
 	kinds := m.stagedKinds()
 	for _, list := range [][]*models.Mock{v.owned, ownedOf(prev)} {
 		for _, mk := range list {
@@ -179,14 +205,18 @@ func (m *MockManager) stagedKinds() map[models.Kind]struct{} {
 	return kinds
 }
 
-// ExactTestOutcome is, under exact serving, the open test and which of its
-// test mocks have answered (in the order they did) and which have not (in
-// recorded order). test is "" when no test is open; ok is false when exact
-// serving is off.
+// ExactTestOutcome is, under exact serving, the latest test opened, open or
+// ended, and which of its test mocks have answered (in the order they did)
+// and which have not (in recorded order). Read once the test stops being
+// served, it is final: no consume reaches a view that is not served. test is
+// "" when no test has been opened; ok is false when exact serving is off.
 func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool) {
-	v := m.exactView()
-	if v == nil {
+	if m.exactView() == nil {
 		return "", nil, nil, false
+	}
+	v := m.exact.last.Load()
+	if v == nil {
+		return "", nil, nil, true
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -277,6 +307,23 @@ func (v *exactView) shows(mk *models.Mock) bool {
 }
 
 // keep narrows staged mocks to those the view shows, in their order.
+// unspent is in less the mocks a parser consumed through a delete door in
+// this view; in itself when there are none.
+func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if len(v.spent) == 0 || len(in) == 0 {
+		return in
+	}
+	out := make([]*models.Mock, 0, len(in))
+	for _, mk := range in {
+		if mk != nil && !v.spent[mk.Name] {
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
 func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 	out := make([]*models.Mock, 0, len(in))
 	for _, mk := range in {
@@ -342,8 +389,14 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	}
 	if v.test != "" {
 		if i, ok := v.index[mk.Name]; ok {
+			// A copy an earlier view served (a previous attempt's, read
+			// before this begin) answers for nothing now. A mock a parser
+			// built by name carries no view, and is the open test's.
+			if g := mk.TestModeInfo.ServedIn; g != 0 && g != v.gen {
+				return exactRefused
+			}
 			v.mu.Lock()
-			if v.consumed[i] {
+			if v.closed || v.consumed[i] {
 				v.mu.Unlock()
 				return exactRefused
 			}
@@ -362,7 +415,7 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 		return exactPass
 	}
 	v.mu.Lock()
-	if v.spent[mk.Name] {
+	if v.closed || v.spent[mk.Name] {
 		v.mu.Unlock()
 		return exactRefused
 	}
@@ -373,6 +426,17 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	v.mu.Unlock()
 	m.noteExactSpent(mk)
 	return exactServed
+}
+
+// exactConsumeValue is exactConsume for a door that takes the mock by value.
+// Its copy is made only under exact serving: a door taking the mock's
+// address would move every consume's mock to the heap, switch on or off.
+func (m *MockManager) exactConsumeValue(mock models.Mock, evicts bool) exactVerdict {
+	if m.exactView() == nil {
+		return exactPass
+	}
+	mk := mock
+	return m.exactConsume(&mk, evicts)
 }
 
 // noteExactSpent records that a staged mock answered through a delete door,

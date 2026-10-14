@@ -240,9 +240,10 @@ type ExactServer interface {
 	// ServeExactPool closes the open test, if any, and serves the pool
 	// slice names of key between tests.
 	ServeExactPool(key string, names []string) error
-	// ExactTestOutcome is the open test and which of its test mocks have
-	// answered (in the order they did) and which have not (in recorded
-	// order); ok is false when exact serving is off.
+	// ExactTestOutcome is the latest test opened, open or ended, and which
+	// of its test mocks have answered (in the order they did) and which have
+	// not (in recorded order); final once the test stops being served. ok is
+	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
