@@ -708,91 +708,107 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return refused, nil
 	}
 
-	// read the public key request from the client
-	publicKeyRequestBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	// The client asks for the server's public key, or, holding the key
+	// already, sends its password encrypted with it at once
+	// (mysqlUtils.IsPublicKeyRequest). The recording holds one of the two
+	// exchanges: its first request is the public key request or the
+	// encrypted password. Nothing the client sends here is logged: the
+	// encrypted password is the server's private key away from the password.
+	clientAuthBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
-		utils.LogError(logger, err, "failed to read public key request from client")
+		utils.LogError(logger, err, "failed to read the public key request or the encrypted password from client")
 		return false, err
 	}
+	recordedAtOnce := len(req) > 0 && req[0].Header != nil && req[0].Header.Type == mysql.EncryptedPassword
 
-	// decode the public key request
-	pkt, err := wire.DecodePayload(ctx, logger, publicKeyRequestBuf, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to decode public key request from client")
-		return false, err
-	}
-
-	publicKey, ok := pkt.Message.(string)
-	if !ok {
-		utils.LogError(logger, nil, "failed to assert public key request packet")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, fmt.Sprintf("the client sent a %s, not the recorded public key request", packetType(pkt)))
-	}
-
-	// Get the public key response from the mock
-	if len(req) < 1 {
-		utils.LogError(logger, nil, "no mysql mocks found for public key response")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for public key response")
-	}
-
-	publicKeyMock, ok := req[0].Message.(string)
-	if !ok {
-		utils.LogError(logger, nil, "failed to assert public key response packet")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key request")
-	}
-
-	// Match the header of the public key request
-	if req[0].Header == nil || req[0].Header.Header == nil || pkt.Header == nil || pkt.Header.Header == nil ||
-		!matchHeader(*req[0].Header.Header, *pkt.Header.Header) {
-		utils.LogError(logger, nil, "header mismatch for public key request")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "header mismatch for public key request")
-	}
-
-	// Match the public key response from the client with the mock
-	if publicKey != publicKeyMock {
-		utils.LogError(logger, nil, "public key mismatch", zap.Any("actual", publicKey), zap.Any("expected", publicKeyMock))
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "public key mismatch")
-	}
-
-	// Get the AuthMoreData for sending the public key
-	if len(resp) < 1 {
-		utils.LogError(logger, nil, "no mysql mocks found for auth more data (public key)")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for auth more data (public key)")
-	}
-
-	// Get the AuthMoreData packet
-	_, ok = resp[0].Message.(*mysql.AuthMoreDataPacket)
-	if !ok {
-		utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key to answer with")
-	}
-	if resp[0].Header == nil {
-		utils.LogError(logger, nil, "the recorded public key has no header")
-		return false, matchedHandshakeMiss(dst, stepPublicKey, "the recorded public key cannot be read")
-	}
-
-	// encode the public key response
-	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to encode public key response packet")
-		return false, unencodableMiss(dst, stepPublicKey, "public key", err)
-	}
-
-	// Write the public key response to the client
-	_, err = clientConn.Write(buf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
+	encryptedPasswordBuf := clientAuthBuf
+	if mysqlUtils.IsPublicKeyRequest(clientAuthBuf) {
+		if recordedAtOnce {
+			utils.LogError(logger, nil, "the client asked for the server's public key, which the recording does not hold")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "the client asked for the server's public key; the recording holds none, as the client it was recorded with had the key already and sent its password encrypted at once")
 		}
-		utils.LogError(logger, err, "failed to write public key response to the client")
-		return false, err
-	}
+		pkt, err := wire.DecodePayload(ctx, logger, clientAuthBuf, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode public key request from client")
+			return false, err
+		}
 
-	// Read the encrypted password from the client
+		if len(req) < 1 {
+			utils.LogError(logger, nil, "no mysql mocks found for public key response")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for public key response")
+		}
+		if req[0].Header != nil && req[0].Header.Type != mysql.CachingSha2PasswordToString(mysql.RequestPublicKey) {
+			found := packetType(&req[0].PacketBundle)
+			utils.LogError(logger, nil, "the recording holds no public key request where the client sent one", zap.String("found", found))
+			return false, matchedHandshakeMiss(dst, stepPublicKey, fmt.Sprintf("the client asked for the server's public key; the recording holds a %s there", found))
+		}
+		if _, ok := req[0].Message.(string); !ok {
+			utils.LogError(logger, nil, "failed to assert public key response packet")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key request")
+		}
 
-	encryptedPasswordBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read encrypted password from client")
-		return false, err
+		// Match the header of the public key request
+		if req[0].Header == nil || req[0].Header.Header == nil || pkt.Header == nil || pkt.Header.Header == nil ||
+			!matchHeader(*req[0].Header.Header, *pkt.Header.Header) {
+			utils.LogError(logger, nil, "header mismatch for public key request")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "header mismatch for public key request")
+		}
+
+		// Get the AuthMoreData for sending the public key
+		if len(resp) < 1 {
+			utils.LogError(logger, nil, "no mysql mocks found for auth more data (public key)")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "no mysql mocks found for auth more data (public key)")
+		}
+
+		// Get the AuthMoreData packet
+		_, ok := resp[0].Message.(*mysql.AuthMoreDataPacket)
+		if !ok {
+			utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "the handshake mock records no public key to answer with")
+		}
+		if resp[0].Header == nil {
+			utils.LogError(logger, nil, "the recorded public key has no header")
+			return false, matchedHandshakeMiss(dst, stepPublicKey, "the recorded public key cannot be read")
+		}
+
+		// encode the public key response
+		buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode public key response packet")
+			return false, unencodableMiss(dst, stepPublicKey, "public key", err)
+		}
+
+		// Write the public key response to the client
+		_, err = clientConn.Write(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write public key response to the client")
+			return false, err
+		}
+		req, resp = req[1:], resp[1:]
+
+		// Read the encrypted password from the client
+		encryptedPasswordBuf, err = mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read encrypted password from client")
+			return false, err
+		}
+	} else if !recordedAtOnce {
+		why := "the client sent its password encrypted with a public key it holds; the recording holds nothing for it"
+		if len(req) > 0 {
+			switch found := packetType(&req[0].PacketBundle); found {
+			case mysql.CachingSha2PasswordToString(mysql.RequestPublicKey):
+				why = "the client sent its password encrypted with a public key it holds; the recording asks the server for its key first"
+			case mysql.PlainPassword:
+				why = "the client sent its password encrypted, without TLS; the recording was made over TLS, where the client sends it in clear"
+			default:
+				why = fmt.Sprintf("the client sent its password encrypted with a public key it holds; the recording holds a %s there", found)
+			}
+		}
+		utils.LogError(logger, nil, "the client's full authentication is not the recorded one", zap.String("why", why))
+		return false, matchedHandshakeMiss(dst, stepPublicKey, why)
 	}
 
 	// Get the packet from the buffer
@@ -802,13 +818,13 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return false, err
 	}
 
-	if len(req) < 2 {
+	if len(req) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for encrypted password during full auth")
 		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "no mysql mocks found for encrypted password during full auth")
 	}
 
 	// Get the encrypted password from the mock
-	encryptedPassMock := req[1].PacketBundle
+	encryptedPassMock := req[0].PacketBundle
 
 	if encryptedPassMock.Header == nil || encryptedPassMock.Header.Type != mysql.EncryptedPassword {
 		found := packetType(&encryptedPassMock)
@@ -817,25 +833,25 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Since encrypted password can be different, we should just check the sequence number
-	if encryptedPassMock.Header != nil && encryptedPassMock.Header.Header != nil &&
+	if encryptedPassMock.Header.Header != nil &&
 		encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
 		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
 		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "sequence number mismatch for encrypted password")
 	}
 
 	//Now send the final response (OK/Err) to the client
-	if len(resp) < 2 {
+	if len(resp) < 1 {
 		utils.LogError(logger, nil, "final response mock not found for full auth")
 		return false, matchedHandshakeMiss(dst, stepEncryptedPassword, "final response mock not found for full auth")
 	}
 
-	logger.Debug("final response for full auth", zap.String("response", packetType(&resp[1].PacketBundle)))
+	logger.Debug("final response for full auth", zap.String("response", packetType(&resp[0].PacketBundle)))
 
 	// The handshake stays in the pool for a connection the recording holds no
 	// other handshake for: the client authenticates in full again, as the
 	// server asks. It was deleted, and the next connection of a recording that
 	// held one handshake got none.
-	return serveVerdict(ctx, logger, clientConn, dst, stepEncryptedPassword, &resp[1].PacketBundle, initialHandshakeMock, mockDb, decodeCtx)
+	return serveVerdict(ctx, logger, clientConn, dst, stepEncryptedPassword, &resp[0].PacketBundle, initialHandshakeMock, mockDb, decodeCtx)
 }
 
 func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (bool, error) {
@@ -917,13 +933,17 @@ func hr41At(m *models.Mock, idx int) bool {
 // after the greeting), or, after a recorded AuthSwitchRequest, the
 // AuthSwitchResponse (responses[2]); or it ends the caching_sha2_password
 // exchange an AuthMoreData there starts: right after it for a fast
-// authentication, or a full one over TLS; after the public key for a full one
-// without TLS, as useSSL says. A full authentication that ends in an ERR is a
-// refusal (a wrong password, on MySQL 8's default login method). The verdict
-// switch in simulateInitialHandshake serves these, and must be kept in step
-// with this. A mock that holds no verdict, one replay does not serve (such as
-// a next authentication factor, or an AuthMoreData of another mechanism), or
-// an exchange cut short does not shadow one that can be served.
+// authentication, or a full one over TLS; for a full one without TLS (as
+// useSSL says), after the public key when the recorded client asked for it,
+// and right after it when the client held the key and sent its password
+// encrypted at once (fullAuthStart). A recording of the password in clear,
+// made over TLS, serves no client without TLS. A full authentication that
+// ends in an ERR is a refusal (a wrong password, on MySQL 8's default login
+// method). The verdict switch in simulateInitialHandshake serves these, and
+// must be kept in step with this. A mock that holds no verdict, one replay
+// does not serve (such as a next authentication factor, or an AuthMoreData of
+// another mechanism), or an exchange cut short does not shadow one that can
+// be served.
 func servableVerdict(m *models.Mock, useSSL bool) (servable, refuses bool) {
 	resp := m.Spec.MySQLResponses
 	at := 1
@@ -944,7 +964,18 @@ func servableVerdict(m *models.Mock, useSSL bool) (servable, refuses bool) {
 		case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
 			at++
 			if !useSSL {
-				at++ // the public key comes first
+				// Without TLS the client sends its password encrypted:
+				// after the public key it asked for, or at once with a
+				// key it held. A recording of the password in clear was
+				// made over TLS, and a client without TLS cannot be
+				// served from it.
+				switch fullAuthStart(m) {
+				case mysql.CachingSha2PasswordToString(mysql.RequestPublicKey):
+					at++ // the public key comes first
+				case mysql.EncryptedPassword:
+				default:
+					return false, false
+				}
 			}
 		default:
 			return false, false
@@ -965,6 +996,23 @@ func servableVerdict(m *models.Mock, useSSL bool) (servable, refuses bool) {
 		return ok, ok
 	}
 	return false, false
+}
+
+// fullAuthStart is how the client of handshake mock m began a
+// caching_sha2_password full authentication: the type of its first request
+// that is a public key request, an encrypted password or a password in
+// clear (recorded over TLS), or "" when it holds none.
+func fullAuthStart(m *models.Mock) string {
+	for _, r := range m.Spec.MySQLRequests {
+		if r.Header == nil {
+			continue
+		}
+		switch r.Header.Type {
+		case mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), mysql.EncryptedPassword, mysql.PlainPassword:
+			return r.Header.Type
+		}
+	}
+	return ""
 }
 
 // cachingSha2Mechanism is the caching_sha2_password mechanism an AuthMoreData

@@ -3,12 +3,14 @@ package replayer
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -17,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // testDBAddr is the upstream the application dialled, as the proxy names it.
@@ -494,6 +497,9 @@ func TestServableVerdict(t *testing.T) {
 		{name: "full auth over TLS, OK", m: tlsFullAuth(okAnswer(4)), useSSL: true, servable: true},
 		{name: "full auth over TLS, ERR", m: tlsFullAuth(refusal(4)), useSSL: true, servable: true, refuses: true},
 		{name: "a TLS full auth, for a client without TLS", m: tlsFullAuth(okAnswer(4))},
+		{name: "full auth without TLS, with a held key", m: handshakeMock(mysql.CachingSha2,
+			[]mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), okAnswer(4)},
+			mysql.Request{PacketBundle: bundle(3, mysql.EncryptedPassword, "")}), servable: true},
 		{name: "fast auth cut short", m: handshakeMock(mysql.CachingSha2, []mysql.Response{authMoreData(2, mysql.FastAuthSuccess)})},
 		{name: "another mechanism's AuthMoreData", m: sha256Key},
 		{name: "no verdict", m: handshakeMock(mysql.Native, nil)},
@@ -574,6 +580,200 @@ func TestAPlainPasswordIsNotCompared(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A client that holds the server's public key already (go-sql-driver's
+// serverPubKey, mysql --server-public-key-path, Connector/J's
+// serverRSAPublicKeyFile) answers a full authentication without TLS with its
+// password encrypted at once, never asking for the key. Its recording holds
+// the encrypted password (its length) and the verdict, and replay serves it.
+// A client that does it against a recording that asked for the key, or one
+// that asks for the key against a recording that holds none, is a miss of
+// that step. No log line holds what the client sent.
+//
+// It used to be read as the public key request: the encrypted password was
+// decoded as a packet of whatever type its first byte named, logged at Debug
+// as an unknown packet and, at replay, at ERROR as a public key mismatch.
+func TestAFullAuthenticationWithAHeldKey(t *testing.T) {
+	ciphertext := bytes.Repeat([]byte{0x9E}, 256)
+	heldKeyHandshake := func(verdict mysql.Response) *models.Mock {
+		return handshakeMock(mysql.CachingSha2,
+			[]mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), verdict},
+			mysql.Request{PacketBundle: bundle(3, mysql.EncryptedPassword, base64.StdEncoding.EncodeToString(make([]byte, len(ciphertext))))})
+	}
+	heldKeyLogin := func(c mysqlClient) {
+		fastAuthLogin(c)
+		c.send(3, ciphertext)
+	}
+	// A full authentication recorded over TLS: the password in clear.
+	tlsRecorded := func() *models.Mock {
+		return handshakeMock(mysql.CachingSha2,
+			[]mysql.Response{authMoreData(2, mysql.PerformFullAuthentication), okAnswer(4)},
+			mysql.Request{PacketBundle: bundle(3, mysql.PlainPassword, base64.StdEncoding.EncodeToString(make([]byte, 13)))})
+	}
+	askForKey := func(c mysqlClient) {
+		fastAuthLogin(c)
+		c.send(3, []byte{byte(mysql.RequestPublicKey)})
+	}
+	for _, tc := range []struct {
+		name   string
+		mock   *models.Mock
+		client func(c mysqlClient)
+		served bool   // the recorded OK
+		diff   string // the miss's, when not served
+	}{
+		{name: "recorded with a held key", mock: heldKeyHandshake(okAnswer(4)), client: heldKeyLogin, served: true},
+		{name: "a client that asks for the key, recorded with a held key", mock: heldKeyHandshake(okAnswer(4)), client: askForKey, diff: "the recording holds none"},
+		{name: "a client that holds the key, recorded asking for it", mock: fullAuthHandshake(okAnswer(6)), client: heldKeyLogin, diff: "asks the server for its key first"},
+		{name: "a client that holds the key, recorded over TLS", mock: tlsRecorded(), client: heldKeyLogin, diff: "the recording was made over TLS"},
+		{name: "a client that asks for the key, recorded over TLS", mock: tlsRecorded(), client: askForKey, diff: "the recording holds a " + mysql.PlainPassword + " there"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			cfg := zap.NewDevelopmentEncoderConfig()
+			logger := zap.New(zapcore.NewTee(
+				zapcore.NewCore(zapcore.NewJSONEncoder(cfg), zapcore.AddSync(logs), zapcore.DebugLevel),
+				zapcore.NewCore(zapcore.NewConsoleEncoder(cfg), zapcore.AddSync(logs), zapcore.DebugLevel),
+			))
+			app, agentEnd := net.Pipe()
+			t.Cleanup(func() { _ = app.Close(); _ = agentEnd.Close() })
+			done := make(chan error, 1)
+			go func() {
+				done <- Replay(context.Background(), logger, agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, &poolDb{fakeMockDb{session: []*models.Mock{tc.mock}}}, models.OutgoingOptions{})
+				_ = agentEnd.Close()
+			}()
+			c := mysqlClient{t: t, c: app}
+			tc.client(c)
+			if tc.served {
+				if got := c.read(); len(got) == 0 || got[0] != mysql.OK {
+					t.Fatalf("the client read %x; want the recorded OK", got)
+				}
+				_ = app.Close()
+				if err := <-done; errors.Is(err, models.ErrNoMockMatched) {
+					t.Fatalf("Replay returned the miss %v for a connection it served", err)
+				}
+			} else {
+				err := <-done
+				requireConnectionMiss(t, err, "connection phase: "+stepPublicKey, models.MatchPhaseExhausted, tc.diff)
+				if got, _ := io.ReadAll(app); len(got) != 0 {
+					t.Fatalf("the client read %x; want nothing before its connection is closed", got)
+				}
+			}
+			if holdsBytes(logs.bytes(), ciphertext) {
+				t.Fatalf("the log holds what the client sent as its password:\n%s", logs.bytes())
+			}
+		})
+	}
+}
+
+// holdsBytes reports whether log holds secret, raw or base64 encoded at any
+// offset into what was encoded.
+func holdsBytes(log, secret []byte) bool {
+	if bytes.Contains(log, secret) {
+		return true
+	}
+	for skip := 0; skip < 3; skip++ {
+		part := secret[skip:]
+		part = part[:len(part)-len(part)%3]
+		if bytes.Contains(log, []byte(strings.TrimRight(base64.StdEncoding.EncodeToString(part), "="))) {
+			return true
+		}
+	}
+	return false
+}
+
+// lockedBuffer is a bytes.Buffer goroutines may write to at once.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
+// A recording keeps only the length of the client's authentication data, in
+// zero bytes: the auth response of its HandshakeResponse41, its
+// AuthSwitchResponse, and the password of a full authentication (in clear
+// over TLS, encrypted without it). Replay serves it as it serves a recording
+// of the credential itself, made before the recorder stopped keeping it: it
+// checks such data by its type and sequence only, and answers with the
+// recorded verdict whatever the client sends.
+func TestARecordingOfOnlyTheCredentialsLengthIsServed(t *testing.T) {
+	zeros := func(n int) string { return base64.StdEncoding.EncodeToString(make([]byte, n)) }
+	lengthOnly := func(m *models.Mock) *models.Mock {
+		for i, r := range m.Spec.MySQLRequests {
+			switch r.Header.Type {
+			case mysql.HandshakeResponse41:
+				hr := *r.Message.(*mysql.HandshakeResponse41Packet)
+				hr.AuthResponse = make([]byte, len(hr.AuthResponse))
+				m.Spec.MySQLRequests[i].Message = &hr
+			case mysql.AuthSwithResponse:
+				m.Spec.MySQLRequests[i].Message = zeros(20)
+			case mysql.EncryptedPassword:
+				m.Spec.MySQLRequests[i].Message = zeros(256)
+			}
+		}
+		return m
+	}
+	switchedLogin := func(c mysqlClient) {
+		c.greetAndAnswer("app", mysql.Native)
+		c.answerSwitch(3)
+	}
+	for _, tc := range []struct {
+		name   string
+		mock   *models.Mock
+		client func(c mysqlClient)
+	}{
+		{name: "a HandshakeResponse41", mock: lengthOnly(nativeHandshake()), client: nativeLogin},
+		{name: "an auth switch", mock: lengthOnly(switchedHandshake(okAnswer(4))), client: switchedLogin},
+		{name: "a full authentication without TLS", mock: lengthOnly(fullAuthHandshake(okAnswer(6))), client: fullAuthLogin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := login(t, &poolDb{fakeMockDb{session: []*models.Mock{tc.mock}}}, tc.client); got != mysql.OK {
+				t.Fatalf("the client read %#x; want the recorded OK", got)
+			}
+		})
+	}
+
+	t.Run("a full authentication over TLS", func(t *testing.T) {
+		hs := handshakeMock(mysql.CachingSha2, nil)
+		app, agentEnd := net.Pipe()
+		t.Cleanup(func() { _ = app.Close(); _ = agentEnd.Close() })
+		decodeCtx := newDecodeCtx()
+		decodeCtx.LastOp = wire.NewLastOpMap()
+		decodeCtx.ServerGreetings = wire.NewGreetings()
+		decodeCtx.ServerGreetings.Store(agentEnd, hs.Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet))
+		type outcome struct {
+			refused bool
+			err     error
+		}
+		ret := make(chan outcome, 1)
+		go func() {
+			refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
+				req:  []mysql.Request{{PacketBundle: bundle(5, mysql.PlainPassword, zeros(len("app-password\x00")))}},
+				resp: []mysql.Response{okAnswer(6)},
+			}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+			ret <- outcome{refused, err}
+		}()
+		c := mysqlClient{t: t, c: app}
+		c.send(5, []byte("app-password\x00"))
+		verdict := c.read()
+		if o := <-ret; o.err != nil || o.refused {
+			t.Fatalf("simulatePlainPassword returned refused=%v, %v; want the recorded OK served", o.refused, o.err)
+		}
+		if len(verdict) == 0 || verdict[0] != mysql.OK {
+			t.Fatalf("the client read %x; want the recorded OK", verdict)
+		}
+	})
 }
 
 // Every step of the connection phase at which the recording holds no answer
