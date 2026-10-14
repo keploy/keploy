@@ -179,9 +179,17 @@ func (h *Hooks) WaitAppConnsSettled(ctx context.Context, n uint64) error {
 	return h.app.settled.WaitAccepted(ctx, n)
 }
 
-// CaptureLosses are the application connections lost before the proxy got
-// them (models.CaptureLossAppConnLost), each a call keploy never saw.
+// CaptureLosses is what the hooks saw the application do that keploy could
+// not capture, besides the PID-map refusals: its connections lost before the
+// proxy got them (appConnLosses) and its AF_UNIX connects to sockets no member
+// of it owns (unixLosses).
 func (h *Hooks) CaptureLosses() models.CaptureLosses {
+	return append(h.appConnLosses(), h.unixLosses()...)
+}
+
+// appConnLosses are the application connections lost before the proxy got
+// them (models.CaptureLossAppConnLost), each a call keploy never saw.
+func (h *Hooks) appConnLosses() models.CaptureLosses {
 	h.appMu.Lock()
 	defer h.appMu.Unlock()
 	if h.app.lost == 0 {
