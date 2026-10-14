@@ -1426,13 +1426,17 @@ func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiff
 // renderTemplateFailures writes one line per template variable place a test
 // case failed on: where, the placeholder, and why. A placeholder refused when
 // the set loaded is said under its own heading: the test case was never sent,
-// so no answer was compared.
+// so no answer was compared. So is a test set refused whole, which is no
+// placeholder's refusal (wholeSetRefusal).
 func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
-	var failed, refused []models.TemplateFailure
+	var failed, refused, set []models.TemplateFailure
 	for _, f := range fs {
-		if f.Refused {
+		switch {
+		case wholeSetRefusal(f):
+			set = append(set, f)
+		case f.Refused:
 			refused = append(refused, f)
-		} else {
+		default:
 			failed = append(failed, f)
 		}
 	}
@@ -1442,6 +1446,7 @@ func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
 	}{
 		{"=== TEMPLATE VARIABLES THE ANSWER DID NOT SATISFY ===", failed},
 		{"=== TEMPLATE PLACEHOLDERS REFUSED WHEN THE TEST SET LOADED (THE TEST CASE WAS NOT SENT) ===", refused},
+		{"=== TEST SET REFUSED WHEN IT LOADED (THE TEST CASE WAS NOT SENT) ===", set},
 	} {
 		if len(s.fs) == 0 {
 			continue

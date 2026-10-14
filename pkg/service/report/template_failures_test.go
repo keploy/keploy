@@ -325,10 +325,15 @@ func TestReports_SayEveryTemplateFailureAndARefusal(t *testing.T) {
 // them, and JUnit says the test case was refused, not sent.
 func TestBuildFailure_NamesARefusedSetsReason(t *testing.T) {
 	refused := refusedCase()
+	refused.FailureInfo.Category = []models.FailureCategory{models.TestSetRefused}
 	refused.TemplateFailures = []models.TemplateFailure{{Where: "test set test-set-0", Why: "refused when the test set loaded: an interrupted write left its files behind", Refused: true}}
 	f := buildFailure(refused)
-	if want := "template variable test set test-set-0: refused when the test set loaded: an interrupted write left its files behind"; !strings.Contains(f.Text, want) {
+	if want := "test set test-set-0: refused when the test set loaded: an interrupted write left its files behind"; !strings.Contains(f.Text, want) {
 		t.Errorf("the JUnit failure does not give the set's reason as %q: %q", want, f.Text)
+	}
+	// It is no template variable's failure (TEST_SET_REFUSED).
+	if strings.Contains(f.Text, "template variable") {
+		t.Errorf("the JUnit failure files a refused test set as a template variable: %q", f.Text)
 	}
 	if f.Message != "test case refused when its test set loaded, not sent [HIGH-RISK]" {
 		t.Errorf("message %q", f.Message)
@@ -337,5 +342,8 @@ func TestBuildFailure_NamesARefusedSetsReason(t *testing.T) {
 	renderTemplateFailures(&sb, refused.TemplateFailures)
 	if want := "  test set test-set-0: refused when the test set loaded: an interrupted write left its files behind\n"; !strings.Contains(sb.String(), want) {
 		t.Errorf("keploy report says %q, want %q", sb.String(), want)
+	}
+	if !strings.Contains(sb.String(), "=== TEST SET REFUSED WHEN IT LOADED") || strings.Contains(sb.String(), "TEMPLATE PLACEHOLDERS") {
+		t.Errorf("keploy report files a refused test set under template placeholders: %q", sb.String())
 	}
 }
