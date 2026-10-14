@@ -48,6 +48,10 @@ const (
 	DiffKindTypeChanged   MockFieldDiffKind = "type_changed"    // same field, different JSON type
 	DiffKindMissingInLive MockFieldDiffKind = "missing_in_live" // recorded mock has it, live request doesn't
 	DiffKindMissingInMock MockFieldDiffKind = "missing_in_mock" // live request has it, recorded mock doesn't
+	// DiffKindVariable: a place that holds a test variable holds another value
+	// than the variable's this run (Expected: the variable's value; Actual: the
+	// live value).
+	DiffKindVariable MockFieldDiffKind = "variable"
 )
 
 // MockFieldDiff is one field-level difference between the live request and the
@@ -73,6 +77,11 @@ const (
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
 	MatchPhaseExhausted  = "no_match"             // full cascade ran and nothing matched
 	MatchPhaseProtoError = "protocol_error"       // matching aborted on a protocol/decode error
+	// MatchPhaseVariable: a recorded call fit this one except that a test
+	// variable it carries does not hold (proven switch): the call sent another
+	// value than the one the variable was bound to this run, used it before
+	// the call that binds it, or the mock declares a place keploy cannot follow.
+	MatchPhaseVariable = "variable_mismatch"
 )
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.

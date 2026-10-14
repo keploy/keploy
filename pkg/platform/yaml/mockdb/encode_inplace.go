@@ -41,6 +41,8 @@ type inPlaceDoc struct {
 	LastUpdated  *models.LastUpdated `yaml:"last_updated,omitempty"`
 	Curl         string              `yaml:"curl,omitempty"`
 	ConnectionID string              `yaml:"connectionId,omitempty"`
+
+	Variables models.MockVariables `yaml:"variables,omitempty"`
 }
 
 // mysqlPacketInPlace is mysql.RequestYaml (and ResponseYaml, the same shape)
@@ -76,6 +78,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 		ConnectionID: mock.ConnectionID,
 		Async:        mock.Spec.Async,
 		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Variables:    mock.Spec.Variables.Clone(),
 	}
 	switch mock.Kind {
 	case models.MySQL:

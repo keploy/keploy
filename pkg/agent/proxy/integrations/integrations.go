@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -288,6 +289,16 @@ type MockMemDb interface {
 type MockCursor interface {
 	MockCursorIndex(key string, n int) int
 	AdvanceMockCursor(key string, servedIdx, n int)
+}
+
+// VariableStore is an optional MockMemDb capability: the table of the test
+// variables the replay has bound (package variables), which a matcher reads
+// to follow a mock's declared variable places under the proven switch. The
+// agent's MockManager implements it, and every MockMemDb wrapper must forward
+// it: a wrapper that drops it leaves the calls it wraps unable to match any
+// mock that declares a variable place.
+type VariableStore interface {
+	Variables() *variables.Table
 }
 
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks

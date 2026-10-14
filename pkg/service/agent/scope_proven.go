@@ -805,6 +805,21 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	case isSQL(m.Protocol):
 		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
+	if m.MatchPhase == models.MatchPhaseVariable {
+		// A test variable did not hold, or the closest mock's variables could
+		// not be followed. The part of the call it is in is kept: a URL path
+		// segment by its position, a header or query parameter by its name.
+		// A body place is kept as "body" alone, since a JSON key can be a
+		// value the app sent (a map keyed by an email). No value is kept.
+		for _, d := range m.FieldDiffs {
+			path := d.Path
+			if strings.HasPrefix(path, "body.") || strings.HasPrefix(path, "body[") {
+				path = "body"
+			}
+			out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: path, Kind: d.Kind})
+		}
+		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
+	}
 	return out
 }
 

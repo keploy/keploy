@@ -1019,3 +1019,28 @@ func TestRefusalsAreInTheWindows(t *testing.T) {
 	require.NoError(t, a.resetSession(context.Background()))
 	require.Empty(t, a.claimWindows(), "the refusals belong to their session")
 }
+
+// A variable that did not hold keeps, as evidence, the place it did not hold
+// at, never a value.
+func TestSanitizedMissKeepsTheVariablesPlaceNotItsValues(t *testing.T) {
+	m := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/o9abc", ClosestMock: "mock-2",
+		MatchPhase: models.MatchPhaseVariable, Diff: `variable orderId is "o1abc" ...`,
+		NextSteps:  "the application sent another value at url.path[1] than the one it made in this test",
+		FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]", Kind: models.DiffKindVariable, Expected: "o1abc", Actual: "o9abc"}}})
+	if len(m.FieldDiffs) != 1 || m.FieldDiffs[0].Path != "url.path[1]" || m.FieldDiffs[0].Expected != "" || m.FieldDiffs[0].Actual != "" {
+		t.Fatalf("field diffs %+v", m.FieldDiffs)
+	}
+	if m.Diff != "" || strings.Contains(m.NextSteps, "o1abc") || strings.Contains(m.NextSteps, "o9abc") || !strings.Contains(m.NextSteps, "mock-2") {
+		t.Fatalf("evidence %+v", m)
+	}
+	// A body place keeps only that it is in the body: a JSON key can be a
+	// value the app sent.
+	b := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x", ClosestMock: "mock-3", MatchPhase: models.MatchPhaseVariable,
+		FieldDiffs: []models.MockFieldDiff{
+			{Path: `body.users["alice@x.com"].id`, Kind: models.DiffKindTypeChanged, Expected: `"1"`, Actual: "1"},
+			{Path: `body[0]["bob@x.com"]`, Kind: models.DiffKindVariable, Expected: "a", Actual: "b"},
+		}})
+	if len(b.FieldDiffs) != 2 || b.FieldDiffs[0].Path != "body" || b.FieldDiffs[0].Kind != models.DiffKindTypeChanged || b.FieldDiffs[0].Expected != "" || b.FieldDiffs[1].Path != "body" {
+		t.Fatalf("body places kept as %+v", b.FieldDiffs)
+	}
+}

@@ -4036,6 +4036,15 @@ func (p *Proxy) ResetStatefulCursors() {
 	}
 }
 
+// ResetVariables forgets every test variable the replay has bound: a new scope
+// (a test case of keploy test, or a test of keploy mock replay) begins.
+// Satisfies the agent's optional VariableResetter extension interface.
+func (p *Proxy) ResetVariables() {
+	if m := p.getMockManager(); m != nil {
+		m.Variables().Reset()
+	}
+}
+
 // CarryOverLoadRange reports which recorded-time range of carry-over mocks the
 // agent should load beside the window that starts at start. Satisfies the
 // agent's optional CarryOverPlanner extension interface.

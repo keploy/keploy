@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -66,6 +67,10 @@ type matchDiag struct {
 	// already finished with, attached to a struct only ever built on the
 	// no-match return.
 	pool []*models.Mock
+	// variable is the evidence of a mock that fits the call but whose
+	// variables do not hold (proven switch; see variables.go): the miss is
+	// reported as that, whatever else the cascade found.
+	variable *varProblem
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -83,6 +88,17 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
+		}
+
+		// The variables' scope this attempt checks against is read before
+		// the pool: a test that begins after this read (its pool swapped in,
+		// then its scope begun) makes this attempt's binds stale, so a call
+		// checked against the previous test's mocks never binds in the next
+		// test (variables.Table.BindAll).
+		var varGen uint64
+		varTable := variableTable(mockDb)
+		if varTable != nil && provenswitch.On() {
+			varGen = varTable.Gen()
 		}
 
 		// Fetch HTTP mocks from BOTH pools:
@@ -136,6 +152,67 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
+		// Under the proven switch a mock that declares variable places is
+		// served by the variable pass alone (variables.go): no later pass
+		// sees it, so it is never served on a call whose variables do not
+		// hold. With the switch off nothing here runs.
+		comparedPool := unfilteredMocks
+		var vp *varProblem
+		if provenswitch.On() {
+			withVars, rest := splitVariableMocks(unfilteredMocks)
+			if len(withVars) > 0 {
+				table := varTable
+				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
+				if err != nil {
+					return false, nil, nil, err
+				}
+				if len(hits) > 0 {
+					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if problem != nil {
+						if table.Gen() != varGen {
+							continue // a test began meanwhile: check the call against it
+						}
+						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
+					}
+					if commitCursor != nil {
+						commitCursor()
+					}
+					return true, served, nil, nil
+				}
+				vp = problem
+				unfilteredMocks = rest
+				if vp != nil {
+					// A recording fit this call but its variables did not
+					// hold: only an exact recording of this very call may
+					// still answer it, never a lenient pass.
+					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, urlNoise, statefulMocks)
+					if err != nil {
+						return false, nil, nil, err
+					}
+					if retry {
+						continue
+					}
+					if ok {
+						return true, served, nil, nil
+					}
+					if table != nil && table.Gen() != varGen {
+						continue // a test began meanwhile: check the call against it
+					}
+					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil
+				}
+				if len(unfilteredMocks) == 0 {
+					return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
+				}
+			}
+		}
+
 		// Matching process
 		// Pass 1: exact URL + configured url-noise only. Deterministic and
 		// genuinely-distinct calls match here and are never relaxed.
@@ -159,7 +236,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 
 		if len(schemaMatched) == 0 {
-			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(unfilteredMocks), pool: unfilteredMocks}, nil
+			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
 		}
 
 		h.Logger.Debug("http mock schema match results",
@@ -197,7 +274,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// field, capture the live value, and render it into the served response —
 		// run BEFORE the lenient key-schema / fuzzy passes so a correlated mock is
 		// not served stale or rejected by strict noise.
-		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation); okC {
+		// Under the proven switch an echo is a variable of its call, followed
+		// by the variable pass; shape-detected correlations are not honoured.
+		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation && !provenswitch.On()); okC {
 			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
 			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
 			if err != nil {
@@ -235,7 +314,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 				if beforeStrict > 0 {
 					phase = models.MatchPhaseStrict
 				}
-				return false, nil, &matchDiag{phase: phase, candidates: len(unfilteredMocks), schemaMatched: schemaMatched, pool: unfilteredMocks}, nil
+				return false, nil, &matchDiag{phase: phase, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool}, nil
 			}
 
 			if len(bodyMatched) == 1 {
@@ -270,7 +349,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 			return true, served, nil, nil
 		}
-		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(unfilteredMocks), schemaMatched: shortListed, pool: unfilteredMocks}, nil
+		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
 	}
 }
 
@@ -1643,6 +1722,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		httpMocks = FilterHTTPMocks(mocks)
 	}
 
+	if diag != nil && diag.variable != nil {
+		return variableMismatchReport(request, liveBody, dest, actualKey, diag, httpMocks)
+	}
+
 	phase := models.MatchPhaseExhausted
 	candidateCount := len(httpMocks)
 	var schemaSurvivors []*models.Mock
@@ -1691,15 +1774,23 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 			WithComparedDestinations(comparedDests).
 			WithPhase(phase, candidateCount).Build()
 	}
+	// The call the field diffs are computed from: under the proven switch a
+	// closest mock with variables is diffed with its recorded values at their
+	// places, so a variable's place is never named as the difference. The
+	// report still renders the call as it was received.
+	diffReq, diffBody := request, liveBody
+	if provenswitch.On() {
+		diffReq, diffBody = asRecordedForDiff(request, liveBody, closestMock)
+	}
 
 	mockReq := closestMock.Spec.HTTPReq
 	var fieldDiffs []models.MockFieldDiff
 
 	// method / path pseudo-fields
-	if string(mockReq.Method) != request.Method {
+	if string(mockReq.Method) != diffReq.Method {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "method", Kind: models.DiffKindValueChanged,
-			Expected: string(mockReq.Method), Actual: request.Method,
+			Expected: string(mockReq.Method), Actual: diffReq.Method,
 		})
 	}
 	mockPath := mockReq.URL
@@ -1708,10 +1799,10 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 		mockPath = parsed.Path
 		mockQuery = parsed.Query()
 	}
-	if mockPath != request.URL.Path {
+	if mockPath != diffReq.URL.Path {
 		fieldDiffs = append(fieldDiffs, models.MockFieldDiff{
 			Path: "path", Kind: models.DiffKindValueChanged,
-			Expected: mockPath, Actual: request.URL.Path,
+			Expected: mockPath, Actual: diffReq.URL.Path,
 		})
 	}
 
@@ -1725,14 +1816,14 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 	} else {
 		recordedQuery = mockQuery
 	}
-	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, request.URL.Query())...)
-	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, request.Header, headerNoise)...)
+	fieldDiffs = append(fieldDiffs, mismatch.QueryParamDiffs(recordedQuery, diffReq.URL.Query())...)
+	fieldDiffs = append(fieldDiffs, mismatch.HeaderKeyDiffs(mockReq.Header, diffReq.Header, headerNoise)...)
 
 	// Body diffs: JSON bodies get field-level diffs excluding everything the
 	// matcher itself ignores (learned req_body_noise + user body noise).
-	if len(liveBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(liveBody) {
+	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
 		ignore := mergeNoiseMaps(stripBodyPrefix(closestMock.Spec.ReqBodyNoise), userBodyNoise)
-		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(liveBody), ignore)...)
+		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they

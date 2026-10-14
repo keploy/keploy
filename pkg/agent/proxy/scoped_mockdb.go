@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -288,6 +289,15 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	if c, ok := s.MockMemDb.(integrations.MockCursor); ok {
 		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
 	}
+}
+
+// Variables forwards the replay's variable table. Under the proven switch one
+// test is open at a time in an agent, so every view shares the one table.
+func (s *scopedMockDb) Variables() *variables.Table {
+	if v, ok := s.MockMemDb.(integrations.VariableStore); ok {
+		return v.Variables()
+	}
+	return nil
 }
 
 func (s *scopedMockDb) cursorKey(key string) string {

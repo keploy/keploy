@@ -83,6 +83,18 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			return fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
 		}
 		a.openWindow(name, pid, at)
+		// Under the proven switch a test is the scope of the variables
+		// keploy mock replay binds: each test begins with none bound. The
+		// proven wire refuses a begin while a test is open (ProvenBegin), so
+		// one test is one scope, and the agent keeps one table. The scope
+		// begins once the test's pool is in, at each return of a begin that
+		// succeeded, so a call checked against the previous pool binds
+		// nothing in it; a begin that fails narrowed nothing and begins none.
+		beginVariables := func() {
+			if provenswitch.On() {
+				a.ResetVariables()
+			}
+		}
 		a.scopeMu.Lock()
 		names, ok := a.scopeTable[name]
 		a.scopeMu.Unlock()
@@ -102,12 +114,14 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			}
 		case !ok || len(names) == 0:
 			// No per-test mapping for this test — leave the whole pool armed.
+			beginVariables()
 			return nil
 		case pid > 0:
 			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
 			// PID, so concurrent workers never overwrite one shared filter.
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
+			beginVariables()
 			return nil
 		default:
 			// No worker PID reported — restrict the single global pool (correct for
@@ -132,6 +146,7 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			a.noteScopeFailed(name, pid, at)
 			return errors.Join(err, a.endTestClock(ctx, name, pid))
 		}
+		beginVariables()
 		return nil
 	}
 

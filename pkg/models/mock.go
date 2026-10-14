@@ -394,6 +394,12 @@ type MockSpec struct {
 	// home as ReqBodyNoise. Additive / omitempty: an older replayer ignores it.
 	Correlations []FieldCorrelation `json:"Correlations,omitempty" yaml:"correlations,omitempty" bson:"correlations,omitempty"`
 
+	// Variables names the places of this call that hold a test variable's
+	// value (see MockVariables). Kind-agnostic, carried on the doc envelope as
+	// a top-level `variables:` block like noise; nil for a call that holds
+	// none. Additive / omitempty: an older keploy ignores it.
+	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
 	// block — kept OUT of the flat parser Metadata above. Serialized as a
@@ -1080,6 +1086,8 @@ func (m *Mock) DeepCopy() *Mock {
 			}
 		}
 	}
+
+	c.Spec.Variables = m.Spec.Variables.Clone()
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.

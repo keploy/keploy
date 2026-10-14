@@ -11,6 +11,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -124,6 +125,11 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+
+	// vars holds the test variables this replay has bound (package
+	// variables): reset as each test case of keploy test and each test of
+	// keploy mock replay begins. Read only under the proven switch.
+	vars variables.Table
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -1609,6 +1615,12 @@ func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
 	m.cursorMu.Unlock()
+}
+
+// Variables returns the table of the test variables this replay has bound.
+// Satisfies the matchers' optional integrations.VariableStore capability.
+func (m *MockManager) Variables() *variables.Table {
+	return &m.vars
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
