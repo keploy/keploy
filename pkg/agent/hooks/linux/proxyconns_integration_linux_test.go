@@ -51,6 +51,7 @@ func loadProxyConnObject(t *testing.T, h *Hooks) {
 	h.objectsMutex.Lock()
 	err = spec.LoadAndAssign(&h.objects, nil)
 	h.agentRegistrationMap = h.objects.KeployAgentRegistrationMap
+	h.redirectProxyMap = h.objects.RedirectProxyMap
 	h.objectsMutex.Unlock()
 	if err != nil {
 		t.Fatalf("load keploy's BPF object: %v", err)
