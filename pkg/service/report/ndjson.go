@@ -49,7 +49,8 @@ const EffectsSchemaVersion = "1"
 // `template_failures` (optional, added within schema_version "1") names each
 // template variable place the test case failed on (TEMPLATE_VARIABLE): where
 // in the response, the placeholder, and why; for a test case refused when its
-// set loaded, the refusal.
+// set loaded, the refusal. A test set refused whole (TEST_SET_REFUSED) gives
+// each test case one refusal with an empty placeholder.
 //
 // One `effects` entry per models.DepMetaResult, flattened with its parent row's
 // name and type so a consumer never has to walk a nested structure. `effects`
