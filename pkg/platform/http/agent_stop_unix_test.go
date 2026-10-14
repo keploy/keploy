@@ -18,12 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -104,7 +106,10 @@ func TestStopAgentNeverHangsUpTheAgentsTerminal(t *testing.T) {
 //
 // It writes with shell builtins alone: an external writer (mv, touch) it ran
 // as it was killed would go on writing in the test's directory after it.
-// The stop skips a report it reads half written.
+// The stop skips a report it reads half written. It ends once the test binary
+// that ran it has (killed at a timeout, which runs no cleanup): in a process
+// group of its own, it looped for ever, reparented to init. Run it with its
+// test's directory as its argument (fakeAgentCommand), which names it.
 const fakeNativeAgent = `report() {
   printf '{"seq":%d,"beat":%d,"steps":true,"done":%s}' "$1" "$2" "$3" > "$PROGRESS"
 }
@@ -113,7 +118,7 @@ trap 'term=1' TERM
 # busy: in the middle of teardown work, it does not die of the escalation.
 [ "$MODE" = busy ] && trap '' USR2
 : > "$READY"
-while [ "$term" = 0 ]; do sleep 0.01; done
+while [ "$term" = 0 ]; do kill -0 "$PPID" 2>/dev/null || exit 0; sleep 0.01; done
 : > "$GOT"
 beat=0
 while :; do
@@ -124,8 +129,18 @@ while :; do
     detached) report 1 "$beat" true ;;
     endless|busy) report "$beat" "$beat" false ;;
   esac
+  kill -0 "$PPID" 2>/dev/null || exit 0
   sleep 0.01
 done`
+
+// fakeAgentCommand runs fakeNativeAgent for the test whose directory is dir,
+// in a process group of its own, as keploy runs an agent.
+func fakeAgentCommand(dir string, env ...string) *exec.Cmd {
+	cmd := exec.Command("sh", "-c", fakeNativeAgent, "fake-agent", dir)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
 
 // stopNativeAgent, the native stop goroutine's call, against a real process:
 // the agent, which cannot be asked, gets SIGTERM, answered or not, and is
@@ -162,9 +177,7 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 				dir := t.TempDir()
 				readyFile, got := filepath.Join(dir, "ready"), filepath.Join(dir, "got-term")
 				progress := filepath.Join(dir, "teardown.json")
-				cmd := exec.Command("sh", "-c", fakeNativeAgent)
-				cmd.Env = append(os.Environ(), "READY="+readyFile, "GOT="+got, "PROGRESS="+progress, "MODE="+tc.mode)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd := fakeAgentCommand(dir, "READY="+readyFile, "GOT="+got, "PROGRESS="+progress, "MODE="+tc.mode)
 				if err := cmd.Start(); err != nil {
 					t.Fatal(err)
 				}
@@ -360,6 +373,12 @@ var stopTestContainer = fmt.Sprintf("keploy-stop-test-no-such-container-%d", os.
 // agent's teardown progress as the engine does, a tar stream, from
 // engineProgressFile(log), and logs each read's content to engineReads(log);
 // `cp` is not logged as a call.
+//
+// No invocation outlives its test (reapEngine): a `wait`, or a `cp` made to
+// hang (slowcp), also ends once the test is done with the engine, once its
+// directory is gone, and once the test binary that ran it is (killed at a
+// `go test` timeout, it runs no cleanup). Each looped for ever before,
+// reparented to init, holding a job slot.
 func fakeEngine(t *testing.T) (log, release string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -370,11 +389,17 @@ func fakeEngine(t *testing.T) (log, release string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
+dir="` + dir + `"
+echo $$ >> "$dir/pids"
+# held: the test still holds this call -- it is not done with the engine, the
+# engine's directory is there, and the test binary that ran it lives.
+held() { [ ! -e "$dir/done" ] && [ -d "$dir" ] && kill -0 "$PPID" 2>/dev/null; }
 if [ "$1" = cp ]; then
   echo cp >> "` + engineCps(log) + `"
 fi
-if [ "$1" = cp ] && [ -e "` + filepath.Join(filepath.Dir(log), "slowcp") + `" ]; then
-  exec sleep 3600
+if [ "$1" = cp ] && [ -e "$dir/slowcp" ]; then
+  while held; do sleep 0.05; done
+  exit 1
 fi
 if [ "$1" = cp ]; then
   f="` + engineProgressFile(log) + `"
@@ -384,7 +409,7 @@ if [ "$1" = cp ]; then
 fi
 echo "$*" >> "` + log + `"
 if [ "$1" = wait ]; then
-  while [ ! -e "` + release + `" ]; do sleep 0.05; done
+  while [ ! -e "` + release + `" ] && held; do sleep 0.05; done
 fi
 if [ "$1" = kill ] && { [ "$2" != --signal ] || [ "$3" = SIGUSR2 ]; }; then
   : > "` + release + `"
@@ -395,8 +420,228 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
+	// Registered after t.TempDir, so it runs before the directory is removed.
+	t.Cleanup(func() { reapEngine(t, dir) })
 	return log, release
+}
+
+// reapEngine ends every invocation of the fake engine in dir that is still
+// running as its test ends -- a `wait` on a container a test never released,
+// or that does not exist, or a hanging `cp` -- and waits for each to exit.
+// The test is done with the engine (done), which lets each go. One still
+// running after hangBound is killed, and fails the test.
+func reapEngine(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "done"), nil, 0o644); err != nil {
+		t.Errorf("could not let the fake engine's calls go: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "pids"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Errorf("could not read the fake engine's pids: %v", err)
+	}
+	deadline := time.Now().Add(hangBound) // only turns a hang into a failure
+	for _, f := range strings.Fields(string(b)) {
+		var pid int
+		if _, err := fmt.Sscan(f, &pid); err != nil || pid <= 0 {
+			continue
+		}
+		for processRunning(t, pid, filepath.Join(dir, "docker")) {
+			if time.Now().After(deadline) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Errorf("the fake engine's process %d did not end with its test; killed it", pid)
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// processRunning reports whether pid is still running, as the process whose
+// arguments contain match (a fake engine's script, a fake agent's directory):
+// not gone, not exited awaiting its reaping, and not another process that has
+// since taken its pid. A process table it cannot read fails the test: taken
+// for "gone", it passed the tests that wait on it without checking anything.
+func processRunning(t *testing.T, pid int, match string) bool {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	var args string
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+			t.Fatalf("no process table to read (/proc): %v", err)
+		}
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		switch {
+		case os.IsNotExist(err) || errors.Is(err, syscall.ESRCH):
+			return false
+		case err != nil:
+			t.Fatalf("read process %d's arguments: %v", pid, err)
+		}
+		args = strings.ReplaceAll(string(b), "\x00", " ") // a zombie's are empty
+	} else {
+		out, err := exec.Command("ps", "-o", "stat=,args=", "-p", fmt.Sprint(pid)).Output()
+		var exit *exec.ExitError
+		switch {
+		case errors.As(err, &exit):
+			return false // no such process
+		case err != nil:
+			t.Fatalf("read process %d's arguments: %v", pid, err)
+		}
+		line := strings.TrimSpace(string(out))
+		if strings.HasPrefix(line, "Z") {
+			return false
+		}
+		args = line
+	}
+	return strings.Contains(args, match)
+}
+
+// A call to the fake engine that its test never let go -- a `wait` on a
+// container it never released, or that does not exist, or a `cp` made to
+// hang -- ends with the test, before the engine's directory is removed: one
+// that did not looped for ever, reparented to init.
+func TestAFakeEngineCallEndsWithItsTest(t *testing.T) {
+	for _, call := range []string{"wait", "cp"} {
+		var cmd *exec.Cmd
+		exited := make(chan error, 1)
+		t.Run(call, func(t *testing.T) {
+			log, _ := fakeEngine(t)
+			dir := filepath.Dir(log)
+			if call == "cp" {
+				if err := os.WriteFile(filepath.Join(dir, "slowcp"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd = exec.Command(filepath.Join(dir, "docker"), call, stopTestContainer)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			go func() { exited <- cmd.Wait() }()
+			within(t, "the call under way", func() {
+				for {
+					pids, _ := os.ReadFile(filepath.Join(dir, "pids"))
+					if strings.Contains(string(pids), fmt.Sprint(cmd.Process.Pid)) {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			})
+			// The test ends here, the call still held.
+		})
+		if cmd == nil || cmd.Process == nil {
+			continue // the subtest failed before the call began
+		}
+		select {
+		case <-exited:
+		case <-time.After(hangBound): // only turns a hang into a failure
+			_ = cmd.Process.Kill()
+			<-exited
+			t.Fatalf("a %s the test never let go was still running after its test ended", call)
+		}
+	}
+}
+
+// orphanEnv, set to "engine", "agent" or "agent-teardown", makes
+// TestOrphanHelper stand in for a test binary killed with a fake engine's
+// `wait`, or a fake native agent waiting for its stop or in its teardown,
+// under way.
+const orphanEnv = "KEPLOY_TEST_ORPHAN"
+
+// TestOrphanHelper starts a fake engine's `wait`, or a fake native agent, and
+// exits as a test binary killed at a `go test` timeout does: at once, its
+// cleanups not run. It says what it left running: its pid, and what its
+// arguments contain.
+func TestOrphanHelper(t *testing.T) {
+	what := os.Getenv(orphanEnv)
+	if what == "" {
+		t.Skip("a helper for TestATestsChildEndsWithTheTestBinary")
+	}
+	dir := t.TempDir()
+	var cmd *exec.Cmd
+	var match string
+	var started func() bool
+	switch what {
+	case "engine":
+		log, _ := fakeEngine(t)
+		match = filepath.Join(filepath.Dir(log), "docker")
+		cmd = exec.Command(match, "wait", stopTestContainer)
+		started = func() bool { return count(engineLines(t, log), "wait "+stopTestContainer) > 0 }
+	case "agent", "agent-teardown":
+		ready, got := filepath.Join(dir, "ready"), filepath.Join(dir, "got")
+		match = dir
+		cmd = fakeAgentCommand(dir, "READY="+ready, "GOT="+got, "PROGRESS="+filepath.Join(dir, "p"), "MODE=endless")
+		started = func() bool {
+			if _, err := os.Stat(ready); err != nil {
+				return false
+			}
+			if what == "agent" {
+				return true
+			}
+			_ = cmd.Process.Signal(syscall.SIGTERM) // its stop: it reports its teardown, endlessly
+			_, err := os.Stat(got)
+			return err == nil
+		}
+	default:
+		t.Fatalf("%s=%q", orphanEnv, what)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	hung := time.After(hangBound) // only turns a hang into a failure
+	for !started() {
+		select {
+		case err := <-exited:
+			t.Fatalf("the %s exited before it was under way: %v", what, err)
+		case <-hung:
+			_ = cmd.Process.Kill()
+			t.Fatalf("the %s never got under way", what)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	fmt.Printf("orphan %d %s\n", cmd.Process.Pid, match)
+	os.Exit(3)
+}
+
+// A test's child under way when its test binary dies -- killed at a timeout,
+// which runs no cleanup -- ends on its own: a fake engine's `wait` and a fake
+// native agent, each in a process group of its own, looped for ever,
+// reparented to init, holding a job slot.
+func TestATestsChildEndsWithTheTestBinary(t *testing.T) {
+	for _, what := range []string{"engine", "agent", "agent-teardown"} {
+		t.Run(what, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), hangBound) // only turns a hang into a failure
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOrphanHelper$", "-test.timeout="+hangBound.String())
+			cmd.Env = append(os.Environ(), orphanEnv+"="+what, "TMPDIR="+t.TempDir())
+			cmd.WaitDelay = time.Second
+			out, err := cmd.Output()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+				t.Fatalf("the helper did not exit as a killed binary would (%v): %s", err, out)
+			}
+			var pid int
+			var match string
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "orphan %d %s", &pid, &match); err != nil {
+				t.Fatalf("the helper did not say what it left running (%v): %q", err, out)
+			}
+			t.Cleanup(func() {
+				if processRunning(t, pid, match) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			// On the test's goroutine: processRunning may fail the test.
+			deadline := time.Now().Add(hangBound) // only turns a hang into a failure
+			for processRunning(t, pid, match) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the orphan %d did not end within %v of its test binary", pid, hangBound)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
 }
 
 // engineCps is where the fake engine notes each `cp` it is asked for: each
