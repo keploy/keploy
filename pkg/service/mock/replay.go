@@ -208,6 +208,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		Learn:                     m.learning(),
+		LearnPool:                 m.learningPool(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -379,6 +381,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
 	}
 	detail := replayDetail{
+		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
@@ -389,6 +392,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	missed, missesKnown := counts.missed, counts.missed >= 0
 
 	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
+	// The learn step's findings not kept means keploy did not complete the
+	// round, whatever the test command did: that is the exit, and the
+	// receipt's.
+	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
+		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
+	}
 	m.propagateExit(appErr, "replay")
 	// WHOSE failure this is, from what the runner reported -- not from the
 	// global exit code. keploy's own internal failure (a panic in the app
@@ -538,6 +548,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		At:          started.UTC().Truncate(time.Second),
 		MocksDigest: digest,
 		Tests:       counts.tests,
+		Learned:     counts.learnedPool,
 	})
 	return keployFailure
 }
@@ -1239,6 +1250,11 @@ type replayCounts struct {
 	missed     int
 	missedData int
 	tests      []TestReceipt
+	// learnedPool is what the learn step wrote onto mocks no test consumed.
+	learnedPool []string
+	// learnErr is why what the learn step learned could not be written: the
+	// round did not complete.
+	learnErr error
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -1350,6 +1366,20 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// What each test used and missed, and its verdict: for the receipt, and
 	// for the reporter below.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	// What the learn step learned goes onto the recording, before the record
+	// that runs this round commits it. A round whose learning cannot be read
+	// or kept did not complete: its record would judge recordings that lack
+	// what this round served.
+	var learned map[string][]string
+	var learnedPool []string
+	var learnErr error
+	if m.learning() {
+		if consumedErr != nil {
+			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
+		} else {
+			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
+		}
+	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free
@@ -1388,6 +1418,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.missed, counts.missedData = -1, -1
 	}
 	counts.tests = withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows)
+	for i := range counts.tests {
+		counts.tests[i].Learned = learned[counts.tests[i].Name]
+	}
+	counts.learnedPool = learnedPool
+	counts.learnErr = learnErr
 	return counts
 }
 

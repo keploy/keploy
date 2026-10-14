@@ -28,6 +28,7 @@ import (
 	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -185,6 +186,17 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 // every other caller uses match() and ignores the flag.
 func (ni noiseIndex) matchKind(keyLower string) (regs []*regexp.Regexp, isNoisy, typeStrict bool) {
 	for _, e := range ni.entries {
+		if e.typeStrict && provenswitch.On() {
+			// Under the proven switch a learned entry names exactly the field
+			// that drifted and its subtree (the learn step writes it so,
+			// package matcher/learn). As a substring it would also excuse a
+			// field whose name it happens to contain: "items[].id" in
+			// "items[].identifier".
+			if keyLower == e.keyLower || strings.HasPrefix(keyLower, e.keyLower+".") || strings.HasPrefix(keyLower, e.keyLower+"[]") {
+				return e.regexps, true, true
+			}
+			continue
+		}
 		if strings.Contains(keyLower, e.keyLower) {
 			return e.regexps, true, e.typeStrict
 		}

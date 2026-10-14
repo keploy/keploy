@@ -214,6 +214,9 @@ type MockMismatchReport struct {
 	// are redacted by the producing parser before they land here.
 	ClosestMockReq string // rendered request of the closest mock
 	ReceivedReq    string // rendered request the app actually sent
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

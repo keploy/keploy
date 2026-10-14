@@ -181,6 +181,11 @@ type TestsReceipt struct {
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto
+	// mocks no test consumed (the set's start-up and pool), each field as
+	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
+	// §7.2 step 10).
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
@@ -194,6 +199,10 @@ type TestReceipt struct {
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses and the recorded calls of its mapping it never made.
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto the
+	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
+	// §7.2 step 10). Only that round has any.
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner

@@ -39,6 +39,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Adapter is the per-protocol contract for plugging into the shared mock-noise
@@ -346,11 +347,25 @@ func StripBodyPrefix(in map[string][]string) map[string][]string {
 	if len(in) == 0 {
 		return nil
 	}
+	proven := provenswitch.On()
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
+		// Under the proven switch the learn step also learns noise in a
+		// request's other parts (header.<name>, url.query.<name>,
+		// url.path.<i>; package matcher/learn), in the same store. None
+		// of them is a body path.
+		if proven && learnedOutsideBody(k) {
+			continue
+		}
 		out[strings.TrimPrefix(k, "body.")] = v
 	}
 	return out
+}
+
+// learnedOutsideBody reports whether a stored noise path names a part of the
+// request other than its body, as the learn step writes them.
+func learnedOutsideBody(path string) bool {
+	return strings.HasPrefix(path, "header.") || strings.HasPrefix(path, "url.")
 }
 
 // AddBodyPrefix returns a copy of in with "body." prepended to each key that
