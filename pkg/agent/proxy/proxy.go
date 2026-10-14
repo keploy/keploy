@@ -306,6 +306,9 @@ type Proxy struct {
 	treeMu     sync.Mutex
 	tree       map[net.Conn]int
 	caJavaHome string
+	// topology is told, under the proven switch, where the run's calls to
+	// local listeners went (SetTopologySink).
+	topology atomic.Pointer[topologyBox]
 
 	// selfCalls counts the self-calls passed through, and selfCallOwners the
 	// processes of the run that served them: the run's first is logged at
@@ -2403,9 +2406,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// below has waited for the parsers, so every mock they record is stamped
 	// first.
 	proven := provenswitch.On()
+	var ctrKey string
 	if proven {
 		connID := fmt.Sprint(clientConnID)
-		containerkey.Default.Name(p.logger, connID, dstAddr)
+		_, ctrKey, _ = containerkey.Default.Name(p.logger, connID, dstAddr)
 		defer containerkey.Default.Forget(connID)
 	}
 
@@ -2506,7 +2510,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	if served, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID)); served {
+	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	if served {
 		return err
 	}
 
@@ -2544,6 +2549,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		return nil
+	}
+	// From here the connection is recorded, or answered from mocks: under
+	// the proven switch a local destination is listed mocked (design v14
+	// §3.1).
+	if proven {
+		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
 	}
 	if p.synchronous {
 		outgoingOpts.Synchronous = true
@@ -4872,17 +4883,22 @@ func (p *Proxy) closeDependencyConns() {
 	}
 }
 
-func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (bool, error) {
+// serveTreeListener relays a call to a listener of the run's own process
+// tree to that listener (served). Under the proven switch, a call it leaves
+// to the mock path that is addressed to this machine comes back as outside,
+// its mocked-local row (without its test), for the caller to list once it
+// knows the call is recorded or mocked.
+func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (served bool, outside *models.MockedRow, err error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	host, _, err := net.SplitHostPort(dstAddr)
 	if err != nil {
-		return false, nil
+		return false, nil, nil
 	}
 	ip := net.ParseIP(host)
 	if !ownIP(ip) {
-		return false, nil
+		return false, nil, nil
 	}
 	if ip.IsUnspecified() {
 		if ip.To4() != nil {
@@ -4894,30 +4910,56 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))
-		return true, nil
+		return true, nil, nil
 	}
+	// Under the proven switch the run's process tree is the membership
+	// (release1-cut §5.1 items 3 and 8): app marking is retired, so a
+	// listener the tree owns is always the run's own and always live, and
+	// any other local listener is a dependency, recorded and mocked, and
+	// listed (design v14 §3.1).
+	proven := provenswitch.On()
 	if owner == 0 || !descends(owner, int(p.appPID)) {
 		p.logger.Debug("the destination is not a process the test command started", zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Bool("listening", listening))
-		return false, nil
+		if proven && (listening || recorded.has(dest.Port)) {
+			// Listed whether or not anything listens there now: a
+			// recorded local dependency that is not running (CI) is
+			// mocked all the same, and may be the app under test. A call
+			// nothing answers and no recording has (a record's dial that
+			// will fail, a replay's miss) is neither recorded nor mocked.
+			outside = localListener(owner, dstAddr, dest.Port)
+		}
+		return false, outside, nil
 	}
 	seeProcess(pidToUint32(owner))
-	if starts.Default.Dependency(pidToUint32(owner)) {
+	if !proven && starts.Default.Dependency(pidToUint32(owner)) {
 		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		starts.Default.Child(conn)
-		return false, nil
+		return false, nil, nil
 	}
 	// A port the recording called as a (non-child) outside dependency stays on
 	// the mock path even when something in the run's tree now listens there:
 	// those recorded responses are the dependency's, and serving the live
 	// listener would skip the mock the test set is built on. A genuine
 	// self-call is unaffected — an app's own ingress port is never a recorded
-	// dependency destination.
-	if ip.IsLoopback() && RecordedPort(dest.Port) {
+	// dependency destination. Not under the proven switch: there a listener
+	// of the run's tree is live whatever a recording says (design v14 §3.1),
+	// and a recording that mocked it leaves its mocks unconsumed (U11).
+	if !proven && ip.IsLoopback() && RecordedPort(dest.Port) {
 		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
-		return false, nil
+		return false, nil, nil
 	}
 	caller := int(dest.KernelPid)
-	defer p.trackTree(srcConn, owner)()
+	if proven {
+		// A call to a listener another process of the tree owns is LIVE,
+		// listed per test; one a process makes to its own listener (an
+		// in-process test server) is not.
+		if caller != owner {
+			srcConn = p.liveConn(srcConn, owner, dest.Port)
+		}
+	} else {
+		// Only app marking closes these (closeDependencyConns).
+		defer p.trackTree(srcConn, owner)()
+	}
 	// A self-call: the destination is a listener owned by the run's own process
 	// tree, so it is passed through to the real handler instead of served from a
 	// mock, and a broken self-handler fails the run rather than passing on a
@@ -4939,13 +4981,13 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
-		return true, nil
+		return true, nil, nil
 	}
 	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
 	if err != nil {
-		return true, err
+		return true, nil, err
 	}
 	defer dstConn.Close()
 	util.RelayRawPassthrough(srcConn, dstConn)
-	return true, nil
+	return true, nil, nil
 }
