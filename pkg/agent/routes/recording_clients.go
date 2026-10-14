@@ -74,18 +74,15 @@ func RecordingClients() int {
 }
 
 // WaitForRecordingClients blocks while a recording's client holds a frame
-// stream open, or until stopNow is closed. It reports whether every stream was
-// closed. A client closes its streams once its stop has drained them; one that
-// dies closes them as its connections drop.
-func WaitForRecordingClients(stopNow <-chan struct{}) bool {
+// stream open. A client closes its streams once its stop has drained them;
+// one that dies closes them as its connections drop. Nothing else ends the
+// wait: a stop signal may be a copy of the one before (utils.SetSignalHold),
+// and an agent stopped another way (its API's stop, its escalation signal)
+// stops without it.
+func WaitForRecordingClients() {
 	c := &recordingClients
 	c.mu.Lock()
 	gone := c.gone
 	c.mu.Unlock()
-	select {
-	case <-gone:
-		return true
-	case <-stopNow:
-		return false
-	}
+	<-gone
 }

@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -39,6 +40,11 @@ const watchParentInterval = time.Second
 // client PID — rather than relying on PDEATHSIG — is robust across the `sudo`
 // the agent is usually launched under (whose death PDEATHSIG would otherwise
 // track instead of the real CLI). No-op when clientPID <= 0.
+//
+// A stop already under way may be holding for the client's frame streams
+// (utils.SetSignalHold), which a repeated signal does not cut short: that one
+// is ended as the agent's stop over its API is (utils.ExecCancel), not left
+// to the streams of a client that is gone.
 func watchParentProcess(ctx context.Context, logger *zap.Logger, clientPID int) {
 	if logger != nil {
 		logger.Debug("arming parent-death watchdog", zap.Int("clientPID", clientPID))
@@ -59,13 +65,25 @@ func watchParentProcess(ctx context.Context, logger *zap.Logger, clientPID int) 
 						logger.Info("parent client process exited; self-terminating to release eBPF hooks, DNS and ports",
 							zap.Int("clientPID", clientPID))
 					}
-					// Reuse the normal signal-driven graceful shutdown.
-					_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+					endForGoneClient()
 					return
 				}
 			}
 		}
 	}()
+}
+
+// endForGoneClient stops this agent once its client is gone: through the
+// normal signal-driven graceful shutdown, or, with a stop already under way,
+// by cancelling it directly: its hold for the client's streams
+// (utils.SetSignalHold) would wait on a client that is gone, and a repeated
+// signal does not end it.
+var endForGoneClient = func() {
+	if utils.Interrupted() {
+		utils.ExecCancel()
+		return
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 }
 
 // parentAlive reports whether process pid still exists. Signal 0 performs error

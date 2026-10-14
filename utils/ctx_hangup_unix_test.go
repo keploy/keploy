@@ -65,17 +65,13 @@ func TestHangupHelper(t *testing.T) {
 	if os.Getenv("KEPLOY_TEST_HANGUP_HOLD") != "" {
 		// As cli/agent.go holds the first stop signal while a recording's
 		// client still drains: here until the test says.
-		SetSignalHold(func(stopNow <-chan struct{}) {
+		SetSignalHold(func() {
 			mark("holding", strconv.FormatBool(hangupsAbsorbed.Load()))
 			for {
 				if _, err := os.Stat(filepath.Join(dir, "release-hold")); err == nil {
 					return
 				}
-				select {
-				case <-stopNow:
-					return
-				case <-time.After(5 * time.Millisecond):
-				}
+				time.Sleep(5 * time.Millisecond)
 			}
 		})
 	}

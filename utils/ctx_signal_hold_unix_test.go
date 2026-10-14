@@ -4,6 +4,7 @@ package utils
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,19 +42,29 @@ func TestSignalHoldHelper(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	hold := func(stopNow <-chan struct{}) {
+	hooksRan := make(chan struct{})
+	RegisterPreCancelHook(func() { mark("hooks"); close(hooksRan) })
+	hold := func() {
 		mark("holding")
+		var repeats uint64
+		stopping := false
 		for {
+			// Each signal after the first, as it is counted.
+			for n := RepeatInterrupts(); repeats < n; {
+				repeats++
+				mark(fmt.Sprintf("repeated-%d", repeats))
+			}
+			// The process stopped another way while it holds: the agent's
+			// stop over its API (ExecCancel, as utils.Stop does).
+			if _, err := os.Stat(filepath.Join(dir, "stop-api")); err == nil && !stopping {
+				stopping = true
+				ExecCancel()
+			}
 			if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
 				mark("released")
 				return
 			}
-			select {
-			case <-stopNow:
-				mark("stopped-now")
-				return
-			case <-time.After(5 * time.Millisecond):
-			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	if os.Getenv(signalHoldNone) == "" {
@@ -66,6 +77,9 @@ func TestSignalHoldHelper(t *testing.T) {
 		OfferStopNow()
 	}
 	mark("cancelled")
+	// NewCtx goes on with the stop (its pre-cancel hooks) once it no longer
+	// waits on the hold.
+	<-hooksRan
 	if os.Getenv(signalHoldLinger) != "" {
 		// Still stopping when a later signal comes (the agent's client
 		// stopping it once it has closed its streams).
@@ -77,9 +91,6 @@ func TestSignalHoldHelper(t *testing.T) {
 		}
 		mark("again")
 		os.Exit(0)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "stopped-now")); err == nil && RepeatInterrupts() == 0 {
-		os.Exit(5) // a second signal that cut the hold short is not counted
 	}
 	os.Exit(0)
 }
@@ -145,32 +156,103 @@ func TestNewCtx_TheFirstSignalWaitsOnTheHold(t *testing.T) {
 	if err := <-exited; err != nil {
 		t.Fatalf("the run ended with %v", err)
 	}
-	if !marked(dir, "released") || marked(dir, "stopped-now") {
+	if !marked(dir, "released") {
 		t.Fatal("the hold did not end by its release")
 	}
 }
 
-// A second signal while the hold waits cuts it short (stopNow), marks the run
-// interrupted again (RepeatInterrupts), and the root context is cancelled.
-func TestNewCtx_ASecondSignalCutsTheHoldShort(t *testing.T) {
-	cmd, dir, waitFor, exited := signalHoldRun(t)
+// A copy of the stop -- the same signal again, as the sudo that runs a
+// non-root CLI's agent hands on what `sudo pkill -INT -f keploy` sent it --
+// does not cut the hold short: it is counted and said, and the root context
+// is cancelled only once the hold is released. Taken for a second Ctrl+C, it
+// cut the agent's hold short, and the agent closed the streams its
+// recording's client was still draining.
+func TestNewCtx_ACopyOfTheStopDoesNotCutTheHoldShort(t *testing.T) {
+	cmd, dir, waitFor, exited, out := signalHoldRunOut(t)
 	waitFor("ready")
 	_ = cmd.Process.Signal(syscall.SIGINT)
 	waitFor("holding")
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	waitFor("stopped-now")
+	_ = cmd.Process.Signal(syscall.SIGINT)       // sudo's copy
+	deadline := time.Now().Add(30 * time.Second) // only ends a broken run
+	for !marked(dir, "repeated-1") && !marked(dir, "cancelled") {
+		if time.Now().After(deadline) {
+			t.Fatal("the copy of the stop was never counted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if marked(dir, "cancelled") {
+		t.Fatal("a copy of the stop cut the hold short: the root context was cancelled while it held")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	waitFor("cancelled")
 	if err := <-exited; err != nil {
 		t.Fatalf("the run ended with %v", err)
 	}
+	if !marked(dir, "released") {
+		t.Fatal("the hold did not end by its release")
+	}
+	said := out.String()
+	if !strings.Contains(said, "Signal received again: interrupt; Keploy stops once its client has saved") || strings.Contains(said, "not saved") || strings.Contains(said, "stopping now") {
+		t.Fatalf("the copy was not said, or was said to cut something short:\n%s", said)
+	}
+}
+
+// No signal cuts the hold short, however many come, or however late: a copy
+// of the stop can come any time after it (a sudo, or an agent, starved or
+// frozen), and no time tells one from a second signal. Each is counted
+// (RepeatInterrupts), and the hold ends by its release.
+func TestNewCtx_NoRepeatedSignalCutsTheHoldShort(t *testing.T) {
+	cmd, dir, waitFor, exited := signalHoldRun(t)
+	waitFor("ready")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("holding")
+	for i, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGINT} {
+		_ = cmd.Process.Signal(sig)
+		waitFor(fmt.Sprintf("repeated-%d", i+1))
+		if marked(dir, "cancelled") {
+			t.Fatalf("signal %d after the stop (%v) cut the hold short", i+1, sig)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("cancelled")
+	if err := <-exited; err != nil {
+		t.Fatalf("the run ended with %v", err)
+	}
+	if !marked(dir, "released") {
+		t.Fatal("the hold did not end by its release")
+	}
+}
+
+// Once the process is stopped some other way while it holds -- the agent's
+// stop over its API, its escalation signal (ExecCancel) -- the stop no longer
+// waits on the hold: it goes on (its pre-cancel hooks run) with the hold not
+// released, and the run ends. A client that must stop the agent regardless
+// still can.
+func TestNewCtx_TheHoldEndsWhenTheProcessIsStoppedAnotherWay(t *testing.T) {
+	cmd, dir, waitFor, exited := signalHoldRun(t)
+	waitFor("ready")
+	_ = cmd.Process.Signal(syscall.SIGINT)
+	waitFor("holding")
+	if err := os.WriteFile(filepath.Join(dir, "stop-api"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("cancelled")
+	waitFor("hooks")
+	if err := <-exited; err != nil {
+		t.Fatalf("the run ended with %v", err)
+	}
 	if marked(dir, "released") {
-		t.Fatal("the hold was released, not cut short")
+		t.Fatal("the stop went on only once the hold was released")
 	}
 }
 
 // A signal after the hold finished (the agent's recording client closed its
 // streams, and then stopped the agent) cuts nothing short: it is not said to
-// lose what was being saved. One that cuts the hold short still is.
+// lose what was being saved.
 func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
 	cmd, dir, waitFor, exited, out := signalHoldRunOut(t, signalHoldLinger+"=1")
 	waitFor("ready")
@@ -188,19 +270,6 @@ func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
 	said := out.String()
 	if !strings.Contains(said, "Signal received again") || strings.Contains(said, "not saved") {
 		t.Fatalf("a signal after the hold finished was said to lose what was being saved:\n%s", said)
-	}
-
-	cmd, _, waitFor, exited, out = signalHoldRunOut(t)
-	waitFor("ready")
-	_ = cmd.Process.Signal(syscall.SIGINT)
-	waitFor("holding")
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	waitFor("cancelled")
-	if err := <-exited; err != nil {
-		t.Fatalf("the run ended with %v", err)
-	}
-	if !strings.Contains(out.String(), "not saved") {
-		t.Fatalf("a signal that cut the hold short was not said to lose what was being saved:\n%s", out.String())
 	}
 }
 
