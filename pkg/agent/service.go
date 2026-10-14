@@ -66,6 +66,14 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// CaptureLossErrReporter is the optional extension implemented by hooks whose
+// count of a capture loss could not start (under the proven switch): while
+// CaptureLossesErr is not nil, what it would count is unknown, never 0, and
+// the agent reads no capture losses.
+type CaptureLossErrReporter interface {
+	CaptureLossesErr() error
+}
+
 // ListenerCounter is what the hooks give the proxy so that the kernel counts,
 // and numbers, the connections completed to the proxy's listener.
 type ListenerCounter interface {

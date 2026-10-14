@@ -202,3 +202,35 @@ func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "TLS handshake(s) with keploy's proxy failed")
 }
+
+// blindHooks count PID-map refusals but a count of theirs could not start
+// (the Unix-socket report, on a kernel that loads it neither way).
+type blindHooks struct {
+	countingHooks
+	err error
+}
+
+func (h blindHooks) CaptureLossesErr() error { return h.err }
+
+// A count the hooks could not start is unknown, never 0: the agent reads no
+// capture losses (not "unsupported", which leaves every test as it was), so a
+// session marked while it is fails every replayed test as one keploy cannot
+// judge, as a mark that could not be read does.
+func TestACaptureLossCountThatCouldNotStartIsUnknownNeverNone(t *testing.T) {
+	ctx := context.Background()
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = blindHooks{err: errors.New("no trampoline and no tracepoints")}
+	_, err := a.CaptureLosses(ctx)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, models.ErrCaptureLossesUnsupported, "unsupported leaves every test as it was")
+
+	require.NoError(t, a.resetSession(ctx))
+	claimSelf(t, a)
+	e := endPassed(t, a, "TestA")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "no trampoline and no tracepoints")
+
+	a.Hooks = blindHooks{}
+	_, err = a.CaptureLosses(ctx)
+	require.NoError(t, err, "a count that started")
+}

@@ -23,10 +23,19 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if proxyCounts && a.Proxy != nil {
 		out = append(out, proxy.CaptureLosses()...)
 	}
-	// The application's connections the hooks saw lost before the proxy
-	// got them (under the proven switch; none otherwise).
+	// The hooks' own: the application's connections lost before the proxy
+	// got them, and its AF_UNIX connects to sockets no member of it owns
+	// (under the proven switch; none otherwise).
 	if hooks, ok := a.Hooks.(coreAgent.CaptureLossReporter); ok && a.Hooks != nil {
 		out = append(out, hooks.CaptureLosses()...)
+	}
+	// A count of theirs that could not start is unknown, never 0: not
+	// models.ErrCaptureLossesUnsupported (an agent that counts nothing),
+	// which leaves every test as it was.
+	if blind, ok := a.Hooks.(coreAgent.CaptureLossErrReporter); ok && a.Hooks != nil {
+		if err := blind.CaptureLossesErr(); err != nil {
+			return nil, err
+		}
 	}
 	refusals, err := a.PIDMapRefusals(ctx)
 	switch {

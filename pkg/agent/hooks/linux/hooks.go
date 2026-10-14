@@ -64,6 +64,9 @@ type Hooks struct {
 	app     appConnState
 	appOnce sync.Once
 	appMu   sync.Mutex
+	// unix is the AF_UNIX connect report (unixconn.go), under unixMu.
+	unixMu sync.Mutex
+	unix   *unixConn
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -120,6 +123,10 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		watchPIDMapRefusals(ctx, h.logger, h.pidMapCounts, pidMapPollInterval)
 		return nil
 	})
+
+	// The application's AF_UNIX connects to sockets no member of it owns
+	// (unixconn.go): calls keploy's proxy never sees.
+	h.startUnixConn(ctx)
 
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
