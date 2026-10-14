@@ -445,6 +445,15 @@ func TestStrictNamesFieldsWithoutValues(t *testing.T) {
 	}(), "body.users.alice.smith@example.com.role") {
 		t.Fatal("the report lost the field's full name")
 	}
+	// Keys are named by the rule a call's path segments follow
+	// (models.KeyShape): a short ID with a digit and a random token in both
+	// cases are values the app sent too.
+	keys := recorded("m", "/acl", ct, `{"keys":{"kqzx9w":1,"NffrFeUfNVaHib":2},"amount":1}`)
+	if got, diag := strictMatch(t, sent("/acl", ct, `{"keys":{"kqzx9w":3,"NffrFeUfNVaHib":4},"amount":1}`), nil, nil, nil, keys); got != nil {
+		t.Fatal("served")
+	} else if d := differs(diag); strings.Join(d, ",") != "body.keys.{}" {
+		t.Fatalf("differs %v; want body.keys.{} alone", d)
+	}
 }
 
 // What is not the call is never compared: Content-Length (the body is, and a

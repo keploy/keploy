@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -790,7 +792,7 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 // variableMismatchReport is the miss report of a call a recorded call fit
 // except for a test variable: the variable, the place, the value it has in
 // the test and the one the call sent, and what to do.
-func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock) *models.MockMismatchReport {
+func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) *models.MockMismatchReport {
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -820,7 +822,84 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	if closest != nil {
 		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
 	}
-	return b.Build()
+	r := b.Build()
+	// The problem's own place, the path places the closest mock and the
+	// mocks on this call's route declare, and the segments that hold a value
+	// the test bound (routePathPlaces) hold the application's values: the
+	// miss's shape writes them {} (models.MissShape).
+	if models.IsPathPlace(p.place) {
+		r.VariablePlaces = append(r.VariablePlaces, p.place)
+	}
+	for _, place := range routePathPlaces(request, closest, pool, table) {
+		if !slices.Contains(r.VariablePlaces, place) {
+			r.VariablePlaces = append(r.VariablePlaces, place)
+		}
+	}
+	return r
+}
+
+// withRoutePlaces is r carrying, under the proven switch, the URL path places
+// a test variable holds on the call (routePathPlaces): segments that hold the
+// application's values, whatever else differs. The miss then names its path
+// escaped, as a place counts segments, so its shape writes them {}
+// (models.MissShape). A place of the closest mock off its route only writes
+// more {}. With the switch off, r is as built.
+func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+	if !provenswitch.On() || r == nil || request.URL == nil {
+		return r
+	}
+	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
+		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
+		r.VariablePlaces = places
+	}
+	return r
+}
+
+// routePathPlaces are the URL path places a test variable holds on a call:
+// those the closest mock declares; those of every mock in the pool whose
+// route the call is on (sameRoute: its method and path, the segments it
+// declares aside), so a closer recording without variables does not hide
+// them; and every segment that holds a value the test's variables have
+// (table), so a call made again after the mock that declares its place was
+// consumed, and left the pool, does not keep it. Under the proven switch
+// only.
+func routePathPlaces(request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) []string {
+	out := models.DeclaredPathPlaces(closest)
+	live := reqView{method: request.Method}
+	if request.URL != nil {
+		live.segments = pathSegments(request.URL.EscapedPath())
+	}
+	if table != nil {
+		bound := map[string]bool{}
+		for _, b := range table.Snapshot() {
+			if b.Value != "" {
+				bound[b.Value] = true
+			}
+		}
+		for i, seg := range live.segments {
+			value, err := url.PathUnescape(seg)
+			if err == nil && bound[value] {
+				if place := fmt.Sprintf("url.path[%d]", i); !slices.Contains(out, place) {
+					out = append(out, place)
+				}
+			}
+		}
+	}
+	for _, m := range pool {
+		if m == nil || m.Spec.HTTPReq == nil || len(m.Spec.Variables) == 0 {
+			continue
+		}
+		rec, ok := recordedView(m.Spec.HTTPReq)
+		if !ok || !sameRoute(live, rec, m) {
+			continue
+		}
+		for _, place := range models.DeclaredPathPlaces(m) {
+			if !slices.Contains(out, place) {
+				out = append(out, place)
+			}
+		}
+	}
+	return out
 }
 
 // exactOnly answers a call whose variables did not hold in the recording it
