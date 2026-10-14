@@ -202,8 +202,9 @@ func TestSetRealDepsNeedsAProxyThatRelaysThem(t *testing.T) {
 
 // keploy test's test case windows (Begin/ContinueTestErrorCapture, then
 // /agent/real/test) carry each case's REAL rows and the evidence charged to
-// it: a set's first case starts with what came before it as the run's; each
-// later case takes what came since the last one ended, as a miss does.
+// it: what keploy could not capture while the case ran. What came while no
+// case ran (before the first, between two) touched no case, and is the
+// run's.
 func TestKeployTestCasesCarryTheirRealRows(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	a, p := realAgent(t, models.MODE_TEST)
@@ -218,17 +219,19 @@ func TestKeployTestCasesCarryTheirRealRows(t *testing.T) {
 	require.Equal(t, []models.RealUse{{Dest: "db:5432", Conns: 1}}, got.Real)
 	require.Empty(t, got.Incomplete, "what came before the set's first case is the run's")
 
-	p.tracker.Incomplete("10.0.0.7:443", "between cases") // charged to the next case
+	p.tracker.Incomplete("10.0.0.7:443", "between cases") // touched no case: the run's
 	require.NoError(t, a.ContinueTestErrorCapture(ctx))
+	p.tracker.Incomplete("10.0.0.8:443", "in the case")
 	got, err = a.RealTest(ctx)
 	require.NoError(t, err)
 	require.Empty(t, got.Real)
 	require.Len(t, got.Incomplete, 1)
-	require.Equal(t, "10.0.0.7:443", got.Incomplete[0].Destination)
+	require.Equal(t, "10.0.0.8:443", got.Incomplete[0].Destination)
 
 	run := p.tracker.Run()
-	require.Len(t, run.Incomplete, 1)
+	require.Len(t, run.Incomplete, 2)
 	require.Equal(t, "10.0.0.6:443", run.Incomplete[0].Destination)
+	require.Equal(t, "10.0.0.7:443", run.Incomplete[1].Destination)
 
 	// An agent without a relaying proxy has nothing to report.
 	plain, _ := wireAgent(t, models.MODE_TEST)

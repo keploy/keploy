@@ -175,23 +175,23 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		stop := context.AfterFunc(ctx, func() { _ = src.Close() })
 		name, rerr := realdeps.ReadName(br)
 		stop()
-		// A connection a test's end already charged as undecided is not
-		// charged again.
-		charged := done()
+		// The tracker charges a connection closed unnamed to the open test,
+		// whatever earlier tests' ends charged it (Tracker.Pending).
 		switch {
 		case errors.Is(rerr, realdeps.ErrNoName):
 			why := realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error())
-			if !charged {
-				p.realTracker.Incomplete(dstAddr, why)
-			}
+			done(why)
 			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), zap.String("why", why))
 			return true, wrapped, nil
 		case rerr != nil:
-			if ctx.Err() == nil && !charged {
-				p.realTracker.Incomplete(dstAddr, realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
+			if ctx.Err() == nil {
+				done(realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
+			} else {
+				done("")
 			}
 			return true, wrapped, nil
 		}
+		done("")
 		dec = d.ByName(name, dst.Port())
 		if dec.Verdict == realdeps.Dependency {
 			p.logger.Debug("a connection to a mock.real name's address is for another name: a dependency",

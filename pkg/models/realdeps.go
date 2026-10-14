@@ -73,8 +73,11 @@ type RealRun struct {
 	// talked to them on the run's start time, not on the real clock (design
 	// v14 §3.4, F6).
 	Outside []string `json:"outside,omitempty" yaml:"outside,omitempty"`
-	// Incomplete is capture_incomplete evidence charged to no test: it came
-	// after the run's last test ended.
+	// Incomplete is capture_incomplete evidence charged to no test: it
+	// touched none (made before the first, between two, or after the last,
+	// design v14 §3.2 as amended for class e), it was a test's that never
+	// ended (left open, or interrupted), or no test ended while it was
+	// undecided.
 	Incomplete []CaptureIncomplete `json:"incomplete,omitempty" yaml:"incomplete,omitempty"`
 }
 

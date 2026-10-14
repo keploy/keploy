@@ -55,12 +55,17 @@ const (
 	// address keploy could neither capture nor relay as real (class e,
 	// design v14 §4): it could not read which name one was for, or a name
 	// one carried is not listed. What they carried reached nothing keploy
-	// saw. What names each destination and what to change.
+	// saw. What names each destination and what to change. Unlike the other
+	// kinds it is never an agent-life count: it is a test's own, counting
+	// the connections undecided or used while that test ran (§3.2 as
+	// amended for class e), and never taints a later test.
 	CaptureLossRealUncaptured CaptureLossKind = "real_uncaptured"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
-// agent's life, with what the latest one was (never a value the app sent).
+// agent's life, with what the latest one was (never a value the app sent);
+// for CaptureLossRealUncaptured, how many connections were charged to one
+// test.
 type CaptureLoss struct {
 	Kind  CaptureLossKind `json:"kind"`
 	Count uint64          `json:"count"`

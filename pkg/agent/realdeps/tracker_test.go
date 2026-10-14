@@ -52,52 +52,88 @@ func TestATestsRealRowsCountItsConnectionsAndFailedDials(t *testing.T) {
 	require.Empty(t, run.Incomplete)
 }
 
-func TestEvidenceIsChargedLikeAMiss(t *testing.T) {
+// Evidence of a connection keploy ended is the open test's; made while no
+// test is open (before the first test, between tests, after the last) it touched
+// no test, and is the run's: no test is charged for it.
+func TestEvidenceIsTheOpenTestsOrTheRuns(t *testing.T) {
 	tr := newTracker()
-	tr.Incomplete("10.0.0.1:443", "before the claim")
-	tr.Claimed() // the run's, not the first test's
+	tr.Incomplete("10.0.0.1:443", "before the first test")
 	tr.Incomplete("10.0.0.1:443", "between tests")
 	tr.BeginTest()
 	tr.Incomplete("10.0.0.1:443", "in the test")
 	_, inc := tr.EndTest()
-	require.Len(t, inc, 2, "the evidence made since the last end, and in the test")
-	require.Equal(t, "between tests", inc[0].Why)
-	require.Equal(t, models.CaptureIncompleteRealName, inc[1].Class)
+	require.Len(t, inc, 1, "only what was made while it was open")
+	require.Equal(t, "in the test", inc[0].Why)
+	require.Equal(t, models.CaptureIncompleteRealName, inc[0].Class)
 
 	tr.Incomplete("10.0.0.1:443", "after the last test")
 	run := tr.Run()
-	require.Len(t, run.Incomplete, 2)
-	require.Equal(t, "before the claim", run.Incomplete[0].Why)
-	require.Equal(t, "after the last test", run.Incomplete[1].Why)
+	require.Len(t, run.Incomplete, 3)
+	require.Equal(t, "before the first test", run.Incomplete[0].Why)
+	require.Equal(t, "between tests", run.Incomplete[1].Why)
+	require.Equal(t, "after the last test", run.Incomplete[2].Why)
 	require.Empty(t, tr.Run().Incomplete, "a read takes it")
 }
 
-func TestAConnectionStillUndecidedIsChargedOnce(t *testing.T) {
+// A connection that stays undecided across tests N and N+1 is charged to
+// both: it was undecided during each (design v14 §3.2 as amended for class
+// e). A test that never had it undecided is not charged, and a read charges
+// only what no test was charged.
+func TestAConnectionUndecidedAcrossTestsIsChargedToEach(t *testing.T) {
 	tr := newTracker()
+	tr.BeginTest() // N
 	done := tr.Pending(7, "10.0.0.1:3306", []string{"db.example.com"})
-	tr.BeginTest()
 	_, inc := tr.EndTest()
 	require.Len(t, inc, 1)
 	require.Equal(t, "10.0.0.1:3306", inc[0].Destination)
 	require.Contains(t, inc[0].Why, "db.example.com")
 	require.Contains(t, inc[0].Why, "the test ended")
 
-	tr.BeginTest()
+	tr.BeginTest() // N+1
 	_, inc = tr.EndTest()
-	require.Empty(t, inc, "charged once")
+	require.Len(t, inc, 1, "still undecided during N+1: charged to it too")
+	require.Empty(t, tr.Run().Incomplete, "charged to tests: none of it the run's")
+
+	// Closed unnamed between tests: every test it was undecided in was
+	// charged already.
+	done("its client closed it before naming it")
+	tr.BeginTest() // never touched it
+	_, inc = tr.EndTest()
+	require.Empty(t, inc, "a test that never had it undecided is not charged")
 	require.Empty(t, tr.Run().Incomplete)
 
-	// Decided at last: nothing more to charge.
-	done()
+	// Undecided at N's end and closed unnamed during N+1: charged to both.
+	tr.BeginTest()
+	done = tr.Pending(8, "10.0.0.2:3306", nil)
+	_, inc = tr.EndTest()
+	require.Len(t, inc, 1)
+	tr.BeginTest()
+	done("unreadable")
+	_, inc = tr.EndTest()
+	require.Len(t, inc, 1)
+	require.Equal(t, "unreadable", inc[0].Why)
+
+	// Named during a test: nothing is charged.
+	tr.BeginTest()
+	done = tr.Pending(9, "10.0.0.3:3306", nil)
+	done("")
+	_, inc = tr.EndTest()
+	require.Empty(t, inc)
+
+	// Opened and closed unnamed while no test was open: it touched no test,
+	// and is the run's.
+	tr.Pending(10, "10.0.0.4:3306", nil)("unreadable")
 	tr.BeginTest()
 	_, inc = tr.EndTest()
 	require.Empty(t, inc)
 
-	// One undecided when the results are read is the run's.
-	tr.Pending(8, "10.0.0.2:3306", []string{"db.example.com"})
+	// One undecided when the results are read, never during a test, is the
+	// run's too.
+	tr.Pending(11, "10.0.0.5:3306", []string{"db.example.com"})
 	run := tr.Run()
-	require.Len(t, run.Incomplete, 1)
-	require.Contains(t, run.Incomplete[0].Why, "results were read")
+	require.Len(t, run.Incomplete, 2)
+	require.Equal(t, "10.0.0.4:3306", run.Incomplete[0].Destination)
+	require.Contains(t, run.Incomplete[1].Why, "results were read")
 }
 
 func TestAnInterruptedTestsEvidenceIsTheRuns(t *testing.T) {
@@ -127,16 +163,17 @@ func TestResetStartsARun(t *testing.T) {
 	require.Len(t, run.Incomplete, 1, "a connection still pending belongs to the new run, charged afresh")
 }
 
-// A connection a test's end charged as undecided is charged once: its own
-// end says so.
-func TestAPendingConnectionIsChargedOnce(t *testing.T) {
+// A connection a test's end charged as undecided and closed unnamed after it,
+// with no test open, is not charged again: the test it was undecided in holds
+// it.
+func TestAPendingConnectionClosedAfterItsTestIsNotChargedAgain(t *testing.T) {
 	tr := newTracker()
-	done := tr.Pending(1, "10.0.0.1:443", []string{"a"})
-	require.False(t, tr.Pending(2, "10.0.0.2:443", []string{"a"})(), "decided before any end: not charged")
 	tr.BeginTest()
+	done := tr.Pending(1, "10.0.0.1:443", []string{"a"})
 	_, inc := tr.EndTest()
 	require.Len(t, inc, 1)
-	require.True(t, done(), "charged at the test's end")
+	done("unreadable")
+	require.Empty(t, tr.Run().Incomplete)
 }
 
 // keploy record names a test case's REAL destinations by its window: a use
@@ -213,7 +250,6 @@ func TestAPooledConnectionReachesItsDestinationWhenItAnswers(t *testing.T) {
 // makes no row for the test that began: its own sends say h2.
 func TestAnH2NoteAfterATestBoundaryMakesNoRow(t *testing.T) {
 	var tr Tracker
-	tr.Claimed()
 	tr.BeginTest()
 	tr.Sent(1, "auth.example.com:443")
 	_, _ = tr.EndTest()
@@ -221,4 +257,19 @@ func TestAnH2NoteAfterATestBoundaryMakesNoRow(t *testing.T) {
 	tr.H2("auth.example.com:443")
 	uses, _ := tr.EndTest()
 	require.Empty(t, uses)
+}
+
+// A test whose window was left open (never ended) when the next begins:
+// its evidence is the run's, never charged to the test that begins.
+func TestATestLeftOpenGivesTheRunItsEvidence(t *testing.T) {
+	tr := newTracker()
+	tr.BeginTest()
+	tr.Incomplete("10.0.0.1:443", "in the test left open")
+	require.Empty(t, tr.Run().Incomplete, "an open test's evidence is its own until it ends")
+	tr.BeginTest()
+	_, inc := tr.EndTest()
+	require.Empty(t, inc, "the test that began never touched it")
+	run := tr.Run()
+	require.Len(t, run.Incomplete, 1)
+	require.Equal(t, "in the test left open", run.Incomplete[0].Why)
 }

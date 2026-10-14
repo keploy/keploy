@@ -844,8 +844,8 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	}
 	if t := a.realTracker(); t != nil && provenswitch.On() {
 		// A set's first test: what the REAL connections did before it (the
-		// app's start-up) is the run's, and its own uses start here.
-		t.Claimed()
+		// app's start-up) touched no test and is the run's already; its own
+		// uses start here.
 		t.BeginTest()
 	}
 	return nil
@@ -858,8 +858,9 @@ func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
 	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
 		c.ContinueTestErrorCapture()
 		if t := a.realTracker(); t != nil && provenswitch.On() {
-			// What was not captured since the last test ended is this
-			// test's, as a miss is.
+			// What was not captured while no test case ran is the run's
+			// (design v14 §3.2 as amended for class e); this one's starts
+			// here.
 			t.BeginTest()
 		}
 		return nil

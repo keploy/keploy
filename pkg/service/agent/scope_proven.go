@@ -282,11 +282,6 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
 		}
 	}
-	if t := a.realTracker(); t != nil && prev != me {
-		// What the run's processes did before this one claimed it is the
-		// run's, as their misses are.
-		t.Claimed()
-	}
 	a.provenMu.Lock()
 	a.proven.claim = me
 	newClaim := prev != me || a.proven.key != key
