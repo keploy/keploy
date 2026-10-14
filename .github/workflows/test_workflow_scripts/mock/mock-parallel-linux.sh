@@ -36,6 +36,7 @@ source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # This lane's directory: the shared harness (keploy_v1.py).
+# shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"

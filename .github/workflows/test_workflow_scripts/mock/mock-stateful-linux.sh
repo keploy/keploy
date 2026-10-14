@@ -32,12 +32,15 @@
 #      each read; a connection that kept the view it opened with was served
 #      3,3 in t2), and with no pid (the one pid-less scope, which the v1
 #      wire's tests narrow under the switch).
-#   5. a mock a test consumed is not served again after that test's end.
-#      With consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1, which makes HTTP
-#      mocks per-test), t1 calls /c, then a call between tests, a test the
-#      recording does not have and t2, which recorded no call, each call /c
-#      again: each must miss. A pid-less end stages the whole pool again,
-#      t1's consumed mock with it, and each was served 1.
+#   5. a mock a test consumed is not served again after that test's end, on
+#      the worker's pid (the pid path only). With consume-once mocks
+#      (KEPLOY_STRICT_MOCK_WINDOW=1, which makes HTTP mocks per-test), t1
+#      calls /c, then a call between tests, a test the recording does not
+#      have and t2, which recorded no call, each call /c again: each must
+#      miss. A control first: with t1 making no call, the call between tests
+#      gets t1's recording, so the misses are t1's consumption. (A pid-less
+#      end stages the whole pool again, t1's consumed mock with it: the call
+#      between tests is served it. Reported, not guarded here.)
 # Without the switch every call sends the worker's pid, as today's workers
 # do; step 4's pid-less run says no pid on purpose.
 #
@@ -50,6 +53,7 @@ source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # This lane's directory: the shared harness (keploy_v1.py).
+# shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
@@ -195,10 +199,12 @@ print("KA_%s_t2=%s" % (how, b), flush=True)
 print("KA_%s_sockets=%d" % (how, len(socks)), flush=True)
 PY
 
-# Step 5: argv PORT record|replay. record: t1 reads the counter once, t2 makes
-# no call. replay: t1 reads it, then a call between tests, a test t3 the
-# recording does not have, and t2 each read it again; prints ONCE_<who>=
-# what each got, MISS when nothing answered.
+# Step 5: argv PORT record|replay|control. record: t1 reads the counter
+# once, t2 makes no call. replay: t1 reads it, then a call between tests, a
+# test t3 the recording does not have, and t2 each read it again. control:
+# t1 makes no call, then a call between tests reads it, which t1's
+# unconsumed recording can answer. Prints ONCE_<who>= what each got, MISS
+# when nothing answered.
 cat > once.py <<'PY'
 import os, sys, urllib.request
 import keploy_v1 as k
@@ -221,6 +227,9 @@ if phase == "record":
     assert test("t1", True) == "1"
     test("t2", False)
     print("ONCE_RECORD_OK", flush=True)
+elif phase == "control":
+    test("t1", False)
+    print("ONCE_control_between=" + get(), flush=True)
 else:
     print("ONCE_t1=" + test("t1", True), flush=True)
     print("ONCE_between=" + get(), flush=True)
@@ -296,7 +305,7 @@ RC=${PIPESTATUS[0]}
 echo "== 5. under the proven switch: record t1 calling /c once and t2 calling nothing =="
 # The replay that checks t1's consumed mock is not served again after t1's end
 # needs a build that judges each test (keploy enterprise; this one refuses it,
-# step 1): its lane replays this shape. Here, the recording it replays.
+# step 1), and no lane replays this shape yet. Here, only its recording.
 start_dep
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 once.py $PORT record" --name once-proven --disable-tele 2>&1 | tee rec-once-proven.log
 RC=${PIPESTATUS[0]}
@@ -336,16 +345,28 @@ for how in pid nopid; do
   has "KA_${how}_sockets=1" "rep-keepalive-$how.log" || { echo "FAIL: ($how) the client reconnected, so step 4 did not test one connection across two tests ($(grep -o "KA_${how}_sockets=[0-9]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
 done
 
-echo "== 5. without the switch: a mock t1 consumed is not served again after t1's end =="
+echo "== 5. without the switch: a mock t1 consumed is not served again after t1's end (the pid path) =="
+# On the worker's pid, as every call here sends: an end clears the worker's
+# scope. (A pid-less end stages the whole pool again, t1's consumed mock with
+# it, and the call between tests is served it: reported, not guarded here.)
 start_dep
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 once.py $PORT record" --name once --disable-tele 2>&1 | tee rec-once.log
+RC=${PIPESTATUS[0]}
 stop_dep
-grep -q "ONCE_RECORD_OK" rec-once.log || { echo "FAIL: the once record did not complete"; FAIL=1; }
+[ "$RC" -eq 0 ] && grep -q "ONCE_RECORD_OK" rec-once.log || { echo "FAIL: the once record should pass (exit 0), got $RC"; FAIL=1; }
 GOT=$(mapped_counts keploy/once/mappings.yaml)
 [ "$GOT" = "t1=1 t2=0" ] || { echo "FAIL: want t1 mapped to 1 mock and t2 to none, got '$GOT'"; FAIL=1; }
 # Consume-once mocks: KEPLOY_STRICT_MOCK_WINDOW=1 makes HTTP mocks per-test,
 # where an HTTP mock is otherwise reusable and saturates by design.
+# The control first: with t1 making no call, a call between tests is answered
+# by t1's unconsumed recording, so a miss below is t1's consumption, not a
+# call between tests that nothing could ever answer.
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT control" --name once --disable-tele 2>&1 | tee rep-once-control.log
+has "ONCE_control_between=1" rep-once-control.log ||
+  { echo "FAIL: control: with t1 making no call, the call between tests got '$(grep -o 'ONCE_control_between=[^ ]*' rep-once-control.log | head -1)', want t1's recording (1)"; FAIL=1; }
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 once.py $PORT replay" --name once --disable-tele 2>&1 | tee rep-once.log
+RC=${PIPESTATUS[0]}
+echo "the once replay exited $RC (without --strict, the test command's code)"
 has "ONCE_t1=1" rep-once.log || { echo "FAIL: t1 was not served its own recording (got: $(grep -o 'ONCE_t1=[^ ]*' rep-once.log | head -1))"; FAIL=1; }
 for who in between t3 t2; do
   case $who in
@@ -354,8 +375,12 @@ for who in between t3 t2; do
     t2) what="in t2, which recorded no call" ;;
   esac
   has "ONCE_${who}=MISS" rep-once.log ||
-    { echo "FAIL: after t1's end, the call $what was served ($(grep -o "ONCE_${who}=[^ ]*" rep-once.log | head -1)), not missed: t1's consumed mock was served again"; FAIL=1; }
+    { echo "FAIL: after t1 consumed the recording's one call, the call $what got '$(grep -o "ONCE_${who}=[^ ]*" rep-once.log | head -1)', want a miss"; FAIL=1; }
 done
+# keploy saw the three misses; the scope API without the switch never fails a
+# test at its end, so no end says it did.
+grep -qx 'missed: 3' keploy/once/last-replay.yaml || { echo "FAIL: the once replay's receipt does not count the 3 misses: $(grep -E '^(missed|consumed|loaded):' keploy/once/last-replay.yaml | tr '\n' ' ')"; FAIL=1; }
+grep -q "_FAILED_BY_KEPLOY=" rep-once.log && { echo "FAIL: an end answered fail on the scope API without the switch: $(grep -o 'ONCE_[a-z0-9]*_FAILED_BY_KEPLOY=.*' rep-once.log | head -1)"; FAIL=1; }
 fi
 
 [ "$FAIL" = 0 ] && echo "MOCK STATEFUL E2E: PASSED" || echo "MOCK STATEFUL E2E: FAILED"

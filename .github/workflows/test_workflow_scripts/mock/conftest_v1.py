@@ -12,12 +12,20 @@ trust fails the test, or, for the claim, the run.
 
 KEPLOY_E2E_NO_SKIP plays a harness that predates skipping: its begin does not
 say it can skip, which only the scope API without the proven switch takes.
+KEPLOY_E2E_NO_PID plays a harness that sends no pid on that scope API (the
+optional single shared pool): its begin and end narrow the one pid-less
+scope instead of this worker's. Under the switch no call carries a pid either
+way.
 """
 import os
 
 import pytest
 
 import keploy_v1 as k
+
+# The pid begin and end send: this worker's by default, none with
+# KEPLOY_E2E_NO_PID.
+_PID = None if os.environ.get("KEPLOY_E2E_NO_PID") else k.WORKER
 
 
 def pytest_sessionstart(session):
@@ -30,7 +38,7 @@ def pytest_sessionstart(session):
 @pytest.fixture(autouse=True)
 def keploy_scope(request):
     reason = k.begin(request.node.name, request.node.path.name,
-                     can_skip=not os.environ.get("KEPLOY_E2E_NO_SKIP"))
+                     can_skip=not os.environ.get("KEPLOY_E2E_NO_SKIP"), pid=_PID)
     if reason is not None:
         # Told not to run this test: skip, and send no end for it.
         request.node._keploy_gated = True
@@ -53,7 +61,7 @@ def pytest_runtest_makereport(item, call):
     if rep.when != "teardown":
         return
     try:
-        reason = k.end(item.name, item._keploy_worst, file=item.path.name)
+        reason = k.end(item.name, item._keploy_worst, file=item.path.name, pid=_PID)
     except k.AgentError as e:
         reason = str(e)
     if reason is not None:

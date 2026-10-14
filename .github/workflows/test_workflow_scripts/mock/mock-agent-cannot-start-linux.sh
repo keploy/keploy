@@ -62,6 +62,7 @@
 set -uo pipefail
 
 # This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh

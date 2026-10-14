@@ -35,6 +35,7 @@ if ! python3 -c "import pytest" 2>/dev/null; then
 fi
 
 # This lane's directory: the shared harness (keploy_v1.py, conftest_v1.py).
+# shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"

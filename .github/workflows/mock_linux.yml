@@ -18,7 +18,8 @@ name: Mock Mode Regression (Linux)
 # release 2; without it, replays two concurrent workers under different named
 # scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
-# per worker and per scope. Another runs more short-lived processes than the
+# per worker and per scope, and, with consume-once mocks, that a mock a test
+# consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
 # agent's PID map holds between two calls and asserts both are recorded, then
 # replayed without reaching the dependency. Another records, under the
 # proven switch, three containers of one image on random published ports and
@@ -120,7 +121,11 @@ jobs:
 
       # A stateful dependency (the same request recorded several times) must
       # replay in record order then saturate — unscoped, per concurrent scoped
-      # worker, and from the start again for a re-run of a test.
+      # worker, and from the start again for a re-run of a test. With
+      # consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1), a mock a test
+      # consumed must not be served again after that test's end, on the
+      # worker's pid; a control shows the same call is answered while the
+      # mock is unconsumed.
       - name: Run mock-mode stateful-dependency e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
