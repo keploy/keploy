@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/acceptcount"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
@@ -257,6 +258,10 @@ type Proxy struct {
 	// themselves via their own defers / context cancellation; we do
 	// not need references to force-close them.
 	activeConns sync.WaitGroup
+
+	// accepts counts every connection the listener has accepted, by the
+	// local address it arrived at (AcceptedTo).
+	accepts acceptcount.Counter
 
 	Listener net.Listener
 
@@ -2194,6 +2199,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			// Counted before anything else, by the address it arrived at:
+			// the agent compares this with the kernel's count of the
+			// connections completed to this listener (acceptcount).
+			p.accepts.Add(clientConn.LocalAddr())
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine

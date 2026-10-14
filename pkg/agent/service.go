@@ -51,6 +51,53 @@ type PIDMapReporter interface {
 	PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error)
 }
 
+// ProxyConnsReporter is the optional extension implemented by hooks that
+// count, in the kernel, the connections completed to the proxy's listener at
+// the addresses their connect hooks redirect to (models.ProxyConnCounts'
+// Established). The agent type-asserts for it; with hooks that do not
+// implement it the agent answers models.ErrProxyConnsUnsupported, "unknown".
+type ProxyConnsReporter interface {
+	// ProxyConnsEstablished is the count, only meaningful once Load has
+	// returned. It only ever grows for the life of the hooks, across a
+	// reload of their object too.
+	ProxyConnsEstablished(ctx context.Context) (uint64, error)
+	// ProxyConnTargets are the local addresses those connections are counted
+	// at: where the connect hooks send a redirected connection (the proxy's
+	// IPv4 and IPv6 address, at its port). Empty until Load has returned.
+	ProxyConnTargets() []netip.AddrPort
+}
+
+// AcceptCounter is the optional extension implemented by proxies that count
+// the connections they accept, by the local address each arrived at, from the
+// first accept on. The agent counts the ones at ProxyConnTargets, which is
+// exactly what the hooks count in the kernel.
+type AcceptCounter interface {
+	// AcceptedTo is how many accepted connections arrived at any of targets.
+	AcceptedTo(targets []netip.AddrPort) uint64
+	// WaitAcceptedTo returns once AcceptedTo(targets) >= n, or with ctx's
+	// error when ctx ends first. It has no deadline of its own; each accept
+	// wakes it.
+	WaitAcceptedTo(ctx context.Context, targets []netip.AddrPort, n uint64) error
+}
+
+// ProxyConnCounter is what the agent offers a test's begin and end (S12): the
+// connections waiting in the proxy's accept queue, as two counts, and a wait
+// for the proxy to accept up to a count. begin and end read ProxyConns, then
+// WaitProxyAccepted(ctx, counts.Established), then go on to the bytes and
+// requests the proxy holds.
+//
+// Both counts only ever grow for the life of the agent process: a caller may
+// read Established once and wait for Accepted to reach it. An agent that cannot
+// count answers models.ErrProxyConnsUnsupported ("unknown", never 0).
+// ProxyConns is cheap (a map lookup and an atomic read): a watchdog may call it
+// at every wake-up to see the wait progress.
+type ProxyConnCounter interface {
+	ProxyConns(ctx context.Context) (models.ProxyConnCounts, error)
+	// WaitProxyAccepted returns once the proxy has accepted n connections at
+	// the counted addresses, or with ctx's error. No deadline of its own.
+	WaitProxyAccepted(ctx context.Context, n uint64) error
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }

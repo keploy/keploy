@@ -291,7 +291,9 @@ jobs:
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,
   # so the test's own processes fill it), the kernel refuses the next one, and
-  # the hooks count it (GET /agent/pidmaps) and WARN once. Root-only, so it is
+  # the hooks count it (GET /agent/pidmaps) and WARN once. And the kernel's
+  # count of the connections completed to the proxy's listener agrees with the
+  # proxy's count of its accepts (what a test's end waits on). Root-only, so it is
   # behind the pidmap_integration tag and never in `go test ./...`. amd64 and
   # arm64: each runs its own architecture's object.
   pid_map_overflow:
@@ -326,6 +328,7 @@ jobs:
       - name: Run the PID map integration test (root)
         run: |
           set -o pipefail
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out
-          grep -q -- "--- PASS: TestAProcessThePIDMapRefusesIsReported" /tmp/pidmap.out ||
-            { echo "::error::TestAProcessThePIDMapRefusesIsReported did not pass"; exit 1; }
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestProxyConnsMatchWhatTheProxyAccepts' -test.v | tee /tmp/pidmap.out
+          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts; do
+            grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; exit 1; }
+          done

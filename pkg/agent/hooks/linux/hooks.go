@@ -55,6 +55,14 @@ type Hooks struct {
 
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	// proxyConnsBase is proxy_conns_established's count in the objects
+	// unloaded before the current one, so the count only grows across a
+	// reload (proxyconns.go). Under objectsMutex.
+	proxyConnsBase uint64
+	// proxyInfo is the proxy address the kernel was given (proxyInfoSet once
+	// it was), from which ProxyConnTargets derives. Under objectsMutex.
+	proxyInfo    structs.ProxyInfo
+	proxyInfoSet bool
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -568,6 +576,9 @@ func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, op
 	binary.BigEndian.PutUint32(ip4[:], info.IP4)
 	h.proxyIP4 = net.IP(ip4[:]).String()
 	h.proxyIP6 = info.IP6
+	h.objectsMutex.Lock()
+	h.proxyInfo, h.proxyInfoSet = info, true
+	h.objectsMutex.Unlock()
 	return info, nil
 }
 
@@ -652,6 +663,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
+	h.keepProxyConnsAcrossUnload()
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
