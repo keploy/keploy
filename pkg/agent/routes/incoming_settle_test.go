@@ -345,6 +345,77 @@ func TestHandleIncoming_EachLossIsInTheSummaryOfItsSessionOnce(t *testing.T) {
 	}
 }
 
+// A recording's CLI ends the session by closing its stream once its stop's
+// drain is done; the ingress never closes its test-case channel. The session's
+// summary, and the warnings of what it lost, come at that end too, not only
+// when the channel closes: otherwise a native or docker recording says neither.
+func TestHandleIncoming_TheSummaryComesWhenTheClientEndsTheStream(t *testing.T) {
+	at := newStretch() // its spans must not reach another test's test cases
+	summary, warns := incomingSessionSummary(t, func() {
+		leaveOutIncomplete(t, at)
+		leaveOutOnGlobalManager(t)
+	}, true)
+	if summary["mocks_left_out"] != int64(1) || summary["tcs_left_out_in_flight"] != uint64(1) {
+		t.Fatalf("summary mocks_left_out = %v, tcs_left_out_in_flight = %v, want 1 each",
+			summary["mocks_left_out"], summary["tcs_left_out_in_flight"])
+	}
+	if len(warns) != 1 || warns[0].ContextMap()["test_cases"] != uint64(1) {
+		t.Fatalf("the test case left out in flight is not warned of when the client ends the stream: %v", warns)
+	}
+	if summary["ended_by"] != "client" {
+		t.Fatalf("summary ended_by = %v, want client", summary["ended_by"])
+	}
+	if summary, _ := incomingSessionSummary(t, func() {}, false); summary["ended_by"] != "capture" {
+		t.Fatalf("summary ended_by = %v, want capture", summary["ended_by"])
+	}
+}
+
+// A test case the hold's bound lets go before its verdict was final is warned
+// of when the recording's client ends the stream, as the capture closing the
+// channel would: it may lack mocks, and DEBUG is the only other line about it.
+func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStream(t *testing.T) {
+	defer func(max, tick time.Duration) { testCaseHoldMax, testCaseHoldTick = max, tick }(testCaseHoldMax, testCaseHoldTick)
+	testCaseHoldMax, testCaseHoldTick = 50*time.Millisecond, 10*time.Millisecond
+
+	w := &switchWatermark{} // never settles: a parser stuck behind the traffic
+	syncmgr.Get().SetWatermark(w)
+	t.Cleanup(func() { syncmgr.Get().SetWatermark(nil) })
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	tcs := make(chan *models.TestCase, 1) // like the ingress's: never closed
+	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	defer srv.Close()
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := streamOf(t, resp)
+
+	start := newStretch().Add(time.Second)
+	tcs <- &models.TestCase{Name: "unsettled", HTTPReq: models.HTTPReq{Timestamp: start}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Millisecond)}}
+	if name, ok := nextStreamed(t, names); !ok || name != "unsettled" {
+		t.Fatalf("streamed %q (%v), want the test case the bound let go", name, ok)
+	}
+	resp.Body.Close()
+
+	deadline := time.Now().Add(streamWait)
+	for logs.FilterMessage("agent: recording complete").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no recording-complete summary once the client ended the stream")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("saved before the agent had parsed all the traffic they overlap").All()
+	if len(warned) != 1 || warned[0].ContextMap()["test_cases"] != int64(1) {
+		t.Fatalf("the test case the hold's bound let go is not warned of once when the client ends the stream: %v", warned)
+	}
+	if got := logs.FilterMessage("agent: recording complete").All()[0].ContextMap()["tcs_released_unsettled"]; got != int64(1) {
+		t.Fatalf("summary tcs_released_unsettled = %v, want 1", got)
+	}
+}
+
 // Proxy mode has no watermark, so each test case is checked as it is streamed.
 // A mock left out for the incomplete-mock flag is reported when the parser
 // reaches it, which can be after the test cases recorded over its exchange
@@ -464,6 +535,14 @@ func (c pauseCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Che
 // session wherever the handler is in between.
 func incomingSummary(t *testing.T, during func()) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
 	t.Helper()
+	return incomingSessionSummary(t, during, false)
+}
+
+// incomingSessionSummary is incomingSummary with the session ended by its
+// client closing the stream (clientCloses), as a recording's CLI ends it once
+// its stop's drain is done, or by the capture closing the test-case channel.
+func incomingSessionSummary(t *testing.T, during func(), clientCloses bool) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
+	t.Helper()
 	core, logs := observer.New(zap.DebugLevel)
 	release := make(chan struct{})
 	released := false
@@ -486,9 +565,15 @@ func incomingSummary(t *testing.T, during func()) (summary map[string]interface{
 	during()
 	close(release)
 	released = true
-	close(tcs)
-	_ = streamedNames(t, resp)
-	deadline := time.Now().Add(5 * time.Second)
+	if clientCloses {
+		// The ingress never closes its channel: the stream ends with its
+		// client.
+		resp.Body.Close()
+	} else {
+		close(tcs)
+		_ = streamedNames(t, resp)
+	}
+	deadline := time.Now().Add(streamWait)
 	for logs.FilterMessage("agent: recording complete").Len() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("no recording-complete summary")

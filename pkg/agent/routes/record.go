@@ -381,6 +381,10 @@ func (f *flushOnWrite) Write(p []byte) (int, error) {
 // tell what the stream does at once from what its tick does.
 var testCaseHoldTick = syncmgr.TestCaseHoldTick
 
+// testCaseHoldMax is how long HandleIncoming holds a test case for its verdict
+// at most (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
+var testCaseHoldMax = syncmgr.TestCaseHoldMax
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -586,7 +590,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// completes (syncMock settle.go). Without one, test cases go at once.
 	var hold *syncmgr.TestCaseHold
 	if w := syncmgr.Get().Watermark(); w != nil {
-		hold = syncmgr.NewTestCaseHold(w, syncmgr.TestCaseHoldMax, syncmgr.TestCaseHoldBytes)
+		hold = syncmgr.NewTestCaseHold(w, testCaseHoldMax, syncmgr.TestCaseHoldBytes)
 		// A stream that ends while it holds test cases (its client went
 		// away, or it broke) sends none of them.
 		defer func() {
@@ -638,6 +642,107 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		syncmgr.Get().NoteHeld(hold.Oldest())
 		return true
 	}
+	// summarize says what this session recorded, and what it lost, however the
+	// stream ends (endedBy): the capture closing tc, the recording's client
+	// closing the stream once its stop's drain is done (how a native or docker
+	// recording ends: the ingress never closes tc), or the stream breaking.
+	endedBy := "broken"
+	summarize := func() {
+		_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
+		orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
+		pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
+		// Suppression protects replay from test cases whose mocks
+		// were never captured, but it is coarse: the windows are
+		// timestamp-based and session-wide, so a connection that
+		// stays busy while un-capturable can take a large share of
+		// the run with it — including test cases that other,
+		// healthy connections served completely. At a few percent
+		// that is the intended trade; at a third of the session the
+		// operator has a materially thinner recording than they
+		// think, and must be told at a level they actually see.
+		logRecordingComplete := a.logger.Info
+		if total := tcsSentSoFar + tcsSuppressedSoFar; total > 0 &&
+			tcsSuppressedSoFar*100/total >= massSuppressionPercent {
+			logRecordingComplete = a.logger.Warn
+		}
+		// Read once: the warning and the summary say the same.
+		leftOutInFlight := leftOut.LeftOut()
+		if leftOutInFlight > 0 {
+			// Never captured, so never counted above: each stayed in
+			// flight while the mocks the agent held for the requests
+			// in flight passed their budget, or memory pressure let
+			// them go, and was left out rather than recorded without
+			// its mocks. The manager warns of the first and every
+			// 1024th; this is the session's count.
+			a.logger.Warn("agent: some test cases were left out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+				zap.Uint64("test_cases", leftOutInFlight),
+				zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
+		}
+		if tcsUnsettled > 0 {
+			// The capture's parsers ran more than the hold's bound
+			// behind: these were checked against what was known then.
+			a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+				zap.Int("test_cases", tcsUnsettled),
+				zap.Duration("held_up_to", testCaseHoldMax))
+		}
+		logRecordingComplete("agent: recording complete",
+			// How the stream ended: "client" (it closed the stream),
+			// "capture" (it closed its channel) or "broken".
+			zap.String("ended_by", endedBy),
+			zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+			zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
+			// _total is how often each suppressor fired; the spans
+			// are what they were kept as, after overlapping and (past
+			// the cap) joining (syncMock.Spans).
+			zap.Int("pressure_ranges_total", pressureRecorded),
+			zap.Int("pressure_spans", pressureSpans),
+			zap.Int("orphan_ranges_total", orphanRecorded),
+			zap.Int("orphan_spans_closed", orphanClosed),
+			zap.Int("orphan_ranges_still_open", orphanOpen),
+			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			// Every mock a parser left out, the exchange it stopped
+			// on included, each reported with Session.ReportLeftOut
+			// (Session.ReportStoppedOn for the one it stopped on):
+			// for the incomplete-mock flag (a chunk the relay
+			// dropped, a short write, a decode error), for a reason
+			// of the parser's own, or for the server bytes that
+			// start a connection the capture joined mid-way, the
+			// answer to a request it does not have
+			// (Session.NextRequest). A parser's own reasons: a
+			// MySQL command that does not decode, that the replayer
+			// cannot serve, or whose response cannot be framed is
+			// left out alone, and the connection's recording goes
+			// on; an HTTP/1 request or response that does not
+			// decode stops the parser, and so does a MySQL command
+			// in which the framing of the client's stream is lost,
+			// or whose response cannot be framed with no way to
+			// take the connection up again after it (a client that
+			// pipelines its commands, say); an HTTP/2 stream reset
+			// before it completed is left out, which the capture
+			// did not lose: its call did not complete. Their WARN
+			// is rate-limited, so this is where each is counted:
+			// the ones reported while this session was open, as
+			// tcs_left_out_in_flight counts its test cases left out
+			// in flight, so a later session's summary does not
+			// count them again. What a connection carried after its
+			// recording stopped is in the orphan spans above, not
+			// here: it was never parsed into mocks to count.
+			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
+			zap.Int64("mocks_added_successfully", finalAdded),
+			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
+			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+			zap.Int("tcs_released_unsettled", tcsUnsettled),
+			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
+			// Held for their verdicts when the stream ended, and not sent
+			// (the hold's Drain). A client ends its stream holding none from
+			// before its stop unless its drain gave up, which it says: these
+			// are what the app served after the stop, or what that drain lost.
+			zap.Int("tcs_held_at_end", heldLen(hold)),
+		)
+	}
+	// Before the hold's Drain (deferred earlier, so run later): what it still
+	// holds is counted first.
+	defer summarize()
 	for {
 		var tickC <-chan time.Time
 		if holdTick != nil {
@@ -646,6 +751,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
+			endedBy = "client"
 			return
 		case <-tickC:
 			if !release() {
@@ -661,6 +767,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					}
 					select {
 					case <-r.Context().Done():
+						endedBy = "client"
 						return
 					case <-holdTick.C:
 					}
@@ -668,89 +775,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-				_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
-				orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
-				pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
-				// Suppression protects replay from test cases whose mocks
-				// were never captured, but it is coarse: the windows are
-				// timestamp-based and session-wide, so a connection that
-				// stays busy while un-capturable can take a large share of
-				// the run with it — including test cases that other,
-				// healthy connections served completely. At a few percent
-				// that is the intended trade; at a third of the session the
-				// operator has a materially thinner recording than they
-				// think, and must be told at a level they actually see.
-				logRecordingComplete := a.logger.Info
-				if total := tcsSentSoFar + tcsSuppressedSoFar; total > 0 &&
-					tcsSuppressedSoFar*100/total >= massSuppressionPercent {
-					logRecordingComplete = a.logger.Warn
-				}
-				// Read once: the warning and the summary say the same.
-				leftOutInFlight := leftOut.LeftOut()
-				if leftOutInFlight > 0 {
-					// Never captured, so never counted above: each stayed in
-					// flight while the mocks the agent held for the requests
-					// in flight passed their budget, or memory pressure let
-					// them go, and was left out rather than recorded without
-					// its mocks. The manager warns of the first and every
-					// 1024th; this is the session's count.
-					a.logger.Warn("agent: some test cases were left out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
-						zap.Uint64("test_cases", leftOutInFlight),
-						zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
-				}
-				if tcsUnsettled > 0 {
-					// The capture's parsers ran more than the hold's bound
-					// behind: these were checked against what was known then.
-					a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
-						zap.Int("test_cases", tcsUnsettled),
-						zap.Duration("held_up_to", syncmgr.TestCaseHoldMax))
-				}
-				logRecordingComplete("agent: recording complete",
-					zap.Int("tcs_sent_to_cli", tcsSentSoFar),
-					zap.Int("tcs_suppressed_total", tcsSuppressedSoFar),
-					// _total is how often each suppressor fired; the spans
-					// are what they were kept as, after overlapping and (past
-					// the cap) joining (syncMock.Spans).
-					zap.Int("pressure_ranges_total", pressureRecorded),
-					zap.Int("pressure_spans", pressureSpans),
-					zap.Int("orphan_ranges_total", orphanRecorded),
-					zap.Int("orphan_spans_closed", orphanClosed),
-					zap.Int("orphan_ranges_still_open", orphanOpen),
-					zap.Int64("mocks_dropped_by_pressure", finalDropped),
-					// Every mock a parser left out, the exchange it stopped
-					// on included, each reported with Session.ReportLeftOut
-					// (Session.ReportStoppedOn for the one it stopped on):
-					// for the incomplete-mock flag (a chunk the relay
-					// dropped, a short write, a decode error), for a reason
-					// of the parser's own, or for the server bytes that
-					// start a connection the capture joined mid-way, the
-					// answer to a request it does not have
-					// (Session.NextRequest). A parser's own reasons: a
-					// MySQL command that does not decode, that the replayer
-					// cannot serve, or whose response cannot be framed is
-					// left out alone, and the connection's recording goes
-					// on; an HTTP/1 request or response that does not
-					// decode stops the parser, and so does a MySQL command
-					// in which the framing of the client's stream is lost,
-					// or whose response cannot be framed with no way to
-					// take the connection up again after it (a client that
-					// pipelines its commands, say); an HTTP/2 stream reset
-					// before it completed is left out, which the capture
-					// did not lose: its call did not complete. Their WARN
-					// is rate-limited, so this is where each is counted:
-					// the ones reported while this session was open, as
-					// tcs_left_out_in_flight counts its test cases left out
-					// in flight, so a later session's summary does not
-					// count them again. What a connection carried after its
-					// recording stopped is in the orphan spans above, not
-					// here: it was never parsed into mocks to count.
-					zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
-					zap.Int64("mocks_added_successfully", finalAdded),
-					zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
-					zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
-					zap.Int("tcs_released_unsettled", tcsUnsettled),
-					zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
-				)
+				endedBy = "capture"
 				return
 			}
 
@@ -774,6 +799,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			syncmgr.Get().NoteHeld(hold.Oldest())
 		}
 	}
+}
+
+// heldLen is how many test cases hold holds: none without a hold.
+func heldLen(hold *syncmgr.TestCaseHold) int {
+	if hold == nil {
+		return 0
+	}
+	return hold.Len()
 }
 
 // discardUpload deletes the files t's upload was written to (conn.Capture): t

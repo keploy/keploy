@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -56,16 +57,25 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	clientFrameCh := make(chan frameChunk, 512)
 	destFrameCh := make(chan frameChunk, 512)
 
+	// Every chunk teed is being built into a test case, as far as a
+	// recording's stop can tell, from before it is stamped until the parser
+	// has taken all of it and the emitter has captured the calls it
+	// completed, into the recorder's queue: the stop waits for it
+	// (syncMock BacklogBefore). Without this, the agent answers "clear" while
+	// a gRPC call that ended before the stop is still in this pipeline, and
+	// the stop ends the stream without it.
+	building := syncMock.FromContextOrGlobal(ctx).BuildingTestCase
+
 	// Forward client → dest, tee copies to channel
 	go func() {
 		defer close(clientFrameCh)
-		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false)
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false, building)
 	}()
 
 	// Forward dest → client, tee copies to channel
 	go func() {
 		defer close(destFrameCh)
-		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true)
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building)
 	}()
 
 	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
@@ -74,18 +84,38 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		Utils.CaptureGRPC(ctx, logger, t, stream, appPort, synchronous, mapping)
 	}
 
-	// Single emitter goroutine to avoid duplicate test case emission.
+	// Single emitter goroutine to avoid duplicate test case emission. Each
+	// pass releases the chunks the parsers had handed it before it began
+	// (parsed): every call those chunks completed was in the stream manager
+	// by then, and the pass captures it.
+	var emitMu sync.Mutex
+	var parsedChunks []func()
+	emit := func() {
+		emitMu.Lock()
+		done := parsedChunks
+		parsedChunks = nil
+		emitMu.Unlock()
+		emitCompleteStreams(logger, sm, captureStream)
+		for _, d := range done {
+			d()
+		}
+	}
 	emitCh := make(chan struct{}, 1)
 	emitDone := make(chan struct{})
 	go func() {
 		defer close(emitDone)
 		for range emitCh {
-			emitCompleteStreams(logger, sm, captureStream)
+			emit()
 		}
-		emitCompleteStreams(logger, sm, captureStream)
+		emit()
 	}()
 
-	triggerEmit := func() {
+	parsed := func(done []func()) {
+		if len(done) > 0 {
+			emitMu.Lock()
+			parsedChunks = append(parsedChunks, done...)
+			emitMu.Unlock()
+		}
 		select {
 		case emitCh <- struct{}{}:
 		default:
@@ -98,13 +128,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Parse client→app frames (requests)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(ctx, logger, clientFrameCh, sm, false, triggerEmit)
+		parseFramesFromChan(ctx, logger, clientFrameCh, sm, false, parsed)
 	}()
 
 	// Parse app→client frames (responses)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, triggerEmit)
+		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, parsed)
 	}()
 
 	parseWg.Wait()
@@ -127,16 +157,45 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 type frameChunk struct {
 	data      []byte
 	timestamp time.Time
+	// built, when set, says the chunk is through the pipeline: its parser has
+	// taken all of it, and the emitter has captured what it completed (or it
+	// was let go). See building in RecordIncoming.
+	built func()
+	// teeEnded marks the end of what the forwarder tees (memory pressure
+	// stopped it for good): the parser gives up, as the rest of the frame it
+	// is in the middle of will never come.
+	teeEnded bool
 }
 
-func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, stampAfterWrite bool) {
+// recordingPaused reports memory pressure (memoryguard): a variable so a test
+// can stop the tee.
+var recordingPaused = memoryguard.IsRecordingPaused
+
+// release calls built, if set.
+func release(built func()) {
+	if built != nil {
+		built()
+	}
+}
+
+// forwardAndTee's building, when set, notes each chunk it tees as being built
+// into a test case (syncMock BuildingTestCase), from before the chunk is
+// stamped, at a time no later than its stamp: a stop that asks about a time
+// before its stamp is told of it from then on, however long the forwarder
+// waits between the two.
+func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, stampAfterWrite bool, building func(time.Time) func()) {
 	buf := make([]byte, 32*1024)
-	teeActive := !memoryguard.IsRecordingPaused()
+	teeActive := !recordingPaused()
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
+			var built func()
+			if teeActive && building != nil {
+				built = building(time.Now())
+			}
 			readAt := time.Now()
 			if _, wErr := dst.Write(buf[:n]); wErr != nil {
+				release(built)
 				logger.Debug("forward write error",
 					zap.String("direction", direction), zap.Error(wErr))
 				return
@@ -146,14 +205,17 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 				timestamp = time.Now()
 			}
 			if teeActive {
-				if memoryguard.IsRecordingPaused() {
+				if recordingPaused() {
 					teeActive = false
+					release(built)
+					ch <- frameChunk{teeEnded: true}
 				} else {
 					data := make([]byte, n)
 					copy(data, buf[:n])
 					ch <- frameChunk{
 						data:      data,
 						timestamp: timestamp,
+						built:     built,
 					} // blocking send — preserves stream integrity
 				}
 			}
@@ -169,16 +231,53 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 }
 
 // parseFramesFromChan reconstructs HTTP/2 frames from timestamped byte chunks
-// received via channel, then feeds them to the DefaultStreamManager.
-func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, triggerEmit func()) {
+// received via channel, then feeds them to the DefaultStreamManager. After the
+// frames of each chunk, it calls parsed with what releases the chunks it has
+// taken all of (frameChunk.built), for the emitter to release once it has
+// captured what their frames completed; parsed also wakes the emitter. When it
+// stops, it hands parsed the chunks it took part of at once (it gave up
+// mid-chunk, or the stream ended mid-frame), and releases those it never takes
+// (drainFrameChunks) as they come: none waits for the connection to end.
+func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
 	var buffer []byte
 	prefaceRead := isOutgoing
+
+	// inBuffer is the chunks with bytes still in buffer, oldest first, by
+	// where each ends in the stream; appended is how many bytes the stream
+	// has given so far.
+	type bufferedChunk struct {
+		end   int64
+		built func()
+	}
+	var inBuffer []bufferedChunk
+	var appended int64
+	// handOff hands parsed the chunks still in buffer: frames of them may be
+	// in the stream manager, and the emitter's next pass captures what they
+	// completed before it releases them.
+	handOff := func() {
+		if len(inBuffer) == 0 {
+			return
+		}
+		done := make([]func(), 0, len(inBuffer))
+		for _, c := range inBuffer {
+			done = append(done, c.built)
+		}
+		inBuffer = nil
+		parsed(done)
+	}
+	// giveUp stops parsing: what it took goes on at once, and what is left
+	// on ch is released as it comes, until the forwarder closes ch.
+	giveUp := func() {
+		handOff()
+		drainFrameChunks(ch)
+	}
+	defer handOff()
 
 	for {
 		var chunk frameChunk
 		select {
 		case <-ctx.Done():
-			drainFrameChunks(ch)
+			giveUp()
 			return
 		case next, ok := <-ch:
 			if !ok {
@@ -187,10 +286,19 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			chunk = next
 		}
 
+		if chunk.teeEnded {
+			giveUp()
+			return
+		}
 		if len(chunk.data) == 0 {
+			release(chunk.built)
 			continue
 		}
 		buffer = append(buffer, chunk.data...)
+		appended += int64(len(chunk.data))
+		if chunk.built != nil {
+			inBuffer = append(inBuffer, bufferedChunk{end: appended, built: chunk.built})
+		}
 
 		if !prefaceRead {
 			if len(buffer) < len(http2.ClientPreface) {
@@ -198,13 +306,14 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			}
 			if !bytes.Equal(buffer[:len(http2.ClientPreface)], []byte(http2.ClientPreface)) {
 				logger.Debug("unexpected bytes instead of HTTP/2 preface")
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			buffer = buffer[len(http2.ClientPreface):]
 			prefaceRead = true
 		}
 
+		handled := false
 		for {
 			if len(buffer) < 9 {
 				break
@@ -215,7 +324,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 					zap.Bool("isOutgoing", isOutgoing),
 					zap.Uint32("frameLength", frameLength),
 					zap.Uint32("maxFrameSize", pkg.MaxFrameSize))
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			frameSize := int(frameLength) + 9
@@ -226,7 +335,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			frame, consumed, err := pkg.ExtractHTTP2Frame(buffer[:frameSize])
 			if err != nil {
 				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			buffer = buffer[consumed:]
@@ -237,14 +346,27 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 			if err := sm.HandleFrame(frame, isOutgoing, chunk.timestamp); err != nil {
 				logger.Debug("stream manager error", zap.Error(err))
 			}
+			handled = true
+		}
 
-			triggerEmit()
+		// The chunks taken all of: their frames are in the stream manager.
+		taken := appended - int64(len(buffer))
+		var done []func()
+		for len(inBuffer) > 0 && inBuffer[0].end <= taken {
+			done = append(done, inBuffer[0].built)
+			inBuffer = inBuffer[1:]
+		}
+		if handled || len(done) > 0 {
+			parsed(done)
 		}
 	}
 }
 
+// drainFrameChunks takes what is left on ch until it closes, releasing each
+// chunk: nothing will be built of it.
 func drainFrameChunks(ch <-chan frameChunk) {
-	for range ch {
+	for c := range ch {
+		release(c.built)
 	}
 }
 

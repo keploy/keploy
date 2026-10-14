@@ -1397,6 +1397,48 @@ func (m *SyncMockManager) CloseOutChan() {
 	m.outChanClosed = true
 }
 
+// flushTake is what FlushOwnedWindows does with a buffered mock
+// (flushTakeLocked): every take but flushKeep moves it out of the buffer.
+type flushTake int
+
+const (
+	// flushKeep: no window can take it yet; it stays buffered for one.
+	flushKeep flushTake = iota
+	// flushReusable: a session or connection mock, sent as it is.
+	flushReusable
+	// flushOwned: in a resolved kept window, sent for that window's test.
+	flushOwned
+	// flushDuplicates: in a resolved static-dedup duplicate's window: a
+	// startup mock is sent, any other held for a request in flight or dropped.
+	flushDuplicates
+	// flushStartup: a startup mock no window owns, sent.
+	flushStartup
+	// flushClaimed: in a resolved kept window's part after its yield, which a
+	// request in flight claims: held for that request.
+	flushClaimed
+)
+
+// flushTakeLocked is what the next FlushOwnedWindows does with mock, and the
+// windows it does it by (ownerOrSharedLocked). BacklogBefore asks it too: what
+// a flush will take is still to be handed on. Caller holds m.mu.
+func (m *SyncMockManager) flushTakeLocked(mock *models.Mock) (take flushTake, w resolvedWindow, shared resolvedWindow, behind bool) {
+	if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+		return flushReusable, w, shared, false
+	}
+	w, ok, shared, behind := m.ownerOrSharedLocked(mock.Spec.ReqTimestampMock)
+	switch {
+	case ok && w.keep:
+		return flushOwned, w, shared, behind
+	case ok:
+		return flushDuplicates, w, shared, behind
+	case isStartupMock(mock):
+		return flushStartup, w, shared, behind
+	case behind:
+		return flushClaimed, w, shared, behind
+	}
+	return flushKeep, w, shared, behind
+}
+
 // FlushOwnedWindows forwards every buffered mock that can be attributed
 // right now — session/connection mocks (reusable, never window-bound) and
 // per-test mocks whose ReqTimestampMock falls inside an already-resolved
@@ -1440,30 +1482,29 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		if mock == nil {
 			continue
 		}
-		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+		take, w, shared, behind := m.flushTakeLocked(mock)
+		switch take {
+		case flushReusable:
 			// Reusable across tests; flush verbatim (never renamed),
 			// matching ResolveRange's lifetime carve-out. Owned by no
 			// specific test → owner "" (a capacity drop records nothing).
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 			continue
-		}
-		w, ok, shared, behind := m.ownerOrSharedLocked(mock.Spec.ReqTimestampMock)
-		if ok {
-			if !w.keep {
-				// A static-dedup duplicate's window (sync mode): its late mocks
-				// go the way its in-time ones went in ResolveRange — pruned,
-				// except a startup-window mock, which is rescued with no owner
-				// and no mapping (a duplicate's testName is synthetic), and one
-				// a request still in flight may own, which is held for it.
-				if isStartupMock(mock) {
-					mock.Name = "mock-" + generateRandomString(8)
-					noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
-					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
-				} else {
-					m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
-				}
-				continue
+		case flushDuplicates:
+			// A static-dedup duplicate's window (sync mode): its late mocks
+			// go the way its in-time ones went in ResolveRange — pruned,
+			// except a startup-window mock, which is rescued with no owner
+			// and no mapping (a duplicate's testName is synthetic), and one
+			// a request still in flight may own, which is held for it.
+			if isStartupMock(mock) {
+				mock.Name = "mock-" + generateRandomString(8)
+				noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
+				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
+			} else {
+				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
 			}
+			continue
+		case flushOwned:
 			mock.Name = "mock-" + generateRandomString(8)
 			if w.mapping {
 				if lateMappings == nil {
@@ -1475,20 +1516,18 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			// drop suppresses that TC.
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock, owner: w.testName})
 			continue
-		}
-		// STARTUP RESCUE: a startup-window mock the ownerWindowLocked check above
-		// didn't claim (boot traffic owns no window; an early-test mock whose
-		// window hasn't resolved yet on this ticker tick). Flush it to disk
-		// proactively rather than leaving it parked in the buffer where a dedup
-		// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
-		// is ever persisted. Owns no specific test → owner "".
-		if isStartupMock(mock) {
+		case flushStartup:
+			// STARTUP RESCUE: a startup-window mock the ownerWindowLocked check above
+			// didn't claim (boot traffic owns no window; an early-test mock whose
+			// window hasn't resolved yet on this ticker tick). Flush it to disk
+			// proactively rather than leaving it parked in the buffer where a dedup
+			// cleanup, stale-cutoff, or memory-pressure wipe could reap it before it
+			// is ever persisted. Owns no specific test → owner "".
 			mock.Name = "mock-" + generateRandomString(8)
 			noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
 			mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			continue
-		}
-		if behind {
+		case flushClaimed:
 			// In a resolved kept window's part after its yield, and a request
 			// in flight claims it: held for that request now, with the window
 			// it goes back to if that request ends without it.
