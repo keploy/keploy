@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +39,38 @@ func awaitReport(t *testing.T, path string, ok func(TeardownProgress) bool) Tear
 	}
 }
 
+// startReporter starts a reporter (reportTeardownProgress) writing to sink,
+// stopped when the test ends -- and waited for, before the test's temporary
+// directory is removed: a reporter still writing there would leave a file
+// behind, and the removal would fail.
+func startReporter(t *testing.T, ctx context.Context, sink progressSink, between func()) {
+	t.Helper()
+	stop := make(chan struct{})
+	exited := reportTeardownProgress(ctx, zap.NewNop(), sink, stop, between)
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-exited:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Error("the reporter did not return once stopped")
+		}
+	})
+}
+
+// recordingSink keeps the reports a reporter writes, in order, up to its
+// capacity; it drops the rest rather than block the reporter.
+type recordingSink chan []byte
+
+func (recordingSink) clear() error { return nil }
+
+func (r recordingSink) write(b []byte) error {
+	select {
+	case r <- append([]byte(nil), b...):
+	default: // the test reads only the first few
+	}
+	return nil
+}
+
 // The reporter writes nothing until the teardown begins (the root context's
 // cancel), and removes what an earlier agent left; from then on it reports at
 // once, on every step and on the end of the detach, and on every beat.
@@ -53,9 +86,7 @@ func TestReportTeardownProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, begin := context.WithCancel(context.Background())
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	reportTeardownProgress(ctx, zap.NewNop(), pathSink(path), stop)
+	startReporter(t, ctx, pathSink(path), nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("an earlier agent's report is still there (%v): it would pass for this agent's", err)
 	}
@@ -93,9 +124,7 @@ func TestTeardownWorkIsReportedBusy(t *testing.T) {
 	teardownBeat = 5 * time.Millisecond
 	path := filepath.Join(t.TempDir(), "teardown.json")
 	ctx, begin := context.WithCancel(context.Background())
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	reportTeardownProgress(ctx, zap.NewNop(), pathSink(path), stop)
+	startReporter(t, ctx, pathSink(path), nil)
 	begin()
 	before := awaitReport(t, path, func(TeardownProgress) bool { return true }).Seq
 	end := BeginTeardownWork()
@@ -103,4 +132,69 @@ func TestTeardownWorkIsReportedBusy(t *testing.T) {
 	end()
 	end() // once
 	awaitReport(t, path, func(p TeardownProgress) bool { return !p.Busy && p.Seq == before+2 })
+}
+
+// A report never pairs a step from before a stage of teardown work ended with
+// an agent no longer busy: the CLI would count every beat since the last
+// report it read, up to the whole stage, as checks without progress. It rests
+// on two orders, and each case guards one: the work ends between the report's
+// loads (Busy, then Seq), and the report is taken as the work ends (its step,
+// then the end of the work). Either way the report reads the work in progress
+// or the step that ended it.
+func TestATeardownReportIsNeverTorn(t *testing.T) {
+	if TeardownBusy() {
+		t.Fatal("teardown work an earlier test began is still in progress: every report reads busy, and this test would prove nothing")
+	}
+	// Either case's report is the same: taken with the work in progress, it
+	// still reads it so, and the end's step too.
+	assertNotTorn := func(t *testing.T, before uint64, p TeardownProgress) {
+		t.Helper()
+		if p.Seq == before && !p.Busy {
+			t.Fatalf("a torn report: no step since %d and not busy, across a stage of work (%+v)", before, p)
+		}
+		if !p.Busy || p.Seq != before+1 {
+			t.Fatalf("the report read Busy=%v and %d steps since %d, want the work in progress and the one step that ended it: its hook ran out of place, or the order this case guards is broken (%+v)", p.Busy, p.Seq-before, before, p)
+		}
+	}
+	t.Run("the work ends between the report's loads", func(t *testing.T) {
+		// The reporter the agent runs, its teardown begun, taking its first
+		// report as the work ends.
+		end := BeginTeardownWork()
+		defer end() // once: a no-op if the report ended it
+		before := TeardownSteps()
+		var ended atomic.Bool
+		reports := make(recordingSink, 8)
+		ctx, begin := context.WithCancel(context.Background())
+		begin()
+		startReporter(t, ctx, reports, func() {
+			if ended.CompareAndSwap(false, true) {
+				end()
+			}
+		})
+		var p TeardownProgress
+		select {
+		case b := <-reports:
+			var err error
+			if p, err = ParseTeardownProgress(b); err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("the reporter wrote no report")
+		}
+		if !ended.Load() {
+			t.Fatal("the report never ran its hook between its loads: this case proves nothing")
+		}
+		assertNotTorn(t, before, p)
+	})
+	t.Run("the report is taken as the work ends", func(t *testing.T) {
+		var p TeardownProgress
+		taken := false
+		end := beginTeardownWork(func() { p = snapshotTeardown(7, nil); taken = true })
+		before := TeardownSteps()
+		end()
+		if !taken {
+			t.Fatal("the end of the work never ran its hook between its step and the end: this case proves nothing")
+		}
+		assertNotTorn(t, before, p)
+	})
 }
