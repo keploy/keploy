@@ -25,12 +25,18 @@
 # test (keploy enterprise does), refuses the replay under the switch before
 # it runs the command, and the dependency sees nothing. Replayed without the
 # switch, today's default, which the flip deletes with the switch.
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own. Each keploy run ends when keploy exits: no clock bounds it.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
@@ -90,8 +96,9 @@ answered() {
   grep -qx "after-churn 200" "$1" || fail "$2: the call after the churn did not get a 200"
 }
 
+if half on; then
 echo "== record under the proven switch: one call, $CHURN short-lived processes, another call =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 30 300 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn-proven --disable-tele > rec-proven.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn-proven --disable-tele > rec-proven.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "record under the switch: keploy exited $rc, want 0"
 answered rec-proven.log "record under the switch"
@@ -102,7 +109,7 @@ done
 
 : > dep.log
 echo "== replay under the proven switch: refused by this build, nothing run =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 30 300 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn-proven --disable-tele > rep-proven.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn-proven --disable-tele > rep-proven.log 2>&1
 rc=$?
 [ "$rc" = 1 ] || fail "replay under the switch: keploy exited $rc, want this build's refusal (1)"
 grep -q "needs a keploy build that judges each test" rep-proven.log ||
@@ -110,8 +117,11 @@ grep -q "needs a keploy build that judges each test" rep-proven.log ||
 grep -q "before-churn" rep-proven.log && fail "replay under the switch: the refused replay ran the command"
 [ -s dep.log ] && fail "replay under the switch: the refused replay reached the dependency: $(tr '\n' ' ' < dep.log)"
 
+fi
+
+if half off; then
 echo "== record without the switch: the same =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= timeout -k 30 300 "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "bash churn.sh" --name churn --disable-tele > rec.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "record: keploy exited $rc, want 0"
 answered rec.log record
@@ -122,16 +132,18 @@ done
 
 : > dep.log
 echo "== replay without the switch: the same command, the dependency up and logging =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= timeout -k 30 300 "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "bash churn.sh" --name churn --disable-tele > rep.log 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail "replay: keploy exited $rc, want 0"
 answered rep.log replay
 if [ -s dep.log ]; then
   fail "replay: these calls went to the real dependency instead of a mock: $(tr '\n' ' ' < dep.log)"
 fi
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   for l in rec-proven rep-proven rec rep; do
+    [ -f "$l.log" ] || continue
     echo "--- the last 40 lines of $l.log ---"
     tail -n 40 "$l.log"
   done

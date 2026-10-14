@@ -30,12 +30,18 @@
 #
 # Every case runs twice: without the proven switch (today's default) and under
 # KEPLOY_PROVEN=1, which the flip makes the default (cases named proven-*).
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 #
 # Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
 # image, which defaults to the runner's own distribution so the binary finds
 # the libc it was built against.
 set -uo pipefail
 
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
 # shellcheck disable=SC1091
@@ -203,8 +209,8 @@ cases() {
   succeeds "${P}control"
 }
 
-cases "" ""
-cases proven- 1
+half off && cases "" ""
+half on && cases proven- 1
 
 if [ "$FAIL" -ne 0 ]; then
   echo "config-guard e2e FAILED"

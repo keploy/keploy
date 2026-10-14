@@ -42,13 +42,18 @@
 #
 # Every case runs twice: without the proven switch (today's default) and under
 # KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven). A
-# hang-up must match SIGTERM in each.
+# hang-up must match SIGTERM in each. MOCK_LANE_SWITCH (lane_switch.sh) picks
+# the half a run runs; CI runs each in a job of its own.
 #
 # Run it as a user with passwordless sudo, not as root.
 #
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
 # Resolved: keploy starts its agent at the path its own binary resolves to.
@@ -283,8 +288,8 @@ all_cases() {
   grep -aq "Starting native agent with PTY" "$WORK/hup-pty$x/out" ||
     fail "hup-pty$x: keploy did not start its agent on a terminal of its own, so the case did not check what it is for"
 }
-all_cases ""
-all_cases -proven
+half off && all_cases ""
+half on && all_cases -proven
 
 if [ "$FAIL" -ne 0 ]; then
   for c in term hup-gap hup-nogap hup-user hup-pty term-proven hup-gap-proven hup-nogap-proven hup-user-proven hup-pty-proven; do

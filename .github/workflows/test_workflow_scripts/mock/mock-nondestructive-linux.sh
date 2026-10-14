@@ -19,6 +19,8 @@
 # (today's default) and under KEPLOY_PROVEN=1, which the flip makes the
 # default. This build does not judge each test (keploy enterprise does), so
 # under the switch a record is kept or not exactly as without it.
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 #
 # Env: RECORD_BIN (the keploy binary under test), set by download-binary.
 set -uo pipefail
@@ -32,6 +34,10 @@ if ! python3 -c "import pytest" 2>/dev/null; then
   python3 -m pip install --quiet --disable-pip-version-check pytest
 fi
 
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 ROOT="$(mktemp -d)"
 cd "$ROOT" || exit 1
@@ -148,8 +154,8 @@ if grep -q '/users' "$MFILE"; then echo "FAIL: $LABEL: the baseline's calls surv
 no_staging_left "a successful re-record"
 }
 
-run_all switch-off ""
-run_all switch-on 1
+half off && run_all switch-off ""
+half on && run_all switch-on 1
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK NON-DESTRUCTIVE E2E: PASSED"; else echo "MOCK NON-DESTRUCTIVE E2E: FAILED"; fi
 exit "$FAIL"

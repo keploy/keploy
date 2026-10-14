@@ -12,7 +12,8 @@
 # test's mocks and begin under the test's ID, and this build, which does not
 # judge each test (keploy enterprise does), refuses the replay before it runs
 # the test command. The suite's harness speaks scope protocol v1 both ways
-# (keploy_v1.py, conftest_v1.py).
+# (keploy_v1.py, conftest_v1.py). MOCK_LANE_SWITCH (lane_switch.sh) picks the
+# half a run runs; CI runs each in a job of its own.
 #
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test), set by the
 # .github/actions/download-binary composite action, as in the other lang scripts.
@@ -66,6 +67,8 @@ PY
 # test with its file and canSkip, and end it with its outcome), failing a test
 # on any answer it cannot trust. An agent without the proven switch has no
 # claim route; the harness then speaks the scope API as it was (keploy_v1.py).
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
@@ -104,17 +107,33 @@ def test_items():  assert get("/items/42")["path"]=="/items/42"
 def test_health(): assert get("/health")["path"]=="/health"
 PY
 
-start_dep() { python3 depserver.py "$PORT" >dep.log 2>&1 & echo $!; }
-stop_dep()  { kill "$1" 2>/dev/null; sleep 1; }
+# start_dep: starts the dependency and waits for its ready line (depserver.py
+# prints it after binding). stop_dep stops it by its pid and waits for it to
+# go, so the replays after it reach no dependency.
+DEP_PID=""
+trap '[ -z "$DEP_PID" ] || kill "$DEP_PID" 2>/dev/null' EXIT
+start_dep() {
+  : > dep.log
+  python3 depserver.py "$PORT" >dep.log 2>&1 &
+  DEP_PID=$!
+  until grep -qx ready dep.log 2>/dev/null; do
+    kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the dependency exited before it listened"; cat dep.log; exit 1; }
+    sleep 0.1
+  done
+}
+stop_dep() { kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; DEP_PID=""; }
 
+if half off; then
 echo "== 1. record dependency calls =="
-DEP_PID=$(start_dep); sleep 1
+start_dep
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --disable-tele 2>&1 | tee rec.log
-stop_dep "$DEP_PID"
+stop_dep
 MOCKS=$(grep -c '^kind:' keploy/e2e/mocks.yaml 2>/dev/null || echo 0)
 echo "recorded mocks: $MOCKS"
 [ "$MOCKS" -eq 3 ] || { echo "FAIL: expected 3 mocks, got $MOCKS"; FAIL=1; }
 [ -f keploy/e2e/mappings.yaml ] || { echo "FAIL: per-test mappings.yaml not written"; FAIL=1; }
+# Begins are kept only under the switch (step 6).
+grep -qE '^\s+at: ' keploy/e2e/mappings.yaml && { echo "FAIL: a record without the proven switch wrote test begins"; FAIL=1; }
 
 echo "== 2. replay with the dependency STOPPED (must serve from mocks) =="
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --disable-tele 2>&1 | tee rep.log
@@ -318,22 +337,19 @@ SAID=$(grep -c "INFO.*self-call passed through to the run's own listener" self.l
 grep -qE "self-calls passed through to the run's own listeners.*\"calls\": 5" self.log ||
   { echo "FAIL: the run's 5 self-calls were not counted when it ended"; FAIL=1; }
 
+fi
+
+if half on; then
 echo "== 6. under the proven switch, a record keeps when each test began =="
 # The agent moves the run's clock to each test's recorded begin while the test
 # is open (design v14 §3.4); a build that freezes the clock does the moving.
 # Under the switch a replay needs a build that judges each test (keploy
 # enterprise), so here the begins are checked on disk; the enterprise UM lane
 # (mock-local-loop-e2e) replays them on a frozen clock.
-grep -qE '^\s+at: ' keploy/e2e/mappings.yaml && { echo "FAIL: a record without the proven switch wrote test begins"; FAIL=1; }
-DEP_PID=$(start_dep)
-# Ready when it says it listens (depserver.py prints after binding).
-until grep -qx ready dep.log 2>/dev/null; do
-  kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the dependency exited before it listened"; FAIL=1; break; }
-  sleep 0.1
-done
+start_dep
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-proven --disable-tele 2>&1 | tee rec-proven.log
 RC=${PIPESTATUS[0]}
-stop_dep "$DEP_PID"
+stop_dep
 [ "$RC" -eq 0 ] && grep -q "3 passed" rec-proven.log || { echo "FAIL: under the switch the record should pass (exit 0, 3 passed), got $RC"; FAIL=1; }
 MOCKS=$(grep -c '^kind:' keploy/e2e-proven/mocks.yaml 2>/dev/null)
 [ "${MOCKS:-0}" -eq 3 ] || { echo "FAIL: under the switch, expected 3 mocks, got ${MOCKS:-0}"; FAIL=1; }
@@ -385,6 +401,7 @@ grep -qx 'exitCode: 1' "$R" || { echo "FAIL: the refused replay's receipt does n
 grep -qx 'failedBy: setup' "$R" || { echo "FAIL: the refused replay's receipt does not blame its setup"; FAIL=1; }
 grep -qx 'isolationNote: the test command never ran' "$R" || { echo "FAIL: the refused replay's receipt does not say the test command never ran"; FAIL=1; }
 grep -qx 'isolated: false' "$R" || { echo "FAIL: the refused replay's receipt claims isolation"; FAIL=1; }
+fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi
 exit "$FAIL"

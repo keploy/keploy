@@ -20,6 +20,9 @@
 # The runner's harness speaks scope protocol v1 (keploy_v1.py); without the
 # switch the agent has no claim route, and it speaks the scope API as it was.
 #
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test), set by the
 # calling workflow from .github/actions/download-binary's `path` output. The
 # agent image must be loaded as ghcr.io/keploy/keploy:v3-dev —
@@ -38,6 +41,8 @@ REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 # Tear down only this project, by name. Never a blanket prune.
@@ -201,6 +206,7 @@ no_project_started() {
   grep -q "RUNNER PASSED 3\|AGENT REFUSED" "$1" && { echo "FAIL: $2 ran the runner"; FAIL=1; }
 }
 
+if half on; then
 echo "== 0. under the proven switch, a compose record and replay are refused before anything starts =="
 for verb in record replay; do
   BIN=$RECORD_BIN
@@ -216,7 +222,9 @@ for verb in record replay; do
   no_project_started "proven-$verb.log" "a compose $verb under the switch"
 done
 cleanup
+fi
 
+if half off; then
 echo "== 1. record a compose project =="
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record \
   -c "docker compose up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rec.log
@@ -313,6 +321,7 @@ sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: 
 # saw -- --strict passes it, and it is metered as zero.
 grep -q 'mock replay summary.*"missed": "unknown"' agentdies.log || { echo "FAIL: the replay summary gives a killed agent's outcome as known"; FAIL=1; }
 sudo grep -q '^missed: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives a killed agent's misses as known:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK COMPOSE E2E: PASSED"; else echo "MOCK COMPOSE E2E: FAILED"; fi
 exit "$FAIL"

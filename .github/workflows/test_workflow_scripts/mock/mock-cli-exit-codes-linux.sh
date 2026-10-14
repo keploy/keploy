@@ -10,16 +10,21 @@
 #
 # Pure CLI behaviour: no sudo, no eBPF, no dependencies. Every check runs
 # twice: without the proven switch (today's default) and under KEPLOY_PROVEN=1,
-# which the flip makes the default.
+# which the flip makes the default. MOCK_LANE_SWITCH (lane_switch.sh) picks
+# the half a run runs; CI runs each in a job of its own.
 set -uo pipefail
 
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 FAIL=0
 
 check() {
   local want="$1" proven got
   shift
-  for proven in "" 1; do
+  for proven in "${SWITCH_VALUES[@]}"; do
     KEPLOY_PROVEN="$proven" "$RECORD_BIN" "$@" >/dev/null 2>&1
     got=$?
     if [ "$got" -ne "$want" ]; then

@@ -19,6 +19,8 @@
 # a replay's connections as it names a record's, which pkg/agent/proxy's
 # TestHandleConnectionNamesAContainerDestination covers.) The suite's harness
 # speaks scope protocol v1 both ways (keploy_v1.py, conftest_v1.py).
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 #
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test); DEP_IMAGE (the
 # dependency's image, python:3.11-slim by default).
@@ -149,6 +151,8 @@ PY
 # collects, then begin each test with its file and canSkip, and end it with
 # its outcome), failing on any answer it cannot trust. Without the switch the
 # agent has no claim route, and the harness speaks the scope API as it was.
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
@@ -256,6 +260,7 @@ expect() {
   fi
 }
 
+if half on; then
 echo "== 1. record under the proven switch =="
 record ck rec.log 1
 grep -q "2 passed" rec.log || { echo "FAIL: pytest did not pass both tests while recording"; FAIL=1; }
@@ -296,6 +301,9 @@ RC=$?
 grep -q "needs a keploy build that judges each test" rep-on.log || { echo "FAIL: the refused replay does not say it needs a build that judges each test"; FAIL=1; }
 grep -qE "[0-9]+ (passed|failed|error)" rep-on.log && { echo "FAIL: under the switch the refused replay ran the tests"; FAIL=1; }
 
+fi
+
+if half off; then
 echo "== 5. without the switch nothing is keyed =="
 record ck-off rec-off.log ""
 grep -q "2 passed" rec-off.log || { echo "FAIL: pytest did not pass both tests recording without the switch"; FAIL=1; }
@@ -304,6 +312,7 @@ keys_of ck-off | sort > keys-off.txt
 cat keys-off.txt
 expect keys-off.txt "a recording made without the switch carries container keys" \
   "/boot -" "/one -" "/two-a -" "/two-c -"
+fi
 
 # A race build reports a data race and carries on: fail on one in any leg.
 if grep -l "WARNING: DATA RACE" ./*.log; then

@@ -25,9 +25,17 @@
 #      it: v1 has no pid (one test process per run until release 2).
 #   3. t1 run twice by ONE worker process: the second run is a new scope (same
 #      pid), so its sequence starts over at 1,2,3 instead of saturating.
-#   4. ONE keep-alive connection reused for t1 and then t2 in one process, over
-#      the v1 bodies (no pid, the scope v1 opens): what it sees follows the
-#      test to t2 (4,5), not the scope it was opened in.
+#   4. ONE keep-alive connection reused for t1 and then t2 in one process:
+#      what it sees follows the test to t2 (4,5), not the scope it was opened
+#      in. Twice: over the v1 bodies (no pid: the one scope v1 opens), and
+#      with the worker's pid on each call, which takes the per-worker path
+#      (SetWorkerScope, and scopedMockDb resolving the view at each read; a
+#      connection that kept the view it opened with was served 3,3 in t2).
+# The record without the switch sends the pid too, as today's parallel
+# workers do.
+#
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 
@@ -42,6 +50,8 @@ WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 PORT=18877
 FAIL=0
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > dep.py <<'PY'
@@ -69,16 +79,23 @@ def read(n):
     return ",".join(urllib.request.urlopen("http://127.0.0.1:%s/counter" % PORT).read().decode() for _ in range(n))
 PY
 
-# Record: one test process, two tests in turn -> t1: 1,2,3  t2: 4,5.
+# Record: one test process, two tests in turn -> t1: 1,2,3  t2: 4,5. argv:
+# PORT [legacy-pid]: with legacy-pid, an agent without the switch is sent
+# this process's pid on each call, as today's parallel workers send it.
 cat > rec.py <<'PY'
-import os
+import os, sys
 import keploy_v1 as k
 from kp import read
-print("CLAIM=" + k.claim(".", os.getcwd()), flush=True)
+mode = k.claim(".", os.getcwd())
+print("CLAIM=" + mode, flush=True)
+pid = None
+if len(sys.argv) > 2:
+    assert mode == k.LEGACY, "a pid is sent only to the scope API without the proven switch, and the agent answered the claim: " + mode
+    pid = os.getpid()
 for name, n, want in (("t1", 3, "1,2,3"), ("t2", 2, "4,5")):
-    assert k.begin(name, "rec.py") is None
+    assert k.begin(name, "rec.py", pid=pid) is None
     assert read(n) == want
-    assert k.end(name, "passed", file="rec.py") is None
+    assert k.end(name, "passed", file="rec.py", pid=pid) is None
 print("RECORD_OK", flush=True)
 PY
 
@@ -131,8 +148,11 @@ for p in ps:
 print(subprocess.run(["python3", "worker.py", PORT, "t1", "3", "2"], stdout=subprocess.PIPE).stdout.decode().strip().replace("t1=", "t1first="), flush=True)
 PY
 
-# Replay 4: ONE keep-alive connection reused across two tests of one process,
-# over the v1 bodies: what the connection sees must follow the test.
+# Replay 4: ONE keep-alive connection reused across two tests of one process:
+# what the connection sees must follow the test. argv: PORT v1|pid: v1 sends
+# the v1 bodies; pid sends this process's pid on each call (the scope API
+# without the switch, which then scopes the worker, not the run). Prints
+# KA_<argv[2]>_t1=, _t2= and _sockets=.
 # The recording was made with urllib, so each request carries the header keys
 # urllib sends (matching requires them); Connection: keep-alive keeps the one
 # socket open, and the socket's address proves it was never reopened -- a new
@@ -152,14 +172,19 @@ def read(n):
         assert conn.sock is not None, "the connection was closed after a response"
         socks.add(conn.sock.getsockname())
     return ",".join(out)
-k.claim(".", os.getcwd())
-assert k.begin("t1", "rec.py") is None
-a = read(3); k.end("t1", "passed", file="rec.py")
-assert k.begin("t2", "rec.py") is None
-b = read(2); k.end("t2", "passed", file="rec.py")
-print("KA_t1=" + a, flush=True)
-print("KA_t2=" + b, flush=True)
-print("KA_sockets=%d" % len(socks), flush=True)
+how = sys.argv[2]
+mode = k.claim(".", os.getcwd())
+pid = None
+if how == "pid":
+    assert mode == k.LEGACY, "a pid is sent only to the scope API without the proven switch, and the agent answered the claim: " + mode
+    pid = os.getpid()
+assert k.begin("t1", "rec.py", pid=pid) is None
+a = read(3); k.end("t1", "passed", file="rec.py", pid=pid)
+assert k.begin("t2", "rec.py", pid=pid) is None
+b = read(2); k.end("t2", "passed", file="rec.py", pid=pid)
+print("KA_%s_t1=%s" % (how, a), flush=True)
+print("KA_%s_t2=%s" % (how, b), flush=True)
+print("KA_%s_sockets=%d" % (how, len(socks)), flush=True)
 PY
 
 # start_dep: a new counter (from 1), once it says it listens. stop_dep stops
@@ -180,6 +205,9 @@ mocks_of() {
   sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -oE '"mocks": *[0-9]+' | grep -oE '[0-9]+' | tail -1
 }
 
+has() { grep -qE "(^|[^[:alnum:]])$1([^[:alnum:],]|\$)" "$2"; }
+
+if half on; then
 echo "== 1. under the proven switch: record a counter under two tests (t1: 1,2,3  t2: 4,5) =="
 start_dep
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name s-proven --disable-tele 2>&1 | tee rec-proven.log
@@ -206,10 +234,12 @@ RC=${PIPESTATUS[0]}
 [ "$RC" -eq 1 ] && grep -q "needs a keploy build that judges each test" rep-proven.log ||
   { echo "FAIL: under the switch this build should refuse the replay (exit 1, saying it needs a build that judges each test), got $RC"; FAIL=1; }
 [ -e ran.txt ] && { echo "FAIL: under the switch the refused replay ran the test command"; FAIL=1; }
+fi
 
-echo "== 1'. without the switch: record the same =="
+if half off; then
+echo "== 1'. without the switch: record the same, each call with the pid =="
 start_dep
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name s --disable-tele 2>&1 | tee rec.log
+sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT legacy-pid" --name s --disable-tele 2>&1 | tee rec.log
 grep -qx "CLAIM=legacy" rec.log || { echo "FAIL: without the switch the record driver did not fall back to the scope API as it was"; FAIL=1; }
 grep -q "RECORD_OK" rec.log || { echo "FAIL: record driver did not complete"; FAIL=1; }
 [ "$(mocks_of rec.log)" = "5" ] || { echo "FAIL: expected 5 recorded mocks, got $(mocks_of rec.log)"; FAIL=1; }
@@ -217,7 +247,6 @@ stop_dep
 
 echo "== 2. without the switch: replay unscoped, dependency DOWN: record order, then saturate =="
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 unscoped.py $PORT" --name s --disable-tele 2>&1 | tee rep-unscoped.log
-has() { grep -qE "(^|[^[:alnum:]])$1([^[:alnum:],]|\$)" "$2"; }
 has "UNSCOPED=1,2,3,4,5,5" rep-unscoped.log || { echo "FAIL: unscoped replay did not serve 1,2,3,4,5,5 (got: $(grep -o 'UNSCOPED=[^ ]*' rep-unscoped.log))"; FAIL=1; }
 
 echo "== 3. without the switch: replay two concurrent pid-scoped workers, then a re-run, dependency DOWN =="
@@ -227,11 +256,16 @@ has "t2=4,5"        rep-workers.log || { echo "FAIL: worker t2 was not served it
 has "t1first=1,2,3" rep-workers.log || { echo "FAIL: t1 in a new worker process was not served 1,2,3 (got: $(grep -o 't1first=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 has "t1again=1,2,3" rep-workers.log || { echo "FAIL: a re-run of t1 in the same process did not start its sequence over (got: $(grep -o 't1again=[0-9,A-Z:a-z]*' rep-workers.log | head -1))"; FAIL=1; }
 
-echo "== 4. without the switch: one keep-alive connection across two tests, dependency DOWN =="
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 keepalive.py $PORT" --name s --disable-tele 2>&1 | tee rep-keepalive.log
-has "KA_t1=1,2,3" rep-keepalive.log || { echo "FAIL: t1 on the keep-alive connection was not served its own 1,2,3 (got: $(grep -o 'KA_t1=[0-9,A-Z:a-z]*' rep-keepalive.log | head -1))"; FAIL=1; }
-has "KA_t2=4,5" rep-keepalive.log || { echo "FAIL: t2 on the connection t1 opened was not served its own 4,5 (got: $(grep -o 'KA_t2=[0-9,A-Z:a-z]*' rep-keepalive.log | head -1))"; FAIL=1; }
-has "KA_sockets=1" rep-keepalive.log || { echo "FAIL: the client reconnected, so step 4 did not test one connection across two tests ($(grep -o 'KA_sockets=[0-9]*' rep-keepalive.log | head -1))"; FAIL=1; }
+# 4a over the v1 bodies, 4b with the worker's pid: the same connection
+# reused across the two tests must be served each test's own recordings.
+for how in v1 pid; do
+  echo "== 4($how). without the switch: one keep-alive connection across two tests, dependency DOWN =="
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 keepalive.py $PORT $how" --name s --disable-tele 2>&1 | tee "rep-keepalive-$how.log"
+  has "KA_${how}_t1=1,2,3" "rep-keepalive-$how.log" || { echo "FAIL: ($how) t1 on the keep-alive connection was not served its own 1,2,3 (got: $(grep -o "KA_${how}_t1=[0-9,A-Z:a-z]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
+  has "KA_${how}_t2=4,5" "rep-keepalive-$how.log" || { echo "FAIL: ($how) t2 on the connection t1 opened was not served its own 4,5 (got: $(grep -o "KA_${how}_t2=[0-9,A-Z:a-z]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
+  has "KA_${how}_sockets=1" "rep-keepalive-$how.log" || { echo "FAIL: ($how) the client reconnected, so step 4 did not test one connection across two tests ($(grep -o "KA_${how}_sockets=[0-9]*" "rep-keepalive-$how.log" | head -1))"; FAIL=1; }
+done
+fi
 
 [ "$FAIL" = 0 ] && echo "MOCK STATEFUL E2E: PASSED" || echo "MOCK STATEFUL E2E: FAILED"
 exit $FAIL

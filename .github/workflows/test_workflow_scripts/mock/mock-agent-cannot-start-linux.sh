@@ -53,11 +53,18 @@
 # (agent-no-ipv4 runs the agent alone: an agent takes the switch only from
 # the --proven flag of the keploy that starts it, and under the switch no
 # keploy starts an agent container.)
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 #
 # Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
 # image, which defaults to the runner's own distribution so the binary finds
 # the libc it was built against.
 set -uo pipefail
+
+# This lane's directory: lane_switch.sh.
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
@@ -164,6 +171,7 @@ check() {
   [ -e "$WORK/$name/ran" ] && fail "$name: the test command ran, with no agent to record or replay it"
 }
 
+if half off; then
 check unprivileged 3 "keploy does not have the kernel privileges it needs"
 check no-tracefs 6 "neither debugfs nor tracefs are mounted" --privileged
 check agent-no-ipv4 6 "could not find a non-loopback IP for the container" --privileged
@@ -179,6 +187,7 @@ check docker-sysctl-relaxed 6 "this environment lacks something keploy needs" \
 check docker-3 3 "keploy does not have the kernel privileges it needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
 check docker-6 6 "this environment lacks something keploy needs" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=6
 check docker-0 1 "the keploy agent exited before it became ready" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=0
+fi
 
 # check_proven <case> <record exit> <what record says> <replay exit> <what
 # replay says> <docker flags...>: the case under the proven switch, as
@@ -208,12 +217,14 @@ check_proven() {
   fi
 }
 
+if half on; then
 JUDGES="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
 check_proven unprivileged 3 "keploy does not have the kernel privileges it needs" 1 "$JUDGES"
 check_proven no-tracefs 6 "neither debugfs nor tracefs are mounted" 1 "$JUDGES" --privileged
 NATIVELY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
 check_proven docker-unprivileged 1 "$NATIVELY" 1 "$JUDGES" -e AGENT_EXIT=0
 check_proven docker-3 1 "$NATIVELY" 1 "$JUDGES" --privileged -e PIN_PARANOID=4 -e AGENT_EXIT=3
+fi
 
 rm -rf "$WORK"
 if [ "$FAIL" -ne 0 ]; then

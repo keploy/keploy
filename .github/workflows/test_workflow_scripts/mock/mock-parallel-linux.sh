@@ -26,6 +26,9 @@
 # Both ways, the control plane refuses a caller with no token (401) and still
 # answers /agent/health without one.
 #
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Uses the PR `build` binary for record and replay (mock_linux.yml).
 set -uo pipefail
 
@@ -46,6 +49,8 @@ fail() {
   FAIL=1
 }
 
+[ -f "$MOCK_DIR/lane_switch.sh" ] || { echo "FAIL: no lane_switch.sh beside this lane, in $MOCK_DIR"; exit 1; }
+source "$MOCK_DIR/lane_switch.sh"
 cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > dep.py <<'PY'
@@ -140,8 +145,10 @@ PY
 #     open: refused. It then tells B to claim, and waits for B to finish.
 #   B claims while A, alive, holds the run: refused.
 # Each prints <who>_REFUSED=<status> <code>, then <who>_MESSAGE= and
-# <who>_REMEDY=, and exits 1: a refused integration fails its run. The pipes
-# are the order; nothing waits on a clock.
+# <who>_REMEDY=, and exits 1: a refused integration fails its run. Each says
+# <who>_END=refused (or accepted) last, so an exit 1 that is the refusal is
+# told apart from one that is a crash. The pipes are the order; nothing waits
+# on a clock.
 cat > refuse.py <<'PY'
 import os, subprocess, sys, urllib.request
 import guard, keploy_v1 as k
@@ -168,6 +175,7 @@ if len(sys.argv) > 2:
         os.write(mine, b"x")
         assert os.read(other, 1) == b"x", "B exited before it claimed"
         assert k.end("t1", "passed", file="refuse.py") is None
+        print("A_END=" + ("refused" if refused else "accepted"), flush=True)
         sys.exit(1 if refused else 0)
     # B
     assert os.read(other, 1) == b"x", "A exited before it claimed"
@@ -180,6 +188,7 @@ if len(sys.argv) > 2:
         report("B", e)
         refused = True
     os.write(mine, b"x")
+    print("B_END=" + ("refused" if refused else "accepted"), flush=True)
     sys.exit(1 if refused else 0)
 r1, w1 = os.pipe()
 r2, w2 = os.pipe()
@@ -212,6 +221,7 @@ line_of() {
   sed -n "s/^$2=//p" "$1" | head -1
 }
 
+if half on; then
 echo "== 1. under the proven switch: one test process, two tests one after the other, passes =="
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 rec.py $PORT" --name p-proven --disable-tele 2>&1 | tee rec-proven.log
 RC=${PIPESTATUS[0]}
@@ -219,10 +229,21 @@ RC=${PIPESTATUS[0]}
 [ "$(line_of rec-proven.log CLAIM)" = v1 ] || fail "under the switch the agent did not take the claim on scope protocol v1 (claim: '$(line_of rec-proven.log CLAIM)')"
 grep -q "RECORD_OK" rec-proven.log || fail "the record driver did not complete under the switch"
 [ "$(mocks_of rec-proven.log)" = "2" ] || fail "under the switch, expected 2 recorded mocks, got $(mocks_of rec-proven.log)"
-for t in t1 t2; do
-  grep -qE "^ +- id: rec\.py::$t\$" keploy/p-proven/mappings.yaml 2>/dev/null ||
-    fail "under the switch the mapping does not name the test rec.py::$t"
-done
+# Each test's ID names its file, and its mapping its own one mock.
+python3 - keploy/p-proven/mappings.yaml <<'PY' || FAIL=1
+import re, sys
+try:
+    t = open(sys.argv[1]).read()
+except OSError as e:
+    sys.exit("FAIL: under the switch the record wrote no mapping: %s" % e)
+got = {}
+for block in re.split(r"\n(?=\s*- id: )", t):
+    m = re.search(r"- id: (\S+)", block)
+    if m:
+        got[m.group(1)] = re.findall(r"- name: (\S+)", block)
+if sorted(got) != ["rec.py::t1", "rec.py::t2"] or any(len(v) != 1 for v in got.values()) or got["rec.py::t1"] == got["rec.py::t2"]:
+    sys.exit("FAIL: under the switch want rec.py::t1 and rec.py::t2 each mapped to its own one mock, got %s" % got)
+PY
 
 echo "== 2. under the proven switch: two test processes, and two tests at once, are refused =="
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 refuse.py $PORT" --name p-refused --disable-tele 2>&1 | tee refused.log
@@ -250,13 +271,17 @@ line_of refused.log B_REMEDY | grep -qF "run one test process at a time" ||
 line_of refused.log B_REMEDY | grep -qF "parallel test workers arrive in a later keploy release" ||
   fail "the one_test_process_at_a_time refusal does not say parallel workers come later: '$(line_of refused.log B_REMEDY)'"
 grep -q "B_CLAIMED_WHILE_A_HELD_THE_RUN" refused.log && fail "the agent let a second test process claim the run while the first held it"
-# The run does not pass.
+# The run does not pass: each process reached its end, refused, and failed.
+[ "$(line_of refused.log A_END)" = refused ] || fail "the first test process did not end refused (A_END='$(line_of refused.log A_END)'): its exit is not the refusal"
+[ "$(line_of refused.log B_END)" = refused ] || fail "the second test process did not end refused (B_END='$(line_of refused.log B_END)'): its exit is not the refusal"
 grep -qx "EXITS=1,1" refused.log || fail "each refused test process should fail (exit 1): $(line_of refused.log EXITS)"
 [ "$RC" -ne 0 ] || fail "a run whose test processes were refused passed (keploy exited 0)"
 grep -q "tests failed; the recording was not kept" refused.log ||
   fail "keploy did not say the refused run's recording was not kept"
 [ -e keploy/p-refused/mocks.yaml ] && fail "keploy kept a recording of a run it refused"
+fi
 
+if half off; then
 echo "== 3. without the switch: record two endpoints under two pid scopes =="
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 rec.py $PORT legacy-pid" --name p --disable-tele 2>&1 | tee rec.log
 RC=${PIPESTATUS[0]}
@@ -275,6 +300,7 @@ echo "== 4. without the switch: two concurrent workers, both hitting /b, depende
 sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$REPLAY_BIN" mock replay -c "python3 run.py $PORT" --name p --disable-tele 2>&1 | tee rep.log
 grep -q "t2=SERVED:BBB" rep.log || fail "the worker scoped to t2 was NOT served /b"
 grep -q "t1=MISS"       rep.log || fail "the worker scoped to t1 was NOT isolated (it saw another test's mock)"
+fi
 
 [ "$FAIL" = 0 ] && echo "MOCK PARALLEL E2E: PASSED" || echo "MOCK PARALLEL E2E: FAILED"
 exit $FAIL

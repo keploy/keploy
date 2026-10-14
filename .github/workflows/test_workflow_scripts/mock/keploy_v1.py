@@ -15,17 +15,21 @@ unknown v is an error (AgentError, or Refused for an answer the agent gave a
 code), never retried. There is no timeout: the agent answers once the work it
 owes is done, and a deadline would let the machine's load decide a test.
 
-An agent without the proven switch has no /agent/instance and answers 404:
-claim() then returns LEGACY, and begin and end send the same bodies to the
-scope API as it was, whose answers carry no v. LEGACY alone may send a pid
-(the per-worker scopes of today's parallel workers, which v1 has no word
-for). The flip deletes LEGACY with the switch.
+An agent without the proven switch has no /agent/instance and answers 404.
+On a 404 claim() asks /agent/health whether the agent's switch is off (its
+X-Keploy-Proven header; an agent from before the switch sends none) and only
+then returns LEGACY: begin and end send the same bodies to the scope API as
+it was, whose answers carry no v. An agent whose switch is on and that has no
+claim route is an error. LEGACY alone may send a pid (the per-worker scopes
+of today's parallel workers, which v1 has no word for). The flip deletes
+LEGACY with the switch.
 
 Inert (every call returns at once and sends nothing) when KEPLOY_MOCK_AGENT is
 unset or "off", or when KEPLOY_TEST_PID names a process this one runs under:
 a process of a test process that claimed the run is a member, and claims
 nothing (§2.2 item 2).
 """
+import http.client
 import json
 import os
 import urllib.error
@@ -103,20 +107,44 @@ def joined():
     return AGENT not in ("", "off") and not _member()
 
 
-def post(path, body, auth=True):
-    """Sends one call. Returns (status, raw body bytes); never raises for a
-    non-2xx answer. A transport error raises."""
+def _send(req):
+    """Sends req. Returns (status, headers, raw body bytes); never raises for
+    a non-2xx answer. A call that got no answer (the agent unreachable, the
+    connection dropped mid-answer) raises AgentError."""
+    try:
+        with _opener.open(req) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+        raise AgentError("keploy: no answer from the keploy agent at %s to %s: %s" % (AGENT, req.selector, e)) from e
+
+
+def _check_url():
     if not AGENT.startswith(("http://", "https://")):
         raise AgentError("keploy: KEPLOY_MOCK_AGENT=%r is neither off nor the http URL of a keploy agent" % AGENT)
+
+
+def post(path, body, auth=True):
+    """Sends one call. Returns (status, raw body bytes); never raises for a
+    non-2xx answer. A call that got no answer raises AgentError."""
+    _check_url()
     h = {"Content-Type": "application/json"}
     if auth and TOKEN:
         h["Authorization"] = "Bearer " + TOKEN
     req = urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST")
-    try:
-        with _opener.open(req) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+    status, _, raw = _send(req)
+    return status, raw
+
+
+def switch_state():
+    """The agent's proven switch from its health check: "on", "off", or ""
+    for an agent from before the switch, which does not say."""
+    _check_url()
+    status, headers, raw = _send(urllib.request.Request(AGENT + "/agent/health", method="GET"))
+    if status != 200:
+        raise AgentError("keploy: the keploy agent answered %s to its health check: %r" % (status, raw[:512]))
+    return (headers.get("X-Keploy-Proven") or "").strip()
 
 
 def _call(path, body, versioned):
@@ -140,8 +168,9 @@ def _call(path, body, versioned):
     if versioned:
         if "v" not in a:
             raise AgentError("keploy: the keploy agent answered %s with %r, which names no scope protocol version" % (path, text[:512]))
-        if a["v"] != V:
-            raise AgentError("keploy: the keploy agent answered %s in scope protocol v%s; this harness speaks v%d" % (path, a["v"], V))
+        # An int, not JSON's true or 1.0, which Python takes for 1.
+        if type(a["v"]) is not int or a["v"] != V:
+            raise AgentError("keploy: the keploy agent answered %s in scope protocol v%r; this harness speaks v%d" % (path, a["v"], V))
     return a
 
 
@@ -163,6 +192,11 @@ def claim(key=".", dir=None):
     except Refused as e:
         if e.status != 404:
             raise
+        # No claim route: the scope API as it was, but only from an agent
+        # whose switch is off (or that predates it).
+        state = switch_state()
+        if state not in ("off", ""):
+            raise AgentError("keploy: the keploy agent says its proven switch is %r, yet it has no claim route (/agent/instance answered 404)" % state)
         _mode = LEGACY
         return _mode
     if a.get("instance") != "run":
