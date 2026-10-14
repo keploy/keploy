@@ -107,6 +107,40 @@ func TestReportTeardownProgress(t *testing.T) {
 	awaitReport(t, path, func(p TeardownProgress) bool { return p.Done && p.Seq == 2 })
 }
 
+// StopTeardownReporting ends every reporter the agent's entry points started,
+// writing or not yet, and returns once none writes any more; a reporter
+// started after it runs, and the next call ends that one too.
+func TestStopTeardownReportingEndsEveryReporter(t *testing.T) {
+	defer func(b time.Duration) { teardownBeat = b }(teardownBeat)
+	teardownBeat = time.Millisecond
+	for round := 0; round < 2; round++ {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "teardown.json")
+		ctx, begin := context.WithCancel(context.Background())
+		ReportTeardownProgress(ctx, zap.NewNop(), path)
+		idle, cancelIdle := context.WithCancel(context.Background()) // its teardown never begins
+		ReportTeardownProgress(idle, zap.NewNop(), filepath.Join(t.TempDir(), "teardown.json"))
+		begin()
+		first := awaitReport(t, path, func(TeardownProgress) bool { return true })
+		awaitReport(t, path, func(p TeardownProgress) bool { return p.Beat > first.Beat })
+
+		stopped := make(chan struct{})
+		go func() { StopTeardownReporting(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("round %d: StopTeardownReporting never returned: a reporter it should have ended still runs", round)
+		}
+		cancelIdle()
+		if n := reporting.live.Load(); n != 0 {
+			t.Fatalf("round %d: %d reporters still running after StopTeardownReporting returned", round, n)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatalf("round %d: a stopped reporter's directory does not come away: %v", round, err)
+		}
+	}
+}
+
 // An empty path reports nothing.
 func TestReportTeardownProgressWithoutAPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

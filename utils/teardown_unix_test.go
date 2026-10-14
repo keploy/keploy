@@ -102,9 +102,12 @@ func TestACommandLineProgressPathIsChecked(t *testing.T) {
 		{"the CLI's", filepath.Join(ok, TeardownProgressFileName), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := openCommandLineSink(tc.path)
+			sink, err := openCommandLineSink(tc.path)
 			if (err == nil) != tc.ok {
 				t.Fatalf("openCommandLineSink(%q) = %v, want ok=%v", tc.path, err, tc.ok)
+			}
+			if sink != nil {
+				sink.(*dirSink).close()
 			}
 		})
 	}
@@ -113,6 +116,7 @@ func TestACommandLineProgressPathIsChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer sink.(*dirSink).close()
 	// The path is moved and a symlink put in its place: the writes stay
 	// in the directory that was opened.
 	moved, elsewhere := ok+".moved", t.TempDir()
@@ -282,5 +286,54 @@ func TestTheEscalationBeforeTheStopBeginsIt(t *testing.T) {
 	}
 	if st := helper.ProcessState.Sys().(syscall.WaitStatus); !st.Signaled() || st.Signal() != syscall.SIGKILL {
 		t.Fatalf("the helper ended with %v, want it killed (SIGKILL)\n%s", helper.ProcessState, out.String())
+	}
+}
+
+// StopTeardownReporting ends a reporter the command-line entry point
+// (ReportTeardownProgressTo) started too, and that reporter lets go of the
+// directory it held open: no fd of this process names it any more.
+func TestStopTeardownReportingReleasesACommandLineReporter(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skipf("no /proc/self/fd to count this process's fds by (%v)", err)
+	}
+	dir := filepath.Join(t.TempDir(), "keploy-agent-stop-fd")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir) // as /proc/self/fd names it
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func() int {
+		ents, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, e := range ents {
+			if target, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil && target == resolved {
+				n++
+			}
+		}
+		return n
+	}
+	before := held()
+	ctx, begin := context.WithCancel(context.Background())
+	path := filepath.Join(dir, TeardownProgressFileName)
+	if err := ReportTeardownProgressTo(ctx, nil, path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(StopTeardownReporting) // if the test fails before it does
+	begin()
+	awaitReport(t, path, func(TeardownProgress) bool { return true })
+	if n := held(); n != before+1 {
+		t.Fatalf("the reporter holds the directory open %d times, want once: this test cannot see it let go", n-before)
+	}
+	StopTeardownReporting()
+	if n := reporting.live.Load(); n != 0 {
+		t.Fatalf("%d reporters still running after StopTeardownReporting returned", n)
+	}
+	if n := held(); n != before {
+		t.Fatalf("the stopped reporter still holds the directory open (%d fds)", n-before)
 	}
 }

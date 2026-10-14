@@ -70,9 +70,16 @@ func DieOnEscalation(ctx context.Context) {
 // (openCommandLineSink): every write goes to that directory, whatever its
 // path names by then.
 type dirSink struct {
-	dir  int // the directory's fd, open for the life of the process
+	dir  int // the directory's fd, open for as long as its reporter runs
 	name string
 	n    atomic.Uint64
+}
+
+// close lets the directory go, once the reporter writes no more; the sink
+// is not used after it.
+func (d *dirSink) close() {
+	_ = unix.Close(d.dir)
+	d.dir = -1
 }
 
 // openCommandLineSink opens the directory of a command-line progress path
