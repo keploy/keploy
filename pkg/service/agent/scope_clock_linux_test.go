@@ -238,7 +238,7 @@ func TestTheWireMovesTheClockPerTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := &clockHooks{}
 	useHooks(t, h)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a)
 	ctx := context.Background()
 	h.file = "/tmp/kclk1/t"
@@ -260,7 +260,8 @@ func TestTheWireMovesTheClockPerTest(t *testing.T) {
 	h.err = nil
 	require.Zero(t, a.clockHeld)
 
-	a.clientMocks.Delete(uint64(0)) // its pool cannot narrow, after its clock moved
+	a.scopeTable = map[string][]string{"o::TestD": {"mock-1"}}
+	a.clientMocks.Delete(uint64(0)) // its test mocks cannot be read, after its clock moved
 	_, serr = a.ProvenBegin(ctx, begin("TestD"))
 	require.NotNil(t, serr, "a test whose pool cannot narrow is refused, with the clock moved back")
 	storeMocks(a)
@@ -291,7 +292,7 @@ func TestASessionResetGivesBackAClockTakenAfterTheRelease(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := &clockHooks{}
 	useHooks(t, h)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a)
 	ctx := context.Background()
 	claimSelf(t, a)

@@ -483,6 +483,12 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if kpid == 0 || mgr == nil {
 		return mgr
 	}
+	// Under exact serving (the proven switch) the manager itself decides what
+	// every read shows (exact.go): no per-worker or per-start view narrows or
+	// widens it.
+	if mm, ok := mgr.(*MockManager); ok && mm.exactView() != nil {
+		return mgr
+	}
 	if starts.Default.Active() {
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
 	}

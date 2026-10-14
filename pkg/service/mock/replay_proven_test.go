@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
@@ -205,7 +206,7 @@ func replayErrOnMiss(t *testing.T, instr *composeInstr, cmdType utils.CmdType, o
 	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	return New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	return New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
 }
 
 // Under the switch what each test did is keploy's verdict: a replay that
@@ -284,24 +285,79 @@ func TestOnMissOtherThanFailIsRefusedUnderTheSwitch(t *testing.T) {
 	}
 }
 
-// Under the switch each test is judged by its mapping: a set without
-// per-test mappings is refused, not replayed unjudged.
-func TestASetWithoutMappingsIsRefusedUnderTheSwitch(t *testing.T) {
+// namedMockDB is a mock store holding mocks, all in the session tier.
+type namedMockDB struct {
+	stubMockDB
+	mocks []*models.Mock
+}
+
+func (l namedMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return l.mocks, nil
+}
+
+func named(names ...string) namedMockDB {
+	var l namedMockDB
+	for _, n := range names {
+		l.mocks = append(l.mocks, &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Name: n})
+	}
+	return l
+}
+
+// Under the switch a set without a mapping file is judged like any other:
+// none of its tests owns a mock (design v14 §5.2), so the agent is handed an
+// empty table and every mock as the keyless pool slice; a dependency-free
+// set stays green, and every other call misses.
+func TestASetWithoutMappingsOwnsNothingUnderTheSwitch(t *testing.T) {
 	provenOn(t)
 	repo := t.TempDir()
 	t.Chdir(repo)
 	keployDir := filepath.Join(repo, "keploy")
 	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	err := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
-	require.ErrorContains(t, err, "it has no per-test mappings")
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	runs, _ := instr.counts()
+	require.Equal(t, 1, runs, "the test command ran")
+	require.NotNil(t, instr.table, "an empty table is pushed, not left out")
+	require.Empty(t, instr.table)
+	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-0"}}, instr.pool)
+}
+
+// Under the switch a mapping that names a mock the recording does not have
+// refuses: what the test owns cannot be told, and nothing is replayed
+// unjudged.
+func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-9\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "its mappings name mocks the recording does not have: mock-9")
 	runs, _ := instr.counts()
 	require.Zero(t, runs, "the test command ran unjudged")
+}
+
+// Each key's pool slice is every mock no test lists, under the key its
+// startup entry gives it, else the keyless slice; a test's mock is in no
+// slice, and names nothing loaded has are reported.
+func TestPoolSlices(t *testing.T) {
+	mp := &models.Mapping{Startup: []models.MockEntry{{Name: "mock-1", Key: "o"}, {Name: "mock-2"}, {Name: "mock-0", Key: "o"}, {Name: "mock-8", Key: "o"}}}
+	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}}, named("mock-0", "mock-1", "mock-2", "mock-3").mocks)
+	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-3"}}, pool)
+	require.Equal(t, []string{"mock-8", "mock-9"}, unknown)
+	pool, unknown = poolSlices(nil, nil, nil)
+	require.Empty(t, pool)
+	require.Empty(t, unknown)
 }
 
 // Under the switch docker run is refused like compose: keploy cannot tell
@@ -329,7 +385,7 @@ func TestASetOfTestsWithoutCallsIsJudgedUnderTheSwitch(t *testing.T) {
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	err := New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	err := New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
 	require.NoError(t, err)
 	runs, _ := instr.counts()
 	require.Equal(t, 1, runs)
@@ -407,8 +463,8 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
-	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2"}, "users": {"mock-3"}}, instr.pool)
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-4"}, "users": {"mock-3"}}, instr.pool, "a mock no test lists and no startup entry keys is the keyless slice's")
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
 }
 
@@ -436,7 +492,7 @@ func TestTheWholePoolIsNotArmedBeforeTheRunUnderTheSwitch(t *testing.T) {
 			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ErrCode = 0 })
-			require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+			require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 			require.Equal(t, !on, slices.Contains(instr.seq(), "stage"), "%v", instr.seq())
 		})
 	}
@@ -461,7 +517,7 @@ func TestTheReceiptCarriesTheRunsRefusals(t *testing.T) {
 	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	r, err := ReadReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.Equal(t, []models.RunRefusal{refused}, r.Refusals)

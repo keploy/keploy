@@ -23,8 +23,14 @@ type orderProxy struct {
 
 func (p *orderProxy) log(e string) { p.mu.Lock(); p.events = append(p.events, e); p.mu.Unlock() }
 func (p *orderProxy) SetMocks(context.Context, []*models.Mock, []*models.Mock) error {
-	p.log("pool")
+	p.log("stage")
 	return nil
+}
+
+// ServeExactTest is the run's pool going in under the switch (exact serving).
+func (p *orderProxy) ServeExactTest(test string, owned []*models.Mock) error {
+	p.log("pool")
+	return p.workerPool.ServeExactTest(test, owned)
 }
 func (p *orderProxy) SetWorkerScope(uint32, []string) { p.log("worker-pool") }
 func (p *orderProxy) ResetVariables()                 { p.tbl.Reset(); p.log("reset") }
@@ -58,7 +64,7 @@ func orderAgent(t *testing.T) (*Agent, *orderProxy) {
 // pool goes in: the run's pool (worker 0) or a worker's view.
 func TestATestsVariablesBeginAfterItsPool(t *testing.T) {
 	a, p := orderAgent(t)
-	a.clientMocks.Store(uint64(0), &ClientMockStorage{})
+	a.clientMocks.Store(uint64(0), &ClientMockStorage{filtered: []*models.Mock{{Name: "m1", Kind: models.HTTP}, {Name: "m2", Kind: models.HTTP}}})
 	ctx := context.Background()
 	_ = a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"m1"}, "pkg::TestW": {"m2"}})
 	if err := a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()); err != nil {
@@ -69,7 +75,7 @@ func TestATestsVariablesBeginAfterItsPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(p.events, ", ")
-	for _, want := range []string{"clock-begin pkg::TestA, pool, reset", "worker-pool, reset"} {
+	for _, want := range []string{"clock-begin pkg::TestA, stage, pool, reset", "worker-pool, reset"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("events %s; want %q in order", got, want)
 		}

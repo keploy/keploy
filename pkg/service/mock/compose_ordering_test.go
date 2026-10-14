@@ -69,8 +69,9 @@ type composeInstr struct {
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
-	// pool is the pool slices the last proven table push sent.
-	pool map[string][]string
+	// table and pool are the per-test table and the pool slices the last
+	// proven table push sent.
+	table, pool map[string][]string
 	// begins is what the last push of the tests' recorded begins sent, and
 	// beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -216,8 +217,8 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 
 // PushProvenTable takes the per-test table and the pool slices
 // (ProvenTablePusher), and keeps the slices.
-func (f *composeInstr) PushProvenTable(_ context.Context, _, pool map[string][]string) error {
-	f.pool = pool
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string) error {
+	f.table, f.pool = table, pool
 	return nil
 }
 

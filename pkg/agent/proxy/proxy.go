@@ -4077,6 +4077,41 @@ func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool)
 	return time.Time{}, time.Time{}, false
 }
 
+// errNoMockManager: a call that needs the mock manager came before the proxy
+// served any replay.
+var errNoMockManager = errors.New("the proxy serves no replay: no mock manager")
+
+// ServeExactTest implements agent.ExactServer (exact.go).
+func (p *Proxy) ServeExactTest(test string, owned []*models.Mock) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactTest(test, owned)
+	return nil
+}
+
+// ServeExactPool implements agent.ExactServer (exact.go).
+func (p *Proxy) ServeExactPool(key string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactPool(key, names)
+	return nil
+}
+
+// ExactTestOutcome implements agent.ExactServer (exact.go).
+func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil, nil, false
+	}
+	return m.ExactTestOutcome()
+}
+
+var _ agent.ExactServer = (*Proxy)(nil)
+
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
 	m := p.getMockManager()
@@ -4514,6 +4549,8 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					FieldDiffs:       parserErr.MismatchReport.FieldDiffs,
 					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
+					Kind:             parserErr.MissKind,
+					Recorded:         parserErr.MismatchReport.Recorded,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -4529,6 +4566,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
+					Kind:          parserErr.MissKind,
 				})
 			}
 		}
@@ -4665,6 +4703,15 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		stamped := *r
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
+	}
+	// Under exact serving (the proven switch) a miss says where it was made:
+	// in the open test, outside every test, or, as its matcher found, as one
+	// call more than the test recorded.
+	if m := p.getMockManager(); m != nil {
+		proxyErr.MissKind = m.exactMissKind()
+		if r := proxyErr.MismatchReport; r != nil && proxyErr.MissKind == models.MissInTest && r.MissKind == models.MissExtraCall {
+			proxyErr.MissKind, proxyErr.Recorded = models.MissExtraCall, r.Recorded
+		}
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,

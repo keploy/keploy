@@ -705,3 +705,25 @@ func TestFoldRetries(t *testing.T) {
 	}
 	require.Equal(t, []time.Time{at(22)}, subs)
 }
+
+// Under the proven switch a test's mapping lists data-plane mocks only: a
+// protocol-phase mock made inside a test (a token fetch, a DNS lookup, a
+// MySQL ping) goes to the pool, which serves it to every test (design v14
+// §5.2). Without the switch nothing is marked protocol-phase, and mappings
+// are as they were.
+func TestAMappingListsDataPlaneMocksOnly(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100)}}
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(10)},
+		{name: "mock-1", ts: at(20), protocol: true},
+		{name: "mock-2", ts: at(30)},
+	}
+	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
+	require.Equal(t, []models.MockEntry{{Name: "mock-1"}}, startupMocks(windows, mocks, nil))
+	for i := range mocks {
+		mocks[i].protocol = false
+	}
+	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
+	require.Empty(t, startupMocks(windows, mocks, nil))
+}

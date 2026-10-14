@@ -100,6 +100,56 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 	}
 }
 
+// extraCall tells, for an exchange no mock answered under exact serving (the
+// proven switch), whether it is one exchange more than the open test
+// recorded: one its own mocks already answered, matched as the per-test pool
+// is (exactly, or at the per-test similarity). It returns how many times the
+// test recorded that exchange, 0 when it is not one or exact serving is off.
+func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
+	er, ok := mockDb.(integrations.ExactConsumedReader)
+	if !ok {
+		return 0
+	}
+	var answered []*models.Mock
+	for _, mk := range er.ConsumedTestMocks() {
+		if mk.Kind == models.GENERIC {
+			answered = append(answered, mk)
+		}
+	}
+	idx := findExactMatch(answered, reqBuffs)
+	if idx == -1 {
+		idx = findBinaryMatch(answered, reqBuffs, 0.9)
+	}
+	if idx == -1 {
+		return 0
+	}
+	n := 0
+	for _, mk := range answered {
+		if sameRequests(mk.Spec.GenericRequests, answered[idx].Spec.GenericRequests) {
+			n++
+		}
+	}
+	return max(n, 1)
+}
+
+// sameRequests reports whether two recorded exchanges sent the same bytes.
+func sameRequests(a, b []models.Payload) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i].Message) != len(b[i].Message) {
+			return false
+		}
+		for j := range a[i].Message {
+			if a[i].Message[j] != b[i].Message[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // buildGenericMismatchReport builds the universal mock-miss report for the
 // generic (opaque TCP) parser. Field-level diffs are impossible for unparsed
 // wire bytes, so the report carries the closest candidate by Jaccard

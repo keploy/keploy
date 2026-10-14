@@ -301,6 +301,18 @@ type VariableStore interface {
 	Variables() *variables.Table
 }
 
+// ExactConsumedReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (design v14 §5.2, under the proven
+// switch): each test mock answers at most one request, so once it answered
+// it is in no read. ConsumedTestMocks returns the open test's mocks that have
+// answered, in the order they did (none while no test is open), so a matcher
+// that finds no mock for a call can tell a call the test made once more than
+// it recorded (models.MissExtraCall, with MockMismatchReport.Recorded) from
+// one it never recorded. A matcher must only read them: they answer nothing.
+type ExactConsumedReader interface {
+	ConsumedTestMocks() []*models.Mock
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

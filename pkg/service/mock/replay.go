@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -253,7 +254,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional;
 	//    under the proven switch each test is judged by it, so required).
-	if err := m.pushScopeTable(ctx, name); err != nil {
+	if err := m.pushScopeTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...)); err != nil {
 		return err
 	}
 	if provenswitch.On() {
@@ -743,48 +744,24 @@ func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64,
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) error {
-	proven := provenswitch.On()
-	refuse := func(why string) error {
-		if !proven {
-			return nil
-		}
-		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
+// Under the proven switch it is pushProvenTable, and loaded, the mocks the
+// agent holds, are what the table and the pool slices must name.
+func (m *mockService) pushScopeTable(ctx context.Context, name string, loaded []*models.Mock) error {
+	if provenswitch.On() {
+		return m.pushProvenTable(ctx, name, loaded)
 	}
 	if m.mappingDB == nil {
-		return refuse("this keploy reads no per-test mappings")
+		return nil
 	}
-	var pool map[string][]string
-	if proven {
-		reader, ok := m.mappingDB.(MappingReader)
-		if !ok {
-			return refuse("this keploy cannot read the calls the set recorded outside its tests")
-		}
-		mp, err := reader.GetMapping(ctx, name)
-		if err != nil {
-			return refuse("its mappings cannot be read: " + err.Error())
-		}
-		if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
-			return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
-		}
-		pool = poolSlices(mp)
-	} else if m.pushSetTable(ctx, name) {
+	if m.pushSetTable(ctx, name) {
 		return nil
 	}
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
-		return refuse("this keploy's agent takes no per-test table")
+		return nil
 	}
 	mappings, meaningful, err := m.mappingDB.Get(ctx, name)
-	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
-	}
-	// Under the switch a test recorded with no call is a test too: a set
-	// whose tests all made none is judged like any other.
-	if len(mappings) == 0 || (!proven && !meaningful) {
-		if proven {
-			return refuse("it has no per-test mappings")
-		}
+	if err != nil || len(mappings) == 0 || !meaningful {
 		return nil
 	}
 	table := make(map[string][]string, len(mappings))
@@ -795,19 +772,6 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) error {
 		}
 		table[testName] = names
 	}
-	if proven {
-		// With each key's pool slice: between tests the agent serves only
-		// the calls recorded under the claim's key (design v14 §5.2, U21).
-		pp, ok := m.instrumentation.(ProvenTablePusher)
-		if !ok {
-			return refuse("this keploy's agent takes no pool slice per key")
-		}
-		if err := pp.PushProvenTable(ctx, table, pool); err != nil {
-			return refuse("its agent refused the per-test table: " + err.Error())
-		}
-		m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
-		return nil
-	}
 	if err := pusher.PushScopeTable(ctx, table); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
 		return nil
@@ -816,24 +780,114 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) error {
 	return nil
 }
 
-// poolSlices is each key's pool slice of a recording: its start-up mocks by
-// the key they were recorded under, models.PoolKeyNone for none.
-func poolSlices(mp *models.Mapping) map[string][]string {
-	pool := map[string][]string{}
-	if mp == nil {
-		return pool
+// pushProvenTable hands the agent, under the proven switch, what each test
+// owns and each key's pool slice (design v14 §5.2): the one view the agent
+// serves a replay from. A test owns exactly the mocks its mapping lists (the
+// agent keeps the data-plane ones); a test the mapping omits, or a set with
+// no mapping file or an all-empty one, owns none, so a dependency-free set
+// stays green and every other call misses with its reason. Every mock no
+// test lists is the pool's: under the key it was recorded with (mappings'
+// startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
+// names a mock the recording does not have, refuses, and so does an agent
+// that refuses the table: nothing is served from a whole pool instead.
+func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded []*models.Mock) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
-	for _, e := range mp.Startup {
-		if e.Name == "" {
+	if m.mappingDB == nil {
+		return refuse("this keploy reads no per-test mappings")
+	}
+	reader, ok := m.mappingDB.(MappingReader)
+	if !ok {
+		return refuse("this keploy cannot read the calls the set recorded outside its tests")
+	}
+	mp, err := reader.GetMapping(ctx, name)
+	if err != nil {
+		return refuse("its mappings cannot be read: " + err.Error())
+	}
+	if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
+		return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
+	}
+	mappings, _, err := m.mappingDB.Get(ctx, name)
+	if err != nil {
+		return refuse("its mappings cannot be read: " + err.Error())
+	}
+	pp, ok := m.instrumentation.(ProvenTablePusher)
+	if !ok {
+		return refuse("this keploy's agent takes no per-test table with pool slices")
+	}
+	table := make(map[string][]string, len(mappings))
+	for testName, entries := range mappings {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name)
+		}
+		table[testName] = names
+	}
+	pool, unknown := poolSlices(mp, table, loaded)
+	if len(unknown) > 0 {
+		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
+	}
+	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+		return refuse("its agent refused the per-test table: " + err.Error())
+	}
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	return nil
+}
+
+// poolSlices is each key's pool slice of a recording (design v14 §5.2): every
+// loaded mock no test's mapping lists, under the key its mappings' startup:
+// entry gives it, else models.PoolKeyNone (an older recording's, or one made
+// outside every claim). unknown lists, sorted, the names the table or the
+// startup entries give that no loaded mock has.
+func poolSlices(mp *models.Mapping, table map[string][]string, loaded []*models.Mock) (pool map[string][]string, unknown []string) {
+	have := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			have[mk.Name] = true
+		}
+	}
+	missing := map[string]bool{}
+	mapped := map[string]bool{}
+	for _, names := range table {
+		for _, n := range names {
+			mapped[n] = true
+			if !have[n] {
+				missing[n] = true
+			}
+		}
+	}
+	pool = map[string][]string{}
+	keyed := map[string]bool{}
+	if mp != nil {
+		for _, e := range mp.Startup {
+			if e.Name == "" || mapped[e.Name] || keyed[e.Name] {
+				continue
+			}
+			if !have[e.Name] {
+				missing[e.Name] = true
+				continue
+			}
+			key := e.Key
+			if key == "" {
+				key = models.PoolKeyNone
+			}
+			keyed[e.Name] = true
+			pool[key] = append(pool[key], e.Name)
+		}
+	}
+	for _, mk := range loaded {
+		if mk == nil || mk.Name == "" || mapped[mk.Name] || keyed[mk.Name] {
 			continue
 		}
-		key := e.Key
-		if key == "" {
-			key = models.PoolKeyNone
-		}
-		pool[key] = append(pool[key], e.Name)
+		keyed[mk.Name] = true
+		pool[models.PoolKeyNone] = append(pool[models.PoolKeyNone], mk.Name)
 	}
-	return pool
+	for n := range missing {
+		unknown = append(unknown, n)
+	}
+	sort.Strings(unknown)
+	return pool, unknown
 }
 
 // pushTestBegins hands the agent when each test of the recording began

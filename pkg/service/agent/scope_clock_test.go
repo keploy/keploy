@@ -129,7 +129,7 @@ func TestABeginThatFailsGivesTheClockBack(t *testing.T) {
 	a.clientMocks.Delete(uint64(0)) // the narrowing fails
 	ctx := context.Background()
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"mock-1"}}))
-	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()), "no mocks stored")
+	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()), "no mocks are loaded")
 	a.clientMocks.Store(uint64(0), &ClientMockStorage{})
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestB", 0, time.Now()))
 	require.Equal(t, []string{
@@ -149,7 +149,7 @@ func TestABeginThatFailsAfterTheClockMovedFailsTheTest(t *testing.T) {
 	a.clientMocks.Delete(uint64(0)) // the narrowing fails
 	ctx := context.Background()
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA": {"mock-1"}}))
-	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()), "no mocks stored")
+	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()), "no mocks are loaded")
 	a.NoteScopeOutcome("pkg::TestA", 0, models.ScopeOutcomePassed)
 	// Its end tries to give the pool back, which fails as the narrowing did
 	// (no mocks stored here); the end records nothing either way.
@@ -289,6 +289,8 @@ func TestTimeFileIsTheBuildsClockRecord(t *testing.T) {
 type workerPool struct {
 	coreAgent.Proxy
 	narrowed, cleared []uint32
+	mu                sync.Mutex
+	exactTest         string
 }
 
 func (p *workerPool) Mock(context.Context, models.OutgoingOptions) error { return nil }
@@ -301,6 +303,25 @@ func (p *workerPool) SetMocks(context.Context, []*models.Mock, []*models.Mock) e
 }
 func (p *workerPool) SetWorkerScope(pid uint32, _ []string) { p.narrowed = append(p.narrowed, pid) }
 func (p *workerPool) ClearWorkerScope(pid uint32)           { p.cleared = append(p.cleared, pid) }
+
+// The proven wire serves its single worker exactly (exact_proven.go).
+func (p *workerPool) ServeExactTest(test string, _ []*models.Mock) error {
+	p.mu.Lock()
+	p.exactTest = test
+	p.mu.Unlock()
+	return nil
+}
+func (p *workerPool) ServeExactPool(string, []string) error {
+	p.mu.Lock()
+	p.exactTest = ""
+	p.mu.Unlock()
+	return nil
+}
+func (p *workerPool) ExactTestOutcome() (string, []string, []string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exactTest, nil, nil, true
+}
 
 // syncClockHooks notes the moves it is asked to make from many goroutines,
 // and whether a begin ever came while another test's begin was unanswered by
@@ -503,7 +524,7 @@ func TestASubtestWhoseNarrowingFailsMovesNoClock(t *testing.T) {
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
 	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"pkg::TestA/case": {"mock-1"}}))
 	a.clientMocks.Delete(uint64(0)) // the narrowing fails
-	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA/case", 0, time.Now()), "no mocks stored")
+	require.ErrorContains(t, a.BeginScopeAt(ctx, "pkg::TestA/case", 0, time.Now()), "no mocks are loaded")
 	a.NoteScopeOutcome("pkg::TestA/case", 0, models.ScopeOutcomePassed)
 	_ = a.EndScopeAt(ctx, "pkg::TestA/case", 0, time.Now())
 	require.Equal(t, []string{models.ScopeOutcomePassed}, outcomesOf(t, a, "pkg::TestA/case"))

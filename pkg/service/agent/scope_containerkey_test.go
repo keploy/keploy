@@ -45,7 +45,7 @@ func useTestKeyer(t *testing.T) func(port int) string {
 // container shows whether the test's scope closed.
 func TestTheWiresOpenTestNumbersItsOwnContainers(t *testing.T) {
 	key := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	const k = "container:postgres:16:5432#"
 
@@ -72,7 +72,7 @@ func TestTheWiresOpenTestNumbersItsOwnContainers(t *testing.T) {
 // run's final read (failOpen), closes its numbering too.
 func TestATestKeployFailsClosesItsNumbering(t *testing.T) {
 	key := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	proc := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "k"}, proc.Process.Pid)
@@ -90,7 +90,7 @@ func TestATestKeployFailsClosesItsNumbering(t *testing.T) {
 // the same in a run of every package and in a run of that one.
 func TestEachTestProcessNumbersFromTheRunsStart(t *testing.T) {
 	key := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	const k = "container:postgres:16:5432#"
 	require.Equal(t, k+"1", key(40001), "a container of the run's, before any test process")
@@ -113,7 +113,7 @@ func TestEachTestProcessNumbersFromTheRunsStart(t *testing.T) {
 // while it is skipped is the run's.
 func TestASkippedTestNumbersNothing(t *testing.T) {
 	key := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "flaky"}))

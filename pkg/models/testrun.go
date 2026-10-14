@@ -243,6 +243,11 @@ type UnmatchedCall struct {
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Kind is where the call was made, under the proven switch (MissInTest,
+	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
+	// extra call, how many times the test recorded that call.
+	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 }
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it

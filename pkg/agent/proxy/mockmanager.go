@@ -131,6 +131,10 @@ type MockManager struct {
 	// keploy mock replay begins. Read only under the proven switch.
 	vars variables.Table
 
+	// exact is exact serving, under the proven switch (exact.go): when on,
+	// it decides what every read shows and which consume succeeds.
+	exact exactState
+
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
 	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
@@ -496,6 +500,10 @@ func (m *MockManager) ResetForReplaySession() {
 		return true
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+	// Exact serving belongs to one replay session: the agent turns it on
+	// again for the next one.
+	m.exact.view.Store(nil)
+	m.exact.fired.Store(false)
 
 	// The never-drained per-name consumption history belongs to ONE test set.
 	//
@@ -703,6 +711,9 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.perTest("", results), nil
+	}
 	return results, nil
 }
 
@@ -740,6 +751,9 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 // tolerable — callers that need strict window/pool atomicity go
 // through GetPerTestMocksInWindow (which snapshots both under swapMu).
 func (m *MockManager) IsTestWindowActive() bool {
+	if v := m.exactView(); v != nil {
+		return v.test != ""
+	}
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return !m.windowStart.IsZero() && !m.windowEnd.IsZero()
@@ -801,6 +815,10 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		return true
 	})
 
+	// Under exact serving the test's mapping decides, not a recorded time.
+	if v := m.exactView(); v != nil {
+		return v.perTest("", all), nil
+	}
 	if start.IsZero() || end.IsZero() {
 		return all, nil
 	}
@@ -1437,6 +1455,9 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.keep(results), nil
+	}
 	return results, nil
 }
 
@@ -1513,6 +1534,13 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Under exact serving the open test's unanswered mocks lead the union:
+	// it is every mock a parser that reads nothing else may serve.
+	if v := m.exactView(); v != nil {
+		if owned := v.unanswered(""); len(owned) > 0 {
+			startup = append(owned, startup...)
+		}
+	}
 	if len(startup) == 0 {
 		return session, nil
 	}
@@ -1558,7 +1586,8 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
 // parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
-	if n <= 1 {
+	key, cursored := m.exactCursorKey(key)
+	if n <= 1 || !cursored {
 		// Zero or one recorded response: always the first (only) one — identical
 		// to the legacy reuse behaviour, no cursor state needed.
 		return 0
@@ -1577,7 +1606,8 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 // to n-1), so a hot repeated request never grows it unbounded. Call it only
 // after the chosen response was actually served.
 func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
-	if n <= 1 {
+	key, cursored := m.exactCursorKey(key)
+	if n <= 1 || !cursored {
 		return
 	}
 	m.cursorMu.Lock()
@@ -1648,6 +1678,9 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.keep(results), nil
+	}
 	return results, nil
 }
 
@@ -1678,6 +1711,9 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.keep(results), nil
+	}
 	return results, nil
 }
 
@@ -1721,6 +1757,9 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // swapMu). For pair-coherent reads use WindowSnapshot, which
 // takes both locks in declared order and returns a tear-free snapshot.
 func (m *MockManager) HasFirstTestFired() bool {
+	if m.exactView() != nil {
+		return m.exact.fired.Load()
+	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
 	return m.testFiredThisSet
@@ -1779,6 +1818,11 @@ func (m *MockManager) FirstTestWindowStart() time.Time {
 // legacy parsers and out-of-repo consumers; those callers don't need
 // the pair and a single-lock read is materially cheaper per call.
 func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
+	// Under exact serving a test is open between its begin and its end,
+	// whatever the recorded times say.
+	if v := m.exactView(); v != nil {
+		return models.WindowSnapshot{Active: v.test != "", FirstTestFired: m.exact.fired.Load()}
+	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
 	m.windowMu.RLock()
@@ -1803,6 +1847,11 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
+	// Under exact serving no recorded time narrows what a test is served:
+	// its mapping does.
+	if m.exactView() != nil {
+		return time.Time{}, time.Time{}
+	}
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return m.windowStart, m.windowEnd
@@ -2139,6 +2188,9 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.perTest(kind, results), nil
+	}
 	return results, nil
 }
 
@@ -2157,6 +2209,9 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.keep(results), nil
+	}
 	return results, nil
 }
 
@@ -2344,6 +2399,12 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	switch m.exactConsume(old) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
@@ -2458,6 +2519,12 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	switch m.exactConsume(&mock) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
@@ -2552,6 +2619,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	switch m.exactConsume(&mock) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
@@ -2633,6 +2706,12 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // it).
 func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
+		return false
+	}
+	switch m.exactConsume(&mock) {
+	case exactServed:
+		return true
+	case exactRefused:
 		return false
 	}
 	m.treesMu.RLock()
@@ -2854,6 +2933,12 @@ func (m *MockManager) signalWindowChange() {
 // semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	if mock.Name == "" {
+		return false
+	}
+	switch m.exactConsume(&mock) {
+	case exactServed:
+		return true
+	case exactRefused:
 		return false
 	}
 	m.bumpHitCount(mock.Name, mock.Kind)
@@ -3336,11 +3421,17 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 // window. A parser serves them after the running test's own mocks and consumes
 // them through DeleteFilteredMock. Empty while no kind is registered.
 func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
+	if v := m.exactView(); v != nil {
+		return v.keep(m.carry.snapshot("")), nil
+	}
 	return m.carry.snapshot(""), nil
 }
 
 // GetCarryOverMocksByKind is GetCarryOverMocks for one kind.
 func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if v := m.exactView(); v != nil {
+		return v.keep(m.carry.snapshot(kind)), nil
+	}
 	return m.carry.snapshot(kind), nil
 }
 
