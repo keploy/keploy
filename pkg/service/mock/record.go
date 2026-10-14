@@ -347,7 +347,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		mockCount++
 		kind := mk.Spec.Metadata["type"]
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
+		// Under the proven switch a protocol-phase mock is the pool's, never
+		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
+		protocol := provenswitch.On() && mk.IsProtocolPhase()
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -650,7 +653,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
-			byTest := correlateScopes(windows, recorded)
+			byTest := correlateScopes(windows, dataPlane(recorded))
 			owned := recorded
 			var plan bootPlan
 			if len(starts) > 0 {
@@ -665,6 +668,14 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if len(byTest) > 0 {
 				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					if provenswitch.On() {
+						// Without them no test of the set can be judged
+						// (design v14 §5.2): the record fails and says so.
+						m.propagateExit(appErr, "record")
+						stopReason = "keploy could not write which recorded calls each test made (mappings.yaml)"
+						utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name), zap.String("next_step", "free the disk or fix the set directory's permissions, then record again"))
+						return fmt.Errorf("%s: %w", stopReason, err)
+					}
 					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
 				} else {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
@@ -942,13 +953,16 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
-	name  string
-	ts    time.Time
-	pid   uint32 // source worker PID (0 if unknown); enables exact parallel attribution
-	end   time.Time
-	boot  bool
-	start string
-	ref   string
+	name string
+	ts   time.Time
+	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end  time.Time
+	boot bool
+	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
+	// so in no test's mapping and in the pool.
+	protocol bool
+	start    string
+	ref      string
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1014,6 +1028,18 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
 	}
 	return byTest
+}
+
+// dataPlane is the captured mocks less the protocol-phase ones (none
+// without the proven switch): only data-plane mocks go in a test's mapping.
+func dataPlane(mocks []capturedMock) []capturedMock {
+	out := mocks[:0:0]
+	for _, mk := range mocks {
+		if !mk.protocol {
+			out = append(out, mk)
+		}
+	}
+	return out
 }
 
 // correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
@@ -1113,7 +1139,7 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
 	var out []models.MockEntry
 	for _, mk := range mocks {
-		if mk.boot || containing(windows, mk.ts) == "" {
+		if mk.boot || mk.protocol || containing(windows, mk.ts) == "" {
 			// Under the proven wire, the pool slice of the key it was made
 			// under (design v14 §5.2); claims are none without it.
 			out = append(out, models.MockEntry{Name: mk.name, Key: claimKeyAt(claims, mk.ts)})

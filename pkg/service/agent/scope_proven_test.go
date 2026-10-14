@@ -26,8 +26,9 @@ import (
 // process: the agent's refusal of its own claims is tested by itself.
 func init() { agentPID = -1 }
 
-// wireProxy is the part of the proxy the proven wire reads: the misses, how
-// often each mock answered, the per-test capture window and the tree root.
+// wireProxy is the part of the proxy the proven wire reads: the misses, the
+// per-test capture window, the staging, and exact serving, whose consumption
+// a test drives by counting answers in served.
 type wireProxy struct {
 	coreAgent.Proxy
 	mu        sync.Mutex
@@ -35,10 +36,17 @@ type wireProxy struct {
 	missErr   error
 	served    map[string]uint64
 	continues int
-	// filtered is the per-test pool the last SetMocks installed; setErr
-	// fails SetMocks.
-	filtered []*models.Mock
-	setErr   error
+	// exactTest and exactNames are what exact serving was last told to
+	// serve: an open test and its test mocks, or ("", the pool slice);
+	// atServe is served when the test opened. setErr fails serving.
+	exactTest  string
+	exactNames []string
+	atServe    map[string]uint64
+	setErr     error
+	// failPools fails that many pool serves, then serves again.
+	failPools int
+	// staged counts the stagings (SetMocks).
+	staged int
 }
 
 func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
@@ -52,42 +60,85 @@ func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, erro
 	return out, nil
 }
 
-func (p *wireProxy) ServedCounts() map[string]uint64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make(map[string]uint64, len(p.served))
-	for k, v := range p.served {
-		out[k] = v
-	}
-	return out
-}
-
 func (p *wireProxy) ContinueTestErrorCapture() { p.mu.Lock(); p.continues++; p.mu.Unlock() }
 
-// SetMocks takes the pool a begin narrows to its test's mocks.
-func (p *wireProxy) SetMocks(_ context.Context, filtered, _ []*models.Mock) error {
+// SetMocks takes a staging of the replay's mocks.
+func (p *wireProxy) SetMocks(_ context.Context, _, _ []*models.Mock) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.staged++
+	return nil
+}
+
+func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.setErr != nil {
 		return p.setErr
 	}
-	p.filtered = filtered
+	p.exactTest, p.exactNames = test, nil
+	for _, m := range owned {
+		p.exactNames = append(p.exactNames, m.Name)
+	}
+	p.atServe = make(map[string]uint64, len(p.served))
+	for k, v := range p.served {
+		p.atServe[k] = v
+	}
 	return nil
 }
 
-// countlessProxy cannot count which mocks answered.
-type countlessProxy struct{ coreAgent.Proxy }
+func (p *wireProxy) ServeExactPool(_ string, names []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.setErr != nil {
+		return p.setErr
+	}
+	if p.failPools > 0 {
+		p.failPools--
+		return errors.New("the proxy refused the pool")
+	}
+	p.exactTest, p.exactNames = "", append([]string(nil), names...)
+	return nil
+}
 
-func (countlessProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return nil, nil }
+// ExactTestOutcome: a test mock answered when served moved since its test
+// opened.
+func (p *wireProxy) ExactTestOutcome() (string, []string, []string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exactTest == "" {
+		return "", nil, nil, true
+	}
+	var consumed, unconsumed []string
+	for _, n := range p.exactNames {
+		if p.served[n] > p.atServe[n] {
+			consumed = append(consumed, n)
+		} else {
+			unconsumed = append(unconsumed, n)
+		}
+	}
+	return p.exactTest, consumed, unconsumed, true
+}
 
-// captureless counts answers but cannot keep each test's misses apart.
+// exactless cannot serve each test exactly.
+type exactless struct{ coreAgent.Proxy }
+
+func (exactless) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return nil, nil }
+
+// captureless serves exactly but cannot keep each test's misses apart.
 type captureless struct{ coreAgent.Proxy }
 
-func (captureless) ServedCounts() map[string]uint64 { return nil }
+func (captureless) ServeExactTest(string, []*models.Mock) error { return nil }
+func (captureless) ServeExactPool(string, []string) error       { return nil }
+func (captureless) ExactTestOutcome() (string, []string, []string, bool) {
+	return "", nil, nil, true
+}
 
 // wireAgent is an agent whose CLI (its registered client) is this test
-// process's parent, so the test process and its children are the run's.
-func wireAgent(mode models.Mode) (*Agent, *wireProxy) {
+// process's parent, so the test process and its children are the run's. The
+// proven switch is on: the wire is served only under it.
+func wireAgent(t *testing.T, mode models.Mode) (*Agent, *wireProxy) {
+	t.Setenv(provenswitch.Env, "1")
 	p := &wireProxy{served: map[string]uint64{}}
 	cfg := &config.Config{}
 	cfg.Agent.Mode = mode
@@ -143,7 +194,7 @@ func kill(t *testing.T, c *exec.Cmd) {
 // One test process at a time: a claim while another claimer runs is
 // refused, whether or not a test is open.
 func TestAClaimWhileAnotherClaimerRunsIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	other := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, other.Process.Pid)
@@ -158,7 +209,7 @@ func TestAClaimWhileAnotherClaimerRunsIsRefused(t *testing.T) {
 // A claimer that exited with a test open: the test fails, and the next claim
 // is accepted.
 func TestAClaimerThatExitedFailsItsOpenTestAndFreesTheRun(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	gone := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, gone.Process.Pid)
@@ -178,7 +229,7 @@ func TestAClaimerThatExitedFailsItsOpenTestAndFreesTheRun(t *testing.T) {
 // The run's windows, read after its test process exited mid-test, report
 // the test failed.
 func TestTheWindowsReportATestWhoseProcessExitedAsFailed(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	proc := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "k"}, proc.Process.Pid)
@@ -194,7 +245,7 @@ func TestTheWindowsReportATestWhoseProcessExitedAsFailed(t *testing.T) {
 // The windows are read at the run's end: a test whose process outlived the
 // test command and never ended it fails too, never left out of them.
 func TestATestStillOpenAtTheFinalReadFails(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	proc := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "k"}, proc.Process.Pid)
@@ -209,7 +260,7 @@ func TestATestStillOpenAtTheFinalReadFails(t *testing.T) {
 // A test begun before its process claimed the run is refused: keploy cannot
 // tell that the caller's calls are captured or mocked.
 func TestABeginWithoutAClaimIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenBegin(context.Background(), begin("TestOrphan"))
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
@@ -223,7 +274,7 @@ func TestABeginWithoutAClaimIsRefused(t *testing.T) {
 // run's earlier processes: they stay in the run's misses and are charged to
 // none of the new process's tests.
 func TestMissesMadeBeforeAClaimAreTheRunsNotATests(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	first := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, first.Process.Pid)
@@ -251,7 +302,7 @@ func TestMissesMadeBeforeAClaimAreTheRunsNotATests(t *testing.T) {
 // A begin judged at its end against the counts it began with: a mapped mock
 // that answered before the test began, and not during it, was not made by it.
 func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
@@ -268,7 +319,7 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 // A wire operation waiting for another ends with its caller's context: the
 // CLI's final read is never stuck behind an operation it cannot see.
 func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	require.NoError(t, a.wire.lock(context.Background()))
 	defer a.wire.unlock()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -287,7 +338,7 @@ func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {
 // A claim from a process outside the run's own processes is refused: keploy
 // does not intercept it.
 func TestAClaimFromOutsideTheRunIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.config.Agent.ClientNSPID = uint32(os.Getpid()) // the run is this process's own children
 	stranger := os.Getppid()
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a"}, stranger)
@@ -299,7 +350,7 @@ func TestAClaimFromOutsideTheRunIsRefused(t *testing.T) {
 }
 
 func TestAClaimKeyWithTheIDSeparatorIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	for _, key := range []string{"", "a::b", ":a", "a:", "/abs", "..", "../up", "a/../../b", "x/../..", "a/b/../../..", "a\x00b", "./orders", "orders/", "a//b"} {
 		_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: key}, os.Getpid())
 		require.NotNil(t, serr, key)
@@ -308,7 +359,7 @@ func TestAClaimKeyWithTheIDSeparatorIsRefused(t *testing.T) {
 }
 
 func TestBeginWithoutCanSkipNeedsANewIntegration(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenBegin(context.Background(), models.ScopeReq{Name: "TestA"})
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrUpgradeIntegration, serr.Code)
@@ -318,7 +369,7 @@ func TestBeginWithoutCanSkipNeedsANewIntegration(t *testing.T) {
 }
 
 func TestASecondOpenTestIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -335,7 +386,7 @@ func TestASecondOpenTestIsRefused(t *testing.T) {
 }
 
 func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
@@ -354,7 +405,7 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 }
 
 func TestARecordNeverSkips(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestToken": "listed"}))
@@ -364,7 +415,7 @@ func TestARecordNeverSkips(t *testing.T) {
 }
 
 func TestAnEndWithoutAnOutcomeCountsAsFailed(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -375,7 +426,7 @@ func TestAnEndWithoutAnOutcomeCountsAsFailed(t *testing.T) {
 }
 
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
@@ -406,7 +457,7 @@ func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
 // A miss fails the replayed test, which is recorded failed, and the run's own
 // read of the misses still counts it, once.
 func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
@@ -447,7 +498,7 @@ func TestAMissFailsTheReplayedTestAndStaysInTheRunsMisses(t *testing.T) {
 // A test keploy cannot judge never passes: a failed read of its misses fails
 // the end, and the test is recorded failed.
 func TestAnUnreadableMissListFailsTheTest(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -466,7 +517,7 @@ func TestAnUnreadableMissListFailsTheTest(t *testing.T) {
 // is not also the run's refusal (the CLI would read it as an agent failure
 // and lose the test's own row).
 func TestAnUnreadTestIsNotTheRunsRefusal(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -480,7 +531,7 @@ func TestAnUnreadTestIsNotTheRunsRefusal(t *testing.T) {
 // A test keploy could neither read nor end: unread on its window, and its
 // end's failure (its mocks or clock not put back) is the run's, once.
 func TestAnUnreadTestKeployCouldNotEndIsTheRunsRefusal(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
@@ -512,7 +563,7 @@ func TestAnUnreadTestKeployCouldNotEndIsTheRunsRefusal(t *testing.T) {
 // Keploy's failure to end a test is the run's whoever ends it: here the
 // next claim, once the test's process exited with it open.
 func TestAFailedEndAtAClaimHandoffIsTheRunsRefusal(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"a::TestCrash": {"mock-1"}}
@@ -524,23 +575,21 @@ func TestAFailedEndAtAClaimHandoffIsTheRunsRefusal(t *testing.T) {
 	require.Nil(t, serr)
 	kill(t, gone)
 	p.mu.Lock()
-	p.setErr = errors.New("the proxy refused the pool")
+	// The end's pool serve fails; the new claim's pool is served.
+	p.failPools = 1
 	p.mu.Unlock()
 	_, serr = a.ClaimInstance(ctx, models.InstanceReq{Key: "b"}, os.Getpid())
 	require.Nil(t, serr, "the run is free once its claimer exited")
-	p.mu.Lock()
-	p.setErr = nil
-	p.mu.Unlock()
 	require.Equal(t, []string{models.ScopeErrInternal}, refusalCodes(a))
 }
 
-// In a replay a proxy that cannot count answers cannot judge a test, so the
-// begin fails and leaves nothing open.
+// In a replay a proxy that cannot serve each test exactly its own mocks
+// cannot judge a test, so the begin fails and leaves nothing open.
 func TestABeginKeployCannotJudgeOpensNothing(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
-	a.Proxy = countlessProxy{}
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
+	a.Proxy = exactless{}
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
 	require.NotNil(t, serr)
 	require.Equal(t, http.StatusInternalServerError, serr.Status)
@@ -556,26 +605,47 @@ func TestABeginKeployCannotJudgeOpensNothing(t *testing.T) {
 	require.Nil(t, serr, "the failed begins left no open test behind")
 }
 
-// A begin keeps how often each mock had answered, which its end judges
-// against.
-func TestABeginKeepsTheCountsItBeganWith(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
-	p.served = map[string]uint64{"mock-1": 3}
+// A begin serves its test exactly its test mocks: the data-plane mocks of
+// its mapping, in recorded order; a mapped protocol-phase mock stays in the
+// pool, and an end serves the pool slice again.
+func TestABeginServesItsTestExactlyItsTestMocks(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	later := httpMock("mock-1", "GET", "http://h/later")
+	later.Spec.ReqTimestampMock = t0.Add(time.Second)
+	earlier := httpMock("mock-2", "GET", "http://h/earlier")
+	earlier.Spec.ReqTimestampMock = t0
+	handshake := httpMock("mock-3", "GET", "http://h/token")
+	handshake.Spec.Metadata = map[string]string{"type": "config"}
+	storeMocks(a, later, earlier, handshake, httpMock("mock-4", "GET", "http://h/pool"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1", "mock-2", "mock-3"}}
+	ctx := context.Background()
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-4"}}))
 	claimSelf(t, a)
-	_, serr := a.ProvenBegin(context.Background(), begin("TestA"))
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
 	require.Nil(t, serr)
-	a.provenMu.Lock()
-	defer a.provenMu.Unlock()
-	require.Equal(t, map[string]uint64{"mock-1": 3}, a.proven.atBegin)
+	p.mu.Lock()
+	require.Equal(t, "o::TestA", p.exactTest)
+	require.Equal(t, []string{"mock-2", "mock-1"}, p.exactNames, "recorded order; the handshake is no test mock")
+	require.Equal(t, 1, p.staged, "the recording is staged once")
+	p.served["mock-1"], p.served["mock-2"] = 1, 1
+	p.mu.Unlock()
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"mock-4"}, p.filteredNames())
+	p.mu.Lock()
+	require.Equal(t, 1, p.staged, "an end stages nothing again")
+	p.mu.Unlock()
 }
 
 // A test that skipped itself is not failed for the recorded calls it then
 // never made; a miss still fails it.
 func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", nil, false)
+	ev, err := a.testEvidence(context.Background(), "t", false)
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -583,7 +653,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 // The same test process claiming again while its test is open is refused;
 // between tests it is a claim like any other.
 func TestARepeatedClaimWhileATestIsOpenIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, os.Getpid())
 	require.Nil(t, serr)
@@ -601,7 +671,7 @@ func TestARepeatedClaimWhileATestIsOpenIsRefused(t *testing.T) {
 // A run keploy did not start natively (docker compose: no client) cannot
 // take a claim, and says so.
 func TestAClaimInARunWithoutAClientSaysWhy(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.config.Agent.ClientNSPID = 0
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a"}, os.Getpid())
 	require.NotNil(t, serr)
@@ -610,7 +680,7 @@ func TestAClaimInARunWithoutAClientSaysWhy(t *testing.T) {
 }
 
 func TestABeginRefusesAnIDSeparatorInItsFile(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	for _, req := range []models.ScopeReq{
 		{Name: "t", File: "a::b", CanSkip: true},
 		{Name: "t", File: ":a", CanSkip: true},
@@ -625,7 +695,7 @@ func TestABeginRefusesAnIDSeparatorInItsFile(t *testing.T) {
 }
 
 func TestARecordedTestNeverFails(t *testing.T) {
-	a, p := wireAgent(models.MODE_RECORD)
+	a, p := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -645,20 +715,21 @@ func httpMock(name, method, url string) *models.Mock {
 	return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: models.Method(method), URL: url}}}
 }
 
-// A mapped data-plane mock that did not answer while the test was open is
-// an unmade call; one that answered again during the test, though it had
-// answered before it, was made; a protocol-phase mock is never checked.
+// A test mock that did not answer while the test was open is an unmade
+// call; one that answered during it, though it had answered before it, was
+// made; a protocol-phase mock is no test mock.
 func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	audit := httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit")
 	user := httpMock("mock-2", "GET", "http://127.0.0.1:18282/users/1")
 	dns := &models.Mock{Name: "mock-3", Kind: models.DNS}
 	storeMocks(a, audit, user, dns)
 	a.scopeTable = map[string][]string{"orders::TestPlaceOrder": {"mock-1", "mock-2", "mock-3"}}
+	p.served = map[string]uint64{"mock-1": 1, "mock-2": 1}
+	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
+	p.served["mock-2"]++
 
-	atBegin := map[string]uint64{"mock-1": 1, "mock-2": 1}
-	p.served = map[string]uint64{"mock-1": 1, "mock-2": 2}
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", atBegin, true)
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true)
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
@@ -666,17 +737,23 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.Contains(t, reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
-// A mapping that names a mock the loaded recording lacks cannot be judged.
+// A mapping that names a mock the loaded recording lacks cannot be served
+// exactly: the begin refuses, and opens nothing.
 func TestAMappedMockThatIsNotLoadedIsAnError(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
-	a.scopeTable = map[string][]string{"t": {"mock-1", "mock-9"}}
-	_, err := a.testEvidence(context.Background(), "t", nil, true)
-	require.ErrorContains(t, err, "mock-9")
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1", "mock-9"}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(context.Background(), begin("TestA"))
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "mock-9")
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	require.Empty(t, a.proven.open)
 }
 
 func TestTheWireResetsWithTheSession(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestA": "listed"}))
 	claimSelf(t, a)
@@ -694,7 +771,7 @@ func TestTheWireResetsWithTheSession(t *testing.T) {
 // A session start that waits on a wire operation ends with its caller: a
 // stuck operation never holds the record or replay request forever.
 func TestASessionStartEndsWithItsCaller(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	require.NoError(t, a.wire.lock(context.Background()))
 	defer a.wire.unlock()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -773,7 +850,7 @@ func TestTheReasonQuotesAnIDTheShellWouldSplit(t *testing.T) {
 // A claim whose process exited is no claim: a begin under it is refused, so
 // a test is never given another process's key.
 func TestABeginUnderADeadClaimIsRefused(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	gone := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "pkg1"}, gone.Process.Pid)
@@ -787,7 +864,7 @@ func TestABeginUnderADeadClaimIsRefused(t *testing.T) {
 // A claim whose read of the run's misses failed is not made: its retry
 // reads them again, so they are never charged to its first test.
 func TestAClaimWhoseMissReadFailedIsNotMade(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	p.missErr = errors.New("the drain did not finish")
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, os.Getpid())
@@ -808,7 +885,7 @@ func TestAClaimWhoseMissReadFailedIsNotMade(t *testing.T) {
 // Once the run's windows are read the run is over: a claim or a begin then
 // is refused, as nothing it does would be read.
 func TestNothingIsBegunAfterTheFinalRead(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, err := a.FinalScopeWindows(ctx)
@@ -825,37 +902,44 @@ func TestNothingIsBegunAfterTheFinalRead(t *testing.T) {
 }
 
 // A read that fails after the test's misses were found keeps them: they are
-// its whatever else could not be told.
-func TestAFailedMappingReadKeepsTheTestsMisses(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+// its whatever else could not be told. Here the proxy was not serving the
+// test exactly at its end.
+func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
-	a.scopeTable = map[string][]string{"o::TestA": {"mock-9"}}
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", nil, true)
-	require.ErrorContains(t, err, "mock-9")
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true)
+	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
 }
 
-// Under the switch a test recorded with no call is served only the
-// reusable tier: no other test's per-test mock answers it.
+// A test recorded with no call, or one the mapping omits, owns no test mock:
+// no other test's mock answers it.
 func TestATestRecordedWithNoCallIsServedNoPerTestMock(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/other-tests-call"))
-	a.scopeTable = map[string][]string{"o::TestPure": {}}
+	a.scopeTable = map[string][]string{"o::TestPure": {}, "o::TestOther": {"mock-1"}}
 	claimSelf(t, a)
-	_, serr := a.ProvenBegin(context.Background(), begin("TestPure"))
-	require.Nil(t, serr)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	require.Empty(t, p.filtered, "another test's per-test mock was armed")
+	ctx := context.Background()
+	for _, name := range []string{"TestPure", "TestUnmapped"} {
+		_, serr := a.ProvenBegin(ctx, begin(name))
+		require.Nil(t, serr)
+		p.mu.Lock()
+		require.Equal(t, "o::"+name, p.exactTest)
+		require.Empty(t, p.exactNames, "another test's mock was served to %s", name)
+		p.mu.Unlock()
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+		require.Nil(t, serr)
+		require.Empty(t, e.Action, "a test that owns nothing and called nothing passes")
+	}
 }
 
 // A test whose end could not restore the pool is counted failed, in its
 // window as in its answer.
 func TestATestWhoseEndFailedIsCountedFailed(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.served = map[string]uint64{}
@@ -893,7 +977,7 @@ func refusalCodes(a *Agent) []string {
 // A test whose name holds "::" (a subtest named after an IPv6 address) runs;
 // its ID escapes the name, so the ID's last "::" still ends its path.
 func TestATestNamedWithTheIDSeparatorRuns(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestDial/[::1]:8080"))
@@ -909,7 +993,7 @@ func TestTheAgentRefusesItsOwnClaim(t *testing.T) {
 	was := agentPID
 	agentPID = os.Getpid()
 	t.Cleanup(func() { agentPID = was })
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "o"}, os.Getpid())
 	require.NotNil(t, serr)
 	require.Contains(t, serr.Message, "read itself as the caller")
@@ -918,7 +1002,7 @@ func TestTheAgentRefusesItsOwnClaim(t *testing.T) {
 // A read that returns misses together with an error keeps them: they fail
 // the test, and stay in the run's misses.
 func TestMissesReadWithAnErrorAreKept(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
 	a.Proxy = p
 	ctx := context.Background()
@@ -958,7 +1042,7 @@ func (p *partialProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 // answered with what it read, the misses already charged to tests included:
 // the run's last read may be one, and nothing reads after it.
 func TestAnUnreadReadKeepsTheChargedMisses(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
 	a.Proxy = p
 	ctx := context.Background()
@@ -975,15 +1059,12 @@ func TestAnUnreadReadKeepsTheChargedMisses(t *testing.T) {
 	require.Len(t, all, 2, "the charged miss and the partial read")
 }
 
-// filteredNames is the per-test pool the proxy was last given.
+// filteredNames is what exact serving was last told to serve: the open
+// test's test mocks, or the pool slice between tests.
 func (p *wireProxy) filteredNames() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	var out []string
-	for _, m := range p.filtered {
-		out = append(out, m.Name)
-	}
-	return out
+	return append([]string(nil), p.exactNames...)
 }
 
 // Between tests the agent serves the pool slice of the current claim's key
@@ -991,8 +1072,7 @@ func (p *wireProxy) filteredNames() []string {
 // its key's, during a test the test's own mocks, and after it the key's
 // slice again. Another key's pool mock never answers.
 func TestBetweenTestsTheCurrentKeysPoolSliceIsServed(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a,
 		httpMock("mock-1", "GET", "http://h/orders-setup"),
 		httpMock("mock-2", "GET", "http://h/before-any-claim"),
@@ -1013,11 +1093,10 @@ func TestBetweenTestsTheCurrentKeysPoolSliceIsServed(t *testing.T) {
 	require.Equal(t, []string{"mock-1"}, p.filteredNames(), "after the test: the key's slice again")
 }
 
-// Without the slices (a CLI that sent none) the whole pool stays armed
-// between tests, as before them.
-func TestWithoutPoolSlicesTheWholePoolIsServed(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	a, p := wireAgent(models.MODE_TEST)
+// Without the slices (a CLI that sent none) no data-plane pool mock answers
+// between tests: the whole pool is never armed.
+func TestWithoutPoolSlicesNoPoolMockIsServed(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"), httpMock("mock-3", "GET", "http://h/test-a"))
 	ctx := context.Background()
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-3"}}
@@ -1027,14 +1106,17 @@ func TestWithoutPoolSlicesTheWholePoolIsServed(t *testing.T) {
 	p.served["mock-3"] = 1
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.Nil(t, serr)
-	require.ElementsMatch(t, []string{"mock-1", "mock-3"}, p.filteredNames())
+	require.Empty(t, p.filteredNames())
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Empty(t, p.exactTest)
 }
 
 // Each claim is in the run's windows, in order, so a record tags each pool
 // mock with the key it was made under; a re-claim by the claimer with the
 // same key adds none.
 func TestTheClaimsAreInTheWindows(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	claimSelf(t, a)
 	claimSelf(t, a)
 	ws, err := a.GetScopeWindows(context.Background())
@@ -1058,14 +1140,10 @@ func TestTheClaimsAreInTheWindows(t *testing.T) {
 // An empty pool (a recording with no start-up mock) is a pool: between
 // tests no pool mock answers, and no test's own mock.
 func TestAnEmptyPoolServesNoPoolMock(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/test-a"), httpMock("mock-2", "GET", "http://h/test-b"))
 	ctx := context.Background()
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}
-	p.mu.Lock()
-	p.filtered = []*models.Mock{httpMock("sentinel", "GET", "http://h/never-armed")}
-	p.mu.Unlock()
 	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
 	require.Empty(t, p.filteredNames(), "before any claim: armed with no pool mock")
 	claimSelf(t, a)
@@ -1080,7 +1158,7 @@ func TestAnEmptyPoolServesNoPoolMock(t *testing.T) {
 // A refusal is in the run's windows, once when repeated, and the session
 // keeps a bounded number of them.
 func TestRefusalsAreInTheWindows(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	r := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "a second test process"}
 	a.NoteRefusal(r)
 	a.NoteRefusal(r)
@@ -1132,7 +1210,7 @@ func TestSanitizedMissKeepsTheVariablesPlaceNotItsValues(t *testing.T) {
 // them: a refused begin opens nothing, and a refused end fails and closes
 // the test it names. A v1 body runs.
 func TestTheWireRefusesThePidClockAndFolderOfTheOldWire(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	for _, tc := range []struct {
@@ -1166,7 +1244,7 @@ func TestTheWireRefusesThePidClockAndFolderOfTheOldWire(t *testing.T) {
 // test it names, with keploy's reason: left open, the next begin would be
 // refused one_test_at_a_time and the run blamed for two tests at once.
 func TestAnEndWithTheOldWiresFieldsFailsTheOpenTest(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -1185,7 +1263,7 @@ func TestAnEndWithTheOldWiresFieldsFailsTheOpenTest(t *testing.T) {
 // A harness refused at every test, by turns at its begin and its end, adds
 // each refusal once, and a refusal it has not made is still kept.
 func TestARefusalIsKeptOnceWhateverCameBetween(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	begin := models.RunRefusal{Code: models.ScopeErrUpgradeIntegration, Message: "predates protocol v1"}
 	end := models.RunRefusal{Code: models.ScopeErrUpgradeIntegration, Message: "sends pid"}
 	for i := 0; i < 2*maxRefusals; i++ {

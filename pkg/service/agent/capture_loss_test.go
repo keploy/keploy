@@ -26,7 +26,7 @@ func endPassed(t *testing.T, a *Agent, name string) models.ScopeEndResp {
 // saw: the test open when it happened fails, and so does every test after it
 // in the run (design v14 §3.2, taint). The test before it does not.
 func TestACaptureLossFailsTheOpenTestAndEveryLaterOne(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	claimSelf(t, a)
 	require.Empty(t, endPassed(t, a, "TestBefore").Action, "nothing lost yet")
 
@@ -55,7 +55,7 @@ func TestACaptureLossFailsTheOpenTestAndEveryLaterOne(t *testing.T) {
 
 // A loss between two tests charges the next test, not the one that ended.
 func TestACaptureLossBetweenTestsChargesTheNext(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	claimSelf(t, a)
 	require.Empty(t, endPassed(t, a, "TestA").Action)
 	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Excluded: 1}}
@@ -72,7 +72,7 @@ func TestACaptureLossBetweenTestsChargesTheNext(t *testing.T) {
 
 // What was lost before the run's session began is not the run's.
 func TestACaptureLossBeforeTheSessionIsNotTheRuns(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 9}}
 	require.NoError(t, a.resetSession(context.Background()))
 	claimSelf(t, a)
@@ -82,7 +82,7 @@ func TestACaptureLossBeforeTheSessionIsNotTheRuns(t *testing.T) {
 // A record never fails a test: the loss goes on the window, for judging, and
 // the test's own outcome stands.
 func TestARecordKeepsACaptureLossOnTheWindowAndNeverFails(t *testing.T) {
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	claimSelf(t, a)
 	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2}}
 	e := endPassed(t, a, "TestA")
@@ -109,7 +109,7 @@ func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
 		{"hooks that counted at the start and no longer can", func(a *Agent) { a.Hooks = loadedHooks{} }, "cannot tell whether it captured every call"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, _ := wireAgent(models.MODE_TEST)
+			a, _ := wireAgent(t, models.MODE_TEST)
 			claimSelf(t, a)
 			tc.hooks(a)
 			e := endPassed(t, a, "TestA")
@@ -119,7 +119,7 @@ func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
 			require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
 			require.True(t, windowOf(t, a, "o::TestA").Evidence.Unread, "no verdict of its own, as unread evidence")
 
-			r, _ := wireAgent(models.MODE_RECORD)
+			r, _ := wireAgent(t, models.MODE_RECORD)
 			claimSelf(t, r)
 			tc.hooks(r)
 			require.Empty(t, endPassed(t, r, "TestA").Action)
@@ -131,7 +131,7 @@ func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
 // A session whose start could not read the counts: every test of it is one
 // keploy cannot judge.
 func TestACaptureLossMarkThatCouldNotBeReadFailsTheReplayedTests(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.Hooks = countingHooks{err: errors.New("not loaded")}
 	require.NoError(t, a.resetSession(context.Background()))
 	a.Hooks = countingHooks{}
@@ -144,7 +144,7 @@ func TestACaptureLossMarkThatCouldNotBeReadFailsTheReplayedTests(t *testing.T) {
 // Hooks that never count (other platforms', which release 1 does not prove)
 // leave every test as it was, as the PID-map check leaves a session.
 func TestHooksThatNeverCountLeaveTheTestsAsTheyWere(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.Hooks = loadedHooks{}
 	require.NoError(t, a.resetSession(context.Background()))
 	claimSelf(t, a)
@@ -164,7 +164,7 @@ func (p lossProxy) CaptureLosses() models.CaptureLosses { return p.losses }
 func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	ctx := context.Background()
 	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	a.Proxy = lossProxy{wireProxy: p, losses: models.CaptureLosses{tls}}
 	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2}}
 	got, err := a.CaptureLosses(ctx)
@@ -187,7 +187,7 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 // A TLS handshake a client aborted against keploy's CA fails the replayed
 // test running then, through the proxy's count.
 func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
-	a, p := wireAgent(models.MODE_TEST)
+	a, p := wireAgent(t, models.MODE_TEST)
 	lp := lossProxy{wireProxy: p}
 	a.Proxy = lp
 	a.proven.losses = a.markCaptureLosses(context.Background())

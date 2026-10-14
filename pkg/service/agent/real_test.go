@@ -29,8 +29,8 @@ func (p *realProxy) SetRealDeps(_ context.Context, real []string) error {
 
 func (p *realProxy) RealRun() models.RealRun { return p.tracker.Run() }
 
-func realAgent(mode models.Mode) (*Agent, *realProxy) {
-	a, w := wireAgent(mode)
+func realAgent(t *testing.T, mode models.Mode) (*Agent, *realProxy) {
+	a, w := wireAgent(t, mode)
 	p := &realProxy{wireProxy: w}
 	a.Proxy = p
 	return a, p
@@ -39,7 +39,7 @@ func realAgent(mode models.Mode) (*Agent, *realProxy) {
 // A replayed test's REAL rows come from the bytes its connections sent while
 // it was open, and a connection keploy could not capture fails it.
 func TestAReplayedTestCarriesItsRealRowsAndFailsOnWhatKeployCouldNotCapture(t *testing.T) {
-	a, p := realAgent(models.MODE_TEST)
+	a, p := realAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -63,7 +63,7 @@ func TestAReplayedTestCarriesItsRealRowsAndFailsOnWhatKeployCouldNotCapture(t *t
 // A record never fails a test: what keploy could not capture is kept for
 // judging, and the test keeps its own outcome.
 func TestARecordedTestKeepsItsOutcomeAndItsUncapturedEvidence(t *testing.T) {
-	a, p := realAgent(models.MODE_RECORD)
+	a, p := realAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -84,7 +84,7 @@ func TestARecordedTestKeepsItsOutcomeAndItsUncapturedEvidence(t *testing.T) {
 // What keploy could not capture before a test process claimed the run is the
 // run's, not its first test's.
 func TestUncapturedBeforeAClaimIsTheRuns(t *testing.T) {
-	a, p := realAgent(models.MODE_TEST)
+	a, p := realAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	p.tracker.Incomplete("10.0.0.7:443", "a setup step")
 	claimSelf(t, a)
@@ -105,7 +105,7 @@ func TestUncapturedBeforeAClaimIsTheRuns(t *testing.T) {
 // could not capture of its own. A later test that only used REAL is tainted
 // by the loss and keeps its row too.
 func TestAReplayedTestCarriesItsRealRowsAndACaptureLoss(t *testing.T) {
-	a, p := realAgent(models.MODE_TEST)
+	a, p := realAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -148,7 +148,7 @@ func TestAReplayedTestCarriesItsRealRowsAndACaptureLoss(t *testing.T) {
 // In a record, a REAL row and a capture loss compose on the window for
 // judging, and the test keeps its own outcome.
 func TestARecordedTestKeepsItsRealRowsAndACaptureLoss(t *testing.T) {
-	a, p := realAgent(models.MODE_RECORD)
+	a, p := realAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -173,7 +173,7 @@ func TestARecordedTestKeepsItsRealRowsAndACaptureLoss(t *testing.T) {
 // A new session drops a test the last one left open; its evidence is the
 // run's.
 func TestANewSessionDropsAnOpenTestsRealUse(t *testing.T) {
-	a, p := realAgent(models.MODE_TEST)
+	a, p := realAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
@@ -186,7 +186,7 @@ func TestANewSessionDropsAnOpenTestsRealUse(t *testing.T) {
 }
 
 func TestSetRealDepsNeedsAProxyThatRelaysThem(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	require.NoError(t, a.SetRealDeps(ctx, nil), "an empty list asks nothing")
 	require.ErrorIs(t, a.SetRealDeps(ctx, []string{"localhost:5432"}), models.ErrNoRealRelay)
@@ -194,7 +194,7 @@ func TestSetRealDepsNeedsAProxyThatRelaysThem(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, run)
 
-	a, p := realAgent(models.MODE_TEST)
+	a, p := realAgent(t, models.MODE_TEST)
 	require.NoError(t, a.SetRealDeps(ctx, []string{"localhost:5432"}))
 	require.Equal(t, []string{"localhost:5432"}, p.set)
 }

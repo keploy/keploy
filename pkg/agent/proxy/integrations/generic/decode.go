@@ -69,6 +69,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
 				report := buildGenericMismatchReport(ctx, genericRequests, mockDb)
+				// Under exact serving: one exchange more than the test recorded?
+				if n := extraCall(genericRequests, mockDb); n > 0 {
+					report.MissKind, report.Recorded = models.MissExtraCall, n
+				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundError (covers
 				// every parser), so this stays Debug to avoid double-logging.

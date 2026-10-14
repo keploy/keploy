@@ -228,6 +228,13 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
 		return
 	}
+	if req.Sets != nil && provenswitch.On() {
+		// Under the switch each test is served exactly its own mocks, the one
+		// path that decides (design v14 §5.2): app starts are retired, and no
+		// per-start table may widen what a test is served.
+		http.Error(w, "under KEPLOY_PROVEN this keploy agent serves no per-start table: app starts are retired", http.StatusUnprocessableEntity)
+		return
+	}
 	if req.Sets != nil {
 		starts.Default.SetTable(req.Root, req.Sets)
 		var first time.Time
