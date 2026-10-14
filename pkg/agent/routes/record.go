@@ -385,6 +385,19 @@ var testCaseHoldTick = syncmgr.TestCaseHoldTick
 // at most (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
 var testCaseHoldMax = syncmgr.TestCaseHoldMax
 
+// streamWriteFailed logs a failed write to a recording's test-case stream: at
+// DEBUG once the stream has ended (net/http ends the request's context on a
+// failed write, as on its client going away; the summary's ended_by and
+// tcs_held_at_end say what the end cost), at ERROR when the failure is the
+// handler's own (a test case that does not encode, an upload it cannot read).
+func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err error) {
+	if r.Context().Err() != nil {
+		logger.Debug(msg, zap.Error(err))
+		return
+	}
+	logger.Error(msg, zap.Error(err))
+}
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -402,7 +415,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	mw := multipart.NewWriter(w)
 	defer func() {
 		if err := mw.Close(); err != nil {
-			a.logger.Error("failed to close multipart writer", zap.Error(err))
+			streamWriteFailed(a.logger, r, "failed to close multipart writer", err)
 		}
 		// Flush the final boundary so the client sees a clean EOF
 		// instead of "unexpected EOF" when the connection tears down.
@@ -520,11 +533,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		header.Set("Content-Type", "application/json")
 		part, err := mw.CreatePart(header)
 		if err != nil {
-			a.logger.Error("failed to create metadata part", zap.Error(err))
+			streamWriteFailed(a.logger, r, "failed to create metadata part", err)
 			return false
 		}
 		if err := json.NewEncoder(part).Encode(t); err != nil {
-			a.logger.Error("failed to encode metadata", zap.Error(err))
+			streamWriteFailed(a.logger, r, "failed to encode metadata", err)
 			return false
 		}
 
@@ -549,7 +562,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
 					filePart, err := mw.CreatePart(fileHeader)
 					if err != nil {
-						a.logger.Error("failed to create file part", zap.Error(err))
+						streamWriteFailed(a.logger, r, "failed to create file part", err)
 						return false
 					}
 
@@ -560,7 +573,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					}
 					if _, err := io.Copy(filePart, f); err != nil {
 						f.Close()
-						a.logger.Error("failed to copy file to stream", zap.Error(err))
+						streamWriteFailed(a.logger, r, "failed to copy file to stream", err)
 						return false
 					}
 					f.Close()
@@ -576,7 +589,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		delimiterHeader := textproto.MIMEHeader{}
 		delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
 		if _, err := mw.CreatePart(delimiterHeader); err != nil {
-			a.logger.Error("failed to create delimiter part", zap.Error(err))
+			streamWriteFailed(a.logger, r, "failed to create delimiter part", err)
 			return false
 		}
 

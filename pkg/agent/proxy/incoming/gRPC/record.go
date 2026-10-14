@@ -59,9 +59,9 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	destFrameCh := make(chan frameChunk, 512)
 
 	// Every chunk teed is being built into a test case, as far as a
-	// recording's stop can tell, from before it is stamped until the parser
-	// has taken all of it and the emitter has captured the calls it
-	// completed, into the recorder's queue: the stop waits for it
+	// recording's stop can tell, from before it is stamped until its frames
+	// are handled and the emitter has captured the calls they completed,
+	// into the recorder's queue (parseFramesFromChan): the stop waits for it
 	// (syncMock BacklogBefore). Without this, the agent answers "clear" while
 	// a gRPC call that ended before the stop is still in this pipeline, and
 	// the stop ends the stream without it.
@@ -158,9 +158,9 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 type frameChunk struct {
 	data      []byte
 	timestamp time.Time
-	// built, when set, says the chunk is through the pipeline: its parser has
-	// taken all of it, and the emitter has captured what it completed (or it
-	// was let go). See building in RecordIncoming.
+	// built, when set, says the chunk is through the pipeline: its frames
+	// are handled, and the emitter has captured the calls they completed (or
+	// it was let go). See building in RecordIncoming.
 	built func()
 	// teeEnded marks the end of what the forwarder tees (memory pressure
 	// stopped it for good): the parser gives up, as the rest of the frame it
