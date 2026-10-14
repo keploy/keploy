@@ -746,6 +746,9 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
+	// Under the proven switch, the proxy's listener is marked for the hooks'
+	// count of the connections waiting for it (proxyconns.go).
+	a.markProxyListener()
 
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,

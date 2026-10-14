@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -55,6 +56,9 @@ type Hooks struct {
 
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	// proxyMarked is set once MarkProxyListener has marked the proxy's
+	// listener: proxy_conns_established counts nothing before (proxyconns.go).
+	proxyMarked atomic.Bool
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map

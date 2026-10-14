@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -56,6 +57,86 @@ type PIDMapReporter interface {
 // (models.CaptureLosses). The agent adds these counts to the hooks' own.
 type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
+}
+
+// ListenerCounter is what the hooks give the proxy so that the kernel counts,
+// and numbers, the connections completed to the proxy's listener.
+type ListenerCounter interface {
+	// MarkProxyListener marks the proxy's listening socket, rc, as the one
+	// whose connections the kernel counts. The mark is copied into every
+	// socket the kernel creates for a connection to it, from the moment it
+	// is set, so the proxy marks its socket before listen(): every
+	// connection it can ever accept is then counted. The socket must be
+	// plain TCP; an MPTCP one is refused, since the kernel creates its
+	// connections' sockets from a TCP socket of its own that the mark never
+	// reaches.
+	MarkProxyListener(rc syscall.RawConn) error
+	// ProxyConnSeq is the sequence number the kernel gave the accepted
+	// connection rc as it counted it: 1 for the first connection completed
+	// to the marked listener, and so on. A connection with none is an error.
+	ProxyConnSeq(rc syscall.RawConn) (uint64, error)
+}
+
+// ProxyConnsReporter is the optional extension implemented by hooks that
+// count, in the kernel, the connections completed to the proxy's listener
+// (models.ProxyConnCounts' Established). The agent type-asserts for it; with
+// hooks that do not implement it the agent answers
+// models.ErrProxyConnsUnsupported, "unknown".
+type ProxyConnsReporter interface {
+	ListenerCounter
+	// ProxyConnsEstablished is the count of the connections completed to the
+	// marked listener, the highest sequence number given. It only ever
+	// grows, for the life of the hooks. It fails until a listener has been
+	// marked.
+	ProxyConnsEstablished(ctx context.Context) (uint64, error)
+}
+
+// ListenerCountTaker is the optional extension implemented by proxies that can
+// have their listener counted by the hooks. The agent hands it the hooks
+// (ListenerCounter), under the proven switch only, before StartProxy; the
+// proxy then listens plain TCP, never MPTCP, marks its socket before
+// listen(), and reads each accepted connection's sequence number.
+type ListenerCountTaker interface {
+	SetListenerCounter(c ListenerCounter)
+}
+
+// AcceptCounter is the optional extension implemented by proxies that keep
+// the sequence numbers of the connections their marked listener accepts.
+type AcceptCounter interface {
+	// Accepted is the highest n such that every connection the kernel
+	// numbered 1..n has been accepted. It fails when the listener is not
+	// marked (the hooks could not mark it, it has no listener, nothing asked
+	// it to), has closed, or a number could not be read: "unknown".
+	Accepted() (uint64, error)
+	// WaitAccepted returns once Accepted() >= n, or with ctx's error when
+	// ctx ends first, or with Accepted's error, at once or when it comes.
+	// It has no deadline of its own; each accept wakes it.
+	WaitAccepted(ctx context.Context, n uint64) error
+	// ListenDrops is the marked listener's count of the packets the kernel
+	// dropped at it (models.ProxyConnCounts' ListenDrops). It fails as
+	// Accepted does.
+	ListenDrops() (uint64, error)
+}
+
+// ProxyConnCounter is what the agent offers a test's begin and end (S12): the
+// connections the kernel completed to the proxy's listener, numbered, and a
+// wait for the proxy to have accepted every one up to a number. begin and end
+// read ProxyConns, then WaitProxyAccepted(ctx, counts.Established), then go on
+// to the bytes and requests the proxy holds; a test whose ListenDrops differ
+// between its begin and its end is not verified.
+//
+// The counts only ever grow for the life of the agent process. An agent that
+// cannot count answers an error wrapping models.ErrProxyConnsUnsupported
+// ("unknown", never 0). ProxyConns is cheap (a locked map lookup, a locked
+// read and a getsockopt): a watchdog may call it at every wake-up to see the
+// wait progress.
+type ProxyConnCounter interface {
+	ProxyConns(ctx context.Context) (models.ProxyConnCounts, error)
+	// WaitProxyAccepted returns once the proxy has accepted every connection
+	// the kernel numbered 1..n, or with ctx's error. Connections numbered
+	// later cannot hold it back. No deadline of its own; it looks again at
+	// each accept.
+	WaitProxyAccepted(ctx context.Context, n uint64) error
 }
 
 type AuxiliaryProxyHook interface {
