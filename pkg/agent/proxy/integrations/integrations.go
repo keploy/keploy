@@ -301,6 +301,20 @@ type VariableStore interface {
 	Variables() *variables.Table
 }
 
+// TestWindows is an optional MockMemDb capability: where the request time of
+// a recorded mock falls among the replay's test windows. The learn step tells
+// the open test's own mocks, the pool's and other tests' apart by it where
+// the store's tiers cannot (a reusable HTTP mock of any test is in the
+// session tier).
+type TestWindows interface {
+	// InTestWindow reports whether t is inside the window of the test the
+	// replay runs now.
+	InTestWindow(t time.Time) bool
+	// InRecordedTestWindow reports whether t is inside the window of some
+	// recorded test of the set; known is false when the replay sent none.
+	InRecordedTestWindow(t time.Time) (inside, known bool)
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is

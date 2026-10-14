@@ -232,8 +232,8 @@ func TestPair(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	at := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
-	rec := body(t, "k", `{"order":"o-1","n":12345,"tok":"Bearer tok-A","nonce":"n-1","ts":"t-5","tags":["t1","t2"],"empty":"","db":"u-77"}`)
-	live := body(t, "k", `{"order":"o-9","n":54321,"tok":"Bearer tok-B","nonce":"n-9","ts":"t-6","tags":["u1","t2"],"empty":"now","db":"u-88"}`)
+	rec := body(t, "k", `{"order":"o-1","n":12345,"tok":"Bearer tok-A","nonce":"n-1","ts":"t-5","tags":["t1","t2"],"empty":"","db":"u-77","sess":"sess s-1","at":"2026-10-14 09:59:30"}`)
+	live := body(t, "k", `{"order":"o-9","n":54321,"tok":"Bearer tok-B","nonce":"n-9","ts":"t-6","tags":["u1","t2"],"empty":"now","db":"u-88","sess":"sess s-2","at":"2026-10-14 10:00:41"}`)
 	resp := map[string]Leaf{}
 	v, _ := DecodeJSON([]byte(`{"echo":"n-1","location":"/orders/x/n-1","items":[{"tag":"t1"}]}`))
 	JSONLeaves("body", v, resp)
@@ -261,8 +261,12 @@ func TestClassify(t *testing.T) {
 		// Recorded after the paired call, and not served before it: not
 		// earlier.
 		{Mock: "pg-9", At: at.Add(time.Second), Text: `{"params":["t-5"]}`},
+		// A word of a drifted value counts in a payload only as a whole
+		// value there: "s-1" of "sess s-1" is one, "9" of a row's time is not.
+		RawOf(&models.Mock{Name: "redis-2", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"args": "SET sid s-1"}, GenericRequests: []models.Payload{{Message: []models.OutputBinary{{Data: "s-1"}}}}}}, false),
+		RawOf(&models.Mock{Name: "pg-4", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"row": "2026-10-14 09:59"}}}, false),
 	}
-	got := Classify([]string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts"}, live, rec, at, earlier, raw, respLeaves)
+	got := Classify([]string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at"}, live, rec, at, earlier, raw, respLeaves)
 	kinds := map[string]Kind{}
 	from := map[string]Place{}
 	for _, l := range got {
@@ -278,6 +282,8 @@ func TestClassify(t *testing.T) {
 		"body.tags[0]": KindEcho,     // echoed by the answer's items[0].tag
 		"body.ts":      KindNoise,    // only a mock recorded after it holds it
 		"body.empty":   KindNoise,    // an empty recorded value carries nothing to follow
+		"body.sess":    KindVariable, // s-1 is a whole value of an earlier store call
+		"body.at":      KindNoise,    // its words are only pieces of an earlier row's time
 	}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("kinds %v, want %v", kinds, want)
@@ -398,26 +404,27 @@ func TestTracker(t *testing.T) {
 	if !tr.Open() {
 		t.Fatal("a test is open once it begins")
 	}
-	n, earlier, mocks := tr.Test()
+	n, earlier, mocks, _ := tr.Test()
 	if len(earlier) != 0 || len(mocks) != 0 {
 		t.Fatal("a new tracker holds nothing")
 	}
 	tr.Served(n, Earlier{Mock: "a"})
 	tr.ServedMock(&models.Mock{Name: "pg-1"})
-	if _, e, m := tr.Test(); len(e) != 1 || len(m) != 1 {
+	if _, e, m, _ := tr.Test(); len(e) != 1 || len(m) != 1 {
 		t.Fatal("served is earlier for the same test")
 	}
 	tr.End()
+	tr.ServedMock(&models.Mock{Name: "between"}) // served between two tests
 	if tr.Open() {
 		t.Fatal("no test is open once it ends")
 	}
 	tr.Begin()
 	tr.Served(n, Earlier{Mock: "late"}) // the previous test's request ended after the boundary
-	if _, e, m := tr.Test(); len(e) != 0 || len(m) != 0 {
-		t.Fatalf("a new test starts with nothing earlier, and a previous test's request does not leak into it: %v %v", e, m)
+	if _, e, m, before := tr.Test(); len(e) != 0 || len(m) != 0 || len(before) != 2 || before[0].Name != "pg-1" || before[1].Name != "between" {
+		t.Fatalf("a new test starts with nothing served in it, a previous test's request does not leak into it, and what was served before it began is kept apart: %v %v %v", e, m, before)
 	}
 	// Variables are named per test, by where each is bound.
-	n, _, _ = tr.Test()
+	n, _, _, _ = tr.Test()
 	id, ok := tr.Name(n, "mock-1", "body.id", nil)
 	if !ok || id != "id" {
 		t.Fatalf("Name = %q %v", id, ok)
@@ -438,7 +445,7 @@ func TestTracker(t *testing.T) {
 		t.Fatal("a test that ended names nothing")
 	}
 	tr.Begin()
-	n, _, _ = tr.Test()
+	n, _, _, _ = tr.Test()
 	if fresh, _ := tr.Name(n, "mock-2", "body.order.id", nil); fresh != "id" {
 		t.Fatalf("names are per test: %q", fresh)
 	}
@@ -450,7 +457,7 @@ func TestTracker(t *testing.T) {
 	if name, ok := nilTracker.Name(0, "m", "header.x-request-id", nil); !ok || name != "x-request-id" {
 		t.Fatalf("a nil tracker names a variable by its place: %q %v", name, ok)
 	}
-	if n, e, m := nilTracker.Test(); n != 0 || e != nil || m != nil || !nilTracker.Open() {
+	if n, e, m, b := nilTracker.Test(); n != 0 || e != nil || m != nil || b != nil || !nilTracker.Open() {
 		t.Fatal("a nil tracker is inert, and knows of no test boundary")
 	}
 }

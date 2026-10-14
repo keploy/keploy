@@ -26,7 +26,12 @@ type learnDb struct {
 }
 
 func (d *learnDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return d.perTest, nil }
-func (d *learnDb) GetSessionMocks() ([]*models.Mock, error)         { return d.mocks, nil }
+
+// The fake's session mocks were recorded outside every recorded test's
+// window (the start-up): the pool's.
+func (d *learnDb) InTestWindow(time.Time) bool                 { return false }
+func (d *learnDb) InRecordedTestWindow(time.Time) (bool, bool) { return false, true }
+func (d *learnDb) GetSessionMocks() ([]*models.Mock, error)    { return d.mocks, nil }
 func (d *learnDb) DeleteFilteredMock(m models.Mock) bool {
 	for i, p := range d.perTest {
 		if p.Name == m.Name {
@@ -142,7 +147,7 @@ func TestLearnMatchLearnsAnEchoAsAVariableOfItsCall(t *testing.T) {
 		t.Fatalf("served %s: this run's value is answered where the recorded one was echoed whole", served.Spec.HTTPResp.Body)
 	}
 	want := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true}}
-	if got := db.consumed[0].Spec.Variables; !reflect.DeepEqual(got, want) {
+	if got := db.consumed[0].Spec.Learned(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("variables %+v, want %+v", got, want)
 	}
 	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
@@ -188,11 +193,11 @@ func TestLearnMatchFollowsAVariable(t *testing.T) {
 		t.Fatalf("served %s: the answer holds this run's value", served.Spec.HTTPResp.Body)
 	}
 	use := db.consumed[1]
-	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Variables, want) {
-		t.Fatalf("variables %+v, want %+v", use.Spec.Variables, want)
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
 	}
-	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(use.Spec.Binds, want) {
-		t.Fatalf("binds %+v, want %+v", use.Spec.Binds, want)
+	if want := (map[string]models.MockVariables{"mock-0": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
+		t.Fatalf("binds %+v, want %+v", use.Spec.LearnedBinds(), want)
 	}
 	if len(use.Spec.ReqBodyNoise) != 0 {
 		t.Fatalf("a variable is never noise: %v", use.Spec.ReqBodyNoise)
@@ -351,7 +356,7 @@ func TestLearnMatchVariablesAreNeverNoise(t *testing.T) {
 			if served == nil || miss != nil {
 				t.Fatalf("served %v miss %+v", served, miss)
 			}
-			if got := db.consumed[1].Spec; len(got.Variables) != 1 || len(got.ReqBodyNoise) != 0 {
+			if got := db.consumed[1].Spec; len(got.Learned()) != 1 || len(got.ReqBodyNoise) != 0 {
 				t.Fatalf("variables %+v noise %v", got.Variables, got.ReqBodyNoise)
 			}
 		})
@@ -513,10 +518,10 @@ func TestWhatFLearnsTheVariablePassFollows(t *testing.T) {
 			out[name] = &c
 		}
 		for _, st := range f.consumed {
-			for vn, v := range st.Spec.Variables {
+			for vn, v := range st.Spec.Learned() {
 				out[st.Name].Spec.Variables[vn] = v
 			}
-			for target, vs := range st.Spec.Binds {
+			for target, vs := range st.Spec.LearnedBinds() {
 				for vn, v := range vs {
 					out[target].Spec.Variables[vn] = v
 				}
@@ -576,7 +581,7 @@ func TestLearnMatchOneValueIsOneEcho(t *testing.T) {
 	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"key":"k-2"}` {
 		t.Fatalf("served %v miss %+v", served, miss)
 	}
-	vars := db.consumed[0].Spec.Variables
+	vars := db.consumed[0].Spec.Learned()
 	if len(vars) != 1 {
 		t.Fatalf("variables %+v: one value, one variable", vars)
 	}
@@ -726,12 +731,12 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	for _, c := range consumed {
 		m := byName[c.Name]
 		m.Spec.ReqBodyNoise = mergeReqBodyNoise(m.Spec.ReqBodyNoise, c.Spec.ReqBodyNoise)
-		for n, v := range c.Spec.Variables {
+		for n, v := range c.Spec.Learned() {
 			vars(m)[n] = v
 		}
 	}
 	for _, c := range consumed {
-		for target, vs := range c.Spec.Binds {
+		for target, vs := range c.Spec.LearnedBinds() {
 			m := byName[target]
 			for n, b := range vs {
 				cur, ok := vars(m)[n]
@@ -863,8 +868,8 @@ func TestLearnMatchAValueTheTestCaseGaveIsItsKey(t *testing.T) {
 	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"id":"u-9","name":"a"}` {
 		t.Fatalf("served %v miss %+v", served, miss)
 	}
-	if want := (models.MockVariables{"userId": {Recorded: "u-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Variables, want) {
-		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Variables, want)
+	if want := (models.MockVariables{"userId": {Recorded: "u-1", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
 	}
 
 	// Recorded equal to the key's value, but another value now: an echo of
@@ -875,7 +880,7 @@ func TestLearnMatchAValueTheTestCaseGaveIsItsKey(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("served %v miss %+v", served, miss)
 	}
-	got := db.consumed[0].Spec.Variables
+	got := db.consumed[0].Spec.Learned()
 	if _, took := got["id"]; took || len(got) != 1 || got["id-2"].Echo != true {
 		t.Fatalf("variables %+v: the order's own echo, not the key's name", got)
 	}

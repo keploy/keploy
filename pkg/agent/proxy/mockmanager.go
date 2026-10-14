@@ -735,6 +735,28 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.signalWindowChange()
 }
 
+// InTestWindow reports whether a mock recorded at t was recorded inside the
+// window of the test the replay runs now (integrations.TestWindows).
+func (m *MockManager) InTestWindow(t time.Time) bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	if m.windowStart.IsZero() || m.windowEnd.IsZero() || t.IsZero() {
+		return false
+	}
+	return !t.Before(m.windowStart) && !t.After(m.windowEnd)
+}
+
+// InRecordedTestWindow reports whether a mock recorded at t was recorded
+// inside the window of some recorded test of the set (SeedRecordedWindows);
+// known is false when the replay seeded none (integrations.TestWindows).
+func (m *MockManager) InRecordedTestWindow(t time.Time) (inside, known bool) {
+	s := m.recordedWindows.Load()
+	if s.Len() == 0 || t.IsZero() {
+		return false, false
+	}
+	return s.Contains(t), true
+}
+
 // IsTestWindowActive reports whether a non-zero test window is currently
 // set on this MockManager (via SetCurrentTestWindow or SetMocksWithWindow).
 // Parsers that split mocks into per-test and session tiers use this as
@@ -3105,25 +3127,33 @@ func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 }
 
 // variablesOf is what a consumed mock's state carries of its variables:
-// under the proven switch, its own (MockSpec.Variables), the ones the learn
-// step learned on it included, which record's full round writes onto the
-// recording. Without the switch nothing, as before it.
+// under the proven switch, its own (MockSpec.Variables) and the ones the
+// learn step learned on it (MockSpec.Learned), which record's full round
+// writes onto the recording. Without the switch nothing, as before it.
 func variablesOf(spec models.MockSpec) models.MockVariables {
 	if !provenswitch.On() {
 		return nil
 	}
-	return spec.Variables.Clone()
+	out := spec.Variables.Clone()
+	for name, v := range spec.Learned().Clone() {
+		if out == nil {
+			out = models.MockVariables{}
+		}
+		out[name] = v
+	}
+	return out
 }
 
 // bindsOf is what a consumed mock's state carries of the variables the learn
 // step learned while answering it that are bound at an earlier mock
-// (MockSpec.Binds): under the proven switch only.
+// (MockSpec.LearnedBinds): under the proven switch only.
 func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
-	if !provenswitch.On() || len(spec.Binds) == 0 {
+	binds := spec.LearnedBinds()
+	if !provenswitch.On() || len(binds) == 0 {
 		return nil
 	}
-	out := make(map[string]models.MockVariables, len(spec.Binds))
-	for m, v := range spec.Binds {
+	out := make(map[string]models.MockVariables, len(binds))
+	for m, v := range binds {
 		out[m] = v.Clone()
 	}
 	return out

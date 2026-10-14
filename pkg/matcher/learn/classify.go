@@ -50,6 +50,9 @@ type Raw struct {
 	At     time.Time
 	Served bool
 	Text   string
+	// Scalars are the whole scalar values of Text (its strings, and its
+	// numbers as written).
+	Scalars map[string]bool
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -180,8 +183,13 @@ func appeared(values []string, at time.Time, served []Earlier, raw []Raw) (Place
 		if !x.Served && !x.At.Before(at) {
 			continue
 		}
-		for _, v := range values {
-			if ContainsToken(x.Text, v) {
+		// Of a mock with no live view, F cannot tell whether a place drifted:
+		// the recorded value counts as a token of its payload, and a word of
+		// it only where it is a whole value there (a token sent to a store
+		// before it went out in "Bearer <token>"), not as a piece of another
+		// (the "00" of an earlier row's timestamp).
+		for i, v := range values {
+			if i == 0 && ContainsToken(x.Text, v) || i > 0 && x.Scalars[v] {
 				return Place{Mock: x.Mock}, true
 			}
 		}
@@ -235,15 +243,36 @@ func RawOf(m *models.Mock, served bool) Raw {
 	if err != nil {
 		return r
 	}
-	var v interface{}
-	if json.Unmarshal(b, &v) != nil {
+	v, ok := DecodeJSON(b)
+	if !ok {
 		return r
 	}
-	b, err = json.Marshal(dropKeys(v))
+	v = dropKeys(v)
+	b, err = json.Marshal(v)
 	if err == nil {
 		r.Text = string(b)
 	}
+	r.Scalars = map[string]bool{}
+	scalars(v, r.Scalars)
 	return r
+}
+
+// scalars adds the string and number values of a decoded JSON value to out.
+func scalars(v interface{}, out map[string]bool) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for _, c := range t {
+			scalars(c, out)
+		}
+	case []interface{}:
+		for _, c := range t {
+			scalars(c, out)
+		}
+	case string:
+		out[t] = true
+	case json.Number:
+		out[t.String()] = true
+	}
 }
 
 // dropKeys is v without the object keys payloadKeys names, at any depth.

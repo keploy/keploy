@@ -108,6 +108,15 @@ func (s *WindowSchedule) ReleaseIndex(t time.Time) int {
 	return p - 1
 }
 
+// Contains reports whether t is inside one of the windows, ends included.
+func (s *WindowSchedule) Contains(t time.Time) bool {
+	p := s.CurrentIndex(t) + 1 // windows[0:p] started at or before t
+	if p <= 0 {
+		return false
+	}
+	return sort.Search(p, func(i int) bool { return !s.maxEnd[i].Before(t) }) < p
+}
+
 // Released reports whether traffic recorded at t is due once the current
 // window starts at currentStart: its release window starts at or before it.
 // With no schedule everything is released.

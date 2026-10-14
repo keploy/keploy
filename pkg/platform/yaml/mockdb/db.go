@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
@@ -691,6 +692,20 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 // that first sent it, before a later call showed it flowed on).
 func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
+	if !provenswitch.On() {
+		// Without the switch nothing learns variables, and noise merges as
+		// it always has.
+		for k := range st.ReqBodyNoise {
+			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
+				added = append(added, k+" (noise)")
+			}
+		}
+		if len(st.ReqBodyNoise) > 0 {
+			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
+		}
+		sort.Strings(added)
+		return added
+	}
 	if len(st.Variables) > 0 || len(binds) > 0 {
 		vars := mock.Spec.Variables.Clone()
 		if vars == nil {

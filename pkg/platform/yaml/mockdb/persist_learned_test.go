@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -17,6 +18,7 @@ import (
 // variable's bind and drops the noise learned at the place before it was
 // known to flow on.
 func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 		t.Run(string(f), func(t *testing.T) {
 			dir := t.TempDir()
@@ -97,5 +99,48 @@ func TestMergeVariable(t *testing.T) {
 	}
 	if got := mergeVariable(models.MockVariable{}, models.MockVariable{Recorded: "v", Bind: "body.id", Echo: true}); !got.Echo {
 		t.Fatal("an echo merged into nothing stays an echo")
+	}
+}
+
+// With the switch off the noise writers are what they were: a mock that
+// carries a variables block keeps every noise path learned, and the noise it
+// had (the round-3 reviewer's repro).
+func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "")
+	ctx := context.Background()
+	set := "test-set-0"
+	m := noiseTestMock(`{"key":"k-1","other":"o"}`)
+	m.Name = "mock-0"
+	m.Spec.Variables = models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key"}}
+	m.Spec.ReqBodyNoise = map[string][]string{"body.key": {}}
+	if err := ys.InsertMock(ctx, m, set); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ys.PersistMockNoise(ctx, set, map[string]models.MockState{
+		"mock-0": {Name: "mock-0", ReqBodyNoise: map[string][]string{"body.other": {}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := ys.GetFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string][]string
+	for _, mk := range append(mocks, filtered...) {
+		if mk.Name == "mock-0" {
+			got = mk.Spec.ReqBodyNoise
+		}
+	}
+	if want := map[string][]string{"body.key": {}, "body.other": {}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch off: noise written %v, want %v", got, want)
 	}
 }

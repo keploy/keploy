@@ -413,6 +413,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 
 	open := tracker.Open()
 	owner, _ := mockDb.(integrations.TestOwnership)
+	windows, _ := mockDb.(integrations.TestWindows)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -428,21 +429,8 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		// A test's own mock is pairable while its test is open. The pool's
-		// is pairable only in a full record (pool), and a mock is the pool's
-		// only when the store can say so: in a view that scopes the pool to
-		// a test, a visible mock that test does not own; anywhere else, the
-		// session tier. A per-test mock outside its open test (between
-		// tests every test's are visible) is never paired.
-		perTestTier := i < len(httpPerTest)
-		own, poolsOwn := open && perTestTier, !perTestTier
-		if owner != nil {
-			owned, known := owner.OwnedByTest(m)
-			own = open && known && owned
-			if known {
-				poolsOwn = !owned
-			}
-		}
+		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows)
+		own = own && open
 		c := learn.Candidate{
 			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
@@ -459,6 +447,41 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		sc.own = append(sc.own, false)
 	}
 	return sc, nil
+}
+
+// ownership says whether a recorded mock is the open test's own and whether
+// it is the pool's, from what the store can tell. A test's own mock is
+// pairable while its test is open; the pool's only in a full record; another
+// test's never (it still counts as the closest, which makes the request a
+// miss). The store's tiers alone cannot tell them apart: a reusable HTTP mock
+// of any test is in the session tier.
+//
+//   - A view that scopes the pool to a test (owner) says: the mocks its
+//     mapping names are the test's, every other mock it shows is the pool's;
+//     with no test open in it, none is paired.
+//   - Otherwise the open test's own are its per-test tier, the session mocks
+//     its mapping names (IsFiltered, set from the test's mapping when the
+//     replay stages it), and the session mocks recorded inside its window.
+//     The pool's are the other session mocks recorded outside every recorded
+//     test's window (the start-up, between tests); with no recorded windows
+//     a session mock is no one's to pair.
+func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows) (own, pool bool) {
+	if owner != nil {
+		// A view with no test open in it cannot say whose a mock is: none
+		// is paired.
+		owned, known := owner.OwnedByTest(m)
+		return known && owned, known && !owned
+	}
+	at := m.Spec.ReqTimestampMock
+	if perTestTier || m.TestModeInfo.IsFiltered || windows != nil && windows.InTestWindow(at) {
+		return true, false
+	}
+	if windows != nil {
+		if inside, known := windows.InRecordedTestWindow(at); known && !inside {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // exactGroup are the candidates that match live exactly, modulo what is
@@ -493,7 +516,8 @@ func earlierThan(earlier []learn.Earlier, paired *models.Mock) []learn.Earlier {
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
 // values: every mock any parser served earlier in the test, and every mock
-// the scope shows that was recorded before it. The paired mock is not one,
+// recorded before it that the scope shows or that was served before the test
+// began (visible). The paired mock is not one,
 // and neither is an exchange the learn step served (earlier): its leaves,
 // with what F saw at each, are read instead.
 func earlierRaw(paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) []learn.Raw {
@@ -559,7 +583,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		// concurrent call consumed before the scope was read is gone from
 		// the scope, and the mock manager told the tracker of it before it
 		// left (MockManager.observeServed), so it is in one of the two.
-		test, earlier, served := tracker.Test()
+		test, earlier, served, before := tracker.Test()
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -590,14 +614,14 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 					}
 				}
 			}
-			tracker.Served(test, earlierOf(picked, rec, liveShape, out, own))
+			tracker.Served(test, withExcused(earlierOf(picked, rec, liveShape, out, own), n, live, recordedParts(picked)))
 			return out, nil, nil
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
 			earlier := earlierThan(earlier, m)
 			learned := learn.Classify(res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
-				earlierRaw(m, served, sc.visible, earlier), respLeaves(m.Spec.HTTPResp))
+				earlierRaw(m, served, append(before, sc.visible...), earlier), respLeaves(m.Spec.HTTPResp))
 			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
@@ -618,7 +642,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			tracker.Served(test, earlierOf(m, c.Shape, liveShape, out, own))
+			tracker.Served(test, withExcused(earlierOf(m, c.Shape, liveShape, out, own), n, live, recordedParts(m)))
 			return out, nil, nil
 		}
 		miss := &learnMiss{res: res, pool: sc.http}
@@ -866,18 +890,11 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 		if len(p.noise) > 0 {
 			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
 		}
-		if len(p.vars) > 0 {
-			vars := spec.Variables.Clone()
-			if vars == nil {
-				vars = models.MockVariables{}
-			}
-			for name, v := range p.vars {
-				vars[name] = v
-			}
-			spec.Variables = vars
-		}
-		if len(p.binds) > 0 {
-			spec.Binds = p.binds
+		// What was learned rides out on the consumed mock's state, never on
+		// what the pool serves next: a reused mock stays the recording the
+		// learn step pairs again (not one the variable pass alone serves).
+		if len(p.vars) > 0 || len(p.binds) > 0 {
+			spec.SetLearned(p.vars.Clone(), p.binds)
 		}
 	})
 	return served, claimed, "", nil
@@ -933,6 +950,33 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own b
 		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place})
 	}
 	sort.Slice(e.Seen, func(i, j int) bool {
+		if e.Seen[i].Side != e.Seen[j].Side {
+			return e.Seen[i].Side == learn.Request
+		}
+		return e.Seen[i].Leaf.Path < e.Seen[j].Leaf.Path
+	})
+	return e
+}
+
+// withExcused adds to an exchange F served the header values its comparison
+// excuses (the static list, keploy.yml's header noise): never compared, they
+// are still places a value the app made can be sent first (a request id it
+// mints and carries on), and a later call that carries it uses it.
+func withExcused(e learn.Earlier, n learnNoise, live, rec httpParts) learn.Earlier {
+	for k, v := range rec.header {
+		if !n.headers[k] {
+			continue
+		}
+		lv, ok := live.header[k]
+		if !ok {
+			continue
+		}
+		path := "header." + k
+		place, _ := learn.VarPlace(learn.Leaf{Path: path}, false)
+		e.Seen = append(e.Seen, learn.Seen{Side: learn.Request, Leaf: learn.Leaf{Path: path, Noise: path, Type: learn.String, Value: v}, Live: lv, Place: place})
+	}
+	// The request's places first, as earlierOf orders them.
+	sort.SliceStable(e.Seen, func(i, j int) bool {
 		if e.Seen[i].Side != e.Seen[j].Side {
 			return e.Seen[i].Side == learn.Request
 		}

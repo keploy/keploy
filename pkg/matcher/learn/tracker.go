@@ -18,6 +18,12 @@ type Tracker struct {
 	epoch  uint64
 	served []Earlier
 	mocks  []*models.Mock
+	// before are the mocks served before the running test began: in the
+	// previous test, between tests, or while the next test's mocks were
+	// being put in place. The test's boundary and the mock store's do not
+	// move at one moment, so a call near it may be either test's, and its
+	// earlier places may be there.
+	before []*models.Mock
 	open   bool
 	// names are the running test's variables, by where each is bound (its
 	// mock and place), and taken the names given.
@@ -38,7 +44,7 @@ func (t *Tracker) Begin() {
 	t.mu.Lock()
 	t.epoch++
 	t.served = nil
-	t.mocks = nil
+	t.before, t.mocks = t.mocks, nil
 	t.names, t.taken = nil, nil
 	t.open = true
 	t.mu.Unlock()
@@ -67,16 +73,17 @@ func (t *Tracker) Open() bool {
 }
 
 // Test is the running test's number, what the learn step served in it so
-// far, leaf by leaf, and every mock any parser served in it so far
-// (ServedMock). A request reads it as it starts, and hands the number back
-// to Served.
-func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock) {
+// far, leaf by leaf, every mock any parser served in it so far
+// (ServedMock), and the mocks served before it began (see Tracker.before).
+// A request reads it once its scope is read, and hands the number back to
+// Served.
+func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 	if t == nil {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.epoch, append([]Earlier(nil), t.served...), append([]*models.Mock(nil), t.mocks...)
+	return t.epoch, append([]Earlier(nil), t.served...), append([]*models.Mock(nil), t.mocks...), append([]*models.Mock(nil), t.before...)
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -86,10 +93,8 @@ func (t *Tracker) ServedMock(m *models.Mock) {
 		return
 	}
 	t.mu.Lock()
-	// Between tests a served mock is no test's: it is not kept.
-	if t.open {
-		t.mocks = append(t.mocks, m)
-	}
+	// Kept between tests too: the next Begin moves it to before.
+	t.mocks = append(t.mocks, m)
 	t.mu.Unlock()
 }
 

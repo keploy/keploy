@@ -400,11 +400,16 @@ type MockSpec struct {
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
 
-	// Binds are, on a mock the learn step of record's full round just paired
-	// (agent side, in memory), the variables it learned that are bound at an
-	// earlier mock of the same test, by that mock's name; they ride out on
-	// the consumed mock's state (MockState.Binds). Never written or read.
-	Binds map[string]MockVariables `json:"-" yaml:"-" bson:"-"`
+	// learned and learnedBinds are, on a mock the learn step of record's
+	// full round just paired (agent side, in memory), the variables it
+	// learned on the mock and those it learned that are bound at an earlier
+	// mock of the same test (by that mock's name). They ride out on the
+	// consumed mock's state (MockState.Variables, MockState.Binds), and are
+	// never encoded (unexported: no gob, JSON or YAML of a mock carries
+	// them) nor served: a reused mock the learn step paired is the same
+	// recording to the next call.
+	learned      MockVariables
+	learnedBinds map[string]MockVariables
 
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
@@ -1021,7 +1026,7 @@ type MockState struct {
 	// written onto the recording.
 	Variables MockVariables `json:"variables,omitempty"`
 	// Binds are the variables the learn step learned, while answering this
-	// mock, that are bound at an earlier mock of the same test (MockSpec.Binds),
+	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
 	// by that mock's name: the replay writes them onto that mock.
 	Binds map[string]MockVariables `json:"binds,omitempty"`
 }
@@ -1230,3 +1235,17 @@ func (m *Mock) DeepCopy() *Mock {
 
 	return &c
 }
+
+// SetLearned records on s, in memory only, the variables the learn step
+// learned on its mock (vars) and those bound at earlier mocks (binds): see
+// MockSpec.learned.
+func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables) {
+	s.learned, s.learnedBinds = vars, binds
+}
+
+// Learned is the variables the learn step learned on s's mock (SetLearned).
+func (s *MockSpec) Learned() MockVariables { return s.learned }
+
+// LearnedBinds is the variables the learn step learned while answering s's
+// mock that are bound at an earlier mock, by its name (SetLearned).
+func (s *MockSpec) LearnedBinds() map[string]MockVariables { return s.learnedBinds }

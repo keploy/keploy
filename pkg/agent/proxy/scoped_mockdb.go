@@ -306,6 +306,22 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	}
 }
 
+// InTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InTestWindow(t time.Time) bool {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InTestWindow(t)
+	}
+	return false
+}
+
+// InRecordedTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InRecordedTestWindow(t)
+	}
+	return false, false
+}
+
 // Variables forwards the replay's variable table. Under the proven switch one
 // test is open at a time in an agent, so every view shares the one table.
 func (s *scopedMockDb) Variables() *variables.Table {
