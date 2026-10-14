@@ -71,6 +71,64 @@ func (v MockVariables) Clone() MockVariables {
 	return out
 }
 
+// MergeVariables is a and b as one block (neither is changed): a variable in
+// both keeps a's bind and both's uses and answers, and is an echo only when
+// both say so.
+func MergeVariables(a, b MockVariables) MockVariables {
+	out := a.Clone()
+	for name, v := range b {
+		if out == nil {
+			out = MockVariables{}
+		}
+		cur, ok := out[name]
+		if !ok {
+			out[name] = MockVariables{name: v}.Clone()[name]
+			continue
+		}
+		if cur.Bind == "" {
+			cur.Bind = v.Bind
+		}
+		cur.Use = appendNewPlaces(cur.Use, v.Use...)
+		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
+		cur.Echo = cur.Echo && v.Echo
+		out[name] = cur
+	}
+	return out
+}
+
+// MergeBinds is a and b, variables bound at other mocks by mock, as one
+// (neither is changed).
+func MergeBinds(a, b map[string]MockVariables) map[string]MockVariables {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]MockVariables, len(a)+len(b))
+	for m, v := range a {
+		out[m] = v.Clone()
+	}
+	for m, v := range b {
+		out[m] = MergeVariables(out[m], v)
+	}
+	return out
+}
+
+// appendNewPlaces appends to list each of vs it does not hold yet.
+func appendNewPlaces(list []string, vs ...string) []string {
+	for _, v := range vs {
+		dup := false
+		for _, have := range list {
+			if have == v {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			list = append(list, v)
+		}
+	}
+	return list
+}
+
 // TestVariablesResp is the answer of GET /agent/variables.
 type TestVariablesResp struct {
 	Variables []VariableBinding `json:"variables"`

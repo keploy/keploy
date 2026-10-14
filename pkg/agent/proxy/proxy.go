@@ -41,6 +41,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -121,6 +122,12 @@ func probeDial(logger *zap.Logger, phase string, connID int64, addr string, durN
 
 type Proxy struct {
 	logger *zap.Logger
+
+	// learnTracker keeps what record's full round served in the running
+	// test, for the learn step (package matcher/learn): a test begins
+	// whenever its error capture window opens (openTestErrorCapture). Under
+	// the proven switch the parsers find it on their connection's context.
+	learnTracker *learn.Tracker
 
 	IP4               string
 	IP6               string
@@ -1069,6 +1076,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	warnIfRemovedRelayKnobSet(logger)
 	proxy := &Proxy{
 		logger:                    logger,
+		learnTracker:              learn.NewTracker(),
 		Port:                      opts.ProxyPort,
 		IncomingProxyPort:         opts.IncomingProxyPort,
 		DNSPort:                   opts.DNSPort, // default: 26789
@@ -1859,6 +1867,11 @@ func hostPortFromAuthority(authority, scheme string) (string, int) {
 // goroutine since MockManager owns a per-instance ticker that only
 // stops on Close().
 func (p *Proxy) setMockManager(m *MockManager) {
+	if provenswitch.On() && m != nil {
+		// Every mock served in a test is an earlier place of its recording
+		// for the learn step (package matcher/learn).
+		m.SetServedObserver(p.learnTracker.ServedMock)
+	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
 	p.mockManager = m
@@ -2688,6 +2701,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
+		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
 	}
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
@@ -4668,6 +4682,10 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
 func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
 
 func (p *Proxy) openTestErrorCapture(carry bool) {
+	if provenswitch.On() {
+		// The learn step's earlier places are the running test's.
+		p.learnTracker.Begin()
+	}
 	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
 	// Misses made with no test's window open — or into a window its test's
@@ -4750,6 +4768,9 @@ func missSummaries(errs []error) []string {
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
 func (p *Proxy) EndTestErrorCapture() []error {
+	if provenswitch.On() {
+		p.learnTracker.End()
+	}
 	if acc := p.activeTestErrors.Swap(nil); acc != nil {
 		return acc.drain()
 	}
@@ -4856,6 +4877,10 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		if acc := p.activeTestErrors.Swap(nil); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
 		}
+		if provenswitch.On() {
+			// The test is over: no test is open until the next one begins.
+			p.learnTracker.End()
+		}
 	} else {
 		// Rendezvous could not complete (errChannel full or the drain stalled
 		// past the deadline). Take what the window holds now but DON'T close it,
@@ -4901,6 +4926,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Differs:          parserErr.MismatchReport.Differs,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					// Why the call missed, when record's full round's learn
+					// step decided it: judging's evidence.
+					Reason: parserErr.MismatchReport.Reason,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

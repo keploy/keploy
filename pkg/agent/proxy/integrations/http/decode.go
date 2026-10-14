@@ -322,7 +322,40 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			var (
+				ok    bool
+				stub  *models.Mock
+				diag  *matchDiag
+				lmiss *learnMiss
+			)
+			switch {
+			case provenswitch.On() && opts.Learn:
+				// Record's full round: the learn step decides every request
+				// (design v14 §7.2).
+				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				ok = stub != nil
+			default:
+				// Under the switch a replay first honours what the learn step
+				// learned onto the recording; anything else goes on to the
+				// matcher as before.
+				proven := provenswitch.On()
+				if proven {
+					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					ok = stub != nil
+				}
+				if !ok && err == nil {
+					// Under the switch the learn step of record's full round
+					// is the one request-noise learner, and what it learned is
+					// always followed (design v14 §7.2 step 10; U18): no other
+					// replay learns noise, and a learned correlation is never
+					// switched off.
+					detect, correlate := opts.NoiseDetection(), !opts.DisableMockCorrelation
+					if proven {
+						detect, correlate = false, true
+					}
+					ok, stub, diag, err = h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+				}
+			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -333,6 +366,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
+				if lmiss == nil && provenswitch.On() {
+					// A call that came with an array in another order is
+					// unstable_order in every round, not only the full one.
+					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+				}
+				if lmiss != nil {
+					diag = lmiss.diag()
+				}
 				// Under exact serving: one call more than the test recorded?
 				// Any other miss is diagnosed against the test's answered
 				// recordings too (answeredDiag): they are in no read now.
@@ -340,12 +381,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
 				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
-				if n == 0 {
+				if n == 0 && lmiss == nil {
+					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+				}
+				if lmiss != nil {
+					lmiss.explain(report)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
