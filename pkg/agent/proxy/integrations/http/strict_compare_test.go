@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -255,13 +256,20 @@ func TestStrictExcusesOnlyKnownBodyNoise(t *testing.T) {
 	}
 }
 
-// A form is compared key by key, its values in any order; a field the mock
-// learned may change.
+// A form is compared key by key, in any order of its keys and of a repeated
+// key's values (as the learn step reads them); a field the mock learned may
+// change.
 func TestStrictComparesForms(t *testing.T) {
 	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	rec := recorded("m", "/oauth/token", ct, "grant_type=client_credentials&scope=a&scope=b&nonce=n1")
-	if got, _ := strictMatch(t, sent("/oauth/token", ct, "nonce=n1&scope=b&grant_type=client_credentials&scope=a"), nil, nil, nil, rec); got == nil {
-		t.Fatal("the same form in another order was not served")
+	if got, _ := strictMatch(t, sent("/oauth/token", ct, "nonce=n1&scope=a&grant_type=client_credentials&scope=b"), nil, nil, nil, rec); got == nil {
+		t.Fatal("the same form with its keys in another order was not served")
+	}
+	if got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=client_credentials&scope=b&scope=a&nonce=n1"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a repeated key's values in another order were not served: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=client_credentials&scope=a&nonce=n1"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body.scope") {
+		t.Fatalf("a repeated key with a value fewer: served %v, differs %v", got != nil, differs(diag))
 	}
 	got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=client_credentials&scope=a&scope=b&nonce=n2"), nil, nil, nil, rec)
 	if got != nil || !hasField(differs(diag), "body.nonce") {
@@ -330,8 +338,8 @@ func TestStrictComparesOpaqueBodies(t *testing.T) {
 }
 
 // The path and the query are compared by value: keploy.yml's url noise and
-// what the mock learned may differ; a repeated parameter's values in any
-// order.
+// what the mock learned may differ; parameters, and a repeated parameter's
+// values, in any order (as the learn step reads them).
 func TestStrictComparesThePathAndTheQuery(t *testing.T) {
 	rec := recorded("m", "/v1/users/42/orders?status=open&tag=a&tag=b", nil, "")
 	rec.Spec.HTTPReq.Method = "GET"
@@ -340,8 +348,17 @@ func TestStrictComparesThePathAndTheQuery(t *testing.T) {
 		r.method = "GET"
 		return r
 	}
-	if got, _ := strictMatch(t, get("/v1/users/42/orders?tag=b&status=open&tag=a"), nil, nil, nil, rec); got == nil {
-		t.Fatal("a repeated parameter in another order was not served")
+	if got, _ := strictMatch(t, get("/v1/users/42/orders?tag=a&status=open&tag=b"), nil, nil, nil, rec); got == nil {
+		t.Fatal("the parameters in another order were not served")
+	}
+	if got, diag := strictMatch(t, get("/v1/users/42/orders?tag=b&status=open&tag=a"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a repeated parameter's values in another order were not served: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, get("/v1/users/42/orders?status=open&tag=a&tag=b&page=2"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "query.page") {
+		t.Fatalf("a parameter more: served %v, differs %v", got != nil, differs(diag))
+	}
+	if got, diag := strictMatch(t, get("/v1/users/42/orders?status=open&tag=a&tag=c"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "query.tag") {
+		t.Fatalf("a repeated parameter with another value: served %v, differs %v", got != nil, differs(diag))
 	}
 	if got, diag := strictMatch(t, get("/v1/users/43/orders?status=open&tag=a&tag=b"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "path") {
 		t.Fatalf("another id: served %v, differs %v", got != nil, differs(diag))
@@ -427,5 +444,297 @@ func TestStrictNamesFieldsWithoutValues(t *testing.T) {
 		return out
 	}(), "body.users.alice.smith@example.com.role") {
 		t.Fatal("the report lost the field's full name")
+	}
+}
+
+// What is not the call is never compared: Content-Length (the body is, and a
+// body whose excused field changed length still answers), and keploy's own
+// headers and query parameters. A header the obfuscator redacted may change
+// its value, not go away.
+func TestStrictSkipsWhatIsNotTheCall(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json", "Content-Length": "10", "Keploy-Test-Id": "t-1", "X-Api-Key": "REDACTED-7"}
+	rec := recorded("m", "/v1/charge?keployTrace=1", ct, `{"id":"a"}`)
+	rec.Spec.ReqBodyNoise = map[string][]string{"body.id": {}}
+	rec.Noise = []string{`^REDACTED-\d+$`}
+	live := sent("/v1/charge?keployTrace=2", map[string]string{"Content-Type": "application/json", "Content-Length": "15", "Keploy-Test-Id": "t-2", "X-Api-Key": "live-key"}, `{"id":"abcdef"}`)
+	if got, diag := strictMatch(t, live, nil, nil, nil, rec); got == nil {
+		t.Fatalf("not served: %v", differs(diag))
+	}
+	live.header.Del("X-Api-Key")
+	if got, diag := strictMatch(t, live, nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.x-api-key") {
+		t.Fatalf("a redacted header that went away: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A repeated header's lines are compared in their order (RFC 9110 §5.3).
+func TestStrictComparesARepeatedHeaderInOrder(t *testing.T) {
+	rec := recorded("m", "/x", map[string]string{"Accept-Language": "en,fr"}, "")
+	live := func(lines ...string) *req {
+		r := sent("/x", nil, "")
+		for _, l := range lines {
+			r.header.Add("Accept-Language", l)
+		}
+		return r
+	}
+	if got, _ := strictMatch(t, live("en", "fr"), nil, nil, nil, rec); got == nil {
+		t.Fatal("the same lines were not served")
+	}
+	if got, diag := strictMatch(t, live("fr", "en"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.accept-language") {
+		t.Fatalf("the lines in another order: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A body with data after its JSON document is not that document.
+func TestStrictJSONHasNothingAfterIt(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json"}
+	rec := recorded("m", "/x", ct, `{"a":1}`)
+	if got, diag := strictMatch(t, sent("/x", ct, `{"a":1} {"b":2}`), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body") {
+		t.Fatalf("trailing data: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// keploy.yml's request-body noise excuses a field whose value it covers on
+// both sides: a value the live call sends that the noise does not cover is
+// compared.
+func TestStrictDeclaredBodyNoiseCoversBothSides(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json"}
+	rec := recorded("m", "/x", ct, `{"ts":"2026-10-14T10:00:00Z"}`)
+	noise := map[string][]string{"ts": {`^\d{4}-\d{2}-\d{2}T`}}
+	if got, diag := strictMatch(t, sent("/x", ct, `{"ts":"2026-10-15T11:00:00Z"}`), nil, noise, nil, rec); got == nil {
+		t.Fatalf("a value the noise covers on both sides was compared: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, sent("/x", ct, `{"ts":"yesterday"}`), nil, noise, nil, rec); got != nil || !hasField(differs(diag), "body.ts") {
+		t.Fatalf("a live value the noise does not cover: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A container the mock learned (an object or array at a learned place)
+// excuses what it holds, keeping its type.
+func TestStrictALearnedContainerExcusesItsMembers(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json"}
+	rec := recorded("m", "/x", ct, `{"meta":{"trace":"t1","span":"s1"},"amount":1}`)
+	rec.Spec.ReqBodyNoise = map[string][]string{"body.meta": {}}
+	if got, diag := strictMatch(t, sent("/x", ct, `{"meta":{"trace":"t2","span":"s2"},"amount":1}`), nil, nil, nil, rec); got == nil {
+		t.Fatalf("members of a learned container were compared: %v", differs(diag))
+	}
+	if got, _ := strictMatch(t, sent("/x", ct, `{"meta":"flat","amount":1}`), nil, nil, nil, rec); got != nil {
+		t.Fatal("a learned container changed its type and was served")
+	}
+	if got, _ := strictMatch(t, sent("/x", ct, `{"meta":{"trace":"t2","span":"s2"},"amount":2}`), nil, nil, nil, rec); got != nil {
+		t.Fatal("a field outside the learned container was excused")
+	}
+}
+
+// A form value the obfuscator redacted (its whole "key=value" segment as
+// written) may change.
+func TestStrictARedactedFormValueMayChange(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	rec := recorded("m", "/oauth/token", ct, "grant_type=client_credentials&client_secret=REDACTED-3")
+	rec.Noise = []string{`^client_secret=REDACTED-\d+$`}
+	if got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=client_credentials&client_secret=s3cr3t"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a redacted form value was compared: %v", differs(diag))
+	}
+	if got, _ := strictMatch(t, sent("/oauth/token", ct, "grant_type=password&client_secret=s3cr3t"), nil, nil, nil, rec); got != nil {
+		t.Fatal("another form value beside a redacted one was excused")
+	}
+}
+
+// Only recordings consumed by a cursor share one, in their record order: a
+// recording served once is not in the group, and the pool's order is not the
+// record's.
+func TestStrictTheCursorGroupIsTheCallsRecordingsInRecordOrder(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Unix(1_700_000_000, 0)
+	cm := func(name string, ts time.Time, consume models.ConsumeMode) *models.Mock {
+		m := onHost(name, "/counter", "api.example")
+		m.TestModeInfo.Consume = consume
+		m.Spec.ReqTimestampMock = ts
+		return m
+	}
+	first := cm("first", base, models.ConsumeCursorSaturate)
+	second := cm("second", base.Add(time.Second), models.ConsumeCursorSaturate)
+	once := cm("once", base.Add(2*time.Second), models.ConsumeReuse)
+	h := newHTTP()
+	db := &mockMemDb{}
+	pick := func(fits ...*models.Mock) string {
+		m, commit := h.strictCursorPick(fits, db, true)
+		if commit != nil {
+			commit()
+		}
+		return m.Name
+	}
+	// The pool lists the later recording first.
+	for i, want := range []string{"first", "second", "second"} {
+		if got := pick(second, first, once); got != want {
+			t.Fatalf("pick %d = %s, want %s (record order, saturating, the once-served recording outside the group)", i+1, got, want)
+		}
+	}
+}
+
+// The closest recording a miss is diffed against is one of the call's route
+// (method, host, path) when there is one, even if a recording of another
+// route differs in fewer fields.
+func TestStrictTheClosestRecordingIsOfTheCallsRoute(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json", "X-A": "1", "X-B": "1"}
+	route := recorded("route", "/v1/charge", ct, `{"amount":100}`)
+	other := recorded("other", "/v1/refund", map[string]string{"Content-Type": "application/json", "X-A": "2", "X-B": "2"}, `{"amount":250}`)
+	live := sent("/v1/refund", map[string]string{"Content-Type": "application/json", "X-A": "2", "X-B": "2"}, `{"amount":250}`)
+	live.url.Path = "/v1/charge"
+	_, diag := strictMatch(t, live, nil, nil, nil, other, route)
+	if diag == nil || diag.closest == nil || diag.closest.Name != "route" {
+		t.Fatalf("closest = %+v, want the recording of the call's route", diag)
+	}
+}
+
+// A miss names only the fields the strict comparison found differ: not a
+// body field it excused (a learned place), nor a body it found equal (a
+// multipart form under another boundary).
+func TestStrictDiffersNamesOnlyWhatDiffers(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/json", "X-Tenant": "acme"}
+	rec := recorded("m", "/v1/charge", ct, `{"items":[{"at":1},{"at":2}]}`)
+	rec.Spec.ReqBodyNoise = map[string][]string{"body.items[1].at": {}}
+	live := sent("/v1/charge", map[string]string{"Content-Type": "application/json", "X-Tenant": "globex"}, `{"items":[{"at":1},{"at":9}]}`)
+	got, diag := strictMatch(t, live, nil, nil, nil, rec)
+	if got != nil {
+		t.Fatal("served")
+	}
+	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	if strings.Join(r.Differs, ",") != "header.x-tenant" {
+		t.Fatalf("Differs = %v, want only the header", r.Differs)
+	}
+
+	body, mct := multipartBody(t, "rec-boundary", map[string]string{"name": "pen", "kind": "x"}, "hello")
+	up := recorded("up", "/upload", map[string]string{"Content-Type": mct, "X-Tenant": "acme"}, body)
+	same, sameCT := multipartBody(t, "live-boundary-123", map[string]string{"name": "pen", "kind": "x"}, "hello")
+	liveUp := sent("/upload", map[string]string{"Content-Type": sameCT, "X-Tenant": "globex"}, same)
+	got, diag = strictMatch(t, liveUp, nil, nil, nil, up)
+	if got != nil {
+		t.Fatal("served")
+	}
+	r = newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/upload"}, Host: "api.example", Header: liveUp.header}, liveUp.body, &mockMemDb{mocks: []*models.Mock{up}}, nil, nil, nil, diag)
+	if strings.Join(r.Differs, ",") != "header.x-tenant" {
+		t.Fatalf("Differs = %v, want only the header", r.Differs)
+	}
+}
+
+// A container the mock learned excuses the fields it holds in a form too:
+// a learned body excuses every value, not a key that went away.
+func TestStrictALearnedBodyExcusesAFormsValues(t *testing.T) {
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	rec := recorded("m", "/oauth/token", ct, "grant_type=client_credentials&nonce=n1")
+	rec.Spec.ReqBodyNoise = map[string][]string{"body": {}}
+	if got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=password&nonce=n2"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("the values of a learned body were compared: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, sent("/oauth/token", ct, "grant_type=password"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body.nonce") {
+		t.Fatalf("a key that went away: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A path-only recording is read as a request line is: "//v1/charge" is that
+// path, not host v1.
+func TestStrictReadsAPathOnlyRecordingAsARequestLine(t *testing.T) {
+	rec := recorded("m", "//v1/charge", nil, "")
+	rec.Spec.HTTPReq.Method = "GET"
+	live := sent("/x", nil, "")
+	live.method = "GET"
+	live.url = &url.URL{Path: "//v1/charge"}
+	if got, diag := strictMatch(t, live, nil, nil, nil, rec); got == nil {
+		t.Fatalf("the very call was not served: %v", differs(diag))
+	}
+}
+
+// A recording that kept its query only in URLParams (which joins a repeated
+// parameter's values with ", ") is compared value by value.
+func TestStrictReadsARecordingsURLParams(t *testing.T) {
+	rec := recorded("m", "/search", nil, "")
+	rec.Spec.HTTPReq.Method = "GET"
+	rec.Spec.HTTPReq.URLParams = map[string]string{"tag": "a, b", "q": "pen"}
+	get := func(path string) *req {
+		r := sent(path, nil, "")
+		r.method = "GET"
+		return r
+	}
+	if got, diag := strictMatch(t, get("/search?q=pen&tag=b&tag=a"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("the recorded query was not served: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, get("/search?q=pen&tag=a"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "query.tag") {
+		t.Fatalf("a value fewer: served %v, differs %v", got != nil, differs(diag))
+	}
+	if got, diag := strictMatch(t, get("/search?q=ink&tag=a&tag=b"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "query.q") {
+		t.Fatalf("another value: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A multipart form must hold the same parts: a part more, or an upload where
+// a field was, or another file name, is another call.
+func TestStrictComparesAMultipartFormsParts(t *testing.T) {
+	body, ct := multipartBody(t, "rec", map[string]string{"name": "pen"}, "hello")
+	rec := recorded("m", "/upload", map[string]string{"Content-Type": ct}, body)
+	more, moreCT := multipartBody(t, "live", map[string]string{"name": "pen", "kind": "x"}, "hello")
+	if got, diag := strictMatch(t, sent("/upload", map[string]string{"Content-Type": moreCT}, more), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body") {
+		t.Fatalf("a part more: served %v, differs %v", got != nil, differs(diag))
+	}
+	// A part after all the recorded ones.
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	_ = w.SetBoundary("live-extra")
+	_ = w.WriteField("name", "pen")
+	fw, _ := w.CreateFormFile("doc", "a.txt")
+	_, _ = fw.Write([]byte("hello"))
+	_ = w.WriteField("trailer", "x")
+	_ = w.Close()
+	if got, diag := strictMatch(t, sent("/upload", map[string]string{"Content-Type": w.FormDataContentType()}, b.String()), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body") {
+		t.Fatalf("a part after the recorded ones: served %v, differs %v", got != nil, differs(diag))
+	}
+	renamed := strings.ReplaceAll(body, `filename="`, `filename="other-`)
+	if renamed == body {
+		t.Fatal("the fixture names no file")
+	}
+	if got, diag := strictMatch(t, sent("/upload", map[string]string{"Content-Type": ct}, renamed), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "body") {
+		t.Fatalf("another file name: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A query value the mock learned may change while the parameter has one
+// value; a parameter with several values is compared.
+func TestStrictALearnedQueryValueIsOneValue(t *testing.T) {
+	rec := recorded("m", "/feed?cursor=c1&tag=a&tag=b", nil, "")
+	rec.Spec.HTTPReq.Method = "GET"
+	rec.Spec.ReqBodyNoise = map[string][]string{"url.query.cursor": {}, "url.query.tag": {}}
+	get := func(path string) *req {
+		r := sent(path, nil, "")
+		r.method = "GET"
+		return r
+	}
+	if got, diag := strictMatch(t, get("/feed?cursor=c9&tag=a&tag=b"), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a learned single value was compared: %v", differs(diag))
+	}
+	if got, diag := strictMatch(t, get("/feed?cursor=c1&tag=x&tag=y"), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "query.tag") {
+		t.Fatalf("a learned parameter with several values: served %v, differs %v", got != nil, differs(diag))
+	}
+}
+
+// A recording that is served once (not consumed by a cursor) answers as it
+// is, ahead of cursor-consumed ones: no cursor applies to it.
+func TestStrictARecordingServedOnceTakesNoCursor(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Unix(1_700_000_000, 0)
+	once := onHost("once", "/counter", "api.example")
+	once.TestModeInfo.Consume = models.ConsumeReuse
+	once.Spec.ReqTimestampMock = base
+	c1 := onHost("c1", "/counter", "api.example")
+	c1.TestModeInfo.Consume = models.ConsumeCursorSaturate
+	c1.Spec.ReqTimestampMock = base.Add(time.Second)
+	c2 := onHost("c2", "/counter", "api.example")
+	c2.TestModeInfo.Consume = models.ConsumeCursorSaturate
+	c2.Spec.ReqTimestampMock = base.Add(2 * time.Second)
+	h := newHTTP()
+	db := &mockMemDb{}
+	for i := 0; i < 2; i++ {
+		m, commit := h.strictCursorPick([]*models.Mock{once, c1, c2}, db, true)
+		if commit != nil || m.Name != "once" {
+			t.Fatalf("pick %d = %s (commit %v), want once with no cursor", i+1, m.Name, commit != nil)
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -177,9 +178,17 @@ func valueDiff(path, expected, actual string) models.MockFieldDiff {
 
 // recordedURL is a recorded request's path and query: the recorded URL's own
 // query, or, for a recording that kept it only there, URLParams (which joins
-// a repeated parameter's values with ", ").
+// a repeated parameter's values with ", "). The path is decoded, as the
+// request matcher, the learn step and keploy.yml's url noise read it: a
+// percent-encoded slash ("a%2Fb") reads as two segments.
 func recordedURL(r *models.HTTPReq) (string, url.Values) {
-	u, err := url.Parse(r.URL)
+	parse := url.Parse
+	if strings.HasPrefix(r.URL, "/") {
+		// A path-only recording is read as a request line is: "//v1/charge"
+		// is a path, not a host.
+		parse = url.ParseRequestURI
+	}
+	u, err := parse(r.URL)
 	if err != nil {
 		return r.URL, nil
 	}
@@ -221,10 +230,10 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 }
 
 // queryDiffs compares two queries: the same parameters, each with the same
-// value (keploy.yml's url noise masked in both). A repeated parameter's values
-// are compared in any order, as HTTP reads them; one value the mock learned
-// (url.query.<name>) may differ. Parameters keploy itself adds (keploy*) are
-// not compared.
+// values (keploy.yml's url noise masked in both), a repeated parameter's in
+// any order, as the request matcher and the learn step read them (an app may
+// build them from a set); one value the mock learned (url.query.<name>) may
+// differ. Parameters keploy itself adds (keploy*) are not compared.
 func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 	names := map[string]bool{}
 	for name := range rec {
@@ -249,8 +258,7 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", strings.Join(lv, ", ")))
 			continue
 		}
-		rm, lm := maskAndSort(rv, k.n.url), maskAndSort(lv, k.n.url)
-		if strings.Join(rm, "\x00") == strings.Join(lm, "\x00") {
+		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
 			continue
 		}
 		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
@@ -314,7 +322,9 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header) []stri
 }
 
 // sameHeaderValue reports whether a header's recorded value (its lines joined
-// with ",", as the recorder writes them) and its live lines are the same.
+// with ",", as the recorder writes them) and its live lines are the same, in
+// the same order: the order of a repeated header's lines is significant (RFC
+// 9110 §5.3).
 func sameHeaderValue(name, rec string, live []string) bool {
 	switch name {
 	case "content-type":
@@ -322,11 +332,7 @@ func sameHeaderValue(name, rec string, live []string) bool {
 	case "user-agent":
 		return productName(rec) == productName(strings.Join(live, ","))
 	}
-	if rec == strings.Join(live, ",") {
-		return true
-	}
-	// A repeated header's values in any order, as HTTP reads them.
-	return sameMembers(strings.Split(rec, ","), strings.Split(strings.Join(live, ","), ","))
+	return rec == strings.Join(live, ",")
 }
 
 // mediaTypeKey is a Content-Type's media types, lowercased and sorted, without
@@ -352,25 +358,24 @@ func productName(ua string) string {
 	return name
 }
 
+// sameMembers reports whether a and b hold the same values, in any order.
 func sameMembers(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	as, bs := make([]string, len(a)), make([]string, len(b))
-	for i := range a {
-		as[i] = strings.TrimSpace(a[i])
-	}
-	for i := range b {
-		bs[i] = strings.TrimSpace(b[i])
-	}
+	as, bs := slices.Clone(a), slices.Clone(b)
 	sort.Strings(as)
 	sort.Strings(bs)
-	for i := range as {
-		if as[i] != bs[i] {
-			return false
-		}
+	return slices.Equal(as, bs)
+}
+
+// maskValues are vals with keploy.yml's url noise masked, in their order.
+func maskValues(vals []string, noise []*regexp.Regexp) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = maskURLNoise(v, noise)
 	}
-	return true
+	return out
 }
 
 // bodyDiffs compares two bodies, by the recording's media type: a form or a
@@ -407,7 +412,7 @@ func bodyChanged() strictField {
 }
 
 // formDiffs compares two form bodies key by key: the same keys, each with the
-// same values in any order.
+// same values, a repeated key's in any order, as the learn step reads them.
 func (k strictKnown) formDiffs(rec, live string) []strictField {
 	rf, rerr := url.ParseQuery(rec)
 	lf, lerr := url.ParseQuery(live)
@@ -485,7 +490,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 	for i := range rp {
 		path := "body." + rp[i].name
 		switch {
-		case rp[i].name != lp[i].name || rp[i].file != lp[i].file || (rp[i].file != "") != (lp[i].file != ""):
+		case rp[i].name != lp[i].name || rp[i].file != lp[i].file:
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue

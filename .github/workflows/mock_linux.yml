@@ -290,6 +290,20 @@ jobs:
         with:
           src: build
 
+      - name: Ensure yq
+        run: |
+          # The script reads its reports with yq, which the runner image ships;
+          # install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
       - name: Run proven strict-HTTP e2e (request drift)
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
