@@ -217,9 +217,17 @@ type FailureInfo struct {
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
-	// not capture since the test set began, as this test ended: a loss taints
-	// the test running when it happened and every later test of the set
-	// (design v14 §3.2), each of which fails. Empty with the switch off.
+	// not capture that is charged to this test, each of which fails it:
+	//   - every kind but real_uncaptured: what the agent lost since the test
+	//     set began, as this test ended. A loss taints the test running when
+	//     it happened and every later test of the set (design v14 §3.2).
+	//   - real_uncaptured (class e, mock.real): the connections keploy could
+	//     neither capture nor relay as real that were undecided or used while
+	//     this test ran, counted for this test alone. One undecided across
+	//     several tests is charged to each; a test that never touched it is
+	//     not (§3.2 as amended for class e). keploy relays nothing of such a
+	//     connection, so no later test's calls escape capture through it.
+	// Empty with the switch off.
 	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
 	// CaptureUnread says, under KEPLOY_PROVEN=1, that keploy could not read
 	// whether its agent captured every call while this test ran (the count
