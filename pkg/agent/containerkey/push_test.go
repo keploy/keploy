@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/go-connections/nat"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -186,10 +189,10 @@ func TestApplySnapshotOnlyOnAPushedAgent(t *testing.T) {
 	if !TakesPushed() {
 		t.Fatal("a docker-mode agent says it takes no lists")
 	}
-	if err := ApplySnapshot(Snapshot{Containers: []SnapshotContainer{{ID: "r", Image: "redis:7", IPs: []string{"172.17.0.9"}}}}); err != nil {
+	if err := ApplySnapshot(Snapshot{Containers: []SnapshotContainer{{ID: "r", Image: "redis:7", IPs: []string{"172.17.0.9"}, Fingerprint: fpRedis}}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := name(t, Default, "1", "172.17.0.9:6379"); got != "container:redis:7:6379#1" {
+	if got := name(t, Default, "1", "172.17.0.9:6379"); got != keyRedis {
 		t.Fatalf("a pushed agent named %q", got)
 	}
 }
@@ -225,6 +228,39 @@ func (p *posts) count() int {
 	return len(p.got)
 }
 
+// waitPost waits until the agent's last list satisfies ok.
+func waitPost(ps *posts, ok func(Snapshot) bool) Snapshot {
+	for {
+		if ps.count() > 0 {
+			if s := ps.last(); ok(s) {
+				return s
+			}
+		}
+		<-ps.sent
+	}
+}
+
+// settled: the agent was given every listed container with its
+// configuration read (the list's reads, beside its first push).
+func settled(s Snapshot) bool {
+	for _, c := range s.Containers {
+		if c.Reading || c.Fingerprint == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// settle waits until the agent's list is settled, and returns how many lists
+// it was given by then, with every post told.
+func settle(ps *posts) int {
+	waitPost(ps, settled)
+	for len(ps.sent) > 0 {
+		<-ps.sent
+	}
+	return ps.count()
+}
+
 // testPusher is a pusher over f.
 func testPusher(f *fakeDocker, ps *posts) *Pusher {
 	p := NewPusher(ps.post, "")
@@ -243,25 +279,27 @@ func TestPushGivesTheListNowAndEveryChange(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if ps.count() != 1 || len(ps.last().Containers) != 3 || ps.last().Err != "" || ps.last().Source == "" {
-		t.Fatalf("Push gave %d lists, the last %+v", ps.count(), ps.last())
+	ps.mu.Lock()
+	got := ps.got[0]
+	ps.mu.Unlock()
+	if len(got.Containers) != 3 || got.Err != "" || got.Source == "" {
+		t.Fatalf("Push gave %+v", got)
 	}
-	<-ps.sent
+	// Each listed container's configuration, read beside the list, is given
+	// as a change.
+	settle(ps)
 	first := ps.last()
 	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
 	f.msgs <- start("new")
-	<-ps.sent
-	if s := ps.last(); len(s.Containers) != 4 || s.Seq <= first.Seq || s.Source != first.Source {
+	if s := waitPost(ps, func(s Snapshot) bool { return len(s.Containers) == 4 && settled(s) }); s.Seq <= first.Seq || s.Source != first.Source {
 		t.Fatalf("after a start = %+v", s)
 	}
 	f.remove("pg")
 	f.msgs <- die("pg")
-	<-ps.sent
-	if len(ps.last().Containers) != 3 {
-		t.Fatalf("after a die = %+v", ps.last())
-	}
-	if err := p.Push(t.Context(), nil); err != nil || ps.count() != 4 {
-		t.Fatalf("a second Push in the session: %v, %d lists", err, ps.count())
+	waitPost(ps, func(s Snapshot) bool { return len(s.Containers) == 3 })
+	n := settle(ps)
+	if err := p.Push(t.Context(), nil); err != nil || ps.count() != n+1 {
+		t.Fatalf("a second Push in the session: %v, %d lists after %d", err, ps.count(), n)
 	}
 }
 
@@ -331,7 +369,7 @@ func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
 	if err := p.Push(first, nil); err != nil {
 		t.Fatal(err)
 	}
-	<-ps.sent
+	settle(ps)
 	p.mu.Lock()
 	last := p.changed
 	p.mu.Unlock()
@@ -344,7 +382,7 @@ func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	<-ps.sent
+	settle(ps)
 	p.mu.Lock()
 	next := p.changed
 	p.mu.Unlock()
@@ -356,10 +394,7 @@ func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
 	}
 	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
 	f.msgs <- start("new")
-	<-ps.sent
-	if len(ps.last().Containers) != 4 {
-		t.Fatalf("the next session's loop gave %+v", ps.last())
-	}
+	waitPost(ps, func(s Snapshot) bool { return len(s.Containers) == 4 })
 }
 
 // A watch that fails mid-session (the CLI's event stream ended) gives the
@@ -372,12 +407,23 @@ func TestAWatchThatFailsMidSessionIsPushed(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	<-ps.sent
+	settle(ps)
 	f.endStream(errors.New("unexpected EOF"))
-	<-ps.sent
-	if s := ps.last(); s.Err == "" || len(s.Containers) != 0 {
+	if s := waitPost(ps, func(s Snapshot) bool { return s.Err != "" }); len(s.Containers) != 0 {
 		t.Fatalf("after the stream ended the agent was given %+v; want the failure", s)
 	}
+}
+
+// oneChange is one change to p's index, told once: a container the index
+// now holds. (A container an event starts is told as it is placed, put in and
+// read: several signals, of which the loop may hold any.)
+func oneChange(p *Pusher) {
+	p.idx.mu.Lock()
+	st := p.idx.cur
+	p.idx.mu.Unlock()
+	e := entry{id: "new", image: "nginx"}
+	e.addIP("172.17.0.9")
+	p.idx.put(st, e, 0)
 }
 
 // tookTheChange waits until p's change loop has taken the change told: with
@@ -399,10 +445,12 @@ func TestAChangeTheAgentWasGivenIsNotGivenAgain(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
+	for range 3 {
+		<-applied // the listed containers' configurations
+	}
+	n0 := settle(ps)
 	p.mu.Lock()
-	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
-	f.msgs <- start("new")
-	<-applied
+	oneChange(p)
 	tookTheChange(p)                 // the loop holds the change, and waits for p.mu
 	err := p.send(t.Context(), true) // a session start's push, under p.mu as Push sends
 	p.changed <- struct{}{}          // the loop takes this once done with the change it holds
@@ -411,8 +459,8 @@ func TestAChangeTheAgentWasGivenIsNotGivenAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	tookTheChange(p)
-	if n := ps.count(); n != 2 {
-		t.Fatalf("%d lists; want 2, the first push and the forced one: the loop gave the change again", n)
+	if n := ps.count(); n != n0+1 {
+		t.Fatalf("%d lists after %d; want only the forced one more: the loop gave the change again", n, n0)
 	}
 }
 
@@ -428,18 +476,19 @@ func TestAnEndedSessionsLoopGivesNothing(t *testing.T) {
 	if err := p.Push(first, nil); err != nil {
 		t.Fatal(err)
 	}
-	<-ps.sent
+	for range 3 {
+		<-applied // the listed containers' configurations
+	}
+	n0 := settle(ps)
 	p.mu.Lock()
 	done := p.loopDone
-	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
-	f.msgs <- start("new")
-	<-applied
+	oneChange(p)
 	tookTheChange(p)
 	end()
 	p.mu.Unlock()
 	<-done
-	if n := ps.count(); n != 1 {
-		t.Fatalf("the ended session's loop gave the agent %d lists", n-1)
+	if n := ps.count(); n != n0 {
+		t.Fatalf("the ended session's loop gave the agent %d lists", n-n0)
 	}
 }
 
@@ -518,4 +567,314 @@ func TestClientEndpoint(t *testing.T) {
 	if got := clientEndpoint(); got != "unix:///ctx.sock" {
 		t.Fatalf("from the context = %q", got)
 	}
+}
+
+// A docker-mode agent takes a container's fingerprint from its CLI's lists:
+// one the CLI is still reading waits for the list that carries it, and one
+// the list holds without (its read failed) has none.
+func TestAPushedAgentWaitsForTheFingerprint(t *testing.T) {
+	p := newPushedIndex()
+	p.apply(Snapshot{Source: "s", Seq: 1, Containers: []SnapshotContainer{
+		{ID: "late", Image: "postgres:16", IPs: []string{"172.17.0.2"}, Reading: true},
+		{ID: "none", Image: "postgres:16", IPs: []string{"172.17.0.3"}},
+	}})
+	if fp, ok := p.Fingerprint(t.Context(), "none"); ok || fp != "" {
+		t.Fatalf("a container with no fingerprint and no read = %q, %v", fp, ok)
+	}
+	got := make(chan string, 1)
+	go func() {
+		fp, _ := p.Fingerprint(t.Context(), "late")
+		got <- fp
+	}()
+	p.apply(Snapshot{Source: "s", Seq: 2, Containers: []SnapshotContainer{
+		{ID: "late", Image: "postgres:16", IPs: []string{"172.17.0.2"}, Fingerprint: fpDefault},
+	}})
+	if fp := <-got; fp != fpDefault {
+		t.Fatalf("the fingerprint once listed = %q", fp)
+	}
+	if c, ok, _ := p.Lookup(netip.MustParseAddrPort("172.17.0.2:5432")); !ok || c.Fingerprint != fpDefault {
+		t.Fatalf("Lookup = %+v, %v", c, ok)
+	}
+}
+
+// errAgent503 is an agent that did not take a list.
+var errAgent503 = errors.New("the agent answered 503")
+
+// A list the agent did not take is given again until it takes one: the
+// agent may be waiting on it for a container's configuration.
+func TestALostListIsGivenAgain(t *testing.T) {
+	f := testcontainers()
+	// ls's configuration comes in after Push's own list: the list lost is
+	// one the change loop gives, which it must give again.
+	lsRead := make(chan struct{})
+	f.block["ls"] = lsRead
+	agent := newPushedIndex()
+	var mu sync.Mutex
+	failed := false
+	took := make(chan Snapshot, 64)
+	post := func(_ context.Context, s Snapshot) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if settled(s) && !failed {
+			failed = true // the list that carries the fingerprints is lost once
+			return errAgent503
+		}
+		agent.apply(s)
+		took <- s
+		return nil
+	}
+	p := NewPusher(post, "")
+	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
+	p.idx.socketExists = func(string) bool { return true }
+	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	close(lsRead)
+	for s := range took {
+		if settled(s) {
+			break
+		}
+	}
+	k := NewKeyer(agent)
+	if _, _, ok := k.Name(zap.NewNop(), "c1", "172.17.0.3:4566"); !ok {
+		t.Fatal("ls not named")
+	}
+	m := &models.Mock{ConnectionID: "c1"}
+	k.Stamp(m)
+	if m.Spec.Metadata[MetadataKey] == "" {
+		t.Fatalf("stamped %v, want ls's key", m.Spec.Metadata)
+	}
+}
+
+// A container whose configuration the CLI is still reading is listed as
+// being read, so the agent waits for the list that carries it.
+func TestTheCLIListsAContainerItIsReadingAsBeingRead(t *testing.T) {
+	f := testcontainers()
+	stuck := make(chan struct{})
+	f.block["ls"] = stuck
+	ps := newPosts()
+	p := testPusher(f, ps)
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	reading := false
+	for _, c := range ps.last().Containers {
+		if c.ID == "ls" {
+			reading = c.Reading && c.Fingerprint == ""
+		}
+	}
+	close(stuck)
+	if !reading {
+		t.Fatalf("the list %+v does not show ls as being read", ps.last())
+	}
+	waitPost(ps, settled)
+}
+
+// A listed container the CLI could not read is listed as read, with no
+// fingerprint: the agent stops waiting for it at once (its calls are a
+// container's with no key), instead of waiting for a list that never comes.
+func TestTheCLIListsAContainerItCouldNotReadAsRead(t *testing.T) {
+	f := testcontainers()
+	gate := make(chan struct{})
+	f.block["ls"] = gate
+	f.inspectErr = map[string]error{"ls": errors.New("Error response from daemon: 500")}
+	agent := newPushedIndex()
+	ps := newPosts()
+	p := NewPusher(func(ctx context.Context, s Snapshot) error {
+		agent.apply(s)
+		return ps.post(ctx, s)
+	}, "")
+	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
+	p.idx.socketExists = func(string) bool { return true }
+	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	<-f.entered
+	// Every other container's read is in and given to the agent first, so
+	// the read of ls ending is the only change left to give it.
+	waitPost(ps, func(s Snapshot) bool {
+		for _, c := range s.Containers {
+			if c.ID != "ls" && c.Fingerprint == "" {
+				return false
+			}
+		}
+		return true
+	})
+	close(gate)
+	readOf := func(id string) func(Snapshot) bool {
+		return func(s Snapshot) bool {
+			for _, c := range s.Containers {
+				if c.ID == id {
+					return !c.Reading
+				}
+			}
+			return false
+		}
+	}
+	s := waitPost(ps, readOf("ls"))
+	for _, c := range s.Containers {
+		if c.ID == "ls" && c.Fingerprint != "" {
+			t.Fatalf("ls listed with a fingerprint %q", c.Fingerprint)
+		}
+	}
+	k := NewKeyer(agent)
+	if _, _, ok := k.Name(zap.NewNop(), "c1", "172.17.0.3:4566"); !ok {
+		t.Fatal("ls not named")
+	}
+	if key, st := StateFromContext(WithConn(t.Context(), k, "c1")); st != Withheld || key != "" {
+		t.Fatalf("a call to ls = %q, %v, want a container with no key", key, st)
+	}
+}
+
+// A list the agent did not take when Push gave it is given again, though
+// nothing changes after: a restarted agent holds no list until it takes one.
+func TestPushGivesAListTheAgentDidNotTakeAgain(t *testing.T) {
+	f := testcontainers()
+	ps := newPosts()
+	p := testPusher(f, ps)
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	settle(ps)
+	// The agent restarts; the next session's Push finds it not yet up.
+	ps.mu.Lock()
+	ps.err = errors.New("connection refused")
+	ps.mu.Unlock()
+	if err := p.Push(t.Context(), nil); err == nil {
+		t.Fatal("Push said the agent took the list")
+	}
+	n := ps.count()
+	ps.mu.Lock()
+	ps.err = nil
+	ps.mu.Unlock()
+	// Nothing changes on the daemon: the list is given again all the same.
+	for ps.count() == n {
+		<-ps.sent
+	}
+	if !settled(ps.last()) {
+		t.Fatalf("given again %+v", ps.last())
+	}
+}
+
+// The pushed index answers Pending and AwaitReadsOf from the list held: the
+// containers it shows being placed, and none at the app container's own
+// loopback; a wait for some of them ends with the list that shows them
+// placed, whatever it shows of others.
+func TestThePushedIndexWaitsOnlyForThePlacingsAsked(t *testing.T) {
+	agent := newPushedIndex()
+	agent.apply(Snapshot{Source: "s", Seq: 1, Placing: []string{"a", "b"}})
+	ids, could := agent.Pending(netip.MustParseAddrPort("172.17.0.9:5432"))
+	if !could || !reflect.DeepEqual(ids, []string{"a", "b"}) {
+		t.Fatalf("Pending = %v, %v", ids, could)
+	}
+	if _, could := agent.Pending(netip.MustParseAddrPort("127.0.0.1:5432")); could {
+		t.Fatal("a container could be at the app container's own loopback")
+	}
+	done := make(chan struct{})
+	go func() {
+		agent.AwaitReadsOf(t.Context(), []string{"a"})
+		close(done)
+	}()
+	// a is placed; b, still being placed, is not waited for.
+	agent.apply(Snapshot{Source: "s", Seq: 2, Placing: []string{"b"}, Containers: []SnapshotContainer{
+		{ID: "a", Image: "postgres:16", IPs: []string{"172.17.0.2"}, Reading: true},
+	}})
+	<-done
+}
+
+// The CLI lists a container an event started as being placed until it is
+// placed: an agent connection accepted meanwhile waits for it, as the CLI's
+// own index would, and is named.
+func TestTheCLIListsAContainerItIsPlacingAsBeingPlaced(t *testing.T) {
+	f := testcontainers()
+	agent := newPushedIndex()
+	ps := newPosts()
+	p := NewPusher(func(ctx context.Context, s Snapshot) error {
+		agent.apply(s)
+		return ps.post(ctx, s)
+	}, "")
+	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
+	p.idx.socketExists = func(string) bool { return true }
+	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	settle(ps)
+	g := make(chan struct{})
+	read := make(chan struct{})
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.block["svc"] = read // only the list places it
+	f.mu.Unlock()
+	f.set("svc", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	<-f.placeEntered
+	waitPost(ps, func(s Snapshot) bool { return slices.Contains(s.Placing, "svc") })
+	spy := &awaitSpy{resolver: agent, awaiting: make(chan []string, 1)}
+	k := NewKeyer(spy)
+	k.Name(zap.NewNop(), "c1", "172.17.0.9:80")
+	got := make(chan State, 1)
+	go func() {
+		_, st := StateFromContext(WithConn(t.Context(), k, "c1"))
+		got <- st
+	}()
+	select {
+	case ids := <-spy.awaiting:
+		if !reflect.DeepEqual(ids, []string{"svc"}) {
+			t.Fatalf("the first use waits for %v", ids)
+		}
+	case st := <-got:
+		t.Fatalf("the first use returned %v while the CLI was placing the container", st)
+	}
+	close(g)
+	close(read) // its key waits for its configuration
+	if st := <-got; st == NotContainer {
+		t.Fatalf("a connection accepted while the CLI placed the container it reaches is no container's")
+	}
+}
+
+// awaitSpy is a resolver that tells awaiting what each AwaitReadsOf waits
+// for, as it begins.
+type awaitSpy struct {
+	resolver
+	awaiting chan []string
+}
+
+func (s *awaitSpy) AwaitReadsOf(ctx context.Context, ids []string) {
+	s.awaiting <- slices.Clone(ids)
+	s.resolver.AwaitReadsOf(ctx, ids)
+}
+
+// A placing that ends with nothing placed (the container started and exited:
+// the list has nothing) reaches a docker-mode agent: the CLI gives a list
+// without it.
+func TestTheCLIListsAPlacingThatFoundNothingAsEnded(t *testing.T) {
+	f := testcontainers()
+	agent := newPushedIndex()
+	ps := newPosts()
+	p := NewPusher(func(ctx context.Context, s Snapshot) error {
+		agent.apply(s)
+		return ps.post(ctx, s)
+	}, "")
+	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
+	p.idx.socketExists = func(string) bool { return true }
+	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	settle(ps)
+	g := make(chan struct{})
+	f.mu.Lock()
+	f.placeGate["quick"] = g
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", nil, nat.PortMap{})
+	c.State.Running = false // exited at once: the list has nothing
+	f.set("quick", c)
+	f.msgs <- start("quick")
+	<-f.placeEntered
+	waitPost(ps, func(s Snapshot) bool { return slices.Contains(s.Placing, "quick") })
+	close(g)
+	waitPost(ps, func(s Snapshot) bool { return !slices.Contains(s.Placing, "quick") })
 }

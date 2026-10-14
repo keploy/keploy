@@ -19,8 +19,12 @@ import (
 type oneContainer struct{}
 
 func (oneContainer) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
-	return containerkey.Container{ID: fmt.Sprint(dst.Port()), Image: "postgres:16", Port: 5432}, true, nil
+	return containerkey.Container{ID: fmt.Sprint(dst.Port()), Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"}, true, nil
 }
+
+func (oneContainer) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (oneContainer) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (oneContainer) AwaitReadsOf(context.Context, []string)             {}
 
 func (oneContainer) Bind(context.Context)               {}
 func (oneContainer) Watch(context.Context, *zap.Logger) {}
@@ -43,7 +47,7 @@ func TestHandleContainers(t *testing.T) {
 		}
 		return rec.Code
 	}
-	list := `{"source":"cli","seq":1,"containers":[{"id":"pg","image":"postgres:16","ips":["172.18.0.2"]}]}`
+	list := `{"source":"cli","seq":1,"containers":[{"id":"pg","image":"postgres:16","ips":["172.18.0.2"],"fingerprint":"0123456789ab"}]}`
 
 	containerkey.Default = containerkey.NewKeyer(oneContainer{})
 	if code := call(http.MethodGet, ""); code != http.StatusConflict {
@@ -63,7 +67,7 @@ func TestHandleContainers(t *testing.T) {
 	if code := call(http.MethodPost, list); code != http.StatusNoContent {
 		t.Fatalf("a docker-mode agent answered %d to a list, want 204", code)
 	}
-	if _, key, _ := containerkey.Default.Name(zap.NewNop(), "1", "172.18.0.2:5432"); key != "container:postgres:16:5432#1" {
+	if _, key, _ := containerkey.Default.Name(zap.NewNop(), "1", "172.18.0.2:5432"); key != "container:postgres:5432@0123456789ab" {
 		t.Fatalf("after the list the agent named %q", key)
 	}
 }

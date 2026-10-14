@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -43,12 +44,21 @@ type Snapshot struct {
 	// address, which misses, never matches wrongly.)
 	Local      []string            `json:"local,omitempty"`
 	Containers []SnapshotContainer `json:"containers"`
+	// Placing is the containers the CLI is placing: ones an event started
+	// or moved, not yet in Containers where they now are. A connection the
+	// agent accepts meanwhile waits for them, as the CLI's index would.
+	Placing []string `json:"placing,omitempty"`
 }
 
 // SnapshotContainer is one running container of a Snapshot.
 type SnapshotContainer struct {
 	ID    string `json:"id"`
 	Image string `json:"image"`
+	// Fingerprint is the container's Fingerprint, once the CLI's read of its
+	// configuration is in; Reading says that read is in flight, and a later
+	// list will carry it.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Reading     bool   `json:"reading,omitempty"`
 	// Name is the container's name, for messages.
 	Name  string         `json:"name,omitempty"`
 	IPs   []string       `json:"ips,omitempty"`
@@ -93,13 +103,15 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 	for a := range st.local {
 		s.Local = append(s.Local, a.String())
 	}
+	s.Placing = st.placingIDs()
 	at := map[string]int{}
 	for id, image := range st.images {
 		if exclude != "" && st.names[id] == "/"+exclude {
 			continue
 		}
 		at[id] = len(s.Containers)
-		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/")})
+		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/"),
+			Fingerprint: st.fingerprints[id], Reading: st.fingerprints[id] == "" && st.reading[id]})
 	}
 	// Each IP goes to the container the index names at it (byIP): a
 	// container that took an IP whose old holder's die never arrived holds
@@ -124,6 +136,9 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 type pushedIndex struct {
 	mu sync.Mutex
 	st *watchState
+	// applied closes, and is replaced, whenever a list is taken: what waits
+	// for a container's fingerprint looks again then.
+	applied chan struct{}
 	// source and seq are the list held.
 	source string
 	seq    uint64
@@ -131,7 +146,7 @@ type pushedIndex struct {
 	endpoint string
 }
 
-func newPushedIndex() *pushedIndex { return &pushedIndex{} }
+func newPushedIndex() *pushedIndex { return &pushedIndex{applied: make(chan struct{})} }
 
 // apply takes a snapshot in place of the one held, unless it is an older
 // list of the same source.
@@ -144,6 +159,9 @@ func (p *pushedIndex) apply(s Snapshot) {
 		st.err = fmt.Errorf("%w (keploy read %s)", errNoDaemon, s.Endpoint)
 	case s.Err != "":
 		st.err = errors.New(s.Err)
+	}
+	for _, id := range s.Placing {
+		st.placing[id] = true
 	}
 	st.local = map[netip.Addr]bool{}
 	for _, a := range s.Local {
@@ -160,6 +178,11 @@ func (p *pushedIndex) apply(s Snapshot) {
 			e.publish(port.HostIP, port.HostPort, port.Port)
 		}
 		st.images[e.id] = e.image
+		if c.Fingerprint != "" {
+			st.fingerprints[e.id] = c.Fingerprint
+		} else if c.Reading {
+			st.reading[e.id] = true
+		}
 		for _, a := range e.ips {
 			st.byIP[a] = e.id
 		}
@@ -173,6 +196,8 @@ func (p *pushedIndex) apply(s Snapshot) {
 		return // an older list that arrived late
 	}
 	p.st, p.source, p.seq, p.endpoint = st, s.Source, s.Seq, s.Endpoint
+	close(p.applied)
+	p.applied = make(chan struct{})
 }
 
 // errNoList is a docker-mode agent's lookup before its CLI gave it a list:
@@ -192,6 +217,63 @@ func (p *pushedIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 	}
 	c, ok := p.st.find(dst)
 	return c, ok, nil
+}
+
+// Fingerprint is container id's fingerprint in the list held, waiting, while
+// the CLI is reading it, for a list that carries it.
+func (p *pushedIndex) Fingerprint(ctx context.Context, id string) (string, bool) {
+	for {
+		p.mu.Lock()
+		st, applied := p.st, p.applied
+		var fp string
+		held, reading := false, false
+		if st != nil && st.err == nil {
+			fp, held, reading = st.fingerprints[id], st.images[id] != "", st.reading[id]
+		}
+		p.mu.Unlock()
+		switch {
+		case fp != "" && held:
+			return fp, true
+		case !reading:
+			return "", false
+		}
+		select {
+		case <-applied:
+		case <-ctx.Done():
+			return "", false
+		}
+	}
+}
+
+// Pending says whether a container could be at dst by the list held (none
+// at the app container's own loopback), and which containers the CLI is
+// placing by that list. It never waits.
+func (p *pushedIndex) Pending(dst netip.AddrPort) ([]string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.st == nil || p.st.err != nil {
+		return nil, false
+	}
+	return p.st.placingIDs(), p.st.couldBeAt(dst.Addr())
+}
+
+// AwaitReadsOf waits until the list held shows none of the containers ids
+// still being placed by the CLI, or ctx ends.
+func (p *pushedIndex) AwaitReadsOf(ctx context.Context, ids []string) {
+	for {
+		p.mu.Lock()
+		st, applied := p.st, p.applied
+		reading := st != nil && st.err == nil && st.placingAny(ids)
+		p.mu.Unlock()
+		if !reading {
+			return
+		}
+		select {
+		case <-applied:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // Bind does nothing: a docker-mode agent reads no daemon.
@@ -261,11 +343,14 @@ type Pusher struct {
 	// tells and only that session's loop reads, so a loop whose session
 	// ended never takes a change meant for the next one. loopDone closes
 	// when the loop has ended. sentGen is the count of changes the agent was
-	// last given. logger is the last Push's.
+	// last given; owed says the agent did not take the last list it was
+	// given, which is then given again whether or not anything changed.
+	// logger is the last Push's.
 	alive    context.Context
 	changed  chan struct{}
 	loopDone chan struct{}
 	sentGen  uint64
+	owed     bool
 	logger   *zap.Logger
 }
 
@@ -301,6 +386,14 @@ func (p *Pusher) Push(ctx context.Context, logger *zap.Logger) error {
 	}
 	p.idx.Watch(ctx, logger)
 	err := p.send(ctx, true)
+	if err != nil {
+		// The agent did not take it: the loop gives it again, paced, until
+		// it does (owed), though nothing changes meanwhile.
+		select {
+		case p.changed <- struct{}{}:
+		default:
+		}
+	}
 	if fresh {
 		p.loopDone = make(chan struct{})
 		go p.loop(ctx, p.changed, logger, p.loopDone)
@@ -308,21 +401,23 @@ func (p *Pusher) Push(ctx context.Context, logger *zap.Logger) error {
 	return err
 }
 
-// send gives the agent the list as it is now: always when forced, else only
-// when it changed since the agent was last given it. p.mu is held.
+// send gives the agent the list as it is now: always when forced or owed
+// (the agent did not take the last one), else only when it changed since the
+// agent was last given it. p.mu is held.
 func (p *Pusher) send(ctx context.Context, force bool) error {
 	s, gen, ok := p.idx.snapshot(p.exclude)
 	if !ok {
 		return ctx.Err()
 	}
-	if !force && gen == p.sentGen {
+	if !force && !p.owed && gen == p.sentGen {
 		return nil
 	}
 	s.Source = p.source
 	if err := p.post(ctx, s); err != nil {
+		p.owed = true
 		return err
 	}
-	p.sentGen = gen
+	p.sentGen, p.owed = gen, false
 	if p.logger != nil {
 		names := make([]string, 0, len(s.Containers))
 		for _, c := range s.Containers {
@@ -340,27 +435,49 @@ func (p *Pusher) send(ctx context.Context, force bool) error {
 // change after.
 func (p *Pusher) loop(ctx context.Context, changed <-chan struct{}, logger *zap.Logger, done chan struct{}) {
 	defer close(done)
+	// retry is set while the agent has not taken the list as it is: a list
+	// that failed is given again, paced, until the agent takes one, since
+	// the agent may be waiting on it for a container's configuration (a
+	// lost list would otherwise hold its parsers until the session ends).
+	var retry <-chan time.Time
+	backoff := pushRetryFirst
+	warned := false
 	for {
 		select {
 		case <-changed:
-			p.mu.Lock()
-			if ctx.Err() != nil {
-				p.mu.Unlock()
-				return
-			}
-			err := p.send(ctx, false)
-			p.mu.Unlock()
-			if err != nil && ctx.Err() == nil && logger != nil {
-				// The next change, the next session start or the agent's
-				// restart gives it again.
-				logger.Warn("keploy could not give its agent the list of the Docker daemon's containers: until it does, the agent names container destinations from the last list it was given",
-					zap.Error(err), zap.String("next_step", "check that keploy's agent is up; the next change, session start or agent restart gives it the list again"))
-			}
+		case <-retry:
 		case <-ctx.Done():
 			return
 		}
+		p.mu.Lock()
+		if ctx.Err() != nil {
+			p.mu.Unlock()
+			return
+		}
+		err := p.send(ctx, false)
+		p.mu.Unlock()
+		if err == nil || ctx.Err() != nil {
+			retry, backoff, warned = nil, pushRetryFirst, false
+			continue
+		}
+		if !warned && logger != nil {
+			warned = true
+			logger.Warn("keploy could not give its agent the list of the Docker daemon's containers: it gives it again until the agent takes it, and meanwhile the agent names container destinations from the last list it was given",
+				zap.Error(err), zap.String("next_step", "check that keploy's agent is up"))
+		}
+		retry = time.After(backoff)
+		if backoff < pushRetryMax {
+			backoff *= 2
+		}
 	}
 }
+
+// pushRetryFirst and pushRetryMax pace giving a list again after the agent
+// did not take it: they bound how often keploy asks, never for how long.
+const (
+	pushRetryFirst = 100 * time.Millisecond
+	pushRetryMax   = 5 * time.Second
+)
 
 // clientEndpoint is the Docker endpoint the keploy CLI's own commands use:
 // DOCKER_HOST, else the docker CLI's current context.

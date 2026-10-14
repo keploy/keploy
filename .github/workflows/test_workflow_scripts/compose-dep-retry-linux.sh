@@ -182,8 +182,11 @@ before=$FAIL
 KEPLOY_PROVEN=1 record recreated-proven "docker compose up --always-recreate-deps app"
 setup_again recreated-proven || fail "recreated-proven: the agent compose recreated was not set up again"
 mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
-keyed=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c 'containerKey: container:python:3.11-slim:8000#1$')
-if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ]; then
+# The dependency's key: its repository (no tag), its port and its
+# configuration's fingerprint; one key on every mock.
+keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@[0-9a-f]{12}$')
+keyed=$(grep -c . <<<"$keys")
+if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | wc -l)" -ne 1 ]; then
   fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
 fi
 [ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"

@@ -7,12 +7,13 @@
 # host port: A is the suite's, started before the run and called while the
 # tests are collected (outside every test); B and C are started by test_one
 # and test_two themselves, as Testcontainers does, and removed when pytest
-# exits. The recording must carry, on each call's mock:
-#   - A, outside tests and inside test_two:  container:<image>:8000#1
-#   - B inside test_one, C inside test_two:  container:<image>:8000#2
-# so a test's own container is numbered the same in every test, after the
-# suite's. Recording again with every container new, on new ports, must name
-# them the same, and so must recording test_two alone. The switch's recording
+# exits. Each is configured apart (WHO=a, b, c). The recording must carry, on
+# each call's mock, its container's key,
+#   container:<repository>:8000@<fingerprint of its configuration>
+# A's on the calls outside tests and test_two's to A, B's in test_one, C's in
+# test_two: three keys, one per configuration. Recording again with every
+# container new, on new ports, must name them the same, and so must recording
+# test_two alone. The switch's recording
 # replays without the switch, and a recording made without the switch has no
 # keys. A replay under the switch needs a build that judges each test, keploy
 # enterprise: this build refuses it before it runs the tests. (The agent names
@@ -207,7 +208,9 @@ start_suite() {
 }
 
 CMD="python3 -m pytest -q -p no:cacheprovider test_containers.py"
-want="container:${IMAGE}:8000"
+# A key: the image's repository (no tag), the port, the configuration's
+# fingerprint.
+KEY_RE="^container:${IMAGE%%:*}:8000@[0-9a-f]{12}$"
 
 # keys_of NAME: "<path> <containerKey or ->" for each HTTP mock of the set.
 keys_of() {
@@ -265,14 +268,24 @@ expect() {
   fi
 }
 
+# key_at FILE PATH: the key FILE's line for PATH carries.
+key_at() { awk -v p="$2" '$1 == p { print $2 }' "$1"; }
+
 if half on; then
 echo "== 1. record under the proven switch =="
 record ck rec.log 1
 grep -q "2 passed" rec.log || { echo "FAIL: pytest did not pass both tests while recording"; FAIL=1; }
 keys_of ck | sort > keys.txt
 cat keys.txt
-expect keys.txt "the recorded container keys are not the suite's #1 and each test's own #2" \
-  "/boot ${want}#1" "/one ${want}#2" "/two-a ${want}#1" "/two-c ${want}#2"
+KA=$(key_at keys.txt /boot)
+KB=$(key_at keys.txt /one)
+KC=$(key_at keys.txt /two-c)
+for k in "$KA" "$KB" "$KC"; do
+  grep -qE "$KEY_RE" <<<"$k" || { echo "FAIL: '$k' is not a container key of $IMAGE's port 8000"; FAIL=1; }
+done
+[ "$KA" != "$KB" ] && [ "$KA" != "$KC" ] && [ "$KB" != "$KC" ] || { echo "FAIL: containers configured apart share a key"; FAIL=1; }
+expect keys.txt "the recorded container keys are not A's outside tests and in test_two, B's and C's in their tests" \
+  "/boot $KA" "/one $KB" "/two-a $KA" "/two-c $KC"
 
 echo "== 2. record again, every container new on a new random port =="
 record ck-again rec-again.log 1
@@ -280,15 +293,15 @@ grep -q "2 passed" rec-again.log || { echo "FAIL: pytest did not pass both tests
 keys_of ck-again | sort > keys-again.txt
 cat keys-again.txt
 expect keys-again.txt "new containers on new ports were not named as the first record named the old ones" \
-  "/boot ${want}#1" "/one ${want}#2" "/two-a ${want}#1" "/two-c ${want}#2"
+  "/boot $KA" "/one $KB" "/two-a $KA" "/two-c $KC"
 
-echo "== 3. record test_two alone: its own container is still #2 =="
+echo "== 3. record test_two alone: its own container keeps its key =="
 record ck-two rec-two.log 1 -k test_two
 grep -q "1 passed" rec-two.log || { echo "FAIL: pytest did not pass test_two alone while recording"; FAIL=1; }
 keys_of ck-two | sort > keys-two.txt
 cat keys-two.txt
-expect keys-two.txt "test_two alone did not number its container as the full run did" \
-  "/boot ${want}#1" "/two-a ${want}#1" "/two-c ${want}#2"
+expect keys-two.txt "test_two alone did not name its containers as the full run did" \
+  "/boot $KA" "/two-a $KA" "/two-c $KC"
 
 echo "== 4. the switch's recording replays without the switch =="
 start_suite

@@ -21,14 +21,20 @@
 #
 # A container on a random published port, as Testcontainers runs one
 # (recorded under the switch):
-#   6. The recording carries the container's key (containerkey); nothing
-#      compares it yet.
-#   7. KEPLOY_PROVEN=1, a new container of the image on another random port:
-#      the set fails, naming the host. Its authority changed, and until the
-#      key names a container by its own configuration it is not matched by
-#      its key: the known limit of this step.
-#   8. Switch off, the same: the set passes, as on main.
-#   9. No data race in any log.
+#   6. The recording carries the container's key (containerkey): its
+#      repository, port and configuration's fingerprint.
+#   7. KEPLOY_PROVEN=1, a new container of the image, configured the same, on
+#      another random port: the set passes. Its address changed; its key did
+#      not.
+#  7b. The same, with the container started while the replay runs, as a test
+#      starts a Testcontainers container: keploy reads it from Docker's start
+#      event, and the set passes. The app learns its URL from a file, and its
+#      /healthz answers 2xx only then (--health-url), so no test starts first.
+#   8. KEPLOY_PROVEN=1, a container of the image configured otherwise (another
+#      environment): the set fails, and the report names the container.
+#   9. KEPLOY_PROVEN=1, a container of another repository: the same.
+#  10. Switch off, the same: the set passes, as on main.
+#  11. No data race in any log.
 #
 # Readiness is the app's listening port while recording, a container's own
 # "ready" line, and keploy's own probe of the app (--health-path, any HTTP
@@ -42,6 +48,7 @@ source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 IMAGE="${DEP_IMAGE:-python:3.11-slim}"
+OTHER_IMAGE="busybox:1.36"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=8090
 DEP=9099
@@ -109,11 +116,12 @@ wait_ready() {
     return 1
 }
 # start_payments <image> <cmd...>: a payments container on a new random
-# published port; sets PORT and CID.
+# published port, with RUN_OPTS's docker run options; sets PORT and CID.
+RUN_OPTS=()
 start_payments() {
     local image="$1"
     shift
-    CID=$(docker run -d --init -p "127.0.0.1::$DEP" "$image" "$@") || { echo "::error::cannot start a container of $image"; exit 1; }
+    CID=$(docker run -d --init "${RUN_OPTS[@]}" -p "127.0.0.1::$DEP" "$image" "$@") || { echo "::error::cannot start a container of $image"; exit 1; }
     CONTAINERS+=("$CID")
     wait_ready "$CID" || { echo "::error::the $image container exited before it was ready"; docker logs "$CID"; exit 1; }
     PORT=$(docker port "$CID" "$DEP/tcp" | grep -m1 '^127\.0\.0\.1:' | cut -d: -f2)
@@ -185,8 +193,10 @@ for p in "$APP" "$DEP"; do
 done
 REC_PID=""
 DEP_PID=""
+MID_PID=""
 cleanup() {
     [ -n "$REC_PID" ] && stop_pid "$REC_PID"
+    [ -n "$MID_PID" ] && stop_pid "$MID_PID"
     [ -n "$DEP_PID" ] && kill "$DEP_PID" 2>/dev/null
     stop_containers
 }
@@ -230,7 +240,7 @@ REC_PORT=$PORT
 record 1 "http://127.0.0.1:$REC_PORT"
 
 echo "== 6. the recording carries the container's key =="
-grep -qE "containerKey: container:${IMAGE}:${DEP}#[0-9]+" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
+grep -qE "containerKey: container:${IMAGE%%:*}:${DEP}@[0-9a-f]{12}" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
 
 # The new container starts while the recorded one still holds its port, so
 # Docker gives it another.
@@ -238,17 +248,56 @@ start_payments "$IMAGE" python3 -c "$SERVER"
 docker rm -f "$REC_CID" >/dev/null 2>&1
 [ "$PORT" != "$REC_PORT" ] || { echo "::error::Docker published two running containers on port $PORT"; exit 1; }
 
-echo "== 7. KEPLOY_PROVEN=1, a new container on another port: fails naming the host =="
+echo "== 7. KEPLOY_PROVEN=1, a new container configured the same, on another port: passes =="
 replay newcontainer 100 "http://127.0.0.1:$PORT" KEPLOY_PROVEN=1
-expect_miss "step 7" host
-
-echo "== 8. switch off, the same: passes, as on main =="
-replay newcontaineroff 100 "http://127.0.0.1:$PORT"
-expect_pass "step 8"
+expect_pass "step 7"
 stop_containers
 
-echo "== 9. no data race =="
-for f in record-off.log record-1.log unchanged.log host.log hostoff.log drift.log driftoff.log newcontainer.log newcontaineroff.log; do
+echo "== 7b. KEPLOY_PROVEN=1, the container started while the replay runs: passes =="
+URL_FILE="$WORK/payments-url"
+rm -f "$URL_FILE"
+before="$(newest_run)"
+sudo -E env -u KEPLOY_PROVEN PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env AMOUNT=100 PAYMENTS_URL_FILE=$URL_FILE ./order-app" \
+    --delay 1 --health-url "http://127.0.0.1:$APP/healthz" --health-poll-timeout 600s --generateGithubActions=false --disable-tele >midsession.log 2>&1 </dev/null &
+MID_PID=$!
+# keploy started the app, so its session (and its watch of Docker) is up: the
+# container starts now, and the app learns where it is.
+wait_listen "$APP" "$MID_PID" || { fail "step 7b: the app did not start under keploy test"; tail -30 midsession.log; }
+start_payments "$IMAGE" python3 -c "$SERVER"
+echo "http://127.0.0.1:$PORT" >"$URL_FILE"
+wait "$MID_PID"
+RC=$?
+MID_PID=""
+own
+if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
+    fail "step 7b: keploy test wrote no report (exit $RC)"
+    tail -30 midsession.log
+fi
+grep -q "falling back to fixed delay" midsession.log && fail "step 7b: the tests started before the container did"
+expect_pass "step 7b"
+stop_containers
+
+echo "== 8. KEPLOY_PROVEN=1, a container of the image configured otherwise: fails naming the container =="
+RUN_OPTS=(-e PAYMENTS_REGION=eu)
+start_payments "$IMAGE" python3 -c "$SERVER"
+RUN_OPTS=()
+replay otherconfig 100 "http://127.0.0.1:$PORT" KEPLOY_PROVEN=1
+expect_miss "step 8" container
+stop_containers
+
+echo "== 9. KEPLOY_PROVEN=1, a container of another repository: fails naming the container =="
+docker pull -q "$OTHER_IMAGE" >/dev/null || { echo "::error::cannot pull $OTHER_IMAGE"; exit 1; }
+start_payments "$OTHER_IMAGE" sh -c "echo ready; exec httpd -f -p $DEP"
+replay othercontainer 100 "http://127.0.0.1:$PORT" KEPLOY_PROVEN=1
+expect_miss "step 9" container
+
+echo "== 10. switch off, the same: passes, as on main =="
+replay othercontaineroff 100 "http://127.0.0.1:$PORT"
+expect_pass "step 10"
+stop_containers
+
+echo "== 11. no data race =="
+for f in record-off.log record-1.log unchanged.log host.log hostoff.log drift.log driftoff.log newcontainer.log midsession.log otherconfig.log othercontainer.log othercontaineroff.log; do
     grep -q 'WARNING: DATA RACE' "$f" 2>/dev/null && fail "data race in $f"
 done
 
@@ -256,4 +305,4 @@ if [ "$FAIL" -ne 0 ]; then
     echo "proven strict-HTTP e2e: $FAIL failure(s); work dir $WORK"
     exit 1
 fi
-echo "PASS: under KEPLOY_PROVEN=1 a call to another authority, or with another body value, gets no recorded answer and fails the test, naming the field; a container's key is recorded; without the switch nothing changes"
+echo "PASS: under KEPLOY_PROVEN=1 a call to another authority or another container, or with another body value, gets no recorded answer and fails the test, naming the field; a container configured the same on a new random port, or started while the replay runs, is matched by its key; without the switch nothing changes"

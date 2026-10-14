@@ -276,7 +276,7 @@ func TestUnderTheSwitchALocalListenerOutsideTheTreeIsMocked(t *testing.T) {
 // mock's runs list anything.
 func TestAMockedContainerIsListedByItsKey(t *testing.T) {
 	p, s := provenTreeProxy(t)
-	const key = "container:postgres:16:5432#1"
+	const key = "container:postgres:5432@aaaaaaaaaaaa"
 	p.noteMockedLocal("127.0.0.1:49153", 49153, &models.MockedRow{Addr: "127.0.0.1:49153", PID: 9, Exe: "/usr/bin/docker-proxy", Port: 49153}, key)
 	p.noteMockedLocal("172.17.0.2:5432", 5432, nil, key)
 	p.noteMockedLocal("10.0.0.7:443", 443, nil, "")
@@ -518,11 +518,15 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 		mode        models.Mode
 		passthrough bool
 		container   bool
+		// unread: the container's configuration is not read yet, so it has
+		// no key: it is listed as a container all the same, by its label.
+		unread bool
 	}{
-		{models.MODE_TEST, false, false}, {models.MODE_TEST, true, false}, {models.MODE_TEST, false, true},
-		{models.MODE_RECORD, false, false}, {models.MODE_RECORD, true, false}, {models.MODE_RECORD, false, true},
+		{models.MODE_TEST, false, false, false}, {models.MODE_TEST, true, false, false}, {models.MODE_TEST, false, true, false},
+		{models.MODE_TEST, false, true, true},
+		{models.MODE_RECORD, false, false, false}, {models.MODE_RECORD, true, false, false}, {models.MODE_RECORD, false, true, false},
 	} {
-		t.Run(fmt.Sprintf("%s/passthrough=%v/container=%v", tc.mode, tc.passthrough, tc.container), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/passthrough=%v/container=%v/unread=%v", tc.mode, tc.passthrough, tc.container, tc.unread), func(t *testing.T) {
 			recorded.reset()
 			t.Cleanup(recorded.reset)
 			t.Setenv("KEPLOY_PROVEN", "1")
@@ -530,8 +534,11 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			saved := containerkey.Default
 			t.Cleanup(func() { containerkey.Default = saved })
 			if tc.container {
-				containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
-					c: containerkey.Container{ID: "c1", Image: "postgres:16", Port: 5432}})
+				c := containerkey.Container{ID: "c1", Image: "postgres:16", Port: 5432, Fingerprint: "aaaaaaaaaaaa"}
+				if tc.unread {
+					c.Fingerprint = ""
+				}
+				containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream, c: c})
 			} else {
 				containerkey.Default = containerkey.NewKeyer(containerAt{})
 			}
@@ -576,9 +583,12 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 				_, portText, _ := net.SplitHostPort(upstream)
 				port, _ := strconv.Atoi(portText)
 				want := models.MockedRow{Addr: upstream, Port: uint16(port)}
-				if tc.container {
-					want.Container = "container:postgres:16:5432#1"
-				} else {
+				switch {
+				case tc.unread:
+					want.Container = "container:postgres:5432"
+				case tc.container:
+					want.Container = "container:postgres:5432@aaaaaaaaaaaa"
+				default:
 					exe, err := os.Executable()
 					if err != nil {
 						t.Fatal(err)
@@ -599,7 +609,8 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 // A local destination mock.real lists, by its address or as a container:
 // entry, is relayed to the real thing and never listed mocked, in a record as
 // in a replay: the REAL relay is decided before the mocked-local row, and the
-// one container naming gives both its key and its repository.
+// one container naming gives both its label and its repository (its
+// configuration unread here: the repository needs none).
 func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 	for _, tc := range []struct {
 		mode      models.Mode

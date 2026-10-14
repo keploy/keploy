@@ -94,7 +94,8 @@ jobs:
   # container has no Docker socket, so the CLI gives it the list of the
   # daemon's containers. `keploy record` of a compose app and of a docker run
   # app must record the calls to their dependency as
-  # container:<image>:<port>#<n>, and record no keys without the switch.
+  # container:<repository>:<port>@<fingerprint>, and record no keys without
+  # the switch.
   compose_container_keys_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
