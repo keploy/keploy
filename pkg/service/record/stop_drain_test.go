@@ -64,6 +64,12 @@ func tcAt(name string, at time.Time) *models.TestCase {
 	return &models.TestCase{Name: name, HTTPReq: models.HTTPReq{Timestamp: at}}
 }
 
+// grpcAt is a gRPC test case whose call completed at at.
+func grpcAt(name string, at time.Time) *models.TestCase {
+	return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: at.Add(-time.Millisecond)}, GrpcResp: models.GrpcResp{Timestamp: at}}
+}
+
 // The agent's parsers run behind the traffic: at the stop, a busy recording
 // still has mocks queued there (1,655 of 3,300 tests lost them at 110 req/s,
 // when the CLI stopped reading at the stop and gave its stream 30 s). They
@@ -416,9 +422,11 @@ func TestGetTestAndMockChans_NothingOfTrafficAfterTheStopIsRecorded(t *testing.T
 		}
 	}
 	send(h.f.incoming, tcAt("t-before", before))
+	send(h.f.incoming, grpcAt("g-before", before)) // a gRPC call is dated by its wire times too
 	send(h.f.outgoing, mockAt("m-before", before))
 	send(h.f.incoming, tcAt("t-after", after))
-	send(h.f.incoming, &models.TestCase{Name: "t-undated"}) // gRPC: cannot be told
+	send(h.f.incoming, grpcAt("g-after", after))
+	send(h.f.incoming, &models.TestCase{Name: "t-undated"}) // no wire times: cannot be told
 	send(h.f.outgoing, mockAt("m-after", after))
 	// The frame drains have taken what was queued; the mappings trail them.
 	time.Sleep(100 * time.Millisecond)
@@ -429,7 +437,7 @@ func TestGetTestAndMockChans_NothingOfTrafficAfterTheStopIsRecorded(t *testing.T
 	time.Sleep(mappingIdleGrace + 500*time.Millisecond)
 	send(h.f.mappings, models.TestMockMapping{TestName: "t-never-read", MockIDs: []string{"m-x"}})
 	wg.Wait()
-	if fmt.Sprint(tcs, mocks, maps) != "[t-before] [m-before] [t-before]" {
+	if fmt.Sprint(tcs, mocks, maps) != "[t-before g-before] [m-before] [t-before]" {
 		t.Fatalf("recorded test cases %v, mocks %v, mappings %v; want only what was served before the stop", tcs, mocks, maps)
 	}
 }
@@ -440,9 +448,16 @@ func TestTestCaseCapturedAtIsWhenItWasComplete(t *testing.T) {
 	if got := testCaseCapturedAt(&models.TestCase{HTTPReq: models.HTTPReq{Timestamp: req}, HTTPResp: models.HTTPResp{Timestamp: resp}}); !got.Equal(resp) {
 		t.Fatalf("got %v, want the response %v", got, resp)
 	}
+	// A gRPC call, by its response, else its request.
+	if got := testCaseCapturedAt(&models.TestCase{GrpcReq: models.GrpcReq{Timestamp: req}, GrpcResp: models.GrpcResp{Timestamp: resp}}); !got.Equal(resp) {
+		t.Fatalf("got %v for a gRPC test case, want its response %v", got, resp)
+	}
+	if got := testCaseCapturedAt(&models.TestCase{GrpcReq: models.GrpcReq{Timestamp: req}}); !got.Equal(req) {
+		t.Fatalf("got %v for a gRPC test case with no response time, want its request %v", got, req)
+	}
 	// Created is when the agent built it, possibly long after it ran.
 	if got := testCaseCapturedAt(&models.TestCase{Created: 100}); !got.IsZero() {
-		t.Fatalf("got %v for a gRPC test case, want it undated", got)
+		t.Fatalf("got %v for a test case with no wire times, want it undated", got)
 	}
 }
 

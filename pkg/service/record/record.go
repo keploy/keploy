@@ -345,14 +345,15 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 }
 
 // testCaseCapturedAt is when a test case was complete, from the wire times the
-// agent stamped: its response, else its request. A gRPC test case carries
-// neither (its Created is when the agent built it, not when it ran) and is
-// undated.
+// agent stamped: its response, else its request, HTTP or gRPC. One with none
+// is undated: its Created is when the agent built it, not when it ran.
 func testCaseCapturedAt(tc *models.TestCase) time.Time {
-	if !tc.HTTPResp.Timestamp.IsZero() {
-		return tc.HTTPResp.Timestamp
+	for _, at := range [...]time.Time{tc.HTTPResp.Timestamp, tc.HTTPReq.Timestamp, tc.GrpcResp.Timestamp, tc.GrpcReq.Timestamp} {
+		if !at.IsZero() {
+			return at
+		}
 	}
-	return tc.HTTPReq.Timestamp
+	return time.Time{}
 }
 
 // resetTimer re-arms t for d, safely draining any pending fire first.
@@ -2663,9 +2664,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		if appRunsOn {
 			// A test case the app served after the stop is not part of the
 			// recording: its mocks may come after the drain has ended, and
-			// saved without them it would fail replay. An undated one (gRPC)
-			// cannot be told from one, and is left out too. Neither is its
-			// mapping (MAPPINGS).
+			// saved without them it would fail replay. An undated one
+			// (testCaseCapturedAt) cannot be told from one, and is left out
+			// too. Neither is its mapping (MAPPINGS).
 			opts.afterStop = func(tc *models.TestCase) {
 				postStopTests.Store(tc.Name, struct{}{})
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
