@@ -14,10 +14,13 @@
 # suite's. Recording again with every container new, on new ports, must name
 # them the same, and so must recording test_two alone. The switch's recording
 # replays without the switch, and a recording made without the switch has no
-# keys. (A replay under the switch needs a build that judges each test, keploy
-# enterprise; the agent names a replay's connections as it names a record's,
-# which pkg/agent/proxy's TestHandleConnectionNamesAContainerDestination
-# covers.)
+# keys. A replay under the switch needs a build that judges each test, keploy
+# enterprise: this build refuses it before it runs the tests. (The agent names
+# a replay's connections as it names a record's, which pkg/agent/proxy's
+# TestHandleConnectionNamesAContainerDestination covers.) The suite's harness
+# speaks scope protocol v1 both ways (keploy_v1.py, conftest_v1.py).
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
 #
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test); DEP_IMAGE (the
 # dependency's image, python:3.11-slim by default).
@@ -31,6 +34,9 @@ if ! python3 -c "import pytest" 2>/dev/null; then
   python3 -m pip install --quiet --disable-pip-version-check pytest
 fi
 
+# This lane's directory: the shared harness (keploy_v1.py, conftest_v1.py).
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
 IMAGE="${DEP_IMAGE:-python:3.11-slim}"
@@ -142,33 +148,18 @@ def get(port, path):
         return json.load(r)
 PY
 
-cat > conftest.py <<'PY'
-import os, json, urllib.request, pytest
-AGENT=os.environ.get("KEPLOY_MOCK_AGENT")
-TOKEN=os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
-def _post(p,b):
-    if not AGENT: return None
-    h={"Content-Type":"application/json"}
-    if TOKEN: h["Authorization"]="Bearer "+TOKEN
-    r=urllib.request.Request(AGENT+p,data=json.dumps(b).encode(),headers=h,method="POST")
-    return json.loads(urllib.request.urlopen(r).read() or b"{}")
-# Under the proven switch the agent serves scope protocol v1: the test
-# process claims the run before its first test, and each test names its file.
-# Without the switch there is no claim to make (/agent/instance is a 404).
-@pytest.fixture(autouse=True, scope="session")
-def keploy_claim():
-    if os.environ.get("KEPLOY_PROVEN")=="1":
-        _post("/agent/instance",{"key":".","dir":os.getcwd()})
-    yield
-@pytest.fixture(autouse=True)
-def keploy_scope(request, keploy_claim):
-    test={"name":request.node.name,"file":request.node.path.name}
-    resp=_post("/agent/scope/begin",dict(test,canSkip=True))
-    if resp and resp.get("action")=="skip":
-        pytest.skip(resp.get("reason") or "keploy: not run this replay")
-    yield
-    _post("/agent/scope/end",dict(test,outcome="passed"))
-PY
+# The test harness: keploy's scope protocol v1 (claim the run before pytest
+# collects, then begin each test with its file and canSkip, and end it with
+# its outcome), failing on any answer it cannot trust. Without the switch the
+# agent has no claim route, and the harness speaks the scope API as it was.
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
+cp "$MOCK_DIR/conftest_v1.py" conftest.py || { echo "FAIL: no conftest_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 cat > test_containers.py <<'PY'
 from deps import get, note, start
@@ -274,6 +265,7 @@ expect() {
   fi
 }
 
+if half on; then
 echo "== 1. record under the proven switch =="
 record ck rec.log 1
 grep -q "2 passed" rec.log || { echo "FAIL: pytest did not pass both tests while recording"; FAIL=1; }
@@ -307,6 +299,16 @@ grep -E "[0-9]+ (passed|failed|error)" rep-off.log | tail -3
 grep -q "2 passed" rep-off.log || { echo "FAIL: pytest did not pass both tests in the replay without the switch"; FAIL=1; }
 untouched rep-off.log "an agent without the switch read Docker for container keys in replay"
 
+echo "== 4b. under the switch this build refuses the replay, the tests never run =="
+sudo -E env PATH="$PATH" DEP_IMAGE="$IMAGE" KEPLOY_PROVEN=1 "$REPLAY_BIN" mock replay -c "$CMD" --name ck --disable-tele > rep-on.log 2>&1
+RC=$?
+[ "$RC" -eq 1 ] || { echo "FAIL: under the switch this build should refuse the replay with exit 1, got $RC"; tail -20 rep-on.log; FAIL=1; }
+grep -q "needs a keploy build that judges each test" rep-on.log || { echo "FAIL: the refused replay does not say it needs a build that judges each test"; FAIL=1; }
+grep -qE "[0-9]+ (passed|failed|error)" rep-on.log && { echo "FAIL: under the switch the refused replay ran the tests"; FAIL=1; }
+
+fi
+
+if half off; then
 echo "== 5. without the switch nothing is keyed =="
 record ck-off rec-off.log ""
 grep -q "2 passed" rec-off.log || { echo "FAIL: pytest did not pass both tests recording without the switch"; FAIL=1; }
@@ -315,6 +317,7 @@ keys_of ck-off | sort > keys-off.txt
 cat keys-off.txt
 expect keys-off.txt "a recording made without the switch carries container keys" \
   "/boot -" "/one -" "/two-a -" "/two-c -"
+fi
 
 # A race build reports a data race and carries on: fail on one in any leg.
 if grep -l "WARNING: DATA RACE" ./*.log; then
