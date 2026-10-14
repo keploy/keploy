@@ -246,7 +246,7 @@ func (p *Proxy) recordViaSupervisor(
 		// that can really have cost a mock. Once the parser's Run has
 		// returned, it also says which chunks it had read (parserReads).
 		OnCarried:            reads.carried,
-		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, dstConn.RemoteAddr().String()),
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
 		// A hole in this connection's capture: every test case recorded while

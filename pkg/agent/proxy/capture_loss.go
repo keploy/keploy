@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -16,3 +17,34 @@ func (p *Proxy) CaptureLosses() models.CaptureLosses {
 // method renamed, the agent's type assertion would stop matching and those
 // losses would go unreported.
 var _ agent.CaptureLossReporter = (*Proxy)(nil)
+
+// teeDropLoss is the capture loss a relay tee's drop reason is, if any. A
+// parser that stopped taking what was captured for it, whose queue was then
+// abandoned (W8), and bytes dropped for want of room lose what they carried.
+// A drop while the direction was paused (the parser asked for it, or a TLS
+// upgrade was in flight) loses nothing the parser wanted, and a drop after a
+// desync is the consequence of one already counted.
+func teeDropLoss(reason string) (models.CaptureLossKind, bool) {
+	switch reason {
+	case relay.DropConsumerGone:
+		return models.CaptureLossParserStall, true
+	case relay.DropPerConnCap, relay.DropMemoryPressure:
+		return models.CaptureLossDropped, true
+	}
+	return "", false
+}
+
+// teeDropped wraps a relay's drop hook (the session's MarkMockIncomplete) so
+// that a drop that loses captured bytes is also counted as a capture loss of
+// the connection to dst, which every test that ends after it is charged with
+// under the proven switch.
+func (p *Proxy) teeDropped(mark func(reason string), dst string) func(reason string) {
+	return func(reason string) {
+		if mark != nil {
+			mark(reason)
+		}
+		if kind, ok := teeDropLoss(reason); ok {
+			p.losses.Add(kind, reason+" on a connection to "+dst)
+		}
+	}
+}

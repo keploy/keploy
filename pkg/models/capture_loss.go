@@ -26,6 +26,16 @@ const (
 	// (STARTTLS, Postgres SSLRequest) and keploy could not make the upgrade,
 	// so what followed was not parsed.
 	CaptureLossSTARTTLS CaptureLossKind = "starttls_failed"
+	// CaptureLossParserStall (W8): a connection's parser stopped taking what
+	// the relay captured for it, and the chunks still queued were abandoned
+	// once it had made no progress for the stall window (counted in time
+	// the process could run, not wall time): what they carried was neither
+	// recorded nor mocked.
+	CaptureLossParserStall CaptureLossKind = "parser_stalled"
+	// CaptureLossDropped: the relay dropped captured bytes for want of room
+	// (the per-connection cap, memory pressure), so the call they belong to
+	// was not recorded whole.
+	CaptureLossDropped CaptureLossKind = "capture_dropped"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -92,6 +102,10 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d TLS handshake(s) with keploy's proxy failed on the client's side (a client that does not trust keploy's CA aborts it), so those calls were neither recorded nor mocked", c.Count)
 	case CaptureLossSTARTTLS:
 		return fmt.Sprintf("keploy could not make %d STARTTLS upgrade(s), so what followed on those connections was not parsed", c.Count)
+	case CaptureLossParserStall:
+		return fmt.Sprintf("%d connection(s)' parser stopped taking what keploy captured, and what was still queued for it was abandoned, neither recorded nor mocked", c.Count)
+	case CaptureLossDropped:
+		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
