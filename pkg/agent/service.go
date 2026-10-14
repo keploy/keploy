@@ -226,6 +226,26 @@ type CarryOverPlanner interface {
 	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
 }
 
+// ExactServer is the optional extension of a proxy that serves each test its
+// own mocks exactly, under the proven switch (design v14 §5.2): while a test
+// is open, each of its test mocks answers at most one request, in recorded
+// order, and the pool answers only protocol-phase requests; while none is,
+// the current key's pool slice answers. It is the one visibility path there:
+// the agent moves it at every begin and end, and nothing else narrows or
+// widens what a parser is served.
+type ExactServer interface {
+	// ServeExactTest opens test, served exactly owned: its test mocks, in
+	// recorded order. A test opened again starts with none answered.
+	ServeExactTest(test string, owned []*models.Mock) error
+	// ServeExactPool closes the open test, if any, and serves the pool
+	// slice names of key between tests.
+	ServeExactPool(key string, names []string) error
+	// ExactTestOutcome is the open test and which of its test mocks have
+	// answered (in the order they did) and which have not (in recorded
+	// order); ok is false when exact serving is off.
+	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

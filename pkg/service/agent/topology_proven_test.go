@@ -43,7 +43,7 @@ func topologyOf(t *testing.T, a *Agent) ([]models.LiveRow, []models.MockedRow) {
 func TestARowNamesTheTestOpenWhenTheCallWasMade(t *testing.T) {
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		t.Run(string(mode), func(t *testing.T) {
-			a, _ := wireAgent(mode)
+			a, _ := wireAgent(t, mode)
 			ctx := context.Background()
 			app := models.LiveRow{Exe: "/usr/bin/node", Port: 3000}
 			db := models.MockedRow{Addr: "127.0.0.1:5432", PID: 42, Exe: "/usr/lib/postgresql/16/bin/postgres", Port: 5432}
@@ -81,7 +81,7 @@ func TestARowNamesTheTestOpenWhenTheCallWasMade(t *testing.T) {
 // The run's windows are read once, at its end: a row seen after that would
 // never be read, and is not kept.
 func TestARowAfterTheFinalReadIsNotKept(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	live, _ := topologyOf(t, a)
 	require.Empty(t, live)
 	a.NoteLive(models.LiveRow{Exe: "/app", Port: 8080})
@@ -93,7 +93,7 @@ func TestARowAfterTheFinalReadIsNotKept(t *testing.T) {
 
 // The rows belong to the session that saw them.
 func TestRowsResetWithTheSession(t *testing.T) {
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	a.NoteLive(models.LiveRow{Exe: "/app", Port: 8080})
 	a.NoteMocked(models.MockedRow{Addr: "127.0.0.1:6379", Port: 6379})
 	require.NoError(t, a.resetSession(context.Background()))
