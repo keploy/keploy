@@ -247,6 +247,20 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ScopeStager is an optional Proxy capability: it stages the pool of a test
+// of keploy mock replay that its harness began (open) or ended (!open) without
+// a worker pid, with the proven switch off. Such a test is served the mocks
+// its mapping names, so its window has no recorded-time bounds; it is open
+// while the test runs. Between tests the pool is served as before the first
+// test, less every per-test mock served while a test was open, which the
+// proxy leaves out. A proxy without it is staged through WindowedProxy with
+// the models.BaseTime sentinel, which opens no window, so its tier-aware
+// parsers answer a test's calls from the startup tier, which then holds the
+// test's mocks and the reusable tier.
+type ScopeStager interface {
+	SetScopeMocks(ctx context.Context, filtered, unFiltered []*models.Mock, open bool) error
+}
+
 type WindowedProxy interface {
 	// SetMocksWithWindow atomically replaces mocks AND publishes the active
 	// outer-test [req,res] window.

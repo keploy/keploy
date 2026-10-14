@@ -579,7 +579,11 @@ type WindowAware interface {
 	SetCurrentTestWindow(start, end time.Time)
 
 	// IsTestWindowActive reports whether a non-zero test window has been
-	// set via SetCurrentTestWindow or SetMocksWithWindow. Parsers that
+	// set via SetCurrentTestWindow or SetMocksWithWindow, or a test of keploy
+	// mock replay begun without a worker pid is open (SetScopeMocks; any
+	// other window staging or SetCurrentTestWindow closes it): a window with
+	// no recorded-time bounds, for which CurrentTestWindow reads zero and
+	// FirstTestWindowStart does not move. Parsers that
 	// partition their index into per-test and session tiers consult this
 	// at dispatch time to decide which tier a live query should be served
 	// from: true = inside a test-body window (route to per-test index),
@@ -599,6 +603,12 @@ type WindowAware interface {
 	// same underlying value FirstTestWindowStart below exposes as a
 	// timestamp — "has this set's first test fired" and "when did it fire"
 	// are one field, so they share that per-set lifetime.
+	//
+	// One exception: while a test of keploy mock replay begun without a
+	// worker pid is open (SetScopeMocks), this reports true with
+	// IsTestWindowActive, and false again once it ends; the scope sets no
+	// FirstTestWindowStart. Such a replay serves between tests as before the
+	// first test.
 	//
 	// Parsers use this alongside IsTestWindowActive to distinguish
 	// "app bootstrap" (before first test) from "between tests" (after
@@ -645,7 +655,10 @@ type WindowAware interface {
 
 	// CurrentTestWindow returns the [start, end] request-timestamp bounds of
 	// the outer test currently being replayed, or (zero, zero) when no window
-	// is active. Matchers that receive per-test data mocks via the session
+	// is active or the active one has no recorded-time bounds (a test of
+	// keploy mock replay begun without a worker pid; IsTestWindowActive tells
+	// the two apart). A caller must not read zero bounds as "nothing is in
+	// the window". Matchers that receive per-test data mocks via the session
 	// pool (the enterprise agent lax-promotes them and relies on the
 	// MockManager for strict windowing) use this to tell an in-window mock
 	// from a stale earlier-test mock when disambiguating repeated identical

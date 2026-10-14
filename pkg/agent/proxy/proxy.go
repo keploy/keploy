@@ -4053,6 +4053,26 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 	return nil
 }
 
+// SetScopeMocks stages the pool of a keploy mock replay test begun (open) or
+// ended (!open) without a worker pid, with the proven switch off: see
+// MockManager.SetScopeMocks. Satisfies the agent's optional ScopeStager
+// extension interface. Everything else a staging does, it does as
+// SetMocksWithWindow does.
+func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.Mock, open bool) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.SetScopeMocks(filtered, unFiltered, open)
+		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil {
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
+var _ agent.ScopeStager = (*Proxy)(nil)
+
 // FirstTestWindowStart returns the earliest test window start observed
 // by the underlying MockManager, or zero before any non-BaseTime
 // SetMocksWithWindow has landed. Satisfies the agent's optional
