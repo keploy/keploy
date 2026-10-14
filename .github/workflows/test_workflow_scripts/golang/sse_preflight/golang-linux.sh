@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 echo "$RECORD_BIN"
@@ -60,7 +61,7 @@ do_record() {
     send_request &
     # shellcheck disable=SC2086
     "$RECORD_BIN" record $extra_flags -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee "$log"
-    if grep "ERROR" "$log"; then
+    if grep -aE "$ERROR_LINE_RE" "$log"; then
         echo "Error found in pipeline..."
         cat "$log"
         exit 1
@@ -87,7 +88,7 @@ fi
 # Start the app in test mode.
 "$REPLAY_BIN" test -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee test_logs.txt
 
-if grep "ERROR" "test_logs.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
     exit 1
@@ -140,7 +141,7 @@ case "${REPLAY_BIN:-}" in
             echo "::error::Race condition detected in the ignored-set replay"
             exit 1
         fi
-        if grep "ERROR" test_logs_ignored.txt; then
+        if grep -aE "$ERROR_LINE_RE" test_logs_ignored.txt; then
             echo "::error::Error found in the ignored-set replay"
             cat test_logs_ignored.txt
             exit 1
@@ -176,7 +177,7 @@ esac
 
 if json_pass_supported; then
     "$REPLAY_BIN" test --storage-format json -c "./sse-preflight-server" --generateGithubActions=false 2>&1 | tee test_logs_json.txt
-    if grep "ERROR" "test_logs_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "test_logs_json.txt"; then
         echo "Error found in pipeline (json replay)..."
         cat "test_logs_json.txt"
         exit 1

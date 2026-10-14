@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 set -o errtrace
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
 section() { echo "::group::$*"; }
@@ -128,7 +129,7 @@ do_record_iteration() {
     cat "${app_name}.txt"
     exit 1
   fi
-  if grep -q "ERROR" "${app_name}.txt"; then
+  if grep -q -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
     echo "::error::Error found during recording (iteration $i${label:+ json})"
     cat "${app_name}.txt"
     exit 1
@@ -206,7 +207,7 @@ run_replay() {
     echo "::error::Data race detected in replay #$idx"
     return 1
   fi
-  if grep -q "ERROR" "$logfile"; then
+  if grep -q -aE "$ERROR_LINE_RE" "$logfile"; then
     echo "::error::Error found in replay #$idx"
     return 1
   fi
@@ -322,7 +323,7 @@ if json_pass_supported; then
     echo "::error::Data race detected in json replay"
     exit 1
   fi
-  if grep -q "ERROR" "test_logs_json.txt"; then
+  if grep -q -aE "$ERROR_LINE_RE" "test_logs_json.txt"; then
     echo "::error::Error found in json replay"
     exit 1
   fi

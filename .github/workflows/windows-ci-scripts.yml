@@ -37,3 +37,14 @@ jobs:
       - name: Test the Windows Docker cleanup scripts (pwsh)
         shell: pwsh
         run: ./.github/scripts/windows/reap-keploy-containers.tests.ps1
+
+  # What the lanes count as a logged error (test_workflow_scripts/error-lines.sh):
+  # ERROR as a level token, never a substring, in every lane.
+  error-lines:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test error-lines.sh and scan the lanes for substring ERROR greps
+        run: bash .github/workflows/test_workflow_scripts/error-lines-test.sh

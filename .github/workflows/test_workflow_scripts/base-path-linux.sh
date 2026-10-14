@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/error-lines.sh" # ERROR_LINE_RE
 # E2E: `keploy test --base-path <url>` replays a recording against an app that
 # is already running. Keploy starts neither the app nor an agent and mocks
 # nothing: each recorded request goes to the base path, the answers are
@@ -234,7 +235,7 @@ down
 grep -q '"total": 14' drive.log || fail "the app did not price the order while recording: $(cat drive.log)"
 grep -q '"asked": "/echo/a%2Fb/?q=a%20b%23c%26d%3De"' drive.log || fail "the app was not asked the escaped request while recording: $(cat drive.log)"
 grep -q 'WARNING: DATA RACE' record.log && fail "data race while recording: $(grep -m1 -A12 'WARNING: DATA RACE' record.log)"
-grep -q 'ERROR' record.log && fail "the recording logged an ERROR: $(grep -m3 'ERROR' record.log)"
+grep -q -aE "$ERROR_LINE_RE" record.log && fail "the recording logged an ERROR: $(grep -m3 -aE "$ERROR_LINE_RE" record.log)"
 RECORDED=$(find keploy/test-set-0/tests -type f 2>/dev/null | wc -l)
 if [ "$RECORDED" -ne "$TESTS" ]; then
   echo "FAIL: recorded $RECORDED tests, want $TESTS"
@@ -266,8 +267,8 @@ replay() {
     fail "$name: the replay asked an agent it never started"
   fi
   grep -q 'WARNING: DATA RACE' "$name.log" && fail "$name: data race"
-  if [ "$want_exit" -eq 0 ] && grep -q 'ERROR' "$name.log"; then
-    fail "$name: a passing replay logged an ERROR: $(grep -m1 'ERROR' "$name.log")"
+  if [ "$want_exit" -eq 0 ] && grep -q -aE "$ERROR_LINE_RE" "$name.log"; then
+    fail "$name: a passing replay logged an ERROR: $(grep -m1 -aE "$ERROR_LINE_RE" "$name.log")"
   fi
   if [ "${want%% *}" = NONE ]; then
     [ ! -e "$report" ] || fail "$name: the replay went on to its tests and wrote $report"
@@ -374,7 +375,7 @@ got=$(report_of "$RUN" 2>/dev/null)
 [ "$got" = "USER_ABORT 1 0" ] || fail "stopped: the report says '$got' (status, passed, failed), want 'USER_ABORT 1 0'"
 grep -q 'Now executing streaming tests' stopped.log && fail "stopped: the run went on to its streamed test"
 grep -q 'deleting failing testcases' stopped.log && fail "stopped: --must-pass deleted tests the stop cut short"
-grep -q 'ERROR' stopped.log && fail "stopped: a stop logged an ERROR: $(grep -m1 'ERROR' stopped.log)"
+grep -q -aE "$ERROR_LINE_RE" stopped.log && fail "stopped: a stop logged an ERROR: $(grep -m1 -aE "$ERROR_LINE_RE" stopped.log)"
 LEFT=$(find keploy/test-set-0/tests -type f | wc -l)
 [ "$LEFT" -eq "$TESTS" ] || fail "stopped: $LEFT of the $TESTS tests are left in the test set"
 if [ "$FAIL" -ne "$BEFORE" ]; then

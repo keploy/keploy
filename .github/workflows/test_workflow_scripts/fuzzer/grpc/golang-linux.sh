@@ -9,6 +9,7 @@
 
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 MODE=${1:-incoming}
@@ -151,11 +152,11 @@ check_for_errors() {
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
     # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    if grep -aE "$ERROR_LINE_RE" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      grep -aE "$ERROR_LINE_RE" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
       echo "----------------------"
       exit 1
     fi

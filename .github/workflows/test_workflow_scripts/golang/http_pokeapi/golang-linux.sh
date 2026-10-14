@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 echo "$RECORD_BIN"
@@ -83,7 +84,7 @@ record_iterations() {
         send_request "$i" &
         # shellcheck disable=SC2086
         "$RECORD_BIN" record $extra_flags -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
-        if grep "ERROR" "${app_name}.txt"; then
+        if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
             echo "Error found in pipeline..."
             cat "${app_name}.txt"
             exit 1
@@ -138,7 +139,7 @@ fi
 # Start the go-http app in test mode.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
 
-if grep "ERROR" "test_logs.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
     exit 1
@@ -187,7 +188,7 @@ fi
 # failed.
 if [ "$strict_phase" = true ]; then
     KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./strict-run --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_strict.txt
-    if grep "ERROR" "test_logs_strict.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "test_logs_strict.txt"; then
         echo "::error::Error found in the strict mock-window replay"
         cat "test_logs_strict.txt"
         exit 1
@@ -303,7 +304,7 @@ fi
 
 if json_pass_supported; then
     "$REPLAY_BIN" test --storage-format json -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_json.txt
-    if grep "ERROR" "test_logs_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "test_logs_json.txt"; then
         echo "Error found in pipeline (json replay)..."
         cat "test_logs_json.txt"
         exit 1

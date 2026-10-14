@@ -42,6 +42,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/../../error-lines.sh" # ERROR_LINE_RE
 source "$HERE/common.sh"
 RECORD_BIN="${RECORD_BIN:?RECORD_BIN must name the keploy binary under test}"
 WORK="$(mktemp -d)"
@@ -256,9 +257,9 @@ if grep -q 'keploy_synhold' "$WORK/tables_after.txt"; then
 else
   echo "ok: keploy record removed its nf_tables table when it stopped"
 fi
-if grep -q 'ERROR' "$WORK/record.log"; then
+if grep -q -aE "$ERROR_LINE_RE" "$WORK/record.log"; then
   echo "::error::keploy record logged errors:"
-  grep 'ERROR' "$WORK/record.log" | head -20
+  grep -aE "$ERROR_LINE_RE" "$WORK/record.log" | head -20
   fail=1
 fi
 # The amd64 PR build is race-enabled: a race in the hold is a failure even when the

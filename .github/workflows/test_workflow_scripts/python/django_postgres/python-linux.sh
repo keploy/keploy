@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
@@ -128,7 +129,7 @@ do_record_iteration() {
     local request_pid=$!
     # shellcheck disable=SC2086
     $RECORD_BIN record $extra_flags -c "python3 manage.py runserver"   2>&1 | tee "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
         exit 1
@@ -170,7 +171,7 @@ echo "Postgres stopped - Keploy should now use mocks for database interactions"
 # replaying the recorded Postgres mocks, especially on shared CI runners.
 $REPLAY_BIN test -c "python3 manage.py runserver" --delay 20    2>&1 | tee test_logs.txt
 
-if grep "ERROR" "test_logs.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs.txt"; then
         echo "Error found in pipeline..."
         cat "test_logs.txt"
         exit 1
@@ -209,7 +210,7 @@ fi
 
 if json_pass_supported; then
     $REPLAY_BIN test --storage-format json -c "python3 manage.py runserver" --delay 20    2>&1 | tee test_logs_json.txt
-    if grep "ERROR" "test_logs_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "test_logs_json.txt"; then
         echo "Error found in json replay..."
         cat "test_logs_json.txt"
         exit 1

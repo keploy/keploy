@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // startFakeUpstream spins up a miekg/dns UDP server on a
@@ -823,5 +826,57 @@ func TestForwardDNSUpstream_NoUpstreamConfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no upstream") {
 		t.Errorf("err = %v; want message containing 'no upstream'", err)
+	}
+}
+
+// TestNODATARelayLogsNoErrorToken: relaying an upstream NODATA is the healthy
+// path -- glibc asks A and AAAA for every name, and an IPv4-only name answers
+// the AAAA with no records -- so nothing it logs may read as an error to a
+// reader who greps for one. Its INFO line (mocking on) and DEBUG line (mocking
+// off) once named the rcode "NOERROR", and every CI step and user script that
+// greps a keploy log for "ERROR" flagged a healthy replay.
+func TestNODATARelayLogsNoErrorToken(t *testing.T) {
+	addr, stop := startFakeUpstream(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeSuccess // no answer records: NODATA
+		_ = w.WriteMsg(m)
+	})
+	defer stop()
+
+	for _, mocking := range []bool{true, false} {
+		core, logs := observer.New(zapcore.DebugLevel)
+		p := newProxyWithUpstream(t, addr, 2*time.Second)
+		p.logger = zap.New(core)
+		mgr := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mgr.Close)
+		p.mockManager = mgr
+
+		q := dns.Question{Name: "postgres.example.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
+		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, mocking, time.Now(), nil)
+		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
+			t.Fatalf("mocking=%v: want the NODATA relayed, got %v", mocking, entry.Msg)
+		}
+
+		var nodata int
+		for _, e := range logs.All() {
+			if !strings.Contains(e.Message, "NODATA") {
+				continue
+			}
+			nodata++
+			if e.Level >= zapcore.ErrorLevel {
+				t.Errorf("mocking=%v: a NODATA relay logged at %v: %q", mocking, e.Level, e.Message)
+			}
+			text := e.Message
+			for k, v := range e.ContextMap() {
+				text += " " + k + "=" + fmt.Sprint(v)
+			}
+			if strings.Contains(text, "ERROR") {
+				t.Errorf("mocking=%v: the %v line for a healthy NODATA relay contains \"ERROR\": %q", mocking, e.Level, text)
+			}
+		}
+		if nodata == 0 {
+			t.Errorf("mocking=%v: the NODATA relay logged nothing; this test no longer reaches the line it guards", mocking)
+		}
 	}
 }

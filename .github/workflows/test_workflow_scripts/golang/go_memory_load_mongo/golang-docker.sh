@@ -2,6 +2,7 @@
 
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
@@ -181,7 +182,7 @@ check_for_errors() {
         return 1
     fi
 
-    # if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    # if grep -aE "$ERROR_LINE_RE" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
     #     echo "Critical Keploy errors found in $logfile"
     #     return 1
     # fi

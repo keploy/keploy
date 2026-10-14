@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/error-lines.sh" # ERROR_LINE_RE
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
@@ -76,7 +77,7 @@ do_record_iteration() {
     send_request &
     # shellcheck disable=SC2086
     $RECORD_BIN record $extra_flags -c "$launcher run -p 6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" --generateGithubActions=false  &> "${container_name}.txt"
-    if grep "ERROR" "${container_name}.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
         exit 1
@@ -113,7 +114,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 # Testing phase
 test_container="flashApp_test"
 $REPLAY_BIN test -c "docker run -p 6000:6000 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug 
-if grep "ERROR" "${test_container}.txt"; then
+if grep -aE "$ERROR_LINE_RE" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
     exit 1
@@ -153,7 +154,7 @@ fi
 if json_pass_supported; then
     test_container_json="${test_container}_json"
     $REPLAY_BIN test --storage-format json -c "docker run -p 6000:6000 --net keploy-network --name $test_container_json flask-app:1.0" --containerName "$test_container_json" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug &> "${test_container_json}.txt"
-    if grep "ERROR" "${test_container_json}.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${test_container_json}.txt"; then
         cat "${test_container_json}.txt"
         exit 1
     fi

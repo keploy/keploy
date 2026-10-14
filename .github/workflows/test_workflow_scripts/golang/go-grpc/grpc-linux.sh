@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
@@ -59,7 +60,7 @@ check_for_errors() {
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
     # This command finds lines with "ERROR" but excludes the non-critical "Unsupported DNS query type" error.
-    if awk '/ERROR/ && !/Unsupported DNS query type/ { exit 0 } END { exit 1 }' "$logfile"; then
+    if grep -aE "$ERROR_LINE_RE" "$logfile" | grep -v "Unsupported DNS query type" >/dev/null; then
         echo "Error found in $logfile"
         cat "$logfile"
         exit 1

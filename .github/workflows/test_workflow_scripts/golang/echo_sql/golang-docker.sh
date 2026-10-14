@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
@@ -77,7 +78,7 @@ do_record_iteration() {
         cat "$log"
         exit 1
     fi
-    if grep "ERROR" "$log"; then
+    if grep -aE "$ERROR_LINE_RE" "$log"; then
         echo "Error found in pipeline..."
         cat "$log"
         cat "docker-compose-tmp.yaml"
@@ -125,7 +126,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 test_container="echoApp"
 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep -aE "$ERROR_LINE_RE" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
     exit 1
@@ -168,7 +169,7 @@ fi
 
 if json_pass_supported; then
     $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}_json.txt"
-    if grep "ERROR" "${test_container}_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
     fi

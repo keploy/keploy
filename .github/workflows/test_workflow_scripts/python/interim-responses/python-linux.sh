@@ -26,6 +26,7 @@ set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
 set +e
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -141,9 +142,9 @@ KEPLOY_CFG
         tail -200 "record_logs_${mode}.txt"
         return 1
     fi
-    if grep -q 'ERROR' "record_logs_${mode}.txt"; then
+    if grep -q -aE "$ERROR_LINE_RE" "record_logs_${mode}.txt"; then
         echo "::error::keploy record logged an error (${mode})"
-        grep -n 'ERROR' "record_logs_${mode}.txt" | head -20
+        grep -n -aE "$ERROR_LINE_RE" "record_logs_${mode}.txt" | head -20
         return 1
     fi
     if grep -q 'Not recording this request' "record_logs_${mode}.txt"; then
@@ -185,9 +186,9 @@ KEPLOY_CFG
         tail -200 "test_logs_${mode}.txt"
         return 1
     fi
-    if grep -q 'ERROR' "test_logs_${mode}.txt"; then
+    if grep -q -aE "$ERROR_LINE_RE" "test_logs_${mode}.txt"; then
         echo "::error::keploy test logged an error (${mode})"
-        grep -n 'ERROR' "test_logs_${mode}.txt" | head -20
+        grep -n -aE "$ERROR_LINE_RE" "test_logs_${mode}.txt" | head -20
         return 1
     fi
     local report status

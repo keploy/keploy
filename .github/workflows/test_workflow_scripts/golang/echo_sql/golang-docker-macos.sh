@@ -4,6 +4,7 @@
 set -euo pipefail
 
 # for the below source make it such a way that if the file is not present or already present it does not error
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
@@ -264,7 +265,7 @@ do_record_iteration() {
         echo "Race condition detected in recording, stopping pipeline..."
         exit 1
     fi
-    if grep "ERROR" "${log_file_name}.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${log_file_name}.txt"; then
         echo "Error found in pipeline..."
         exit 1
     fi
@@ -295,7 +296,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 test_container="${APP_CONTAINER}"
 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --debug --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep -aE "$ERROR_LINE_RE" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     exit 1
 fi
@@ -334,7 +335,7 @@ fi
 
 if json_pass_supported; then
     $REPLAY_BIN test --storage-format json -c 'docker compose up' --containerName "$test_container" --debug --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}_json.txt"
-    if grep "ERROR" "${test_container}_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
     fi

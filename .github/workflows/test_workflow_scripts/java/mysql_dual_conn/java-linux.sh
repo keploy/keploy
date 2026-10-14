@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 
 # E2E test for MySQL dual-connection handshake matching.
@@ -175,7 +176,7 @@ do_record_iteration() {
     cat "${app_name}.txt"
     exit 1
   fi
-  if grep -q "ERROR" "${app_name}.txt"; then
+  if grep -q -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
     echo "Errors found in ${app_name}.txt (not fatal unless record failed)"
     cat "${app_name}.txt"
   fi

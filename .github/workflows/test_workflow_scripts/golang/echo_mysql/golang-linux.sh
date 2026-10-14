@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # safer bash. -e also arrives from the step shell: golang_linux.yml SOURCES
 # this file from a `run:` step with no `shell:` key, i.e. GitHub's `bash -e {0}`.
@@ -181,7 +182,7 @@ run_record_iteration() {
     cat "${app_name}.txt"
     return 1
   fi
-  if grep -q "ERROR" "${app_name}.txt"; then
+  if grep -q -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
     echo "::warning::Errors found in ${app_name}.txt (not fatal unless record failed)"
     cat "${app_name}.txt"
   fi

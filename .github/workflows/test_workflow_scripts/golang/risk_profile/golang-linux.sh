@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
@@ -62,7 +63,7 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for critical errors in $logfile..."
   if [ -f "$logfile" ]; then
-    if grep "ERROR" "$logfile" | grep "Keploy:"; then
+    if grep -aE "$ERROR_LINE_RE" "$logfile" | grep "Keploy:"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       exit 1
     fi

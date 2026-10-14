@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 # E2E test for CONNECT tunnel support.
@@ -409,7 +410,7 @@ for i in 1 2; do
         exit 1
     fi
 
-    if grep "ERROR" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+    if grep -aE "$ERROR_LINE_RE" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
         echo "::error::Error found in recording iteration $i"
         cat "${app_name}.txt"
         exit 1
@@ -442,7 +443,7 @@ if json_pass_supported; then
             exit 1
         fi
 
-        if grep "ERROR" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+        if grep -aE "$ERROR_LINE_RE" "${app_name}.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
             echo "::error::Error found in json recording iteration $i"
             cat "${app_name}.txt"
             exit 1
@@ -528,7 +529,7 @@ if [ "$replay_rc" -eq 124 ] || [ "$replay_rc" -eq 137 ]; then
     exit 1
 fi
 
-if grep "ERROR" "test_logs.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
     echo "::error::Error found in replay"
     cat "test_logs.txt"
     exit 1
@@ -591,7 +592,7 @@ if [ "$both_build" = true ]; then
             echo "::error::connect-tunnel json replay timed out"
             exit 1
         fi
-        if grep "ERROR" "test_logs_json.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
+        if grep -aE "$ERROR_LINE_RE" "test_logs_json.txt" | grep "Keploy" | grep -v "tinyproxy\|WARNING\|CONNECT\|connection refused\|no matching.*mock"; then
             echo "::error::Error found in json replay"
             cat "test_logs_json.txt"
             exit 1

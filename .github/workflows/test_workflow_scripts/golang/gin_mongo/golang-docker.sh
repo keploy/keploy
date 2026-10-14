@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
@@ -96,7 +97,7 @@ do_record_iteration() {
         cat "$log"
         exit 1
     fi
-    if grep "ERROR" "$log"; then
+    if grep -aE "$ERROR_LINE_RE" "$log"; then
         echo "Error found in pipeline..."
         cat "$log"
         exit 1
@@ -127,7 +128,7 @@ fi
 test_container="ginApp_test"
 $REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep -aE "$ERROR_LINE_RE" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
     exit 1
@@ -170,7 +171,7 @@ fi
 
 if json_pass_supported; then
     $REPLAY_BIN test --storage-format json -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test_json gin-mongo' --containerName "ginApp_test_json" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}_json.txt"
-    if grep "ERROR" "${test_container}_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${test_container}_json.txt"; then
         cat "${test_container}_json.txt"
         exit 1
     fi

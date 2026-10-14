@@ -499,7 +499,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				//     once per (name,qtype) so the signal survives without the spam.
 				if mockingEnabled {
 					if p.shouldLogNodataRelay(generateCacheKey(question.Name, question.Qtype)) {
-						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
+						p.logger.Info("DNS mock miss: upstream NODATA (no records of this type, rcode 0), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 							zap.String("query", question.Name),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
 					} else {
@@ -508,7 +508,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
 					}
 				} else {
-					p.logger.Debug("DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
+					p.logger.Debug("DNS NODATA (no records of this type, rcode 0); mocking disabled, relaying real upstream answer",
 						zap.String("query", question.Name),
 						zap.String("qtype", dns.TypeToString[question.Qtype]))
 				}

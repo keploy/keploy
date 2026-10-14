@@ -53,6 +53,7 @@
 # and REPLAY_BIN. The script stops only the processes it started (by PID).
 set -uo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
@@ -319,7 +320,7 @@ expect_rc 0 "step 4"
 cmp -s "$MOCKS" mocks.declared.yaml || fail "keploy test rewrote the mocks"
 grep -q '^ *variables:$' "$(REPORT)" || fail "the report lists no variable the tests bound"
 grep -A6 '^ *variables:$' "$(REPORT)" | grep -q 'given: true' || fail "the report does not list the id the read-back's request gave"
-grep -q ' ERROR ' follow.log && { fail "the passing run logged an ERROR"; grep ' ERROR ' follow.log | head; }
+grep -qaE "$ERROR_LINE_RE" follow.log && { fail "the passing run logged an ERROR"; grep -aE "$ERROR_LINE_RE" follow.log | head; }
 
 echo "== 5. the app reads back another id: the set fails with the variable as evidence =="
 replay wrong wrong-read KEPLOY_PROVEN=1

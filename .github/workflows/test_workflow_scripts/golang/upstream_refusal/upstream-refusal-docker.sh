@@ -18,6 +18,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/../../error-lines.sh" # ERROR_LINE_RE
 source "$HERE/common.sh"
 RECORD_BIN="${RECORD_BIN:?RECORD_BIN must name the keploy binary under test}"
 WORK="$(mktemp -d)"
@@ -82,9 +83,9 @@ elif [ "$conns" != "1" ]; then
 else
   echo "ok: $server_ip:9000 -> echoed over the application's one connection"
 fi
-if grep -q 'ERROR' "$WORK/record.log"; then
+if grep -q -aE "$ERROR_LINE_RE" "$WORK/record.log"; then
   echo "::error::keploy record logged errors:"
-  grep 'ERROR' "$WORK/record.log" | head -20
+  grep -aE "$ERROR_LINE_RE" "$WORK/record.log" | head -20
   fail=1
 fi
 if grep -q 'WARNING: DATA RACE' "$WORK/record.log"; then

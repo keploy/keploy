@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Function to cleanup any remaining keploy processes
@@ -140,7 +141,7 @@ for i in 1 2; do
     request_pid=$!
     wait_for_port_free 8000 || true
     $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
-    if grep "ERROR" "${app_name}.txt"; then exit 1; fi
+    if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
     if ! wait "$request_pid"; then
@@ -152,7 +153,7 @@ done
 
 # Sanitize the testcases
 $RECORD_BIN sanitize 2>&1 | tee sanitize_logs.txt
-if grep "ERROR" "sanitize_logs.txt"; then exit 1; fi
+if grep -aE "$ERROR_LINE_RE" "sanitize_logs.txt"; then exit 1; fi
 sleep 5
 
 # --- Record cycle for the new /astro endpoint (its own test set) ---
@@ -161,7 +162,7 @@ send_request "astro" &
 request_pid=$!
 wait_for_port_free 8000 || true
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
-if grep "ERROR" "${app_name}.txt"; then exit 1; fi
+if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
 sleep 5
 if ! wait "$request_pid"; then
@@ -187,7 +188,7 @@ fi
 # Testing phase
 wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
-if grep "ERROR" "test_logs.txt"; then exit 1; fi
+if grep -aE "$ERROR_LINE_RE" "test_logs.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then exit 1; fi
 
 all_passed=true
@@ -247,7 +248,7 @@ else
 fi
 
 # Check if the test with config path was successful
-if grep "ERROR" "config_path_test_logs.txt"; then
+if grep -aE "$ERROR_LINE_RE" "config_path_test_logs.txt"; then
     echo "ERROR: Test with config path failed"
     cat "config_path_test_logs.txt"
     exit 1
@@ -274,12 +275,12 @@ $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
 
 echo "Running the normalize command"
 $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
-if grep "ERROR" "normalize_logs.txt"; then exit 1; fi
+if grep -aE "$ERROR_LINE_RE" "normalize_logs.txt"; then exit 1; fi
 
 echo "Running test again, this time it will pass"
 wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
-if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
+if grep -aE "$ERROR_LINE_RE" "test_logs_pass.txt"; then exit 1; fi
 
 all_passed=true
 for i in {0..1}; do
@@ -315,7 +316,7 @@ send_request "misc" &
 request_pid=$!
 wait_for_port_free 8000 || true
 $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
-if grep "ERROR" "${app_name}.txt"; then
+if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
     echo "Error found in misc recording..."
     cat "${app_name}.txt"
     exit 1
@@ -341,7 +342,7 @@ if json_pass_supported; then
     request_pid=$!
     wait_for_port_free 8000 || true
     $RECORD_BIN record --storage-format json -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
-    if grep "ERROR" "${app_name}.txt"; then exit 1; fi
+    if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
     if ! wait "$request_pid"; then
@@ -353,7 +354,7 @@ fi
 
 # Sanitize the newly created test cases
 $RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
-if grep "ERROR" "sanitize_logs_misc.txt"; then
+if grep -aE "$ERROR_LINE_RE" "sanitize_logs_misc.txt"; then
     echo "Error found in misc sanitize..."
     cat "sanitize_logs_misc.txt"
     exit 1
@@ -363,7 +364,7 @@ fi
 echo "Running test on the new 'misc' test suite..."
 wait_for_port_free 8000 || true
 $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
-if grep "ERROR" "final_test_logs.txt"; then
+if grep -aE "$ERROR_LINE_RE" "final_test_logs.txt"; then
     echo "Error found in final test run..."
     cat "final_test_logs.txt"
     exit 1
@@ -433,7 +434,7 @@ fi
 if json_pass_supported; then
     wait_for_port_free 8000 || true
     $REPLAY_BIN test --storage-format json -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs_json.txt
-    if grep "ERROR" "final_test_logs_json.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "final_test_logs_json.txt"; then
         cat final_test_logs_json.txt
         exit 1
     fi

@@ -93,6 +93,7 @@
 # by a released keploy is what an upgrading user templatizes.
 set -uo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
@@ -577,7 +578,7 @@ rm -rf keploy && mv keploy.before9e keploy
 
 echo "== 10. logs: no ERROR where nothing failed, no data race anywhere =="
 for log in record templatize templatize2 templatize3 templated update normalize normalized; do
-  if grep -q "ERROR" "$log.log"; then fail "ERROR in $log.log: $(grep -m3 ERROR "$log.log")"; fi
+  if grep -q -aE "$ERROR_LINE_RE" "$log.log"; then fail "ERROR in $log.log: $(grep -m3 ERROR "$log.log")"; fi
 done
 for log in ./*.log; do
   if grep -q "WARNING: DATA RACE" "$log"; then fail "a data race in $log"; fi

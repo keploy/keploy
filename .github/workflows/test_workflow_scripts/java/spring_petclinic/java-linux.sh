@@ -3,6 +3,7 @@
 
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
@@ -727,7 +728,7 @@ do_record_iteration() {
     cat "${app_name}.txt"
     exit 1
   fi
-  if grep -q "ERROR" "${app_name}.txt"; then
+  if grep -q -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
     echo "::warning::Errors found in ${app_name}.txt"
     cat "${app_name}.txt"
   fi

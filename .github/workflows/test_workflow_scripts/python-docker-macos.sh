@@ -4,6 +4,7 @@
 set -euo pipefail
 
 # for the below shource make it such a way that if the file is not present or already present it does not error
+source "$(dirname "${BASH_SOURCE[0]}")/error-lines.sh" # ERROR_LINE_RE
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/mongo-ci.sh"
@@ -254,7 +255,7 @@ if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
-# if grep "ERROR" "${test_container}.txt"; then
+# if grep -aE "$ERROR_LINE_RE" "${test_container}.txt"; then
 #   echo "Error found while running test pipeline..."
 #   cat "${test_container}.txt"
 #   exit 1

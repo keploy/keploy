@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
@@ -157,7 +158,7 @@ send_request(){
 
 has_unexpected_errors() {
     local log_file="$1"
-    grep "ERROR" "$log_file" | grep -Ev "failed to read from connection.*use of closed network connection"
+    grep -aE "$ERROR_LINE_RE" "$log_file" | grep -Ev "failed to read from connection.*use of closed network connection"
 }
 
 for record_iteration in {1..2}; do

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Load test scripts and start MongoDB container
+source "$(dirname "${BASH_SOURCE[0]}")/../../error-lines.sh" # ERROR_LINE_RE
 source ./../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Prepare environment
@@ -87,7 +88,7 @@ do_record_iteration() {
     # shellcheck disable=SC2086
     $RECORD_BIN record $extra_flags -c 'node app.js'    &> "${app_name}.txt"
     cat "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
+    if grep -aE "$ERROR_LINE_RE" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
         exit 1
@@ -119,7 +120,7 @@ fi
 # Test modes and result checking
 $REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
 cat test_logs1.txt
-if grep "ERROR" "test_logs1.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs1.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs1.txt"
     exit 1
@@ -132,7 +133,7 @@ fi
 
 $REPLAY_BIN test -c 'node app.js' --delay 10 --testsets test-set-0    &> test_logs2.txt
 cat test_logs2.txt
-if grep "ERROR" "test_logs2.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
     exit 1
@@ -145,7 +146,7 @@ fi
 
 $REPLAY_BIN test -c 'node app.js' --apiTimeout 30 --delay 10    &> test_logs3.txt
 cat test_logs3.txt
-if grep "ERROR" "test_logs3.txt"; then
+if grep -aE "$ERROR_LINE_RE" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"
     exit 1
@@ -194,7 +195,7 @@ if [ "$all_passed" = true ]; then
     if json_pass_supported; then
         $REPLAY_BIN test --storage-format json -c 'node app.js' --delay 10    &> test_logs_json.txt
         cat test_logs_json.txt
-        if grep "ERROR" "test_logs_json.txt"; then
+        if grep -aE "$ERROR_LINE_RE" "test_logs_json.txt"; then
             echo "Error found in json replay..."
             cat "test_logs_json.txt"
             exit 1
