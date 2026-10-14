@@ -152,6 +152,15 @@ func TestSetScopeMocksEndLeavesOutWhatTheTestServed(t *testing.T) {
 	mm.SetScopeMocks(pool(), session(), false)
 	sameNames(t, "the pool between tests", scopeNames(mm.GetStartupMocks()), "boot", "b", "cfg")
 
+	// The next test's end leaves out what every test served, not only its own.
+	mm.SetScopeMocks([]*models.Mock{scopeMock("b", t0.Add(3*time.Second))}, session(), true)
+	per, _ = mm.GetPerTestMocksInWindow()
+	if len(per) != 1 || !mm.DeleteFilteredMock(*per[0]) {
+		t.Fatalf("could not consume b from %v", scopeNames(per, nil))
+	}
+	mm.SetScopeMocks(pool(), session(), false)
+	sameNames(t, "the pool between tests after both tests", scopeNames(mm.GetStartupMocks()), "boot", "cfg")
+
 	// A test run again is staged its own mocks afresh.
 	mm.SetScopeMocks([]*models.Mock{scopeMock("a1", t0), scopeMock("a2", t0.Add(time.Second))}, session(), true)
 	sameNames(t, "a second run's tier", scopeNames(mm.GetPerTestMocksInWindow()), "a1", "a2")
