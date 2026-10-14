@@ -32,15 +32,16 @@ import (
 //     keploy` signals both sudo and keploy, and sudo hands its signal on), and
 //     the copy comes with the first; and a press that ended a recording's
 //     drain is no press to kill the agent mid-teardown. A press does what the
-//     offer it answers said: the first offer's has the agent die once no
-//     teardown work is in progress (as the verdicts below do); only the offer
-//     that comes after the agent was told so -- a whole period after the
-//     press, or the verdict, that told it -- kills it at once. A copy that
-//     sudo was held from handing on until after an offer -- sudo starved, or
-//     stopped -- can only be told from a press by its time, which the copy's
-//     delay can outlast. Taken for a press, it costs what a stall verdict
-//     does: the agent dies between teardown steps, never in one (no uprobe is
-//     left half removed), and the steps it had not taken are not taken.
+//     offer it answers said, which goes by the presses before it alone, not
+//     by any verdict: the first offer's press has the agent die once no
+//     teardown work is in progress (as the verdicts below do); only an offer
+//     made a whole period after a press was answered kills it at once. A copy
+//     that sudo was held from handing on until after an offer -- sudo
+//     starved, or stopped -- can only be told from a press by its time, which
+//     the copy's delay can outlast. Taken for a press, a single copy costs at
+//     most what a stall verdict does: the agent dies between teardown steps,
+//     never in one (no uprobe is left half removed), and the steps it had not
+//     taken are not taken.
 //
 // A check is one of the agent's own beats (utils.TeardownBeat), not a tick of
 // the CLI's clock: an agent the host does not schedule at all does not beat.
@@ -126,9 +127,10 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 // -- and goes on waiting for the exit; and at the user's Ctrl+C once it has
 // said that a press stops the agent (a utils.StopNowNotice, paced on its
 // polls: a whole stopWatchOffer after the stop's signal was seen, or after the
-// press or verdict before). A press does what the offer it answers said: the
-// first kills as a verdict does; one after the agent was told to die so kills
-// it at once, kill(true), where the CLI can, after which the watch waits no
+// press before). A press does what the offer it answers said, by the presses
+// before it alone: the first kills as a verdict does, and the drains still
+// wait for the agent's exit; one answering an offer made after that kills it
+// at once, kill(true), where the CLI can, after which the watch waits no
 // more. reported, when set, is closed at the agent's
 // first report: its teardown has begun.
 //
@@ -157,11 +159,11 @@ type stopWatch struct {
 var holdStale = time.Duration(stallChecks) * utils.TeardownBeat
 
 // stopWatchOffer is how long after the stop's signal was seen (or after the
-// press or verdict before) a stopWatch says Ctrl+C stops the agent, and from
-// when a press does: longer than a copy of that signal (sudo's) takes to come,
-// unless sudo is held from handing it on. A copy that late is taken for a
-// press, and costs what the first press does: the agent dies between teardown
-// steps, as at a stall verdict, never in one.
+// press before) a stopWatch says Ctrl+C stops the agent, and from when a press
+// does: longer than a copy of that signal (sudo's) takes to come, unless sudo
+// is held from handing it on. A single copy that late is taken for the first
+// press, and costs what it does: the agent dies between teardown steps, as at
+// a stall verdict, never in one.
 var stopWatchOffer = 5 * time.Second
 
 // run returns once the agent has exited (false), or once it has been killed
@@ -221,7 +223,12 @@ func (w stopWatch) run() bool {
 	offering := false
 
 	var judge stopJudge
-	reported, killed, beaten := false, false, false
+	// judged: a verdict has told the agent to die once no teardown work is
+	// in progress; pressed: a press has. What a press does goes by the
+	// presses before it alone, as the offer it answers says: the first has
+	// the agent die once idle (again, after a verdict: it changes nothing);
+	// one answering an offer made after that kills it at once.
+	reported, judged, pressed, beaten := false, false, false, false
 	var lastBeat uint64
 	for {
 		var p utils.TeardownProgress
@@ -233,14 +240,14 @@ func (w stopWatch) run() bool {
 			// a whole period from now.
 			notice.Withdraw()
 			notice, offering = utils.NewStopNowNotice(stopWatchOffer), false
-			if !killed {
+			if !pressed {
 				// The first press: the agent dies once no teardown work is
-				// in progress, as at a verdict.
+				// in progress, as at a verdict. Its stop still ends on its
+				// own, so the drains still wait for it (hold).
 				if !w.force("Ctrl+C was pressed: it stops once no teardown work is in progress", false) {
 					return false
 				}
-				killed = true
-				hold(false)
+				pressed = true
 				continue
 			}
 			if !w.force("Ctrl+C was pressed again", true) {
@@ -250,7 +257,7 @@ func (w stopWatch) run() bool {
 		case <-ticks.C:
 			if !offering && notice.Next() {
 				offering = true
-				if killed {
+				if pressed {
 					w.logger.Info("Press Ctrl+C again to stop the keploy agent at once: what it has not yet removed from the kernel may stay attached")
 				} else {
 					w.logger.Info("Press Ctrl+C again to stop the keploy agent: it then stops once no teardown work is in progress")
@@ -272,13 +279,13 @@ func (w stopWatch) run() bool {
 		if !beaten || p.Beat != lastBeat { // a beat: the agent is not frozen
 			beaten, lastBeat = true, p.Beat
 			stale.Reset(holdStale)
-			hold(p.Steps && !killed)
+			hold(p.Steps && !judged)
 		}
 		verdict := judge.observe(p)
 		if w.judged != nil {
 			w.judged(p)
 		}
-		if killed {
+		if judged {
 			continue
 		}
 		switch verdict {
@@ -289,16 +296,10 @@ func (w stopWatch) run() bool {
 		default:
 			continue
 		}
-		// It dies once no teardown work is in progress; a press kills it at
-		// once -- one that answers an offer saying so: a standing offer said
-		// a press would have it die once idle, so it is withdrawn, and the
-		// next comes a whole period from now, saying what a press does now.
-		killed = true
+		// It dies once no teardown work is in progress. A press is still
+		// answered by the presses before it alone (above).
+		judged = true
 		hold(false)
-		if offering {
-			notice.Withdraw()
-			notice, offering = utils.NewStopNowNotice(stopWatchOffer), false
-		}
 	}
 }
 

@@ -278,8 +278,8 @@ func (n *StopNowNotice) Withdraw() {
 func MarkInterruptedAgain() (stoppedNow bool) { return noteRepeatInterrupt(nil) }
 
 // noteRepeatInterrupt is MarkInterruptedAgain. say, when set, is told whether
-// the interrupt ends the stop, and says so, before anything that waits on the
-// interrupt is woken: what an interrupt does is said before what it does.
+// the interrupt ends a stop, and is called before anything that waits on the
+// interrupt is woken: what is said of an interrupt comes before what it does.
 func noteRepeatInterrupt(say func(stoppedNow bool)) (stoppedNow bool) {
 	repeatInterrupts.mu.Lock()
 	defer repeatInterrupts.mu.Unlock()
@@ -477,18 +477,14 @@ func NewCtx() context.Context {
 		// and unread, so Ctrl+C did nothing and only SIGKILL, which skips all
 		// cleanup, could end the process. One before that ends nothing: it
 		// may be the first one again (OfferStopNow).
-		// What a stop gives up at it, it says itself (a recording's drain:
-		// what the agent still held is not saved). An agent whose recording
-		// client finished with it (the hold returned) offers nothing: a
-		// signal then, often the client's own stop of it, cuts nothing
-		// short.
+		// The line claims nothing: what a repeat does, the stop that acts on
+		// it says itself (a recording's drain: what the agent still held is
+		// not saved; an agent's stop: how it stops the agent), and one before
+		// any offer does nothing. It is said before anything waiting on the
+		// repeat is woken, so it comes before what the repeat makes happen.
 		for sig2 := range sigs {
-			noteRepeatInterrupt(func(stoppedNow bool) {
-				if stoppedNow {
-					fmt.Printf("Signal received again: %s, stopping now\n", sig2)
-				} else {
-					fmt.Printf("Signal received again: %s\n", sig2)
-				}
+			noteRepeatInterrupt(func(bool) {
+				fmt.Printf("Signal received again: %s\n", sig2)
 			})
 		}
 	}()

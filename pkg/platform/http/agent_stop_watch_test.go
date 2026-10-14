@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -418,13 +419,13 @@ func TestStopWatchDoesNotTakeACopyOfTheStopForCtrlC(t *testing.T) {
 	}
 }
 
-// A press does what the offer it answers said. The watch offers while the
-// agent progresses (a press then has it die once no teardown work is in
-// progress); a stall verdict then tells it so, and it stays in the middle of
-// teardown work. That offer is withdrawn: a press answering it -- or a copy
-// of the stop sudo was held from handing on until after it -- does not kill
-// the agent at once, mid-work. The offer to kill it at once comes a whole
-// period after the verdict, and only a press after that does.
+// A press does what the offer it answers said, and that goes by the presses
+// before it alone. The watch offers while the agent progresses (a press then
+// has it die once no teardown work is in progress); a stall verdict then
+// tells it so, and it stays in the middle of teardown work. The press
+// answering that offer -- or a copy of the stop sudo was held from handing on
+// until after it -- has it die once idle, as the offer said, and kills nothing
+// at once; only a press answering the offer made after that does.
 func TestStopWatchAPressAnswersTheOfferItWasMadeFor(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -455,18 +456,109 @@ func TestStopWatchAPressAnswersTheOfferItWasMadeFor(t *testing.T) {
 	if f.now.Load() {
 		t.Fatal("setup: the verdict killed at once")
 	}
-	utils.MarkInterruptedAgain() // the press the first offer asked for (or a late copy)
-	within(t, "the offer to kill at once", func() {
-		for logs.FilterMessageSnippet(atOnce).Len() == 0 && f.killed.Load() == 1 {
+	if !utils.MarkInterruptedAgain() { // the press the offer asked for (or a late copy)
+		t.Fatal("setup: no offer standing")
+	}
+	within(t, "the press acted on", func() {
+		for f.killed.Load() < 2 {
 			time.Sleep(time.Millisecond)
 		}
 	})
-	if f.killed.Load() != 1 || f.now.Load() {
-		t.Fatalf("a press answering %q killed the agent at once, mid teardown work (kills %d, now %v)", onceIdle, f.killed.Load(), f.now.Load())
+	if f.now.Load() {
+		t.Fatalf("a press answering %q killed the agent at once, mid teardown work (kills %d)", onceIdle, f.killed.Load())
 	}
+	within(t, "the offer to kill at once", func() {
+		for logs.FilterMessageSnippet(atOnce).Len() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	})
 	ctrlCWhileWaited(t) // the press the offer to kill at once asked for
-	if !awaitWatch(t, w) || f.killed.Load() != 2 || !f.now.Load() {
+	if !awaitWatch(t, w) || f.killed.Load() != 3 || !f.now.Load() {
 		t.Fatalf("the press after the offer to kill at once did not (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	}
+}
+
+// A stop that began on its own (a record timer), whose agent stalls: the
+// verdict tells it to die once idle, and it goes on in the middle of
+// teardown work. CI's pattern kill then lands, and sudo's copy of it is held
+// until after the watch's offer. The offer is the first's, to have the agent
+// die once idle -- a verdict skips no press -- and the late copy, taken for
+// its press, kills nothing at once. On the test's clock: nothing hangs on
+// scheduling.
+func TestStopWatchAVerdictSkipsNoPress(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	defer func(n uint64) { stallChecks = n }(stallChecks)
+	stallChecks = 2
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_000_000, 0).UnixNano())
+	defer utils.SetNoticeClockForTest(func() time.Time { return time.Unix(0, clock.Load()) })()
+	core, logs := observer.New(zapcore.InfoLevel)
+	f := newFakeAgent()
+	f.busy = true // the verdict's kill does not end it: it goes on in teardown work
+	f.set(p(1, 0, false))
+	w := &watching{finished: make(chan struct{})}
+	sw := stopWatch{logger: zap.New(core), gone: f.gone, read: f.read, kill: f.kill, poll: time.Millisecond}
+	go func() { w.killed.Store(sw.run()); close(w.finished) }()
+	defer func() { f.exited(); <-w.finished }()           // before stallChecks is restored
+	for beat := uint64(1); f.killed.Load() == 0; beat++ { // it stalls: the verdict
+		f.set(p(1, beat, false))
+		time.Sleep(5 * time.Millisecond)
+	}
+	f.set(busy(2, 100))
+	utils.MarkInterrupted() // the pattern kill's first copy; sudo's is held
+	const offer = "Press Ctrl+C again to stop the keploy agent"
+	within(t, "the offer", func() {
+		for logs.FilterMessageSnippet(offer).Len() == 0 {
+			clock.Add(int64(time.Millisecond))
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if got := logs.FilterMessageSnippet(offer).All()[0].Message; strings.Contains(got, "at once") {
+		t.Fatalf("after a verdict, the first offer was %q: a verdict skipped the press that has the agent die once idle", got)
+	}
+	utils.MarkInterruptedAgain() // sudo's copy, released late
+	within(t, "the copy acted on", func() {
+		for f.killed.Load() < 2 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if f.now.Load() {
+		t.Fatalf("a late copy of the stop killed the agent at once, mid teardown work (kills %d)", f.killed.Load())
+	}
+}
+
+// The first press has the agent die once no teardown work is in progress:
+// its stop still ends on its own, so it still holds the drains (an agent
+// that records its steps and beats), and a recording's teardown waits for
+// the agent rather than giving up on it and saying a goroutine ignored its
+// cancellation. Only a kill at once, a verdict or a frozen agent lets them go.
+func TestStopWatchFirstPressKeepsTheDrainsWaiting(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
+	f := newFakeAgent()
+	f.busy = true // removing what it attached to the kernel
+	f.set(p(1, 0, false))
+	w := startWatch(f, nil)
+	t.Cleanup(func() { f.exited(); <-w.finished }) // its hold ends with it
+	awaitObserved(t, f, w, p(1, 0, false))
+	f.set(p(2, 1, false))
+	awaitObserved(t, f, w, p(2, 1, false))
+	if !utils.AgentStopInProgress() {
+		t.Fatal("setup: a stepping agent's stop does not hold the drains")
+	}
+	ctrlCWhileWaited(t)
+	within(t, "the first press's kill", func() {
+		for f.killed.Load() < 1 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	f.set(p(3, 2, false)) // it beats on, taking its steps
+	awaitObserved(t, f, w, p(3, 2, false))
+	if !utils.AgentStopInProgress() {
+		t.Fatal("the first press let the drains go while the agent still worked through its teardown")
 	}
 }
 
@@ -542,9 +634,21 @@ func TestStopWatchWaitsAfterAVerdictAndKillsAtCtrlC(t *testing.T) {
 		t.Fatal("the watch stopped waiting for an agent still in the middle of its work")
 	case <-time.After(100 * time.Millisecond):
 	}
+	// A press goes by the presses before it, not the verdict: the first, as
+	// its offer says, has the agent die once idle (again); one answering the
+	// next offer kills it at once.
 	ctrlCWhileWaited(t)
-	if !awaitWatch(t, w) || f.killed.Load() != 2 || !f.now.Load() {
-		t.Fatalf("Ctrl+C after the verdict did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
+	within(t, "the first press's kill", func() {
+		for f.killed.Load() < 2 {
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if f.now.Load() {
+		t.Fatal("the first press after the verdict killed the agent at once, mid teardown work")
+	}
+	ctrlCAgainWhileWaited(t)
+	if !awaitWatch(t, w) || f.killed.Load() != 3 || !f.now.Load() {
+		t.Fatalf("Ctrl+C answering the second offer did not kill the agent at once (kills %d, now %v)", f.killed.Load(), f.now.Load())
 	}
 }
 

@@ -70,6 +70,11 @@ func TestSignalHoldHelper(t *testing.T) {
 		// Still stopping when a later signal comes (the agent's client
 		// stopping it once it has closed its streams).
 		<-InterruptedAfter(0)
+		select {
+		case <-StopNow():
+			mark("stopnow")
+		default:
+		}
 		mark("again")
 		os.Exit(0)
 	}
@@ -200,16 +205,17 @@ func TestNewCtx_ASignalAfterTheHoldFinishedLosesNothing(t *testing.T) {
 }
 
 // With no hold (the CLI), a second signal after the stop told the user one
-// would end it at once (its drain does: OfferStopNow) stops it now, and says
-// so; what that gives up, the stop says itself. One before that is said, and
-// claims nothing: it may be the first signal again, as sudo hands it on.
+// would end it at once (its drain does: OfferStopNow) ends it (StopNow); one
+// before that does not: it may be the first signal again, as sudo hands it
+// on. Either is said, claiming nothing: what it gives up, the stop that acts
+// on it says itself.
 func TestNewCtx_ASecondSignalWithNoHoldStopsNowOnlyOnceOffered(t *testing.T) {
 	for _, offered := range []bool{true, false} {
 		env := []string{signalHoldNone + "=1", signalHoldLinger + "=1"}
 		if offered {
 			env = append(env, signalHoldOffer+"=1")
 		}
-		cmd, _, waitFor, exited, out := signalHoldRunOut(t, env...)
+		cmd, dir, waitFor, exited, out := signalHoldRunOut(t, env...)
 		waitFor("ready")
 		_ = cmd.Process.Signal(syscall.SIGINT)
 		waitFor("cancelled")
@@ -218,13 +224,12 @@ func TestNewCtx_ASecondSignalWithNoHoldStopsNowOnlyOnceOffered(t *testing.T) {
 		if err := <-exited; err != nil {
 			t.Fatalf("the run ended with %v", err)
 		}
+		if marked(dir, "stopnow") != offered {
+			t.Fatalf("offered=%v: the second signal ended the stop: %v", offered, marked(dir, "stopnow"))
+		}
 		said := out.String()
-		switch {
-		case offered && !strings.Contains(said, "Signal received again: interrupt, stopping now"):
-			t.Fatalf("a second signal after the stop offered to end was not said to stop it now:\n%s", said)
-		case !offered && (strings.Contains(said, "stopping now") || strings.Contains(said, "not saved") ||
-			!strings.Contains(said, "Signal received again: interrupt")):
-			t.Fatalf("a second signal before the stop said what one does was said to cut it short:\n%s", said)
+		if !strings.Contains(said, "Signal received again: interrupt") || strings.Contains(said, "stopping now") || strings.Contains(said, "not saved") {
+			t.Fatalf("offered=%v: the second signal was not said, or was said to cut something short:\n%s", offered, said)
 		}
 	}
 }
