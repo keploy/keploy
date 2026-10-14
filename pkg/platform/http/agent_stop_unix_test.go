@@ -202,10 +202,13 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 					}
 				}
 				if tc.interrupt {
+					theStopWasASignal(t)
 					go func() {
+						// Pressed until heard: once the stop has said a press
+						// stops the agent now (stopWatch), and its teardown
+						// has begun.
 						for {
-							if _, err := os.Stat(progress); err == nil {
-								utils.MarkInterruptedAgain()
+							if _, err := os.Stat(progress); err == nil && utils.MarkInterruptedAgain() {
 								return
 							}
 							if returnsWithin(run.gone, 5*time.Millisecond) {
@@ -670,72 +673,66 @@ func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while the agent's container is waited for kills it at
-// once (SIGKILL).
+// Ctrl+C pressed again while the agent's container is waited for, once the
+// stop has said a press stops it now, kills it at once (SIGKILL), and lets
+// what waits for its exit go.
 func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
 	log, _ := fakeEngine(t)
 	ready := newAgentRun()
 	ready.ready.Store(true)
 	returned := make(chan struct{})
 	go func() { stopAgentContainerFor(zap.NewNop(), ready, stopTestContainer); close(returned) }()
 	awaitEngineWait(t, log, returned)
-	utils.MarkInterruptedAgain()
+	ctrlCWhileWaited(t)
 	within(t, "stopAgentContainerFor", func() { <-returned })
+	within(t, "the run let go", func() { <-ready.letGo })
 	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill "+stopTestContainer; got != want {
 		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed again kills the container", got, want)
 	}
 }
 
 // awaitAgentExit: the group waits for the agent's exit, and once the stop has
-// begun an interrupt the user gives lets the group go, not the agent. One from
-// before the stop began is not counted: a copy of the stop's own signal (sudo
-// hands one on), which comes long before a recording's drains are done and the
-// agent is stopped. No stop offers anything in this phase (the drains withdrew
-// theirs): the wait counts from when it began (utils.InterruptedAfter).
+// killed the agent at once at the user's Ctrl+C (run.letGo) it lets the group
+// go, not waiting for the agent to finish dying. An interrupt alone does not:
+// only the stop, which hears no copy of its own signal, says what one was.
 func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
 	a := &AgentClient{logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
 	reaped := make(chan error, 1)
+	run := newAgentRun()
 	returned := make(chan struct{})
 	var ok atomic.Bool
-	go func() { _, o := a.awaitAgentExit(ctx, reaped, 1); ok.Store(o); close(returned) }()
-	utils.MarkInterruptedAgain() // the stop's copy, from sudo, during the drains
-	cancel()                     // the drains are done: the agent stop begins
+	go func() { _, o := a.awaitAgentExit(ctx, reaped, run, 1); ok.Store(o); close(returned) }()
+	cancel() // the agent stop begins
+	utils.MarkInterruptedAgain()
 	if returnsWithin(returned, 200*time.Millisecond) {
-		t.Fatal("the group stopped waiting on the stop, or on a copy of it from before")
+		t.Fatal("the group stopped waiting on the stop, or on an interrupt its stop did not act on")
 	}
-	// The user presses Ctrl+C while keploy waits for the agent. (Repeated
-	// until heard: the wait counts from when it saw the stop begin.)
-	deadline := time.Now().Add(30 * time.Second)
-	for !returnsWithin(returned, 10*time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the user's interrupt during the agent stop did not let the group go")
-		}
-		utils.MarkInterruptedAgain()
-	}
+	run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
+	within(t, "awaitAgentExit", func() { <-returned })
 	if ok.Load() {
 		t.Fatal("awaitAgentExit reported an exit it did not see")
 	}
 
-	utils.ResetInterruptedAgain()
 	reaped2 := make(chan error, 1)
 	reaped2 <- nil
-	if _, o := a.awaitAgentExit(context.Background(), reaped2, 1); !o {
+	if _, o := a.awaitAgentExit(context.Background(), reaped2, newAgentRun(), 1); !o {
 		t.Fatal("awaitAgentExit missed the exit")
 	}
 }
 
 // The user's Ctrl+C while keploy waits for a stopping agent that runs under
 // sudo (a non-root user's), once the recording's drains are done and their
-// offers withdrawn: the stop says "(Ctrl+C stops it now)", and on the press
-// kills the agent, which for one under sudo only escalates the signal: it
-// dies once its teardown (uprobe removal) is through. The group lets go at
-// that press (awaitAgentExit), and does not wait out the teardown's bound to
-// then say a goroutine ignored its cancellation.
+// offers withdrawn: the stop says a press stops the agent now, and on the
+// press kills it, which for one under sudo only escalates the signal: it dies
+// once its teardown (uprobe removal) is through. The group lets go at that
+// press (awaitAgentExit, run.letGo), and does not wait out the teardown's
+// bound to then say a goroutine ignored its cancellation.
 func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
@@ -753,7 +750,7 @@ func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
 	var beat atomic.Uint64
 	killedNow := make(chan struct{})
 	var once sync.Once
-	grp.Go(func() error { a.awaitAgentExit(ctx, reaped, 1); return nil })
+	grp.Go(func() error { a.awaitAgentExit(ctx, reaped, run, 1); return nil })
 	grp.Go(func() error {
 		<-ctx.Done()
 		a.endAgent(run, 1,
@@ -771,8 +768,8 @@ func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
 		return nil
 	})
 	cancel() // setupCtxCancel: the agent stop begins
-	within(t, "the stop saying Ctrl+C stops it now", func() {
-		for logs.FilterMessageSnippet("Ctrl+C stops it now").Len() == 0 {
+	within(t, "the stop saying a press stops the agent now", func() {
+		for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent now").Len() == 0 {
 			time.Sleep(10 * time.Millisecond)
 		}
 	})

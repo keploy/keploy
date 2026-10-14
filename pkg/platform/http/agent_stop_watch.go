@@ -25,10 +25,13 @@ import (
 //   - it has reported everything detached (utils.MarkDetachDone) and is still
 //     there a check later: nothing a kill can cut short is left; or
 //   - it has taken no teardown step across stallChecks consecutive checks; or
-//   - the user presses Ctrl+C again while keploy waits for it
-//     (utils.InterruptedAfter): an interrupt that came before the stop began
-//     does not count, since one stop is often delivered twice (`sudo pkill -f
-//     keploy` signals both sudo and keploy, and sudo hands its signal on).
+//   - the user presses Ctrl+C again while keploy waits for it, once keploy
+//     has said that one stops it now (utils.StopNowNotice): a whole
+//     stopWatchOffer after the stop's signal was seen. An interrupt before
+//     that does not count. One stop is often delivered twice (`sudo pkill -f
+//     keploy` signals both sudo and keploy, and sudo hands its signal on), and
+//     the copy comes with the first; and a press that ended a recording's
+//     drain is no press to kill the agent mid-teardown.
 //
 // A check is one of the agent's own beats (utils.TeardownBeat), not a tick of
 // the CLI's clock: an agent the host does not schedule at all does not beat.
@@ -111,11 +114,12 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 // stopWatch waits for a stopping agent to exit (gone), checking its teardown
 // progress (read) every poll. It kills it (kill) when a stopJudge says so --
 // kill(false): the agent dies once it is not in the middle of teardown work
-// -- and goes on waiting for the exit; and at an interrupt that arrives after
-// the since-th one after the first (utils.InterruptedAfter) -- kill(true), at
-// once where the CLI can -- after which it waits no more. The stop takes
-// utils.RepeatInterrupts() as it begins. reported, when set, is closed at the
-// agent's first report: its teardown has begun.
+// -- and goes on waiting for the exit; and at the user's Ctrl+C once it has
+// said that one stops the agent now (a utils.StopNowNotice, paced on its
+// polls: a whole stopWatchOffer after the stop's signal was seen) --
+// kill(true), at once where the CLI can -- after which it waits no more.
+// reported, when set, is closed at the agent's first report: its teardown has
+// begun.
 //
 // While the agent reports that it records its steps (Steps) and keeps
 // beating, no drain gives up on keploy's teardown (utils.BeginAgentStop): its
@@ -127,7 +131,6 @@ func (j *stopJudge) observe(p utils.TeardownProgress) stopVerdict {
 // its steps never holds them.
 type stopWatch struct {
 	logger   *zap.Logger
-	since    uint64
 	gone     <-chan struct{}
 	read     func(ctx context.Context) (utils.TeardownProgress, bool)
 	kill     func(now bool) error
@@ -141,6 +144,11 @@ type stopWatch struct {
 // holdStale is how long, on the CLI's clock, a stepping agent may go without
 // a beat before its stop stops holding the drains (stopWatch).
 var holdStale = time.Duration(stallChecks) * utils.TeardownBeat
+
+// stopWatchOffer is how long after the stop's signal was seen a stopWatch
+// says Ctrl+C stops the agent now, and from when a press does: longer than a
+// copy of that signal (sudo's) takes to come.
+var stopWatchOffer = 5 * time.Second
 
 // run returns once the agent has exited (false), or once it has been killed
 // at once (true). The reads run on a goroutine of their own, under a context
@@ -191,18 +199,30 @@ func (w stopWatch) run() bool {
 	stale := time.NewTimer(holdStale)
 	defer stale.Stop()
 
+	// Ctrl+C stops the agent now once the watch has said so (offering).
+	notice := utils.NewStopNowNotice(stopWatchOffer)
+	defer notice.Withdraw()
+	ticks := time.NewTicker(w.poll)
+	defer ticks.Stop()
+	offering := false
+
 	var judge stopJudge
 	reported, killed, beaten := false, false, false
 	var lastBeat uint64
-	again := utils.InterruptedAfter(w.since)
 	for {
 		var p utils.TeardownProgress
 		select {
 		case <-w.gone:
 			return false
-		case <-again:
+		case <-notice.Interrupt():
 			w.force("Ctrl+C was pressed again", true)
 			return true
+		case <-ticks.C:
+			if !offering && notice.Next() {
+				offering = true
+				w.logger.Info("Press Ctrl+C again to stop the keploy agent now: what it has not yet removed from the kernel may stay attached")
+			}
+			continue
 		case <-stale.C:
 			hold(false) // no beat for a while: a stop that may not end
 			continue
@@ -210,7 +230,7 @@ func (w stopWatch) run() bool {
 		}
 		if !reported {
 			reported = true
-			w.logger.Info("Waiting for the keploy agent to finish shutting down: it removes what it attached to the kernel before it exits, and is stopped by force only if it stops making progress (Ctrl+C stops it now)")
+			w.logger.Info("Waiting for the keploy agent to finish shutting down: it removes what it attached to the kernel before it exits, and is stopped by force only if it stops making progress")
 			if w.reported != nil {
 				close(w.reported)
 			}

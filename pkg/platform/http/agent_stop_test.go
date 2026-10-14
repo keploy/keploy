@@ -50,6 +50,29 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	}
 }
 
+// theStopWasASignal: the recording was stopped by the user's interrupt
+// (utils.Interrupted), which a stop's offer to stop the agent now waits on.
+func theStopWasASignal(t *testing.T) {
+	t.Helper()
+	utils.MarkInterrupted()
+	t.Cleanup(utils.ClearInterrupted)
+}
+
+// ctrlCWhileWaited is the user's Ctrl+C while keploy waits for a stopping
+// agent, pressed as told: once the stop has said one stops the agent now
+// (stopWatch's offer), which a press before does not count. It presses until
+// one is heard.
+func ctrlCWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for !utils.MarkInterruptedAgain() {
+		if time.Now().After(deadline) {
+			t.Fatal("no stop ever said Ctrl+C stops the agent now")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // endAgent's decision on the CLI's stop. The agent is asked first, and one
 // that answers is not signalled. One that was up and is already going away is
 // signalled only if, after the grace, it has reported no teardown. One whose
@@ -244,7 +267,8 @@ func TestTheStopRequestIsSentOnAConnectionOfItsOwn(t *testing.T) {
 
 // --from-container: the user's container is restored only once the agent
 // container, which holds the app's ports, has exited -- it is waited for, not
-// killed -- or once the user's second interrupt says not to wait.
+// killed -- or once its stop killed it at once at the user's Ctrl+C
+// (run.letGo), when there is no more to wait for.
 func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 	for _, interrupt := range []bool{false, true} {
 		utils.ResetInterruptedAgain()
@@ -270,7 +294,7 @@ func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 			t.Fatalf("interrupt=%v: started the user's container while the agent container still ran", interrupt)
 		}
 		if interrupt {
-			utils.MarkInterruptedAgain()
+			run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
 		} else {
 			run.exited()
 		}

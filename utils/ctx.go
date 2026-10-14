@@ -157,17 +157,24 @@ func init() { ResetInterruptedAgain() }
 // before it, the copy of that signal would find the offer standing; and a
 // whole notice period after that signal was seen (StopNowNotice), by when the
 // copy has come too, whether the signal began the stop or came while a stop
-// that began on its own (the app exits, a record timer) waited. withdraw is called once the stop no longer waits, so the
-// offer does not stand for a later wait it did not tell the user of.
-func OfferStopNow() (withdraw func()) {
+// that began on its own (the app exits, a record timer) waited.
+//
+// next is closed by the first interrupt after this offer: a wait that must
+// hear only an interrupt given to it (an agent's stop, after the drains, where
+// a press that ended a drain must not kill the agent mid-teardown) selects on
+// it, not on StopNow. withdraw is called once the stop no longer waits, so the
+// offer does not stand for a later wait it did not tell the user of. With no
+// signal yet, nothing is offered: next is nil.
+func OfferStopNow() (next <-chan struct{}, withdraw func()) {
 	if !Interrupted() {
-		return func() {}
+		return nil, func() {}
 	}
 	repeatInterrupts.mu.Lock()
 	repeatInterrupts.offers++
+	next = repeatInterrupts.next
 	repeatInterrupts.mu.Unlock()
 	var once sync.Once
-	return func() {
+	return next, func() {
 		once.Do(func() {
 			repeatInterrupts.mu.Lock()
 			repeatInterrupts.offers--
@@ -195,19 +202,36 @@ type StopNowNotice struct {
 	period time.Duration
 	// sawAt is when the stop's first signal was first seen to have come
 	// (zero: not yet).
-	sawAt    time.Time
+	sawAt time.Time
+	// next and withdraw are the offer's, once made (OfferStopNow).
+	next     <-chan struct{}
 	withdraw func()
 }
 
-// noticeClock is StopNowNotice's clock: a test's to set.
-var noticeClock = time.Now
+// noticeClock is StopNowNotice's clock (nil: time.Now): a test's to set
+// (SetNoticeClockForTest), while notices are given on other goroutines.
+var noticeClock atomic.Pointer[func() time.Time]
+
+func noticeNow() time.Time {
+	if c := noticeClock.Load(); c != nil {
+		return (*c)()
+	}
+	return time.Now()
+}
+
+// SetNoticeClockForTest has StopNowNotice read the time from now, and returns
+// what puts its own clock back. Tests only.
+func SetNoticeClockForTest(now func() time.Time) (restore func()) {
+	old := noticeClock.Swap(&now)
+	return func() { noticeClock.Store(old) }
+}
 
 // NewStopNowNotice starts the notices, every period, of a stop that begins
 // now. Call it before the notices' clock starts.
 func NewStopNowNotice(period time.Duration) *StopNowNotice {
 	n := &StopNowNotice{period: period}
 	if Interrupted() {
-		n.sawAt = noticeClock()
+		n.sawAt = noticeNow()
 	}
 	return n
 }
@@ -216,7 +240,7 @@ func NewStopNowNotice(period time.Duration) *StopNowNotice {
 // another interrupt stops it now: from this notice on (it makes the offer), or
 // since an earlier one.
 func (n *StopNowNotice) Next() (offering bool) {
-	now := noticeClock()
+	now := noticeNow()
 	switch {
 	case n.withdraw != nil:
 	case n.sawAt.IsZero():
@@ -224,10 +248,14 @@ func (n *StopNowNotice) Next() (offering bool) {
 			n.sawAt = now
 		}
 	case now.Sub(n.sawAt) >= n.period:
-		n.withdraw = OfferStopNow()
+		n.next, n.withdraw = OfferStopNow()
 	}
 	return n.withdraw != nil
 }
+
+// Interrupt returns a channel closed by the first interrupt after the offer:
+// nil, which never is, until the offer is made.
+func (n *StopNowNotice) Interrupt() <-chan struct{} { return n.next }
 
 // Withdraw withdraws the offer, if one was made: the stop no longer waits.
 func (n *StopNowNotice) Withdraw() {

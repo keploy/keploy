@@ -46,6 +46,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(code)
 	}
+	// A stop says Ctrl+C stops the agent now this long after its signal
+	// was seen (stopWatch): short, so a test's press waits little.
+	stopWatchOffer = 20 * time.Millisecond
 	os.Exit(m.Run())
 }
 

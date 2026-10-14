@@ -80,8 +80,7 @@ func TestStopNowNoticeOffersOnlyAfterACopyOfTheStopHasCome(t *testing.T) {
 	reset := func() { ResetInterruptedAgain(); ClearInterrupted() }
 	t.Cleanup(reset)
 	now := time.Unix(1_000_000, 0)
-	defer func(c func() time.Time) { noticeClock = c }(noticeClock)
-	noticeClock = func() time.Time { return now }
+	defer SetNoticeClockForTest(func() time.Time { return now })()
 	const period = 5 * time.Second
 	stopped := func() bool {
 		select {
