@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,10 +30,14 @@ const EscalationSignal = syscall.SIGUSR2
 // the parsers' switch -- stops the agent gracefully instead of killing it
 // with its CA still installed. Once the stop has begun, the signal kills the
 // process (SIGKILL to itself, or an exit where that cannot kill it: a pid
-// namespace's init) as soon as no teardown work is in progress
-// (BeginTeardownWork): the CLI judged from a report a moment old, and the
-// agent may have begun a uprobe removal, or a CA tool rewriting a trust
-// store, since. It is for `keploy agent`.
+// namespace's init) as soon as no teardown work in progress may still be
+// making progress (BeginTeardownWork): none is in progress, or every stage in
+// progress is wedged. The CLI judged from a report a moment old, and the agent
+// may have begun a uprobe removal, or a CA tool rewriting a trust store,
+// since; but a stage wedged in the middle -- the kernel never finishing a
+// removal -- no longer keeps the agent from its end, which a kill the CLI
+// cannot deliver itself (sudo's agent is root) relies on. It is for `keploy
+// agent`.
 func DieOnEscalation(ctx context.Context) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, EscalationSignal)
@@ -46,24 +49,34 @@ func DieOnEscalation(ctx context.Context) {
 			}
 			ExecCancel()
 		}
-		for {
-			teardownWorkMu.Lock()
-			if teardownWork.Load() == 0 {
-				// Held across the kill: no work begins in between.
-				if os.Getpid() == 1 {
-					// The init of its pid namespace (a container's PID 1),
-					// which no signal sent from inside the namespace kills,
-					// its own included: exit instead, the same end to
-					// anything in flight.
-					os.Exit(137)
-				}
-				_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
-				select {} // the kill may land after Kill returns (macOS)
-			}
-			teardownWorkMu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-		}
+		killOnceTeardownWorkHalted()
 	}()
+}
+
+// killOnceTeardownWorkHalted kills this process (SIGKILL to itself, or an
+// exit where that cannot kill it) as soon as no teardown work in progress may
+// still be making progress (teardownWorkHaltedLocked), waiting on the work's
+// events meanwhile: a stage that begins, ends, or is checked. It does not
+// return.
+func killOnceTeardownWorkHalted() {
+	for {
+		teardownWorkMu.Lock()
+		if teardownWorkHaltedLocked() {
+			// Held across the kill: no work begins in between.
+			if os.Getpid() == 1 {
+				// The init of its pid namespace (a container's PID 1),
+				// which no signal sent from inside the namespace kills,
+				// its own included: exit instead, the same end to
+				// anything in flight.
+				os.Exit(137)
+			}
+			_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
+			select {} // the kill may land after Kill returns (macOS)
+		}
+		changed := workChanged
+		teardownWorkMu.Unlock()
+		<-changed // a stage ended, or was checked
+	}
 }
 
 // dirSink writes TeardownProgressFileName through a directory opened once

@@ -407,6 +407,13 @@ type Proxy struct {
 	// BeforeTeardown runs at most once across start()'s mutually-exclusive
 	// shutdown paths (skipListener return / listener defer).
 	teardownOnce sync.Once
+	// auxMu orders the auxiliary hook's start (AfterStart) against its
+	// teardown (runAuxTeardown): a teardown waits for a start in flight, and
+	// no start begins once the teardown has run (auxTornDown). A stop that
+	// came while StartProxy ran had the teardown run first, and the start
+	// that followed attached what nothing removed before the exit.
+	auxMu       sync.Mutex
+	auxTornDown bool
 
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
@@ -1637,7 +1644,10 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 // them while still inside the awaited start() goroutine — before the process
 // exits and before any update-ca-certificates fork — closing the race that
 // otherwise leaks the uprobe.
+//
+// It runs under auxMu (runAuxStart), which detachThenRemoveCA holds.
 func (p *Proxy) runAuxTeardown(ctx context.Context) {
+	p.auxTornDown = true
 	h, ok := p.auxiliaryHook.(agent.TeardownableProxyHook)
 	if !ok {
 		return
@@ -1649,6 +1659,37 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 	})
 }
 
+// errAuxTornDown is runAuxStart's answer once the proxy's teardown has run.
+var errAuxTornDown = errors.New("the proxy was stopped before its auxiliary hook started")
+
+// runAuxStart runs the auxiliary hook's AfterStart, unless the proxy's
+// teardown has already run its BeforeTeardown (runAuxTeardown): what a start
+// after that attached would be removed by nothing before the process exits.
+// A teardown that comes while the start runs waits for it, and then removes
+// what it attached.
+//
+// Where its progress can be seen (utils.TeardownProgressSeen), the start is
+// teardown work of its own (utils.BeginTeardownWork), on this goroutine: a
+// teardown that waits for it makes no progress of its own meanwhile, and the
+// start -- loading BPF, attaching uprobes, cut short by a fatal signal like
+// their removal -- is what the CLI that stops the agent, and the agent's own
+// end on its kill, then go by. Before the stop, its steps are read by
+// nothing. Where its progress cannot be seen, neither the start nor the
+// teardown's wait for it is teardown work (detachThenRemoveCA): a start
+// wedged against AfterStart's contract is then killed for want of progress.
+func (p *Proxy) runAuxStart(ctx context.Context) error {
+	p.auxMu.Lock()
+	defer p.auxMu.Unlock()
+	if p.auxTornDown {
+		return errAuxTornDown
+	}
+	if utils.TeardownProgressSeen() {
+		end := utils.BeginTeardownWork()
+		defer end()
+	}
+	return p.auxiliaryHook.AfterStart(ctx, p)
+}
+
 // detachThenRemoveCA runs the last two stages of the proxy's shutdown: the
 // auxiliary hook's teardown (runAuxTeardown), which removes TLS uprobes, and
 // then the removal of this run's MITM CA from the OS trust store, so trust does
@@ -1658,10 +1699,27 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 // tool cut short leaves a trust store half rewritten -- and either can take
 // long without a step of its own, so both are teardown work in progress
 // (utils.BeginTeardownWork), one span with a step between them.
+//
+// The span begins only once an auxiliary hook's start in flight is over
+// (auxMu): waiting for it is not work of the teardown's own. Where the
+// start's progress is seen it is teardown work of its own (runAuxStart),
+// which the CLI goes by meanwhile; where it is not, a span begun before the
+// wait would count as progress throughout it, and a start wedged against
+// AfterStart's contract would never be killed.
 func (p *Proxy) detachThenRemoveCA(ctx context.Context) {
+	p.auxMu.Lock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			p.auxMu.Unlock()
+		}
+	}
+	defer unlock()
 	end := utils.BeginTeardownWork()
 	defer end()
 	p.runAuxTeardown(ctx)
+	unlock() // the CA's removal does not hold up a start, which no longer runs
 	utils.TeardownStep()
 	pTls.TeardownNativeCA(p.logger)
 }
@@ -1942,6 +2000,8 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
+		// start() is what removes the CA installed above: it never runs.
+		p.detachThenRemoveCA(ctx)
 		return errors.New("failed to get the error group from the context")
 	}
 	// Create a channel to signal readiness of each server
@@ -1999,7 +2059,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	if p.auxiliaryHook != nil {
-		if err := p.auxiliaryHook.AfterStart(ctx, p); err != nil {
+		if err := p.runAuxStart(ctx); err != nil {
+			if errors.Is(err, errAuxTornDown) {
+				return err // the stop came first: nothing failed
+			}
 			// Do NOT swallow the error. An auxiliary hook only gets
 			// registered when a caller has explicitly opted into the
 			// feature it implements (currently: --low-latency, which
@@ -2145,6 +2208,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+		// What StartProxy installed before this -- the run's CA in the trust
+		// store, and whatever the auxiliary hook holds -- is removed now:
+		// the shutdown below that removes it is never set up (a port in use,
+		// a previous agent still around, left the anchor trusted).
+		p.detachThenRemoveCA(ctx)
 		// Notify failure
 		readyChan <- err
 		return err

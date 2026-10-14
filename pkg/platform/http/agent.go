@@ -113,9 +113,10 @@ type AgentClient struct {
 // teardown makes progress -- killing it only once that stops, or it has
 // detached everything and not exited, or the user presses Ctrl+C once keploy
 // has said a press stops it (stopWatch: a press answering the first offer has
-// it die once no teardown work is in progress, one answering an offer made
-// after a press kills it at once); never on a timer, never by a hang-up from
-// closing its terminal
+// it die once no teardown work in progress is making progress, one answering
+// an offer made after a press kills it at once -- an agent sudo runs as root,
+// which no kill ends at once, is waited for instead until it has exited or
+// halted); never on a timer, never by a hang-up from closing its terminal
 // (endAgent, stopAgentContainerFor). That holds before the agent answers too:
 // it attaches its uprobes first.
 //
@@ -132,15 +133,17 @@ type agentRun struct {
 	ready    atomic.Bool
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
 	goneOnce sync.Once
-	// letGo is closed once its stop killed it at once at the user's Ctrl+C
-	// (stopWatch): what waits for its exit waits no more.
+	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
+	// or found an agent sudo runs as root halted after a press (stopWatch):
+	// what waits for its exit waits no more.
 	letGo     chan struct{}
 	letGoOnce sync.Once
 }
 
 func newAgentRun() *agentRun { return &agentRun{gone: make(chan struct{}), letGo: make(chan struct{})} }
 
-// stoppedAtOnce says its stop killed it at once at the user's Ctrl+C.
+// stoppedAtOnce says its stop killed it at once at the user's Ctrl+C, or
+// found a root agent halted after one (stopWatch.run returned true).
 func (r *agentRun) stoppedAtOnce() { r.letGoOnce.Do(func() { close(r.letGo) }) }
 
 // exited marks the agent gone; it may be called more than once.
@@ -2159,13 +2162,14 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
 // stopped making any, or has detached everything and not exited -- kill(false),
-// on which it dies once no teardown work is in progress -- or at the user's
-// Ctrl+C once the stop has said a press stops it, as that offer says:
-// kill(false) at a press answering the first offer, kill(true), at once, at
-// one answering an offer made after a press (stopWatch). reach is what kill
-// does where that differs (Windows, sudo): the offers say so.
-// An agent already reaped is never signalled: its pid may be another
-// process's by now.
+// on which it dies once no teardown work in progress is making progress -- or
+// at the user's Ctrl+C once the stop has said a press stops it, as that offer
+// says: kill(false) at a press answering the first offer, kill(true), at
+// once, at one answering an offer made after a press (stopWatch). reach is
+// what kill does where that differs (Windows, sudo): the offers say so. An
+// agent sudo runs as root (reach.noAtOnce), which no kill ends at once, is
+// waited for after a press until it has exited or halted. An agent already
+// reaped is never signalled: its pid may be another process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, reach killReach, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
@@ -2185,7 +2189,8 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
-		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach}
+		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
+		settled: sudoAgentSettled(pid)}
 
 	err := ask()
 	switch {
@@ -2287,11 +2292,12 @@ func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 }
 
 // awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
-// the stop has killed the agent at once at the user's Ctrl+C (run.letGo:
-// stopWatch hears only one given once it said that one stops the agent now,
-// never a copy of the stop's own signal), it lets the group go -- and with it
-// a caller waiting on the group -- while the agent finishes dying on its own;
-// ok is false then.
+// the stop has killed the agent at once at the user's Ctrl+C, or found an
+// agent sudo runs as root halted after a press (run.letGo: stopWatch hears
+// only one given once it said that one stops the agent now, never a copy of
+// the stop's own signal), it lets the group go -- and with it a caller
+// waiting on the group -- while the agent finishes dying on its own; ok is
+// false then.
 func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, run *agentRun, pid int) (err error, ok bool) {
 	select {
 	case err = <-reaped:
@@ -3183,10 +3189,10 @@ var dockerStopPoll = time.Second
 // container (readContainerProgress). It kills it only once it has stopped
 // making any, or has detached everything and not exited -- with the
 // escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
-// teardown work is in progress -- or at the user's Ctrl+C once the stop has
-// said a press stops it, as that offer says: the escalation signal at a press
-// answering the first offer, and at once (`kill`, SIGKILL) at one answering
-// an offer made after a press (stopWatch). Not `stop`, whose
+// teardown work in progress is making progress -- or at the user's Ctrl+C
+// once the stop has said a press stops it, as that offer says: the escalation
+// signal at a press answering the first offer, and at once (`kill`, SIGKILL)
+// at one answering an offer made after a press (stopWatch). Not `stop`, whose
 // grace period (10 s by default) ends in a SIGKILL however the teardown is
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent
@@ -3195,8 +3201,8 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
 	// kill(false) sends the agent the escalation signal, on which it dies
-	// once no teardown work is in progress (utils.DieOnEscalation); kill(true)
-	// is SIGKILL, at once.
+	// once no teardown work in progress is making progress
+	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
 	kill := func(now bool) error {
 		args := []string{"kill", "--signal", "SIGUSR2", name}
 		if now {
