@@ -72,6 +72,9 @@ type replayCase struct {
 	// mapped: the set has per-test mappings (keploy mock record wrote them),
 	// which the proven switch requires.
 	mapped bool
+	// losses: the agent counts what it could not capture (GET
+	// /agent/capturelosses).
+	losses *lossCounter
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -133,7 +136,11 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	svc := New(zap.New(core), instr, stubMockDB{}, mapDB, nil, nil, cfg)
+	var run Instrumentation = instr
+	if c.losses != nil {
+		run = lossReplayInstr{instr, c.losses}
+	}
+	svc := New(zap.New(core), run, stubMockDB{}, mapDB, nil, nil, cfg)
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -945,10 +952,13 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 func TestRecordTestsReceipt(t *testing.T) {
 	keployDir := t.TempDir()
 	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	lost := &models.ScopeEvidence{CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}
 	windows := []models.ScopeWindow{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestA/case", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed, Evidence: &models.ScopeEvidence{}},
 		{Name: "suite", Suite: true},
 		{Name: "app", App: true},
 	}
@@ -960,7 +970,9 @@ func TestRecordTestsReceipt(t *testing.T) {
 	require.Equal(t, []TestReceipt{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
-	}, got.Tests)
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed},
+	}, got.Tests, "a window's capture loss is kept for judging; empty evidence is not written")
 	ignore, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
 	require.NoError(t, err)
 	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)

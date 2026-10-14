@@ -14,6 +14,9 @@ package http_test
 import (
 	"context"
 	"errors"
+	"go.keploy.io/server/v3/pkg/service/mock"
+	"go.keploy.io/server/v3/pkg/service/record"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -97,5 +100,51 @@ func TestGetPIDMapRefusalsKeepsARealFailureAnError(t *testing.T) {
 	}
 	if errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
 		t.Fatalf("a failed read is not \"this agent cannot count\": %v", err)
+	}
+}
+
+// The CLI's agent client is what each command's PID-map check type-asserts
+// for: were the method renamed, every check would quietly turn itself off.
+func TestTheAgentClientServesEveryPIDMapCheck(t *testing.T) {
+	c := newClient(t, agentWith(t, pidMapSvc{}))
+	var _ mock.PIDMapReader = c
+	var _ replay.PIDMapReader = c
+	var _ record.CaptureLossReader = c
+	var _ replay.CaptureLossReader = c
+}
+
+// lossAgentSvc counts capture losses, for the client's round trip.
+type lossAgentSvc struct {
+	pidMapSvc
+	losses models.CaptureLosses
+	err    error
+}
+
+func (s lossAgentSvc) CaptureLosses(context.Context) (models.CaptureLosses, error) {
+	return s.losses, s.err
+}
+
+// The client reads what the agent counted, field for field; an agent older
+// than the route (404) or one that cannot count (501) is "unknown"; a 500 is
+// an error that is not.
+func TestGetCaptureLossesReadsWhatTheAgentCounted(t *testing.T) {
+	want := models.CaptureLosses{{Kind: models.CaptureLossSTARTTLS, Count: 1, What: "a TLS upgrade the parser asked for"}}
+	got, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLosses(context.Background())
+	if err != nil || len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("read %+v, %v; want %+v", got, err, want)
+	}
+	if got, err := newClient(t, agentWith(t, lossAgentSvc{})).GetCaptureLosses(context.Background()); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("nothing lost: %+v, %v; want an empty list", got, err)
+	}
+	if _, err := newClient(t, agentWith(t, lossAgentSvc{err: models.ErrCaptureLossesUnsupported})).GetCaptureLosses(context.Background()); !errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("an agent that cannot count: %v", err)
+	}
+	if _, err := newClient(t, agentWith(t, lossAgentSvc{err: errors.New("bad file descriptor")})).GetCaptureLosses(context.Background()); err == nil || errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("a failed read: %v, want an error that is not 'unsupported'", err)
+	}
+	older := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(older.Close)
+	if _, err := newClient(t, older.URL+"/agent").GetCaptureLosses(context.Background()); !errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("an agent older than the route: %v", err)
 	}
 }

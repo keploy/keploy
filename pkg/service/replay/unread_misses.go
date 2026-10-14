@@ -66,3 +66,28 @@ func (r *Replayer) forgetNotJudged(testSetID string) {
 	defer r.notJudgedMu.Unlock()
 	delete(r.notJudgedSets, testSetID)
 }
+
+// testsWithUnreadCapture names the tests of a set whose capture could not be
+// told (FailureInfo.CaptureUnread: keploy could not read its agent's capture-
+// loss counts as the test ended, or at its set's mark), in result order. Under
+// the proven switch such a test has no verdict and neither has its set. With
+// the switch off it is always nil.
+func testsWithUnreadCapture(results []models.TestResult) []string {
+	if !provenswitch.On() {
+		return nil
+	}
+	var out []string
+	for _, r := range results {
+		if r.FailureInfo.CaptureUnread {
+			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// unreadCaptureReason is the test-set report's reason for a set left unjudged
+// by tests whose capture could not be told.
+func unreadCaptureReason(tests []string) string {
+	return fmt.Sprintf("not judged: keploy could not read whether its agent captured every call while %d test(s) ran (%s); check the agent's log for why its count could not be read, then run the test-set again",
+		len(tests), strings.Join(tests, ", "))
+}

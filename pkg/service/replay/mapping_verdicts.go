@@ -180,7 +180,7 @@ func passedMissShaped(results []models.TestResult, left []string) []string {
 // consumption may be its mapping: PASSED, and not a row the proven switch
 // leaves without a verdict.
 func passedWithAVerdict(r models.TestResult) bool {
-	return r.Status == models.TestStatusPassed && !r.FailureInfo.UnmatchedCallsUnread
+	return r.Status == models.TestStatusPassed && !r.FailureInfo.UnmatchedCallsUnread && !r.FailureInfo.CaptureUnread
 }
 
 // leftRecordedMockUnconsumed reports whether a test left a mock of its recorded

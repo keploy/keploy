@@ -292,6 +292,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     the test command runs: the run's own refusals are what it grows by
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "replay")
+	lossesBase := m.captureLossBaseline(ctx)
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
@@ -455,6 +456,26 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		}
 		m.logger.Error(msg, append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", captureIncomplete))...)
 	}
+	// Under the proven switch, every other loss of capture during the run
+	// fails it the same way: each test after it already failed with it, and
+	// this covers a loss after the last test too.
+	lost, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	if t := lost.Text(); t != "" {
+		if captureIncomplete == "" {
+			captureIncomplete = t
+		} else {
+			captureIncomplete += "; " + t
+		}
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy != FailedByKeploy {
+			failedBy = FailedByCaptureIncomplete
+		}
+		keployFailure = errors.New(captureIncomplete)
+		m.logger.Error("replay failed: keploy could not capture every call the test command made ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t))
+	}
 
 	// --strict means "fail unless every recorded call was matched". An
 	// unreadable miss list is not proof of that, so it fails too: a
@@ -515,21 +536,31 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// claims the failure first and keeps its name. Only --strict fails on it;
 	// without --strict it is said, and the receipt does not certify the run
 	// as isolated (below).
+	// Under the proven switch, a capture-loss count that could not be read
+	// is the same verdict as a lost PID-map count, said as what it is.
+	lossesUnread := false
+	if pidCheck.unreadable == nil && lostErr != nil && captureIncomplete == "" {
+		pidCheck.unreadable, lossesUnread = lostErr, true
+	}
 	if pidCheck.unreadable != nil {
 		captureUnverified = models.CaptureUnverified(pidCheck.unreadable)
+		unread, next := "tracked every process the test command ran", "check the agent logs for why its count could not be read, and for a WARN about its PID maps"
+		if lossesUnread {
+			captureUnverified = models.CaptureLossesUnverified(pidCheck.unreadable)
+			unread, next = "captured every call the test command made", "check the agent logs for why its count could not be read"
+		}
 		if m.config.Mock.Strict && utils.ErrCode == 0 { // a failure already decided keeps its name
 			utils.ErrCode = 1
 			failedBy = FailedByStrict
 			keployFailure = errors.New("--strict could not verify this replay: " + captureUnverified)
-			m.logger.Error("replay failed under --strict: keploy could not read whether the agent tracked every process the test command ran, so a clean run could not be proven",
+			m.logger.Error("replay failed under --strict: keploy could not read whether the agent "+unread+", so a clean run could not be proven",
 				zap.String("mock-set", name), zap.Error(pidCheck.unreadable),
 				zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why its count could not be read"))
 		} else {
-			next := "check the agent logs for why its count could not be read, and for a WARN about its PID maps"
 			if !m.config.Mock.Strict {
 				next += "; --strict fails such a run"
 			}
-			m.logger.Warn("this replay is not verified: keploy could not read whether the agent tracked every process the test command ran, so a call may have reached the real dependency unmocked",
+			m.logger.Warn("this replay is not verified: keploy could not read whether the agent "+unread+", so a call may have reached the real dependency unmocked",
 				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
 		}
 	}
@@ -1482,6 +1513,27 @@ func provenCount(n int) *int {
 	return &n
 }
 
+// mergeCaptureLosses is a and b, one entry per kind: the one with the larger
+// count (the counts are since the run began, so the later attempt's).
+func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
+	out := append(models.CaptureLosses(nil), a...)
+	for _, l := range b {
+		found := false
+		for i := range out {
+			if out[i].Kind == l.Kind {
+				found = true
+				if l.Count > out[i].Count {
+					out[i] = l
+				}
+			}
+		}
+		if !found {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // withEvidence puts on each test's line the evidence the proven wire charged
 // to it at its end (models.ScopeWindow.Evidence). A test that ran more than
 // once keeps the evidence of every attempt: one failed attempt fails it.
@@ -1508,6 +1560,9 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		if w.Evidence.Unread && !ev.Unread {
 			ev.Unread, ev.Reason = true, w.Evidence.Reason
 		}
+		// Counts since the run began: each attempt carries the run's, so
+		// keep one per kind, the latest (largest).
+		ev.CaptureIncomplete = mergeCaptureLosses(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete)
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {

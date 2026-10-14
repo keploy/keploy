@@ -468,6 +468,14 @@ type Replayer struct {
 	// reused across test sets is marked by the first test set that reaches
 	// its agent, whichever that is (a first test set can end before it).
 	pidMarked bool
+	// lossMark is, under the proven switch, where the next test set's tests
+	// count the agent's capture losses from (pidmaps.go); lossMarked is
+	// whether this run has taken one yet; lossLast is the latest per-test
+	// read, which the set's end counts what is left from.
+	lossMark     captureLossMark
+	lossMarked   bool
+	lossLast     models.CaptureLosses
+	lossLastRead bool
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -765,7 +773,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// even the --keep-app-alive one below): the run's refused PID map inserts
 	// are counted from here. A compose agent comes up with its project, in
 	// RunTestSet, which marks it there.
-	r.pidMarked = false
+	r.pidMarked, r.lossMarked = false, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 	}
@@ -2366,6 +2374,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// path leaves it unread: with nothing mocked, the report has no mock
 		// to describe.
 		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
+	}
+
+	// A run that started no application (an agent already up, no -c) has
+	// not marked the capture losses its tests count from: its first test set
+	// marks them here, before its first test (proven switch).
+	if provenswitch.On() && !r.lossMarked {
+		r.markCaptureLosses(runTestSetCtx)
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -4165,6 +4180,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", missed))
 	}
+	// Read before any hook runs, as the evidence floor reads it: a loss while
+	// a test ran holds the prune and mappings.yaml below.
+	testsLostCapture := anyTestLostCapture(testCaseResults)
+	if tainted := failTestsWithCaptureLoss(testCaseResults); len(tainted) > 0 {
+		r.logger.Error("tests failed: keploy's agent could not capture every call while they or a test before them ran (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", tainted))
+	}
 	// The evidence against each test, as the loop wrote it, before any hook can
 	// touch it (holdEvidenceFloor reads it back).
 	evidence := snapshotEvidence(testCaseResults)
@@ -4259,6 +4282,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// set has none either: neither PASSED nor FAILED, and nothing a judge may
 	// read as either (proven switch). A set already not judged for what its
 	// tests consumed says both.
+	// So has one whose capture could not be told (proven switch).
+	if unreadCapture := testsWithUnreadCapture(testCaseResults); len(unreadCapture) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		notJudged = alsoNotJudged(notJudged, unreadCaptureReason(unreadCapture))
+		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call while some of its tests ran; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", unreadCapture),
+			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
 	unreadMisses := testsWithUnreadMisses(testCaseResults)
 	if len(unreadMisses) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		notJudged = alsoNotJudged(notJudged, unreadMissesReason(unreadMisses))
@@ -4371,6 +4404,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// set nothing shows is complete is no basis for deleting recorded mocks.
 	pidVerdict := r.pidMapCaptureIncomplete(ctx, testSetID)
 	captureIncomplete, captureUnverified := pidVerdict.incomplete, pidVerdict.unverified
+	// Under the proven switch, what the agent lost after this set's last
+	// per-test read is the set's own, charged to none of its tests: the set
+	// fails with it, and it holds the prune and mappings.yaml, as above. The
+	// next test set's tests count from here.
+	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
+	if t := late.Text(); t != "" {
+		if captureIncomplete == "" {
+			captureIncomplete = t
+		} else {
+			captureIncomplete += "; " + t
+		}
+	}
+	if lateErr != nil && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = models.CaptureLossesUnverified(lateErr)
+	}
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
 	}
@@ -4385,8 +4433,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		(testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		unverifiedNotJudged = testSetStatus != models.TestSetStatusInternalErr
 		notJudged = alsoNotJudged(notJudged, captureUnverified)
-		r.logger.Error("test-set is not judged: keploy could not read whether its agent tracked every process the application ran; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-			zap.String("test-set", testSetID),
+		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call the application made; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID), zap.String("reason", captureUnverified),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -4506,7 +4554,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		resultsComplete:     resultsComplete,
 		noAnswer:            len(noAnswerTests) > 0,
 		appUnreachable:      appUnreachable,
-		captureIncomplete:   captureIncomplete != "",
+		captureIncomplete:   captureIncomplete != "" || testsLostCapture,
 		captureUnverified:   captureUnverified != "",
 		success:             success,
 		failure:             failure,
@@ -4670,18 +4718,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
 	switch {
 	case !wouldWrite:
-	case captureIncomplete != "":
+	case pidVerdict.incomplete != "":
 		// Whatever the flag: a call of an untracked process reached the real
 		// dependency, so the mock recorded for it is in no test's entry. A
 		// file created from that lacks it for good, and --update-test-mapping
 		// would put the short entries in place of the complete ones. First,
 		// as in the prune's reasons: it is positive evidence of a loss.
 		holdMappings = "the agent could not track every process the application ran, so the calls of an untracked one are in no test's entry"
+	case captureIncomplete != "" || testsLostCapture:
+		// The same for a call keploy lost (proven switch).
+		holdMappings = "keploy could not capture every call the application made, so a lost call's mock is in no test's entry"
 	case !allTestsGotAVerdict:
 		holdMappings = "not every loaded test got a verdict"
-	case captureUnverified != "":
+	case pidVerdict.unverified != "":
 		// The same, unproven either way: the agent's count could not be read.
 		holdMappings = "keploy could not read whether the agent tracked every process the application ran, so the calls of an untracked one may be in no test's entry"
+	case captureUnverified != "":
+		holdMappings = "keploy could not verify that the agent captured every call the application made, so a call it did not see may be in no test's entry"
 	case !r.config.Test.UpdateTestMapping && (len(noAnswerTests) > 0 || internalErr || !resultsComplete || appUnreachable):
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
@@ -6084,6 +6137,9 @@ func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
 //   - capture_incomplete: the agent could not track a process the application
 //     ran (pidmaps.go). Its calls reached the real dependency, so the mocks
 //     recorded for them were consumed by nobody, and every test may have passed.
+//     Under the proven switch, also a call keploy lost while a test ran, or
+//     after the set's last test (a TLS handshake a client aborted, a parser
+//     stall): the mock recorded for it was consumed by nobody either.
 //   - not_every_test_got_a_verdict: a subset or stopped run. The tests it did
 //     not score consumed nothing, and only mappings.yaml protects their mocks.
 //   - internal_error: keploy lost part of the run, such as a result insert.
@@ -6134,7 +6190,7 @@ type pruneRun struct {
 	resultsComplete            bool // results read back, none short of the verdicts
 	noAnswer                   bool // a request got no answer (pkg.IsAppNoAnswer)
 	appUnreachable             bool // anyAppConnectionError over the results read back
-	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete)
+	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete), or lost a call (proven switch)
 	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
 	success, failure, obsolete int
 	preserveFailedMocks        bool
@@ -6693,6 +6749,11 @@ type testMisses struct {
 	calls []models.UnmatchedCall
 	err   error
 	asked bool
+	// lost and lostErr are, under the proven switch, what the agent could not
+	// capture since the test set began (testCaptureLosses), and why that
+	// could not be told.
+	lost    models.CaptureLosses
+	lostErr error
 }
 
 // readMockErrors reads, once, the calls of the test just run that no mock
@@ -6704,7 +6765,11 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
-	return testMisses{calls: calls, err: err, asked: true}
+	read := testMisses{calls: calls, err: err, asked: true}
+	if provenswitch.On() {
+		read.lost, read.lostErr = r.testCaptureLosses(ctx)
+	}
+	return read
 }
 
 // attachReadMockErrors attaches a read of a test's misses to its result.
@@ -6742,6 +6807,18 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
 		}
 		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
+	}
+	switch {
+	case read.lostErr != nil:
+		// The test's capture cannot be told: like a miss list not read
+		// whole, it leaves the test without a verdict, and its set unjudged.
+		if result != nil {
+			result.FailureInfo.CaptureUnread = true
+		}
+		r.logger.Error("could not tell whether keploy's agent captured every call while this test ran; its test set is not judged",
+			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
+	case len(read.lost) > 0 && result != nil:
+		result.FailureInfo.CaptureIncomplete = read.lost
 	}
 }
 

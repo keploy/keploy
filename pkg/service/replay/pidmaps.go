@@ -71,6 +71,7 @@ type pidMapVerdict struct {
 // (pidMapCaptureIncomplete), so that every refusal of the run falls in exactly
 // one test set.
 func (r *Replayer) markPIDMaps(ctx context.Context) {
+	r.markCaptureLosses(ctx)
 	r.pidMark = pidMapMark{}
 	r.pidMarked = true
 	reader, ok := r.instrumentation.(PIDMapReader)
@@ -194,4 +195,120 @@ func withCaptureIncomplete(captureIncomplete, reason string) string {
 		return captureIncomplete
 	}
 	return captureIncomplete + "; " + reason
+}
+
+// CaptureLossReader is an optional Instrumentation extension: every kind of
+// capture loss the agent has counted since it started (models.CaptureLosses).
+type CaptureLossReader interface {
+	GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
+}
+
+// captureLossMark is, under the proven switch, the agent's capture-loss counts
+// a test set's tests are counted from. known is false when they could not be
+// read; err says why (models.ErrCaptureLossesUnsupported for an agent that
+// cannot count, which leaves the tests as they were).
+type captureLossMark struct {
+	at    models.CaptureLosses
+	known bool
+	err   error
+}
+
+// markCaptureLosses reads, under the proven switch, the counts the next test
+// set's tests are counted from: where the PID maps are marked, and again at
+// each test set's end, so a loss between two test sets is the next one's.
+func (r *Replayer) markCaptureLosses(ctx context.Context) {
+	r.lossMark = captureLossMark{}
+	r.lossMarked = true
+	// A run that does not mock sends every call to the real dependency by
+	// design: nothing is lost, and nothing is checked (as for the PID maps).
+	// Nor does a run with no agent to ask (a --base-path run): nothing of
+	// its is captured.
+	if !provenswitch.On() || !r.mocksDependencies() || r.noAgent {
+		r.lossMark.err = models.ErrCaptureLossesUnsupported
+		return
+	}
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	if !ok {
+		r.lossMark.err = models.ErrCaptureLossesUnsupported
+		return
+	}
+	at, err := readCaptureLosses(ctx, reader)
+	if err != nil {
+		r.lossMark.err = err
+		return
+	}
+	r.lossMark = captureLossMark{at: at, known: true}
+}
+
+// readCaptureLosses reads the agent's counts with no deadline of its own (the
+// proven switch's reads: the answer, the connection's close or ctx ends it).
+func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.CaptureLosses, error) {
+	return reader.GetCaptureLosses(ctx)
+}
+
+// testCaptureLosses is, under the proven switch, what the agent could not
+// capture since the test set's mark, read as one of its tests ends: processes
+// the kernel refused a place in the agent's PID maps, client-side TLS
+// handshakes that failed against keploy's CA, TLS upgrades keploy could not
+// make. A loss taints the test running when it happened and every later test
+// of the set (design v14 §3.2); the counts only grow, so every later read
+// carries it. An agent that cannot count leaves every test as it was, as the
+// set's own check does; one that counts but could not be read now, or at the
+// mark, is an error: the test's capture cannot be told.
+func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	if !ok || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
+		return nil, nil
+	}
+	if !r.lossMark.known {
+		if r.lossMark.err == nil {
+			return nil, errors.New("keploy did not read the agent's capture-loss counts when the test set began")
+		}
+		return nil, fmt.Errorf("at the start of the test set: %w", r.lossMark.err)
+	}
+	now, err := readCaptureLosses(ctx, reader)
+	if err != nil {
+		return nil, err
+	}
+	r.lossLast, r.lossLastRead = now, true
+	return now.Since(r.lossMark.at), nil
+}
+
+// endCaptureLosses reads, at a test set's end under the proven switch, what
+// the agent lost after the set's last per-test read (after its mark, when no
+// test read), and moves the mark to now for the next test set. Nothing for
+// an agent that cannot count or a run that does not mock. An error is a read
+// that failed: what the set's tail lost cannot be told, and the next set's
+// tests cannot be counted.
+func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	reader, ok := r.instrumentation.(CaptureLossReader)
+	mark, last, lastRead := r.lossMark, r.lossLast, r.lossLastRead
+	r.lossLast, r.lossLastRead = nil, false
+	if !provenswitch.On() || !ok || !r.mocksDependencies() || r.noAgent || errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
+		r.markCaptureLosses(ctx)
+		return nil, nil
+	}
+	now, err := readCaptureLosses(ctx, reader)
+	r.lossMarked = true
+	if err != nil {
+		r.lossMark = captureLossMark{err: err}
+		return nil, err
+	}
+	r.lossMark = captureLossMark{at: now, known: true}
+	if !mark.known {
+		return nil, nil // the set's tests were unjudged for it already
+	}
+	from := mark.at
+	if lastRead {
+		from = last
+	}
+	// Not the PID-map refusals: the set's PID-map check (pidMapCaptureIncomplete)
+	// reports those, once.
+	var out models.CaptureLosses
+	for _, l := range now.Since(from) {
+		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
+			out = append(out, l)
+		}
+	}
+	return out, nil
 }

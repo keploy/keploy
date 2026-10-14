@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -113,6 +114,12 @@ type Config struct {
 	// Logger receives diagnostic messages. Nil is safe; a no-op
 	// logger is substituted.
 	Logger *zap.Logger
+
+	// OnCaptureLoss, when set, is told of each call the relay could not
+	// capture: today a TLS upgrade (STARTTLS, Postgres SSLRequest) it could
+	// not make, after which the connection is not parsed. kind and what are
+	// as for models.CaptureLoss. Nil is safe.
+	OnCaptureLoss func(kind models.CaptureLossKind, what string)
 
 	// PerConnCap is the soft cap on parser-owned buffered bytes.
 	// When the number of bytes currently sitting in the tee channel
