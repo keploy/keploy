@@ -176,3 +176,38 @@ func withCaptureIncomplete(captureIncomplete, reason string) string {
 	}
 	return captureIncomplete + "; " + reason
 }
+
+// testCaptureLosses is, under the proven switch, what the agent could not
+// capture since the test set's mark, read as one of its tests ends: the
+// processes the kernel refused a place in the agent's PID maps. A loss taints
+// the test running when it happened and every later test of the set (design
+// v14 §3.2); the count only grows, so every later read carries it. An agent
+// that cannot count leaves every test as it was, as the set's own check does;
+// one that counts but could not be read now, or at the mark, is an error: the
+// test's capture cannot be told.
+func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	reader, ok := r.instrumentation.(PIDMapReader)
+	if !ok || (!r.pidMark.known && r.pidMark.unreadable == nil) {
+		return nil, nil
+	}
+	if !r.pidMark.known {
+		return nil, fmt.Errorf("at the start of the test set: %w", r.pidMark.unreadable)
+	}
+	now, err := readPIDMapRefusals(ctx, reader)
+	if err != nil {
+		return nil, err
+	}
+	refused := now.Since(r.pidMark.at)
+	if !refused.Any() {
+		return nil, nil
+	}
+	what := "target_namespace_pids"
+	cause := models.PIDMapRefusalCause(refused.LastTargetErr)
+	if refused.Target == 0 {
+		what, cause = "excluded_pids", models.PIDMapRefusalCause(refused.LastExcludedErr)
+	}
+	if cause != "" {
+		what += ": " + cause
+	}
+	return models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: refused.Target + refused.Excluded, What: what}}, nil
+}

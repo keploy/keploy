@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -491,5 +492,71 @@ func TestWithCaptureIncomplete(t *testing.T) {
 		if got := withCaptureIncomplete(tc.ci, tc.reason); got != tc.want {
 			t.Errorf("withCaptureIncomplete(%q, %q) = %q, want %q", tc.ci, tc.reason, got, tc.want)
 		}
+	}
+}
+
+// Under the proven switch a process the PID map refused taints the test
+// running when it happened and every later test of the set (design v14 §3.2):
+// each is FAILED with CAPTURE_INCOMPLETE and what was lost, and the test
+// before it is not. With the switch off the per-test reads are not made.
+func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 3, 0) // every test passes
+	// The mark, then one read as each test ends, then the set's own read.
+	instr := &prPIDMapInstr{prInstr: h.instr, answers: []models.PIDMapRefusals{
+		{}, {}, {Target: 2, LastTargetErr: -7}, {Target: 2, LastTargetErr: -7}, {Target: 2, LastTargetErr: -7},
+	}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("test set status %q, want FAILED", status)
+	}
+	byID := map[string]models.TestResult{}
+	for _, r := range h.report.report.Tests {
+		byID[r.TestCaseID] = r
+	}
+	if r := byID["test-1"]; r.Status != models.TestStatusPassed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+		t.Fatalf("test-1 (ended before the loss): %s %+v, want PASSED with no capture evidence", r.Status, r.FailureInfo.CaptureIncomplete)
+	}
+	for _, id := range []string{"test-2", "test-3"} {
+		r := byID[id]
+		if r.Status != models.TestStatusFailed {
+			t.Fatalf("%s: %s, want FAILED: the loss taints the test running and every later one", id, r.Status)
+		}
+		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0].Count != 2 ||
+			!strings.Contains(r.FailureInfo.CaptureIncomplete[0].What, "target_namespace_pids") {
+			t.Fatalf("%s: capture evidence %+v, want 2 refused inserts into target_namespace_pids", id, r.FailureInfo.CaptureIncomplete)
+		}
+		found := false
+		for _, c := range r.FailureInfo.Category {
+			found = found || c == models.CaptureIncompleteCategory
+		}
+		if !found {
+			t.Fatalf("%s: categories %v lack %s", id, r.FailureInfo.Category, models.CaptureIncompleteCategory)
+		}
+	}
+}
+
+// Under the proven switch a per-test read that fails leaves that test without
+// a verdict, and its set unjudged, like a miss list not read whole.
+func TestUnderTheSwitchAPerTestCaptureReadThatFailsLeavesTheSetUnjudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 3, 0)
+	instr := &prPIDMapInstr{prInstr: h.instr, answers: []models.PIDMapRefusals{{}}, errAt: map[int]error{3: errors.New("connection reset")}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+	status := h.run(t)
+	if status == models.TestSetStatusPassed || status == models.TestSetStatusFailed {
+		t.Fatalf("status %s: a set with a test whose capture could not be told is neither PASSED nor FAILED", status)
+	}
+	var unread []string
+	for _, r := range h.report.report.Tests {
+		if r.FailureInfo.UnmatchedCallsUnread {
+			unread = append(unread, r.TestCaseID)
+		}
+	}
+	if len(unread) != 1 || unread[0] != "test-2" {
+		t.Fatalf("tests without a verdict %v, want [test-2] (the read as it ended failed)", unread)
 	}
 }

@@ -187,6 +187,11 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
+	// not capture since the test set began, as this test ended: a loss taints
+	// the test running when it happened and every later test of the set
+	// (design v14 §3.2), each of which fails. Empty with the switch off.
+	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -414,6 +419,10 @@ const (
 	// which fails it under KEPLOY_PROVEN=1. The calls are in
 	// FailureInfo.UnmatchedCalls.
 	CallUnmatched FailureCategory = "UNMATCHED_CALL"
+	// CaptureIncompleteCategory: keploy's agent could not capture every call
+	// while this test or one before it in its test set ran, which fails it
+	// under KEPLOY_PROVEN=1. The losses are in FailureInfo.CaptureIncomplete.
+	CaptureIncompleteCategory FailureCategory = "CAPTURE_INCOMPLETE"
 	// TemplateVariable means a template variable place of the expected
 	// response was not satisfied by the answer (a {{capture ...}} that found
 	// no value of its type, or a use that did not hold its key's value), or

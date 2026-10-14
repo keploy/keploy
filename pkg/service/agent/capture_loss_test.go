@@ -97,7 +97,7 @@ func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
 		{"a failed read", func(a *Agent) {
 			a.Hooks = countingHooks{err: errors.New("bad file descriptor")}
 		}, "bad file descriptor"},
-		{"hooks that cannot count", func(a *Agent) { a.Hooks = loadedHooks{} }, "cannot tell whether it captured every call"},
+		{"hooks that counted at the start and no longer can", func(a *Agent) { a.Hooks = loadedHooks{} }, "cannot tell whether it captured every call"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _ := wireAgent(models.MODE_TEST)
@@ -129,4 +129,14 @@ func TestACaptureLossMarkThatCouldNotBeReadFailsTheReplayedTests(t *testing.T) {
 	e := endPassed(t, a, "TestA")
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	require.Contains(t, e.Reason, "at the start of the run")
+}
+
+// Hooks that never count (other platforms', which release 1 does not prove)
+// leave every test as it was, as the PID-map check leaves a session.
+func TestHooksThatNeverCountLeaveTheTestsAsTheyWere(t *testing.T) {
+	a, _ := wireAgent(models.MODE_TEST)
+	a.Hooks = loadedHooks{}
+	require.NoError(t, a.resetSession(context.Background()))
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestA").Action)
 }

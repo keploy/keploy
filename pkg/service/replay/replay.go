@@ -4116,6 +4116,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", missed))
 	}
+	if tainted := failTestsWithCaptureLoss(testCaseResults); len(tainted) > 0 {
+		r.logger.Error("tests failed: keploy's agent could not capture every call while they or a test before them ran (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", tainted))
+	}
 	// The evidence against each test, as the loop wrote it, before any hook can
 	// touch it (holdEvidenceFloor reads it back).
 	evidence := snapshotEvidence(testCaseResults)
@@ -6605,6 +6610,11 @@ type testMisses struct {
 	calls []models.UnmatchedCall
 	err   error
 	asked bool
+	// lost and lostErr are, under the proven switch, what the agent could not
+	// capture since the test set began (testCaptureLosses), and why that
+	// could not be told.
+	lost    models.CaptureLosses
+	lostErr error
 }
 
 // readMockErrors reads, once, the calls of the test just run that no mock
@@ -6616,7 +6626,11 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
-	return testMisses{calls: calls, err: err, asked: true}
+	read := testMisses{calls: calls, err: err, asked: true}
+	if provenswitch.On() {
+		read.lost, read.lostErr = r.testCaptureLosses(ctx)
+	}
+	return read
 }
 
 // attachReadMockErrors attaches a read of a test's misses to its result.
@@ -6654,6 +6668,16 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			result.FailureInfo.UnmatchedCalls = append(result.FailureInfo.UnmatchedCalls, me)
 		}
 		r.mockMismatchFailures.AddUnmatchedCallForTest(testSetID, testCaseName, me)
+	}
+	switch {
+	case read.lostErr != nil:
+		// The test's capture cannot be told: like a miss list not read
+		// whole, it leaves the test without a verdict, and its set unjudged.
+		markUnmatchedCallsUnread(result)
+		r.logger.Error("could not tell whether keploy's agent captured every call while this test ran; its test set is not judged",
+			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
+	case len(read.lost) > 0 && result != nil:
+		result.FailureInfo.CaptureIncomplete = read.lost
 	}
 }
 

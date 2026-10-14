@@ -70,8 +70,13 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // it taints the test open when it happened and every test after it (design
 // v14 §3.2), so every test that ends after a loss carries it. A mark or a read
 // that failed is an error: a test keploy cannot tell was fully captured is
-// not judged as if it were.
+// not judged as if it were. Hooks that cannot count at all (other platforms'
+// hooks, which release 1 does not prove) leave every test as it was, as the
+// PID-map check does for a session (models.ErrPIDMapRefusalsUnsupported).
 func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark) (models.CaptureLosses, error) {
+	if errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
+		return nil, nil
+	}
 	if !mark.known {
 		if mark.err == nil {
 			return nil, errors.New("keploy did not read its capture-loss counts when the run began")
@@ -80,6 +85,8 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark) (m
 	}
 	now, err := a.CaptureLosses(ctx)
 	if err != nil {
+		// Hooks that counted at the run's start and no longer can: the count
+		// was lost, which is not "never counted".
 		return nil, err
 	}
 	return now.Since(mark.at), nil
