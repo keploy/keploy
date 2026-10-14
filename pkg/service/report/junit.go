@@ -307,13 +307,26 @@ func depNonFailureBody(deps []models.DepResult) string {
 }
 
 // templateFailureLines is one line per template variable place a test case
-// failed on.
+// failed on, and for a test case of a test set refused whole, the set's
+// refusal, which is no template variable's.
 func templateFailureLines(fs []models.TemplateFailure) []string {
 	lines := make([]string, 0, len(fs))
 	for _, f := range fs {
+		if wholeSetRefusal(f) {
+			lines = append(lines, templateFailureLine(f))
+			continue
+		}
 		lines = append(lines, "template variable "+templateFailureLine(f))
 	}
 	return lines
+}
+
+// wholeSetRefusal reports whether f refuses a test case's whole test set (one
+// a killed keploy templatize left half-written; its category is
+// TEST_SET_REFUSED), which names no placeholder, rather than a placeholder of
+// the test case.
+func wholeSetRefusal(f models.TemplateFailure) bool {
+	return f.Refused && f.Placeholder == ""
 }
 
 // templateFailureLine is one template failure as the reports say it: where,
