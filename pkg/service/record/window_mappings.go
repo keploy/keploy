@@ -50,9 +50,15 @@ func (r *Recorder) newWindowMappings() *windowMappings {
 }
 
 // addTest records the window of a test case once it is persisted (under the
-// name its insert gave it).
+// name its insert gave it). One that came back without a name keeps its window
+// and gets no entry, as a test case the recording failed to persist does: an
+// entry needs the test's name.
 func (w *windowMappings) addTest(tc *models.TestCase) {
 	if w == nil {
+		return
+	}
+	if tc == nil || tc.Name == "" {
+		w.addLostTest(tc)
 		return
 	}
 	win := models.RecordedWindow(tc)
@@ -125,12 +131,11 @@ func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db Mappi
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
+	// The drain joined every goroutine that adds to the collector: derive from
+	// it as it is, without a copy.
 	w.mu.Lock()
-	tests := append([]models.TestWindow(nil), w.tests...)
-	mocks := append([]models.WindowedMock(nil), w.mocks...)
+	derived := models.DeriveWindowMappings(w.tests, w.mocks)
 	w.mu.Unlock()
-
-	derived := models.DeriveWindowMappings(tests, mocks)
 	kept := func(id string) bool {
 		_, gone := deleted[id]
 		return !gone && !strings.HasPrefix(id, lostTestPrefix)

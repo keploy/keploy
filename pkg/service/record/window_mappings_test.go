@@ -223,10 +223,12 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 		name    string
 		proven  bool
 		sync    bool
+		stream  bool
 		disable bool
 	}{
 		{name: "switch off"},
-		{name: "--sync under the switch", proven: true, sync: true},
+		{name: "--sync under the switch", proven: true, sync: true, stream: true},
+		{name: "--sync under the switch, the agent streamed nothing", proven: true, sync: true},
 		{name: "--disable-mapping under the switch", proven: true, disable: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +245,7 @@ func TestStart_OnlyAProvenRecordWithoutSyncMapsFromWindows(t *testing.T) {
 			w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
 			w.test(t, winTest("test-1", 1000, 1100))
 			var want []map[string][]string
-			if tc.sync {
+			if tc.stream {
 				// The agent maps a --sync recording itself.
 				w.streamed(t, models.TestMockMapping{TestName: "test-1", MockIDs: []string{"rates-1"}})
 				want = []map[string][]string{{"test-1": {"rates-1"}}}
@@ -438,5 +440,71 @@ func TestWindowMappingsCollectOnlyTestMocks(t *testing.T) {
 	w.addMock(winMock("query", models.Postgres, "mocks", 1030))
 	if len(w.mocks) != 1 || w.mocks[0].Name != "query" {
 		t.Fatalf("collected %+v; want only the data-plane query", w.mocks)
+	}
+}
+
+// Through Start: a test case whose insert fails keeps its window, so the call
+// recorded while it and a later-started test were open goes to no test, not
+// to the one that persisted. The failed insert ends the recording; the
+// mappings of what it kept are still written.
+func TestStart_ProvenWindowMappingsKeepTheWindowOfATestThatFailedToPersist(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	mappingDB := &recMappingDB{}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{failNames: map[string]bool{"lost": true}},
+		mockDB:          mockDB,
+		mappingDb:       mappingDB,
+		telemetry:       &recTelemetry{},
+		instrumentation: &blockingInstr{f},
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+	}
+	// Not cancellable: the failed insert ends the recording (see
+	// TestAPortIsObservedEvenWhenItsTestCaseFailsToPersist).
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+	select {
+	case f.outgoing <- winMock("call", models.HTTP, "", 1210):
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recorder never took the mock")
+	}
+	require.Eventually(t, func() bool {
+		mockDB.mu.Lock()
+		defer mockDB.mu.Unlock()
+		return len(mockDB.inserted) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+	// The surviving test case first: the failing insert ends the recording.
+	for _, tc := range []*models.TestCase{winTest("kept", 1200, 1300), winTest("lost", 1000, 1500)} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder never took %s", tc.Name)
+		}
+	}
+	close(f.outgoing)
+	close(f.incoming)
+	close(f.mappings)
+	select {
+	case err := <-done:
+		require.Error(t, err, "precondition: the failed insert ends the recording")
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	mappingDB.mu.Lock()
+	defer mappingDB.mu.Unlock()
+	if len(mappingDB.batches) != 1 {
+		t.Fatalf("want one batch, got %v", mappingDB.batches)
+	}
+	if got := mappingDB.batches[0]; len(got) != 1 || len(got["kept"]) != 0 {
+		t.Fatalf("mapped %v; want kept with no mock: the call was recorded inside the window of the test case that failed to persist", got)
 	}
 }

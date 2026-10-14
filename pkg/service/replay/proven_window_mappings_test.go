@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -32,11 +33,42 @@ func mongoMockAt(name string, ms int) *models.Mock {
 	}
 }
 
+// drainedByWindow is consumedByWindow with the agent's read semantics: what a
+// window consumed is handed over once, and a second read of the same window
+// (the streaming pass reads before and after the stream) gets nothing more.
+func drainedByWindow(h *prRun, byTest map[string][]models.MockState) func() []models.MockState {
+	answer := consumedByWindow(h, byTest)
+	var mu sync.Mutex
+	handed := map[string]bool{}
+	return func() []models.MockState {
+		h.instr.mu.Lock()
+		after := h.instr.lastParams.AfterTime.String()
+		h.instr.mu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
+		if handed[after] {
+			return nil
+		}
+		handed[after] = true
+		return answer()
+	}
+}
+
+// carriedAt is mongoAt for a mock the agent reports carried over: consumed
+// outside the window it was recorded in.
+func carriedAt(name string, ms int) models.MockState {
+	m := mongoAt(name, ms)
+	m.CarryOver = true
+	return m
+}
+
 func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowMockUnconsumed(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		consumed map[string][]models.MockState
 		update   bool
+		// streamed names the tests replayed in the streaming pass.
+		streamed []string
 		// wantOff is the file the run creates with the switch off; wantOn
 		// with it on (nil: no file).
 		wantOff, wantOn map[string][]string
@@ -72,6 +104,36 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 			wantLeft: []string{"test-2"},
 		},
 		{
+			name:     "a streamed test consumed the mocks of its window: the control",
+			streamed: []string{"test-2"},
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-1", 1010)},
+				"test-2": {mongoAt("mock-2", 2010)},
+			},
+			wantOff: map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}},
+			wantOn:  map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}},
+		},
+		{
+			name:     "a streamed test no longer makes its call",
+			streamed: []string{"test-2"},
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-1", 1010)},
+			},
+			wantOff:  map[string][]string{"test-1": {"mock-1"}},
+			wantLeft: []string{"test-2"},
+		},
+		{
+			// A carried-over mock (a pushed message) recorded in test-2's
+			// window and consumed while test-1 ran is test-2's by the run's
+			// attribution: test-2 did not leave it unconsumed.
+			name: "a carried-over mock test-2's window recorded, consumed while test-1 ran",
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-1", 1010), carriedAt("mock-2", 2010)},
+			},
+			wantOff: map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}},
+			wantOn:  map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}},
+		},
+		{
 			name: "--update-test-mapping creates no file either",
 			consumed: map[string][]models.MockState{
 				"test-1": {mongoAt("mock-1", 1010)},
@@ -94,6 +156,7 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 				pinWindows(h)
 				h.replayer.logger = zap.New(core)
 				h.replayer.config.Test.UpdateTestMapping = tc.update
+				h.streaming(tc.streamed...)
 				// The recording: a DNS lookup and a handshake in test-1's
 				// window are not test mocks, and nothing consumes them here.
 				lookup := mongoMockAt("lookup", 1005)
@@ -102,7 +165,7 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappingsFromARunThatLeftAWindowM
 				handshake.Spec.Metadata["type"] = "config"
 				h.mocks.filtered = []*models.Mock{lookup, handshake, mongoMockAt("mock-1", 1010), mongoMockAt("mock-2", 2010)}
 				db := mappingFile(t, h, nil)
-				h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, tc.consumed)}
+				h.replayer.hookImpl = prHooks{consumedFor: drainedByWindow(h, tc.consumed)}
 				_ = h.run(t)
 
 				want := tc.wantOff

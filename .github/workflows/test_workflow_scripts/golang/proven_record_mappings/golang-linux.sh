@@ -88,11 +88,11 @@ until curl -fsS http://localhost:8080/api/locations > /dev/null; do
     kill -0 "$record_pid" 2>/dev/null || fail "keploy record exited before the app answered" record_logs.txt
     sleep 1
 done
-locations=$(curl -fsS http://localhost:8080/api/locations)
+locations=$(curl -fsS http://localhost:8080/api/locations) || fail "GET /api/locations failed while recording" record_logs.txt
 location=$(echo "$locations" | jq -r '.location[0]')
-curl -fsS "http://localhost:8080/api/locations/$location" > /dev/null
-curl -fsS http://localhost:8080/api/greet > /dev/null
-curl -fsS "http://localhost:8080/api/greet?format=xml" > /dev/null
+for path in "/api/locations/$location" /api/greet "/api/greet?format=xml"; do
+    curl -fsS "http://localhost:8080$path" > /dev/null || fail "GET $path failed while recording" record_logs.txt
+done
 
 # Stop the recording as Ctrl+C does; it hands over everything captured before
 # the stop, and only then exits.
@@ -245,13 +245,11 @@ shopt -u nullglob
 [ ${#created[@]} -eq 0 ] || fail "a run in which tests left the calls recorded in their windows unconsumed created ${created[*]} under KEPLOY_PROVEN=1" "${created[@]}"
 grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "KEPLOY_PROVEN=1" ||
     fail "the run must say why it did not create mappings.yaml (exit $unmapped_rc)" unmapped_removed_logs.txt
-for id in "${location_tests[@]}"; do
-    case "$id" in
-        get-api-locations-[0-9]*)
-            grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "$id" ||
-                fail "the hold must name $id, which left its recorded call unconsumed" unmapped_removed_logs.txt
-            ;;
-    esac
+for tc in "$set_dir"/tests/*.yaml; do
+    [ "$(yq '.spec.req.url' "$tc")" = "http://localhost:8080/api/locations" ] || continue
+    id=$(yq '.name' "$tc")
+    grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "\"$id\"" ||
+        fail "the hold must name $id, which left its recorded call unconsumed" unmapped_removed_logs.txt
 done
 echo "✓ under KEPLOY_PROVEN=1 a replay that left a recorded call unconsumed creates no mappings.yaml"
 
