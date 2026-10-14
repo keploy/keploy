@@ -15,7 +15,7 @@ func wmWindow(test string, from, to int) TestWindow {
 }
 
 func wmMock(name string, at int) WindowedMock {
-	return WindowedMock{Entry: MockEntry{Name: name, Kind: string(HTTP)}, At: wmAt(at), TestMock: true}
+	return WindowedMock{Name: name, Kind: HTTP, At: wmAt(at), Res: wmAt(at + 1), TestMock: true}
 }
 
 // mappedNames is each test's derived mapping by mock name, in its order.
@@ -46,7 +46,7 @@ func TestDeriveWindowMappingsSequentialWindows(t *testing.T) {
 		wmMock("m-1b", 1100), // at the window's end
 		wmMock("m-1a", 1000), // at its start, recorded first
 		wmMock("gap", 1500),
-		{Entry: MockEntry{Name: "handshake"}, At: wmAt(2010), TestMock: false},
+		{Name: "handshake", At: wmAt(2010), TestMock: false},
 		wmMock("m-2", 2050),
 		wmMock("untimed", 0),
 		wmMock("after", 3200),
@@ -63,8 +63,9 @@ func TestDeriveWindowMappingsSequentialWindows(t *testing.T) {
 	if got.Concurrent != nil {
 		t.Fatalf("sequential tests reported as concurrent: %v", got.Concurrent)
 	}
-	if e := got.Tests[1].Mocks[0]; e.Kind != string(HTTP) {
-		t.Fatalf("the entry lost its kind: %+v", e)
+	if e := got.Tests[1].Mocks[0]; e.Kind != string(HTTP) || e.ReqTimestampMock != FormatMockTimestamp(wmAt(2050)) ||
+		e.ResTimestampMock != FormatMockTimestamp(wmAt(2051)) || e.Timestamp != wmAt(2050).Unix() {
+		t.Fatalf("the entry does not carry the mock's kind and recorded times: %+v", e)
 	}
 }
 
@@ -164,10 +165,8 @@ func TestNewWindowedMockTestMocks(t *testing.T) {
 			if w.TestMock != tc.want {
 				t.Fatalf("TestMock = %v; want %v", w.TestMock, tc.want)
 			}
-			if !w.At.Equal(at) || w.Entry.Name != "mock-1" || w.Entry.Kind != string(tc.mock.Kind) ||
-				w.Entry.ReqTimestampMock != FormatMockTimestamp(at) || w.Entry.ResTimestampMock != FormatMockTimestamp(at.Add(time.Millisecond)) ||
-				w.Entry.Timestamp != at.Unix() {
-				t.Fatalf("entry = %+v at %v", w.Entry, w.At)
+			if !w.At.Equal(at) || !w.Res.Equal(at.Add(time.Millisecond)) || w.Name != "mock-1" || w.Kind != tc.mock.Kind {
+				t.Fatalf("windowed mock = %+v", w)
 			}
 		})
 	}

@@ -320,7 +320,7 @@ func TestWindowMappingsWriteNothingAfterADrainThatTimedOut(t *testing.T) {
 	w := &windowMappings{}
 	w.addTest(winTest("test-1", 1000, 1100))
 	w.addMock(winMock("rates-1", models.HTTP, "", 1030))
-	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, false)
+	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, false, 0)
 
 	if len(db.batches) != 0 {
 		t.Fatalf("wrote %v after a drain that timed out", db.batches)
@@ -334,7 +334,7 @@ func TestWindowMappingsWriteNothingAfterADrainThatTimedOut(t *testing.T) {
 
 	// The control: drained, the same collector writes.
 	utils.ErrCode = 0
-	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true)
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
 	if len(db.batches) != 1 || utils.ErrCode != 0 {
 		t.Fatalf("a drained recording wrote %v (exit code %d); want one batch", db.batches, utils.ErrCode)
 	}
@@ -351,7 +351,7 @@ func TestWindowMappingsNameConcurrentTests(t *testing.T) {
 	w.addTest(winTest("alone", 3000, 3100))
 	w.addMock(winMock("call", models.HTTP, "", 1250))
 	w.addMock(winMock("other", models.HTTP, "", 3050))
-	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, true)
+	w.write(context.Background(), zap.New(core), db, "test-set-0", nil, true, 0)
 
 	warned := logs.FilterMessageSnippet("recorded while another test's request was still open").All()
 	if len(warned) != 1 {
@@ -359,5 +359,84 @@ func TestWindowMappingsNameConcurrentTests(t *testing.T) {
 	}
 	if got := warned[0].ContextMap()["tests"]; !reflect.DeepEqual(got, []interface{}{"slow", "fast"}) {
 		t.Fatalf("the warning names %v; want [slow fast]", got)
+	}
+}
+
+// A recording made without --sync that the agent mapped itself (enterprise's
+// static dedup resolves windows in the agent) keeps the agent's mappings and
+// derives none: both could list one call under two tests.
+func TestStart_ProvenWindowMappingsYieldToMappingsTheAgentStreamed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	keepExitCode(t)
+	core, logs := observer.New(zap.InfoLevel)
+	w := startWinRecording(t, &config.Config{}, nil)
+	w.r.logger = zap.New(core)
+	w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
+	w.mock(t, winMock("rates-2", models.HTTP, "", 2030))
+	w.test(t, winTest("test-1", 1000, 1100))
+	w.test(t, winTest("test-2", 2000, 2100))
+	w.streamed(t, models.TestMockMapping{TestName: "test-1", MockIDs: []string{"rates-1"}})
+	require.Eventually(t, func() bool { return len(w.batches()) == 1 }, 10*time.Second, 10*time.Millisecond)
+	w.stop(t, 2, 2)
+
+	want := []map[string][]string{{"test-1": {"rates-1"}}}
+	if got := w.batches(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mappings written: %v; want only the agent's %v", got, want)
+	}
+	if logs.FilterMessageSnippet("mapped this recording's tests to their mocks itself").Len() != 1 {
+		t.Fatalf("want one line saying the agent mapped the recording, got %+v", logs.All())
+	}
+	if utils.ErrCode != 0 {
+		t.Fatalf("exit code %d", utils.ErrCode)
+	}
+}
+
+// A test case the recording failed to persist keeps its window, as a deleted
+// one does: the call recorded while it and a later test were open is its own,
+// not handed to the later test. Neither it nor a deleted test is named as
+// concurrent.
+func TestWindowMappingsALostTestKeepsItsWindow(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addLostTest(winTest("", 1000, 1500))
+	w.addTest(winTest("kept", 1200, 1300))
+	w.addTest(winTest("deleted", 1250, 1400))
+	w.addTest(winTest("other", 3000, 3100))
+	w.addMock(winMock("lost-call", models.HTTP, "", 1210))
+	w.addMock(winMock("other-call", models.HTTP, "", 3050))
+	w.write(context.Background(), zap.New(core), db, "test-set-0", map[string]struct{}{"deleted": {}}, true, 0)
+
+	if len(db.batches) != 1 {
+		t.Fatalf("want one batch, got %v", db.batches)
+	}
+	names := map[string][]string{}
+	for test, entries := range db.batches[0] {
+		names[test] = []string{}
+		for _, e := range entries {
+			names[test] = append(names[test], e.Name)
+		}
+	}
+	if want := map[string][]string{"kept": {}, "other": {"other-call"}}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	warned := logs.FilterMessageSnippet("recorded while another test's request was still open").All()
+	if len(warned) != 1 || !reflect.DeepEqual(warned[0].ContextMap()["tests"], []interface{}{"kept"}) {
+		t.Fatalf("want the warning to name only kept, got %+v", logs.All())
+	}
+}
+
+// The collector keeps only the mocks a test may own: a recording can make
+// millions of handshakes, DNS lookups and async deliveries.
+func TestWindowMappingsCollectOnlyTestMocks(t *testing.T) {
+	w := &windowMappings{}
+	async := winMock("delivery", models.HTTP, "", 1020)
+	async.Spec.Async = &models.AsyncMeta{Lane: "events"}
+	w.addMock(winMock("handshake", models.Postgres, "config", 1010))
+	w.addMock(winMock("lookup", models.DNS, "", 1015))
+	w.addMock(async)
+	w.addMock(winMock("query", models.Postgres, "mocks", 1030))
+	if len(w.mocks) != 1 || w.mocks[0].Name != "query" {
+		t.Fatalf("collected %+v; want only the data-plane query", w.mocks)
 	}
 }

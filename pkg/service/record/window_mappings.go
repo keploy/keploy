@@ -2,6 +2,8 @@ package record
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -24,8 +26,17 @@ import (
 type windowMappings struct {
 	mu    sync.Mutex
 	tests []models.TestWindow
+	// lost is how many windows of test cases the recording failed to persist
+	// tests holds (see addLostTest).
+	lost int
+	// mocks holds only the test mocks: a protocol-phase or async-lane mock
+	// is no test's, and a recording can make millions of them.
 	mocks []models.WindowedMock
 }
+
+// lostTestPrefix starts the window name of a test case the recording failed
+// to persist. No test case is named so: a test case's name is a file name.
+const lostTestPrefix = "\x00lost-"
 
 // newWindowMappings is the collector of a recording that derives its
 // mappings.yaml from its test windows: one made without --sync under the
@@ -50,13 +61,32 @@ func (w *windowMappings) addTest(tc *models.TestCase) {
 	w.mu.Unlock()
 }
 
+// addLostTest records the window of a test case the recording failed to
+// persist. It owns what was recorded inside it, as a test case the finalize
+// deletes does, so those mocks go to no test rather than to one that ran
+// beside it; it gets no entry.
+func (w *windowMappings) addLostTest(tc *models.TestCase) {
+	if w == nil {
+		return
+	}
+	win := models.RecordedWindow(tc)
+	w.mu.Lock()
+	w.lost++
+	win.TestCase = fmt.Sprintf("%s%d", lostTestPrefix, w.lost)
+	w.tests = append(w.tests, win)
+	w.mu.Unlock()
+}
+
 // addMock records a mock once it is persisted (under the name its insert gave
-// it, with the async lane its hooks stamped on it).
+// it, with the async lane its hooks stamped on it), when a test may own it.
 func (w *windowMappings) addMock(m *models.Mock) {
 	if w == nil {
 		return
 	}
 	wm := models.NewWindowedMock(m)
+	if !wm.TestMock || wm.At.IsZero() {
+		return
+	}
 	w.mu.Lock()
 	w.mocks = append(w.mocks, wm)
 	w.mu.Unlock()
@@ -68,13 +98,24 @@ func (w *windowMappings) addMock(m *models.Mock) {
 // keeps its window, so the mocks recorded inside it stay its own and are not
 // handed to a test that ran beside it; its entry is left out.
 //
+// streamed is how many mappings the agent handed over. An agent that maps a
+// recording made without --sync itself (enterprise's static dedup resolves its
+// windows in the agent) has written them already, and entries derived here as
+// well could list one call under two tests: none is derived.
+//
 // drained says the record drain joined every persist goroutine. When it did
 // not, a test case or mock may still be on its way to disk, and a mapping
 // derived now could leave a test without a mock it recorded: none is written.
 // A mapping that is not written, or whose write fails, fails the recording, as
 // a failed mappings write refuses under the proven model (design v14 §5.2).
-func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool) {
+func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool, streamed uint64) {
 	if w == nil {
+		return
+	}
+	if streamed > 0 {
+		logger.Info("the keploy agent mapped this recording's tests to their mocks itself, so no mappings are derived from the test windows",
+			zap.String("testSetID", testSetID),
+			zap.Uint64("mappingsFromTheAgent", streamed))
 		return
 	}
 	if !drained {
@@ -90,14 +131,24 @@ func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db Mappi
 	w.mu.Unlock()
 
 	derived := models.DeriveWindowMappings(tests, mocks)
+	kept := func(id string) bool {
+		_, gone := deleted[id]
+		return !gone && !strings.HasPrefix(id, lostTestPrefix)
+	}
 	byTest := make(map[string][]models.MockEntry, len(derived.Tests))
 	mapped := 0
 	for _, tc := range derived.Tests {
-		if _, gone := deleted[tc.ID]; gone {
+		if !kept(tc.ID) {
 			continue
 		}
 		byTest[tc.ID] = tc.Mocks
 		mapped += len(tc.Mocks)
+	}
+	var concurrent []string
+	for _, id := range derived.Concurrent {
+		if kept(id) {
+			concurrent = append(concurrent, id)
+		}
 	}
 	if len(byTest) == 0 {
 		return
@@ -114,11 +165,11 @@ func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db Mappi
 		zap.String("testSetID", testSetID),
 		zap.Int("numTests", len(byTest)),
 		zap.Int("mappedMocks", mapped))
-	if n := len(derived.Concurrent); n > 0 {
+	if n := len(concurrent); n > 0 {
 		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while two tests were open is mapped to the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),
 			zap.Int("count", n),
-			zap.Strings("tests", derived.Concurrent[:min(n, 20)]),
+			zap.Strings("tests", concurrent[:min(n, 20)]),
 			zap.String("next_step", "if one of these tests fails in keploy test with a call it did not make or a call no recorded mock answered, record them one request at a time"))
 	}
 }

@@ -168,32 +168,47 @@ func TestRunTestSetUnderTheProvenSwitchARecordedMappingStaysAsFailedTestsKeepIt(
 
 // windowUse's own rule: a test that owns a mock of its recorded window and
 // whose consumption the run did not read (it did not run, or the read failed)
-// holds the create as surely as one that left the mock unconsumed; a test that
-// owns none never does; and a set whose mocks were not read cannot show
-// anything. With the switch off it holds nothing.
+// holds the create as surely as one whose attributed consumption lacks the
+// mock; a carried-over mock its window recorded counts as consumed when the
+// run attributes it to the test, whoever consumed it; a test that owns none
+// never holds it; and a set whose mocks were not read cannot show anything.
+// With the switch off it holds nothing.
 func TestWindowUseHoldCreate(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newPartialRunHarness(t, 3, 0)
 	pinWindows(h)
 	cases := h.cases
 	mocks := []*models.Mock{mongoMockAt("mock-1", 1010), mongoMockAt("mock-2", 2010)}
+	attributed := func(byTest map[string][]string) *models.Mapping {
+		m := &models.Mapping{}
+		for _, tc := range cases {
+			if names, ok := byTest[tc.Name]; ok {
+				m.TestCases = append(m.TestCases, models.MappedTestCase{ID: tc.Name, Mocks: mongoEntries(names...)})
+			}
+		}
+		return m
+	}
 
 	w := newWindowUse()
-	if reason, _, _ := w.holdCreate(cases, nil); !strings.Contains(reason, "were not read") {
+	if reason, _, _ := w.holdCreate(cases, nil, nil); !strings.Contains(reason, "did not load the set's mocks") {
 		t.Fatalf("a set whose mocks were not read: reason %q", reason)
 	}
 	w.load(cases, mocks)
-	w.observe("test-1", []models.MockState{mongoAt("mock-1", 1010)})
+	w.ran("test-1")
 	// test-3 owns nothing; not running it holds nothing.
-	reason, left, unseen := w.holdCreate(cases, nil)
+	reason, left, unseen := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}}))
 	if reason == "" || left != nil || !reflect.DeepEqual(unseen, []string{"test-2"}) {
 		t.Fatalf("test-2 did not run: reason %q, left %v, unseen %v; want test-2 unseen", reason, left, unseen)
 	}
-	w.observe("test-2", []models.MockState{mongoAt("mock-2", 2010)})
-	if reason, _, _ := w.holdCreate(cases, nil); reason != "" {
-		t.Fatalf("every owned mock consumed, yet held: %q", reason)
+	w.ran("test-2")
+	if _, left, _ := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}})); !reflect.DeepEqual(left, []string{"test-2"}) {
+		t.Fatalf("test-2 ran and nothing is attributed to it: left %v; want [test-2]", left)
 	}
-	if _, _, unseen := w.holdCreate(cases, []string{"test-2", "test-3"}); !reflect.DeepEqual(unseen, []string{"test-2"}) {
+	// mock-2 carried over and consumed while test-3 ran, attributed to test-2.
+	if reason, _, _ := w.holdCreate(cases, nil, attributed(map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}})); reason != "" {
+		t.Fatalf("every owned mock attributed to its test, yet held: %q", reason)
+	}
+	if _, _, unseen := w.holdCreate(cases, []string{"test-2", "test-3"}, attributed(map[string][]string{"test-1": {"mock-1"}, "test-2": {"mock-2"}})); !reflect.DeepEqual(unseen, []string{"test-2"}) {
 		t.Fatalf("test-2's consumption was not read: unseen %v; want [test-2]", unseen)
 	}
 
@@ -203,8 +218,8 @@ func TestWindowUseHoldCreate(t *testing.T) {
 	}
 	var off *windowUse
 	off.load(cases, mocks)
-	off.observe("test-1", nil)
-	if reason, _, _ := off.holdCreate(cases, nil); reason != "" {
+	off.ran("test-1")
+	if reason, _, _ := off.holdCreate(cases, nil, nil); reason != "" {
 		t.Fatalf("the switch is off and the create is held: %q", reason)
 	}
 }

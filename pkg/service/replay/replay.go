@@ -1755,7 +1755,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
-		winUse.load(testCases, filtered, unfiltered)
+		if !useMappingBased {
+			// With a mapping in force the file exists: no run creates it.
+			winUse.load(testCases, filtered, unfiltered)
+		}
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
@@ -2952,7 +2955,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTime, tcRespTime := recordReqResTimestamps(testCase)
 			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
-			winUse.observe(testCase.Name, consumedMocks)
+			winUse.ran(testCase.Name)
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
@@ -3895,7 +3898,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			tcReqTimeStream, tcRespTimeStream := recordReqResTimestamps(tc)
 			carryAttr.mapConsumed(actualTestMockMappings, tc.Name, tcReqTimeStream, tcRespTimeStream, consumedMocks)
-			winUse.observe(tc.Name, consumedMocks)
+			winUse.ran(tc.Name)
 
 			// Log consumed mocks for streaming test
 			r.logger.Debug("consumed mocks for streaming test case",
@@ -4618,7 +4621,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// every test consumed every mock recorded in its window. Every case
 		// above that matches without holding has found a file that exists.
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
-			holdMappings, windowLeft, windowUnseen = winUse.holdCreate(testCases, consumptionUnread)
+			holdMappings, windowLeft, windowUnseen = winUse.holdCreate(testCases, consumptionUnread, actualTestMockMappings)
 		}
 	}
 	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""

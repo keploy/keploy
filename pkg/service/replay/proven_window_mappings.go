@@ -19,8 +19,9 @@ import (
 // gives it, as record would: data-plane mocks no async lane serves, less the
 // kinds the per-test assertion leaves out (DNS, connection failures).
 
-// windowUse is what a run's tests consumed of their recorded windows. Nil with
-// the switch off: it then reads nothing and holds nothing back.
+// windowUse is what a run's tests own of their recorded windows, and which of
+// them ran. Nil with the switch off: it then reads nothing and holds nothing
+// back.
 type windowUse struct {
 	// known says the set's mocks were read: owned is their derivation.
 	known bool
@@ -28,8 +29,6 @@ type windowUse struct {
 	owned map[string][]string
 	// seen names the tests whose consumption the run read.
 	seen map[string]bool
-	// left names, in order, the tests that left one of them unconsumed.
-	left []string
 }
 
 func newWindowUse() *windowUse {
@@ -68,42 +67,43 @@ func (w *windowUse) load(testCases []*models.TestCase, pools ...[]*models.Mock) 
 	w.known = true
 }
 
-// observe takes what test consumed in one run of it.
-func (w *windowUse) observe(test string, consumed []models.MockState) {
+// ran marks a test whose consumption the run read.
+func (w *windowUse) ran(test string) {
 	if w == nil {
 		return
 	}
 	w.seen[test] = true
-	if len(w.owned[test]) == 0 {
-		return
-	}
-	got := make(map[string]bool, len(consumed))
-	for _, m := range consumed {
-		got[m.Name] = true
-	}
-	for _, name := range w.owned[test] {
-		if !got[name] {
-			w.left = appendOnce(w.left, test)
-			return
-		}
-	}
 }
 
 // holdCreate says why the run must not create mappings.yaml, or "" when every
-// test consumed every test mock of its recorded window. unread names the tests
-// whose consumption could not be read. left names the tests that left one
-// unconsumed; unseen, in testCases order, those that own one and whose
-// consumption the run did not read (not run, or the read failed).
-func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string) (reason string, left, unseen []string) {
+// test consumed every test mock of its recorded window. A test's consumption
+// is what the run attributes to it (actual: carryOverAttribution.mapConsumed),
+// so a carried-over mock its window recorded counts as its own wherever it was
+// consumed. unread names the tests whose consumption could not be read. left
+// names, in testCases order, the tests that left a test mock of their window
+// unconsumed; unseen those that own one and whose consumption the run did not
+// read (not run, or the read failed).
+func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string, actual *models.Mapping) (reason string, left, unseen []string) {
 	if w == nil {
 		return "", nil, nil
 	}
 	if !w.known {
-		return "the mocks of the tests' recorded windows were not read, so this run cannot show that every test consumed the mocks recorded in its window (KEPLOY_PROVEN=1)", nil, nil
+		return "this run did not load the set's mocks, so it cannot show that every test consumed the mocks recorded in its window (KEPLOY_PROVEN=1)", nil, nil
 	}
 	isUnread := make(map[string]bool, len(unread))
 	for _, id := range unread {
 		isUnread[id] = true
+	}
+	consumed := map[string]map[string]bool{}
+	if actual != nil {
+		for _, tc := range actual.TestCases {
+			if consumed[tc.ID] == nil {
+				consumed[tc.ID] = map[string]bool{}
+			}
+			for _, e := range tc.Mocks {
+				consumed[tc.ID][e.Name] = true
+			}
+		}
 	}
 	for _, tc := range testCases {
 		if tc == nil || len(w.owned[tc.Name]) == 0 {
@@ -111,10 +111,17 @@ func (w *windowUse) holdCreate(testCases []*models.TestCase, unread []string) (r
 		}
 		if !w.seen[tc.Name] || isUnread[tc.Name] {
 			unseen = appendOnce(unseen, tc.Name)
+			continue
+		}
+		for _, name := range w.owned[tc.Name] {
+			if !consumed[tc.Name][name] {
+				left = appendOnce(left, tc.Name)
+				break
+			}
 		}
 	}
-	if len(w.left) == 0 && len(unseen) == 0 {
+	if len(left) == 0 && len(unseen) == 0 {
 		return "", nil, nil
 	}
-	return "a test left a mock recorded in its window unconsumed, or did not run, so a mappings.yaml made from this run would leave that call out of the test's mapping for good (KEPLOY_PROVEN=1); keploy record writes the mappings of a recording made under the switch", w.left, unseen
+	return "a test left a mock recorded in its window unconsumed, or did not run, so a mappings.yaml made from this run would leave that call out of the test's mapping for good (KEPLOY_PROVEN=1); keploy record writes the mappings of a recording made under the switch", left, unseen
 }

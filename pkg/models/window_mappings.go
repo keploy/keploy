@@ -30,10 +30,11 @@ func RecordedWindow(tc *TestCase) TestWindow {
 
 // WindowedMock is what the window derivation reads of one recorded mock.
 type WindowedMock struct {
-	// Entry is the mock as a mapping lists it.
-	Entry MockEntry
-	// At is when its request was recorded; a mock without one is in no window.
-	At time.Time
+	Name string
+	Kind Kind
+	// At is when its request was recorded, and Res when its response was; a
+	// mock without At is in no window.
+	At, Res time.Time
 	// TestMock says a test may own it: a data-plane mock (IsProtocolPhase) that
 	// no async lane serves. An async lane's mocks are served in their lane's
 	// recorded order whichever test is open, so no test owns one.
@@ -43,15 +44,22 @@ type WindowedMock struct {
 // NewWindowedMock is m as the window derivation reads it.
 func NewWindowedMock(m *Mock) WindowedMock {
 	return WindowedMock{
-		Entry: MockEntry{
-			Name:             m.Name,
-			Kind:             string(m.Kind),
-			Timestamp:        m.Spec.ReqTimestampMock.Unix(),
-			ReqTimestampMock: FormatMockTimestamp(m.Spec.ReqTimestampMock),
-			ResTimestampMock: FormatMockTimestamp(m.Spec.ResTimestampMock),
-		},
+		Name:     m.Name,
+		Kind:     m.Kind,
 		At:       m.Spec.ReqTimestampMock,
+		Res:      m.Spec.ResTimestampMock,
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
+	}
+}
+
+// entry is the mock as a mapping lists it.
+func (m WindowedMock) entry() MockEntry {
+	return MockEntry{
+		Name:             m.Name,
+		Kind:             string(m.Kind),
+		Timestamp:        m.At.Unix(),
+		ReqTimestampMock: FormatMockTimestamp(m.At),
+		ResTimestampMock: FormatMockTimestamp(m.Res),
 	}
 }
 
@@ -128,7 +136,7 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			continue
 		}
 		owner := open[0]
-		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.Entry)
+		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.entry())
 		if ending.Len() > 1 {
 			for _, i := range ending.idx {
 				concurrent[i] = true

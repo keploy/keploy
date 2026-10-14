@@ -19,7 +19,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #      recorded locations without calling pokeapi: each /api/locations test
 #      answers as recorded and FAILS, its recorded call named under
 #      failure_info.unconsumed_mocks; every other test passes; the run exits
-#      non-zero.
+#      non-zero;
+#   4. the same two replays of a copy without mappings.yaml (a recording made
+#      before S3): with the call removed, the run creates no mappings.yaml and
+#      says why; as recorded, every test consumes the calls of its window and
+#      the run creates one.
+#
+# CI sources this script from a `bash -e` step: a command that is expected to
+# fail runs where errexit does not apply (an `if`, a `||` list).
 #
 # Never `pgrep keploy`/`pkill keploy` here: the recording is stopped by its own
 # pid, so nothing else running as the same user is touched.
@@ -96,7 +103,7 @@ check_race record_logs.txt
 if grep -qE "mappings.yaml was not written|failed to save the test-mock mappings derived from the test windows|the recording may be incomplete" record_logs.txt; then
     fail "the proven recording did not save all it captured, or its mappings" record_logs.txt
 fi
-echo "keploy record exited $record_rc"
+[ "$record_rc" -eq 0 ] || fail "keploy record exited $record_rc" record_logs.txt
 
 shopt -s nullglob
 sets=( ./keploy/test-set-* )
@@ -133,9 +140,11 @@ for tc in "$set_dir"/tests/*.yaml; do
             ;;
         */api/locations*)
             [ "$(echo "$owned" | wc -w)" -eq 1 ] || fail "$id should own exactly its one pokeapi call; it owns: ${owned:-none}" "$mappings"
-            case "$(mock_field "$owned" '.spec.req.url')" in
-                https://pokeapi.co/api/v2/location-area*) ;;
-                *) fail "$id owns $owned, which is not a pokeapi location-area call" "$mappings" ;;
+            # A recorded HTTP mock keeps the request's path as its url and the
+            # host in its Host header.
+            case "$(mock_field "$owned" '.spec.req.header.Host')$(mock_field "$owned" '.spec.req.url')" in
+                pokeapi.co/api/v2/location-area*) ;;
+                *) fail "$id owns $owned, which is not a pokeapi location-area call" "$mappings" "$set_dir/mocks.yaml" ;;
             esac
             location_tests+=("$id")
             owned_location_mocks+=("$owned")
@@ -152,11 +161,18 @@ echo "✓ the recording mapped each test to the calls recorded in its window: ${
 # ---------------------------------------------------------------------------
 # 2. The recording replayed as recorded, under the switch.
 # ---------------------------------------------------------------------------
+# A pristine copy for step 4, before any replay touches the recording.
+rm -rf ./unmapped-run
+mkdir ./unmapped-run
+cp -a ./keploy ./unmapped-run/keploy
+rm -f ./unmapped-run/keploy/test-set-*/mappings.yaml ./unmapped-run/keploy.yml
+cp ./keploy.yml ./unmapped-run/keploy.yml
+
 rm -rf ./keploy/reports
-KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false > test_logs.txt 2>&1
-test_rc=$?
+test_rc=0
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false > test_logs.txt 2>&1 || test_rc=$?
 check_race test_logs.txt
-"$REPLAY_BIN" report --format json > ndjson.txt 2> ndjson_err.txt
+"$REPLAY_BIN" report --format json > ndjson.txt 2> ndjson_err.txt || true
 if [ "$test_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson.txt > /dev/null; then
     jq -s 'map({test_case_id, status, dependencies_checked})' ndjson.txt
     fail "under KEPLOY_PROVEN=1 the recording must replay green (exit $test_rc)" test_logs.txt
@@ -184,17 +200,18 @@ grep -q "^${anchor}\$" "$req" || fail "$req no longer declares LocationArearespo
 sed -i "/^${anchor}\$/a\\
 \\tif data, err := os.ReadFile(\"$PWD/recorded-locations.json\"); err == nil {\\
 \\t\\tv := models.Location{}\\
-\\t\\treturn v, json.Unmarshal(data, \&v)\\
+\\t\\terr = json.Unmarshal(data, \&v)\\
+\\t\\treturn v, err\\
 \\t}" "$req"
 grep -q "recorded-locations.json" "$req" || fail "could not patch $req"
 go_retry build -o http-pokeapi-nocall
 git checkout -- "$req"
 
 rm -rf ./keploy/reports
-KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi-nocall" --delay 7 --generateGithubActions=false > removed_logs.txt 2>&1
-removed_rc=$?
+removed_rc=0
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi-nocall" --delay 7 --generateGithubActions=false > removed_logs.txt 2>&1 || removed_rc=$?
 check_race removed_logs.txt
-"$REPLAY_BIN" report --format json > ndjson_removed.txt 2> ndjson_removed_err.txt
+"$REPLAY_BIN" report --format json > ndjson_removed.txt 2> ndjson_removed_err.txt || true
 [ "$removed_rc" -ne 0 ] || fail "a test that no longer makes its recorded call must fail the run under KEPLOY_PROVEN=1" removed_logs.txt
 report=$(ls -1t ./keploy/reports/test-run-*/test-set-*-report.yaml | head -n 1)
 for tc in "$set_dir"/tests/*.yaml; do
@@ -213,3 +230,45 @@ for tc in "$set_dir"/tests/*.yaml; do
     fi
 done
 echo "✓ under KEPLOY_PROVEN=1 a test that no longer makes its recorded call fails with it named unconsumed, and nothing else does"
+
+# ---------------------------------------------------------------------------
+# 4. A recording without mappings.yaml (made before S3), under the switch.
+# ---------------------------------------------------------------------------
+# With the call removed, each /api/locations test leaves the call recorded in
+# its window unconsumed: the run must not create mappings.yaml from that.
+unmapped_rc=0
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi-nocall" --path ./unmapped-run --delay 7 --generateGithubActions=false > unmapped_removed_logs.txt 2>&1 || unmapped_rc=$?
+check_race unmapped_removed_logs.txt
+shopt -s nullglob
+created=( ./unmapped-run/keploy/test-set-*/mappings.yaml )
+shopt -u nullglob
+[ ${#created[@]} -eq 0 ] || fail "a run in which tests left the calls recorded in their windows unconsumed created ${created[*]} under KEPLOY_PROVEN=1" "${created[@]}"
+grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "KEPLOY_PROVEN=1" ||
+    fail "the run must say why it did not create mappings.yaml (exit $unmapped_rc)" unmapped_removed_logs.txt
+for id in "${location_tests[@]}"; do
+    case "$id" in
+        get-api-locations-[0-9]*)
+            grep "not writing mappings.yaml" unmapped_removed_logs.txt | grep -q "$id" ||
+                fail "the hold must name $id, which left its recorded call unconsumed" unmapped_removed_logs.txt
+            ;;
+    esac
+done
+echo "✓ under KEPLOY_PROVEN=1 a replay that left a recorded call unconsumed creates no mappings.yaml"
+
+# As recorded, every test consumes the calls of its window: the run creates
+# the file, each test mapped to its own call.
+rm -rf ./unmapped-run/keploy/reports
+unmapped_rc=0
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./unmapped-run --delay 7 --generateGithubActions=false > unmapped_logs.txt 2>&1 || unmapped_rc=$?
+check_race unmapped_logs.txt
+[ "$unmapped_rc" -eq 0 ] || fail "the recording without mappings.yaml must replay green under KEPLOY_PROVEN=1 (exit $unmapped_rc)" unmapped_logs.txt
+shopt -s nullglob
+created=( ./unmapped-run/keploy/test-set-*/mappings.yaml )
+shopt -u nullglob
+[ ${#created[@]} -eq 1 ] || fail "a run in which every test consumed the calls of its window must create mappings.yaml" unmapped_logs.txt
+for i in "${!location_tests[@]}"; do
+    id=${location_tests[$i]}
+    got=$(ID="$id" yq '.tests[] | select(.id == strenv(ID)) | (.mock_entries // []) | .[].name' "${created[0]}" | tr '\n' ' ')
+    [ "$got" = "${owned_location_mocks[$i]} " ] || fail "the created mappings.yaml maps $id to ${got:-nothing}; want its own call ${owned_location_mocks[$i]}" "${created[0]}"
+done
+echo "✓ under KEPLOY_PROVEN=1 a replay in which every test consumed its recorded calls creates mappings.yaml"
