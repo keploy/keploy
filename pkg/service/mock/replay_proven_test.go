@@ -499,3 +499,69 @@ func TestTheReceiptCarriesTheRunsRefusals(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tests.Tests, 1, "a refusal is no test")
 }
+
+// Where the run's calls to local listeners went comes with the windows, a
+// row each; the replay's per-test receipt carries the rows for keploy's
+// summary, and the windows the rest of the replay reads have no row in them.
+func TestTheTestsReceiptCarriesTheRunsTopology(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	live := []models.LiveRow{{Test: "o::TestA", Exe: "/usr/bin/node", Port: 3000}, {Exe: "/usr/bin/node", Port: 3000}}
+	mocked := []models.MockedRow{{Test: "o::TestA", Addr: "127.0.0.1:5432", PID: 42, Exe: "/usr/bin/postgres", Port: 5432}}
+	instr.windows = []models.ScopeWindow{{Name: "o::TestA", Outcome: models.ScopeOutcomePassed}, {Live: &live[0]}, {Mocked: &mocked[0]}, {Live: &live[1]}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, stubMockDB{}, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1, "a row is no test")
+	require.Equal(t, live, tests.Live)
+	require.Equal(t, mocked, tests.Mocked)
+}
+
+// Every reader of a run's windows keeps those that are no test's apart: the
+// claims, the refusals and the topology rows, from the agent itself and from
+// the account a docker compose agent left as it stopped alike.
+func TestTheRunsWindowsAreSplitOnEveryPath(t *testing.T) {
+	claim := models.ScopeWindow{Claim: "o"}
+	refused := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "a second test process"}
+	live := models.LiveRow{Test: "o::TestA", Exe: "/usr/bin/node", Port: 3000}
+	mocked := models.MockedRow{Test: "o::TestA", Addr: "127.0.0.1:5432", Port: 5432}
+	all := []models.ScopeWindow{claim, {Name: "o::TestA", Outcome: models.ScopeOutcomePassed}, {Refused: &refused}, {Live: &live}, {Mocked: &mocked}}
+	check := func(t *testing.T, m *mockService, got []models.ScopeWindow) {
+		t.Helper()
+		require.Equal(t, []models.ScopeWindow{{Name: "o::TestA", Outcome: models.ScopeOutcomePassed}}, got, "only the test's window is a test's")
+		require.Equal(t, []models.ScopeWindow{claim}, m.claims)
+		require.Equal(t, []models.RunRefusal{refused}, m.refusals)
+		require.Equal(t, []models.LiveRow{live}, m.live)
+		require.Equal(t, []models.MockedRow{mocked}, m.mocked)
+	}
+	t.Run("compose", func(t *testing.T) {
+		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+		instr.leftOutcome = models.MockOutcome{Windows: append([]models.ScopeWindow(nil), all...)}
+		cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
+		m := &mockService{logger: zap.NewNop(), instrumentation: instr, config: cfg}
+		got, err := m.replayWindows(context.Background())
+		require.NoError(t, err)
+		check(t, m, got)
+	})
+	t.Run("agent", func(t *testing.T) {
+		provenOn(t)
+		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+		instr.windows = append([]models.ScopeWindow(nil), all...)
+		cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+		m := &mockService{logger: zap.NewNop(), instrumentation: instr, config: cfg}
+		got, err := m.replayWindows(context.Background())
+		require.NoError(t, err)
+		check(t, m, got)
+	})
+}

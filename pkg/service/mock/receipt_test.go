@@ -952,7 +952,7 @@ func TestRecordTestsReceipt(t *testing.T) {
 		{Name: "suite", Suite: true},
 		{Name: "app", App: true},
 	}
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, windows, nil)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, windows)
 	got, err := ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -965,7 +965,7 @@ func TestRecordTestsReceipt(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
 
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, nil, nil)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, nil)
 	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.Nil(t, got, "a record that named no test removes the stale file")
@@ -979,4 +979,32 @@ func writeMapping(t *testing.T, keployDir string) {
 	if err := os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A run that reported no test leaves no per-test file, whatever rows it
+// saw: a record's file says the record reported its tests, and judging reads
+// a missing one as "the record reported no test" (a suite without keploy's
+// integration that called a local listener still makes rows).
+func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Live: []models.LiveRow{{Exe: "/app", Port: 8080}}})
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Nil(t, got, "a replay that reported no test left a per-test file")
+
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", Mocked: []models.MockedRow{{Addr: "127.0.0.1:6379", Port: 6379}}}, nil)
+	gotRec, err := ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, gotRec, "a record that reported no test left a per-test file judging would read as complete")
+	_, err = os.Stat(filepath.Join(keployDir, "t2-go"))
+	require.True(t, os.IsNotExist(err), "a record that reported no test made its set's folder")
+
+	refused := models.RunRefusal{Code: "one_test_process_at_a_time", Message: "m"}
+	withRefusal := TestsReceipt{Set: "t2-go", Refusals: []models.RunRefusal{refused}, Live: []models.LiveRow{{Exe: "/app", Port: 8080}}}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, withRefusal, nil)
+	gotRec, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
+	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
 }

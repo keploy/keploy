@@ -249,6 +249,11 @@ type ScopeWindow struct {
 	// Refused, under the proven wire, makes this no test's window but a
 	// refusal keploy made at Start (RunRefusal).
 	Refused *RunRefusal `json:"refused,omitempty"`
+	// Live and Mocked, under the proven wire, make this no test's window
+	// but one row of where the run's calls to local listeners went
+	// (LiveRow, MockedRow), first seen at Start.
+	Live   *LiveRow   `json:"live,omitempty"`
+	Mocked *MockedRow `json:"mocked,omitempty"`
 }
 
 // PoolKeyNone is the pool slice of calls made before any test process

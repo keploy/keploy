@@ -538,8 +538,9 @@ func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
 			dir := t.TempDir()
 			passed, failed := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
 			passed.Outcome, failed.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomeFailed
+			live := models.LiveRow{Test: "orders::TestA", Exe: "/usr/bin/node", Port: 3000}
 			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
-				windows: []models.ScopeWindow{passed, failed}}
+				windows: []models.ScopeWindow{passed, {Live: &live}, failed}}
 			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
 			cfg.Path = dir
@@ -559,6 +560,7 @@ func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
 				{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 				{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
 			}, got.Tests)
+			require.Equal(t, []models.LiveRow{live}, got.Live, "the record's rows are left with its per-test results")
 			_, err = os.Stat(filepath.Join(dir, set, "mocks.yaml"))
 			require.NoError(t, err, "under the switch the recording is kept for judging to commit test by test")
 		})
