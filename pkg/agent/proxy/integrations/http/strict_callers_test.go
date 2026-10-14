@@ -100,8 +100,8 @@ func TestStrictServesEachCallerItsOwnRecordings(t *testing.T) {
 			}
 		})
 	}
-	// Both callers recorded twice (A, B, A, B): each has a cursor of its
-	// own, and one caller's calls never move the other's.
+	// Both callers recorded twice (A, B, A, B): each takes its own
+	// recordings in turn, and one caller's calls never take the other's.
 	four := authorizeDb()
 	four.mocks = append(four.mocks, authorizeMock("b-2", "token-B", time.Unix(1_700_000_003, 0)))
 	if got := authorizeCalls(t, four, true, "token-A", "token-B", "token-A", "token-B", "token-B", "token-A"); strings.Join(got, ",") != "a-1,b-1,a-2,b-2,b-2,a-2" {
@@ -112,9 +112,9 @@ func TestStrictServesEachCallerItsOwnRecordings(t *testing.T) {
 	if got := authorizeCalls(t, four, true, "token-B", "token-B", "token-A", "token-A"); strings.Join(got, ",") != "b-1,b-2,a-1,a-2" {
 		t.Fatalf("with both callers recorded twice, B first, served %v", got)
 	}
-	// With stateful mocks off there is no cursor: each caller's first.
+	// With stateful mocks off there are no turns: each caller's first.
 	if got := authorizeCalls(t, authorizeDb(), false, "token-B", "token-A", "token-A"); strings.Join(got, ",") != "b-1,a-1,a-1" {
-		t.Fatalf("without the cursor served %v", got)
+		t.Fatalf("without turns served %v", got)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestStrictServesEachCallerItsOwnRecordings(t *testing.T) {
 // caller's: it misses. It is answered only when the recordings learned
 // Authorization as noise (record's full round saw it drift), and then from
 // one group of recordings in record order, whichever token comes: a token
-// that matches every recording under the noise shares their one cursor.
+// that matches every recording under the noise takes their turns.
 func TestStrictARotatedTokenMissesUnlessLearned(t *testing.T) {
 	if got := authorizeCalls(t, authorizeDb(), true, "token-rotated", "token-rotated"); strings.Join(got, ",") != "," {
 		t.Fatalf("a rotated token was served %v", got)

@@ -1445,8 +1445,8 @@ func TestVariables_NoiseOverAUsePlaceDoesNotExcuseAnotherValue(t *testing.T) {
 	}
 }
 
-// A wrong token in a header misses with the evidence of the recording the
-// cursor is at, even when another test's recording of the same request
+// A wrong token in a header misses with the evidence of the recording whose
+// turn it is, even when another test's recording of the same request
 // carries that header as a literal: the header's value is compared outside
 // a recording's variables' places (strictDiff), so that recording is not
 // this call. Main compared header keys only, so it answered (reported by
