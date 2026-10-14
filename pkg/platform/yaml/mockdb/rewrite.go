@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -241,6 +242,166 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 	// later test-sets but are still needed for app startup on future replays.
 	return !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
 		mock.Spec.ReqTimestampMock.Before(startupCutoffTime)
+}
+
+type mysqlStmtKey struct {
+	connID string
+	stmtID uint32
+}
+
+// isMySQLPrepareMock reports whether m is a MySQL COM_STMT_PREPARE mock,
+// returning its connection ID and the statement ID from COM_STMT_PREPARE_OK.
+func isMySQLPrepareMock(m *models.Mock) (mysqlStmtKey, bool) {
+	if m == nil || m.Kind != models.MySQL || len(m.Spec.MySQLResponses) == 0 {
+		return mysqlStmtKey{}, false
+	}
+	spok, ok := m.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
+	if !ok || spok == nil {
+		return mysqlStmtKey{}, false
+	}
+	connID := ""
+	if m.Spec.Metadata != nil {
+		connID = m.Spec.Metadata["connID"]
+	}
+	if connID == "" {
+		connID = m.ConnectionID
+	}
+	return mysqlStmtKey{connID: connID, stmtID: spok.StatementID}, true
+}
+
+// isMySQLCloseMock reports whether m is a MySQL COM_STMT_CLOSE mock,
+// returning its connection ID and the statement ID being closed.
+func isMySQLCloseMock(m *models.Mock) (mysqlStmtKey, bool) {
+	if m == nil || m.Kind != models.MySQL {
+		return mysqlStmtKey{}, false
+	}
+	connID := ""
+	if m.Spec.Metadata != nil {
+		connID = m.Spec.Metadata["connID"]
+	}
+	if connID == "" {
+		connID = m.ConnectionID
+	}
+	for _, req := range m.Spec.MySQLRequests {
+		if msg, ok := req.Message.(*mysql.StmtClosePacket); ok && msg != nil {
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		}
+	}
+	return mysqlStmtKey{}, false
+}
+
+// isMySQLStmtConsumerMock reports whether m is a MySQL mock that references
+// a prepared statement ID (COM_STMT_EXECUTE, COM_STMT_CLOSE, COM_STMT_RESET,
+// COM_STMT_SEND_LONG_DATA, or COM_STMT_FETCH).
+func isMySQLStmtConsumerMock(m *models.Mock) (mysqlStmtKey, bool) {
+	if m == nil || m.Kind != models.MySQL {
+		return mysqlStmtKey{}, false
+	}
+	connID := ""
+	if m.Spec.Metadata != nil {
+		connID = m.Spec.Metadata["connID"]
+	}
+	if connID == "" {
+		connID = m.ConnectionID
+	}
+	for _, req := range m.Spec.MySQLRequests {
+		switch msg := req.Message.(type) {
+		case *mysql.StmtExecutePacket:
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		case *mysql.StmtClosePacket:
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		case *mysql.StmtResetPacket:
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		case *mysql.StmtSendLongDataPacket:
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		case *mysql.StmtFetchPacket:
+			return mysqlStmtKey{connID: connID, stmtID: msg.StatementID}, true
+		}
+	}
+	return mysqlStmtKey{}, false
+}
+
+// pruneKeepsDecision reports whether pruneKeeps would keep mock without
+// mutating mock.Spec.ReqBodyNoise.
+func pruneKeepsDecision(mock *models.Mock, mockNames map[string]models.MockState, pruneBefore, startupCutoffTime time.Time) bool {
+	if mock == nil {
+		return false
+	}
+	if mock.Spec.Metadata["type"] == "config" {
+		return true
+	}
+	if mock.Kind == models.ConnectionFailure {
+		return true
+	}
+	if _, ok := mockNames[mock.Name]; ok {
+		return true
+	}
+	if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
+		return true
+	}
+	return !startupCutoffTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+		mock.Spec.ReqTimestampMock.Before(startupCutoffTime)
+}
+
+// mysqlStmtTracker tracks prepared statements and their consumers across a
+// mock file, so that any COM_STMT_PREPARE or COM_STMT_CLOSE mock required by a
+// kept statement is retained in mockNames and not pruned.
+type mysqlStmtTracker struct {
+	prepMocks   map[mysqlStmtKey][]string
+	closeMocks  map[mysqlStmtKey][]string
+	neededStmts map[mysqlStmtKey]struct{}
+}
+
+func newMySQLStmtTracker() *mysqlStmtTracker {
+	return &mysqlStmtTracker{
+		prepMocks:   make(map[mysqlStmtKey][]string),
+		closeMocks:  make(map[mysqlStmtKey][]string),
+		neededStmts: make(map[mysqlStmtKey]struct{}),
+	}
+}
+
+func (t *mysqlStmtTracker) inspect(mock *models.Mock, mockNames map[string]models.MockState, pruneBefore, startupCutoffTime time.Time) {
+	if mock == nil || mock.Kind != models.MySQL {
+		return
+	}
+	if k, ok := isMySQLPrepareMock(mock); ok {
+		t.prepMocks[k] = append(t.prepMocks[k], mock.Name)
+		if pruneKeepsDecision(mock, mockNames, pruneBefore, startupCutoffTime) {
+			t.neededStmts[k] = struct{}{}
+		}
+	}
+	if k, ok := isMySQLCloseMock(mock); ok {
+		t.closeMocks[k] = append(t.closeMocks[k], mock.Name)
+	}
+	if k, ok := isMySQLStmtConsumerMock(mock); ok {
+		if pruneKeepsDecision(mock, mockNames, pruneBefore, startupCutoffTime) {
+			t.neededStmts[k] = struct{}{}
+		}
+	}
+}
+
+func (t *mysqlStmtTracker) apply(mockNames map[string]models.MockState) {
+	if mockNames == nil {
+		return
+	}
+	for k := range t.neededStmts {
+		for _, name := range t.prepMocks[k] {
+			if _, exists := mockNames[name]; !exists {
+				mockNames[name] = models.MockState{
+					Name: name,
+					Kind: models.MySQL,
+				}
+			}
+		}
+		for _, name := range t.closeMocks[k] {
+			if _, exists := mockNames[name]; !exists {
+				mockNames[name] = models.MockState{
+					Name: name,
+					Kind: models.MySQL,
+				}
+			}
+		}
+	}
 }
 
 // mockFileRewriter writes the replacement of a yaml/json mock file one mock

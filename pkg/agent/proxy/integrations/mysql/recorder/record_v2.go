@@ -1767,7 +1767,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 			emit := func() {
 				emitMockV2(ctx, sess, []mysql.Request{{PacketBundle: *cmdPkt}}, nil, "mocks",
-					cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs)
+					cmdPkt.Header.Type, "NO Response Packet", reqTs, reqTs, decodeCtx)
 			}
 			if held != nil {
 				// Recorded behind the PREPARE, in the order sent.
@@ -1880,6 +1880,15 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			mockType = "connection"
 		}
 
+		if sp, ok := respBundle.Message.(*mysql.StmtPrepareOkPacket); ok {
+			if prepPkt, ok := cmdPkt.Message.(*mysql.StmtPreparePacket); ok && prepPkt != nil && decodeCtx != nil {
+				if decodeCtx.StmtIDToQuery == nil {
+					decodeCtx.StmtIDToQuery = make(map[uint32]string)
+				}
+				decodeCtx.StmtIDToQuery[sp.StatementID] = prepPkt.Query
+			}
+		}
+
 		record := func(resTs time.Time) {
 			emitMockV2(ctx, sess,
 				[]mysql.Request{{PacketBundle: *cmdPkt}},
@@ -1887,7 +1896,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				mockType,
 				cmdPkt.Header.Type,
 				respBundle.Header.Type,
-				reqTs, resTs)
+				reqTs, resTs,
+				decodeCtx)
 		}
 		if sp, ok := respBundle.Message.(*mysql.StmtPrepareOkPacket); ok && leavesFramingOpen(decodeCtx, sp) {
 			// Its response is read whole: holding it is no pending work. The
@@ -2334,7 +2344,7 @@ func nextPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Sessio
 // EmitMock so the session's post-record hook chain and incomplete-mock
 // gate run consistently. Timestamps come from chunk ReadAt stamps; the
 // legacy path's time.Now() use is deliberately NOT replicated here.
-func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time) {
+func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time, decodeCtx ...*wire.DecodeContext) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  reqOp,
@@ -2343,6 +2353,22 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 	}
 	if sess.Opts.DstCfg != nil && sess.Opts.DstCfg.Addr != "" {
 		meta["destAddr"] = sess.Opts.DstCfg.Addr
+	}
+	var dctx *wire.DecodeContext
+	if len(decodeCtx) > 0 {
+		dctx = decodeCtx[0]
+	}
+	if len(requests) > 0 {
+		msg := requests[0].PacketBundle.Message
+		if qp, ok := msg.(*mysql.QueryPacket); ok && qp != nil && qp.Query != "" {
+			meta["query"] = qp.Query
+		} else if prep, ok := msg.(*mysql.StmtPreparePacket); ok && prep != nil && prep.Query != "" {
+			meta["query"] = prep.Query
+		} else if id, ok := statementOf(msg); ok && dctx != nil && dctx.StmtIDToQuery != nil {
+			if q, ok := dctx.StmtIDToQuery[id]; ok && q != "" {
+				meta["query"] = q
+			}
+		}
 	}
 
 	lifetime := models.LifetimePerTest

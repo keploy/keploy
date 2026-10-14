@@ -168,7 +168,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
+func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions, decodeCtx ...*wire.DecodeContext) {
 	// Clamp res >= req for EVERY mysql mock (query, handshake/config, no-response).
 	// On a reused/keepalive connection CapturedRespTime can carry over the
 	// previous exchange's response time, producing an invalid res<req order that
@@ -189,6 +189,22 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 	}
 	if opts.DstCfg != nil && opts.DstCfg.Addr != "" {
 		meta["destAddr"] = opts.DstCfg.Addr
+	}
+	var dctx *wire.DecodeContext
+	if len(decodeCtx) > 0 {
+		dctx = decodeCtx[0]
+	}
+	if len(requests) > 0 {
+		msg := requests[0].PacketBundle.Message
+		if qp, ok := msg.(*mysql.QueryPacket); ok && qp != nil && qp.Query != "" {
+			meta["query"] = qp.Query
+		} else if prep, ok := msg.(*mysql.StmtPreparePacket); ok && prep != nil && prep.Query != "" {
+			meta["query"] = prep.Query
+		} else if id, ok := statementOf(msg); ok && dctx != nil && dctx.StmtIDToQuery != nil {
+			if q, ok := dctx.StmtIDToQuery[id]; ok && q != "" {
+				meta["query"] = q
+			}
+		}
 	}
 	// Map the recorder's on-disk mockType tag to the typed Lifetime
 	// enum so the filter layer's authoritative routing reads it in a

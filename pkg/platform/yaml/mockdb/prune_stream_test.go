@@ -298,6 +298,17 @@ func readAllPrune(t *testing.T, path string, mockNames map[string]models.MockSta
 			}
 		}
 	}
+	if mockNames == nil {
+		mockNames = make(map[string]models.MockState)
+	}
+	tracker := newMySQLStmtTracker()
+	for _, e := range entries {
+		if e.mock != nil {
+			tracker.inspect(e.mock, mockNames, pruneBefore, startupCutoffTime)
+		}
+	}
+	tracker.apply(mockNames)
+
 	var kept []entry
 	for _, e := range entries {
 		mock := e.mock
