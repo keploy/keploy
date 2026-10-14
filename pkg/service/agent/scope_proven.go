@@ -1183,6 +1183,7 @@ func differsText(fields []string) string {
 // fieldShapes keeps the shape of each field name and drops a part of it that
 // may be a value: a map key the app sent (an ID, an email address) becomes
 // {}, by pathShape's rule, so a reason never holds a recorded or sent value.
+// A header's name is kept whole: it names the field (header.Authorization).
 func fieldShapes(fields []string) []string {
 	if len(fields) == 0 {
 		return nil
@@ -1190,7 +1191,7 @@ func fieldShapes(fields []string) []string {
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
 		if name, ok := strings.CutPrefix(f, "header."); ok && !strings.Contains(name, ".") {
-			// A header's name is the protocol's, never a value the app sent.
+			// A header's name names the field, as every report writes it.
 			out = append(out, f)
 			continue
 		}

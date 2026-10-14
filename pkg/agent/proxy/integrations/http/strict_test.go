@@ -136,10 +136,10 @@ func TestStrictDropsTheAutoDynamicPass(t *testing.T) {
 	}
 }
 
-// Under the switch each destination's repeated recordings have a cursor of
-// their own: a call to one host never moves another host's turn, in the
+// Under the switch each destination's repeated recordings take their own
+// turns: a call to one host never takes another host's recording, in the
 // strict pass (its pick: each recording's served mark).
-func TestStrictEachHostHasItsOwnCursor(t *testing.T) {
+func TestStrictEachHostTakesItsOwnRecordingsInTurn(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	base := time.Unix(1_700_000_000, 0)
 	cm := func(name, host string, ts time.Time) *models.Mock {
@@ -159,36 +159,10 @@ func TestStrictEachHostHasItsOwnCursor(t *testing.T) {
 		}
 		return stub.Name
 	}
-	for i, want := range []struct{ host, name string }{{"a.example", "a1"}, {"b.example", "b1"}, {"a.example", "a2"}, {"b.example", "b2"}} {
+	// Out of record order: b's first, though a's were recorded before.
+	for i, want := range []struct{ host, name string }{{"b.example", "b1"}, {"a.example", "a1"}, {"a.example", "a2"}, {"b.example", "b2"}} {
 		if got := call(want.host); got != want.name {
 			t.Fatalf("call %d to %s served %s, want %s", i+1, want.host, got, want.name)
 		}
-	}
-
-	for _, pickWith := range []struct {
-		name string
-		pick func(group []*models.Mock, db *mockMemDb) (*models.Mock, func())
-	}{
-		{"the strict pass's pick", func(g []*models.Mock, db *mockMemDb) (*models.Mock, func()) { return h.strictCursorPick(g, db, true) }},
-	} {
-		t.Run(pickWith.name, func(t *testing.T) {
-			pickDb := &mockMemDb{}
-			pick := func(group ...*models.Mock) string {
-				m, commit := pickWith.pick(group, pickDb)
-				if commit != nil {
-					commit()
-				}
-				return m.Name
-			}
-			if got := pick(a1, a2); got != "a1" {
-				t.Fatalf("host a's first pick %s, want a1", got)
-			}
-			if got := pick(b1, b2); got != "b1" {
-				t.Fatalf("host b's first pick %s, want b1: host a's pick moved host b's cursor", got)
-			}
-			if got := pick(a1, a2); got != "a2" {
-				t.Fatalf("host a's second pick %s, want a2", got)
-			}
-		})
 	}
 }
