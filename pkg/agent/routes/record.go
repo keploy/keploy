@@ -117,6 +117,11 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 			r.Get("/containers", a.HandleTakesContainers)
 			r.Post("/containers", a.HandleContainers)
 		}
+		// The run's mock.real, and what the run saw of it beyond its tests
+		// (real.go). Any method: with the switch off each answers the 404
+		// its path had before it existed.
+		r.HandleFunc("/real", a.HandleRealDeps)
+		r.HandleFunc("/real/run", a.HandleRealRun)
 		r.Post("/app/start", a.HandleAppStart)
 		r.Get("/mock/stats", a.HandleMockStats)
 		// The refused inserts into the hooks' PID maps, each a process they

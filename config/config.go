@@ -371,6 +371,13 @@ type MockCmd struct {
 	// runs with it); every other test's harness is told to skip it. Empty runs
 	// every test. It takes precedence over any gate a wrapping build installs.
 	RunOnly []string `json:"runOnly" yaml:"runOnly" mapstructure:"runOnly"`
+	// Real lists the destinations every run reaches for real, never recorded
+	// and never mocked, in record, in judging and in CI, for keploy mock and
+	// keploy test alike (design v14 §4): address entries (localhost:5432,
+	// 10.0.4.7:6379), name entries (auth.example.com:8443) and container
+	// entries (container:redis). Read only under the proven switch
+	// (KEPLOY_PROVEN=1); without it the key is ignored.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty" mapstructure:"real"`
 }
 
 type Contract struct {

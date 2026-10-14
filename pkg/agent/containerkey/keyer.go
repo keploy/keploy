@@ -173,6 +173,22 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 	return got, key, ok
 }
 
+// Lookup is the container dst (ip:port) reaches by the index, read with no
+// effect on k: no number is given, no key held, and nothing said, so a caller
+// that only asks, before the proxy accepts and names the connection (the
+// handshake hold), changes nothing Name later gives or says. err says the
+// daemon cannot be read.
+func (k *Keyer) Lookup(dst string) (Container, bool, error) {
+	ap, err := parseAddrPort(dst)
+	if err != nil {
+		return Container{}, false, nil
+	}
+	k.mu.Lock()
+	res := k.res
+	k.mu.Unlock()
+	return res.Lookup(ap)
+}
+
 // name is Name under k.mu; warn is the error to tell, once per session.
 func (k *Keyer) name(connID string, ap netip.AddrPort) (got Container, key string, ok bool, warn error) {
 	k.mu.Lock()

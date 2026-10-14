@@ -86,6 +86,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.refuseProvenDocker("record"); err != nil {
 		return err
 	}
+	if err := m.checkRealDeps(); err != nil {
+		return err
+	}
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -194,6 +197,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// recording is kept. Registered before the restore below, so it runs
 	// after it: a restore puts the previous set back, or removes a fresh one.
 	var recordTests []models.ScopeWindow
+	var recordReal *models.RealRun
 	recordJudged := false
 	defer func() {
 		// Only a build that judges the record reads these results; written
@@ -201,7 +205,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked,
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
 			}, recordTests)
 		}
 	}()
@@ -253,6 +257,17 @@ func (m *mockService) Record(ctx context.Context) error {
 		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
 		// re-recorded on its own must not reuse the names of the flows the set carries.
 		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
+	}
+
+	// The run's mock.real (proven switch only), before the capture arms:
+	// those destinations are reached for real from the first connection.
+	if err := m.pushRealDeps(ctx); err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
+		stopReason = "keploy could not hand its agent mock.real"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// 4. Arm the record proxy and stream captured mocks.
@@ -565,6 +580,17 @@ func (m *mockService) Record(ctx context.Context) error {
 				zap.String("next_step", "check the agent's log, then record again"))
 			return fmt.Errorf("%s: %w", stopReason, werr)
 		}
+		// What the run saw of mock.real beyond its tests, read once the
+		// last test ended: as much the record's judging input as the
+		// windows, and as strictly read.
+		var rerr error
+		if recordReal, rerr = m.realRun(ctx); rerr != nil {
+			m.propagateExit(appErr, "record")
+			stopReason = "keploy could not read the run's mock.real destinations from its agent, so nothing was kept"
+			utils.LogError(m.logger, rerr, stopReason, zap.String("mock-set", name),
+				zap.String("next_step", "check the agent's log, then record again"))
+			return fmt.Errorf("%s: %w", stopReason, rerr)
+		}
 	} else if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
@@ -654,6 +680,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
+				stampReal(byCase, windows)
 			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
@@ -1055,6 +1082,20 @@ func stampBegins(byCase map[string]models.MappedTestCase, windows []models.Scope
 		if tc.At.IsZero() || w.Start.Before(tc.At) {
 			tc.At = w.Start
 		}
+		byCase[w.Name] = tc
+	}
+}
+
+// stampReal writes into each test's mapping the mock.real destinations it
+// used while it was open (design v14 §4): its replays run on the real clock,
+// and the verdict asks that CI reach them.
+func stampReal(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if len(w.Real) == 0 {
+			continue
+		}
+		tc := byCase[w.Name]
+		tc.Real = mergeSorted(tc.Real, realDests(w.Real))
 		byCase[w.Name] = tc
 	}
 }

@@ -192,13 +192,20 @@ type TestsReceipt struct {
 	// mocked (models.MockedRow). keploy's summary lists them.
 	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
 	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
+	// Real is, under the proven switch, what the run saw of mock.real beyond
+	// its tests (design v14 §4, §8.2 rule 4): the destinations it reached,
+	// those it first reached outside a test, and the capture_incomplete
+	// evidence charged to no test. nil without the switch.
+	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
 }
 
 // empty reports whether the run reported no test and keploy refused
 // nothing: such a run leaves no per-test file, whatever rows it saw. A
 // record's file is what says the record reported its tests (judging reads a
 // missing one as "the record reported no test"), so rows alone, which a
-// suite without keploy's integration still makes, never write one.
+// suite without keploy's integration still makes, never write one; nor does
+// what the run saw of mock.real (its agent logs each connection it could not
+// capture).
 func (r TestsReceipt) empty() bool {
 	return len(r.Tests) == 0 && len(r.Refusals) == 0
 }
@@ -212,8 +219,16 @@ type TestReceipt struct {
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Evidence is, under the proven wire, what failed the test at its end:
-	// its misses and the recorded calls of its mapping it never made.
+	// its misses, the recorded calls of its mapping it never made, and the
+	// connections keploy could not capture.
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open: its REAL rows (design v14 §4).
+	Real []models.RealUse `yaml:"real,omitempty" json:"real,omitempty"`
+	// RealListed is, in a replay's file, the mock.real destinations the
+	// test's recording lists: the run must reach each (design v14 §8.2 rule
+	// 4), and the test ran on the real clock (§3.4, F3).
+	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner
@@ -284,7 +299,7 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome}
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Real: w.Real}
 		// What keploy could not capture while the test ran (a record's
 		// window carries no misses): a verdict against real infra keploy
 		// did not see whole is no basis for judging the recording.

@@ -595,3 +595,71 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 		})
 	}
 }
+
+// A local destination mock.real lists, by its address or as a container:
+// entry, is relayed to the real thing and never listed mocked, in a record as
+// in a replay: the REAL relay is decided before the mocked-local row, and the
+// one container naming gives both its key and its repository.
+func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
+	for _, tc := range []struct {
+		mode      models.Mode
+		container bool
+	}{{models.MODE_TEST, false}, {models.MODE_TEST, true}, {models.MODE_RECORD, false}, {models.MODE_RECORD, true}} {
+		t.Run(fmt.Sprintf("%s/container=%v", tc.mode, tc.container), func(t *testing.T) {
+			recorded.reset()
+			t.Cleanup(recorded.reset)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			upstream, _, _ := echoUpstream(t)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			entry := upstream
+			if tc.container {
+				containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
+					c: containerkey.Container{ID: "c1", Image: "postgres:16", Port: 5432}})
+				entry = "container:postgres"
+			} else {
+				containerkey.Default = containerkey.NewKeyer(containerAt{})
+			}
+			cfg := config.New()
+			cfg.Agent.Mode = tc.mode
+			cfg.Agent.MockMode = true
+			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
+			p.SetTopologySink(sink)
+			if err := p.SetRealDeps(context.Background(), []string{entry}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+				t.Fatal(err)
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			if _, err := app.Write([]byte("ping")); err != nil {
+				t.Fatal(err)
+			}
+			if got := <-readN(app, 4); got != "ping" {
+				t.Fatalf("the REAL relay carried %q, want the real echo %q", got, "ping")
+			}
+			_ = app.Close()
+			awaitEvent(t, done, "handleConnection returning")
+			select {
+			case r := <-sink.mocked:
+				t.Fatalf("a REAL destination was listed mocked: %+v", r)
+			default:
+			}
+			if got := p.RealRun().Reached; len(got) != 1 {
+				t.Fatalf("the REAL destination was not reached: %v", got)
+			}
+		})
+	}
+}

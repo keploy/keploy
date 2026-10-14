@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +114,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if err := m.refuseProvenDocker("replay"); err != nil {
 		return err
 	}
+	if err := m.checkRealDeps(); err != nil {
+		return err
+	}
 	policy := models.MissPolicy(m.config.Mock.OnMiss)
 	if !policy.Valid() {
 		return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", m.config.Mock.OnMiss)
@@ -190,6 +195,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			return nil
 		}
 		utils.LogError(m.logger, err, "failed to bring up the keploy-agent compose service")
+		return err
+	}
+
+	// The run's mock.real (proven switch only), before the proxy serves:
+	// those destinations are reached for real from the first connection.
+	if err := m.pushRealDeps(ctx); err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
+		utils.LogError(m.logger, err, "keploy could not hand its agent mock.real")
 		return err
 	}
 
@@ -399,6 +414,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			return fmt.Errorf("keploy did not complete the run: %w", appErr.Err)
 		}
 		return fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
+	}
+	// What the run saw of mock.real beyond its tests (proven switch only),
+	// once its last test ended: rule 4's reached destinations, and evidence
+	// charged to no test, which the verdict needs as much as the windows.
+	realRun, rerr := m.realRun(ctx)
+	if rerr != nil {
+		return fmt.Errorf("keploy could not read the run's mock.real destinations from its agent: %w", rerr)
 	}
 	detail := replayDetail{
 		windows:  testWindows(all),
@@ -651,6 +673,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Tests:       counts.tests,
 		Live:        m.live,
 		Mocked:      m.mocked,
+		Real:        realRun,
 	})
 	return keployFailure
 }
@@ -969,11 +992,38 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 		return fmt.Errorf("read when the tests of %s began: %w", name, err)
 	}
 	begins := testBegins(mapping)
-	if err := pusher.PushTestBegins(ctx, begins); err != nil {
+	real := testReal(mapping)
+	if err := pusher.PushTestBegins(ctx, begins, real); err != nil {
 		return err
+	}
+	m.realListed = real
+	for _, id := range slices.Sorted(maps.Keys(real)) {
+		// F3: the test runs on the real clock, so what its recording built
+		// on the recorded time ages; the summary lists it UNFROZEN.
+		m.logger.Info("a test that uses mock.real runs on the real clock, not at its recorded time: re-record it when its recording ages",
+			zap.String("test", id), zap.Strings("real", real[id]))
 	}
 	m.logger.Info("sent the agent when each test began in its recording", zap.Int("tests", len(begins)), zap.String("mock-set", name))
 	return nil
+}
+
+// testReal is, by test ID, the mock.real destinations each test of mapping
+// lists: those tests run on the real clock (design v14 §3.4, F3).
+func testReal(mapping *models.Mapping) map[string][]string {
+	if mapping == nil {
+		return nil
+	}
+	var out map[string][]string
+	for _, tc := range mapping.TestCases {
+		if len(tc.Real) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[tc.ID] = mergeSorted(out[tc.ID], tc.Real)
+	}
+	return out
 }
 
 // testBegins is when each test of mapping began, by test ID.
@@ -1500,7 +1550,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
 	}
-	counts.tests = withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows)
+	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
 	return counts
 }
 
@@ -1555,6 +1605,7 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
+		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
 		// One attempt keploy could not read leaves the test unread, with
 		// that attempt's reason.
 		if w.Evidence.Unread && !ev.Unread {

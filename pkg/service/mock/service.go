@@ -121,7 +121,7 @@ type ScopeGatePusher interface {
 // switch Replay hands the agent when each test of the recording began, so the
 // agent moves the run's clock per test (design v14 §3.4).
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
 }
 
 type SetPusher interface {

@@ -299,3 +299,37 @@ func TestNoDaemonIsSaidOncePerAgentAtInfo(t *testing.T) {
 		t.Fatalf("said %d times at Debug, want the other two sessions", n)
 	}
 }
+
+// Lookup only asks: it keys nothing and says nothing, so the keys Name gives
+// after it, and the warning that Docker cannot be read, are what they are
+// without it.
+func TestLookupChangesNothingNameGivesOrSays(t *testing.T) {
+	asked, plain := NewKeyer(newFake()), NewKeyer(newFake())
+	if c, ok, err := asked.Lookup("127.0.0.1:40003"); err != nil || !ok || c != pgB {
+		t.Fatalf("Lookup = %v, %v, %v; want pgB", c, ok, err)
+	}
+	if _, ok, err := asked.Lookup("not an address"); ok || err != nil {
+		t.Fatalf("Lookup of a bad address = %v, %v", ok, err)
+	}
+	for i, dst := range []string{"127.0.0.1:40002", "127.0.0.1:40003"} {
+		id := fmt.Sprint(i)
+		if got, want := name(t, asked, id, dst), name(t, plain, id, dst); got != want {
+			t.Fatalf("%s: keyed %q after a Lookup, %q without", dst, got, want)
+		}
+	}
+	if stamped(asked, "never-named") != "" {
+		t.Fatal("a Lookup held a key")
+	}
+
+	core, logs := observer.New(zap.DebugLevel)
+	f := newFake()
+	f.err = errors.New("dial unix /var/run/docker.sock: connect: permission denied")
+	k := NewKeyer(f)
+	if _, _, err := k.Lookup("127.0.0.1:40002"); err == nil {
+		t.Fatal("Lookup hid that Docker cannot be read")
+	}
+	_, _, _ = k.Name(zap.New(core), "1", "127.0.0.1:40002")
+	if logs.FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
+		t.Fatal("a Lookup before the session's first Name swallowed its warning")
+	}
+}

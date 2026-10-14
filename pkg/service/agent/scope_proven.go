@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -179,6 +180,10 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	a.provenMu.Lock()
 	a.proven = provenWire{losses: losses}
 	a.provenMu.Unlock()
+	if t := a.realTracker(); t != nil {
+		// A test the last session left open is no test of this one.
+		t.Interrupt()
+	}
 	return nil
 }
 
@@ -269,6 +274,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
 		}
+	}
+	if t := a.realTracker(); t != nil && prev != me {
+		// What the run's processes did before this one claimed it is the
+		// run's, as their misses are.
+		t.Claimed()
 	}
 	a.provenMu.Lock()
 	a.proven.claim = me
@@ -486,6 +496,11 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		// §5.1).
 		capture.ContinueTestErrorCapture()
 	}
+	if t := a.realTracker(); t != nil {
+		// The mock.real destinations its connections send bytes to from
+		// here are this test's.
+		t.BeginTest()
+	}
 	a.provenMu.Lock()
 	a.proven.open, a.proven.atBegin = id, counts
 	a.provenMu.Unlock()
@@ -628,20 +643,42 @@ func (a *Agent) failOpen(ctx context.Context, id string, atBegin map[string]uint
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, atBegin map[string]uint64, why string) (*models.ScopeEvidence, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The mock.real destinations the test used, and the connections keploy
+	// could neither capture nor relay as real while it was open: in a record
+	// as in a replay (design v14 §3.2, §4).
+	var uses []models.RealUse
+	var incomplete []models.CaptureIncomplete
+	if t := a.realTracker(); t != nil {
+		uses, incomplete = t.EndTest()
+	}
 	if a.replaying() {
 		ev, readErr = a.testEvidence(ctx, id, atBegin, outcome != models.ScopeOutcomeSkipped)
-		switch {
-		case readErr != nil:
-			if ev == nil {
-				ev = &models.ScopeEvidence{}
-			}
-			ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
-			ev.Unread = true
-			outcome = models.ScopeOutcomeFailed
-		case !ev.Empty():
-			ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
-			outcome = models.ScopeOutcomeFailed
+	}
+	if len(incomplete) > 0 {
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
 		}
+		ev.Incomplete = append(ev.Incomplete, incomplete...)
+	}
+	switch {
+	case readErr != nil:
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
+		ev.Unread = true
+		outcome = models.ScopeOutcomeFailed
+	case !ev.Empty() && a.replaying():
+		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
+		outcome = models.ScopeOutcomeFailed
+	case !ev.Empty():
+		// A record never fails a test: what keploy could not capture is
+		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
+		// and the test's outcome is its own against real infra.
+		ev.Reason = evidenceReason(id, ev, nil)
+	}
+	if len(uses) > 0 {
+		a.noteScopeReal(id, uses)
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil)
@@ -706,8 +743,15 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	}
 	ev.CaptureIncomplete = lost
 	switch {
-	case a.replaying() && fromEvidence:
-		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
+	case fromEvidence:
+		// keploy's text for the evidence, written again with the losses
+		// first: the same text in a record (whose evidence is the
+		// connections keploy could not capture) as in a replay.
+		var mocks map[string]*models.Mock
+		if a.replaying() {
+			mocks = a.mocksFound(ev.Unconsumed)
+		}
+		ev.Reason = evidenceReason(id, ev, mocks)
 	default:
 		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
@@ -869,6 +913,42 @@ func (a *Agent) noteScopeEvidence(id string, ev *models.ScopeEvidence) {
 	meta := a.scopeMeta[k]
 	meta.evidence = ev
 	a.scopeMeta[k] = meta
+}
+
+// noteScopeReal attaches the mock.real destinations a test used to the
+// window id's end closes.
+func (a *Agent) noteScopeReal(id string, uses []models.RealUse) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: 0, name: id}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.real = uses
+	a.scopeMeta[k] = meta
+}
+
+// realTracking is implemented by a proxy that relays the run's mock.real
+// destinations (design v14 §4).
+type realTracking interface {
+	RealTracker() *realdeps.Tracker
+}
+
+// realTracker is what the run's REAL connections did; nil for a proxy that
+// relays none.
+func (a *Agent) realTracker() *realdeps.Tracker {
+	if a.Proxy == nil {
+		return nil
+	}
+	p, ok := a.Proxy.(realTracking)
+	if !ok {
+		return nil
+	}
+	return p.RealTracker()
 }
 
 // abandonWindow forgets a window a failed begin opened.
@@ -1148,6 +1228,9 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // sent value.
 func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock) string {
 	var what []string
+	for _, c := range ev.Incomplete {
+		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
+	}
 	for _, m := range ev.Misses {
 		what = append(what, missText(m)+" had no recorded answer"+differsText(m.Differs))
 	}
@@ -1170,6 +1253,11 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	const most = 5
 	if len(what) > most {
 		what = append(what[:most], fmt.Sprintf("and %d more", len(what)-most))
+	}
+	if len(ev.Misses) == 0 && len(ev.Unconsumed) == 0 {
+		// Only connections keploy could not capture: each says what to
+		// change, and nothing the test did needs re-recording or quarantine.
+		return "keploy: " + strings.Join(what, "; ") + "."
 	}
 	return fmt.Sprintf("keploy: %s. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
 		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", strings.Join(what, "; "), id, shellQuote(id))

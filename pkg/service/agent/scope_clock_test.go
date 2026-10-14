@@ -73,7 +73,7 @@ func TestReplayMovesTheClockToEachTestsRecordedBegin(t *testing.T) {
 	a := newClockAgent(t)
 	ctx := context.Background()
 	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"pkg::TestA": b}))
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"pkg::TestA": b}, nil))
 
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
 	require.NoError(t, a.EndScopeAt(ctx, "pkg::TestA", 0, time.Now()))
@@ -252,7 +252,7 @@ func TestTheClockStaysWithoutTheSwitchAndInRecord(t *testing.T) {
 // them.
 func TestANewSessionForgetsTheBegins(t *testing.T) {
 	a := newClockAgent(t)
-	require.NoError(t, a.SetTestBegins(context.Background(), map[string]time.Time{"pkg::TestA": time.Now()}))
+	require.NoError(t, a.SetTestBegins(context.Background(), map[string]time.Time{"pkg::TestA": time.Now()}, nil))
 	a.resetScopeState()
 	require.Nil(t, a.testBegins)
 }
@@ -400,14 +400,14 @@ func TestSetTestBeginsRefusesABuildThatCannotMoveItsClock(t *testing.T) {
 	begins := map[string]time.Time{"pkg::TestA": time.Now()}
 	t.Setenv(provenswitch.Env, "1")
 	useHooks(t, &fileOnlyHooks{})
-	require.ErrorIs(t, newClockAgent(t).SetTestBegins(ctx, begins), ErrNoTestClock)
+	require.ErrorIs(t, newClockAgent(t).SetTestBegins(ctx, begins, nil), ErrNoTestClock)
 	useHooks(t, &clockHooks{file: "/tmp/kclk1/t"})
-	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins))
+	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
 	useHooks(t, &AgentHook{})
-	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins))
+	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
 	t.Setenv(provenswitch.Env, "")
 	useHooks(t, &fileOnlyHooks{})
-	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins))
+	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
 }
 
 // A test refused the clock while another holds it undoes nothing at its end:
@@ -572,7 +572,7 @@ func TestAFailedReleaseKeepsThePreviousSession(t *testing.T) {
 	a := newClockAgent(t)
 	a.Proxy = &workerPool{}
 	ctx := context.Background()
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"pkg::TestA": time.Now()}))
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"pkg::TestA": time.Now()}, nil))
 	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
 	h.err = errors.New("disk full")
 	require.Error(t, a.MockOutgoing(ctx, models.OutgoingOptions{}))
@@ -639,4 +639,59 @@ func TestWorkerGoneOnlyWhenTheProcessIsNotThere(t *testing.T) {
 			}
 		})
 	}
+}
+
+// realClockHooks is a build that freezes the run's clock and can put it on
+// real time for a test (RealTestClock).
+type realClockHooks struct{ clockHooks }
+
+func (h *realClockHooks) BeginRealTestClock(_ context.Context, test string) error {
+	h.moves = append(h.moves, "real "+test)
+	return h.err
+}
+
+// A test whose recording lists a mock.real destination runs on the real
+// clock (F3); the others at their recorded begins. Each end moves the clock
+// back to the run's start time.
+func TestATestThatUsesMockRealRunsOnTheRealClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &realClockHooks{clockHooks{file: "/tmp/kclk1/t"}}
+	useHooks(t, h)
+	a := newClockAgent(t)
+	ctx := context.Background()
+	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"pkg::TestA": b, "pkg::TestB": b},
+		map[string][]string{"pkg::TestB": {"db.example.com:5432"}, "pkg::TestC": nil}))
+	for _, id := range []string{"pkg::TestA", "pkg::TestB"} {
+		require.NoError(t, a.BeginScopeAt(ctx, id, 0, time.Now()))
+		require.NoError(t, a.EndScopeAt(ctx, id, 0, time.Now()))
+	}
+	require.Equal(t, []string{
+		"begin pkg::TestA 2026-10-06T09:01:00Z", "end pkg::TestA",
+		"real pkg::TestB", "end pkg::TestB",
+	}, h.moves)
+}
+
+// A build that freezes the run's clock but cannot put it on real time refuses
+// a recording with a REAL test, so the test never runs at its recorded begin
+// against a dependency that answers at real time. A build that freezes
+// nothing has no clock to put back on real time.
+func TestSetTestBeginsRefusesARealTestABuildCannotUnfreeze(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ctx := context.Background()
+	begins := map[string]time.Time{"pkg::TestA": time.Now()}
+	real := map[string][]string{"pkg::TestA": {"db.example.com:5432"}}
+	useHooks(t, &clockHooks{file: "/tmp/kclk1/t"})
+	require.ErrorIs(t, newClockAgent(t).SetTestBegins(ctx, begins, real), ErrNoRealTestClock)
+	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, nil))
+
+	// A list of no destinations is no REAL test.
+	require.NoError(t, newClockAgent(t).SetTestBegins(ctx, begins, map[string][]string{"pkg::TestA": nil}))
+
+	h := &clockHooks{}
+	useHooks(t, h)
+	a := newClockAgent(t)
+	require.NoError(t, a.SetTestBegins(ctx, begins, real))
+	require.NoError(t, a.BeginScopeAt(ctx, "pkg::TestA", 0, time.Now()))
+	require.Empty(t, h.moves, "a REAL test keeps the real clock it is on")
 }

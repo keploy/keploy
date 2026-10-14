@@ -315,12 +315,22 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	flagsSet := false
+	// The run's mock.real (proven switch only): a name entry's questions are
+	// answered live, and every answer is booked, so a connection to an
+	// address can be named by the one name keploy's DNS gave it.
+	rd := p.realList()
 
 	for _, question := range r.Question {
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 
-		resp, found := p.dnsCache.Get(key)
+		var resp dnsCacheEntry
+		found := false
+		if _, listed := rd.listedNameOf(question.Name); listed {
+			resp, found = p.realDNS(question), true
+		} else {
+			resp, found = p.dnsCache.Get(key)
+		}
 		if !found {
 			// No per-cache-miss log: the dnsCache TTL is 30s, so any
 			// unique query (including NXDOMAIN-heavy search-domain
@@ -335,6 +345,9 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
+		}
+		if rd != nil {
+			rd.bookDNSAnswer(question, resp.Answer)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)

@@ -981,6 +981,20 @@ func TestRecordTestsReceipt(t *testing.T) {
 	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.Nil(t, got, "a record that named no test removes the stale file")
+
+	// What the run saw of mock.real writes no file for a record that named
+	// no test: judging says it reported none.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{
+		Reached: []string{"db:5432"}, Incomplete: []models.CaptureIncomplete{{Class: models.CaptureIncompleteRealName, Destination: "10.0.0.7:443"}}}}, nil)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	// With its tests, the record's file carries it.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{Reached: []string{"db:5432"}}}, windows)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Equal(t, []string{"db:5432"}, got.Real.Reached)
 }
 
 // writeMapping writes keploy/set/mappings.yaml: one test, which made the

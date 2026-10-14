@@ -232,7 +232,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if dstCfg != nil {
 				ptPort = uint32(dstCfg.Port)
 			}
-			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url, request.Header); matched {
 				mode := rule.Mode
 				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 				served := "synthetic-200"
