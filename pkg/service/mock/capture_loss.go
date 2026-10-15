@@ -89,11 +89,13 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 
 // captureLossesDuring is what the agent could not capture while the test
 // command ran, every kind but the PID-map refusals (the PID-map check reports
-// those): a TLS handshake a client aborted against keploy's CA, a STARTTLS
-// upgrade keploy could not make, a parser stall or dropped bytes. Under the proven
-// switch every test after such a loss already failed with it; this is the
-// run's own verdict, which also covers a loss after the last test. An error
-// is a count that could not be read, at the start or now.
+// those): a client-side TLS handshake with keploy's proxy that failed other
+// than by the client hanging up, a STARTTLS upgrade keploy could not make, a
+// parser stall or dropped bytes. Under the proven switch the test running at
+// such a loss already failed with it, and every later one too but for a
+// failed handshake, which is only its own test's; this is the run's own
+// verdict, which also covers a loss outside every test. An error is a count
+// that could not be read, at the start or now.
 func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil
