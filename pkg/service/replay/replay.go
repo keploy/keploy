@@ -2030,7 +2030,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2151,7 +2151,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -5306,6 +5306,30 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 	}
 }
 
+// recordedSetShape is the shape a staging call sends for testSetID: that of its
+// test cases, with the first test moved back to the earliest test the set ever
+// recorded when the TestDB keeps it (RecordedStartReader). The agent stages
+// what was recorded before that test as the app's startup traffic, and every
+// test of the run reads the same startup mocks, so a late first test would
+// hand them most of the recording.
+func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
+	shape := recordedSetShapeOf(testCases)
+	reader, ok := r.testDB.(RecordedStartReader)
+	if !ok {
+		return shape
+	}
+	recorded, err := reader.RecordedFirstTestStart(ctx, testSetID)
+	if err != nil {
+		r.logger.Warn("could not read when the test set's first test was recorded; its startup traffic is taken from the test cases it holds now",
+			zap.String("testSetID", testSetID), zap.Error(err))
+		return shape
+	}
+	if !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
+		shape.firstTestStart = recorded
+	}
+	return shape
+}
+
 // recordedTestWindows returns the window each recorded test opens on the agent
 // when it runs — the same [req, res] pair the per-test SendMockFilterParamsToAgent
 // call sends (HTTP and gRPC; other kinds open none) — for every test case of the
@@ -5556,7 +5580,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, recordedSetShapeOf(testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases)); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
