@@ -82,6 +82,11 @@ type provenWire struct {
 	// (variables this keploy cannot follow): nothing serves them, and its end
 	// counts each as a recorded call it did not make.
 	unservable []string
+	// drops are the proxy listener's drops read when the window now open
+	// began (a test's begin, or the previous end); dropsKnown says they were
+	// read (settle).
+	drops      uint64
+	dropsKnown bool
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -456,6 +461,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 	}
+	// The calls the application made before this begin are settled first
+	// (settle_proven.go): they are the pool's, or the previous test's, never
+	// this test's.
+	// A connection whose held requests cannot be told does not stop the
+	// begin: the test's end finds it, and the test is not verified.
+	drops, err := a.settle(ctx, a.replaying())
+	if err != nil && !errors.Is(err, errHoldsUnknown) {
+		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
+	}
+	// The test's end compares the listener's drops with these.
+	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
 	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
 		a.abandonWindow(id)
@@ -615,6 +632,11 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The test's calls are settled before it is judged (settle_proven.go):
+	// a call it made that the proxy has not yet taken or answered is its
+	// own, whatever the load. One keploy cannot settle leaves the test
+	// unjudged, and failed.
+	settleErr := a.settledSince(ctx, a.replaying(), id)
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
 	// as in a replay (design v14 §3.2, §4).
@@ -666,6 +688,23 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	if settleErr != nil {
+		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
+		if why == "" {
+			why = note
+		} else {
+			why += "; " + note
+		}
+		if readErr == nil {
+			readErr = settleErr
+		}
+		// Unsettled, what the test did cannot all have been read: it has
+		// no verdict of its own.
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.Unread = true
+	}
 	if why != "" {
 		if ev == nil {
 			ev = &models.ScopeEvidence{}

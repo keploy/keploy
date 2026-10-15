@@ -117,6 +117,10 @@ func (g *Generic) recordV2(_ context.Context, sess *supervisor.Session) error {
 	return encodeGenericV2(sess, logger)
 }
 
+// HoldsRequests: the generic parser marks the requests it holds while it
+// reads on (integrations.RequestHolding, decodeGeneric).
+func (g *Generic) HoldsRequests() bool { return true }
+
 func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := g.logger.With(zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.String("Client IP Address", src.RemoteAddr().String()))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
