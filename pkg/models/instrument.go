@@ -415,6 +415,18 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	MemoryLimit       uint64
 	ConfigPath        string
+	// AppExtraHosts are the app's own host entries, "name:address" (docker
+	// run --add-host, a container's ExtraHosts). The app joins the agent
+	// container's network namespace, where Docker refuses host entries of the
+	// app's own, so the agent container carries them, and the app reads them
+	// from the /etc/hosts it shares with it. A compose service's extra_hosts
+	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
+	AppExtraHosts []string
+	// HostGateway says the daemon resolves the address host-gateway (Docker
+	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
+	// host.docker.internal to it, as Docker Desktop does for every container,
+	// unless the app maps that name itself.
+	HostGateway bool
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have

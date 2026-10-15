@@ -1416,15 +1416,17 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	}
 
 	// Now modify the app container to integrate with keploy-agent
-	err = idc.modifyAppServiceForKeploy(compose, appContainerName)
+	err = idc.modifyAppServiceForKeploy(compose, appContainerName, opts.HostGateway)
 	if err != nil {
 		return fmt.Errorf("failed to modify app service: %w", err)
 	}
 	return nil
 }
 
-// modifyAppServiceForKeploy modifies the app service to depend on keploy-agent and share namespaces
-func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string) error {
+// modifyAppServiceForKeploy modifies the app service to depend on keploy-agent
+// and share namespaces. hostGateway says the daemon resolves host-gateway:
+// keploy-agent then maps host.docker.internal to it (moveExtraHostsToAgent).
+func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string, hostGateway bool) error {
 	if compose.Services.Content == nil {
 		return fmt.Errorf("no services found in compose file")
 	}
@@ -1475,6 +1477,13 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 					idc.setServicePropertyNode(keployServiceNode, key, cloneYAMLNode(valueNode))
 					idc.removeServiceProperty(serviceContentNode, key)
 				}
+			}
+			// Host entries likewise: compose refuses extra_hosts with
+			// network_mode ("conflicting options: custom host-to-IP mapping
+			// and the network mode"), and the app reads keploy-agent's
+			// /etc/hosts (extra_hosts.go).
+			if err := idc.moveExtraHostsToAgent(serviceContentNode, keployServiceNode, hostGateway); err != nil {
+				return err
 			}
 
 			// Remove networks and ports from the app service
