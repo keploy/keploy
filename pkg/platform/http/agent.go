@@ -2576,7 +2576,29 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	opts.AgentPort = agentPort
 	opts.ProxyPort = proxyPort
 	opts.DnsPort = dnsPort
-	opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
+	// localhost, UNLESS the caller pinned the agent to an address.
+	//
+	// Loopback is right whenever keploy runs OUTSIDE the docker daemon it
+	// drives -- a laptop, where the agent publishes its port to the host, and
+	// where on macOS and Windows a container address is not routable from the
+	// host at all. It is NOT right for a caller that shares the daemon's
+	// network namespace: the Kubernetes replay Pod runs the driver and dockerd
+	// as containers of one Pod, so it reaches the agent by container address
+	// and needs no published port. That matters because a compose network
+	// marked `internal` -- which is how the replayed app is denied egress --
+	// makes docker silently drop port publication altogether (measured: the
+	// mapping is simply absent and every connection to loopback is refused).
+	//
+	// Only the HOST is taken from the caller. The port is this function's to
+	// choose (EnsureAvailablePorts may move it), so a caller that pinned one
+	// would be describing an agent that does not exist.
+	if host := kdocker.PresetAgentIP(a.conf); host != "" {
+		opts.AgentURI = fmt.Sprintf("http://%s:%d/agent", host, agentPort)
+		a.logger.Info("addressing the agent by its pinned container address, not loopback",
+			zap.String("agentURI", opts.AgentURI))
+	} else {
+		opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
+	}
 
 	// Update the ports in the configuration
 	a.conf.Agent.AgentPort = agentPort
