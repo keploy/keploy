@@ -30,12 +30,14 @@
 // actually behave like MySQL?", answered differently per mode because
 // the two modes have fundamentally different information available.
 //
-//	RECORD — a real upstream exists, so ask it. If the client stays
-//	silent past a short window the connection is server-speaks-first;
-//	dial upstream, read whatever it greets with, and run the existing
-//	MySQL.MatchType content matcher over those bytes. A positive match
+//	RECORD — a real upstream exists, so ask it. The upstream is reached
+//	at once and both ends are watched: whichever speaks first decides.
+//	The client first: not MySQL, and its bytes go on to the parser the
+//	moment they arrive. The upstream first: run the existing
+//	MySQL.MatchType content matcher over its greeting. A positive match
 //	routes to the MySQL parser and *learns* the port, so every later
-//	connection to it takes the zero-cost fast path.
+//	connection to it takes the zero-cost fast path. No clock decides
+//	anything (probeMysqlRecord).
 //
 //	REPLAY — there is no upstream to greet anyone; mocks are served
 //	from disk. Content detection is impossible by construction, so the
@@ -48,16 +50,22 @@
 //
 // # Cost
 //
-// Only connections whose client is silent past clientSilenceWindow pay
-// anything at all. Client-speaks-first protocols (HTTP, gRPC, Redis,
-// Postgres, Mongo, Kafka) send bytes immediately and return from
-// probeMysql on the first read, so the hot path is unchanged. Ports on
-// the configured/default/learned list skip the probe entirely.
+// The first connections to a port the proxy knows nothing about are
+// probed; once one of them has a verdict the port is cached, and later
+// connections skip the probe. A probed connection's client is read the
+// moment it speaks, so a client-speaks-first protocol (HTTP, gRPC,
+// Redis, Postgres, Mongo, Kafka) waits only for the probe's dial of its
+// destination to finish, a dial generic dispatch makes anyway. That dial
+// is made when the connection arrives, which is when the application's
+// own connect reached the proxy (where handshakes are held, it has
+// already happened and is reused). Ports on the configured/default/
+// learned list skip the probe entirely.
 package proxy
 
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -70,36 +78,26 @@ import (
 	"go.uber.org/zap"
 )
 
-// Probe tuning. All three are overridable by env var so a slow or
-// heavily contended environment can be adjusted without a rebuild;
-// the defaults are what ships.
+// The windows of the replay's endpoint-drift inference (inferEndpointDrift),
+// the one judgement of this file a clock still makes: a replay has no upstream
+// whose greeting could decide, so a client that has not spoken yet and a MySQL
+// client waiting to be greeted look the same until one of them speaks. Both are
+// overridable by env var so a slow or heavily contended environment can be
+// adjusted without a rebuild; the defaults are what ships. Record decides by
+// what the connection does (probeMysqlRecord), and a replay on a port the
+// recording names decides by the recording: neither uses them.
 const (
 	// defaultClientSilenceWindow is how long the client gets to send
-	// its first byte before we conclude the connection is
+	// its first byte before the inference treats the connection as
 	// server-speaks-first. MySQL clients send *nothing* here, so any
-	// traffic at all is a definitive negative. Kept short because it
-	// is pure added latency on the (rare) silent-client path, and
-	// because a detected port is learned — a connection pool pays it
-	// at most once per port.
+	// traffic at all is a definitive negative.
 	defaultClientSilenceWindow = 250 * time.Millisecond
 
-	// defaultServerGreetingWindow bounds the wait for the upstream's
-	// first bytes once we have decided the client is silent. Sending
-	// the handshake is the first thing mysqld does on accept, so this
-	// window only has to absorb scheduling jitter and a loaded
-	// container — 2s is generous by a wide margin. It matters that it
-	// IS generous: a port that stays silent through it is cached as
-	// non-MySQL for the session (see mysqlPortRegistry), so an
-	// under-sized window would misclassify a very slow server.
+	// defaultServerGreetingWindow is how much longer the first silent
+	// connection to an endpoint must stay silent before the inference
+	// serves it MySQL: a slow TLS client can be quiet past the silence
+	// window and only then send its ClientHello.
 	defaultServerGreetingWindow = 2 * time.Second
-
-	// defaultMockDeriveWait bounds how long a replay-mode connection
-	// waits for the mock set to be loaded before giving up on port
-	// derivation. This matters only for the docker-compose replay
-	// path, where the app container is started before StoreMocks
-	// lands; every other path stores mocks before the app runs. A
-	// bounded wait keeps that race deterministic instead of guessing.
-	defaultMockDeriveWait = 20 * time.Second
 )
 
 func envDuration(key string, def time.Duration) time.Duration {
@@ -122,10 +120,6 @@ func serverGreetingWindow() time.Duration {
 	return envDuration("KEPLOY_MYSQL_SERVER_GREETING_WINDOW", defaultServerGreetingWindow)
 }
 
-func mockDeriveWait() time.Duration {
-	return envDuration("KEPLOY_MYSQL_MOCK_DERIVE_WAIT", defaultMockDeriveWait)
-}
-
 // mysqlPortRegistry caches what the proxy has learned about each
 // destination port, so a port is probed at most once per session.
 //
@@ -135,17 +129,17 @@ func mockDeriveWait() time.Duration {
 //     MySQL.MatchType accepted.
 //   - replay: a port parsed out of a loaded MySQL mock's destAddr.
 //
-// Negatives (`notMysql`) exist because the probe is not free — a
-// silent client costs a wait, and reaching the upstream costs a dial.
+// Negatives (`notMysql`) exist because the probe is not free — it
+// reads both ends of the connection on goroutines of its own, and
+// reaching the upstream costs a dial where handshakes are not held.
 // Without a negative cache every connection to a non-MySQL port pays
-// that again, which for a pool of pre-opened sockets is a permanent
-// per-connection tax rather than a one-time discovery cost. A port is
-// cached negative once the probe reaches a conclusion about it:
+// that again. A port is cached negative once the probe reaches a
+// conclusion about it:
 //
 //   - the client spoke first (a MySQL connection never does), or
 //   - the upstream greeted with something that is not a HandshakeV10, or
-//   - the upstream stayed silent for the whole greeting window, which
-//     mysqld never does (see defaultServerGreetingWindow).
+//   - the upstream closed the connection without a word, which mysqld
+//     never does.
 //
 // Negatives are advisory only: the configured mysqlPorts list and the
 // built-in defaults are consulted first, so an explicit config always
@@ -161,8 +155,8 @@ type mysqlPortRegistry struct {
 	ports    map[uint32]struct{}
 	notMysql map[uint32]struct{}
 	// inferred holds the endpoints that were served MySQL on behavioural
-	// evidence alone (a silent client on a port no mock names — see the
-	// endpoint-drift branch in probeMysql). It does two things: it keeps the
+	// evidence alone (a silent client on a port no mock names — see
+	// inferEndpointDrift). It does two things: it keeps the
 	// warning to one line per endpoint, and it lets the next connection to the
 	// SAME endpoint skip the long confirmation wait, which a pool reopening
 	// connections would otherwise re-pay every time.
@@ -194,9 +188,9 @@ type mysqlPortRegistry struct {
 	sessionStale bool
 	derived      bool
 	// derivedCh is closed the first time DeriveFromMocks runs, so a
-	// replay connection that arrives before mocks are stored can block
+	// replay connection that arrives before mocks are stored can wait
 	// on it instead of guessing. Never closed twice (guarded by mu +
-	// the derived flag).
+	// the derived flag), and never replaced.
 	derivedCh chan struct{}
 }
 
@@ -244,7 +238,7 @@ func (r *mysqlPortRegistry) IsKnownNotMysql(port uint32) bool {
 // LearnNotMysql caches a negative verdict. Returns true if this was a
 // new observation, so the caller can log it exactly once. A port that
 // is already a known positive is never demoted — DeriveFromMocks and a
-// real handshake are both stronger evidence than a probe timeout.
+// real handshake are both stronger evidence than a probe's negative.
 func (r *mysqlPortRegistry) LearnNotMysql(port uint32) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -274,8 +268,8 @@ func (r *mysqlPortRegistry) LearnInferred(dstAddr string) bool {
 
 // IsInferred reports whether this endpoint has already been served on inferred
 // evidence. It shortens the confirmation the NEXT connection to the same
-// endpoint has to pass — see probeMysql — but never replaces the silence check
-// that precedes it.
+// endpoint has to pass — see inferEndpointDrift — but never replaces the
+// silence check that precedes it.
 func (r *mysqlPortRegistry) IsInferred(dstAddr string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -298,16 +292,15 @@ func (r *mysqlPortRegistry) IsInferred(dstAddr string) bool {
 //   - Clearing here instead would blind the registry for the entire gap between
 //     Mock() and this test set's first mock delivery — which spans reading the
 //     whole recorded corpus off disk and shipping it to the agent. A connection
-//     opened in that gap loses the known-port fast path and parks in
-//     WaitDerived. That gap is real traffic: a reused compose stack or
+//     opened in that gap loses the known-port fast path and waits on
+//     derivedSignal. That gap is real traffic: a reused compose stack or
 //     --keep-app-alive holds the application and its connection pool open
 //     across test-set boundaries, and a pool reconnecting there would stall.
 //   - Clearing here would also have to re-arm derivedCh, and replacing that
 //     channel strands anyone already parked on the old one: DeriveFromMocks
-//     closes the NEW channel, so the old waiter sleeps out the full derive
-//     deadline and is then told the mocks never arrived — which is precisely
-//     the "connection gets no MySQL and the test reports status_code 0"
-//     failure this whole mechanism exists to prevent.
+//     closes the NEW channel, so the old waiter is never released by the
+//     mocks it waits for — the connection gets no MySQL and the test reports
+//     status_code 0, the failure this whole mechanism exists to prevent.
 //
 // Swapping at derive time avoids both: the previous recording's ports stay
 // usable right up to the instant the new ones replace them, and derivedCh keeps
@@ -346,7 +339,7 @@ func (r *mysqlPortRegistry) Ports() []uint32 {
 
 // DeriveFromMocks adds every port referenced by a MySQL mock's
 // destAddr metadata and marks derivation complete, releasing any
-// replay connections parked in WaitDerived. It is safe to call
+// replay connections waiting on derivedSignal. It is safe to call
 // repeatedly (once per test-set); later calls union additional ports
 // and are no-ops for the completion signal.
 func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32 {
@@ -388,29 +381,13 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 	return added
 }
 
-// WaitDerived blocks until DeriveFromMocks has run, ctx is cancelled,
-// or timeout elapses. Returns true only if derivation actually
-// completed. Callers reach this only on a silent-client replay
-// connection, so the wait never touches normal traffic.
-func (r *mysqlPortRegistry) WaitDerived(ctx context.Context, timeout time.Duration) bool {
+// derivedSignal is closed once DeriveFromMocks has run: a replay connection
+// that arrives before its mocks are stored waits on it, or on its client
+// speaking first (probeMysqlReplay).
+func (r *mysqlPortRegistry) derivedSignal() <-chan struct{} {
 	r.mu.RLock()
-	done := r.derived
-	ch := r.derivedCh
-	r.mu.RUnlock()
-	if done {
-		return true
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ch:
-		return true
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return false
-	}
+	defer r.mu.RUnlock()
+	return r.derivedCh
 }
 
 // portFromAddr pulls the port out of a recorded destAddr. Handles
@@ -431,15 +408,16 @@ func portFromAddr(addr string) (uint32, bool) {
 }
 
 // deriveMysqlPorts recovers the MySQL port set from the mocks a replay
-// run has just loaded, and unblocks any connection parked in
-// WaitDerived. Called from SetMocks / SetMocksWithWindow before the
+// run has just loaded, and releases any connection waiting on
+// derivedSignal. Called from SetMocks / SetMocksWithWindow before the
 // mocks are published to the manager.
 //
 // Only replay reaches these callers, so derivedCh is never closed in
-// record mode. That is safe because WaitDerived is only reachable under
-// MODE_TEST — and it is bounded anyway (timeout plus ctx cancellation),
-// so even an aborted replay that never stores mocks releases its parked
-// connections rather than hanging them.
+// record mode. That is safe because derivedSignal is only waited on
+// under MODE_TEST, and the wait also ends when the connection's client
+// speaks or closes, or the run ends: a replay that never stores mocks
+// leaves a waiting connection exactly where generic dispatch would
+// leave it, reading its client.
 func (p *Proxy) deriveMysqlPorts(mockSets ...[]*models.Mock) {
 	if p.mysqlPorts == nil {
 		return
@@ -454,28 +432,35 @@ func (p *Proxy) deriveMysqlPorts(mockSets ...[]*models.Mock) {
 // mysqlProbe is what probeMysql learned, together with any connection
 // state it had to create or consume while learning it.
 //
-// SrcConn and DstConn must always be adopted by the caller: the probe
-// may have consumed bytes off either socket, and the returned conns
-// replay them. Ignoring them loses the client's first packet or the
-// server's greeting.
+// SrcConn, DstConn and Predialed must always be adopted by the caller:
+// the probe may have consumed bytes off either socket, and the returned
+// conns replay them. Ignoring them loses the client's first packet or
+// the server's greeting.
 type mysqlProbe struct {
 	// IsMySQL routes the connection to the MySQL parser.
 	IsMySQL bool
 	// SrcConn is srcConn, wrapped to replay any client bytes the
 	// probe consumed. Never nil.
 	SrcConn net.Conn
-	// DstConn is a pre-dialed upstream, wrapped to replay the
-	// server greeting the probe consumed. nil when the probe never
-	// dialed, in which case the caller dials as usual.
+	// DstConn is the upstream on a positive verdict, wrapped to replay
+	// the server greeting the probe consumed. nil otherwise.
 	DstConn net.Conn
+	// Predialed, when not nil, is the upstream the probe dialled for
+	// this connection on a host where its handshake was not held,
+	// handed on with any bytes the probe read from it: the connection's
+	// first dial of its destination takes it (util.Adopt), so the
+	// destination sees one connection. The caller closes it if no dial
+	// does (CloseIfUnused). A connection dialled while the handshake was
+	// held is handed back to its own util.Predialed instead.
+	Predialed *util.Predialed
 	// Reason is a short tag for debug logs.
 	Reason string
 }
 
 // probeMysql decides whether this connection should be handled by the
 // MySQL parser. See the package doc above for the design; the short
-// version is: known port → yes; client speaks first → no; client
-// silent → ask the upstream (record) or the recorded mocks (replay).
+// version is: known port → yes; record → whichever end of the
+// connection speaks first; replay → the recorded mocks.
 //
 // It never returns a nil *mysqlProbe. A non-nil error means the
 // connection is unusable (upstream dial failure) and the caller should
@@ -502,8 +487,7 @@ func (p *Proxy) probeMysql(
 	}
 	// A port already probed and found not to speak MySQL. Skipping here
 	// is what keeps the probe a one-time cost per port rather than a
-	// per-connection tax — without it, every connection to every
-	// non-MySQL port would re-pay the client wait and the upstream dial.
+	// per-connection tax.
 	if p.mysqlPorts.IsKnownNotMysql(port) {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "known-not-mysql"}, nil
 	}
@@ -527,257 +511,521 @@ func (p *Proxy) probeMysql(
 		return &mysqlProbe{SrcConn: src, Reason: reason}
 	}
 
-	// ── Step 1: is the client silent? ──
-	// Only a server-speaks-first connection can be MySQL at this point.
-	// Any client byte is a definitive negative and costs one read.
-	clientBytes, err := readWithin(ctx, srcConn, clientSilenceWindow())
-	if len(clientBytes) > 0 {
-		return notMysql("client-spoke-first", replayConn(srcConn, clientBytes, logger)), nil
-	}
-	if err != nil && !isTimeout(err) {
-		// EOF or a real network error: nothing to detect. Hand the
-		// connection back untouched and let the existing path produce
-		// its usual diagnostics.
-		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
-	}
-
-	logger.Debug("client silent past the probe window; treating as server-speaks-first",
-		zap.String("dstAddr", dstAddr),
-		zap.Uint32("port", port),
-		zap.Duration("window", clientSilenceWindow()))
-
-	// ── Step 2a: replay — there is no upstream, so ask the mocks ──
 	if mode == models.MODE_TEST {
-		if !p.mysqlPorts.WaitDerived(ctx, mockDeriveWait()) {
-			logger.Debug("mysql port derivation did not complete before the deadline",
-				zap.Uint32("port", port), zap.Duration("waited", mockDeriveWait()))
-			return &mysqlProbe{SrcConn: srcConn, Reason: "mocks-not-derived"}, nil
-		}
-		if p.mysqlPorts.Has(port) {
-			logger.Debug("recalled mysql port from recorded mocks", zap.Uint32("port", port))
-			return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "derived-from-mocks"}, nil
-		}
-		// The port is not one the recording saw. Reaching here already means
-		// the client opened the connection and then said nothing, so it is
-		// waiting to be greeted, and MySQL is the only server-speaks-first
-		// protocol keploy replays. Combined with "this recording contains
-		// MySQL mocks", a port that does not match is an environment
-		// difference — the replayed application was handed a different
-		// endpoint than it had at record time — not evidence that the
-		// connection isn't MySQL.
-		//
-		// Declining is not neutral. In replay keploy IS the server, so nothing
-		// else will ever send that greeting: the application blocks until its
-		// own timeout, every test touching that dependency reports
-		// status_code 0, and the whole recorded mock set goes unused while the
-		// recording is perfectly good.
-		//
-		// The gate is MockPorts, not Ports: the latter also holds ports learned
-		// by probing during a record session, and the agent process does not
-		// reset this registry between sessions, so it would arm this branch in
-		// a replay whose recording contains no MySQL at all.
-		if derived := p.mysqlPorts.MockPorts(); len(derived) > 0 && !opts.DisableMysqlEndpointDrift {
-			// Confirm before acting, because the silence window is a weak
-			// signal on its own — a slow TLS client can be quiet that long and
-			// only then send its ClientHello, and answering that with a
-			// HandshakeV10 breaks a connection that was working. A real MySQL
-			// client sends nothing at all until it is greeted, so a second,
-			// longer wait separates the two almost perfectly.
-			//
-			// Only the first connection to an endpoint pays it. After that the
-			// silence check above is confirmation enough: it is what rejects a
-			// client that speaks first, and it has already run. Re-paying the
-			// long wait on every connection would add it to each one a pool
-			// opens — in the bundle that motivated this change, 103 times.
-			// Keyed by endpoint, so a different host on the same port number
-			// does not inherit the shortcut.
-			if !p.mysqlPorts.IsInferred(dstAddr) {
-				late, lateErr := readWithin(ctx, srcConn, serverGreetingWindow())
-				if len(late) > 0 {
-					// It spoke, just slowly. Hand the bytes back and let the
-					// normal dispatch have it. The port is NOT cached as
-					// non-MySQL: this connection was not MySQL, but the next
-					// one on this port still deserves the same decision.
-					logger.Debug("client spoke after the extended window; not inferring MySQL",
-						zap.Uint32("port", port), zap.String("dstAddr", dstAddr),
-						zap.Duration("window", serverGreetingWindow()))
-					return &mysqlProbe{SrcConn: replayConn(srcConn, late, logger), Reason: "client-spoke-late"}, nil
-				}
-				if lateErr != nil && !isTimeout(lateErr) {
-					return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
-				}
-			}
-			// Bookkeeping only — this must not grant the fast path, or one
-			// inference would route every later connection on this port to the
-			// MySQL replayer without re-checking that the client is silent.
-			if p.mysqlPorts.LearnInferred(dstAddr) {
-				logger.Warn("serving MySQL mocks on a port the recording never saw: the replayed application connects to a different endpoint than it did at record time. Set mysqlPorts in keploy.yml to pin the mapping, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here.",
-					zap.Uint32("port", port),
-					zap.String("dstAddr", dstAddr),
-					zap.Uint32s("recordedPorts", derived))
-			}
-			return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "inferred-endpoint-drift"}, nil
-		}
-		return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
+		return p.probeMysqlReplay(ctx, srcConn, dstAddr, port, opts, logger, notMysql)
 	}
+	return p.probeMysqlRecord(ctx, srcConn, dstAddr, pre, port, logger, notMysql)
+}
 
-	// ── Step 2b: record — dial upstream and let the server identify itself ──
-	//
-	// This probe connection is deliberately NOT handed back to the
-	// caller on a negative verdict. Two reasons:
-	//
-	//  1. Leak safety. The generic path reassigns dstConn on several
-	//     branches (TLS dial, CONNECT, Postgres SSL upstream) without
-	//     closing what was there, so a pre-dialed socket handed over on
-	//     a non-MySQL verdict would be dropped unreferenced. That is
-	//     reachable: a slow TLS client can be silent past the client
-	//     window and only then send its ClientHello.
-	//
-	//  2. Staleness. Generic dispatch dials just-in-time, right before
-	//     forwarding the client's first bytes. Handing it a socket
-	//     opened seconds earlier — while we were waiting on a client
-	//     that is slow by definition — risks an upstream idle timeout
-	//     closing it before the first byte is ever written.
-	//
-	// Redialing costs one extra connection on the first probe of a
-	// port; the negative cache makes it exactly once. A server-speaks-
-	// first protocol simply re-greets on the fresh connection, so
-	// discarding this one loses nothing.
-	//
-	// Except when the dial takes the connection opened while the
-	// application's handshake was held (util.Predialed): that one is the
-	// application's own connection to the destination, not a probe. A
-	// negative verdict hands it back — re-armed for generic dispatch's
-	// dial, and watched again for the destination closing it — instead of
-	// closing it, and a destination that closes it during the look, while
-	// the application is still silent, has closed the application's
-	// connection, so the application's end is closed too.
-	dstConn, err := util.DialDestination(ctx, logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: pre})
-	if err != nil {
-		return &mysqlProbe{SrcConn: srcConn, Reason: "upstream-dial-failed"}, err
-	}
-	predialed := pre.Is(dstConn)
-	dstAdopted := false
-	defer func() {
-		if !dstAdopted {
-			_ = dstConn.Close()
-		}
-	}()
-	handBack := func(read []byte) {
-		var replay net.Conn
-		if len(read) > 0 {
-			replay = replayConn(dstConn, read, logger)
-		}
-		if predialed && pre.Return(dstConn, replay) {
-			dstAdopted = true
-		}
-	}
-
-	greeting, err := readGreetingWithin(ctx, dstConn, serverGreetingWindow(), p.Integrations[integrations.MYSQL])
-	if len(greeting) == 0 {
-		if err != nil && !isTimeout(err) {
-			logger.Debug("upstream produced no greeting; not classifying as mysql",
-				zap.String("dstAddr", dstAddr), zap.Error(err))
-			// The destination closed the application's own connection
-			// while it was silent: close the application's end, as the
-			// destination would have. An application that spoke meanwhile
-			// keeps its connection; generic dispatch dials afresh.
-			if predialed && util.ReceivedNothing(srcConn) {
-				_ = srcConn.Close()
-			}
-			return notMysql("upstream-read-error", srcConn), nil
-		}
-		// Both ends silent. mysqld greets immediately on accept, so a
-		// full greeting window of silence rules MySQL out.
-		handBack(nil)
-		return notMysql("no-greeting", srcConn), nil
-	}
-
+// probeMysqlRecord answers, for a record, whether the destination speaks
+// MySQL by what the connection itself does first. A MySQL client sends
+// nothing until its server greets it, and mysqld greets the moment it
+// accepts; every other protocol keploy records is opened by its client.
+// So the upstream is reached at once, both ends are read from the start,
+// and whichever speaks first decides:
+//
+//   - the client: not MySQL. Its bytes go on to generic dispatch the moment
+//     they arrive, so its first request reaches its parser, and is stamped,
+//     when the application sent it.
+//   - the upstream: MySQL if its greeting is a HandshakeV10, read until
+//     MySQL.MatchType's answer on it can no longer change (greetingDecided).
+//   - the upstream closing without a word: not MySQL (mysqld never does).
+//
+// No clock decides anything: until one end speaks or closes, or the run
+// ends, the connection is idle, as it is without keploy — a pool's
+// connection opened at startup and first used minutes later. The probe
+// used to wait for 250ms of client silence and then up to 2s for a
+// greeting, with the client's first bytes unread meanwhile, so a pooled
+// connection first used inside that time had its call held back and
+// stamped late, and recorded against the next test.
+//
+// The upstream is the connection dialled while the application's handshake
+// was held (pre), which is the application's own; without one it is dialled
+// here, when the application's connect reached the proxy, and handed on
+// (mysqlProbe.Predialed) so the destination still sees one connection.
+func (p *Proxy) probeMysqlRecord(
+	ctx context.Context,
+	srcConn net.Conn,
+	dstAddr string,
+	pre *util.Predialed,
+	port uint32,
+	logger *zap.Logger,
+	notMysql func(reason string, src net.Conn) *mysqlProbe,
+) (*mysqlProbe, error) {
 	// Reuse the parser's own content matcher rather than reimplementing
 	// handshake parsing here — it already validates the HandshakeV10
 	// shape and is deliberately strict about false positives.
-	parser, ok := p.Integrations[integrations.MYSQL]
+	matcher, ok := p.Integrations[integrations.MYSQL]
 	if !ok {
 		// No MySQL parser registered in this build: nothing could route
 		// there anyway. Don't cache a negative — this says nothing about
 		// the port, only about the build.
 		logger.Debug("mysql parser not registered; skipping content detection")
-		handBack(greeting)
 		return &mysqlProbe{SrcConn: srcConn, Reason: "mysql-parser-unregistered"}, nil
 	}
-
-	if !parser.MatchType(ctx, greeting) {
-		handBack(greeting)
-		return notMysql("greeting-not-mysql", srcConn), nil
+	if !wakeable(srcConn) {
+		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	}
 
-	if p.mysqlPorts.Learn(port) {
-		logger.Info("detected MySQL wire protocol on a non-default port; routing it to the MySQL parser for the rest of this session",
-			zap.Uint32("port", port),
-			zap.String("dstAddr", dstAddr),
-			zap.String("note", "set mysqlPorts in keploy.yml to skip detection, or disableMysqlAutoDetect: true to turn this off"))
+	client := startFirstRead(srcConn, logger)
+	up := startUpstreamLook(ctx, logger, dstAddr, pre, matcher)
+	cancelled := false
+	select {
+	case <-client.done:
+	case <-up.done:
+	case <-ctx.Done():
+		cancelled = true
+	}
+	clientBytes, clientErr := client.stop()
+	clientSpoke := len(clientBytes) > 0
+	// A client that has gone, or a run that has ended, needs no upstream: a
+	// dial still in flight is abandoned rather than waited for.
+	clientGone := !clientSpoke && clientErr != nil && !isTimeout(clientErr)
+	dstConn, greeting, upErr, dialErr := up.stop(cancelled || clientGone)
+	src := replayConn(srcConn, clientBytes, logger)
+
+	// handBack gives the upstream to whoever dials the destination next,
+	// with what the probe read from it: back to the held connection's
+	// Predialed, or as a Predialed of its own (util.Adopt).
+	predialed := pre.Is(dstConn)
+	handBack := func(read []byte) *util.Predialed {
+		if dstConn == nil {
+			return nil
+		}
+		var replay net.Conn
+		if len(read) > 0 {
+			replay = replayConn(dstConn, read, logger)
+		}
+		if predialed {
+			if !pre.Return(dstConn, replay) {
+				_ = dstConn.Close()
+			}
+			return nil
+		}
+		if replay == nil {
+			replay = dstConn
+		}
+		return util.Adopt(dstAddr, replay)
+	}
+	with := func(probe *mysqlProbe, read []byte) *mysqlProbe {
+		probe.Predialed = handBack(read)
+		return probe
 	}
 
-	// Positive verdict: keep the connection. The greeting is already on
-	// the wire and the client responds to it immediately, so there is no
-	// staleness window here — this is exactly what the pre-existing
-	// isMysqlPort branch did, minus the hardcoded port list.
-	dstAdopted = true
-	return &mysqlProbe{
-		IsMySQL: true,
-		SrcConn: srcConn,
-		DstConn: replayConn(dstConn, greeting, logger),
-		Reason:  "detected-handshake",
-	}, nil
+	switch {
+	case errors.Is(clientErr, errLookIncomplete) || errors.Is(upErr, errLookIncomplete) || errors.Is(dialErr, errLookIncomplete):
+		// A read of the probe's panicked (recovered, and logged): what it
+		// had read is lost, so neither end can be handed on intact.
+		if dstConn != nil {
+			_ = dstConn.Close()
+		}
+		return &mysqlProbe{SrcConn: src, Reason: "probe-failed"}, errLookIncomplete
+
+	case cancelled:
+		return with(&mysqlProbe{SrcConn: src, Reason: "cancelled"}, greeting), nil
+
+	case clientGone:
+		// EOF or a real network error before a byte: nothing to detect.
+		// Hand the connection back and let the existing path produce its
+		// usual diagnostics.
+		return with(&mysqlProbe{SrcConn: src, Reason: "client-read-error"}, greeting), nil
+
+	case dialErr != nil:
+		// The destination cannot be reached, so the connection cannot be
+		// served, whichever end spoke: generic dispatch's own dial would
+		// fail the same way, so it is not tried a second time.
+		return &mysqlProbe{SrcConn: src, Reason: "upstream-dial-failed"}, dialErr
+
+	case len(greeting) > 0 && matcher.MatchType(ctx, greeting):
+		// The server identified itself; a client that spoke at the same
+		// moment changes nothing about that.
+		if p.mysqlPorts.Learn(port) {
+			logger.Info("detected MySQL wire protocol on a non-default port; routing it to the MySQL parser for the rest of this session",
+				zap.Uint32("port", port),
+				zap.String("dstAddr", dstAddr),
+				zap.String("note", "set mysqlPorts in keploy.yml to skip detection, or disableMysqlAutoDetect: true to turn this off"))
+		}
+		// Keep the connection: the greeting is already on the wire and
+		// the client answers it at once, as on the isMysqlPort path.
+		return &mysqlProbe{
+			IsMySQL: true,
+			SrcConn: src,
+			DstConn: replayConn(dstConn, greeting, logger),
+			Reason:  "detected-handshake",
+		}, nil
+
+	case clientSpoke:
+		if len(greeting) == 0 && upErr != nil && !isTimeout(upErr) && !predialed {
+			// The destination closed the probe's own connection as the
+			// client spoke: nothing is handed on, and the connection's
+			// dial dials afresh, as it would have without the probe.
+			_ = dstConn.Close()
+			return notMysql("client-spoke-first", src), nil
+		}
+		return with(notMysql("client-spoke-first", src), greeting), nil
+
+	case len(greeting) > 0:
+		return with(notMysql("greeting-not-mysql", src), greeting), nil
+
+	case upErr != nil && !isTimeout(upErr):
+		logger.Debug("upstream closed the connection without a greeting; not classifying as mysql",
+			zap.String("dstAddr", dstAddr), zap.Error(upErr))
+		// The destination closed the application's own connection while
+		// the application was silent: close the application's end, as the
+		// destination would have. A connection the probe dialled itself is
+		// not the application's: generic dispatch dials afresh.
+		_ = dstConn.Close()
+		if predialed && util.ReceivedNothing(srcConn) {
+			_ = srcConn.Close()
+		}
+		return notMysql("upstream-read-error", src), nil
+	}
+	// Neither end said or did anything, yet a read ended: nothing to go on.
+	return with(&mysqlProbe{SrcConn: src, Reason: "undecided"}, greeting), nil
 }
 
-// readGreetingWithin accumulates the upstream's first bytes until the
-// MySQL matcher can reach a verdict, the overall window expires, or the
-// peer closes.
-//
-// A single Read is not enough. MySQL.MatchType needs the complete first
-// packet (it rejects a buffer shorter than the declared packet length),
-// so a HandshakeV10 split across two TCP segments would be judged "not
-// MySQL" and the connection would fall through to the generic path —
-// re-introducing exactly the deadlock this detection exists to remove,
-// with a debug line that actively points the wrong way. Rare, but a
-// hard hang when it happens, so we keep reading until the matcher
-// commits or we run out of time.
-//
-// matcher may be nil (no MySQL parser registered); then this degrades
-// to a single bounded read, which is all the caller needs.
-func readGreetingWithin(ctx context.Context, conn net.Conn, window time.Duration, matcher integrations.Integrations) ([]byte, error) {
-	deadline := time.Now().Add(window)
-	if err := conn.SetReadDeadline(deadline); err != nil {
-		return nil, err
+// probeMysqlReplay answers, for a replay, whether the connection is MySQL
+// from the recording: keploy is the server here, so there is no greeting to
+// read. A connection that arrives before the test set's mocks are stored
+// (the docker-compose path starts the app first) waits for them, or for its
+// client to speak first, whichever comes first, with its client's first
+// bytes read the moment they arrive.
+func (p *Proxy) probeMysqlReplay(
+	ctx context.Context,
+	srcConn net.Conn,
+	dstAddr string,
+	port uint32,
+	opts models.OutgoingOptions,
+	logger *zap.Logger,
+	notMysql func(reason string, src net.Conn) *mysqlProbe,
+) (*mysqlProbe, error) {
+	derived := p.mysqlPorts.derivedSignal()
+	select {
+	case <-derived:
+	default:
+		if !wakeable(srcConn) {
+			return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
+		}
+		client := startFirstRead(srcConn, logger)
+		cancelled := false
+		select {
+		case <-client.done:
+		case <-derived:
+		case <-ctx.Done():
+			cancelled = true
+		}
+		read, err := client.stop()
+		switch {
+		case errors.Is(err, errLookIncomplete):
+			// The read panicked (recovered, and logged): what it had read
+			// is lost, so the connection cannot be handed on intact.
+			return &mysqlProbe{SrcConn: srcConn, Reason: "probe-failed"}, err
+		case len(read) > 0:
+			return notMysql("client-spoke-first", replayConn(srcConn, read, logger)), nil
+		case err != nil && !isTimeout(err):
+			return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
+		case cancelled:
+			return &mysqlProbe{SrcConn: srcConn, Reason: "cancelled"}, nil
+		}
 	}
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
+	if p.mysqlPorts.Has(port) {
+		logger.Debug("recalled mysql port from recorded mocks", zap.Uint32("port", port))
+		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "derived-from-mocks"}, nil
+	}
+	// The port is not one the recording saw. The gate is MockPorts, not
+	// Ports: the latter also holds ports learned by probing during a record
+	// session, and the agent process does not reset this registry between
+	// sessions, so it would arm the inference in a replay whose recording
+	// contains no MySQL at all.
+	if recorded := p.mysqlPorts.MockPorts(); len(recorded) > 0 && !opts.DisableMysqlEndpointDrift {
+		return p.inferEndpointDrift(ctx, srcConn, dstAddr, port, recorded, logger, notMysql), nil
+	}
+	return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
+}
+
+// inferEndpointDrift serves MySQL mocks on a port the recording never saw, when
+// the client stays silent. A silent client is waiting to be greeted, and MySQL
+// is the only server-speaks-first protocol keploy replays. Combined with "this
+// recording contains MySQL mocks", a port that does not match is an
+// environment difference — the replayed application was handed a different
+// endpoint than it had at record time — not evidence that the connection isn't
+// MySQL.
+//
+// Declining is not neutral. In replay keploy IS the server, so nothing else
+// will ever send that greeting: the application blocks until its own timeout,
+// every test touching that dependency reports status_code 0, and the whole
+// recorded mock set goes unused while the recording is perfectly good.
+//
+// This is the one judgement in this file a clock makes. A client that has not
+// spoken YET and a MySQL client waiting to be greeted look the same until one
+// of them speaks, and replay has no upstream whose greeting could decide, so
+// silence through the windows is taken as the signature. It never holds the
+// client's bytes — every read returns the moment they arrive — and it is
+// opt-out (disableMysqlEndpointDrift); pinning the port with mysqlPorts takes
+// the fast path instead.
+func (p *Proxy) inferEndpointDrift(
+	ctx context.Context,
+	srcConn net.Conn,
+	dstAddr string,
+	port uint32,
+	recorded []uint32,
+	logger *zap.Logger,
+	notMysql func(reason string, src net.Conn) *mysqlProbe,
+) *mysqlProbe {
+	// Any client byte is a definitive negative and costs one read.
+	clientBytes, err := readWithin(ctx, srcConn, clientSilenceWindow())
+	if len(clientBytes) > 0 {
+		return notMysql("client-spoke-first", replayConn(srcConn, clientBytes, logger))
+	}
+	if err != nil && !isTimeout(err) {
+		// EOF or a real network error: nothing to detect. Hand the
+		// connection back untouched and let the existing path produce
+		// its usual diagnostics.
+		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}
+	}
+	logger.Debug("client silent past the probe window; treating as server-speaks-first",
+		zap.String("dstAddr", dstAddr),
+		zap.Uint32("port", port),
+		zap.Duration("window", clientSilenceWindow()))
+
+	// Confirm before acting, because the silence window is a weak signal on
+	// its own — a slow TLS client can be quiet that long and only then send
+	// its ClientHello, and answering that with a HandshakeV10 breaks a
+	// connection that was working. A real MySQL client sends nothing at all
+	// until it is greeted, so a second, longer wait separates the two almost
+	// perfectly.
+	//
+	// Only the first connection to an endpoint pays it. After that the
+	// silence check above is confirmation enough: it is what rejects a client
+	// that speaks first, and it has already run. Re-paying the long wait on
+	// every connection would add it to each one a pool opens — in the bundle
+	// that motivated this change, 103 times. Keyed by endpoint, so a
+	// different host on the same port number does not inherit the shortcut.
+	if !p.mysqlPorts.IsInferred(dstAddr) {
+		late, lateErr := readWithin(ctx, srcConn, serverGreetingWindow())
+		if len(late) > 0 {
+			// It spoke, just slowly. Hand the bytes back and let the normal
+			// dispatch have it. The port is NOT cached as non-MySQL: this
+			// connection was not MySQL, but the next one on this port still
+			// deserves the same decision.
+			logger.Debug("client spoke after the extended window; not inferring MySQL",
+				zap.Uint32("port", port), zap.String("dstAddr", dstAddr),
+				zap.Duration("window", serverGreetingWindow()))
+			return &mysqlProbe{SrcConn: replayConn(srcConn, late, logger), Reason: "client-spoke-late"}
+		}
+		if lateErr != nil && !isTimeout(lateErr) {
+			return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}
+		}
+	}
+	// Bookkeeping only — this must not grant the fast path, or one inference
+	// would route every later connection on this port to the MySQL replayer
+	// without re-checking that the client is silent.
+	if p.mysqlPorts.LearnInferred(dstAddr) {
+		logger.Warn("serving MySQL mocks on a port the recording never saw: the replayed application connects to a different endpoint than it did at record time. Set mysqlPorts in keploy.yml to pin the mapping, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here.",
+			zap.Uint32("port", port),
+			zap.String("dstAddr", dstAddr),
+			zap.Uint32s("recordedPorts", recorded))
+	}
+	return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "inferred-endpoint-drift"}
+}
+
+// wakeable reports whether conn takes a read deadline, which is what wakes a
+// probe's read of it once the other end has decided. A connection that takes
+// none (a closed one, say) is not read by the probe at all.
+func wakeable(conn net.Conn) bool {
+	return conn.SetReadDeadline(time.Time{}) == nil
+}
+
+// errLookIncomplete stands for a read or dial on a probe's goroutine that
+// ended without an answer of its own (it panicked, and was recovered).
+var errLookIncomplete = errors.New("the mysql probe's read did not complete")
+
+// firstRead reads a connection's first bytes on a goroutine of its own, with
+// no deadline: it ends when the peer sends, closes, or stop wakes it.
+type firstRead struct {
+	conn net.Conn
+	done chan struct{}
+	b    []byte
+	err  error
+}
+
+func startFirstRead(conn net.Conn, logger *zap.Logger) *firstRead {
+	r := &firstRead{conn: conn, done: make(chan struct{}), err: errLookIncomplete}
+	go func() {
+		defer close(r.done)
+		defer util.RecoverWithoutClose(logger)
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		r.b, r.err = buf[:n], err
+	}()
+	return r
+}
+
+// stop ends the read if it is still waiting — a read deadline in the past
+// wakes it, and no bytes are lost to that: they stay on the socket — and
+// returns what the client had sent by then. The connection is left with no
+// deadline.
+func (r *firstRead) stop() ([]byte, error) {
+	_ = r.conn.SetReadDeadline(time.Unix(1, 0))
+	<-r.done
+	_ = r.conn.SetReadDeadline(time.Time{})
+	if len(r.b) == 0 && isTimeout(r.err) {
+		// A read the deadline stopped before it began fails without
+		// looking at the socket, so bytes, or the client's close, may be
+		// waiting there all the same.
+		switch data, closed := util.Waiting(r.conn); {
+		case data:
+			buf := make([]byte, 4096)
+			n, err := r.conn.Read(buf) // returns at once: bytes are waiting
+			r.b, r.err = buf[:n], err
+		case closed:
+			r.err = io.EOF
+		}
+	}
+	return r.b, r.err
+}
+
+// upstreamLook reaches a connection's destination and reads what it sends
+// first, on a goroutine of its own, until MySQL.MatchType's answer on it can
+// no longer change (greetingDecided), the destination closes, or stop wakes
+// it. There is no deadline: a destination that waits for its client to speak
+// is waited for, as the client is.
+type upstreamLook struct {
+	done   chan struct{}
+	cancel context.CancelFunc // abandons a dial still in flight
+
+	mu      sync.Mutex
+	conn    net.Conn // the upstream, once reached
+	stopped bool
+
+	greeting []byte
+	err      error // what ended the read
+	dialErr  error // the upstream could not be reached
+}
+
+// dialProbeUpstream dials a probed connection's destination when no connection
+// was dialled while its handshake was held. A variable so a test can stand in a
+// destination that never answers.
+var dialProbeUpstream = func(ctx context.Context, logger *zap.Logger, dstAddr string) (net.Conn, error) {
+	return util.DialDestination(ctx, logger, "tcp", util.DialTarget{Addr: dstAddr})
+}
+
+// startUpstreamLook reaches dstAddr through pre, the connection dialled while
+// the application's handshake was held — taken even if the destination has
+// closed it, which is then its answer (Look) — or by dialling it.
+func startUpstreamLook(ctx context.Context, logger *zap.Logger, dstAddr string, pre *util.Predialed, matcher integrations.Integrations) *upstreamLook {
+	dialCtx, cancel := context.WithCancel(ctx)
+	l := &upstreamLook{done: make(chan struct{}), cancel: cancel, dialErr: errLookIncomplete}
+	go func() {
+		defer close(l.done)
+		defer util.RecoverWithoutClose(logger)
+		conn := pre.Look(dstAddr)
+		if conn == nil {
+			c, err := dialProbeUpstream(dialCtx, logger, dstAddr)
+			if err != nil {
+				l.dialErr = err
+				return
+			}
+			conn = c
+		}
+		l.mu.Lock()
+		// errLookIncomplete until the read returns: a read that panics
+		// leaves it, and what it had read is lost with it.
+		l.conn, l.dialErr, l.err = conn, nil, errLookIncomplete
+		stopped := l.stopped
+		l.mu.Unlock()
+		if stopped {
+			l.err = nil
+			return
+		}
+		l.greeting, l.err = readGreeting(ctx, conn, matcher)
+	}()
+	return l
+}
+
+// stop ends the look if it is still reading, and returns the upstream, what
+// was read from it, what ended the read, and why the upstream could not be
+// reached. A dial in progress is let finish, since the connection is the
+// application's, unless abandon says nobody will use it. The upstream is left
+// with no deadline.
+func (l *upstreamLook) stop(abandon bool) (conn net.Conn, greeting []byte, err, dialErr error) {
+	l.mu.Lock()
+	l.stopped = true
+	if l.conn != nil {
+		_ = l.conn.SetReadDeadline(time.Unix(1, 0))
+	}
+	l.mu.Unlock()
+	if abandon {
+		l.cancel()
+	}
+	<-l.done
+	l.cancel()
+	if l.conn != nil {
+		_ = l.conn.SetReadDeadline(time.Time{})
+	}
+	return l.conn, l.greeting, l.err, l.dialErr
+}
+
+// readGreeting accumulates the upstream's first bytes until the MySQL matcher's
+// answer on them is final (greetingDecided), or a read fails, and returns all
+// it read.
+//
+// A single Read is not enough. MySQL.MatchType needs the complete first packet
+// (it rejects a buffer shorter than the declared packet length), so a
+// HandshakeV10 split across two TCP segments would be judged "not MySQL" and
+// the connection would fall through to the generic path — re-introducing
+// exactly the deadlock this detection exists to remove.
+func readGreeting(ctx context.Context, conn net.Conn, matcher integrations.Integrations) ([]byte, error) {
 	var greeting []byte
 	buf := make([]byte, 4096)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
 			greeting = append(greeting, buf[:n]...)
-			// Stop as soon as the verdict is knowable. A positive is
-			// final; for a negative we still need to be sure we are not
-			// looking at a half-delivered handshake, so keep reading
-			// until the window closes or the greeting grows past any
-			// plausible handshake (MatchType caps packets at 512 bytes).
-			if matcher != nil && matcher.MatchType(ctx, greeting) {
-				return greeting, nil
-			}
-			if len(greeting) > 1024 {
+			if greetingDecided(ctx, greeting, matcher) {
 				return greeting, nil
 			}
 		}
 		if err != nil {
 			return greeting, err
 		}
-		if !time.Now().Before(deadline) {
-			return greeting, nil
-		}
 	}
+}
+
+const (
+	// maxHandshakePacket is the longest first packet MySQL.MatchType takes
+	// for a handshake; it rejects any longer one.
+	maxHandshakePacket = 512
+	// maxGreetingBytes is past any plausible MySQL handshake.
+	maxGreetingBytes = 1024
+)
+
+// greetingDecided reports whether buf, the start of what an upstream sent
+// first, holds enough for MySQL.MatchType's answer on it to be final, so that
+// reading on could not change it:
+//
+//   - MatchType accepts it;
+//   - its first packet is complete: MatchType judges that packet alone (it
+//     slices the body to the declared length), so more bytes cannot change
+//     its answer;
+//   - its first packet declares a length no handshake has, as any text
+//     banner does ("220 ..." reads as millions of bytes);
+//   - it is longer than any handshake.
+//
+// A destination that sends less than its first packet and then waits for its
+// client would be read on until it does more; MySQL never does that, and no
+// server-first protocol keploy has met does either (text banners are decided
+// by their first four bytes).
+func greetingDecided(ctx context.Context, buf []byte, matcher integrations.Integrations) bool {
+	if matcher.MatchType(ctx, buf) || len(buf) >= maxGreetingBytes {
+		return true
+	}
+	if len(buf) < 4 {
+		return false
+	}
+	pktLen := int(buf[0]) | int(buf[1])<<8 | int(buf[2])<<16
+	return pktLen > maxHandshakePacket || len(buf) >= 4+pktLen
 }
 
 // readWithin reads once from conn under a deadline. A timeout is
