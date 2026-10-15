@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // settle.go holds a test case until its verdict under the rule for unrecorded
@@ -67,9 +68,31 @@ type Backlog interface {
 	PendingBefore(before time.Time) bool
 }
 
+// HeldProgressor is a Watermark that can count the progress of what keeps the
+// verdict for a test case of pod recorded over [start, end] from being final:
+// a count that moves whenever it gets further (a parser behind its window
+// consumes bytes or returns, the queue a mock of its window waits in moves),
+// and not for what does not hold it (another connection's parser, a capture
+// that is busy elsewhere). The hold lets a test case go unsettled only once
+// that has not moved for its bound.
+type HeldProgressor interface {
+	HeldProgress(namespace, pod string, start, end time.Time) uint64
+}
+
 const (
-	// TestCaseHoldMax bounds how long a test case is held for its verdict.
-	TestCaseHoldMax = 30 * time.Second
+	// TestCaseHoldMax bounds how long a test case is held for its verdict
+	// while what keeps it from being final makes no progress (HeldProgressor,
+	// else since it came), in the time the process could run (utils/stall):
+	// a busy capture working through its backlog, or one starved of CPU, does
+	// not have its test cases let go unsettled for taking long.
+	//
+	// It outlasts the mock stream's own bound (outChanStall, looked at every
+	// stall.CheckEvery of it): a test case held for a mock of its window
+	// queued for a consumer that took nothing since the last hand-on is let
+	// go once the queue has given that mock up and recorded its test as
+	// dropped (it is then left out), not just before, saved without it. Both
+	// stalls start at that hand-on (HandOnProgress).
+	TestCaseHoldMax = outChanStall + 2*time.Second
 	// TestCaseHoldBytes bounds the bytes of test cases held at once: past
 	// it, the oldest are released first.
 	TestCaseHoldBytes int64 = 32 << 20
@@ -91,8 +114,14 @@ type Held struct {
 
 type heldEntry struct {
 	Held
-	at   time.Time
-	size int64
+	// stallFrom is the hold's clock (Runnable) when what keeps the verdict
+	// from being final last moved (progress, counted: it was read), or when
+	// the test case came, or, while it waits behind an earlier one of its
+	// pod, when what holds that one last moved.
+	stallFrom time.Duration
+	progress  uint64
+	counted   bool
+	size      int64
 	// fence is the token of the barrier opened once its verdict settled
 	// (Fenced); 0 until then.
 	fence uint64
@@ -107,21 +136,37 @@ type TestCaseHold struct {
 	maxBytes int64
 	q        []heldEntry
 	bytes    int64
-	now      func() time.Time
+	// clk measures maxAge (utils/stall). hold holds the process clock while
+	// any test case is held, so it costs no sampling while none is (release
+	// lets it go); nil for a test's clock.
+	clk     stall.Clock
+	hold    func() func()
+	release func()
 }
 
-// NewTestCaseHold holds test cases for w, for at most maxAge each and maxBytes
-// in all (TestCaseHoldMax and TestCaseHoldBytes in production).
+// NewTestCaseHold holds test cases for w, for at most maxAge each without
+// progress (TestCaseHoldMax) and maxBytes in all (TestCaseHoldBytes).
 func NewTestCaseHold(w Watermark, maxAge time.Duration, maxBytes int64) *TestCaseHold {
-	return &TestCaseHold{w: w, maxAge: maxAge, maxBytes: maxBytes, now: time.Now}
+	return &TestCaseHold{w: w, maxAge: maxAge, maxBytes: maxBytes, clk: stall.ProcessClock(), hold: stall.Hold}
 }
 
 // Add holds tc, of pod (namespace, pod; either "" when not known). Release
 // hands it back, at once when its verdict is final already.
 func (h *TestCaseHold) Add(tc *models.TestCase, namespace, pod string) {
+	if h.hold != nil && h.release == nil {
+		h.release = h.hold()
+	}
 	size := testCaseSize(tc)
-	h.q = append(h.q, heldEntry{Held: Held{TC: tc, Namespace: namespace, Pod: pod}, at: h.now(), size: size})
+	h.q = append(h.q, heldEntry{Held: Held{TC: tc, Namespace: namespace, Pod: pod}, stallFrom: h.clk.Runnable(), size: size})
 	h.bytes += size
+}
+
+// idle lets the process clock go once nothing is held.
+func (h *TestCaseHold) idle() {
+	if len(h.q) == 0 && h.release != nil {
+		h.release()
+		h.release = nil
+	}
 }
 
 // Len is how many test cases are held.
@@ -135,6 +180,7 @@ func (h *TestCaseHold) Drain() []*models.TestCase {
 		out = append(out, e.TC)
 	}
 	h.q, h.bytes = nil, 0
+	h.idle()
 	return out
 }
 
@@ -184,30 +230,38 @@ func (h *TestCaseHold) Release() []Held {
 	if len(h.q) == 0 {
 		return nil
 	}
-	now := h.now()
+	now := h.clk.Runnable()
 	over := h.bytes - h.maxBytes
 	type podKey struct{ ns, pod string }
-	var blocked map[podKey]bool
+	// blocked is, for each pod whose first held test case stays, where that
+	// one's stall began (stalled).
+	var blocked map[podKey]time.Duration
 	var out []Held
 	keep := h.q[:0]
 	for _, e := range h.q {
 		k := podKey{e.Namespace, e.Pod}
+		from, behind := blocked[k]
 		release := false
 		switch {
 		case over > 0:
 			// Past the byte budget: the oldest go first, settled or not.
 			release = true
 			e.Unsettled = !h.final(&e)
-		case blocked[k]:
+		case behind:
+			// Held behind an earlier one of its pod, it is held by what
+			// holds that one: its stall runs from that one's, not from when
+			// it came, or it would be let go the moment that one goes, for
+			// the time it waited behind it.
+			e.stallFrom = max(e.stallFrom, from)
 		case h.final(&e):
 			release = true
-		case now.Sub(e.at) >= h.maxAge:
+		case h.stalled(&e, now) >= h.maxAge:
 			release, e.Unsettled = true, true
 		default:
 			if blocked == nil {
-				blocked = make(map[podKey]bool)
+				blocked = make(map[podKey]time.Duration)
 			}
-			blocked[k] = true
+			blocked[k] = e.stallFrom
 		}
 		if release {
 			if e.Unsettled {
@@ -225,7 +279,31 @@ func (h *TestCaseHold) Release() []Held {
 	if len(h.q) == 0 {
 		h.q = nil // do not keep a burst's backing array
 	}
+	h.idle()
 	return out
+}
+
+// stalled is how long, on the hold's clock, what keeps e's verdict from
+// being final has made no progress: since it last moved (HeldProgressor), or,
+// when the watermark cannot count it, since e came. A capture's Progressor is
+// not taken for it: it moves with every parser of the capture, and a busy
+// capture would keep a test case whose own blocker has stopped held for as
+// long as anything else moves. A count read for the first time does not move
+// stallFrom: the stall runs from when e came, or from where Release carried
+// it while e waited behind an earlier one of its pod.
+func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
+	w, ok := h.w.(HeldProgressor)
+	var p uint64
+	if ok {
+		p = w.HeldProgress(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp)
+	}
+	if ok && (!e.counted || p != e.progress) {
+		if e.counted {
+			e.stallFrom = now
+		}
+		e.progress, e.counted = p, true
+	}
+	return max(now-e.stallFrom, 0)
 }
 
 // final reports whether e's verdict is final: settled, and past its fence
@@ -521,7 +599,10 @@ func (m *SyncMockManager) Watermark() Watermark {
 // test cases (a DaemonSet agent's), and is never added beside another.
 type allWatermarks []Watermark
 
-var _ Explainer = allWatermarks(nil)
+var (
+	_ Explainer      = allWatermarks(nil)
+	_ HeldProgressor = allWatermarks(nil)
+)
 
 func (a allWatermarks) Settled(namespace, pod string, start, end time.Time) bool {
 	for _, w := range a {
@@ -530,6 +611,27 @@ func (a allWatermarks) Settled(namespace, pod string, start, end time.Time) bool
 		}
 	}
 	return true
+}
+
+// HeldProgress sums what the watermarks that hold the verdict (those that do
+// not say it is Settled) count of their progress (HeldProgressor). One that
+// does not hold it says nothing of what does. When one that holds it cannot
+// count it, nothing can tell its progress, and another's must not stand for
+// it: the count does not move, and the test case goes once the bound has
+// passed since it came (or since the count last moved).
+func (a allWatermarks) HeldProgress(namespace, pod string, start, end time.Time) uint64 {
+	var n uint64
+	for _, w := range a {
+		if w.Settled(namespace, pod, start, end) {
+			continue
+		}
+		p, ok := w.(HeldProgressor)
+		if !ok {
+			return 0
+		}
+		n += p.HeldProgress(namespace, pod, start, end)
+	}
+	return n
 }
 
 func (a allWatermarks) HeldBy(namespace, pod string, start, end time.Time, fence uint64) fmt.Stringer {

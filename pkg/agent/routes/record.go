@@ -412,7 +412,8 @@ func (f *flushOnWrite) Write(p []byte) (int, error) {
 var testCaseHoldTick = syncmgr.TestCaseHoldTick
 
 // testCaseHoldMax is how long HandleIncoming holds a test case for its verdict
-// at most (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
+// while what holds it makes no progress, in the time the process could run
+// (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
 var testCaseHoldMax = syncmgr.TestCaseHoldMax
 
 // streamWriteFailed logs a failed write to a recording's test-case stream: at
@@ -751,7 +752,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// behind: these were checked against what was known then.
 			a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 				zap.Int("test_cases", tcsUnsettled),
-				zap.Duration("held_up_to", testCaseHoldMax))
+				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
 		logRecordingComplete("agent: recording complete",
 			// How the stream ended: "capture" (it closed its channel),

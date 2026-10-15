@@ -74,14 +74,14 @@ func TestTestCaseHold_BoundsReleaseAndSaySo(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	w := &fakeWatermark{at: map[string]time.Time{}}
 	h := NewTestCaseHold(w, time.Minute, 1<<20)
-	now := t0
-	h.now = func() time.Time { return now }
+	clk := &stall.ManualClock{}
+	h.clk, h.hold = clk, nil
 	h.Add(heldTC("old", t0), "", "a")
-	now = now.Add(59 * time.Second)
+	clk.Advance(59 * time.Second)
 	if got := h.Release(); len(got) != 0 {
 		t.Fatalf("released %v inside the time bound", names(got))
 	}
-	now = now.Add(time.Second)
+	clk.Advance(time.Second)
 	got := h.Release()
 	if len(got) != 1 || !got[0].Unsettled {
 		t.Fatalf("released %+v at the time bound, want it marked unsettled", got)
@@ -275,10 +275,10 @@ func TestTestCaseHold_SaysWhatHeldWhatItLetGo(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	w := &explainedWatermark{}
 	h := NewTestCaseHold(w, time.Minute, 1<<20)
-	now := t0
-	h.now = func() time.Time { return now }
+	clk := &stall.ManualClock{}
+	h.clk, h.hold = clk, nil
 	h.Add(heldTC("behind", t0), "", "a")
-	now = now.Add(time.Minute)
+	clk.Advance(time.Minute)
 	got := h.Release()
 	if len(got) != 1 || !got[0].Unsettled || got[0].HeldBy == nil || got[0].HeldBy.String() != "pod a is behind" {
 		t.Fatalf("released %+v, want it unsettled and held by its pod", got)
@@ -290,7 +290,7 @@ func TestTestCaseHold_SaysWhatHeldWhatItLetGo(t *testing.T) {
 	if got := h.Release(); len(got) != 0 {
 		t.Fatalf("released %v before its fence was passed", names(got))
 	}
-	now = now.Add(time.Minute)
+	clk.Advance(time.Minute)
 	got = h.Release()
 	if len(got) != 1 || got[0].HeldBy == nil || got[0].HeldBy.String() != "fence 7" {
 		t.Fatalf("released %+v, want it held by fence 7", got)
