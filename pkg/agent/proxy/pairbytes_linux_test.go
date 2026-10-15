@@ -170,9 +170,8 @@ func TestALaterConnectionsBytesAreNotWaitedFor(t *testing.T) {
 	}
 }
 
-// Bytes that can no longer arrive end the wait as a capture loss, charged
-// once: the application resets the connection with its call still unsent,
-// or the proxy closes its side first.
+// Bytes that can no longer arrive end the wait as a capture loss: the proxy
+// closes its side first, short of what the application wrote.
 func TestBytesThatCanNoLongerArriveAreACaptureLoss(t *testing.T) {
 	for _, tc := range []string{"the proxy closes it"} {
 		t.Run(tc, func(t *testing.T) {
@@ -186,28 +185,20 @@ func TestBytesThatCanNoLongerArriveAreACaptureLoss(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() { done <- p.waitPairTargets(context.Background(), targets) }()
-			if tc == "the application resets it" {
-				if err := app.SetLinger(0); err != nil {
-					t.Fatal(err)
-				}
-				_ = app.Close()
-				// The proxy's handler, waiting on the connection, sees
-				// the reset: its read ends.
-				go func() { _, _ = io.Copy(io.Discard, reader) }()
-			} else {
-				_ = reader.Close()
-				p.paired.remove(proxySide)
-			}
+			_ = reader.Close()
+			p.paired.remove(proxySide)
 			if err := <-done; err != nil {
 				t.Fatalf("WaitPairedBytes: %v", err)
 			}
 			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
 				t.Fatalf("%d app_bytes_lost, want 1", l)
 			}
-			// Once: a later wait that still finds it does not charge it again.
-			_ = p.WaitPairedBytes(context.Background(), 1)
+			// Once: the same target looked at again is not charged again.
+			if _, err := p.pairReached(targets[0]); err != nil {
+				t.Fatal(err)
+			}
 			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
-				t.Fatalf("%d app_bytes_lost after a second wait, want still 1", l)
+				t.Fatalf("%d app_bytes_lost after a second look, want still 1", l)
 			}
 		})
 	}
@@ -269,8 +260,9 @@ func TestABytesWaitThatCannotBeToldIsUnknown(t *testing.T) {
 
 // Whose application socket is gone when the wait begins: its FIN or reset at
 // the proxy's side ends the wait; a proxy's side still alive with no FIN or
-// reset from it is unknown (the application's socket cannot be seen: in
-// another network namespace, or its end still on the way), never settled.
+// reset from it is waited for once application sockets have been seen (its
+// end is on its way), and unknown while none ever was (another network
+// namespace); never settled.
 func TestAGoneApplicationSocketIsItsFINOrResetOrUnknown(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -289,7 +281,11 @@ func TestAGoneApplicationSocketIsItsFINOrResetOrUnknown(t *testing.T) {
 		{name: "alive at the proxy's side, sockets seen", state: tcpEstablished, visible: true, reach: false},
 		// None ever seen: it may be in another network namespace.
 		{name: "alive at the proxy's side, no socket ever seen", state: tcpEstablished, err: true},
-		{name: "closed by the proxy first", state: tcpEstablished, closed: true, reach: true},
+		// Closed by the proxy while the application's end was open, which has
+		// gone since, and no orphan of the proxy's in TIME_WAIT says its FIN
+		// arrived: a reset, its own or the orphan's refusing bytes written
+		// before the close, cannot be told apart.
+		{name: "closed by the proxy first, the application's end gone since", state: tcpEstablished, closed: true, err: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop()}
