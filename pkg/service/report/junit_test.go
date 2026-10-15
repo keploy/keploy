@@ -228,7 +228,9 @@ func TestFmtSeconds(t *testing.T) {
 // A test set FAILED for an incomplete capture, every test of it passed, is
 // never a green JUnit file: the suite carries a failed "keploy capture" test
 // case with the reason, besides the properties. An unverified capture only
-// gets the properties; a set that was not checked gets neither.
+// gets the properties; a set that was not checked gets neither. Either FAILED
+// set, no case of which failed, carries the case of a set that did not pass
+// (TestJUnitASetThatDidNotPassIsNeverAGreenSuite).
 func TestBuildJUnitSuites_CaptureVerification(t *testing.T) {
 	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
 	for _, tc := range []struct {
@@ -236,17 +238,18 @@ func TestBuildJUnitSuites_CaptureVerification(t *testing.T) {
 		cv           *models.CaptureVerification
 		wantTests    int
 		wantFailures int
+		wantErrors   int
 		wantProps    bool
 	}{
-		{"incomplete", &models.CaptureVerification{Status: models.CaptureIncompleteStatus, Reason: "capture incomplete: the agent's PID map refused 2 insert(s)"}, 2, 1, true},
-		{"unverified", &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: "capture unverified: read failed"}, 1, 0, true},
-		{"not checked", nil, 1, 0, false},
+		{"incomplete", &models.CaptureVerification{Status: models.CaptureIncompleteStatus, Reason: "capture incomplete: the agent's PID map refused 2 insert(s)"}, 2, 1, 0, true},
+		{"unverified", &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: "capture unverified: read failed"}, 2, 0, 1, true},
+		{"not checked", nil, 2, 0, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			suites := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, CaptureVerification: tc.cv}})
 			s := suites.Suites[0]
-			if s.Tests != tc.wantTests || s.Failures != tc.wantFailures || suites.Failures != tc.wantFailures {
-				t.Fatalf("suite tests %d failures %d (all %d); want %d and %d", s.Tests, s.Failures, suites.Failures, tc.wantTests, tc.wantFailures)
+			if s.Tests != tc.wantTests || s.Failures != tc.wantFailures || suites.Failures != tc.wantFailures || s.Errors != tc.wantErrors {
+				t.Fatalf("suite tests %d failures %d (all %d) errors %d; want %d, %d and %d", s.Tests, s.Failures, suites.Failures, s.Errors, tc.wantTests, tc.wantFailures, tc.wantErrors)
 			}
 			if (s.Properties != nil) != tc.wantProps {
 				t.Fatalf("properties %+v, want present %v", s.Properties, tc.wantProps)

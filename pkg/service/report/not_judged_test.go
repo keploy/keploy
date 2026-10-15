@@ -192,8 +192,10 @@ func TestJUnitASetKeployCouldNotJudgeIsAnError(t *testing.T) {
 	if c := s.Cases[1]; c.Name != junitVerdictCase || c.Error == nil || !strings.Contains(c.Error.Text, "captured every call") {
 		t.Fatalf("case %+v; want %q, an error with the set's reason", c, junitVerdictCase)
 	}
-	if s := buildJUnitSuites(report(false)).Suites[0]; s.Errors != 0 || len(s.Cases) != 1 {
-		t.Fatalf("a set run without the switch: suite %+v; want it as before", s)
+	// A set run without the switch is not told unjudged: it did not pass
+	// (TestJUnitASetThatDidNotPassIsNeverAGreenSuite).
+	if s := buildJUnitSuites(report(false)).Suites[0]; s.Errors != 1 || len(s.Cases) != 2 || s.Cases[1].Error == nil || s.Cases[1].Error.Type != "TestSetNotPassed" {
+		t.Fatalf("a set run without the switch: suite %+v; want its did-not-pass case, not a not-judged one", s)
 	}
 	// A case of it that failed does not make the set judged: the set's
 	// reason is said all the same.
