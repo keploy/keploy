@@ -849,7 +849,7 @@ func TestResolveKeptEndsTheWindowBeforeItsSends(t *testing.T) {
 	maps := make(chan models.TestMockMapping, 16)
 	mgr := openWindowManager(out, maps)
 	mgr.outQueueMu.Lock()
-	mgr.outDraining = true
+	mgr.out.draining = true
 	mgr.outQueueMu.Unlock()
 	processOutQueued.Add(outQueueMaxBytes)
 	defer processOutQueued.Add(-outQueueMaxBytes)
