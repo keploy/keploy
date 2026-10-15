@@ -4259,11 +4259,23 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
 	}
-	if p.asyncEngine != nil {
-		// Engine owns the "first window doesn't count" rule; advance blindly.
+	if p.asyncEngine != nil && opensTestWindow(start) {
+		// Engine owns the "first window doesn't count" rule.
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
+}
+
+// opensTestWindow reports whether a staging from start opens a test's window,
+// which is what the async lanes count (async.Engine.AdvanceWindow): a test
+// set's staging, from the models.BaseTime sentinel, stages its mocks before
+// any test runs and opens none, as the mock manager reads it too
+// (setMocksWithWindowLocked). Counting it served every async epoch one test
+// early: an epoch received after test k started, effective from test k+1, was
+// served to test k. A test recorded without times (a zero start) still opens
+// one.
+func opensTestWindow(start time.Time) bool {
+	return !start.Equal(models.BaseTime)
 }
 
 // SetScopeMocks stages the pool of a keploy mock replay test begun (open) or
@@ -4278,7 +4290,9 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 		m.SetScopeMocks(filtered, unFiltered, open)
 		p.dnsCache.Purge()
 	}
-	if p.asyncEngine != nil {
+	if p.asyncEngine != nil && open {
+		// A test begun opens a window; one ended opens none (see
+		// opensTestWindow).
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
