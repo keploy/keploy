@@ -1793,6 +1793,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if len(testSets) != 0 {
 				config.SetSelectedTests(c.cfg, testSets)
 			}
+			// Whether the selection is this command line's own: with the
+			// proven switch off, a name it gives that is not recorded fails
+			// the run, and one keploy.yml inherited is left out with a
+			// warning (Replayer.selectTestSets). -t "" names nothing.
+			c.cfg.Test.SelectedFromCommandLine = cmd.Flags().Changed("testsets") && len(config.TestSetNames(testSets)) > 0
 
 			// get disable-mapping flag value
 			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
@@ -2050,6 +2055,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
+		// -t "test-set-1, test-set-2", the help text's own example, keeps the
+		// space after the comma: each name is trimmed, as keploy test's are.
+		c.cfg.Templatize.TestSets = config.TestSetNames(c.cfg.Templatize.TestSets)
+		c.cfg.Templatize.TestSetsFromCommandLine = cmd.Flags().Changed("testsets") && len(c.cfg.Templatize.TestSets) > 0
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
