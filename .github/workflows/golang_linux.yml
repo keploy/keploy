@@ -300,6 +300,91 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
 
+  # Decision 27: keploy test --remove-unused-mocks keeps a stateful dependency's
+  # recordings whole. The app (test_workflow_scripts/golang/stateful_prune)
+  # answers GET /tick with a counter's next value; eight are recorded, test 6
+  # is made to fail in a pruning run (its mocks are not kept), then put back.
+  # A recording that states no lifetimes (record_latest while the release
+  # states none, and always record_build_strip_lifetimes, whose lifetimes are
+  # removed) replays GET /next as one sequence across tests: the prune used to
+  # drop the failed test's recording, and every later test was answered with
+  # the one after its own. A recording that states lifetimes (record_build)
+  # serves each test its own: the later tests must still be answered with
+  # theirs.
+  stateful_prune:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+          - job: record_build_strip_lifetimes_replay_build
+            record_src: build
+            replay_src: build
+            strip_lifetimes: true
+    name: prune keeps a stateful sequence whole (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads test cases and reports with yq, which the runner
+          # image ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, fail a test in a pruning run, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          STRIP_LIFETIMES: ${{ matrix.config.strip_lifetimes }}
+          WORK: ${{ runner.temp }}/stateful_prune
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/stateful_prune/golang-linux.sh"
+
+      - name: Upload stateful_prune recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stateful-prune-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/stateful_prune/keploy/
+            ${{ runner.temp }}/stateful_prune/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
   # An async lane (keploy.yml async.lanes) whose value changes mid-recording.
   # The app (test_workflow_scripts/golang/async_value_flip) polls a config
   # service in the background; the value flips after the 7th GET /value. The

@@ -199,8 +199,8 @@ func linkedHTTPMock(i int, provides, requires string) *models.Mock {
 // each key it requires, and each mock kept that way keeps what it requires in
 // turn, whatever the order of the file.
 func TestUpdateMocks_KeepsWhatAKeptMockNeedsTransitively(t *testing.T) {
-	models.RegisterMockDeps(models.HTTP, depsByMetadata)
-	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, nil) })
+	prev := models.RegisterMockDeps(models.HTTP, depsByMetadata)
+	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, prev) })
 	fixture := []*models.Mock{
 		linkedHTTPMock(0, "lease", ""),           // mock-0: provides lease
 		linkedHTTPMock(1, "session", "lease"),    // mock-1: provides session, requires lease
@@ -236,8 +236,8 @@ func TestUpdateMocks_KeepsWhatAKeptMockNeedsTransitively(t *testing.T) {
 // keeps mocks by their place in the file, which only the first pass's file
 // gives meaning.
 func TestPruneVerdict_RefusesAFileThatChangedBetweenPasses(t *testing.T) {
-	models.RegisterMockDeps(models.HTTP, depsByMetadata)
-	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, nil) })
+	prev := models.RegisterMockDeps(models.HTTP, depsByMetadata)
+	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, prev) })
 	named := func(m *models.Mock, name string) *models.Mock { m.Name = name; return m }
 	keeps := func(m *models.Mock) bool { return m.Name == "mock-0" }
 	firstPass := func() *pruneVerdict {
@@ -359,6 +359,61 @@ func TestStoredQuerySurvivesEveryMockFormat(t *testing.T) {
 			}
 			if q := readDepsSet(t, dir)["mock-0"].Spec.MySQLRequests[0].StoredQuery(); q != depsQuery {
 				t.Fatalf("the noise write-back lost the stored query: %q", q)
+			}
+		})
+	}
+}
+
+// statefulTestMock is mock i of the fixture: a recording of GET url answered
+// with {"n":n}, recorded before lifetimes were stated unless lifetime says
+// which.
+func statefulTestMock(i int, url string, n int, lifetime string) *models.Mock {
+	m := pruneHTTPMock(i)
+	m.Spec.HTTPReq.Method, m.Spec.HTTPReq.URL, m.Spec.HTTPReq.Body = "GET", url, ""
+	m.Spec.HTTPResp.Body = fmt.Sprintf(`{"n":%d}`, n)
+	m.Spec.Metadata = map[string]string{}
+	if lifetime != "" {
+		m.Spec.Metadata[models.MetadataLifetimeKey] = lifetime
+	}
+	return m
+}
+
+// The prune keeps a reusable stateful HTTP sequence whole (decision 27): a
+// replay serves its recordings in record order, across tests, so dropping
+// the ones it did not consume (a failed test's, when failed tests' mocks are
+// not kept, as the k8s-proxy's auto-replay prunes) answered every later test
+// with the recording after its own. A sequence of recordings stated per-test
+// is served test by test, and is not linked.
+func TestUpdateMocks_KeepsAReusableStatefulSequenceWhole(t *testing.T) {
+	fixture := []*models.Mock{
+		statefulTestMock(0, "http://counter/next", 1, ""), // mock-0..3: one reusable sequence
+		statefulTestMock(1, "http://counter/next", 2, ""),
+		statefulTestMock(2, "http://counter/next", 3, ""),
+		statefulTestMock(3, "http://counter/next", 4, ""),
+		statefulTestMock(4, "http://counter/other", 1, ""),                           // mock-4: a request no test sent
+		statefulTestMock(5, "http://counter/own", 1, models.MetadataLifetimePerTest), // mock-5, 6: per-test
+		statefulTestMock(6, "http://counter/own", 2, models.MetadataLifetimePerTest),
+	}
+	keep := depsConsumed("mock-0", "mock-1", "mock-5") // the test that consumed mock-2 failed
+	want := []string{"mock-0", "mock-1", "mock-2", "mock-3", "mock-5"}
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			writePruneFixture(t, dir, format, fixture, "")
+			core, logs := observer.New(zapcore.DebugLevel)
+			ys := New(zap.New(core), dir, "mocks")
+			if err := ys.UpdateMocks(context.Background(), pruneSet, keep, pruneT0.Add(time.Hour), time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			if names := depsNamesOf(readDepsSet(t, dir)); !reflect.DeepEqual(names, want) {
+				t.Fatalf("the prune kept %v, want %v: the reusable sequence whole, and the consumed per-test recording", names, want)
+			}
+			done := logs.FilterMessageSnippet("pruned mocks successfully").All()
+			if len(done) != 1 {
+				t.Fatalf("%d prune summaries logged, want 1", len(done))
+			}
+			if got := done[0].ContextMap()["keptAsDependencyMocks"]; !reflect.DeepEqual(got, []interface{}{"mock-2", "mock-3"}) {
+				t.Errorf("the prune log names %v as kept as a dependency, want mock-2, mock-3", got)
 			}
 		})
 	}
