@@ -42,10 +42,25 @@ var (
 	_ syncMock.Explainer        = proxyWatermark{}
 	_ syncMock.Progressor       = proxyWatermark{}
 	_ syncMock.PendingExplainer = proxyWatermark{}
+	_ syncMock.HeldProgressor   = proxyWatermark{}
 )
 
 func (w proxyWatermark) Settled(namespace, pod string, start, end time.Time) bool {
 	return w.Watermark.Settled(namespace, pod, start, end) && !w.mgr.PendingIn(start, end)
+}
+
+// HeldProgress counts the progress of what holds a test case's verdict: its
+// window's parsers (relay.Watermark.HeldProgress), and, while the manager
+// holds a mock of its window (PendingIn), the manager handing on mocks (that
+// mock waits behind the others queued for the stream). A hand-on while it
+// holds none is not counted: the manager does not hold that test case, and
+// in a busy recording mocks are handed on all the time.
+func (w proxyWatermark) HeldProgress(namespace, pod string, start, end time.Time) uint64 {
+	n := w.Watermark.HeldProgress(namespace, pod, start, end)
+	if w.mgr.PendingIn(start, end) {
+		n += w.mgr.HandOnProgress()
+	}
+	return n
 }
 
 // HeldBy is the capture's blocker, then a mock of the window the manager still

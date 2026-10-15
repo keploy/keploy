@@ -370,6 +370,9 @@ type SyncMockManager struct {
 	outClock      stall.Clock
 	outStall      time.Duration
 	outCloseStall time.Duration
+	// handedOn counts the mocks the out path decided: delivered or dropped
+	// (HandOnProgress).
+	handedOn atomic.Uint64
 
 	// droppedMu guards droppedTCNames / droppedTCOrder. It is a DEDICATED
 	// LEAF lock: it is only ever taken while (optionally) holding
@@ -977,6 +980,16 @@ type queuedMock struct {
 	done  func(delivered bool)
 }
 
+// HandOnProgress is a count that moves whenever the manager hands a mock on
+// to its stream, or drops one on the way: a test case held for a mock of its
+// window (PendingIn) can tell a queue moving from one that is not.
+func (m *SyncMockManager) HandOnProgress() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.handedOn.Load()
+}
+
 // sendToOutChan hands mock to outChan (send), with no owner and nothing to
 // tell.
 func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
@@ -1001,6 +1014,7 @@ func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
 // cases were left out of a recording that otherwise succeeded.
 func (m *SyncMockManager) send(mock *models.Mock, owner string, done func(bool)) {
 	tell := func(delivered bool) {
+		m.handedOn.Add(1)
 		if done != nil {
 			done(delivered)
 		}
@@ -1119,6 +1133,7 @@ func (m *SyncMockManager) drainOutQueue(out chan<- *models.Mock, gen uint64, aba
 			return
 		}
 		meter.Reset() // the consumer took one
+		m.handedOn.Add(1)
 		if q.done != nil {
 			q.done(true)
 		}
@@ -1177,6 +1192,7 @@ func (m *SyncMockManager) dropQueued(lost []queuedMock, why string) {
 	for _, q := range lost {
 		m.dropOut(q.mock, q.owner, why)
 		m.toldDropped(q.mock)
+		m.handedOn.Add(1)
 		if q.done != nil {
 			q.done(false)
 		}
