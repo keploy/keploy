@@ -34,6 +34,9 @@ const maxMaskedValue = 4096
 //     layout's pattern did not read, or names its zone (hostZone): kept
 //     literal, it would refuse a replay on a host in another zone (a laptop
 //     in IST recording, CI in UTC replaying);
+//   - what the mask would keep literal holds, anywhere, a clock read that
+//     did not move, a zone, or a day or month name (hostRemainder): written
+//     otherwise by a host in another zone, it would refuse that replay too;
 //   - the recorded value is longer than maxMaskedValue.
 func ClockMask(recorded, live string) string {
 	if len(recorded) > maxMaskedValue {
@@ -52,6 +55,9 @@ func ClockMask(recorded, live string) string {
 		}
 	}
 	sort.Slice(reads, func(i, j int) bool { return reads[i].rec[0] < reads[j].rec[0] })
+	if hostRemainder(recorded, reads) {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("^")
 	at := 0
@@ -97,6 +103,57 @@ var (
 func hostZone(s string, span [2]int) bool {
 	before, read, after := s[:span[0]], s[span[0]:span[1]], s[span[1]:]
 	return zoneAfter.MatchString(after) || nameAfter.MatchString(after) || nameBefore.MatchString(before) || zoneNamed.MatchString(read)
+}
+
+// zoneAnywhere is a zone written anywhere in a value: an abbreviation of
+// one ("IST", "UTC+5:30"), a region ID ("Asia/Kolkata"), or an offset
+// ("+05:30", "-0800") standing alone.
+var zoneAnywhere = regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:` +
+	`(?:UTC|GMT|UT|IST|PST|PDT|MST|MDT|CST|CDT|EST|EDT|AKST|AKDT|HST|HDT|AST|ADT|NST|NDT|BST|WET|WEST|CET|CEST|MET|MEST|` +
+	`EET|EEST|MSK|SAST|CAT|EAT|WAT|PKT|NPT|ICT|WIB|WITA|WIT|SGT|MYT|PHT|HKT|JST|KST|AEST|AEDT|ACST|ACDT|AWST|NZST|NZDT|` +
+	`IDT|IRST|TRT|GST|AFT|ChST|SST)(?:[+-]\d{1,2}(?::?\d{2})?)?` +
+	`|(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc)/[A-Za-z_]+` +
+	`|[+-](?:0\d|1[0-4]):?[0-5]\d` +
+	`)(?:[^A-Za-z0-9]|$)`)
+
+// nameAnywhere is a day or month name anywhere in a value, as a formatter
+// writes one: capitalized ("Wed", "October") or in capitals ("WED").
+var nameAnywhere = func() *regexp.Regexp {
+	names := []string{"Mon", "Monday", "Tue", "Tues", "Tuesday", "Wed", "Wednesday", "Thu", "Thur", "Thurs", "Thursday",
+		"Fri", "Friday", "Sat", "Saturday", "Sun", "Sunday", "Jan", "January", "Feb", "February", "Mar", "March",
+		"Apr", "April", "May", "Jun", "June", "Jul", "July", "Aug", "August", "Sep", "Sept", "September",
+		"Oct", "October", "Nov", "November", "Dec", "December"}
+	alts := make([]string, 0, 2*len(names))
+	for _, n := range names {
+		alts = append(alts, n, strings.ToUpper(n))
+	}
+	return regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:` + strings.Join(alts, "|") + `)(?:[^A-Za-z0-9]|$)`)
+}()
+
+// hostRemainder reports whether what a mask of the recorded value would keep
+// literal (all of it but its moved reads, sorted) holds, anywhere, what a
+// host in another zone writes otherwise: a clock read that did not move (a
+// local date beside a moved read: F's lead never moves a day, a zone's shift
+// may), a zone (zoneAnywhere), or a day or month name (nameAnywhere).
+func hostRemainder(recorded string, reads []movedRead) bool {
+	var b strings.Builder
+	at := 0
+	for _, m := range reads {
+		b.WriteString(recorded[at:m.rec[0]])
+		b.WriteByte(0) // no word: the parts either side of a read stay apart
+		at = m.rec[1]
+	}
+	b.WriteString(recorded[at:])
+	rest := b.String()
+	none := make([]bool, len(rest))
+	for _, lay := range clockLayouts {
+		for _, m := range clockMatches(lay, rest, none) {
+			if _, _, ok := lay.read(rest[m[0]:m[1]]); ok {
+				return true
+			}
+		}
+	}
+	return zoneAnywhere.MatchString(rest) || nameAnywhere.MatchString(rest)
 }
 
 // Masked reports whether noise learned at a leaf with patterns excuses its

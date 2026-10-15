@@ -120,15 +120,21 @@ func TestWhatFLearnsReplaysWithAMaskBesideAVariable(t *testing.T) {
 
 // A value whose moved read is not its instant whole (a time of day beside a
 // date and zone no layout reads; a zone, an abbreviation or a region ID
-// after a timestamp) is learned whole, so a replay on another date, or on a
-// host in another zone, is still served (round-1 and round-2 reviews of
-// decision 26): a laptop in IST records, CI in UTC replays.
+// after a timestamp; a zone or a local date elsewhere in the value) is
+// learned whole, so a replay on another date, or on a host in another zone,
+// is still served (rounds 1 to 3 of decision 26's review): a laptop in IST
+// records, CI in UTC replays.
 func TestLearnMatchLearnsAPartialInstantWhole(t *testing.T) {
 	for _, tc := range []struct{ name, rec, f, ci string }{
 		{"Date.toString", "Wed Oct 14 10:00:41 UTC 2026", "Wed Oct 14 10:01:42 UTC 2026", "Thu Nov 05 04:30:41 IST 2026"},
 		{"Go's Time.String", "2026-10-14 10:00:41.123456789 +0530 IST", "2026-10-14 10:01:42.623456789 +0530 IST", "2026-11-05 04:30:41.123456789 +0000 UTC"},
 		{"Java's ZonedDateTime", "2026-10-14T10:00:41.123+05:30[Asia/Kolkata]", "2026-10-14T10:01:42.623+05:30[Asia/Kolkata]", "2026-11-05T04:30:41.123Z[UTC]"},
 		{"Python's %Z, recorded in UTC", "2026-10-14 10:00:41 UTC", "2026-10-14 10:01:42 UTC", "2026-11-05 10:00:41 IST"},
+		// Round 3: the zone named elsewhere in the value, and a local date
+		// F's lead did not move, recorded at 02:00 IST and replayed in UTC
+		// the day before.
+		{"a zone label elsewhere", "at 2026-10-14 02:00:41 tz=IST", "at 2026-10-14 02:01:42 tz=IST", "at 2026-10-13 20:30:41 tz=UTC"},
+		{"an unmoved local date", "report 2026-10-14 generated 2026-10-14T02:00:41+05:30", "report 2026-10-14 generated 2026-10-14T02:01:42+05:30", "report 2026-10-13 generated 2026-10-13T20:30:41Z"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)

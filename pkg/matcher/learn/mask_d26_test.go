@@ -20,6 +20,21 @@ func lead(t *testing.T, layout, s string) string {
 // A value that drifted only by F's clock is masked: its clock reads stand
 // as any read of their layout, and what did not drift is still compared
 // (founder decision 26).
+// What holds no host's zone around a moved read is still masked: an id, a
+// lower-case word, a key with digits, a sentence.
+func TestClockMaskKeepsAMaskWhereNothingIsTheHosts(t *testing.T) {
+	for _, tc := range []struct{ rec, live string }{
+		{"order 1234 placed at 2026-10-14T10:00:41Z", "order 1234 placed at 2026-10-14T10:01:42Z"},
+		{"user u-77 logged in at 2026-10-14T10:00:41+05:30 via sso", "user u-77 logged in at 2026-10-14T10:01:42+05:30 via sso"},
+		{"cache:user-7:1760436041123", "cache:user-7:1760436102623"},
+		{"run 3 of 5 began 2026-10-14 10:00:41", "run 3 of 5 began 2026-10-14 10:01:42"},
+	} {
+		if ClockMask(tc.rec, tc.live) == "" {
+			t.Errorf("no mask for %q", tc.rec)
+		}
+	}
+}
+
 func TestClockMaskComparesWhatDidNotDrift(t *testing.T) {
 	const iso = "2006-01-02T15:04:05Z07:00"
 	rec := "order 1234 placed at 2026-10-14T10:00:41Z"
@@ -158,6 +173,19 @@ func TestClockMaskOnlyForAClockOnlyDrift(t *testing.T) {
 		{"a day name after", "2026-10-14T10:00:41Z, Wednesday", "2026-10-14T10:01:42Z, Wednesday"},
 		{"a month name before", "Oct. 2026-10-14", "Oct. 2026-10-15"},
 		{"PM after", "2026-10-14 10:00:41 PM", "2026-10-14 10:01:42 PM"},
+		// Host-dependent text anywhere in what the mask would keep literal
+		// (round-3 review): a zone named elsewhere, a clock read F's lead
+		// did not move (a local date), a day or month name elsewhere.
+		{"a zone label elsewhere", "at 2026-10-14 02:00:41 tz=IST", "at 2026-10-14 02:01:42 tz=IST"},
+		{"a region ID before", "zone=Asia/Kolkata at=2026-10-14T02:00:41+05:30", "zone=Asia/Kolkata at=2026-10-14T02:01:42+05:30"},
+		{"a zone before, apart", "IST 2026-10-14 02:00:41", "IST 2026-10-14 02:01:42"},
+		{"UTC with an offset elsewhere", "tz UTC+5:30; at 2026-10-14T02:00:41+05:30", "tz UTC+5:30; at 2026-10-14T02:01:42+05:30"},
+		{"an offset elsewhere", "offset +05:30 at 2026-10-14T02:00:41Z", "offset +05:30 at 2026-10-14T02:01:42Z"},
+		{"an unmoved local date before", "report 2026-10-14 generated 2026-10-14T02:00:41+05:30", "report 2026-10-14 generated 2026-10-14T02:01:42+05:30"},
+		{"an unmoved local date after", "issued 2026-10-14T02:00:41+05:30, valid until 2026-10-14", "issued 2026-10-14T02:01:42+05:30, valid until 2026-10-14"},
+		{"an unmoved time of day", "shift 09:00 to 17:00, clocked 2026-10-14T02:00:41Z", "shift 09:00 to 17:00, clocked 2026-10-14T02:01:42Z"},
+		{"a day name elsewhere", "Wednesday digest, sent 2026-10-14T02:00:41+05:30", "Wednesday digest, sent 2026-10-14T02:01:42+05:30"},
+		{"a month name in capitals elsewhere", "OCT batch: at 2026-10-14T02:00:41Z", "OCT batch: at 2026-10-14T02:01:42Z"},
 	} {
 		if mask := ClockMask(tc.rec, tc.live); mask != "" {
 			t.Errorf("%s: mask %q", tc.name, mask)
