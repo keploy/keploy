@@ -444,7 +444,7 @@ func (h *Hooks) isMember(tgid uint32) bool {
 // proven switch only: nothing reads it without the switch (as with the
 // application's connection count, markProxyListener), so nothing attaches. A
 // kernel that can load it neither way gets a WARN, once, and the report stays
-// off: what it would count is unknown (CaptureLossesErr).
+// off: what it would count is unknown, a standing unix_unseen (unixLosses).
 func (h *Hooks) startUnixConn(ctx context.Context) {
 	if !provenswitch.On() {
 		return
@@ -453,7 +453,7 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	u, err := loadUnixConn(&h.objects)
 	h.objectsMutex.RUnlock()
 	if err != nil {
-		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, and keploy cannot say so",
+		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, so no test is judged from now on",
 			zap.Error(err), zap.String("next_step", "reach dependencies over TCP addresses"))
 		h.unixMu.Lock()
 		h.unix = &unixConn{off: err.Error()}
@@ -487,15 +487,27 @@ func kernelName() string {
 }
 
 // unixLosses are the application's AF_UNIX connects to sockets no member of
-// it owns (CaptureLosses). Empty while the report is off or not loaded.
+// it owns (CaptureLosses), and, while keploy cannot see them (a report that
+// could not load, or stopped), a standing unix_unseen: every test from then
+// on is not judged, as one that made such a call is. Empty with the report
+// not started (the switch off).
 func (h *Hooks) unixLosses() models.CaptureLosses {
 	h.unixMu.Lock()
 	u := h.unix
 	h.unixMu.Unlock()
-	if u == nil || u.off != "" {
+	if u == nil {
 		return nil
 	}
-	return u.snapshot()
+	if u.off != "" {
+		return models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: u.off}}
+	}
+	out := u.snapshot()
+	if u.drain != nil {
+		if err := u.drain.failure(); err != nil {
+			out = append(out, models.CaptureLoss{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "keploy's report stopped: " + err.Error()})
+		}
+	}
+	return out
 }
 
 // DrainCaptureLosses waits until the hooks' watches have handled every
@@ -508,8 +520,9 @@ func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
 	h.unixMu.Lock()
 	u := h.unix
 	h.unixMu.Unlock()
+	// A report that stopped is said by unixLosses (unix_unseen), not here.
 	if u != nil && u.off == "" && u.rd != nil {
-		if err := u.drain.wait(ctx, u.rd.Flush); err != nil {
+		if err := u.drain.wait(ctx, u.rd.Flush); err != nil && u.drain.failure() == nil {
 			return fmt.Errorf("wait for keploy's report of the application's calls over Unix sockets: %w", err)
 		}
 	}
@@ -524,24 +537,13 @@ func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
 	return nil
 }
 
-// CaptureLossesErr is why a count the hooks keep under the proven switch could
-// not start: the report of the application's calls over Unix sockets, on a
-// kernel that loads it neither way. What it would count is unknown, never 0,
-// so the agent reads no capture losses at all while it is (Agent.CaptureLosses).
+// CaptureLossesErr is why a count the hooks keep under the proven switch
+// cannot be told: the watch on the application's non-DNS UDP that could not
+// move its epoch on or read a report (udpwatch.go). What it would count is
+// unknown, never 0, so the agent reads no capture losses at all while it is
+// (Agent.CaptureLosses). (A Unix-socket report keploy cannot see through is
+// a standing unix_unseen instead: unixLosses.)
 func (h *Hooks) CaptureLossesErr() error {
-	h.unixMu.Lock()
-	u := h.unix
-	h.unixMu.Unlock()
-	if u != nil && u.off != "" {
-		return fmt.Errorf("keploy cannot see the application's calls over Unix sockets on this kernel, so whether a test made one cannot be told: %s", u.off)
-	}
-	if u != nil && u.drain != nil {
-		if err := u.drain.failure(); err != nil {
-			return fmt.Errorf("keploy's report of the application's calls over Unix sockets has stopped, so whether a test made one cannot be told: %w", err)
-		}
-	}
-	// Under the proven switch, the watch on the application's non-DNS UDP
-	// (udpwatch.go).
 	h.udpMu.Lock()
 	w := h.udp
 	h.udpMu.Unlock()

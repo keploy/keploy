@@ -203,8 +203,8 @@ func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	require.Contains(t, e.Reason, "TLS handshake(s) with keploy's proxy failed")
 }
 
-// blindHooks count PID-map refusals but a count of theirs could not start
-// (the Unix-socket report, on a kernel that loads it neither way).
+// blindHooks count PID-map refusals but a count of theirs cannot be told
+// (the UDP watch, its epoch or a report it could not read).
 type blindHooks struct {
 	countingHooks
 	err error
@@ -341,4 +341,23 @@ func TestTheAgentDrainsTheHooksReportsBeforeItReadsThem(t *testing.T) {
 	_, err = a.CaptureLosses(ctx)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}
+
+// Unix sockets keploy cannot see leave every test not judged, never failed:
+// the replayed test's outcome stands, its window carries unix_unseen.
+func TestUnixSocketsKeployCannotSeeLeaveTestsNotJudged(t *testing.T) {
+	unseen := models.CaptureLosses{{Kind: models.CaptureLossUnixUnseen, Count: 1, What: "no trampoline"}}
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = unixHooks{losses: unseen}
+	claimSelf(t, a)
+	for _, name := range []string{"TestA", "TestB"} {
+		require.Empty(t, endPassed(t, a, name).Action, "%s: never failed for what keploy cannot see", name)
+	}
+	for _, name := range []string{"o::TestA", "o::TestB"} {
+		w := windowOf(t, a, name)
+		require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+		require.NotNil(t, w.Evidence)
+		require.Equal(t, unseen, w.Evidence.NotJudged)
+		require.Contains(t, w.Evidence.Reason, "not judged")
+	}
 }

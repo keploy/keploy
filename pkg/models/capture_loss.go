@@ -73,6 +73,13 @@ const (
 	// at all. It is not a loss of something keploy saw: the test it taints
 	// is NOT JUDGED (NotJudged), never failed.
 	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
+	// CaptureLossUnixUnseen (decision 20): keploy cannot see the
+	// application's calls over Unix sockets (a kernel that loads the report
+	// neither way, a report that stopped), so whether a test made one cannot
+	// be told. A state, not a count: a mark never takes it away (Since), and
+	// every test from then on carries it, NOT JUDGED, as a call over one
+	// would be. What says why.
+	CaptureLossUnixUnseen CaptureLossKind = "unix_unseen"
 	// CaptureLossUDPReply (4c c): the application's UDP other than DNS got a
 	// reply; keploy leaves such UDP where the application sends it, so it was
 	// answered live, neither recorded nor mocked. Only under the proven
@@ -84,7 +91,7 @@ const (
 // without a verdict (decision 20), rather than failing them: a call keploy
 // cannot capture at all, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen
 }
 
 // Split is l's losses that fail a test (judged) and those that leave it
@@ -159,6 +166,10 @@ func (l CaptureLosses) Since(base CaptureLosses) CaptureLosses {
 	}
 	var out CaptureLosses
 	for _, c := range l {
+		if c.Kind == CaptureLossUnixUnseen && c.Count > 0 {
+			out = append(out, c) // a state: no mark takes it away
+			continue
+		}
 		b := was[c.Kind]
 		switch {
 		case c.Count > b:
@@ -233,6 +244,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d UDP socket(s) of the application got a reply from the real destination, which keploy neither records nor mocks (UDP other than DNS); add its port to bypassRules if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
+	case CaptureLossUnixUnseen:
+		return "keploy cannot see the application's calls over Unix sockets here, so whether this test or one before it made one cannot be told"
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

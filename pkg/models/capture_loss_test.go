@@ -127,3 +127,27 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 		t.Fatalf("SinceWithin with the connect before the run's base = %+v, want nothing", got)
 	}
 }
+
+// Unix sockets keploy cannot see (a report that could not load, or stopped)
+// are a standing loss that leaves every test from then on NOT JUDGED, as a
+// call over one does: no mark takes it away, and it is no failure.
+func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
+	unseen := CaptureLoss{Kind: CaptureLossUnixUnseen, Count: 1, What: "no trampoline"}
+	if !unseen.Kind.NotJudged() {
+		t.Fatal("unix_unseen fails tests; want it to leave them not judged")
+	}
+	now := CaptureLosses{unseen}
+	if got := now.Since(now); len(got) != 1 || got[0] != unseen {
+		t.Fatalf("Since(itself) = %+v, want unix_unseen kept: a state, no mark takes it away", got)
+	}
+	if got := now.SinceWithin(now, now); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
+		t.Fatalf("SinceWithin = %+v, want unix_unseen", got)
+	}
+	judged, notJudged := now.Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v; want it not judged", judged, notJudged)
+	}
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "cannot see the application's calls over Unix sockets") || !strings.Contains(text, "no trampoline") {
+		t.Fatalf("NotJudgedText = %q", text)
+	}
+}
