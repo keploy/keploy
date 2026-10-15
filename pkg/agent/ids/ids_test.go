@@ -32,3 +32,22 @@ func TestAConflictingPairDropsTheIDInsteadOfGuessing(t *testing.T) {
 		t.Fatalf("two recorded ids claiming one new id are both dropped: %v", got)
 	}
 }
+
+func TestRestoreTurnsTheRunsIDsBackIntoTheRecordedOnes(t *testing.T) {
+	m := New(map[string]string{"11f4a513-bee3-45e7-bd44-62be219cdcfd": "5edbe3af-8cda-452a-8780-868f15a19ced"})
+	if got := m.Restore("/keploy.io/5edbe3af-8cda-452a-8780-868f15a19ced"); got != "/keploy.io/11f4a513-bee3-45e7-bd44-62be219cdcfd" {
+		t.Fatal(got)
+	}
+	m.Add("aaaa", "bbbb")
+	if got := m.Restore("bbbb"); got != "aaaa" {
+		t.Fatalf("a pair added later is restored too: %s", got)
+	}
+	m.Add("aaaa", "cccc")
+	if got := m.Restore("bbbb"); got != "bbbb" {
+		t.Fatalf("a dropped pair is not restored: %s", got)
+	}
+	m.Reset()
+	if got := m.Restore("5edbe3af-8cda-452a-8780-868f15a19ced"); got != "5edbe3af-8cda-452a-8780-868f15a19ced" {
+		t.Fatalf("nothing is restored after a reset: %s", got)
+	}
+}

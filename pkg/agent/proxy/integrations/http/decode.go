@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -100,6 +101,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				header: request.Header,
 				body:   reqBody,
 				raw:    reqBuf,
+			}
+			if opts.SwapIDs && !provenswitch.On() {
+				input = restoreIDs(input)
 			}
 
 			// Under the proven switch the request's destination is read once,
@@ -417,6 +421,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
+			if opts.SwapIDs && !provenswitch.On() {
+				stub = swapIDs(stub)
+			}
 			respBytes, err := h.buildMockResponseBytes(stub)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -479,6 +486,34 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // async.go) because it is the shared serializer for BOTH the ordinary
 // matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
+func restoreIDs(in *req) *req {
+	if ids.Default.Empty() {
+		return in
+	}
+	u := *in.url
+	u.Path, u.RawPath, u.RawQuery = ids.Default.Restore(u.Path), ids.Default.Restore(u.RawPath), ids.Default.Restore(u.RawQuery)
+	return &req{method: in.method, url: &u, header: in.header, body: []byte(ids.Default.Restore(string(in.body))), raw: []byte(ids.Default.Restore(string(in.raw)))}
+}
+
+func swapIDs(stub *models.Mock) *models.Mock {
+	if ids.Default.Empty() {
+		return stub
+	}
+	s, err := withResponse(stub)
+	if err != nil || s == nil || s.Spec.HTTPResp == nil {
+		return stub
+	}
+	out := *s
+	resp := *s.Spec.HTTPResp
+	resp.Body = ids.Default.Rewrite(resp.Body)
+	resp.Header = make(map[string]string, len(s.Spec.HTTPResp.Header))
+	for k, v := range s.Spec.HTTPResp.Header {
+		resp.Header[k] = ids.Default.Rewrite(v)
+	}
+	out.Spec.HTTPResp = &resp
+	return &out
+}
+
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	name := ""
 	if stub != nil {
