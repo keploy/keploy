@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +22,9 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// SetRealDepsErrNoSwitch refuses mock.real to an agent without the switch.
+var SetRealDepsErrNoSwitch = errors.New("mock.real is the proven model's, and this keploy agent runs without " + provenswitch.Env)
 
 // realState is a run's mock.real as the proxy decides connections by it: the
 // list, and the run's name book.
@@ -67,7 +71,7 @@ func (st *realState) listedName(qname string) (string, bool) {
 // A list keploy cannot read is an error, and nothing is installed.
 func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	if !provenswitch.On() {
-		return errors.New("mock.real is the proven model's, and this keploy agent runs without " + provenswitch.Env)
+		return SetRealDepsErrNoSwitch
 	}
 	if p.GlobalPassthrough {
 		// Every connection would be live: a call mock.real does not list
@@ -103,6 +107,24 @@ func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	return nil
 }
 
+// KeepRealDeps installs raw for a later part of the run that installed it
+// (keploy test's next test set): a proxy that already holds this list keeps
+// what the run saw of it, its bookkeeping and its names; one that holds
+// another list, or none, installs raw afresh (SetRealDeps).
+func (p *Proxy) KeepRealDeps(ctx context.Context, raw []string) error {
+	if !provenswitch.On() {
+		return SetRealDepsErrNoSwitch
+	}
+	list, err := realdeps.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if cur := p.real.Load(); !p.GlobalPassthrough && (cur == nil && list.Empty() || cur != nil && slices.Equal(cur.list.Labels(), list.Labels())) {
+		return nil
+	}
+	return p.SetRealDeps(ctx, raw)
+}
+
 // RealTracker is what the run's REAL connections did, for the agent's tests
 // and the run's verdict.
 func (p *Proxy) RealTracker() *realdeps.Tracker { return &p.realTracker }
@@ -133,7 +155,7 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 	if st == nil {
 		return false, src, nil
 	}
-	dst, perr := netip.ParseAddrPort(dstAddr)
+	dst, perr := containerkey.ParseAddrPort(dstAddr)
 	if perr != nil {
 		return false, src, nil
 	}
@@ -153,23 +175,23 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 		stop := context.AfterFunc(ctx, func() { _ = src.Close() })
 		name, rerr := realdeps.ReadName(br)
 		stop()
-		// A connection a test's end already charged as undecided is not
-		// charged again.
-		charged := done()
+		// The tracker charges a connection closed unnamed to the open test,
+		// whatever earlier tests' ends charged it (Tracker.Pending).
 		switch {
 		case errors.Is(rerr, realdeps.ErrNoName):
 			why := realdeps.UnreadableWhy(dstAddr, dec.Candidates, rerr.Error())
-			if !charged {
-				p.realTracker.Incomplete(dstAddr, why)
-			}
+			done(why)
 			p.logger.Warn("keploy closed a connection it could not name: capture_incomplete", zap.String("destination", dstAddr), zap.String("why", why))
 			return true, wrapped, nil
 		case rerr != nil:
-			if ctx.Err() == nil && !charged {
-				p.realTracker.Incomplete(dstAddr, realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
+			if ctx.Err() == nil {
+				done(realdeps.UnreadableWhy(dstAddr, dec.Candidates, "its client closed it before naming it"))
+			} else {
+				done("")
 			}
 			return true, wrapped, nil
 		}
+		done("")
 		dec = d.ByName(name, dst.Port())
 		if dec.Verdict == realdeps.Dependency {
 			p.logger.Debug("a connection to a mock.real name's address is for another name: a dependency",
@@ -208,7 +230,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	p.realTracker.Dialed(connID, dec.Label, err == nil)
 	if err != nil {
 		logger.Debug("a mock.real destination refused or could not be reached; the app sees its connection reset", zap.Error(err))
-		if tc, ok := client.(*net.TCPConn); ok {
+		if tc, ok := tcpConnOf(client); ok {
 			_ = tc.SetLinger(0)
 		}
 		return nil
@@ -217,8 +239,9 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	logger.Debug("relaying a connection to a mock.real destination")
 	r := &realdeps.Relay{
 		Client: client, In: br, Dest: dest, Check: dec.Check,
-		Sent: func(int) { p.realTracker.Sent(connID, dec.Label) },
-		H2:   func() { p.realTracker.H2(dec.Label) },
+		Sent:     func(int) { p.realTracker.Sent(connID, dec.Label) },
+		Answered: func() { p.realTracker.Answered(dec.Label) },
+		H2:       func() { p.realTracker.H2(dec.Label) },
 		Refused: func(why string) {
 			p.realTracker.Incomplete(dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
@@ -292,7 +315,7 @@ func (p *Proxy) realAtHandshake(dest *agent.NetworkAddress) (string, bool) {
 		return "", false
 	}
 	addr := destAddr(dest)
-	dst, err := netip.ParseAddrPort(addr)
+	dst, err := containerkey.ParseAddrPort(addr)
 	if err != nil {
 		return "", false
 	}
@@ -326,8 +349,9 @@ func (p *Proxy) containerRepoOfConn(ctx context.Context, st *realState, addr str
 // before the connection is accepted, and naming it there would hold the
 // connection in the keyer before it is one and spend the session's one
 // warning that Docker cannot be read. It never waits: a container the index
-// is still placing is no container's yet to the hold, which then makes no
-// dial ahead for it (its accept waits, containerRepoOfConn, and relays it).
+// is still placing is no container's yet to the hold, which dials it ahead,
+// if at all, as a dependency (its accept waits, containerRepoOfConn, and
+// relays it).
 // While the index cannot be read, the run's container: entries match
 // nothing, and the run says so once.
 func (p *Proxy) containerRepoAt(st *realState, addr string) string {
@@ -372,7 +396,7 @@ func (p *Proxy) otherLoopback(dec realdeps.Decision, dstAddr string, err error) 
 	if !errors.Is(err, syscall.ECONNREFUSED) || !strings.HasPrefix(dec.Label, "localhost:") {
 		return "", false
 	}
-	ap, perr := netip.ParseAddrPort(dstAddr)
+	ap, perr := containerkey.ParseAddrPort(dstAddr)
 	if perr != nil || !ap.Addr().IsLoopback() {
 		return "", false
 	}
@@ -388,4 +412,90 @@ func (p *Proxy) otherLoopback(dec realdeps.Decision, dstAddr string, err error) 
 		return "", false
 	}
 	return other.String(), true
+}
+
+// RealDestination is, under the proven switch, the mock.real entry a
+// recorded mock's destination is (realdeps.List.Recorded): a call to it is
+// reached for real, never served from a mock, so a test that owns the mock
+// (a recording made before the destination was listed) is neither served it
+// nor judged for it. ok is false for a mock whose recording does not say,
+// and without a list.
+func (p *Proxy) RealDestination(m *models.Mock) (string, bool) {
+	st := p.realList()
+	if st == nil {
+		return "", false
+	}
+	return st.list.Recorded(m)
+}
+
+// tcpConnOf is the TCP connection under c, through the conns that wrap one
+// and say so (NetConn, as *tls.Conn and the proxy's trackedConn do).
+func tcpConnOf(c net.Conn) (*net.TCPConn, bool) {
+	for i := 0; c != nil && i < 8; i++ {
+		if tc, ok := c.(*net.TCPConn); ok {
+			return tc, true
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil, false
+		}
+		c = u.NetConn()
+	}
+	return nil, false
+}
+
+// realDialFailed counts, against the open test's REAL row, a held handshake's
+// dial to a mock.real destination that failed (the app's connect fails the
+// same way, answered at once), and returns the destination's label. label is
+// what the hold knew of addr; "" when addr was not a mock.real destination by
+// then, which for a list with container: entries may be only because the
+// index was still placing a container Docker started a moment before. Placed
+// since, the failure counts now. Still being placed, the failed connect is
+// noted with the tracker as it happens (Tracker.FailedUndecided) and the
+// placing is waited for off the handshake's path (Keyer.PlacedOrPlacing):
+// told REAL while the test it failed in is open, it counts against that test;
+// that test ending first is charged with it as capture_incomplete. An index
+// that cannot be read, or places nothing that could be there, leaves it a
+// dependency's failed connect, as at the accept.
+func (p *Proxy) realDialFailed(addr, label string) (string, bool) {
+	if label != "" {
+		p.realTracker.Dialed(0, label, false)
+		return label, false
+	}
+	st := p.realList()
+	if st == nil || !st.list.HasContainers() {
+		return "", false
+	}
+	dst, err := containerkey.ParseAddrPort(addr)
+	if err != nil {
+		return "", false
+	}
+	decide := func(repo string) string {
+		if dec := (realdeps.Decider{List: st.list, Book: st.book}).AtAccept(dst, repo); dec.Verdict == realdeps.Real {
+			return dec.Label
+		}
+		return ""
+	}
+	c, ok, wait := containerkey.Default.PlacedOrPlacing(addr)
+	switch {
+	case ok:
+		if label = decide(containerkey.Repository(c.Image)); label != "" {
+			p.realTracker.Dialed(0, label, false)
+		}
+		return label, false
+	case wait != nil:
+		resolve := p.realTracker.FailedUndecided(addr)
+		wait(func(c containerkey.Container, ok, resolved bool) {
+			label := ""
+			if resolved && ok {
+				label = decide(containerkey.Repository(c.Image))
+			}
+			resolve(label, !resolved)
+			if p.realDialResolved != nil {
+				p.realDialResolved()
+			}
+		})
+		return "", true
+	}
+	return "", false
 }

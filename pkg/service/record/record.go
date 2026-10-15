@@ -3,6 +3,7 @@ package record
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -93,6 +95,10 @@ type drainOpts[T any] struct {
 	handing func(T) (handed func())
 	// kind names the frames in logs ("test cases", "mocks").
 	kind string
+	// stream is the agent stream the frames come on, and ends the
+	// recording's stream end, for its end by the agent's marker (streamsEnd).
+	stream models.FrameStream
+	ends   *streamsEnd
 }
 
 // beforeHand runs o.handing for a frame about to be handed over, and returns
@@ -147,6 +153,19 @@ func (o drainOpts[T]) beforeHand(item T) (handed func()) {
 // one host (natively, or in a local container) and so share its clock.
 func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan T, out chan<- T,
 	abandoned <-chan struct{}, o drainOpts[T]) {
+	// An agent that ends its streams on request (streamsEnd): once it says
+	// "clear", this drain reads its stream to the agent's marker (ending),
+	// not until it has been quiet for a while after it closed it.
+	ender, canEnd := r.instrumentation.(streamEnder)
+	ends := o.ends
+	canEnd = canEnd && o.stream != "" && ends != nil
+	if canEnd {
+		// Joined before this drain started (GetTestAndMockChans): a drain
+		// that clears first cannot have the streams ended before this one
+		// is there to read its marker.
+		defer ends.left(r, ender, o.stream)
+	}
+	ending := false
 	var stoppedAt time.Time
 	quiet := r.frameQuietGrace()
 	idle := time.NewTimer(quiet)
@@ -160,6 +179,12 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	// holding frames, and the stream's ready frame then lost a random race
 	// against the timer that fired meanwhile.
 	var quietUntil time.Time
+	// stopCame starts the drain: the stop has come, now.
+	stopCame := func() {
+		stoppedAt = time.Now()
+		quietUntil = stoppedAt.Add(quiet)
+		resetTimer(idle, quiet)
+	}
 	// sinceStop counts the frames handed on since the stop. giveUp ends the
 	// drain at a second interrupt, and says what it got.
 	var sinceStop int
@@ -253,7 +278,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 		if stoppedAt.IsZero() {
 			shutdownC = ctx.Done()
 		} else {
-			idleC = idle.C
+			if !ending {
+				idleC = idle.C
+			}
 			againC = utils.StopNow()
 		}
 		select {
@@ -261,9 +288,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			giveUp()
 			return
 		case <-shutdownC:
-			stoppedAt = time.Now()
-			quietUntil = stoppedAt.Add(quiet)
-			resetTimer(idle, quiet)
+			stopCame()
 			continue
 		case <-idleC:
 			// Quiet is not proof: an agent whose capture can tell says whether
@@ -275,6 +300,16 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			if r.holdForBacklog(stoppedAt, &looks, o.kind) {
 				quietUntil = time.Now().Add(quiet)
 				resetTimer(idle, quiet)
+				continue
+			}
+			if canEnd && looks.endable {
+				// "Clear", from an agent that ends its streams on request:
+				// read on to its marker, which comes once every drain is
+				// clear and it has put on the stream all it had. A frame
+				// still on its way here is read, not lost to a grace.
+				ending = true
+				stopTimer(idle)
+				ends.clear(r, ender, o.stream, o.closeStream)
 				continue
 			}
 			// The agent holds nothing more from before the stop: its capture,
@@ -317,6 +352,15 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			// nowhere to go (see the MAPPINGS forwarder's note).
 			return
 		case item, ok := <-stream:
+			if !ok && ending && (ender.StreamEnded(o.stream) || ends.failed.Load()) {
+				// Read to the agent's marker (or closed here, the agent not
+				// taking the request to end it): every frame it had for this
+				// drain is through.
+				if ender.StreamEnded(o.stream) {
+					r.logger.Debug(streamEndedLog, zap.String("frames", o.kind))
+				}
+				return
+			}
 			if !ok {
 				// The stream's end and the stop can both be ready when this
 				// select runs, and it takes either: whether the stop had come
@@ -337,6 +381,13 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				}
 				return
 			}
+			// The stop and a frame can both be ready when this select runs,
+			// and it takes either: a frame taken once the stop has come is
+			// judged by it, as one taken after the stop branch would be, or
+			// what the app served after the stop is recorded.
+			if stoppedAt.IsZero() && ctx.Err() != nil {
+				stopCame()
+			}
 			if forward, progress := keep(item); forward && !hand(item, progress) {
 				return
 			}
@@ -344,16 +395,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	}
 }
 
-// testCaseCapturedAt is when a test case was complete, from the wire times the
-// agent stamped: its response, else its request. A gRPC test case carries
-// neither (its Created is when the agent built it, not when it ran) and is
-// undated.
-func testCaseCapturedAt(tc *models.TestCase) time.Time {
-	if !tc.HTTPResp.Timestamp.IsZero() {
-		return tc.HTTPResp.Timestamp
-	}
-	return tc.HTTPReq.Timestamp
-}
+// testCaseCapturedAt is when a test case was complete (TestCase.CompletedAt):
+// its response, else its request, HTTP or gRPC. One with neither is undated.
+func testCaseCapturedAt(tc *models.TestCase) time.Time { return tc.CompletedAt() }
 
 // resetTimer re-arms t for d, safely draining any pending fire first.
 func resetTimer(t *time.Timer, d time.Duration) {
@@ -562,6 +606,11 @@ type Recorder struct {
 	// agent still held from before the stop: the recording is incomplete,
 	// and ends as failed.
 	captureLost atomic.Bool
+	// realUncaptured is set, under the proven switch with a mock.real list,
+	// when keploy could neither capture nor relay as real a connection of
+	// the recording, or could not read whether it did (reportRealRun): the
+	// recording is incomplete, and ends as failed, as for a capture loss.
+	realUncaptured atomic.Bool
 	// heldFrames counts the test cases and mocks the frame drains handed on
 	// after the stop that may have been captured before it: what the agent's
 	// answer to a look (holdForBacklog) is about. Mappings, which it does not
@@ -609,6 +658,9 @@ type backlogLooks struct {
 	// heldFrames is Recorder.heldFrames at the latest look the agent was not
 	// gone for (utils.BacklogLooks.Said).
 	heldFrames uint64
+	// endable: the latest look's answer was "clear", from an agent that ends
+	// its streams on request (models.AgentBacklog.EndMarkers).
+	endable bool
 }
 
 // agentEndedDrain reports a frame stream the agent ended on its own after the
@@ -686,6 +738,7 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 	}
 	heldBefore := looks.heldFrames
 	looks.heldFrames = r.heldFrames.Load()
+	looks.endable = false
 	b, err := br.BacklogBefore(context.Background(), stoppedAt)
 	r.logger.Debug("looked at what the keploy agent still holds from before the stop",
 		zap.String("frames", kind), zap.Stringer("agent_says", b.Verdict), zap.Uint64("progress", b.Progress), zap.Error(err))
@@ -708,6 +761,7 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 			zap.String("next_step", "what the agent still held is not saved: test cases it had captured may be missing, or saved without their mocks, and the recording ends as failed. Re-record; if the agent was starved of CPU, give it more"))
 		return false
 	case !wait:
+		looks.endable = b.Verdict == models.BacklogClear && b.EndMarkers
 		if b.Verdict == models.BacklogUnsupported {
 			r.unsupportedBacklogOnce.Do(func() {
 				r.logger.Info("the keploy agent cannot say whether it still holds what it captured before the stop; each stream ends once it has been quiet for a while",
@@ -1229,6 +1283,15 @@ func recordExitCode(err error) int {
 func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// A mock.real keploy cannot read is refused before anything runs (proven
+	// switch only).
+	if err := realclient.Check(r.mockReal()); err != nil {
+		utils.LogError(r.logger, err, "keploy cannot read keploy.yml mock.real")
+		// A recording that cannot start fails the process (the stop
+		// defer below arms the code for every later failure).
+		utils.SetExitCodeOnce(recordExitCode(err))
+		return err
+	}
 	// A recorder can be started again: this recording has not begun to stop,
 	// nor lost anything yet.
 	r.stopping.Store(false)
@@ -1509,12 +1572,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if composeAgent {
 			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
 			drainFrames()
+			// Read while the agent, which the app's stack carries, still
+			// runs: what it could not capture (mock.real).
+			if recordingStarted {
+				r.reportRealRun(ctx)
+			}
 		}
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
+			// Read before the frames drain: the agent stays up while this
+			// recording holds its streams open, even when the stop signal
+			// reached it too, and the app has stopped making calls.
+			if recordingStarted {
+				r.reportRealRun(ctx)
+			}
 			drainFrames()
 		}
 
@@ -1764,6 +1838,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 			incomplete = true
 		}
+		if r.realUncaptured.Load() {
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			incomplete = true
+		}
 		if recordingStarted || stopReason != "" {
 			status := "completed"
 			reason := stopReason
@@ -2007,10 +2085,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
-		case <-ctx.Done():
-			// Parent context cancelled (user pressed Ctrl+C)
-			return ctx.Err()
 		case <-agentCtx.Done():
+			// agentCtx is ctx's: a stop (Ctrl+C) ends it too, and a stop is
+			// no agent that never got ready, and no failure.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			stopReason = "keploy-agent did not become ready in time"
 			utils.LogError(r.logger, nil, stopReason)
 			return errors.New(stopReason)
@@ -2062,6 +2142,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// spin on a mock that will never arrive, and so it can revoke the owning
 	// test rather than replay it with a short mock pool.
 	var droppedMockIDs droppedMockSet
+	// A stop before the agent's streams open finds nothing captured: end here
+	// rather than open them only to drain them.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -2100,9 +2185,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 *
 	 * The consumers that drain them are spawned three
 	 * hundred lines below, and between here and there is exactly ONE
-	 * return: the ctx.Err() gate on the next line. On that path the
-	 * forwarders are alive with nobody reading, and each one ends by
-	 * handing over the item it has already taken from the agent. That
+	 * return: the agent's refusal of this keploy's proven switch. On that
+	 * path the forwarders are alive with nobody reading, and each one ends
+	 * by handing over the item it has already taken from the agent. That
 	 * hand-over used to park forever: a 30s DrainErrGroup timeout on Ctrl+C
 	 * and a goroutine held for the process lifetime, re-leaked per session
 	 * in the DaemonSet embedding. MEASURED deterministically on all three.
@@ -2135,9 +2220,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}()
 
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
+	// A stop that comes from here on (ctx done) finds the agent capturing,
+	// and goes the way of any stop: through the consumers below, and the
+	// stop's drain of what the agent captured before it. Returning here, as
+	// this once did, abandoned the agent's streams; under docker compose,
+	// whose stack (the agent in it) is up by now, the stop then took the
+	// stack down with all the agent held -- lost, said by no one. A busy
+	// host stretches the window between the agent's streams opening and the
+	// consumers running.
 
 	// Kick off the pcap + keylog streams. GetTestAndMockChans above
 	// has already triggered Proxy.Record() on the agent, which
@@ -2164,7 +2254,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	if r.config.CommandType == string(utils.DockerCompose) {
+	// Not once the recording is stopping: the app the agent would release
+	// is being stopped.
+	if r.config.CommandType == string(utils.DockerCompose) && ctx.Err() == nil {
 
 		r.logger.Debug("Making keploy-agent ready for docker compose...")
 
@@ -2180,7 +2272,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	r.logger.Info("Keploy agent is ready to record test cases and mocks.")
+	if ctx.Err() == nil {
+		r.logger.Info("Keploy agent is ready to record test cases and mocks.")
+	}
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
@@ -2483,7 +2577,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// this line without the defer above firing.
 	consumersStarted = true
 
-	if r.config.CommandType != string(utils.DockerCompose) {
+	// Not once the recording is stopping: an app started now would only be
+	// stopped again.
+	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
@@ -2495,7 +2591,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	}
 
 	// setting a timer for recording
-	if r.config.Record.RecordTimer != 0 {
+	if r.config.Record.RecordTimer != 0 && ctx.Err() == nil {
 		errGrp.Go(func() error {
 			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
 			timer := time.After(r.config.Record.RecordTimer)
@@ -2594,10 +2690,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
+	// This recording's streams end by the agent's markers when it can
+	// (stream_end.go): its token names them to the agent.
+	ends := &streamsEnd{token: rand.Text()}
 	// This recording drains the agent's streams after its stop and closes
 	// them before it stops the agent: an agent the client started holds a
 	// stop signal it gets meanwhile for them (models.DrainsAfterStopHeader).
 	ctx = models.WithDrainsAfterStop(ctx)
+	ctx = models.WithStreamEndToken(ctx, ends.token)
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -2699,6 +2799,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
 	}
 
+	ends.join(models.TestCaseStream)
 	g.Go(func() error {
 		defer close(incomingChan)
 		defer frameDrained()
@@ -2712,13 +2813,15 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			},
 			closeStream: tcCancel,
 			kind:        "test cases",
+			stream:      models.TestCaseStream,
+			ends:        ends,
 		}
 		if appRunsOn {
 			// A test case the app served after the stop is not part of the
 			// recording: its mocks may come after the drain has ended, and
-			// saved without them it would fail replay. An undated one (gRPC)
-			// cannot be told from one, and is left out too. Neither is its
-			// mapping (MAPPINGS).
+			// saved without them it would fail replay. An undated one
+			// (testCaseCapturedAt) cannot be told from one, and is left out
+			// too. Neither is its mapping (MAPPINGS).
 			opts.afterStop = func(tc *models.TestCase) {
 				postStopTests.Store(tc.Name, struct{}{})
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
@@ -2778,6 +2881,15 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		tlsPrivateKey = string(keyBytes)
 	}
 
+	// Under the proven switch the agent is handed the run's mock.real first
+	// (design v14 §4): its destinations are reached for real, never
+	// recorded, and each test case lists those its request used.
+	if err := realclient.Push(mockCtx, r.logger, r.instrumentation, r.mockReal()); err != nil {
+		cancel()
+		frameDrained() // the mapping forwarder is not started on these returns
+		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
+	}
+
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:                     r.config.BypassRules,
 		MongoPassword:             r.config.Test.MongoPassword,
@@ -2824,6 +2936,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
+	ends.join(models.MockStream)
 	g.Go(func() error {
 		defer close(outgoingChan)
 		defer frameDrained()
@@ -2837,6 +2950,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			},
 			closeStream: cancel,
 			kind:        "mocks",
+			stream:      models.MockStream,
+			ends:        ends,
 		}
 		if appRunsOn {
 			// Traffic the app serves after the stop is not recorded: a mock
@@ -2896,6 +3011,10 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		var handing atomic.Bool
 		drained := make(chan struct{})
 		defer close(drained)
+		// markerDecided carries, once the frame drains have ended, whether
+		// the stream ends at the agent's marker (streamsEnd) or on quiet.
+		markerDecided := make(chan bool, 1)
+		ender, _ := r.instrumentation.(streamEnder)
 		go func() {
 			// The bound for a stream that is not being read below: an older
 			// agent, which establishes its mapping stream only with the first
@@ -2910,6 +3029,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			case <-drained:
 				return
 			case <-framesDrained:
+			}
+			// An agent that took the request to end its streams ends this one
+			// at its marker, once every mapping it owed from before the stop
+			// is on it (its "clear" counted them): no quiet decides it.
+			byMarker := ends.endsByMarker(drained)
+			markerDecided <- byMarker
+			if byMarker {
+				return
 			}
 			lastMapping.CompareAndSwap(0, time.Now().UnixNano())
 			quiet := time.NewTimer(mappingIdleGrace)
@@ -2952,13 +3079,18 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// idle bound runs from it, so a stream that went quiet while the frame
 		// drains were still ending is not waited on again for a whole grace.
 		framesDone := false
+		// decided and byMarker: whether the stream ends at the agent's
+		// marker, once that is known (markerDecided).
+		decided, byMarker := false, false
 		var lastSeen time.Time
 		for {
 			// While recording is live, wake on ctx.Done(); once shutdown began,
-			// on the frame drains ending; once they have, on the idle timer.
-			// Arming an already-closed channel would spin the loop.
+			// on the frame drains ending; once they have, on how the stream
+			// ends: at the agent's marker (and a second interrupt), or on the
+			// idle timer. Arming an already-closed channel would spin the loop.
 			var idleC <-chan time.Time
-			var shutdownC, framesC <-chan struct{}
+			var shutdownC, framesC, againC <-chan struct{}
+			var decidedC <-chan bool
 			if ctx.Err() != nil && lastSeen.IsZero() {
 				lastSeen = time.Now() // shutdown began before this loop saw it
 			}
@@ -2967,6 +3099,10 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				shutdownC = ctx.Done()
 			case !framesDone:
 				framesC = framesDrained
+			case !decided:
+				decidedC = markerDecided
+			case byMarker:
+				againC = utils.StopNow()
 			default:
 				rest := mappingIdleGrace - time.Since(lastSeen)
 				if rest <= 0 {
@@ -2981,12 +3117,21 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				// Shutdown began: re-loop to wait for the frame drains.
 				continue
 			case <-framesC:
-				// The mocks queued at the stop are in: re-loop to arm the idle
-				// timer, for a whole grace from here, since the agent emits a
-				// test's mapping only after its mocks.
+				// The mocks queued at the stop are in: re-loop to learn how
+				// the stream ends, and to arm the idle timer, for a whole
+				// grace from here, since the agent emits a test's mapping only
+				// after its mocks, if it ends on quiet.
 				framesDone = true
 				lastSeen = time.Now()
 				continue
+			case d := <-decidedC:
+				decided, byMarker = true, d
+				continue
+			case <-againC:
+				// The user's second interrupt gives the drain up: what the
+				// frame drains said (they gave up too).
+				cancel()
+				return nil
 			case <-abandoned:
 				/*
 				 * NOBODY IS COMING, so there is nothing to drain FOR.
@@ -3016,6 +3161,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				// Draining and nothing for mappingIdleGrace: the tail is through.
 				return nil
 			case m, ok := <-ch:
+				if !ok && ender != nil && ender.StreamEnded(models.MappingStream) {
+					// The agent ended it at its marker, every mapping it owed
+					// from before the stop on it.
+					r.logger.Debug(streamEndedLog, zap.String("frames", "mappings"))
+					return nil
+				}
 				if !ok {
 					// Not ended here (mapCtx): the agent ended it. After the
 					// stop that is the agent going away before this drain was
@@ -3070,8 +3221,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					 * cancelled only once the stream has been quiet for
 					 * mappingIdleGrace after the frame drains ended, and not
 					 * during a hand-over, while Abandon fires the moment
-					 * Start returns -- which on the no-consumer path is
-					 * immediately, at its gate. So the outer arm below wins
+					 * Start returns -- which on the no-consumer path (the
+					 * agent's refusal of this keploy's proven switch) is
+					 * immediately. So the outer arm below wins
 					 * every time, and the wedge table cannot drive this one
 					 * without a state the current ordering cannot produce.
 					 *

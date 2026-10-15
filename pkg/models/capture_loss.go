@@ -40,10 +40,38 @@ const (
 	// (the per-connection cap, memory pressure), so the call they belong to
 	// was not recorded whole.
 	CaptureLossDropped CaptureLossKind = "capture_dropped"
+	// CaptureLossAppConnLost: a connection of the application's that keploy
+	// redirected to its proxy, whose connect() had returned, closed (or its
+	// port was reused) before the proxy's side of it reached the proxy: what
+	// it carried was neither recorded nor mocked.
+	CaptureLossAppConnLost CaptureLossKind = "app_connection_lost"
+	// CaptureLossUnpairedConn: a connection reached keploy's proxy that the
+	// kernel could not tie to a connection of the application's keploy
+	// redirected (the proxy sees other addresses than the application's: a
+	// NAT between them, among the causes), so the proxy could not tell
+	// where it was going: it was refused, neither recorded nor mocked.
+	CaptureLossUnpairedConn CaptureLossKind = "unpaired_connection"
+	// CaptureLossRealUncaptured: connections to a mock.real destination's
+	// address keploy could neither capture nor relay as real (class e,
+	// design v14 §4): it could not read which name one was for, or a name
+	// one carried is not listed. What they carried reached nothing keploy
+	// saw. What names each destination and what to change. Unlike the other
+	// kinds it is never an agent-life count: it is a test's own, counting
+	// the connections undecided or used while that test ran (§3.2 as
+	// amended for class e), and never taints a later test.
+	CaptureLossRealUncaptured CaptureLossKind = "real_uncaptured"
+	// CaptureLossAppBytesLost: bytes the application had written to a
+	// connection the proxy holds (one it opened earlier, a pooled
+	// connection) never reached the proxy: the connection was reset, or the
+	// proxy closed it, first. What they carried was neither recorded nor
+	// mocked.
+	CaptureLossAppBytesLost CaptureLossKind = "app_bytes_lost"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
-// agent's life, with what the latest one was (never a value the app sent).
+// agent's life, with what the latest one was (never a value the app sent);
+// for CaptureLossRealUncaptured, how many connections were charged to one
+// test.
 type CaptureLoss struct {
 	Kind  CaptureLossKind `json:"kind"`
 	Count uint64          `json:"count"`
@@ -130,6 +158,14 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s)' parser stopped taking what keploy captured, and what was still queued for it was abandoned, neither recorded nor mocked", c.Count)
 	case CaptureLossDropped:
 		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
+	case CaptureLossUnpairedConn:
+		return fmt.Sprintf("%d connection(s) reached keploy's proxy that it could not tie to a connection of the application's (another address in between, a NAT among the causes), so keploy could not tell where they were going and refused them", c.Count)
+	case CaptureLossAppBytesLost:
+		return fmt.Sprintf("on %d connection(s) to keploy's proxy, bytes the application had written never reached the proxy (the connection was reset, or closed, first), so what they carried was neither recorded nor mocked", c.Count)
+	case CaptureLossAppConnLost:
+		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
+	case CaptureLossRealUncaptured:
+		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

@@ -55,7 +55,13 @@ name: Mock Mode Regression (Linux)
 # and asserts a read-back of another id fails with the variable as evidence.
 # Another replays keploy #4686's request-drift app under the proven switch and
 # asserts a call to another host or container fails naming it, while a
-# container configured the same on a new random port is matched by its key.
+# container configured the same on a new random port is matched by its key;
+# and an aws-sdk-go-v2 S3 app against LocalStack, whose SigV4-signed calls
+# replay under the switch while another region or key id fails naming it.
+# Another (proven_fire_and_forget_linux) replays an app's fire-and-forget
+# publish, on a connection it opens and on one it keeps, with tc netem holding
+# every packet to keploy's proxy 1 s, and asserts the call is judged in its
+# own test: never in the next one, never not at all.
 on:
   workflow_call:
     inputs:
@@ -205,6 +211,16 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-real-deps-linux.sh"
+
+      # mock.real in keploy record and keploy test: a test case lists the REAL
+      # destination its request used and replays with it reached for real (a
+      # REAL case on the real clock); with it down, the run fails, saying the
+      # destination its recordings list was never reached.
+      - name: Run record/test mock.real e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/real-deps-record-test-linux.sh"
 
       - name: Run mock-mode offline e2e
         env:
@@ -445,12 +461,15 @@ jobs:
   # repository, or with another body value must fail the test naming the
   # field, while a container configured the same on a new random port is
   # matched by its key; without the switch every case passes, as on main. Its
-  # own job: the mock-mode job above is near its timeout.
+  # own job: the mock-mode job above is near its timeout. Then an AWS SDK's
+  # SigV4-signed calls (founder decision 25): the Authorization header is
+  # compared by its parts, its signature not at all, so the set replays under
+  # the switch, and fails naming the part when the region or key id differs.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: proven strict-HTTP (record_replay_build)
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -488,12 +507,93 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
 
+      - name: Run proven strict-HTTP e2e (AWS SigV4 against LocalStack)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
+
+  # A fire-and-forget call is the test's own under the proven switch, however
+  # late its bytes reach keploy's proxy (design v14 §5.2): on a connection the
+  # application opens for it (the agent's count of the application's
+  # connections) and on one it opened at startup and keeps (the bytes on the
+  # connections the proxy holds). Every non-SYN packet to the proxy's port is
+  # held 1 s with tc netem, so a test's end reads while the call is still on
+  # its way: the call must be judged in its own test, never in the next one or
+  # not at all. Its own job: the mock-mode jobs above are near their timeouts.
+  proven_fire_and_forget_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven fire-and-forget (record_replay_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Ensure yq
+        run: |
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      # netem holds the packets; the runner's kernel ships it in
+      # linux-modules-extra, which the image may not have installed.
+      - name: Ensure sch_netem
+        run: |
+          if sudo modprobe sch_netem 2>/dev/null; then
+            echo "sch_netem loaded"
+            exit 0
+          fi
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" "linux-modules-extra-$(uname -r)"
+          sudo modprobe sch_netem
+
+      # The bytes wait's target under local transmit drops: a segment a full
+      # queue drops is counted twice in tcpi_bytes_sent, once in the target
+      # (pairbytes_qdisc_linux_test.go), in a network namespace of its own.
+      - name: Run the bytes wait's target under local drops (root)
+        run: |
+          set -o pipefail
+          go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
+          sudo unshare -n sh -c 'ip link set lo up && tc qdisc add dev lo root netem delay 1ms limit 3 && KEPLOY_QDISC_TEST=1 /tmp/proxy.test -test.run "^TestTheTargetCountsALocallyDroppedSegmentOnce$" -test.count=5 -test.v' | tee /tmp/qdisc.out
+          grep -q -- "--- PASS: TestTheTargetCountsALocallyDroppedSegmentOnce" /tmp/qdisc.out
+          if grep -q -- "--- SKIP" /tmp/qdisc.out; then echo "::error::the local-drop test skipped"; exit 1; fi
+
+      - name: Run proven fire-and-forget e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-fire-and-forget-linux.sh"
+
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,
   # so the test's own processes fill it), the kernel refuses the next one, and
-  # the hooks count it (GET /agent/pidmaps) and WARN once. Root-only, so it is
-  # behind the pidmap_integration tag and never in `go test ./...`. amd64 and
-  # arm64: each runs its own architecture's object.
+  # the hooks count it (GET /agent/pidmaps) and WARN once. And the kernel's
+  # count of the connections completed to the proxy's listener agrees with the
+  # proxy's count of its accepts, through the proxy's real accept loop and the
+  # agent's wait (what a test's end waits on). Root-only, so they are
+  # behind the pidmap_integration and proxyconns_integration tags (two
+  # binaries) and never in `go test ./...`. amd64 and arm64: each runs its
+  # own architecture's object.
   pid_map_overflow:
     if: ${{ inputs.jobs_to_run == 'all' }}
     timeout-minutes: 15
@@ -521,11 +621,23 @@ jobs:
       - name: Build the PID map integration test
         run: go test -c -tags 'viper_bind_struct pidmap_integration' -o /tmp/pidmap.test ./pkg/agent/hooks/linux/
 
-      # A -run that matches nothing exits 0, so the test's PASS line is
+      # The proxy's counts against the same object, in a binary of their own:
+      # it links the proxy, whose package initialisation opens sockets that
+      # the PID-map test's count would see.
+      - name: Build the proxy connection integration test
+        run: go test -c -tags 'viper_bind_struct proxyconns_integration' -o /tmp/proxyconns.test ./pkg/agent/hooks/linux/
+
+      # A -run that matches nothing exits 0, so each test's PASS line is
       # required explicitly.
-      - name: Run the PID map integration test (root)
+      - name: Run the PID map and proxy connection integration tests (root)
         run: |
           set -o pipefail
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out
-          grep -q -- "--- PASS: TestAProcessThePIDMapRefusesIsReported" /tmp/pidmap.out ||
-            { echo "::error::TestAProcessThePIDMapRefusesIsReported did not pass"; exit 1; }
+          # Both binaries run, whichever fails: one's failure does not hide
+          # the other's results.
+          rc=0
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
+          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
+            grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
+          done
+          exit $rc

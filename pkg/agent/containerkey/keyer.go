@@ -304,7 +304,7 @@ func (k *Keyer) EndTest() {
 // another container. A host with no Docker daemon socket has no containers
 // to name: the agent says so once, at Info, and at Debug after.
 func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string, bool) {
-	ap, err := parseAddrPort(dst)
+	ap, err := ParseAddrPort(dst)
 	if err != nil {
 		return Container{}, "", false
 	}
@@ -344,7 +344,7 @@ func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string,
 // handshake hold), changes nothing Name later gives or says. err says the
 // daemon cannot be read.
 func (k *Keyer) Lookup(dst string) (Container, bool, error) {
-	ap, err := parseAddrPort(dst)
+	ap, err := ParseAddrPort(dst)
 	if err != nil {
 		return Container{}, false, nil
 	}
@@ -352,6 +352,49 @@ func (k *Keyer) Lookup(dst string) (Container, bool, error) {
 	res := k.res
 	k.mu.Unlock()
 	return res.Lookup(ap)
+}
+
+// PlacedOrPlacing is the container dst reaches now (c, ok), or how to wait
+// for one the index is still placing: wait, non-nil, when the index places
+// none at dst now but is placing containers that could be there (a container
+// Docker started a moment before). wait(fn) then waits, off the caller's
+// path, for those placings only (never a configuration's read, nor a
+// container started since), no longer than the session or the index's
+// watch, and runs fn: ok is whether dst then reaches a container, resolved
+// false when the wait ended first and that cannot be told. Neither (ok false,
+// wait nil): no container is at dst and none could be, the index places
+// nothing now, or it cannot be read (a container: entry then matches
+// nothing, as at the accept). The placings are read before dst is looked up,
+// so one that ends between the two is seen placed, never missed.
+func (k *Keyer) PlacedOrPlacing(dst string) (c Container, ok bool, wait func(fn func(c Container, ok, resolved bool))) {
+	ap, err := ParseAddrPort(dst)
+	if err != nil || !couldBeContainer(ap.Addr()) {
+		return Container{}, false, nil
+	}
+	k.mu.Lock()
+	res := k.res
+	k.mu.Unlock()
+	placing, could := res.Pending(ap)
+	if c, ok, err := res.Lookup(ap); err != nil || ok {
+		return c, ok && err == nil, nil
+	}
+	if !could || len(placing) == 0 {
+		return Container{}, false, nil
+	}
+	ctx := k.sessionCtx()
+	return Container{}, false, func(fn func(c Container, ok, resolved bool)) {
+		go func() {
+			res.AwaitReadsOf(ctx, placing)
+			c, ok, err := res.Lookup(ap)
+			if err != nil || (!ok && ctx.Err() != nil) {
+				// The index failed, or the session ended first: whether dst
+				// is a container cannot be told.
+				fn(Container{}, false, false)
+				return
+			}
+			fn(c, ok, true)
+		}()
+	}
 }
 
 // Placed is the container connection connID reaches: the one Name gave it,
@@ -654,9 +697,13 @@ func FromContext(ctx context.Context) (string, bool) {
 	return key, st == Keyed
 }
 
-// parseAddrPort reads ip:port, IPv6 in brackets, an IPv4-mapped IPv6 address
-// read as IPv4.
-func parseAddrPort(s string) (netip.AddrPort, error) {
+// ParseAddrPort reads a connection's destination as keploy's proxy writes it:
+// ip:port, IPv6 in brackets. An IPv4-mapped one is read as the IPv4 address
+// it reaches, both as [::ffff:a.b.c.d]:p and as [a.b.c.d]:p, the form the
+// proxy writes a dual-stack socket's connection to an IPv4 address in (an
+// IPv6 socket to ::ffff:a.b.c.d, Java's default), which
+// netip.ParseAddrPort refuses.
+func ParseAddrPort(s string) (netip.AddrPort, error) {
 	host, port, err := net.SplitHostPort(s)
 	if err != nil {
 		return netip.AddrPort{}, err

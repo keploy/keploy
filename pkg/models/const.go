@@ -72,12 +72,17 @@ var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 //   - Active:         at least one real test window is currently set
 //     (SetCurrentTestWindow / SetMocksWithWindow with
 //     non-zero start+end; BaseTime staging does NOT
-//     activate — see mockmanager.go isInitialStaging).
+//     activate — see mockmanager.go isInitialStaging), or a
+//     test of keploy mock replay begun without a worker pid
+//     is open (MockManager.SetScopeMocks), a window with no
+//     recorded-time bounds.
 //   - FirstTestFired: at least one real (non-BaseTime) test window has
 //     been set for the test set currently being replayed.
 //     Sticky within a set; MockManager.ResetForReplaySession
 //     clears it at each set boundary, so a set being staged
-//     reads false again.
+//     reads false again. Also true while such a keploy mock
+//     replay test is open, and false again once it ends:
+//     that replay serves between tests as before the first.
 //
 // The principal-engineer review flagged a torn-read hazard: the legacy
 // IsTestWindowActive / HasFirstTestFired accessors read under different

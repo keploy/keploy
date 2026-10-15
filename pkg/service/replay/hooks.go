@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +65,40 @@ func newHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrument
 	return h
 }
 
+// realSimulator is an agent client that puts a mock.real test case on the
+// real clock (AgentClient.BeforeSimulateReal).
+type realSimulator interface {
+	BeforeSimulateReal(ctx context.Context, timestamp *time.Time, testSetID, tcName string, real []string) error
+}
+
+// beforeSimulate runs the before-simulate hook, which puts the run's clock at
+// the test case's recorded request (at), or, under the proven switch for a
+// test case whose recording lists mock.real destinations, then on real time
+// (design v14 §3.4, F3). A freeze that fails is logged, as before; a real
+// clock that cannot be had fails the case: it must not run at its recorded
+// time against a dependency that answers at real time.
+func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *time.Time, testSetID string) error {
+	if provenswitch.On() && len(tc.Real) > 0 {
+		rs, ok := h.instrumentation.(realSimulator)
+		if !ok {
+			return fmt.Errorf("test case %s uses mock.real (%s), and this keploy's agent client cannot put it on the real clock", tc.Name, strings.Join(tc.Real, ", "))
+		}
+		if err := rs.BeforeSimulateReal(ctx, at, testSetID, tc.Name, tc.Real); err != nil {
+			// Whatever the hook began (a freeze, a coverage window) ends,
+			// as after any case.
+			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+			}
+			return err
+		}
+		return nil
+	}
+	if err := h.instrumentation.BeforeSimulate(ctx, at, testSetID, tc.Name); err != nil {
+		h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+	}
+	return nil
+}
+
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
 	// Extract URL replacements and port mappings: merge global + per-test-set
@@ -71,8 +107,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(ctx, tc, &tc.HTTPReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
 		hostToUse := h.cfg.Test.Host
@@ -133,8 +169,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(ctx, tc, &tc.GrpcReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))

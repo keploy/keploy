@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -55,6 +56,14 @@ type Hooks struct {
 
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	// proxyMarked is set once MarkProxyListener has marked the proxy's
+	// listener: proxy_conns_established counts nothing before (proxyconns.go).
+	proxyMarked atomic.Bool
+	// app is the application's side of that count (appconns.go), started
+	// once, by the first mark (appOnce); appMu guards its lost count.
+	app     appConnState
+	appOnce sync.Once
+	appMu   sync.Mutex
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -652,6 +661,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
+	h.stopAppConns()
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}

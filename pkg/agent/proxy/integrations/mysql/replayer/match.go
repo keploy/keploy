@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
@@ -703,6 +704,97 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		prepMemo[k] = q
 		return q, nil
 	}
+	// statementQuery is the query a recorded command that names a prepared
+	// statement ran: the one the recorder kept on the command
+	// (mysql.MetaQuery), or else the one its PREPARE recorded
+	// (recordedQuery). "" when neither is in the set: the statement is
+	// unknown (see unknownStatements).
+	statementQuery := func(recorded *mysql.PacketBundle, connID string, stmtID uint32) (string, error) {
+		if q := recorded.StoredQuery(); q != "" {
+			return q, nil
+		}
+		return recordedQuery(connID, stmtID)
+	}
+	// lostStatements are those of unknown (recorded EXECUTEs whose statement
+	// the pool cannot name) whose PREPARE the test set held and lost (keploy
+	// #4810: an older keploy's mock prune deleted it). The recorder cannot
+	// decode an EXECUTE of a statement whose COM_STMT_PREPARE_OK it did not
+	// see on that connection, so every recorded EXECUTE had a PREPARE; the
+	// question is whether this set held it. It did when the set holds:
+	//   - the connection's handshake (its "config" mock, which no prune
+	//     deletes): the connection was recorded from its start in this set,
+	//     so every statement it ran was prepared in this set. This is the
+	//     pooled connection that kept none of its PREPAREs, because another
+	//     connection prepared each of its statements first and the old prune
+	//     kept only that first one;
+	//   - or a PREPARE of the connection with a lower statement ID: a server
+	//     numbers a connection's statements in the order it prepares them, so
+	//     this one was prepared after a PREPARE the set kept.
+	// A statement prepared in an earlier test set, on a connection a long
+	// recording kept open across sets, is neither, and is not counted.
+	// Evidence holds only when recorded before the unknown EXECUTE: a
+	// connection's handshake and its earlier PREPAREs come before its
+	// EXECUTEs. A set that gathers several recordings (the k8s-proxy's smart
+	// set) holds connections of different agent runs under the same connID,
+	// numbered from 0 by each run, and a later run's handshake or PREPARE
+	// says nothing of an earlier run's EXECUTE. A zero time says nothing and
+	// is taken.
+	type preparedAt struct {
+		id uint32
+		at time.Time
+	}
+	var (
+		evidenceRead bool
+		handshakeAt  map[string]time.Time
+		preparedOn   map[string][]preparedAt
+	)
+	precedes := func(evidence, exec time.Time) bool {
+		return evidence.IsZero() || exec.IsZero() || !evidence.After(exec)
+	}
+	lostStatements := func(unknown []*models.Mock) ([]*models.Mock, error) {
+		if !evidenceRead {
+			if pool == nil {
+				if err := loadPool(); err != nil {
+					return nil, err
+				}
+			}
+			evidenceRead = true
+			handshakeAt = map[string]time.Time{}
+			preparedOn = map[string][]preparedAt{}
+			for _, m := range pool {
+				if c, e, ok := recordedPrepEntry(m); ok {
+					preparedOn[c] = append(preparedOn[c], preparedAt{e.statementID, m.Spec.ReqTimestampMock})
+				}
+				if c := m.Spec.Metadata["connID"]; m.Kind == models.MySQL && m.Spec.Metadata["type"] == "config" && c != "" {
+					if at, seen := handshakeAt[c]; !seen || m.Spec.ReqTimestampMock.Before(at) {
+						handshakeAt[c] = m.Spec.ReqTimestampMock
+					}
+				}
+			}
+		}
+		var out []*models.Mock
+		for _, m := range unknown {
+			c, x := m.Spec.Metadata["connID"], m.Spec.ReqTimestampMock
+			if at, ok := handshakeAt[c]; ok && precedes(at, x) {
+				out = append(out, m)
+				continue
+			}
+		scan:
+			for _, r := range m.Spec.MySQLRequests {
+				exec, _ := r.Message.(*mysql.StmtExecutePacket)
+				if exec == nil {
+					continue
+				}
+				for _, p := range preparedOn[c] {
+					if p.id < exec.StatementID && precedes(p.at, x) {
+						out = append(out, m)
+						break scan
+					}
+				}
+			}
+		}
+		return out, nil
+	}
 
 	// The whole prepared-statement index, for the debug log only.
 	if (req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC) && debugOn {
@@ -802,6 +894,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		defExecResp *mysql.Response
 		defExecMock *models.Mock
 
+		// paramsOnly*: a definitive match on bound parameters alone, of a
+		// recorded EXECUTE whose statement the set cannot name (its PREPARE
+		// is not in the pool and it records no query; see
+		// matchStmtExecutePacketQueryAware). Its statement is unknown, so it
+		// ranks below a match on the query and every parameter: the in-window
+		// one below an in-window exact match (which the scan goes on looking
+		// for), the out-of-window one below defExecMock.
+		paramsOnlyRespWindow *mysql.Response
+		paramsOnlyMockWindow *models.Mock
+		paramsOnlyResp       *mysql.Response
+		paramsOnlyMock       *models.Mock
+
 		// COM_QUERY in-window preference (parity with the COM_STMT_EXECUTE
 		// branch from #4235). A parameterless statement (Spring
 		// JdbcTemplate without bind args → COM_QUERY, not a prepared
@@ -817,6 +921,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// genuinely reusable single-recording query.
 		queryExactResp *mysql.Response
 		queryExactMock *models.Mock
+
+		// unknownStatements are the COM_STMT_EXECUTE mocks recorded inside
+		// the current test window whose statement the pool cannot name: the
+		// recorder kept no query on them, and no PREPARE of theirs is in the
+		// pool. Only those whose parameters have the live command's shape
+		// (sameParameterShape): the others ran another statement. Which of
+		// them lost a PREPARE the set once held is settled after the scan
+		// (lostStatements).
+		unknownStatements []*models.Mock
 	)
 
 	// trackNearest remembers the recorded statement closest to the live one.
@@ -921,7 +1034,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					// query-aware CLOSE matching via recordedPrepByConn + runtime map
 					var expectedQuery, actualQuery string
 					if expClose, _ := mockReq.PacketBundle.Message.(*mysql.StmtClosePacket); expClose != nil {
-						q, err := recordedQuery(mock.Spec.Metadata["connID"], expClose.StatementID)
+						q, err := statementQuery(&mockReq.PacketBundle, mock.Spec.Metadata["connID"], expClose.StatementID)
 						if err != nil {
 							return nil, false, nil, err
 						}
@@ -1054,7 +1167,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 						var expectedQuery, actualQuery string
 						if expMsg != nil {
-							q, err := recordedQuery(mock.Spec.Metadata["connID"], expMsg.StatementID)
+							q, err := statementQuery(&mockReq.PacketBundle, mock.Spec.Metadata["connID"], expMsg.StatementID)
 							if err != nil {
 								return nil, false, nil, err
 							}
@@ -1073,6 +1186,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						}
 					}
 					expectedQuery := ev.recorded
+					if expectedQuery == "" && windowActive && mockInCurrentWindow(mock) &&
+						sameParameterShape(expMsg, actMsg) && !slices.Contains(unknownStatements, mock) {
+						unknownStatements = append(unknownStatements, mock)
+					}
 
 					if ok, c, queryExact := ev.ok, ev.score, ev.queryExact; ok {
 						// Query-aware definitive match (query + params exact).
@@ -1105,12 +1222,26 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// lookup recorded before the first test window) is kept only
 						// as a last-resort fallback so a genuinely unique reusable
 						// read still resolves.
+						//
+						// A match on the parameters alone (the recorded
+						// statement unknown) is weaker: it does not stop the
+						// scan, see paramsOnlyMockWindow.
 						if !gate.allows(mock) {
 							continue
 						}
-						if windowActive && mockInCurrentWindow(mock) {
+						inWindow := windowActive && mockInCurrentWindow(mock)
+						switch {
+						case expectedQuery == "" && inWindow:
+							if paramsOnlyMockWindow == nil {
+								paramsOnlyRespWindow, paramsOnlyMockWindow = &mock.Spec.MySQLResponses[0], mock
+							}
+						case expectedQuery == "":
+							if paramsOnlyMock == nil {
+								paramsOnlyResp, paramsOnlyMock = &mock.Spec.MySQLResponses[0], mock
+							}
+						case inWindow:
 							matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
-						} else if defExecMock == nil {
+						case defExecMock == nil:
 							defExecResp, defExecMock = &mock.Spec.MySQLResponses[0], mock
 						}
 					} else {
@@ -1186,9 +1317,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return nil, false, nil, walkErr
 		}
 		settled := queryMatched || stmtMatched ||
-			// See firstPass: the window's FIFO candidate outranks every other
-			// fallback.
-			(windowPass && req.Header.Type == sCOM_STMT_EXEC && fifoExecMockWindow != nil) ||
+			// See firstPass: the window's FIFO candidate, and its match on the
+			// parameters alone, outrank every other fallback.
+			(windowPass && req.Header.Type == sCOM_STMT_EXEC && (fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
 			// The CLOSE pass scored every recorded CLOSE.
 			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
 		if !firstPass || settled {
@@ -1211,7 +1342,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		fifoExecResp, fifoExecMock = nil, nil
 		fifoExecRespWindow, fifoExecMockWindow = nil, nil
 		defExecResp, defExecMock = nil, nil
+		paramsOnlyRespWindow, paramsOnlyMockWindow = nil, nil
+		paramsOnlyResp, paramsOnlyMock = nil, nil
 		queryExactResp, queryExactMock = nil, nil
+		unknownStatements = nil
 		mysqlCandidates = 0
 		gate.resetDiagnostics()
 	}
@@ -1239,28 +1373,37 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	if req.Header.Type == sCOM_STMT_EXEC && !stmtMatched {
 		// Selection priority when no in-window definitive (query+params
 		// exact) match was found during the scan:
-		//   1. in-window per-test FIFO candidate (query-exact, params not
+		//   1. in-window match on the parameters alone, of a recorded
+		//      EXECUTE whose statement is unknown (paramsOnlyMockWindow)
+		//   2. in-window per-test FIFO candidate (query-exact, params not
 		//      matched — the read-back-of-generated-id case)
-		//   2. any-tier per-test FIFO candidate
-		//   3. out-of-window definitive match (query+params exact in a
+		//   3. any-tier per-test FIFO candidate
+		//   4. out-of-window definitive match (query+params exact in a
 		//      reusable tier — a genuinely unique reusable read)
+		//   5. out-of-window match on the parameters alone
 		// The definitive out-of-window match ranks BELOW the in-window
 		// FIFO so the current test's own recorded row always wins over a
 		// stale earlier-test exact match; it ranks above the score-based
 		// pick because exact query+params is strictly stronger evidence
 		// than partial-shape scoring.
-		chosenResp, chosenMock := fifoExecRespWindow, fifoExecMockWindow
+		chosenResp, chosenMock := paramsOnlyRespWindow, paramsOnlyMockWindow
+		if chosenMock == nil {
+			chosenResp, chosenMock = fifoExecRespWindow, fifoExecMockWindow
+		}
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecResp, fifoExecMock
 		}
 		if chosenMock == nil && defExecMock != nil {
 			chosenResp, chosenMock = defExecResp, defExecMock
 		}
+		if chosenMock == nil && paramsOnlyMock != nil {
+			chosenResp, chosenMock = paramsOnlyResp, paramsOnlyMock
+		}
 		if chosenMock != nil {
 			if matchedMock == nil || matchedMock != chosenMock {
 				logger.Debug("COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order",
 					zap.String("mock_name", chosenMock.Name),
-					zap.Bool("in_window", chosenMock == fifoExecMockWindow),
+					zap.Bool("in_window", chosenMock == fifoExecMockWindow || chosenMock == paramsOnlyMockWindow),
 					zap.String("score_based_mock", func() string {
 						if matchedMock != nil {
 							return matchedMock.Name
@@ -1270,6 +1413,31 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 			matchedResp, matchedMock = chosenResp, chosenMock
 		}
+	}
+
+	// A COM_STMT_EXECUTE that found no mock of its own test to serve, in a
+	// test whose recording holds EXECUTEs that lost their statement (see
+	// lostStatements). One of those may be this command's own: its query is
+	// lost, and nothing left in the set says which statement it ran. Serving
+	// another test's EXECUTE instead, picked by its query alone (FIFO), by
+	// its parameters alone, or by score, answers the command with that
+	// test's result (keploy #4810: another order's OK in place of this
+	// order's duplicate-key error), which can pass the test when it should
+	// fail. So the command is a miss that names the mocks it may have been,
+	// and why. An exact match on the query and every parameter
+	// (defExecMock) is still served: it is the answer the matcher gives a
+	// genuinely reusable read, whatever else the window holds. (A command no
+	// mock answers at all is the miss below, which names them too.)
+	var lost []*models.Mock
+	if req.Header.Type == sCOM_STMT_EXEC && !stmtMatched && len(unknownStatements) > 0 &&
+		(matchedMock == nil || (!mockInCurrentWindow(matchedMock) && matchedMock != defExecMock)) {
+		var err error
+		if lost, err = lostStatements(unknownStatements); err != nil {
+			return nil, false, nil, err
+		}
+	}
+	if len(lost) > 0 && matchedMock != nil {
+		return nil, false, unknownStatementsMiss(lost, matchedMock, mysqlCandidates), nil
 	}
 
 	if matchedResp == nil {
@@ -1598,14 +1766,24 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		case gate.rejected > 0:
 			phase = models.MatchPhaseStrict
 		}
-		return nil, false, &mockMiss{
+		miss := &mockMiss{
 			closestQuery:   closestQuery,
 			closestMock:    bestPartialMockName,
 			fieldDiffs:     gate.fieldDiffs,
 			strictRejected: gate.rejected,
 			candidateCount: mysqlCandidates,
 			matchPhase:     phase,
-		}, nil
+		}
+		if len(lost) > 0 {
+			// The test's own mock may be one whose statement is lost: say so,
+			// and, when nothing else explains the miss, what to do about it.
+			unknown := unknownStatementsMiss(lost, nil, mysqlCandidates)
+			miss.why = unknown.why
+			if miss.strictRejected == 0 {
+				miss.nextSteps = unknown.nextSteps
+			}
+		}
+		return nil, false, miss, nil
 	}
 
 	// Schema-noise detection: diff the winning mock's recorded request body
@@ -1982,6 +2160,29 @@ func queryPacketText(packet mysql.PacketBundle) string {
 func preparePacketText(packet mysql.PacketBundle) string {
 	msg, _ := packet.Message.(*mysql.StmtPreparePacket)
 	return msg.Query
+}
+
+// sameParameterShape reports whether a recorded COM_STMT_EXECUTE (expected)
+// may have run the live one's statement (actual), as far as their bound
+// parameters show: as many, and each of the same type wherever both are
+// bound to a value (a NULL is sent with a type of its own) and both packets
+// carry their types (new_params_bind_flag; without it the decoder fills in a
+// default type, see DecodeStmtExecute).
+func sameParameterShape(expected, actual *mysql.StmtExecutePacket) bool {
+	if expected == nil || actual == nil || expected.ParameterCount != actual.ParameterCount ||
+		len(expected.Parameters) != len(actual.Parameters) {
+		return false
+	}
+	if expected.NewParamsBindFlag != 1 || actual.NewParamsBindFlag != 1 {
+		return true
+	}
+	for i := range expected.Parameters {
+		e, a := expected.Parameters[i], actual.Parameters[i]
+		if e.Value != nil && a.Value != nil && e.Type != a.Type {
+			return false
+		}
+	}
+	return true
 }
 
 // query-aware EXEC scoring.

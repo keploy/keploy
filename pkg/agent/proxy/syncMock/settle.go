@@ -158,11 +158,19 @@ func (h *TestCaseHold) EarliestStarts(fn func(namespace, pod string, start time.
 // Bytes is about how many bytes the held test cases take.
 func (h *TestCaseHold) Bytes() int64 { return h.bytes }
 
-// Oldest is the earliest end of a test case held, zero when none is.
+// Oldest is the earliest end of a test case held (TestCase.CompletedAt: a
+// gRPC one's is its response's), zero when none is. A stop waits while it is
+// at or before the stop (NoteHeld). One with no wire time at all says
+// nothing of when it ran and is skipped: taken as zero, it would say that
+// nothing is held.
 func (h *TestCaseHold) Oldest() time.Time {
 	var oldest time.Time
 	for _, e := range h.q {
-		if end := e.TC.HTTPResp.Timestamp; oldest.IsZero() || end.Before(oldest) {
+		end := e.TC.CompletedAt()
+		if end.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || end.Before(oldest) {
 			oldest = end
 		}
 	}
@@ -394,8 +402,11 @@ type PendingExplainer interface {
 // BacklogBefore is what this recording may still hand over from before
 // `before` (BacklogState): a test case the recorder's stream holds for its
 // verdict that ended by then, one the ingress is still building or has queued
-// for the stream, or, as each Backlog watermark tells, a capture reader or
-// parser that has not got past it. Known only when a Backlog watermark is set:
+// for the stream, a mock requested by then that the manager has yet to hand on
+// (handOnPendingBefore), a mapping of a test from before it that the manager
+// has decided and not yet put on the mapping stream (mappingOwedBefore), or, as
+// each Backlog watermark tells, a capture reader or parser that has not got
+// past it. Known only when a Backlog watermark is set:
 // without one nothing can tell whether a parser is behind.
 func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	var st BacklogState
@@ -429,6 +440,14 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	if why := m.incoming.pendingBefore(before); why != "" {
 		pending(why)
 	}
+	if !st.Pending {
+		if why := m.handOnPendingBefore(before); why != "" {
+			pending(why)
+		}
+	}
+	if !st.Pending && m.mappingOwedBefore(before) {
+		pending("a test's mapping from before it is not yet on the agent's mapping stream")
+	}
 	for _, b := range backlogs {
 		if st.Pending {
 			break
@@ -444,6 +463,42 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 		}
 	}
 	return st
+}
+
+// handOnPendingBefore says why the manager may still hand on a mock requested
+// at or before `before`, "" when it may not: one in its buffer that the next
+// flush takes out of it (flushTakeLocked: a parser that ran behind its traffic
+// handed it over after its window resolved, or it is a session or startup mock
+// no window owns), one owed back to a resolved window, which that flush hands
+// on, or one on its way to the stream. The flush runs on a ticker, which a
+// starved agent runs late: until it has, the mock is the agent's, not in
+// transit. A mock no window can take yet stays buffered for a request that may
+// still claim it, and is not counted: such a request is one the ingress is
+// still building, which is pending already, or one that ended after `before`.
+func (m *SyncMockManager) handOnPendingBefore(before time.Time) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mk := range m.buffer {
+		if mk == nil || mk.Spec.ReqTimestampMock.After(before) {
+			continue
+		}
+		if take, _, _, _ := m.flushTakeLocked(mk); take != flushKeep {
+			return "a mock requested before it waits in the agent's mock buffer for the next flush"
+		}
+	}
+	for _, o := range m.owed {
+		if !o.mock.Spec.ReqTimestampMock.After(before) {
+			return "a mock requested before it is owed back to its test, at the next flush"
+		}
+	}
+	m.sendingMu.Lock()
+	defer m.sendingMu.Unlock()
+	for _, at := range m.sending {
+		if !at.After(before) {
+			return "a mock requested before it is being sent on the agent's mock stream"
+		}
+	}
+	return ""
 }
 
 // Watermark is what tells when the verdict for a test case of this recording
@@ -499,14 +554,22 @@ type incomingBacklog struct {
 	next     uint64
 	building map[uint64]time.Time
 	queues   map[uint64]func() int
-	// built counts the test cases built (or given up): progress.
+	// built counts the test cases built (or given up) that a stop waits on:
+	// progress. Once a stop has asked (asked), only those from before the
+	// time it asked about count: what the app serves after the stop says
+	// nothing of that backlog, and counted, a docker compose app's steady
+	// traffic would keep a stop waiting on a backlog that does not move.
 	built atomic.Uint64
+	// asked is the latest time a stop asked about (pendingBefore), in Unix
+	// nanoseconds; 0 before any did.
+	asked atomic.Int64
 }
 
 // pendingBefore says why a test case from before `before` may still come from
 // the ingress: one whose response came by then is still being built, or a
 // queue holds test cases (whose times it cannot tell). "" when none may.
 func (b *incomingBacklog) pendingBefore(before time.Time) string {
+	b.asked.Store(before.UnixNano())
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, resp := range b.building {
@@ -547,7 +610,9 @@ func (m *SyncMockManager) BuildingTestCase(resp time.Time) (done func()) {
 			b.mu.Lock()
 			delete(b.building, id)
 			b.mu.Unlock()
-			b.built.Add(1)
+			if asked := b.asked.Load(); asked == 0 || resp.UnixNano() <= asked {
+				b.built.Add(1)
+			}
 		})
 	}
 }

@@ -57,7 +57,7 @@ const (
 // not from the run's.
 func TestTheWiresOpenTestIsAScopeOfItsOwn(t *testing.T) {
 	use := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 
 	claimSelf(t, a)
@@ -83,7 +83,7 @@ func TestTheWiresOpenTestIsAScopeOfItsOwn(t *testing.T) {
 // run's final read (failOpen), closes its scope too.
 func TestATestKeployFailsClosesItsScope(t *testing.T) {
 	use := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	proc := child(t)
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "k"}, proc.Process.Pid)
@@ -100,7 +100,7 @@ func TestATestKeployFailsClosesItsScope(t *testing.T) {
 // ambiguous.
 func TestEachTestProcessIsAScopeOfItsOwn(t *testing.T) {
 	use := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_RECORD)
+	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	require.Equal(t, keyed, use(40001), "a container of the run's, before any test process")
 
@@ -122,7 +122,7 @@ func TestEachTestProcessIsAScopeOfItsOwn(t *testing.T) {
 // is skipped is the run's.
 func TestASkippedTestOpensNoScope(t *testing.T) {
 	use := useTestKeyer(t)
-	a, _ := wireAgent(models.MODE_TEST)
+	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
 	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "flaky"}))

@@ -19,7 +19,9 @@ import (
 // connection while it held that connection's handshake (synhold): the
 // application's connect completed only because this dial did, so the
 // connection's first dial of the same address must use it rather than open a
-// second one the application never made.
+// second one the application never made. Where handshakes are not held, the
+// connection the MySQL detection probe dialled for it is kept the same way
+// (Adopt).
 type Predialed struct {
 	mu      sync.Mutex
 	addr    string
@@ -64,8 +66,35 @@ func (p *Predialed) Alias(addr string) {
 	p.aliases = append(p.aliases, addr)
 }
 
+// Adopt makes conn, dialled at addr for an application's connection before
+// anything was read from it, that connection's pre-dialled one: its first dial
+// of addr takes it, as it takes one dialled while the handshake was held,
+// rather than opening a second connection the application never made. The
+// MySQL detection probe dials so on a host where handshakes are not held, to
+// see whether the destination speaks first. conn may wrap the socket to replay
+// bytes the probe already read from it.
+func Adopt(addr string, conn net.Conn) *Predialed {
+	return &Predialed{addr: addr, conn: conn}
+}
+
+// Look takes the connection for a look at what its destination sends first
+// (the MySQL detection probe), as the first dial of addr would, but hands it
+// over even when the destination has already closed it: the look reads that
+// close as the destination's answer to the application's connection, where a
+// dial would open a fresh one. Return hands it back. nil when there is none to
+// take (a nil Predialed, taken already, or dialled at another address).
+func (p *Predialed) Look(addr string) net.Conn {
+	return p.takeConn("tcp", addr, false)
+}
+
 // take hands the connection to the first dial of its address, once.
 func (p *Predialed) take(network, addr string) net.Conn {
+	return p.takeConn(network, addr, true)
+}
+
+// takeConn is take; one the destination closed is handed over too unless
+// dialling, which dials afresh instead.
+func (p *Predialed) takeConn(network, addr string, dialling bool) net.Conn {
 	if p == nil || !strings.HasPrefix(network, "tcp") {
 		return nil
 	}
@@ -87,7 +116,7 @@ func (p *Predialed) take(network, addr string) net.Conn {
 	}
 	// A connection the destination has already closed is no use to the
 	// dial: it dials afresh, as it did before connections were pre-dialled.
-	if closedByPeer(p.conn) {
+	if dialling && closedByPeer(p.conn) {
 		_ = p.conn.Close()
 		return nil
 	}

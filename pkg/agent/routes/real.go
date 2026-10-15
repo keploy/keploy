@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
@@ -17,6 +18,39 @@ import (
 // (design v14 §4).
 type realDepsSetter interface {
 	SetRealDeps(ctx context.Context, real []string) error
+}
+
+// realTestReader is a service that ends keploy test's open test case for
+// mock.real.
+type realTestReader interface {
+	RealTest(ctx context.Context) (models.RealTest, error)
+}
+
+// realUseKeeper is a service that keeps the run's REAL uses while keploy
+// record's incoming stream is open.
+type realUseKeeper interface {
+	KeepRealUses(keep bool)
+}
+
+// realUseReader is a service that names the mock.real destinations a
+// recorded test case used, by its window.
+type realUseReader interface {
+	RealUsedDuring(from, to time.Time) []string
+}
+
+// testCaseWindow is when a recorded test case's request came and its
+// response went, by its kind.
+func testCaseWindow(tc *models.TestCase) (time.Time, time.Time) {
+	if tc.Kind == models.GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
+
+// realDepsKeeper is a service that installs a later push of the same run
+// without starting its REAL bookkeeping afresh (models.RealDepsReq.Keep).
+type realDepsKeeper interface {
+	KeepRealDeps(ctx context.Context, real []string) error
 }
 
 // realRunReader is a service that reports what the run saw of mock.real
@@ -59,7 +93,11 @@ func (a *Agent) HandleRealDeps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this keploy agent cannot relay mock.real destinations", http.StatusNotImplemented)
 		return
 	}
-	if err := s.SetRealDeps(r.Context(), req.Real); err != nil {
+	set := s.SetRealDeps
+	if k, ok := a.svc.(realDepsKeeper); ok && req.Keep {
+		set = k.KeepRealDeps
+	}
+	if err := set(r.Context(), req.Real); err != nil {
 		code := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, realdeps.ErrBadEntry):
@@ -77,7 +115,8 @@ func (a *Agent) HandleRealDeps(w http.ResponseWriter, r *http.Request) {
 // HandleRealRun answers what the run saw of mock.real beyond its tests
 // (models.RealRun): the destinations it reached, those first reached outside
 // a test, and the capture_incomplete evidence charged to no test, which this
-// read takes. The CLI reads it once, after the run's last windows.
+// read takes: each since the last read. keploy mock and keploy record read
+// it once, after the run's last windows; keploy test once per test set.
 //
 // With the switch off it answers 404, as it did before it existed.
 func (a *Agent) HandleRealRun(w http.ResponseWriter, r *http.Request) {
@@ -102,4 +141,35 @@ func (a *Agent) HandleRealRun(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, run)
+}
+
+// HandleRealTest ends keploy test's open test case for mock.real
+// (models.RealTest): the REAL destinations it used, and the
+// capture_incomplete evidence charged to it, which this read takes. The
+// replayer reads it once per test case, after the case's misses.
+//
+// With the switch off it answers 404, as it did before it existed.
+func (a *Agent) HandleRealTest(w http.ResponseWriter, r *http.Request) {
+	if !provenswitch.On() {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	s, ok := a.svc.(realTestReader)
+	if !ok {
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, models.RealTest{})
+		return
+	}
+	got, err := s.RealTest(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, got)
 }

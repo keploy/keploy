@@ -308,7 +308,7 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 }
 
 func (v reqView) asReq(input *req) *req {
-	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw}
+	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw, encoded: input.sentBody()}
 	u := url.URL{}
 	if input.url != nil {
 		u = *input.url

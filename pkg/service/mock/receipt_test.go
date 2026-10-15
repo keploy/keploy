@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -140,7 +141,12 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
 	}
-	svc := New(zap.New(core), run, stubMockDB{}, mapDB, nil, nil, cfg)
+	var store MockDB = stubMockDB{}
+	if c.mapped && provenswitch.On() {
+		// Under the switch the mapping must name mocks the recording has.
+		store = named("mock-0")
+	}
+	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -464,9 +470,11 @@ func (a *armsThenFails) Setup(ctx context.Context, cmd string, opts models.Setup
 	return a.runWrites.Setup(ctx, cmd, opts)
 }
 
-// A user's Ctrl+C is not a failure, wherever it lands: no error, exit 0, and
+// A user's Ctrl+C is not keploy's failure, wherever it lands: no error, and
 // the last completed run's receipt stays, since it still truthfully describes
-// that run. While the test command runs, the interrupt cancels the run's own
+// that run. Nor is it a pass: it exits 128+N for the signal (130 for SIGINT),
+// whatever the stopped runner reported (run-exit: its own 130 won Run's
+// select). While the test command runs, the interrupt cancels the run's own
 // context too, which is exactly what keploy's agent dying under it looks like
 // from there; only the caller's context tells the two apart.
 func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
@@ -496,6 +504,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			defer utils.SetInterruptSignalForTest(2)() // SIGINT, as NewCtx's handler records it
+			t.Cleanup(func() { utils.ErrCode = 0 })
 			base := newInstr(t, agentUpFromSetup, false, tc.runExit)
 			instr := &runWrites{composeInstr: base, onRun: cancel}
 			if tc.stage == "setup" {
@@ -510,8 +520,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 			if err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(ctx); err != nil {
 				t.Fatalf("an interrupted replay failed: %v", err)
 			}
-			if utils.ErrCode != 0 {
-				t.Fatalf("an interrupted replay exits %d", utils.ErrCode)
+			if utils.ErrCode != 130 {
+				t.Fatalf("an interrupted replay (SIGINT) exits %d, want 130: no pass for a run keploy never judged", utils.ErrCode)
 			}
 			if after, err := os.ReadFile(receiptPath); err != nil || !bytes.Equal(after, before) {
 				t.Fatalf("an interrupted replay replaced the last receipt (%v):\n%s", err, after)

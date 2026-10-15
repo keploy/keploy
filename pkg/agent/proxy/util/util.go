@@ -519,6 +519,18 @@ const (
 // never answered, so the caller waited forever. ctx is checked before every
 // Read; a panic in Read ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax)
+}
+
+// ReadBytesUntilEOF is ReadBytes for a reader whose end is its peer's close:
+// an EOF on an empty buffer is returned at once, never retried. ReadBytes'
+// retry, under a read deadline shorter than its sleep, comes back as the
+// deadline's timeout, which hides that the peer closed.
+func ReadBytesUntilEOF(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	return readBytes(ctx, logger, reader, 0)
+}
+
+func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int) ([]byte, error) {
 	// One scratch buffer per call, and the message appended from it, so what is
 	// returned is sized to the message as it always was.
 	scratch := make([]byte, 1024)
@@ -556,7 +568,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 			// startup response is still being written when the
 			// app issues its first Read. Budget is capped so
 			// mid-stream closes surface within 150ms.
-			if emptyEOFRetries >= HandshakeEOFRetryMax {
+			if emptyEOFRetries >= eofRetryMax {
 				return buffer, err
 			}
 			emptyEOFRetries++

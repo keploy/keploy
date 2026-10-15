@@ -14,6 +14,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,9 @@ const (
 
 // TODO: Need to refactor this file
 type AgentClient struct {
+	// streamEnds says, for each frame stream (models.FrameStream), whether
+	// the agent ended the latest one with its end marker (StreamEnded).
+	streamEnds   sync.Map
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
@@ -120,9 +124,10 @@ type AgentClient struct {
 // teardown makes progress -- killing it only once that stops, or it has
 // detached everything and not exited, or the user presses Ctrl+C once keploy
 // has said a press stops it (stopWatch: a press answering the first offer has
-// it die once no teardown work is in progress, one answering an offer made
-// after a press kills it at once); never on a timer, never by a hang-up from
-// closing its terminal
+// it die once no teardown work in progress is making progress, one answering
+// an offer made after a press kills it at once -- an agent sudo runs as root,
+// which no kill ends at once, is waited for instead until it has exited or
+// halted); never on a timer, never by a hang-up from closing its terminal
 // (endAgent, stopAgentContainerFor). That holds before the agent answers too:
 // it attaches its uprobes first.
 //
@@ -139,15 +144,17 @@ type agentRun struct {
 	ready    atomic.Bool
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
 	goneOnce sync.Once
-	// letGo is closed once its stop killed it at once at the user's Ctrl+C
-	// (stopWatch): what waits for its exit waits no more.
+	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
+	// or found an agent sudo runs as root halted after a press (stopWatch):
+	// what waits for its exit waits no more.
 	letGo     chan struct{}
 	letGoOnce sync.Once
 }
 
 func newAgentRun() *agentRun { return &agentRun{gone: make(chan struct{}), letGo: make(chan struct{})} }
 
-// stoppedAtOnce says its stop killed it at once at the user's Ctrl+C.
+// stoppedAtOnce says its stop killed it at once at the user's Ctrl+C, or
+// found a root agent halted after one (stopWatch.run returned true).
 func (r *agentRun) stoppedAtOnce() { r.letGoOnce.Do(func() { close(r.letGo) }) }
 
 // exited marks the agent gone; it may be called more than once.
@@ -200,9 +207,16 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 // kubelet stops a sidecar with its pod), and an agent that held for the
 // client would only be killed at that stop's timeout. Every request that
 // opens the stream carries it, a reconnection too.
+//
+// The stream carries its recording's token too (models.StreamEndTokenHeader),
+// whoever started the agent: the recording's stop asks the agent to end the
+// streams of that token (EndRecordingStreams).
 func (a *AgentClient) markDrainsAfterStop(ctx context.Context, req *http.Request) {
 	if models.DrainsAfterStop(ctx) && a.startedAgent.Load() {
 		req.Header.Set(models.DrainsAfterStopHeader, "true")
+	}
+	if tok := models.StreamEndToken(ctx); tok != "" {
+		req.Header.Set(models.StreamEndTokenHeader, tok)
 	}
 }
 
@@ -245,6 +259,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
+	ended := a.newStreamEnd(models.TestCaseStream)
 
 	// The first response's framing is checked here, where it can still fail
 	// the call; see readIncoming for the rest.
@@ -263,7 +278,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readIncoming(ctx, res, tcChan)
+			done := a.readIncoming(ctx, res, tcChan, ended)
 			if res.Body != nil {
 				if err := res.Body.Close(); err != nil {
 					utils.LogError(a.logger, err, "failed to close response body for incoming request")
@@ -287,7 +302,9 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 // stream ends, in the stream's framing (multipart, or a legacy JSON stream).
 // It reports whether the stream must not go on: ctx is done, or the response
 // cannot be read at all.
-func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase) (done bool) {
+//
+// A stream the agent ends with its end marker sets ended, and is done.
+func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	contentType := res.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -299,13 +316,32 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 			utils.LogError(a.logger, nil, "missing multipart boundary in content-type", zap.String("content-type", contentType))
 			return true
 		}
-		return a.readIncomingParts(ctx, res, boundary, tcChan)
+		return a.readIncomingParts(ctx, res, boundary, tcChan, ended)
 	}
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
 
+// sayAgentSummary says, in this client's own log, what the agent's summary of
+// the session says it lost (models.StreamEndSummary): for an agent this client
+// did not start (docker compose's, kubelet's), whose own log reaches the user
+// through compose or kubelet.
+func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
+	if s.LeftOutInFlight > 0 {
+		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+			zap.Uint64("test_cases", s.LeftOutInFlight))
+	}
+	if s.Unsettled > 0 {
+		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+			zap.Int("test_cases", s.Unsettled))
+	}
+	if s.MassSuppressed {
+		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
+			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
+	}
+}
+
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
-func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase) (done bool) {
+func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
 	var pendingTestCase *models.TestCase
 
@@ -326,6 +362,19 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			break
 		}
 
+		if part.FormName() == models.StreamEndPart {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams): no more to read, nor to resume.
+			// Its marker says what the session lost: said here for an agent
+			// this client did not start, whose own log reaches the user
+			// through compose or kubelet, and can be cut off as it stops.
+			var sum models.StreamEndSummary
+			if err := json.NewDecoder(part).Decode(&sum); err == nil && !a.startedAgent.Load() {
+				a.sayAgentSummary(sum)
+			}
+			ended.Store(true)
+			return true
+		}
 		if part.FormName() == "metadata" {
 			var tc models.TestCase
 			if err := json.NewDecoder(part).Decode(&tc); err != nil {
@@ -504,6 +553,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	// recording arrives. A decoded mock waiting there was the widest of the
 	// three places a trailing mock could be lost.
 	mockChan := make(chan *models.Mock, mockHandoffBuffer)
+	ended := a.newStreamEnd(models.MockStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -518,7 +568,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			stream.close()
 		}()
 		for {
-			dropped := a.readMocks(res, mockChan)
+			dropped := a.readMocks(res, mockChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
@@ -539,8 +589,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 // readMocks hands the mocks of one outgoing stream to mockChan until the
 // stream ends. It reports whether it dropped one because the consumer stopped
-// taking them, after which the stream must not go on.
-func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock) (dropped bool) {
+// taking them, or the agent ended the stream with its end marker (ended is
+// set), after which the stream must not go on.
+func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock, ended *atomic.Bool) (stop bool) {
 	decoder := gob.NewDecoder(res.Body)
 	for {
 		var mock models.Mock
@@ -551,6 +602,12 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 			}
 			utils.LogError(a.logger, err, "failed to decode mock from stream")
 			break
+		}
+		if mock.Kind == models.StreamEndKind {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 
 		// Offer the mock rather than racing the context for it.
@@ -637,6 +694,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	res.Body = conn.body(res.Body)
 
 	mappingChan := make(chan models.TestMockMapping)
+	ended := a.newStreamEnd(models.MappingStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -651,7 +709,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readMappings(ctx, res, mappingChan)
+			done := a.readMappings(ctx, res, mappingChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getmappings")
 			}
@@ -672,7 +730,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 // readMappings hands the mappings of one mappings stream to mappingChan until
 // the stream ends. It reports whether ctx is done, after which the stream must
 // not go on.
-func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping) (done bool) {
+func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping, ended *atomic.Bool) (done bool) {
 	decoder := json.NewDecoder(res.Body)
 	for {
 		var mapping models.TestMockMapping
@@ -681,6 +739,12 @@ func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mapp
 				utils.LogError(a.logger, err, "failed to decode mapping from stream")
 			}
 			return false
+		}
+		if mapping.StreamEnd {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 		select {
 		case <-ctx.Done():
@@ -1334,7 +1398,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
-			a.session().record(stepMockParams, func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
 		}
 	}()
 	// Only a successful answer that says so sets it again below; a call that
@@ -2182,13 +2246,14 @@ func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHand
 // if it has reported no teardown within agentStoppingGrace. Then it is waited
 // for while its teardown makes progress, and killed (kill) only once it has
 // stopped making any, or has detached everything and not exited -- kill(false),
-// on which it dies once no teardown work is in progress -- or at the user's
-// Ctrl+C once the stop has said a press stops it, as that offer says:
-// kill(false) at a press answering the first offer, kill(true), at once, at
-// one answering an offer made after a press (stopWatch). reach is what kill
-// does where that differs (Windows, sudo): the offers say so.
-// An agent already reaped is never signalled: its pid may be another
-// process's by now.
+// on which it dies once no teardown work in progress is making progress -- or
+// at the user's Ctrl+C once the stop has said a press stops it, as that offer
+// says: kill(false) at a press answering the first offer, kill(true), at
+// once, at one answering an offer made after a press (stopWatch). reach is
+// what kill does where that differs (Windows, sudo): the offers say so. An
+// agent sudo runs as root (reach.noAtOnce), which no kill ends at once, is
+// waited for after a press until it has exited or halted. An agent already
+// reaped is never signalled: its pid may be another process's by now.
 func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, reach killReach, read func(context.Context) (utils.TeardownProgress, bool)) {
 	ifRunning := func(f func() error) func() error {
 		return func() error {
@@ -2208,7 +2273,8 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
-		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach}
+		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
+		settled: sudoAgentSettled(pid)}
 
 	err := ask()
 	switch {
@@ -2310,11 +2376,12 @@ func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
 }
 
 // awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
-// the stop has killed the agent at once at the user's Ctrl+C (run.letGo:
-// stopWatch hears only one given once it said that one stops the agent now,
-// never a copy of the stop's own signal), it lets the group go -- and with it
-// a caller waiting on the group -- while the agent finishes dying on its own;
-// ok is false then.
+// the stop has killed the agent at once at the user's Ctrl+C, or found an
+// agent sudo runs as root halted after a press (run.letGo: stopWatch hears
+// only one given once it said that one stops the agent now, never a copy of
+// the stop's own signal), it lets the group go -- and with it a caller
+// waiting on the group -- while the agent finishes dying on its own; ok is
+// false then.
 func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, run *agentRun, pid int) (err error, ok bool) {
 	select {
 	case err = <-reaped:
@@ -3206,10 +3273,10 @@ var dockerStopPoll = time.Second
 // container (readContainerProgress). It kills it only once it has stopped
 // making any, or has detached everything and not exited -- with the
 // escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
-// teardown work is in progress -- or at the user's Ctrl+C once the stop has
-// said a press stops it, as that offer says: the escalation signal at a press
-// answering the first offer, and at once (`kill`, SIGKILL) at one answering
-// an offer made after a press (stopWatch). Not `stop`, whose
+// teardown work in progress is making progress -- or at the user's Ctrl+C
+// once the stop has said a press stops it, as that offer says: the escalation
+// signal at a press answering the first offer, and at once (`kill`, SIGKILL)
+// at one answering an offer made after a press (stopWatch). Not `stop`, whose
 // grace period (10 s by default) ends in a SIGKILL however the teardown is
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent
@@ -3218,8 +3285,8 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
 	// kill(false) sends the agent the escalation signal, on which it dies
-	// once no teardown work is in progress (utils.DieOnEscalation); kill(true)
-	// is SIGKILL, at once.
+	// once no teardown work in progress is making progress
+	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
 	kill := func(now bool) error {
 		args := []string{"kill", "--signal", "SIGUSR2", name}
 		if now {
@@ -3481,18 +3548,64 @@ func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (mode
 		return models.AgentBacklog{}, fmt.Errorf("the agent answered %s", resp.Status)
 	}
 	var out struct {
-		Pending   bool   `json:"pending"`
-		Progress  uint64 `json:"progress"`
-		WaitingOn string `json:"waitingOn"`
+		Pending    bool   `json:"pending"`
+		Progress   uint64 `json:"progress"`
+		WaitingOn  string `json:"waitingOn"`
+		EndMarkers bool   `json:"endMarkers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return models.AgentBacklog{}, err
 	}
-	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn}
+	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn, EndMarkers: out.EndMarkers}
 	if out.Pending {
 		b.Verdict = models.BacklogPending
 	}
 	return b, nil
+}
+
+// EndRecordingStreams asks the agent to end the frame streams of the
+// recording whose token is token (models.StreamEndPath, StreamEndTokenHeader):
+// each puts on its stream what it still has, then its end marker
+// (StreamEnded), and ends; one this client reopens after that ends at once. A
+// recording's stop asks once the agent has said it holds nothing more from
+// before it, if the agent said it can (models.AgentBacklog.EndMarkers).
+func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) error {
+	if a.conf.Agent.AgentURI == "" {
+		return errors.New("no agent to end the streams of")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent answered %s", resp.Status)
+	}
+	return nil
+}
+
+// StreamEnded reports whether the agent ended the latest stream of kind with
+// its end marker (EndRecordingStreams): every frame it had for this client is
+// read. A stream that ended any other way (the agent went away) did not.
+func (a *AgentClient) StreamEnded(kind models.FrameStream) bool {
+	if v, ok := a.streamEnds.Load(kind); ok {
+		return v.(*atomic.Bool).Load()
+	}
+	return false
+}
+
+// newStreamEnd is the end flag of a new stream of kind (StreamEnded).
+func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
+	ended := new(atomic.Bool)
+	a.streamEnds.Store(kind, ended)
+	return ended
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

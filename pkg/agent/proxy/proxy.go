@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v3/pkg/agent/acceptcount"
 	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -137,6 +138,9 @@ type Proxy struct {
 	// connections did.
 	real        atomic.Pointer[realState]
 	realTracker realdeps.Tracker
+	// realDialResolved, when set (tests), is told each time a failed
+	// connect's mock.real standing is told (realDialFailed).
+	realDialResolved func()
 	// agentMode is the mode the agent was started in (--mode); with
 	// GlobalPassthrough it decides what happens to a connection that arrives
 	// while there is no session (no_session.go). noSessionDests are the
@@ -268,8 +272,41 @@ type Proxy struct {
 	// losses counts the calls the proxy intercepted and could not record or
 	// mock (CaptureLosses).
 	losses captureloss.Counter
+	// accepts counts every connection the listener has accepted
+	// (Accepted). They are the connections the kernel counts only when the
+	// listener is the one the hooks marked: acceptsLn, set by listen while
+	// it is open, or acceptsErr saying why it is not (accepts.go). Both
+	// under acceptsMu.
+	accepts    acceptcount.Counter
+	acceptsMu  sync.Mutex
+	acceptsLn  net.Listener
+	acceptsErr error
+	// listenerCounter is the hooks' count of the listener's connections
+	// (SetListenerCounter); nil under the switch off. early holds what the
+	// canary accepted before its own connection, for the accept loop, until
+	// the proxy stops (closeEarly), under earlyMu: the loop's last round can
+	// still be taking one as the stop closes them.
+	listenerCounter agent.ListenerCounter
+	earlyMu         sync.Mutex
+	early           []net.Conn
+	// handingOver, a test's (nil otherwise), is called by an accept round
+	// with a kept connection it is about to hand over, before it does.
+	handingOver func(net.Conn)
+	// pairs holds each accepted connection's pairing (countAccept) until
+	// handleConnection takes its destination (pairedDest).
+	pairs sync.Map
+	// untrackedConns counts the connections the proxy could not route
+	// (untracked.go).
+	untrackedConns atomic.Uint64
+	// paired holds the paired connections until the proxy is done with
+	// them, for the bytes a test's end waits for (pairbytes.go).
+	paired pairedConns
 
 	Listener net.Listener
+
+	// inflight keeps, under the proven switch, every accepted connection, so
+	// a test's end can tell when none holds its calls (inflight.go).
+	inflight inflight
 
 	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
@@ -379,6 +416,13 @@ type Proxy struct {
 	// BeforeTeardown runs at most once across start()'s mutually-exclusive
 	// shutdown paths (skipListener return / listener defer).
 	teardownOnce sync.Once
+	// auxMu orders the auxiliary hook's start (AfterStart) against its
+	// teardown (runAuxTeardown): a teardown waits for a start in flight, and
+	// no start begins once the teardown has run (auxTornDown). A stop that
+	// came while StartProxy ran had the teardown run first, and the start
+	// that followed attached what nothing removed before the exit.
+	auxMu       sync.Mutex
+	auxTornDown bool
 
 	// skipListener disables the TCP accept loop. When true, the proxy
 	// does not bind a port. DNS, parser init, and session state still run.
@@ -1609,7 +1653,10 @@ func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
 // them while still inside the awaited start() goroutine — before the process
 // exits and before any update-ca-certificates fork — closing the race that
 // otherwise leaks the uprobe.
+//
+// It runs under auxMu (runAuxStart), which detachThenRemoveCA holds.
 func (p *Proxy) runAuxTeardown(ctx context.Context) {
+	p.auxTornDown = true
 	h, ok := p.auxiliaryHook.(agent.TeardownableProxyHook)
 	if !ok {
 		return
@@ -1621,6 +1668,37 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 	})
 }
 
+// errAuxTornDown is runAuxStart's answer once the proxy's teardown has run.
+var errAuxTornDown = errors.New("the proxy was stopped before its auxiliary hook started")
+
+// runAuxStart runs the auxiliary hook's AfterStart, unless the proxy's
+// teardown has already run its BeforeTeardown (runAuxTeardown): what a start
+// after that attached would be removed by nothing before the process exits.
+// A teardown that comes while the start runs waits for it, and then removes
+// what it attached.
+//
+// Where its progress can be seen (utils.TeardownProgressSeen), the start is
+// teardown work of its own (utils.BeginTeardownWork), on this goroutine: a
+// teardown that waits for it makes no progress of its own meanwhile, and the
+// start -- loading BPF, attaching uprobes, cut short by a fatal signal like
+// their removal -- is what the CLI that stops the agent, and the agent's own
+// end on its kill, then go by. Before the stop, its steps are read by
+// nothing. Where its progress cannot be seen, neither the start nor the
+// teardown's wait for it is teardown work (detachThenRemoveCA): a start
+// wedged against AfterStart's contract is then killed for want of progress.
+func (p *Proxy) runAuxStart(ctx context.Context) error {
+	p.auxMu.Lock()
+	defer p.auxMu.Unlock()
+	if p.auxTornDown {
+		return errAuxTornDown
+	}
+	if utils.TeardownProgressSeen() {
+		end := utils.BeginTeardownWork()
+		defer end()
+	}
+	return p.auxiliaryHook.AfterStart(ctx, p)
+}
+
 // detachThenRemoveCA runs the last two stages of the proxy's shutdown: the
 // auxiliary hook's teardown (runAuxTeardown), which removes TLS uprobes, and
 // then the removal of this run's MITM CA from the OS trust store, so trust does
@@ -1630,10 +1708,27 @@ func (p *Proxy) runAuxTeardown(ctx context.Context) {
 // tool cut short leaves a trust store half rewritten -- and either can take
 // long without a step of its own, so both are teardown work in progress
 // (utils.BeginTeardownWork), one span with a step between them.
+//
+// The span begins only once an auxiliary hook's start in flight is over
+// (auxMu): waiting for it is not work of the teardown's own. Where the
+// start's progress is seen it is teardown work of its own (runAuxStart),
+// which the CLI goes by meanwhile; where it is not, a span begun before the
+// wait would count as progress throughout it, and a start wedged against
+// AfterStart's contract would never be killed.
 func (p *Proxy) detachThenRemoveCA(ctx context.Context) {
+	p.auxMu.Lock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			p.auxMu.Unlock()
+		}
+	}
+	defer unlock()
 	end := utils.BeginTeardownWork()
 	defer end()
 	p.runAuxTeardown(ctx)
+	unlock() // the CA's removal does not hold up a start, which no longer runs
 	utils.TeardownStep()
 	pTls.TeardownNativeCA(p.logger)
 }
@@ -1914,6 +2009,8 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
+		// start() is what removes the CA installed above: it never runs.
+		p.detachThenRemoveCA(ctx)
 		return errors.New("failed to get the error group from the context")
 	}
 	// Create a channel to signal readiness of each server
@@ -1971,7 +2068,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	if p.auxiliaryHook != nil {
-		if err := p.auxiliaryHook.AfterStart(ctx, p); err != nil {
+		if err := p.runAuxStart(ctx); err != nil {
+			if errors.Is(err, errAuxTornDown) {
+				return err // the stop came first: nothing failed
+			}
 			// Do NOT swallow the error. An auxiliary hook only gets
 			// registered when a caller has explicitly opted into the
 			// feature it implements (currently: --low-latency, which
@@ -2114,14 +2214,22 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 
 	// It will listen on all the interfaces
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
+	listener, err := p.listen(ctx, fmt.Sprintf(":%v", p.Port))
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+		// What StartProxy installed before this -- the run's CA in the trust
+		// store, and whatever the auxiliary hook holds -- is removed now:
+		// the shutdown below that removes it is never set up (a port in use,
+		// a previous agent still around, left the anchor trusted).
+		p.detachThenRemoveCA(ctx)
 		// Notify failure
 		readyChan <- err
 		return err
 	}
 	p.Listener = listener
+	// The kernel's count is proven before the proxy says it is ready
+	// (accepts.go); the stop ends the proof.
+	p.canary(ctx, listener)
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Handshakes are held from the first session whose connections dial
 	// their destination (ensureHandshakeHold); one already set is honoured
@@ -2179,6 +2287,12 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if listener != nil {
 			listener.Close()
 		}
+		// What the canary kept for the accept loop and the loop has not
+		// taken, it never will.
+		p.closeEarly()
+		// What the listener never accepted, it never will: every wait on
+		// its count ends now, not after the slower steps below.
+		p.closeAccepts()
 		// Nothing accepts any more: stop holding handshakes now, not after
 		// the connections drain, so a SYN that arrives meanwhile is refused
 		// at once rather than dialled for and then refused.
@@ -2188,6 +2302,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
+		// Every connection's handler has returned: the count of the
+		// connections the proxy could not route is final (untracked.go).
+		p.untrackedTotal()
 		// Each stage of the proxy's shutdown is a step of the agent's
 		// teardown, which the CLI that stopped it reads (utils.TeardownStep).
 		utils.TeardownStep()
@@ -2228,8 +2345,19 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	for {
 		clientConnCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
+		// handedOver is closed once this round's accept has handed over
+		// what it got, or ended without anything.
+		handedOver := make(chan struct{})
 		go func() {
+			defer close(handedOver)
 			defer utils.Recover(p.logger)
+			if early := p.takeEarly(); early != nil {
+				if p.handingOver != nil {
+					p.handingOver(early)
+				}
+				clientConnCh <- early
+				return
+			}
 			conn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
@@ -2244,11 +2372,54 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}()
 		select {
 		case <-ctx.Done():
+			// This round's accept ends once the shutdown has closed the
+			// listener: what it hands over after the stop -- a connection
+			// the canary kept, or one it accepted -- is closed, not left
+			// open until the process exits.
+			go func() {
+				<-handedOver
+				select {
+				case c := <-clientConnCh:
+					_ = c.Close()
+				default:
+				}
+			}()
 			return nil
 		case err := <-errCh:
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			if ctx.Err() != nil {
+				// The proxy stopped as this round handed it over: nothing
+				// serves it.
+				_ = clientConn.Close()
+				return nil
+			}
+			// Under the proven switch the connection is kept from its
+			// accept on, so a test's end sees what it holds (inflight.go):
+			// kept before it is counted, or a wait that saw the count reach
+			// it could find it nowhere and call the test settled while its
+			// request sat unread.
+			raw := clientConn
+			var tracked *trackedConn
+			if provenswitch.On() {
+				tracked = p.inflight.track(clientConn)
+				clientConn = tracked
+			}
+			// Its sequence number is taken before anything else is done
+			// with it: the agent waits on the numbers the kernel gave the
+			// connections completed to this listener (accepts.go).
+			p.countAccept(raw)
+			// A paired connection is kept too, whatever the switch says
+			// (only a counted listener pairs one): its close is read
+			// before it happens (pairbytes.go).
+			if p.paired.holds(raw) {
+				if tracked == nil {
+					tracked = p.inflight.track(clientConn)
+					clientConn = tracked
+				}
+				tracked.beforeClose = func() { p.paired.closing(raw) }
+			}
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2262,7 +2433,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// the goroutine's deferred cleanup.
 			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
+				// Last, once handleConnection has closed it: a test's end
+				// stops waiting for bytes on it (pairbytes.go).
+				defer p.paired.remove(raw)
 				defer p.activeConns.Done()
+				defer p.inflight.forget(tracked)
 				// A connection's end is a step of the agent's teardown once it
 				// is stopping: the CLI that stopped it reads them as it drains
 				// (utils.TeardownStep). Before, it counts nothing anyone reads.
@@ -2298,6 +2473,10 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	// tracked is the connection as the accept kept it (inflight.go), under
+	// the proven switch: srcConn is wrapped again below (a peek's reader, a
+	// prefix, TLS), and what a test's end reads of it goes to this one.
+	tracked, _ := srcConn.(*trackedConn)
 	// activeConns.Add/Done are paired at the goroutine-spawn site
 	// in the accept loop (see caller) to avoid the "Add concurrent
 	// with Wait" race sync.WaitGroup documents as a misuse.
@@ -2363,29 +2542,38 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	probeProxy(p.logger, "accept", clientConnID, zap.Int("srcPort", sourcePort))
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
-	if err != nil {
-		// Gracefully handle untracked connections (eBPF lookup failed)
-		// This can happen when:
-		// 1. A new connection was opened after test completion (e.g., driver health check)
-		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
-		// 3. The entry was already deleted before this lookup
-		//
-		// Instead of failing with an error (which causes the app to see a broken connection),
-		// we close the connection gracefully. The client will see "connection refused" or EOF,
-		// which is cleaner than a partial/broken connection that causes "already closed" errors.
-		p.logger.Debug("Untracked connection (eBPF lookup failed), closing gracefully",
-			zap.Int("Source port", sourcePort), zap.Error(err))
-		return nil
-	}
+	// Under the proven switch, a connection the kernel paired with the
+	// application's carries its own destination; one it paired with none
+	// is refused. Never a destination by source port, which another
+	// connection may share (accepts.go).
+	var err error
+	destInfo, counted := p.pairedDest(srcConn)
+	if counted {
+		if destInfo == nil {
+			p.refuseUnpaired(srcConn)
+			return nil
+		}
+		// The redirect entry is this connection's too: taken, so the
+		// shared map never fills. It may be gone already.
+		_ = p.dropDest(ctx, srcConn, sourcePort)
+	} else {
+		destInfo, err = p.destFor(ctx, srcConn, sourcePort)
+		if err != nil {
+			// An untracked connection: the hooks hold no destination for it.
+			// It is closed (the client sees EOF), and said, loud, unless the
+			// proxy is stopping (untracked.go).
+			p.untracked(ctx, srcConn, err)
+			return nil
+		}
 
-	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
+		p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
-		return err
+		// releases the occupied source port when done fetching the destination info
+		err = p.dropDest(ctx, srcConn, sourcePort)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
+			return err
+		}
 	}
 	seeProcess(destInfo.KernelPid)
 
@@ -2474,6 +2662,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	// Under the proven switch the accept kept the connection (inflight.go):
+	// a parser that reads ahead says through it which requests it holds
+	// (integrations.HoldRequest).
+	if tracked != nil {
+		parserCtx = integrations.WithRequestHolder(parserCtx, tracked)
+	}
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
 	}
@@ -2602,6 +2796,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// The probe may consume bytes off either socket and may dial
 	// upstream, so its connections are adopted unconditionally — both
 	// on the MySQL path and on the fall-through to generic dispatch.
+	// An upstream it dialled and did not keep becomes this connection's
+	// pre-dialled one, for the dial below to take.
 	probe, err := p.probeMysql(parserCtx, srcConn, dstAddr, predialed, uint32(destInfo.Port), rule.Mode, outgoingOpts, p.logger)
 	if probe != nil {
 		if probe.SrcConn != nil {
@@ -2610,9 +2806,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if probe.DstConn != nil {
 			dstConn = probe.DstConn
 		}
+		if probe.Predialed != nil {
+			predialed = probe.Predialed
+			defer predialed.CloseIfUnused()
+		}
 	}
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to dial the conn to destination server while probing for MySQL", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+		switch {
+		case refusedLocally(err):
+			p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+		case errors.Is(err, errLookIncomplete):
+			utils.LogError(p.logger, err, "keploy could not tell whether this connection speaks MySQL, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
+		default:
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+		}
 		return err
 	}
 	p.logger.Debug("mysql probe result",
@@ -3448,6 +3655,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
+			// A test's end tells this connection's requests apart only if its
+			// parser answers before it reads again, or marks what it holds
+			// (inflight.go).
+			if tracked != nil {
+				tracked.servedBy(parserType, matchedParser)
+			}
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
@@ -4046,12 +4259,46 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
 	}
-	if p.asyncEngine != nil {
-		// Engine owns the "first window doesn't count" rule; advance blindly.
+	if p.asyncEngine != nil && opensTestWindow(start) {
+		// Engine owns the "first window doesn't count" rule.
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
 }
+
+// opensTestWindow reports whether a staging from start opens a test's window,
+// which is what the async lanes count (async.Engine.AdvanceWindow): a test
+// set's staging, from the models.BaseTime sentinel, stages its mocks before
+// any test runs and opens none, as the mock manager reads it too
+// (setMocksWithWindowLocked). Counting it served every async epoch one test
+// early: an epoch received after test k started, effective from test k+1, was
+// served to test k. A test recorded without times (a zero start) still opens
+// one.
+func opensTestWindow(start time.Time) bool {
+	return !start.Equal(models.BaseTime)
+}
+
+// SetScopeMocks stages the pool of a keploy mock replay test begun (open) or
+// ended (!open) without a worker pid, with the proven switch off: see
+// MockManager.SetScopeMocks. Satisfies the agent's optional ScopeStager
+// extension interface. Everything else a staging does, it does as
+// SetMocksWithWindow does.
+func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.Mock, open bool) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.SetScopeMocks(filtered, unFiltered, open)
+		p.dnsCache.Purge()
+	}
+	if p.asyncEngine != nil && open {
+		// A test begun opens a window; one ended opens none (see
+		// opensTestWindow).
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
+var _ agent.ScopeStager = (*Proxy)(nil)
 
 // FirstTestWindowStart returns the earliest test window start observed
 // by the underlying MockManager, or zero before any non-BaseTime
@@ -4141,6 +4388,46 @@ func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool)
 	}
 	return time.Time{}, time.Time{}, false
 }
+
+// errNoMockManager: a call that needs the mock manager came before the proxy
+// served any replay.
+var errNoMockManager = errors.New("the proxy serves no replay: no mock manager")
+
+// ServeExactTest implements agent.ExactServer (exact.go).
+func (p *Proxy) ServeExactTest(test string, owned []*models.Mock) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactTest(test, owned)
+	if p.asyncEngine != nil {
+		// A test opening is a window as the async lanes count them: where a
+		// per-test SetMocksWithWindow advanced them before exact serving.
+		p.asyncEngine.AdvanceWindow()
+	}
+	return nil
+}
+
+// ServeExactPool implements agent.ExactServer (exact.go).
+func (p *Proxy) ServeExactPool(key string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactPool(key, names)
+	return nil
+}
+
+// ExactTestOutcome implements agent.ExactServer (exact.go).
+func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil, nil, false
+	}
+	return m.ExactTestOutcome()
+}
+
+var _ agent.ExactServer = (*Proxy)(nil)
 
 // GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
@@ -4579,6 +4866,8 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					FieldDiffs:       parserErr.MismatchReport.FieldDiffs,
 					ClosestMockReq:   parserErr.MismatchReport.ClosestMockReq,
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
+					Kind:             parserErr.MissKind,
+					Recorded:         parserErr.Recorded,
 					Differs:          parserErr.MismatchReport.Differs,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 				})
@@ -4596,6 +4885,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
 					NextSteps:     "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details.",
+					Kind:          parserErr.MissKind,
 				})
 			}
 		}
@@ -4732,6 +5022,26 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 		stamped := *r
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
+	}
+	// Under exact serving (the proven switch) a miss says where it was made:
+	// in the open test, outside every test, or, as its matcher found, as one
+	// call more than the test recorded.
+	if r := proxyErr.MismatchReport; r != nil {
+		proxyErr.Recorded = r.Recorded
+	}
+	if m := p.getMockManager(); m != nil {
+		if proxyErr.MissKind = m.exactMissKind(); proxyErr.MissKind != "" {
+			// Only a miss made in the open test is an extra call, and only
+			// an extra call says how often the call was recorded. The
+			// matcher found it one against the test's own answered mocks,
+			// which only an open test has: an extra call filed after its
+			// test ended (its last call in flight) stays one.
+			if r := proxyErr.MismatchReport; r != nil && r.MissKind == models.MissExtraCall {
+				proxyErr.MissKind = models.MissExtraCall
+			} else {
+				proxyErr.Recorded = 0
+			}
+		}
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,

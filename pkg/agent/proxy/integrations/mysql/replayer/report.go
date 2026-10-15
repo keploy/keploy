@@ -96,6 +96,41 @@ type mockMiss struct {
 	// hunt for a lost recording.
 	candidateCount int
 	matchPhase     string
+	// why and nextSteps, when set, are what the report says about the miss
+	// in place of the generic diff note and advice.
+	why       string
+	nextSteps string
+}
+
+// maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement
+// names.
+const maxUnknownStatementsNamed = 5
+
+// unknownStatementsMiss is the miss of a COM_STMT_EXECUTE whose test's
+// recording holds EXECUTE mocks that lost their statement (unknown, in pool
+// order): refused because the mock it would have served instead (instead)
+// was recorded for another test, or, with instead nil, matched by no mock.
+// candidates is the scan's candidate count.
+func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candidates int) *mockMiss {
+	names := make([]string, 0, min(len(unknown), maxUnknownStatementsNamed))
+	for _, m := range unknown[:min(len(unknown), maxUnknownStatementsNamed)] {
+		names = append(names, m.Name)
+	}
+	list := strings.Join(names, ", ")
+	if len(unknown) > len(names) {
+		list += fmt.Sprintf(" and %d more", len(unknown)-len(names))
+	}
+	why := fmt.Sprintf("this test's recording holds COM_STMT_EXECUTE mocks whose statement keploy cannot tell (%s): the mock does not record its query, and the COM_STMT_PREPARE of each is gone from the test set, which holds that connection's handshake or an earlier statement of it. One of them may be this command's own", list)
+	if instead != nil {
+		why += fmt.Sprintf(", so keploy does not answer it with %s, which was recorded for another test", instead.Name)
+	}
+	return &mockMiss{
+		closestMock:    unknown[0].Name,
+		candidateCount: candidates,
+		matchPhase:     models.MatchPhaseExhausted,
+		why:            why,
+		nextSteps:      "The COM_STMT_PREPARE mocks these EXECUTEs need were most likely deleted by an older keploy's mock prune (--remove-unused-mocks, or the prune after an auto-replay), which did not keep the mocks a kept mock needs. Re-record the test set with '" + mismatch.RecordCommand() + "', or restore its mocks from a copy made before the prune.",
+	}
 }
 
 // formatExecParams renders bound parameter values for mismatch reports,

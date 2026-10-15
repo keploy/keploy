@@ -32,6 +32,17 @@ type TestReport struct {
 	// and when nothing was checked (an agent that does not count, a run that
 	// does not mock): a report does not tell those two apart.
 	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+	// Real is what the set's run saw of mock.real beyond its test cases
+	// (proven switch): the destinations it reached, and the connections
+	// keploy could not capture outside them. RealListed are the
+	// destinations the recordings of its test cases that ran list. Absent
+	// without a mock.real list.
+	Real       *RealRun `json:"real,omitempty" yaml:"real,omitempty"`
+	RealListed []string `json:"realListed,omitempty" yaml:"real_listed,omitempty"`
+	// RealFailure is why mock.real failed the set (design v14 §8.2 rule 4):
+	// a destination the recordings list that the run never reached, or
+	// that never answered. JUnit fails a case of its own with it.
+	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -130,6 +141,9 @@ type TestResult struct {
 	// failure without --strict-failure); the report still names the places.
 	// Absent when there is none.
 	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Real are the mock.real destinations the test case used while it ran
+	// (proven switch): its REAL rows. Absent when it used none.
+	Real []RealUse `json:"real,omitempty" yaml:"real,omitempty"`
 	// Variables are the test variables bound while the test case ran (proven
 	// switch): the values its request sent, and each value a dependency call
 	// carried where the learn step found it first, with where it was taken.
@@ -203,9 +217,17 @@ type FailureInfo struct {
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
-	// not capture since the test set began, as this test ended: a loss taints
-	// the test running when it happened and every later test of the set
-	// (design v14 §3.2), each of which fails. Empty with the switch off.
+	// not capture that is charged to this test, each of which fails it:
+	//   - every kind but real_uncaptured: what the agent lost since the test
+	//     set began, as this test ended. A loss taints the test running when
+	//     it happened and every later test of the set (design v14 §3.2).
+	//   - real_uncaptured (class e, mock.real): the connections keploy could
+	//     neither capture nor relay as real that were undecided or used while
+	//     this test ran, counted for this test alone. One undecided across
+	//     several tests is charged to each; a test that never touched it is
+	//     not (§3.2 as amended for class e). keploy relays nothing of such a
+	//     connection, so no later test's calls escape capture through it.
+	// Empty with the switch off.
 	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
 	// CaptureUnread says, under KEPLOY_PROVEN=1, that keploy could not read
 	// whether its agent captured every call while this test ran (the count
@@ -290,6 +312,11 @@ type UnmatchedCall struct {
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Kind is where the call was made, under the proven switch (MissInTest,
+	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
+	// extra call, how many times the test recorded that call.
+	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

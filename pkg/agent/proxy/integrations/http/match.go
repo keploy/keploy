@@ -2,8 +2,6 @@ package http
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +36,18 @@ type req struct {
 	header http.Header
 	body   []byte
 	raw    []byte
+	// encoded is the body as the client sent it, before its Content-Encoding
+	// was undone into body; nil when it had none.
+	encoded []byte
+}
+
+// sentBody is the body as the client sent it: what a hash of the payload
+// it sent (x-amz-content-sha256) is a hash of.
+func (r *req) sentBody() []byte {
+	if r.encoded != nil {
+		return r.encoded
+	}
+	return r.body
 }
 
 // matchDiag captures where the match cascade stopped when no mock matched, so
@@ -515,16 +525,11 @@ func recordedBefore(a, b *models.Mock) bool {
 
 // cursorKey builds a stable per-request key so repeated identical requests share
 // one cursor. Method + URL + a hash of the request body is enough: the group is
-// gathered by the same method/URL/body, so the key must agree with it.
+// gathered by the same method/URL/body, so the key must agree with it. It is
+// models.HTTPSequenceKey, the request part of models.StatefulSequenceKey,
+// which the mock prune also keys on.
 func cursorKey(method, url, body string) string {
-	var b strings.Builder
-	b.WriteString(method)
-	b.WriteByte(' ')
-	b.WriteString(url)
-	b.WriteByte('\x00')
-	sum := sha256.Sum256([]byte(body))
-	b.WriteString(hex.EncodeToString(sum[:]))
-	return b.String()
+	return models.HTTPSequenceKey(method, url, body)
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks

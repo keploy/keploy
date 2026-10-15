@@ -17,7 +17,6 @@ import (
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
-	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
@@ -390,12 +389,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if err != nil {
 			return res, fmt.Errorf("parse auth switch response: %w", err)
 		}
-		res.req = append(res.req, mysql.Request{
-			PacketBundle: mysql.PacketBundle{
-				Header:  &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
-				Message: intgUtils.EncodeBase64(switchPkt.Payload),
-			},
-		})
+		res.req = append(res.req, clientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 		if err != nil {
@@ -728,12 +722,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if pErr != nil {
 			return res, fmt.Errorf("post-TLS V2: parse auth switch response: %w", pErr)
 		}
-		res.req = append(res.req, mysql.Request{
-			PacketBundle: mysql.PacketBundle{
-				Header:  &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
-				Message: intgUtils.EncodeBase64(switchPkt.Payload),
-			},
-		})
+		res.req = append(res.req, clientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 		if err != nil {
@@ -874,44 +863,43 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		return handlePlainPasswordV2(ctx, logger, sess, decodeCtx, clientKey)
 	}
 
-	// Client requests server's public key.
-	pubKeyReqBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
-	if err != nil {
-		return res, fmt.Errorf("read public key request: %w", err)
-	}
-	pubKeyReqPkt, err := wire.DecodePayload(ctx, logger, pubKeyReqBuf, clientKey, decodeCtx)
-	if err != nil {
-		return res, fmt.Errorf("decode public key request: %w", err)
-	}
-	res.req = append(res.req, mysql.Request{PacketBundle: *pubKeyReqPkt})
-
-	// Server sends public key.
-	pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
-	if err != nil {
-		return res, fmt.Errorf("read public key response: %w", err)
-	}
-	pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientKey, decodeCtx)
-	if err != nil {
-		return res, fmt.Errorf("decode public key response: %w", err)
-	}
-	pubKeyPkt.Meta = map[string]string{"auth operation": "public key response"}
-	res.resp = append(res.resp, mysql.Response{PacketBundle: *pubKeyPkt})
-
-	// Client sends encrypted password.
+	// The client asks for the server's public key, or, holding the key
+	// already, sends its password encrypted with it at once
+	// (mysqlUtils.IsPublicKeyRequest).
 	encPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
 	if err != nil {
-		return res, fmt.Errorf("read encrypted password: %w", err)
+		return res, fmt.Errorf("read public key request or encrypted password: %w", err)
+	}
+	if mysqlUtils.IsPublicKeyRequest(encPassBuf) {
+		pubKeyReqPkt, err := wire.DecodePayload(ctx, logger, encPassBuf, clientKey, decodeCtx)
+		if err != nil {
+			return res, fmt.Errorf("decode public key request: %w", err)
+		}
+		res.req = append(res.req, mysql.Request{PacketBundle: *pubKeyReqPkt})
+
+		// Server sends public key.
+		pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
+		if err != nil {
+			return res, fmt.Errorf("read public key response: %w", err)
+		}
+		pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientKey, decodeCtx)
+		if err != nil {
+			return res, fmt.Errorf("decode public key response: %w", err)
+		}
+		pubKeyPkt.Meta = map[string]string{"auth operation": "public key response"}
+		res.resp = append(res.resp, mysql.Response{PacketBundle: *pubKeyPkt})
+
+		// Client sends encrypted password.
+		encPassBuf, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.ClientStream)
+		if err != nil {
+			return res, fmt.Errorf("read encrypted password: %w", err)
+		}
 	}
 	encPass, err := mysqlUtils.BytesToMySQLPacket(encPassBuf)
 	if err != nil {
 		return res, fmt.Errorf("parse encrypted password: %w", err)
 	}
-	res.req = append(res.req, mysql.Request{
-		PacketBundle: mysql.PacketBundle{
-			Header:  &mysql.PacketInfo{Header: &encPass.Header, Type: mysql.EncryptedPassword},
-			Message: intgUtils.EncodeBase64(encPass.Payload),
-		},
-	})
+	res.req = append(res.req, clientAuthData(encPass, mysql.EncryptedPassword))
 
 	// Final OK/ERR from server.
 	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
@@ -940,12 +928,8 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	if err != nil {
 		return res, fmt.Errorf("parse plain password: %w", err)
 	}
-	res.req = append(res.req, mysql.Request{
-		PacketBundle: mysql.PacketBundle{
-			Header:  &mysql.PacketInfo{Header: &plainPkt.Header, Type: mysql.PlainPassword},
-			Message: intgUtils.EncodeBase64(plainPkt.Payload),
-		},
-	})
+	// The password is recorded by its length only (clientAuthData).
+	res.req = append(res.req, clientAuthData(plainPkt, mysql.PlainPassword))
 	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read final auth response (plain): %w", err)
@@ -1755,6 +1739,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			continue
 		}
 
+		stampStatementQuery(decodeCtx, cmdPkt)
+
 		// No-response commands: emit immediately with empty response,
 		// matching the legacy recorder shape. Response timestamp is
 		// the command arrival time since no server response exists.
@@ -1874,6 +1860,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			continue
 		}
 		lastEnd = later(reqTs, resTs)
+		rememberPrepared(decodeCtx, cmdPkt, respBundle)
 
 		mockType := "mocks"
 		if cmdPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {

@@ -33,6 +33,15 @@
 # on, so the agent gets the stop twice. The agent holds the first until its
 # client has drained it; the copy, taken for a second Ctrl+C, cut that short,
 # and the recording lost what the client had not drained and failed.
+#
+# And twice more with --sync, which records each test's mapping to its mocks:
+# once lagging, and once busy -- BUSY_REQS calls to /login at once, the stop
+# the moment the last is answered, keploy and the app on two CPUs shared with
+# two busy loops where the runner has four or more. Each must save every test
+# case, its mock and its mapping, its drains ending on the agent's end markers
+# (the agent's summary says ended_by "end"): the stop ends each stream once
+# the agent has put on it all it had from before the stop, mappings included,
+# not once it has been quiet for a while.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -58,8 +67,11 @@ stop_upstream() {
 }
 # The non-root run's agent runs under sudo, whose env_reset would drop the lag.
 SUDOERS_LAG=/etc/sudoers.d/keploy-repeated-headers-lag
+# The busy run's CPU hogs.
+hog_pids=""
 cleanup() {
     echo "cleanup..."
+    [ -n "$hog_pids" ] && kill $hog_pids 2>/dev/null
     sudo pkill -9 keploy 2>/dev/null || true
     sudo rm -f "$SUDOERS_LAG"
     stop_upstream
@@ -136,13 +148,91 @@ drive_requests() {
 # has parsed the /login mock.
 PARSER_LAG=8s
 
+# ended_by_markers checks that a recording's drains ended on the agent's end
+# markers: the agent's summary says its test-case stream ended so, and the
+# CLI neither failed to ask for them nor gave a drain up on its stall bound.
+ended_by_markers() {
+    local format=$1
+    if ! grep -q '"ended_by": "end"' "record_logs_${format}.txt"; then
+        echo "::error::the agent did not end its streams with its markers: the drains ended some other way ($format)"
+        grep -n 'recording complete' "record_logs_${format}.txt"
+        return 1
+    fi
+    if grep -Eq 'could not ask the keploy agent to end its streams|teardown drain made no progress' "record_logs_${format}.txt"; then
+        echo "::error::a drain did not end at the agent's markers: the CLI could not ask for them, or gave the drain up ($format)"
+        grep -En 'could not ask the keploy agent to end its streams|teardown drain made no progress' "record_logs_${format}.txt"
+        return 1
+    fi
+}
+
+# run_sync_busy records BUSY_REQS calls to /login at once with --sync, stops
+# the moment the last is answered, and checks that every test case, its mock
+# and its mapping were saved. Where the runner has four CPUs or more, keploy
+# and the app share two with two busy loops.
+run_sync_busy() {
+    local format=yaml_sync_busy n=${BUSY_REQS:-200} pin=()
+    echo "=================== $format ==================="
+    sudo rm -rf keploy/ keploy.yml
+    cat > keploy.yml <<'KEPLOY_CFG'
+test:
+    globalNoise:
+        global: {"header": {"Date":[]}}
+KEPLOY_CFG
+    python3 upstream.py "$UPSTREAM_PORT" > "upstream_logs_${format}.txt" 2>&1 &
+    upstream_pid=$!
+    wait_for_port "$UPSTREAM_PORT" upstream || return 1
+    if [ "$(nproc)" -ge 4 ]; then
+        pin=(taskset -c 0-1)
+        for _ in 1 2; do
+            taskset -c 0-1 sh -c 'while :; do :; done' &
+            hog_pids="$hog_pids $!"
+        done
+    fi
+    (
+        for _ in $(seq 1 60); do
+            curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:${APP_PORT}/health" && break
+            sleep 1
+        done
+        seq 1 "$n" | xargs -P 16 -I{} curl -sS --max-time 30 -o /dev/null "http://127.0.0.1:${APP_PORT}/login"
+        sudo pkill -INT keploy 2>/dev/null || true
+    ) > "driver_logs_${format}.txt" 2>&1 &
+    local driver_pid=$!
+    sudo -E "${pin[@]}" env PATH="$PATH" "$RECORD_BIN" record --sync \
+        -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
+        --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
+    local record_status=$?
+    [ -n "$hog_pids" ] && kill $hog_pids 2>/dev/null
+    hog_pids=""
+    wait "$driver_pid"
+    stop_upstream
+    echo "record exit status: $record_status"
+    if [ "$record_status" -ne 0 ] || grep -qE 'stopped waiting for the keploy agent|the recording (is|may be) incomplete|the keploy agent ended its (mapping )?stream|stopped saving what the agent captured' "record_logs_${format}.txt"; then
+        echo "::error::the busy --sync recording did not save all it captured ($format)"
+        tail -100 "record_logs_${format}.txt"
+        return 1
+    fi
+    local logins mocks mapped
+    logins=$(grep -l "url: http://127.0.0.1:${APP_PORT}/login" keploy/test-set-0/tests/*.yaml 2>/dev/null | wc -l)
+    mocks=$(grep -c '^kind:' keploy/test-set-0/mocks.yaml 2>/dev/null)
+    mapped=$(grep -cE '^[[:space:]]*- id: test-' keploy/test-set-0/mappings.yaml 2>/dev/null)
+    echo "busy --sync recording: $logins /login test cases, $mocks mocks, $mapped tests mapped, of $n calls"
+    if [ "$logins" -ne "$n" ] || [ "$mocks" -ne "$n" ] || [ "$mapped" -ne "$n" ]; then
+        echo "::error::a busy --sync recording lost test cases, mocks or mappings: $logins test cases, $mocks mocks, $mapped mapped, of $n calls ($format)"
+        tail -60 "record_logs_${format}.txt"
+        return 1
+    fi
+    ended_by_markers "$format" || return 1
+}
+
 run_format() {
     # mode: "" for a normal run, "lag" for the run with the capture lagging,
     # "sudo_lag" for that run recorded by a non-root CLI (its agent under
-    # sudo), stopped as `sudo pkill -INT -f keploy` stops it.
-    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy=""
+    # sudo), stopped as `sudo pkill -INT -f keploy` stops it, "sync_lag" for
+    # the lagging run recorded with --sync (each test's mapping).
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=()
     [ "$format" = json ] && fmt_flag=(--storage-format json)
-    if [ "$mode" = lag ] || [ "$mode" = sudo_lag ]; then
+    [ "$mode" = sync_lag ] && sync_flag=(--sync)
+    if [ "$mode" = lag ] || [ "$mode" = sudo_lag ] || [ "$mode" = sync_lag ]; then
         lag_env=(KEPLOY_DEBUG_PARSER_LAG="$PARSER_LAG")
         stop_after=0
         format="${format}_${mode}"
@@ -173,7 +263,7 @@ KEPLOY_CFG
 
     STOP_AFTER=$stop_after STOP_COPY=$stop_copy drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" \
+    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
@@ -236,6 +326,16 @@ KEPLOY_CFG
             tail -100 "record_logs_${format}.txt"
             return 1
         fi
+    fi
+    if [ "$mode" = sync_lag ]; then
+        local login
+        login=$(grep -l '/login' keploy/test-set-0/tests/*.yaml 2>/dev/null | head -1 | xargs -r basename | sed 's/\.yaml$//')
+        if [ -z "$login" ] || ! grep -qE "^[[:space:]]*- id: ${login}\$" keploy/test-set-0/mappings.yaml 2>/dev/null; then
+            echo "::error::the /login test ($login) has no mapping to its mock ($format)"
+            cat keploy/test-set-0/mappings.yaml 2>/dev/null
+            return 1
+        fi
+        ended_by_markers "$format" || return 1
     fi
 
     # The upstream goes away: at replay only the mock can answer /login.
@@ -311,4 +411,8 @@ run_format yaml lag || exit 1
 echo "PASS: a recording whose capture lags its traffic keeps every test case and its mocks"
 run_format yaml sudo_lag || exit 1
 echo "PASS: a non-root CLI's recording keeps every test case and its mocks when its agent gets the stop twice"
+run_format yaml sync_lag || exit 1
+echo "PASS: a --sync recording whose capture lags keeps each test's mapping, its drains ending on the agent's markers"
+run_sync_busy || exit 1
+echo "PASS: a busy --sync recording keeps every test case, mock and mapping, its drains ending on the agent's markers"
 exit 0

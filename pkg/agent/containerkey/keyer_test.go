@@ -676,14 +676,14 @@ func TestParseAddrPort(t *testing.T) {
 		"[::1]:80":            "[::1]:80",
 		"[::ffff:10.0.0.1]:9": "10.0.0.1:9",
 	} {
-		got, err := parseAddrPort(in)
+		got, err := ParseAddrPort(in)
 		if err != nil || got.String() != want {
-			t.Fatalf("parseAddrPort(%q) = %v, %v", in, got, err)
+			t.Fatalf("ParseAddrPort(%q) = %v, %v", in, got, err)
 		}
 	}
 	for _, in := range []string{"", "127.0.0.1", "host:80", "127.0.0.1:x"} {
-		if _, err := parseAddrPort(in); err == nil {
-			t.Fatalf("parseAddrPort(%q) read it", in)
+		if _, err := ParseAddrPort(in); err == nil {
+			t.Fatalf("ParseAddrPort(%q) read it", in)
 		}
 	}
 }
@@ -901,12 +901,105 @@ func TestKeyerPlacedWaitsForThePlacingsAtTheAccept(t *testing.T) {
 		c, _ := k.Placed(context.Background(), "late")
 		got <- c
 	}()
-	<-f.awaitedCh // Placed waits for the placing in flight at the accept
+	select {
+	case <-f.awaitedCh: // Placed waits for the placing in flight at the accept
+	case c := <-got:
+		t.Fatalf("Placed did not wait for the placing in flight at the accept (got %+v)", c)
+	}
 	f.mu.Lock()
 	f.at["127.0.0.1:40090"] = redis
 	f.mu.Unlock()
 	close(read)
 	if c := <-got; c != redis {
 		t.Fatalf("Placed(late) = %+v, want the container placed after the accept", c)
+	}
+}
+
+// PlacedOrPlacing says what is placed now, or gives a wait for a placing:
+// none when there is nothing to wait for (no container could be there, the
+// index places none now, or it cannot be read). The wait runs off the
+// caller's path and says what the destination reaches, or that it cannot be
+// told when the session ends first.
+func TestKeyerPlacedOrPlacingWaitsOffThePathForThePlacingsNow(t *testing.T) {
+	type told struct {
+		c            Container
+		ok, resolved bool
+	}
+	f := newFake()
+	k := NewKeyer(f)
+	if c, ok, wait := k.PlacedOrPlacing("127.0.0.1:40002"); !ok || c != pgA || wait != nil {
+		t.Fatalf("placed now: %+v %v, wait %v", c, ok, wait != nil)
+	}
+	if _, ok, wait := k.PlacedOrPlacing("127.0.0.1:40090"); ok || wait != nil {
+		t.Fatal("a wait with nothing placing")
+	}
+
+	read := make(chan struct{})
+	f.reads = map[string]chan struct{}{"r": read}
+	f.awaitedCh = make(chan struct{}, 1)
+	_, ok, wait := k.PlacedOrPlacing("127.0.0.1:40090")
+	if ok || wait == nil {
+		t.Fatal("no wait for the placing")
+	}
+	if f.awaited != 0 {
+		t.Fatal("waited before asked to")
+	}
+	got := make(chan told, 1)
+	wait(func(c Container, ok, resolved bool) { got <- told{c, ok, resolved} })
+	<-f.awaitedCh // waiting, and the call has returned
+	f.mu.Lock()
+	f.at["127.0.0.1:40090"] = redis
+	f.mu.Unlock()
+	close(read)
+	if g := <-got; !g.resolved || !g.ok || g.c != redis {
+		t.Fatalf("told %+v; want the container placed meanwhile", g)
+	}
+
+	// A placing that does not end before the session does cannot be told.
+	f.reads = map[string]chan struct{}{"s": make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	k.Bind(ctx)
+	k.Watch(ctx, zap.NewNop())
+	_, _, wait = k.PlacedOrPlacing("127.0.0.1:40091")
+	if wait == nil {
+		t.Fatal("no wait for the placing")
+	}
+	wait(func(c Container, ok, resolved bool) { got <- told{c, ok, resolved} })
+	<-f.awaitedCh
+	cancel()
+	if g := <-got; g.resolved || g.ok {
+		t.Fatalf("told %+v; want unresolved", g)
+	}
+
+	f.noContainerAt = map[netip.Addr]bool{netip.MustParseAddr("127.0.0.1"): true}
+	if _, ok, wait := k.PlacedOrPlacing("127.0.0.1:40092"); ok || wait != nil {
+		t.Fatal("a wait where no container could be")
+	}
+	f.noContainerAt = nil
+	f.err = errors.New("no Docker here")
+	if _, ok, wait := k.PlacedOrPlacing("127.0.0.1:40093"); ok || wait != nil {
+		t.Fatal("a wait on an index that cannot be read")
+	}
+}
+
+// ParseAddrPort reads every form the proxy writes a destination in: the
+// dual-stack [a.b.c.d]:p, and [::ffff:a.b.c.d]:p, as that IPv4 destination.
+func TestParseAddrPortReadsEveryFormTheProxyWrites(t *testing.T) {
+	for in, want := range map[string]string{
+		"10.0.4.7:6379":          "10.0.4.7:6379",
+		"[10.0.4.7]:6379":        "10.0.4.7:6379",
+		"[::ffff:10.0.4.7]:6379": "10.0.4.7:6379",
+		"[::1]:5432":             "[::1]:5432",
+		"[2001:db8::7]:443":      "[2001:db8::7]:443",
+	} {
+		got, err := ParseAddrPort(in)
+		if err != nil || got != netip.MustParseAddrPort(want) {
+			t.Fatalf("ParseAddrPort(%q) = %v, %v; want %s", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"10.0.4.7", "db:5432", "[10.0.4.7]:x", "[10.0.4.7]:70000"} {
+		if _, err := ParseAddrPort(bad); err == nil {
+			t.Fatalf("ParseAddrPort(%q) read it", bad)
+		}
 	}
 }
