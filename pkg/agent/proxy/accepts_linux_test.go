@@ -369,6 +369,112 @@ func TestAStopBeforeTheCanaryEndsTheStart(t *testing.T) {
 	}
 }
 
+// stopAtCanaryCounter is a fakeCounter whose answer to the canary's own
+// connection -- the first it is asked to pair -- comes with the proxy's stop:
+// the stop lands just after the canary has checked the count and returned,
+// before the accept loop has taken what the canary kept.
+type stopAtCanaryCounter struct {
+	*fakeCounter
+	stop context.CancelFunc
+	once sync.Once
+}
+
+func (c *stopAtCanaryCounter) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing, error) {
+	defer c.once.Do(c.stop)
+	return c.fakeCounter.ProxyConnPair(rc)
+}
+
+// heldConns returns n connections, server ends and client ends, from a
+// listener of their own: what the canary keeps (the server ends), and how the
+// test sees each closed (the client ends).
+func heldConns(t *testing.T, n int) (servers, clients []net.Conn) {
+	t.Helper()
+	aux, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aux.Close()
+	for i := 0; i < n; i++ {
+		c, err := net.Dial("tcp", aux.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		s, err := aux.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		servers, clients = append(servers, s), append(clients, c)
+	}
+	return servers, clients
+}
+
+// A stop that lands just after the canary returned closes every connection
+// the canary kept for the accept loop that the loop never took. They stayed
+// open until the process exited: the loop returned at the stop, and nothing
+// else held them (the one a round holds at the stop:
+// TestAStopAsARoundTakesAKeptConnectionClosesIt).
+func TestAStopJustAfterTheCanaryClosesWhatItKept(t *testing.T) {
+	const kept = 8 // the loop takes about one before it sees the stop
+	servers, clients := heldConns(t, kept)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	p := New(zap.NewNop(), plainDestInfo{}, cfg)
+	p.SetListenerCounter(&stopAtCanaryCounter{fakeCounter: &fakeCounter{}, stop: stop})
+	for _, s := range servers {
+		p.keepEarly(s) // kept by the canary, before its own
+	}
+	ready := make(chan error, 1)
+	if err := p.Serve(ctx, ready); err != nil {
+		t.Fatalf("start() = %v, want nil", err)
+	}
+	if err := <-ready; err != nil {
+		t.Fatalf("start() reported %v, want ready", err)
+	}
+	for i, c := range clients {
+		_ = c.SetReadDeadline(time.Now().Add(time.Minute)) // only turns a leak into a failure
+		if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("kept connection %d of %d is still open after the proxy stopped (%v)", i+1, kept, err)
+		}
+	}
+}
+
+// A stop that lands as the loop's round has taken a kept connection, before
+// it hands it over: the loop returns at the stop, and the connection is
+// closed once the round ends, not left in its channel, open until the
+// process exits.
+func TestAStopAsARoundTakesAKeptConnectionClosesIt(t *testing.T) {
+	servers, clients := heldConns(t, 1)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	p := New(zap.NewNop(), plainDestInfo{}, cfg)
+	p.SetListenerCounter(&fakeCounter{})
+	p.keepEarly(servers[0])
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+	// The stop lands as the round takes it, and the round holds it until
+	// start() has returned: the loop can only have seen the stop.
+	p.handingOver = func(net.Conn) { stop(); <-release }
+	ready := make(chan error, 1)
+	if err := p.Serve(ctx, ready); err != nil {
+		t.Fatalf("start() = %v, want nil", err)
+	}
+	if err := <-ready; err != nil {
+		t.Fatalf("start() reported %v, want ready", err)
+	}
+	releaseOnce()
+	_ = clients[0].SetReadDeadline(time.Now().Add(time.Minute)) // only turns a leak into a failure
+	if _, err := clients[0].Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the kept connection the round held is still open after the proxy stopped (%v)", err)
+	}
+}
+
 // Not counted (the switch off): the proxy listens exactly as it always did,
 // net.Listen, MPTCP wherever the kernel (and GODEBUG) has it, makes no canary
 // connection, and says its counts are unknown.
