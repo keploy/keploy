@@ -351,6 +351,124 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	require.ElementsMatch(t, []string{models.MissOutsideTest, models.MissInTest}, kinds, "the miss between tests is charged to the next test")
 }
 
+// sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
+// no recording answers (generateEmptySQSMock): the queue has nothing.
+const sqsEmpty = "{} (the parser's own empty answer)"
+
+// poll answers path as a parser of enterprise SQS's shape does: it reads the
+// session pool, takes the first recording of the call, and consumes it
+// through a delete door (DeleteUnFilteredMock), reading again when the
+// consume is refused; with no recording of the call it answers its own
+// empty answer (sqsEmpty).
+func (p *servingProxy) poll(t *testing.T, path string) string {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		mocks, err := p.mm.GetSessionScopedMocks()
+		require.NoError(t, err)
+		var hit *models.Mock
+		for _, mk := range mocks {
+			if mk.Spec.HTTPReq != nil && strings.HasSuffix(mk.Spec.HTTPReq.URL, path) {
+				hit = mk
+				break
+			}
+		}
+		if hit == nil {
+			return sqsEmpty
+		}
+		if p.mm.DeleteUnFilteredMock(*hit) {
+			return hit.Spec.HTTPResp.Body
+		}
+	}
+	t.Fatalf("%s: every consume was refused", path)
+	return ""
+}
+
+// A recorded answer to a call made outside every test (a consumer's startup
+// poll) is consumed once per staging, in recorded order (decision 31), and
+// once the call's recordings are spent the parser answers it as it knows to
+// (SQS: the queue is empty). It came back at every begin and end: the
+// consumer received the seeded messages after every test, and the writes
+// they drive, recorded once, missed (enterprise E-B4's sqs-localstack:
+// ReceiveMessage mock-4 returned its 2 messages 7 times).
+func TestAnAnswerOutsideEveryTestIsConsumedOncePerSet(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{
+			pingMock("mock-4", "/receive", "2 messages", t0),
+			pingMock("mock-16", "/receive", "empty", t0.Add(time.Second)),
+			pingMock("mock-17", "/receive", "empty", t0.Add(2*time.Second)),
+		},
+		map[string][]string{}, map[string][]string{"o": {"mock-4", "mock-16", "mock-17"}})
+	got := []string{p.poll(t, "/receive"), p.poll(t, "/receive"), p.poll(t, "/receive"), p.poll(t, "/receive")}
+	for _, name := range []string{"TestA", "TestB", "TestC"} {
+		_, e := runTest(t, a, p, name)
+		require.Empty(t, e.Action, "%s failed: %s", name, e.Reason)
+		got = append(got, p.poll(t, "/receive"), p.poll(t, "/receive"))
+	}
+	require.Equal(t, []string{"2 messages", "empty", "empty", sqsEmpty, sqsEmpty, sqsEmpty, sqsEmpty, sqsEmpty, sqsEmpty, sqsEmpty}, got,
+		"the startup poll's recordings, once each in recorded order, then the parser's empty answer, across three tests: the messages are never delivered again")
+}
+
+// The answers spent outside every test are the staging's: a new staging
+// (the next set of keploy test, or the next session) answers them afresh.
+func TestANewStagingAnswersOutsideTestCallsAfresh(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-4", "/receive", "2 messages", t0), pingMock("mock-16", "/receive", "empty", t0.Add(time.Second))},
+		map[string][]string{}, map[string][]string{"o": {"mock-4", "mock-16"}})
+	require.Equal(t, "2 messages", p.poll(t, "/receive"))
+	require.Equal(t, "empty", p.poll(t, "/receive"))
+	require.Equal(t, sqsEmpty, p.poll(t, "/receive"), "spent for the staging")
+	require.NoError(t, a.UpdateMockParams(context.Background(), models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}))
+	require.Equal(t, "2 messages", p.poll(t, "/receive"), "a new staging starts the sequence afresh")
+}
+
+// HTTP's own parser saturates a call outside every test itself: its stateful
+// cursor (the strict pick under the switch) answers the call's recordings
+// once each in recorded order, then its last again, per endpoint and per
+// claim key, across begins and ends, and starts afresh at the next staging.
+// The manager gives it no last answer: the parser knows the call.
+func TestHTTPOutsideEveryTestAnswersOnceThenItsLast(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{
+			pingMock("mock-1", "/n", "one", t0),
+			pingMock("mock-2", "/n", "two", t0.Add(time.Second)),
+			pingMock("mock-3", "/n", "three", t0.Add(2*time.Second)),
+			pingMock("mock-4", "/m", "other", t0.Add(3*time.Second)),
+		},
+		map[string][]string{}, map[string][]string{"o": {"mock-1", "mock-2", "mock-3", "mock-4"}})
+	var got []string
+	call := func(path string) {
+		code, body := p.call(t, path)
+		got = append(got, fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+	}
+	call("/n")
+	call("/n")
+	for _, name := range []string{"TestA", "TestB"} {
+		_, e := runTest(t, a, p, name)
+		require.Empty(t, e.Action, "%s failed: %s", name, e.Reason)
+		call("/n")
+		call("/m")
+	}
+	require.Equal(t, []string{"200 one", "200 two", "200 three", "200 other", "200 three", "200 other"}, got,
+		"once each in recorded order, then the last again, across tests; another endpoint is its own")
+}
+
+// In a test, a protocol-phase mock a parser consumes through a delete door is
+// gone for the rest of the test and back at the next one, as before: the
+// once-per-set rule is for calls made outside every test.
+func TestAProtocolPhaseMockConsumedInATestIsBackAtTheNext(t *testing.T) {
+	token := pingMock("mock-1", "/token", "tok", t0)
+	token.Spec.Metadata = map[string]string{"type": "config"}
+	a, p := exactAgent(t, []*models.Mock{token}, map[string][]string{}, map[string][]string{})
+	for _, name := range []string{"TestA", "TestB"} {
+		_, serr := a.ProvenBegin(context.Background(), begin(name))
+		require.Nil(t, serr)
+		require.Equal(t, "tok", p.poll(t, "/token"), "%s: the handshake answers", name)
+		require.Equal(t, sqsEmpty, p.poll(t, "/token"), "%s: consumed in the test, it is gone for the rest of it (no recording answers)", name)
+		_, serr = a.ProvenEnd(context.Background(), models.ScopeReq{Name: name, CanSkip: true, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+	}
+}
+
 // A protocol-phase mock an old mapping lists stays in the pool: every test
 // is served it, as often as asked, and no test is failed for not making it.
 func TestAMappedProtocolPhaseMockStaysInThePool(t *testing.T) {
