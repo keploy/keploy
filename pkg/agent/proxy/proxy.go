@@ -289,6 +289,10 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	// inflight keeps, under the proven switch, every accepted connection, so
+	// a test's end can tell when none holds its calls (inflight.go).
+	inflight inflight
+
 	// nodataRelayLogged dedupes the "relayed NODATA" Info log to once per
 	// (name,qtype): glibc fires A+AAAA for essentially every hostname and every
 	// IPv4-only cluster service yields an AAAA NODATA here, so an un-deduped
@@ -2293,8 +2297,16 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// panics in some interleavings. Done() still runs in
 			// the goroutine's deferred cleanup.
 			p.activeConns.Add(1)
+			// Under the proven switch the connection is kept from its
+			// accept on, so a test's end sees what it holds (inflight.go).
+			var tracked *trackedConn
+			if provenswitch.On() {
+				tracked = p.inflight.track(clientConn)
+				clientConn = tracked
+			}
 			clientConnErrGrp.Go(func() error {
 				defer p.activeConns.Done()
+				defer p.inflight.forget(tracked)
 				// A connection's end is a step of the agent's teardown once it
 				// is stopping: the CLI that stopped it reads them as it drains
 				// (utils.TeardownStep). Before, it counts nothing anyone reads.
@@ -2522,6 +2534,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	// Under the proven switch the accept kept the connection (inflight.go):
+	// a parser that reads ahead says through it which requests it holds
+	// (integrations.HoldRequest).
+	if tc, ok := srcConn.(*trackedConn); ok {
+		parserCtx = integrations.WithRequestHolder(parserCtx, tc)
+	}
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
 	}
@@ -3496,6 +3514,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// reconnect the producer and crash on a nil schema); such a parser
 			// reports via this hook, replies normally, and keeps serving.
 			testCtx := models.WithMockMismatchReporter(parserCtx, p.sendMockNotFoundError)
+			// A test's end tells this connection's requests apart only if its
+			// parser answers before it reads again, or marks what it holds
+			// (inflight.go).
+			if tc, ok := srcConn.(*trackedConn); ok {
+				tc.servedBy(parserType, matchedParser)
+			}
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring

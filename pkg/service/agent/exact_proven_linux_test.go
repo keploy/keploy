@@ -30,6 +30,9 @@ import (
 // matcher reports, each filed as the proxy files it (models.Miss*).
 type servingProxy struct {
 	coreAgent.Proxy
+	// The calls each test makes are answered before its end (the tests'
+	// calls are synchronous): every call is in hand when a test settles.
+	settledProxy
 	mm     *proxyPkg.MockManager
 	mu     sync.Mutex
 	misses []models.UnmatchedCall

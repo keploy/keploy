@@ -288,6 +288,7 @@ func TestTimeFileIsTheBuildsClockRecord(t *testing.T) {
 // and given back.
 type workerPool struct {
 	coreAgent.Proxy
+	settledProxy
 	narrowed, cleared []uint32
 	mu                sync.Mutex
 	exactTest         string

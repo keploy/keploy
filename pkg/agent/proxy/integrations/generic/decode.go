@@ -19,6 +19,15 @@ import (
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
+	// The requests it has read are held from the read on: it reads on with
+	// a deadline before it matches them, blocked reading while it holds them
+	// (integrations.HoldRequest, a test's end count). Released once
+	// answered; a miss, returned below, is filed before the connection is
+	// let go, which drops the mark.
+	release, holding := func() {}, false
+	if len(reqBuf) > 0 {
+		release, holding = integrations.HoldRequest(ctx), true
+	}
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
@@ -44,6 +53,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
 					logger.Debug("the timeout for the client read in generic or EOF")
 					break
+				}
+				if !holding && len(buffer) > 0 {
+					release, holding = integrations.HoldRequest(ctx), true
 				}
 				genericRequests = append(genericRequests, buffer)
 			}
@@ -106,6 +118,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				}
 			}
 
+			// Answered: no request is held until the next one is read.
+			release()
+			holding = false
 			// Clear the genericRequests buffer for the next dependency call
 			genericRequests = [][]byte{}
 			logger.Debug("the genericRequests after the iteration", zap.Int("length", len(genericRequests)))

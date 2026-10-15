@@ -180,6 +180,33 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		return err
 	}
 	ex := params.Exact
+	// A test case opens, or ends, once the calls made before are settled
+	// (settle_proven.go): they are the pool's, or the test case's own. A
+	// connection whose held requests cannot be told does not stop either:
+	// a test case opens all the same, and one that ends is served the pool
+	// and told it is not verified (its consumption read fails).
+	var unknown error
+	switch {
+	case ex.Stage:
+	case ex.Test != "":
+		// A test case opens all the same with a connection whose held
+		// requests cannot be told: its end finds it. The listener's drops
+		// read now are what its end compares.
+		drops, err := a.settle(ctx, true)
+		if err != nil && !errors.Is(err, errHoldsUnknown) {
+			return err
+		}
+		a.markDrops(drops)
+	default:
+		// A test case that ends is served the pool, and told it is not
+		// verified, when keploy cannot tell its calls settled.
+		if err := a.settledSince(ctx, true, "the test case"); err != nil {
+			if !errors.Is(err, errHoldsUnknown) && !errors.Is(err, errDropped) {
+				return err
+			}
+			unknown = err
+		}
+	}
 	switch {
 	case ex.Stage:
 		staging := params
@@ -216,7 +243,10 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.scopeMu.Lock()
 		pool := append([]string(nil), a.testPool...)
 		a.scopeMu.Unlock()
-		return es.ServeExactPool(models.PoolKeyNone, pool)
+		if err := es.ServeExactPool(models.PoolKeyNone, pool); err != nil {
+			return err
+		}
+		return unknown
 	}
 }
 

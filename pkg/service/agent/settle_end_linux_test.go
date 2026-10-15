@@ -1,0 +1,149 @@
+//go:build linux
+
+package agent
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// A test's end waits until its calls are settled: a call the application
+// makes after the test's harness said it ended, while the proxy still holds
+// the test's work, is the test's own, and the end judges it so, whatever the
+// load. Without the wait the end would judge the mock unconsumed.
+func TestAnEndJudgesTheCallsStillInFlight(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/audit", "ok", t0)},
+		map[string][]string{"o::TestAsync": {"mock-1"}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestAsync"))
+	require.Nil(t, serr)
+	p.set(0, 1) // the application's call is in the proxy's hands
+	ended := make(chan models.ScopeEndResp, 1)
+	go func() {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestAsync", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+		ended <- e
+	}()
+	code, _ := p.call(t, "/audit")
+	require.Equal(t, 200, code)
+	select {
+	case e := <-ended:
+		t.Fatalf("the end judged while the test's call was in flight: %+v", e)
+	default:
+	}
+	p.set(0, 0) // answered: nothing in the proxy's hands
+	e := <-ended
+	require.Empty(t, e.Action, e.Reason)
+}
+
+// A test whose calls keploy cannot count is not judged settled: its end
+// fails it, and says why.
+func TestAnEndThatCannotCountFailsTheTest(t *testing.T) {
+	a, _ := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	a.Hooks.(*countHooks).err = models.ErrProxyConnsUnsupported
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr)
+	w := evidenceOf(t, a, "o::TestA")
+	require.Contains(t, w.Reason, "could not tell that every call of o::TestA reached it")
+}
+
+// The run's last read of its misses waits, as a test's end does, until the
+// calls in the proxy's hands are answered: a call made after the last test's
+// end, still held when the run's command exited, is read, never filed after
+// the read (keploy #4806's H: the run green with the miss unseen). A read
+// keploy cannot settle cannot vouch for every miss.
+func TestTheRunsLastReadOfMissesWaitsForTheCallsInFlight(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{}, map[string][]string{})
+	ctx := context.Background()
+	p.set(0, 1) // a call held after the last test ended
+	read := make(chan error, 1)
+	go func() {
+		_, err := a.GetMockErrors(ctx)
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		t.Fatalf("the run's misses were read while a call was in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	p.set(0, 0)
+	require.NoError(t, <-read)
+
+	a.Hooks.(*countHooks).err = models.ErrProxyConnsUnsupported
+	_, err := a.GetMockErrors(ctx)
+	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread, "a read keploy cannot settle vouches for every miss")
+}
+
+// A connection served by a parser that reads ahead of its answers and does
+// not say which requests it holds (gRPC, HTTP/2, Kafka, Mongo until each marks
+// them) cannot be told settled: a test's end that finds one leaves the test
+// not verified, never passed, naming the protocol; a begin goes on; the run's
+// read of its misses cannot vouch for every miss; keploy test's end of a test
+// case serves the pool and says so.
+func TestAnEndWithAConnectionWhoseHeldRequestsAreUnknownIsNotVerified(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	p.smu.Lock()
+	p.unknown = []string{"grpc"}
+	p.smu.Unlock()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr, "a begin goes on")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr, "an end keploy cannot settle is keploy's error, as one that cannot count")
+	w := windowOf(t, a, "o::TestA")
+	require.Contains(t, w.Evidence.Reason, "keploy cannot tell whether grpc on a connection still holds a request")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.True(t, w.Evidence.Unread, "not verified: no verdict of its own")
+
+	_, err := a.GetMockErrors(ctx)
+	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread)
+
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}), "a test case opens")
+	err = a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
+	require.ErrorIs(t, err, errHoldsUnknown, "a test case's end is told it is not verified")
+}
+
+// A test during which the kernel dropped packets at the proxy's listener (a
+// SYN or final ACK it could not take) is not verified: that connection is in
+// no count until the client retransmits it, so a call of the test may not
+// have reached keploy. Its begin's drops are what its end compares; a test
+// with none dropped passes. keploy test's end of a test case says so after
+// serving the pool.
+func TestATestDuringWhichTheListenerDroppedPacketsIsNotVerified(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}, "o::TestB": {}}, map[string][]string{})
+	ctx := context.Background()
+	p.smu.Lock()
+	p.drops = 4 // dropped before the run's tests: no test's
+	p.smu.Unlock()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, "no packet dropped while TestA ran: %s", e.Reason)
+
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	p.smu.Lock()
+	p.drops = 5
+	p.smu.Unlock()
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr)
+	w := windowOf(t, a, "o::TestB")
+	require.Contains(t, w.Evidence.Reason, "the kernel dropped 1 packet(s) at keploy's proxy listener while o::TestB ran")
+	require.True(t, w.Evidence.Unread, "not verified")
+
+	require.NoError(t, a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}))
+	p.smu.Lock()
+	p.drops = 7
+	p.smu.Unlock()
+	err := a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
+	require.ErrorIs(t, err, errDropped)
+}

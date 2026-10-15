@@ -177,6 +177,29 @@ type ProxyConnCounter interface {
 	WaitProxyAccepted(ctx context.Context, n uint64) error
 }
 
+// InFlightReader is the optional extension of a proxy that tells, under the
+// proven switch, whether a test's calls are still in its hands once every
+// connection the kernel completed to it was accepted (the end count, design
+// v14 §5.2): bytes an accepted connection holds unread, and, in a replay, a
+// request read and not yet answered. It waits by events, never by a clock.
+type InFlightReader interface {
+	// InFlightPending is how many accepted connections hold such work;
+	// answers counts unanswered requests too (a replay, whose answers are
+	// the proxy's own work), not in a record, where a request waits for its
+	// real server.
+	InFlightPending(answers bool) int
+	// InFlightChanged is closed at the next change of what InFlightPending
+	// reads: take it before reading.
+	InFlightChanged() <-chan struct{}
+	// InFlightProgress counts those changes, for a watchdog.
+	InFlightProgress() uint64
+	// InFlightUnknown names the protocols of the accepted connections, in a
+	// replay (answers), whose parser reads ahead of its answers and does not
+	// say which requests it holds (integrations.RequestHolding): whether they
+	// hold one cannot be told, so a test's end is not verified.
+	InFlightUnknown(answers bool) []string
+}
+
 type AuxiliaryProxyHook interface {
 	AfterStart(ctx context.Context, proxy Proxy) error
 }
