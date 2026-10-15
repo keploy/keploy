@@ -197,6 +197,11 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	return strings.Join(do, ", and ")
 }
 
+// ErrMocksNotWritten says mocks the recording captured were not written to
+// the mock file (its writer was stuck, or a write failed): the recording is
+// incomplete, a capture loss as much as a call never captured.
+var ErrMocksNotWritten = errors.New("mocks the recording captured were not written to the mock file")
+
 // CaptureLoss is how many times one kind of capture loss happened in the
 // agent's life, with what the latest one was (never a value the app sent);
 // for CaptureLossRealUncaptured, how many connections were charged to one
