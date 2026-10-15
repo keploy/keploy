@@ -1705,11 +1705,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 
 	for _, miss := range misses {
-		m.logger.Warn("no recorded mock matched an outgoing call",
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", miss.ActualSummary),
-			zap.String("destination", miss.Destination),
-			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
+		logMiss(m.logger, miss)
 	}
 
 	// What each test used and missed, and its verdict: for the receipt, and
@@ -1754,6 +1750,28 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
 	return counts
+}
+
+// logMiss warns of a call no recorded mock answered, with the next step its
+// matcher gave it (a MySQL endpoint that moved names the port to list, a value
+// drift the fields), and, where it gave none, to record the call. A
+// connection whose client sent nothing made no call: it is said as such, and
+// as what it was if its client waited for its server to speak first (a TCP
+// health check closes the same way).
+func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
+	next := miss.NextSteps
+	if next == "" {
+		next = "record this call with --on-miss record, or re-record the set"
+	}
+	msg := "no recorded mock matched an outgoing call"
+	if miss.MatchPhase == models.MatchPhaseNoRequest {
+		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
+	}
+	logger.Warn(msg,
+		zap.String("protocol", miss.Protocol),
+		zap.String("call", miss.ActualSummary),
+		zap.String("destination", miss.Destination),
+		zap.String("next_step", next))
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a

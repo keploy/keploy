@@ -154,8 +154,10 @@ bypassRules: []
 # you use. List a port when replay reaches MySQL at an endpoint that
 # moved since the recording and is neither the container nor the host
 # the recording reached MySQL at — another port of this machine
-# (localhost) always needs listing; keploy's miss or warning names
-# the port — or alongside disableMysqlAutoDetect.
+# (localhost, or any address of its own), or of the Docker host at
+# the container's gateway (172.17.0.1 on Docker's default bridge),
+# always needs listing; keploy's miss or warning names the port — or
+# alongside disableMysqlAutoDetect.
 mysqlPorts: []
 # Set to true to turn detection off and go back to matching mysqlPorts
 # strictly. MySQL on any other port will then hang its handshake.
@@ -163,11 +165,12 @@ disableMysqlAutoDetect: false
 # During replay, keploy serves recorded MySQL mocks on a port the
 # recording never saw when the connection reaches the container the
 # recording reached MySQL in, or the host it reached it on (other than
-# this machine) with the port moved: refusing would leave the app waiting
-# for a greeting only keploy can send. Any other moved endpoint, another
-# localhost port among them, needs its port in mysqlPorts. Set to
-# true if a non-MySQL dependency on that host is being misread as MySQL;
-# unlike disableMysqlAutoDetect this keeps record-time detection on.
+# this machine, or the Docker host at the container's gateway) with the
+# port moved: refusing would leave the app waiting for a greeting only
+# keploy can send. Any other moved endpoint, another localhost port
+# among them, needs its port in mysqlPorts. Set to true if a non-MySQL
+# dependency on that host is being misread as MySQL; unlike
+# disableMysqlAutoDetect this keeps record-time detection on.
 disableMysqlEndpointDrift: false
 disableMapping: false
 mock:
