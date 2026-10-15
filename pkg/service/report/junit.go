@@ -16,7 +16,7 @@ type junitTestSuites struct {
 	XMLName  xml.Name `xml:"testsuites"`
 	Tests    int      `xml:"tests,attr"`
 	Failures int      `xml:"failures,attr"`
-	// Errors counts the cases with no verdict (junitError). Omitted at 0, so a
+	// Errors counts the cases in error (junitError). Omitted at 0, so a
 	// report with none stays byte-identical.
 	Errors int              `xml:"errors,attr,omitempty"`
 	Time   string           `xml:"time,attr"`
@@ -27,7 +27,7 @@ type junitTestSuite struct {
 	Name     string `xml:"name,attr"`
 	Tests    int    `xml:"tests,attr"`
 	Failures int    `xml:"failures,attr"`
-	// Errors counts the suite's cases with no verdict; omitted at 0.
+	// Errors counts the suite's cases in error; omitted at 0.
 	Errors  int    `xml:"errors,attr,omitempty"`
 	Skipped int    `xml:"skipped,attr"`
 	Time    string `xml:"time,attr"`
@@ -53,7 +53,7 @@ type junitTestCase struct {
 	Classname string        `xml:"classname,attr"`
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
-	// Error marks a case keploy could not judge (junitError).
+	// Error marks a case in error (junitError).
 	Error   *junitError   `xml:"error,omitempty"`
 	Skipped *junitSkipped `xml:"skipped,omitempty"`
 	// SystemOut carries information that must reach a CI consumer WITHOUT
@@ -71,11 +71,12 @@ type junitFailure struct {
 	Text    string `xml:",chardata"`
 }
 
-// junitError is the <error> of a case keploy could not judge: its row says
-// PASSED (or OBSOLETE), but what keploy needed to judge it could not be read
-// or checked (models.FailureInfo.NotJudged), so nothing vouches for it. CI
-// systems count an <error> as a failed case, as they should: the run that
-// wrote the row exits non-zero, and its artifact must not read green.
+// junitError is the <error> of a case in error: one keploy could not judge
+// (its row says PASSED or OBSOLETE, but what keploy needed to judge it could
+// not be read or checked, models.FailureInfo.NotJudged, so nothing vouches for
+// it), or a set's verdict case (junitVerdictCase). CI systems count an <error>
+// as a failed case, as they should: the run that wrote the report exits
+// non-zero, and its artifact must not read green.
 type junitError struct {
 	Message string `xml:"message,attr"`
 	Type    string `xml:"type,attr"`
@@ -103,8 +104,8 @@ type junitSkipped struct {
 }
 
 // generateJUnit writes JUnit XML output for the collected test reports.
-func (r *Report) generateJUnit(reports map[string]*models.TestReport) error {
-	suites := buildJUnitSuites(reports)
+func (r *Report) generateJUnit(reports map[string]*models.TestReport, explained map[string]bool) error {
+	suites := buildJUnitSuitesExplained(reports, explained)
 	data, err := xml.MarshalIndent(suites, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal JUnit XML: %w", err)
@@ -161,6 +162,13 @@ func (r *Report) generateJUnit(reports map[string]*models.TestReport) error {
 // rows reach <failure> on a FAILED case, the <skipped> body on an OBSOLETE one
 // and <system-out> on a green one (see depNonFailureBody).
 func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
+	return buildJUnitSuitesExplained(reports, nil)
+}
+
+// buildJUnitSuitesExplained is buildJUnitSuites where explained names the
+// sets a case of which failed or has no verdict, whether or not it is among
+// the cases rendered (--test-case): those carry no did-not-pass case.
+func buildJUnitSuitesExplained(reports map[string]*models.TestReport, explained map[string]bool) junitTestSuites {
 	var totalTests, totalFailures, totalErrors int
 	var totalDuration time.Duration
 	suites := make([]junitTestSuite, 0, len(reports))
@@ -174,7 +182,7 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 
 	for _, name := range names {
 		rep := reports[name]
-		suite := buildJUnitSuite(name, rep)
+		suite := buildJUnitSuiteOf(name, rep, explained[name])
 		totalTests += suite.Tests
 		totalFailures += suite.Failures
 		totalErrors += suite.Errors
@@ -196,6 +204,12 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 }
 
 func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
+	return buildJUnitSuiteOf(name, rep, false)
+}
+
+// buildJUnitSuiteOf is a set's suite; explained says a case of it failed or
+// has no verdict among all its cases, shown or not (--test-case).
+func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) junitTestSuite {
 	cases := make([]junitTestCase, 0, len(rep.Tests))
 	var failures, errs, skipped int
 	// The proven model's evidence is rendered when the set was run under the
@@ -327,6 +341,22 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 			},
 		})
 	}
+	// A set whose status fails the run (it failed, its app halted or
+	// faulted, keploy erred or a script faulted part-way, it had no tests to
+	// run) is never a green suite, with the switch on or off: when no case of
+	// it failed or is in error (the cases it ran passed, the rest never ran),
+	// a case of its own, an <error>, says the set did not pass, with its
+	// reason. Such a suite read green while the run exited non-zero.
+	if setFailsRun(rep.Status) && suite.Failures == 0 && suite.Errors == 0 && !explained {
+		suite.Tests++
+		suite.Errors++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitVerdictCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Error:     &junitError{Message: notPassedSetMessage(rep.Status), Type: "TestSetNotPassed", Text: rep.FailureReason},
+		})
+	}
 	return suite
 }
 
@@ -334,12 +364,50 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 // carries, failed with the reason (buildJUnitSuite).
 const junitCaptureCase = "keploy capture"
 
-// junitVerdictCase is the test case a suite keploy could not judge carries,
-// with no verdict (buildJUnitSuite).
+// junitVerdictCase is a suite's set-level verdict case: NotJudged (a set run
+// under the switch that keploy could not judge) or TestSetNotPassed (a set
+// that failed the run while no case of it failed). At most one per suite
+// (buildJUnitSuite).
 const junitVerdictCase = "keploy verdict"
 
 // notJudgedSetMessage is its <error message>.
 const notJudgedSetMessage = "not judged: keploy could not tell whether this test set passed"
+
+// setFailsRun reports whether a test set's status fails the run it is part
+// of: FAILED, APP_HALTED, APP_FAULT, INTERNAL_ERR, SCRIPT_FAULT,
+// NO_TESTS_TO_RUN, and RUNNING, which a report keeps once keploy is done
+// only when the set never finished (a post-script fault, a failed final
+// write, a keploy killed part-way; JUnit has no state for a set still
+// running). PASSED and IGNORED do not, nor USER_ABORT (a run its user stopped
+// is not failed), nor none (a keploy that wrote no status), which renders as
+// it did.
+func setFailsRun(status string) bool {
+	switch models.TestSetStatus(status) {
+	case models.TestSetStatusFailed, models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp,
+		models.TestSetStatusInternalErr, models.TestSetStatusFaultScript, models.TestSetStatusNoTestsToRun,
+		models.TestSetStatusRunning:
+		return true
+	}
+	return false
+}
+
+// notPassedSetMessage is the <error message> of the case a suite whose set
+// did not pass carries.
+func notPassedSetMessage(status string) string {
+	switch models.TestSetStatus(status) {
+	case models.TestSetStatusNoTestsToRun:
+		return "test set NO_TESTS_TO_RUN: it had no test case to run, so it verified nothing"
+	case models.TestSetStatusRunning:
+		return "test set RUNNING: keploy did not finish it, so it did not pass"
+	}
+	return "test set " + status + ": it did not pass, though no test case of it failed"
+}
+
+// redCase reports whether a test case failed or has no verdict: a suite with
+// one reads red without a case of the set's own.
+func redCase(t models.TestResult) bool {
+	return t.Status == models.TestStatusFailed || len(t.VerdictUnknown()) > 0
+}
 
 // junitRealCase is the test case a suite mock.real's rule 4 failed carries,
 // failed with the reason (buildJUnitSuite).
