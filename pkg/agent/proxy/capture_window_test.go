@@ -170,6 +170,16 @@ func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	if n := logs.Len(); n != 0 {
 		t.Fatalf("a DNS-only discard logged %d Warn line(s): %+v", n, logs.All())
 	}
+
+	// Nor are connections that sent nothing (models.MatchPhaseNoRequest):
+	// the end-of-run summary leaves them out of a green run too.
+	silent := mockMiss("connection phase: server greeting")
+	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
+	p.pendingMockErrors.addBounded(silent, maxPendingMockErrors)
+	p.BeginTestErrorCapture()
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("a discard of connections that sent nothing logged %d Warn line(s): %+v", n, logs.All())
+	}
 }
 
 // When GetMockErrors cannot close a test's window, it reads the window and

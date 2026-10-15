@@ -43,7 +43,12 @@
 //	from disk. Content detection is impossible by construction, so the
 //	answer has to come from what record already observed. Every MySQL
 //	mock carries Metadata["destAddr"] ("host:port"), so the port set is
-//	derived from the loaded mocks (see DeriveMysqlPortsFromMocks).
+//	derived from the loaded mocks (see DeriveMysqlPortsFromMocks). A
+//	port the recording never saw is MySQL only by the identity of what
+//	the connection reaches: the container the recording reached MySQL
+//	in, or the host it reached it on with the port moved, never this
+//	machine (recordedEndpointMoved); anything else only by mysqlPorts.
+//	Nothing is judged by how long a client stays silent.
 //
 // Together: auto-detect at record, auto-recall at replay. `mysqlPorts`
 // remains as an escape hatch but is no longer required for correctness.
@@ -51,8 +56,10 @@
 // # Cost
 //
 // The first connections to a port the proxy knows nothing about are
-// probed; once one of them has a verdict the port is cached, and later
-// connections skip the probe. A probed connection's client is read the
+// probed; in a record, once one of them has a verdict the port is cached,
+// and later connections skip the probe. In a replay, a port the recording
+// never saw is judged connection by connection and never cached
+// (replayUnrecordedPort). A probed connection's client is read the
 // moment it speaks, so a client-speaks-first protocol (HTTP, gRPC,
 // Redis, Postgres, Mongo, Kafka) waits only for the probe's dial of its
 // destination to finish, a dial generic dispatch makes anyway. That dial
@@ -65,63 +72,26 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-// The windows of the replay's endpoint-drift inference (inferEndpointDrift),
-// the one judgement of this file a clock still makes: a replay has no upstream
-// whose greeting could decide, so a client that has not spoken yet and a MySQL
-// client waiting to be greeted look the same until one of them speaks. Both are
-// overridable by env var so a slow or heavily contended environment can be
-// adjusted without a rebuild; the defaults are what ships. Record decides by
-// what the connection does (probeMysqlRecord), and a replay on a port the
-// recording names decides by the recording: neither uses them.
-const (
-	// defaultClientSilenceWindow is how long the client gets to send
-	// its first byte before the inference treats the connection as
-	// server-speaks-first. MySQL clients send *nothing* here, so any
-	// traffic at all is a definitive negative.
-	defaultClientSilenceWindow = 250 * time.Millisecond
-
-	// defaultServerGreetingWindow is how much longer the first silent
-	// connection to an endpoint must stay silent before the inference
-	// serves it MySQL: a slow TLS client can be quiet past the silence
-	// window and only then send its ClientHello.
-	defaultServerGreetingWindow = 2 * time.Second
-)
-
-func envDuration(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return def
-	}
-	return d
-}
-
-func clientSilenceWindow() time.Duration {
-	return envDuration("KEPLOY_MYSQL_CLIENT_SILENCE_WINDOW", defaultClientSilenceWindow)
-}
-
-func serverGreetingWindow() time.Duration {
-	return envDuration("KEPLOY_MYSQL_SERVER_GREETING_WINDOW", defaultServerGreetingWindow)
-}
-
 // mysqlPortRegistry caches what the proxy has learned about each
-// destination port, so a port is probed at most once per session.
+// destination port, so a port is probed at most once per session (a
+// replay's port the recording never saw excepted: replayUnrecordedPort).
 //
 // Positives (`ports`) come from either source:
 //
@@ -149,38 +119,43 @@ func serverGreetingWindow() time.Duration {
 // destAddr's *host* is not stable across runs — container IPs change
 // between record and replay — while the port comes from the app's DSN
 // and does not. This also keeps the semantics identical to the
-// existing `mysqlPorts` config key, which has always been port-only.
+// existing `mysqlPorts` config key, which has always been port-only. A
+// port the recording never saw is judged by the hosts and container keys
+// of its MySQL destinations instead (recordedEndpointMoved).
 type mysqlPortRegistry struct {
 	mu       sync.RWMutex
 	ports    map[uint32]struct{}
 	notMysql map[uint32]struct{}
-	// inferred holds the endpoints that were served MySQL on behavioural
-	// evidence alone (a silent client on a port no mock names — see
-	// inferEndpointDrift). It does two things: it keeps the
-	// warning to one line per endpoint, and it lets the next connection to the
-	// SAME endpoint skip the long confirmation wait, which a pool reopening
-	// connections would otherwise re-pay every time.
+	// inferred holds the endpoints served MySQL as a recorded MySQL endpoint
+	// that moved (recordedEndpointMoved), and hinted those whose client ended
+	// silent with nothing to tie them to the recording: each keeps its
+	// warning to one line per endpoint ("host:port").
 	//
-	// It is deliberately not `ports`, and Has() must keep returning false for
-	// these: the silence check still runs on every connection, which is what
-	// rejects a client that speaks first, so no membership here can turn a
-	// working dependency into a permanent MySQL hijack.
-	//
-	// The key is the full "host:port", unlike everything else in this registry.
-	// Port-only matching is right for a recording — the host changes between
-	// record and replay, the port is the app's own configuration — but this map
-	// weakens a check rather than recalling recorded evidence, and a different
-	// service that merely shares a port number must not inherit that.
+	// Neither is `ports`, and Has() must keep returning false for these: each
+	// connection is judged by its own destination, so no membership here can
+	// turn a working dependency into a permanent MySQL hijack.
 	inferred map[string]struct{}
+	hinted   map[string]struct{}
+	// The recording's MySQL destinations, as a moved endpoint is matched by
+	// them (recordedEndpointMoved): the container keys
+	// (containerkey.MetadataKey) of the mocks recorded against a container,
+	// the hosts of those recorded against anything else (plainHosts), and the
+	// hosts of the container ones (containerHosts), which count only where
+	// the replay cannot tell containers apart. Hosts are kept as
+	// containerkey.ParseAddrPort reads them (an IPv4-mapped address as the
+	// IPv4 one). Swapped with fromMocks at a session's derive.
+	mockKeys       map[string]struct{}
+	plainHosts     map[netip.Addr]struct{}
+	containerHosts map[netip.Addr]struct{}
 	// fromMocks holds only the ports DeriveFromMocks read out of a recording.
 	// `ports` is the union of those and anything Learn() promoted during a
 	// record session, and the agent is one long-lived process that does not
 	// reset this registry between sessions — so `ports` being non-empty does
-	// NOT mean the recording being replayed contains MySQL. The endpoint-drift
-	// inference has to be gated on evidence from the recording itself, or a
-	// port learned while recording would arm it during a replay with no MySQL
-	// mocks at all, and the connection would be routed to a replayer with
-	// nothing to serve.
+	// NOT mean the recording being replayed contains MySQL. The moved-endpoint
+	// judgement (replayUnrecordedPort) has to be gated on evidence from the
+	// recording itself, or a port learned while recording would arm it during
+	// a replay with no MySQL mocks at all, and the connection would be routed
+	// to a replayer with nothing to serve.
 	fromMocks map[uint32]struct{}
 	// sessionStale is set when a new replay session begins and consumed by the
 	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
@@ -196,11 +171,15 @@ type mysqlPortRegistry struct {
 
 func newMysqlPortRegistry() *mysqlPortRegistry {
 	return &mysqlPortRegistry{
-		ports:     make(map[uint32]struct{}),
-		notMysql:  make(map[uint32]struct{}),
-		inferred:  make(map[string]struct{}),
-		fromMocks: make(map[uint32]struct{}),
-		derivedCh: make(chan struct{}),
+		ports:          make(map[uint32]struct{}),
+		notMysql:       make(map[uint32]struct{}),
+		inferred:       make(map[string]struct{}),
+		hinted:         make(map[string]struct{}),
+		mockKeys:       make(map[string]struct{}),
+		plainHosts:     make(map[netip.Addr]struct{}),
+		containerHosts: make(map[netip.Addr]struct{}),
+		fromMocks:      make(map[uint32]struct{}),
+		derivedCh:      make(chan struct{}),
 	}
 }
 
@@ -252,10 +231,10 @@ func (r *mysqlPortRegistry) LearnNotMysql(port uint32) bool {
 	return true
 }
 
-// LearnInferred records that this endpoint has been served on inferred
-// evidence, returning true the first time so the caller logs once. It grants no
-// fast path: Has() is unaffected, so the next connection still has to prove it
-// is server-speaks-first before anything is served.
+// LearnInferred records that this endpoint has been served MySQL as a recorded
+// MySQL endpoint that moved (recordedEndpointMoved), returning true the first
+// time so the caller logs once. It grants no fast path: Has() is unaffected, so
+// the next connection is judged by its own destination.
 func (r *mysqlPortRegistry) LearnInferred(dstAddr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -266,25 +245,99 @@ func (r *mysqlPortRegistry) LearnInferred(dstAddr string) bool {
 	return true
 }
 
-// IsInferred reports whether this endpoint has already been served on inferred
-// evidence. It shortens the confirmation the NEXT connection to the same
-// endpoint has to pass — see inferEndpointDrift — but never replaces the
-// silence check that precedes it.
-func (r *mysqlPortRegistry) IsInferred(dstAddr string) bool {
+// LearnHinted records that this endpoint's next step has been said
+// (hintUnlistedEndpoint), returning true the first time so the caller says it
+// once.
+func (r *mysqlPortRegistry) LearnHinted(dstAddr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.hinted[dstAddr]; ok {
+		return false
+	}
+	r.hinted[dstAddr] = struct{}{}
+	return true
+}
+
+// recordedEndpointMoved reports whether a destination on a port the recording
+// never saw is one of the recording's MySQL destinations with its port moved:
+//
+//   - a container (isContainer): its key must be one a recorded MySQL mock was
+//     stamped with. The key decides, never the address — another container
+//     published on the recorded host is another dependency — and a container
+//     whose configuration could not be read (key "") is no match. A recording
+//     made without container names (named false: no mock of its test set
+//     carries a container stamp, containerkey.RecordingNamesContainers) knows
+//     its MySQL only by its address: a container target then matches by host,
+//     as without the switch.
+//   - anything else, where the replay names containers (keyed, the proven
+//     switch): its host must be one the recording reached MySQL on outside a
+//     container. A host a container was recorded on says nothing about a
+//     host-native service on it.
+//   - anything else, where it does not: its host must be one the recording
+//     reached MySQL on, container or not; the address is all there is.
+//
+// A host never matches when it is this machine — a loopback or unspecified
+// address (founder decision 29): every local service shares it, so a moved
+// port there says nothing about which service it is, and greeting would race
+// a local client-first client to its first bytes. A MySQL moved to another
+// port of this machine is listed in mysqlPorts. why names the match, for the
+// warning.
+func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key string, isContainer, keyed, named bool) (why string, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.inferred[dstAddr]
-	return ok
+	if isContainer {
+		if _, ok := r.mockKeys[key]; ok && key != "" {
+			return "the container the recording reached MySQL in (" + key + ")", true
+		}
+		// A recording made without container names knows its MySQL only by
+		// its address: a container on that host with the port moved is it,
+		// as far as the recording can tell, as with the switch off.
+		if named {
+			return "", false
+		}
+		return r.hostMatchLocked(host, r.plainHosts)
+	}
+	if !keyed {
+		if why, ok := r.hostMatchLocked(host, r.containerHosts); ok {
+			return why, true
+		}
+	}
+	return r.hostMatchLocked(host, r.plainHosts)
+}
+
+// hostMatchLocked reports whether host, not this machine, is one of hosts.
+func (r *mysqlPortRegistry) hostMatchLocked(host netip.Addr, hosts map[netip.Addr]struct{}) (why string, ok bool) {
+	if !host.IsValid() || thisMachine(host) {
+		return "", false
+	}
+	if _, ok := hosts[host.Unmap()]; !ok {
+		return "", false
+	}
+	return "the host the recording reached MySQL on (" + host.Unmap().String() + "), on another port", true
+}
+
+// hasMockKeys reports whether any recorded MySQL mock carries a container
+// key, so that a container destination's key can decide anything.
+func (r *mysqlPortRegistry) hasMockKeys() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.mockKeys) > 0
+}
+
+// thisMachine reports whether a is a loopback or unspecified address: one
+// every local service is reached at.
+func thisMachine(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsLoopback() || a.IsUnspecified()
 }
 
 // MarkSessionStale says that the recording in force is about to be replaced, so
 // the next set of mocks should supersede rather than accumulate. The agent is a
 // single long-lived process and this registry is allocated once, so without it
-// the gate on the drift inference would mean "any recording this process has
-// ever replayed" rather than "the recording being replayed now" — a test set
-// holding MySQL mocks would arm the inference for a later one that holds none,
-// and a silent connection there would be routed to a replayer with nothing to
-// serve.
+// the gate on the moved-endpoint judgement would mean "any recording this
+// process has ever replayed" rather than "the recording being replayed now" — a
+// test set holding MySQL mocks would arm it for a later one that holds none,
+// and a connection there would be routed to a replayer with nothing to serve.
 //
 // It only marks. The actual swap happens in DeriveFromMocks, when the
 // replacement is in hand, and that ordering is the whole point:
@@ -354,6 +407,10 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 		}
 		r.fromMocks = make(map[uint32]struct{})
 		r.inferred = make(map[string]struct{})
+		r.hinted = make(map[string]struct{})
+		r.mockKeys = make(map[string]struct{})
+		r.plainHosts = make(map[netip.Addr]struct{})
+		r.containerHosts = make(map[netip.Addr]struct{})
 		r.sessionStale = false
 	}
 	for _, mocks := range mockSets {
@@ -361,9 +418,20 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			if m == nil || m.Kind != models.MySQL {
 				continue
 			}
-			port, ok := portFromAddr(m.Spec.Metadata["destAddr"])
+			if key, ok := containerkey.Recorded(m); ok {
+				r.mockKeys[key] = struct{}{}
+			}
+			destAddr := m.Spec.Metadata["destAddr"]
+			port, ok := portFromAddr(destAddr)
 			if !ok {
 				continue
+			}
+			if ap, err := containerkey.ParseAddrPort(destAddr); err == nil {
+				if containerkey.RecordedContainer(m) {
+					r.containerHosts[ap.Addr()] = struct{}{}
+				} else {
+					r.plainHosts[ap.Addr()] = struct{}{}
+				}
 			}
 			r.fromMocks[port] = struct{}{}
 			if _, exists := r.ports[port]; !exists {
@@ -736,98 +804,144 @@ func (p *Proxy) probeMysqlReplay(
 	// The port is not one the recording saw. The gate is MockPorts, not
 	// Ports: the latter also holds ports learned by probing during a record
 	// session, and the agent process does not reset this registry between
-	// sessions, so it would arm the inference in a replay whose recording
-	// contains no MySQL at all.
-	if recorded := p.mysqlPorts.MockPorts(); len(recorded) > 0 && !opts.DisableMysqlEndpointDrift {
-		return p.inferEndpointDrift(ctx, srcConn, dstAddr, port, recorded, logger, notMysql), nil
+	// sessions, so it would arm the judgement below in a replay whose
+	// recording contains no MySQL at all.
+	recorded := p.mysqlPorts.MockPorts()
+	if len(recorded) == 0 || opts.DisableMysqlEndpointDrift {
+		return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
 	}
-	return &mysqlProbe{SrcConn: srcConn, Reason: "no-mysql-mock-for-port"}, nil
+	return p.replayUnrecordedPort(ctx, srcConn, dstAddr, port, recorded, logger)
 }
 
-// inferEndpointDrift serves MySQL mocks on a port the recording never saw, when
-// the client stays silent. A silent client is waiting to be greeted, and MySQL
-// is the only server-speaks-first protocol keploy replays. Combined with "this
-// recording contains MySQL mocks", a port that does not match is an
-// environment difference — the replayed application was handed a different
-// endpoint than it had at record time — not evidence that the connection isn't
-// MySQL.
+// replayUnrecordedPort judges a replay connection to a port the recording
+// never saw, in a replay whose recording holds MySQL. The replayed application
+// may have been handed a MySQL endpoint that moved since the recording — a
+// random published port, a reconstructed environment — and declining it is not
+// neutral: keploy is the server here, so nothing else will ever greet its
+// client, and the tests that touch it fail with the recording unused.
 //
-// Declining is not neutral. In replay keploy IS the server, so nothing else
-// will ever send that greeting: the application blocks until its own timeout,
-// every test touching that dependency reports status_code 0, and the whole
-// recorded mock set goes unused while the recording is perfectly good.
-//
-// This is the one judgement in this file a clock makes. A client that has not
-// spoken YET and a MySQL client waiting to be greeted look the same until one
-// of them speaks, and replay has no upstream whose greeting could decide, so
-// silence through the windows is taken as the signature. It never holds the
-// client's bytes — every read returns the moment they arrive — and it is
-// opt-out (disableMysqlEndpointDrift); pinning the port with mysqlPorts takes
-// the fast path instead.
-func (p *Proxy) inferEndpointDrift(
+// But nothing about a client that has not spoken yet says it is waiting to be
+// greeted: it may simply not have spoken yet, and no clock can tell the two
+// apart. So the connection is MySQL only by the identity of what it reaches:
+// the container the recording reached MySQL in, or the host it reached it on
+// with the port moved — never this machine, whose loopback address every local
+// service shares (recordedEndpointMoved). Then keploy, the server, greets at
+// once — unless the client has already spoken, which a MySQL client never
+// does. Anything else is MySQL only if mysqlPorts lists its port (the fast
+// path in probeMysql), and is handed on: if its client closes having said
+// nothing, it waited to be greeted, and its miss names the port to list
+// (unlistedEndpointMiss); a warning says it once per endpoint, also when the
+// run ends with the client silent (hintUnlistedEndpoint). No verdict here is
+// cached for the port: each connection is judged by what it reaches.
+func (p *Proxy) replayUnrecordedPort(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
 	port uint32,
 	recorded []uint32,
 	logger *zap.Logger,
-	notMysql func(reason string, src net.Conn) *mysqlProbe,
-) *mysqlProbe {
-	// Any client byte is a definitive negative and costs one read.
-	clientBytes, err := readWithin(ctx, srcConn, clientSilenceWindow())
-	if len(clientBytes) > 0 {
-		return notMysql("client-spoke-first", replayConn(srcConn, clientBytes, logger))
+) (*mysqlProbe, error) {
+	var host netip.Addr
+	if ap, err := containerkey.ParseAddrPort(dstAddr); err == nil {
+		host = ap.Addr()
 	}
-	if err != nil && !isTimeout(err) {
-		// EOF or a real network error: nothing to detect. Hand the
-		// connection back untouched and let the existing path produce
-		// its usual diagnostics.
-		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}
+	// A container's key is waited for only when a recorded key could match
+	// it; otherwise whether the destination is a container at all decides,
+	// and placing a connection never waits on a container's configuration.
+	var (
+		key                string
+		isContainer, keyed bool
+	)
+	if p.mysqlPorts.hasMockKeys() {
+		key, isContainer, keyed = containerkey.KeyFromContext(ctx)
+	} else {
+		isContainer, keyed = containerkey.PlacedFromContext(ctx)
 	}
-	logger.Debug("client silent past the probe window; treating as server-speaks-first",
-		zap.String("dstAddr", dstAddr),
-		zap.Uint32("port", port),
-		zap.Duration("window", clientSilenceWindow()))
+	named := containerkey.RecordingNamesContainers(ctx)
+	if why, ok := p.mysqlPorts.recordedEndpointMoved(host, key, isContainer, keyed, named); ok {
+		if nothing, known := util.ArrivedNothing(srcConn); known && !nothing {
+			return &mysqlProbe{SrcConn: srcConn, Reason: "client-spoke-first"}, nil
+		}
+		// Bookkeeping only — this must not grant the fast path: the next
+		// connection on this port is judged by its own destination.
+		if p.mysqlPorts.LearnInferred(dstAddr) {
+			logger.Warn("serving MySQL mocks on a port the recording never saw: the destination is "+why+", so the application reaches MySQL at an endpoint that moved since the recording",
+				zap.Uint32("port", port),
+				zap.String("dstAddr", dstAddr),
+				zap.Uint32s("recordedPorts", recorded),
+				zap.String("next_step", "set mysqlPorts in keploy.yml to pin the port, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here"))
+		}
+		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "recorded-endpoint-moved"}, nil
+	}
 
-	// Confirm before acting, because the silence window is a weak signal on
-	// its own — a slow TLS client can be quiet that long and only then send
-	// its ClientHello, and answering that with a HandshakeV10 breaks a
-	// connection that was working. A real MySQL client sends nothing at all
-	// until it is greeted, so a second, longer wait separates the two almost
-	// perfectly.
-	//
-	// Only the first connection to an endpoint pays it. After that the
-	// silence check above is confirmation enough: it is what rejects a client
-	// that speaks first, and it has already run. Re-paying the long wait on
-	// every connection would add it to each one a pool opens — in the bundle
-	// that motivated this change, 103 times. Keyed by endpoint, so a
-	// different host on the same port number does not inherit the shortcut.
-	if !p.mysqlPorts.IsInferred(dstAddr) {
-		late, lateErr := readWithin(ctx, srcConn, serverGreetingWindow())
-		if len(late) > 0 {
-			// It spoke, just slowly. Hand the bytes back and let the normal
-			// dispatch have it. The port is NOT cached as non-MySQL: this
-			// connection was not MySQL, but the next one on this port still
-			// deserves the same decision.
-			logger.Debug("client spoke after the extended window; not inferring MySQL",
-				zap.Uint32("port", port), zap.String("dstAddr", dstAddr),
-				zap.Duration("window", serverGreetingWindow()))
-			return &mysqlProbe{SrcConn: replayConn(srcConn, late, logger), Reason: "client-spoke-late"}
-		}
-		if lateErr != nil && !isTimeout(lateErr) {
-			return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}
-		}
+	if !wakeable(srcConn) {
+		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	}
-	// Bookkeeping only — this must not grant the fast path, or one inference
-	// would route every later connection on this port to the MySQL replayer
-	// without re-checking that the client is silent.
-	if p.mysqlPorts.LearnInferred(dstAddr) {
-		logger.Warn("serving MySQL mocks on a port the recording never saw: the replayed application connects to a different endpoint than it did at record time. Set mysqlPorts in keploy.yml to pin the mapping, or disableMysqlEndpointDrift: true if a non-MySQL dependency is being misread as MySQL here.",
-			zap.Uint32("port", port),
-			zap.String("dstAddr", dstAddr),
-			zap.Uint32s("recordedPorts", recorded))
+	client := startFirstRead(srcConn, logger)
+	cancelled := false
+	select {
+	case <-client.done:
+	case <-ctx.Done():
+		cancelled = true
 	}
-	return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "inferred-endpoint-drift"}
+	read, err := client.stop()
+	switch {
+	case errors.Is(err, errLookIncomplete):
+		// The read panicked (recovered, and logged): what it had read is
+		// lost, so the connection cannot be handed on intact.
+		return &mysqlProbe{SrcConn: srcConn, Reason: "probe-failed"}, err
+	case len(read) > 0:
+		return &mysqlProbe{SrcConn: replayConn(srcConn, read, logger), Reason: "client-spoke-first"}, nil
+	case err != nil && !isTimeout(err):
+		// It waited to be greeted and gave up: a call no mock answered.
+		p.sendMockNotFoundError(unlistedEndpointMiss(dstAddr, host, port, recorded))
+		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "its client closed it without sending anything")
+		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
+	case cancelled:
+		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "the run ended with its client still silent")
+		return &mysqlProbe{SrcConn: srcConn, Reason: "cancelled"}, nil
+	}
+	return &mysqlProbe{SrcConn: srcConn, Reason: "undecided"}, nil
+}
+
+// hintUnlistedEndpoint says, once per endpoint, which port to list in
+// mysqlPorts for a connection to a port the recording never saw whose client
+// ended silent, in a replay whose recording holds MySQL: an application that
+// waited there for its server to speak first was reaching MySQL at an endpoint
+// keploy could not tie to the recording. what says how the connection ended.
+func (p *Proxy) hintUnlistedEndpoint(logger *zap.Logger, dstAddr string, host netip.Addr, port uint32, recorded []uint32, what string) {
+	if !p.mysqlPorts.LearnHinted(dstAddr) {
+		return
+	}
+	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host (not this machine) the recording reached MySQL at, so it served this one nothing",
+		zap.String("dstAddr", dstAddr),
+		zap.Uint32s("recordedPorts", recorded),
+		zap.String("next_step", unlistedNextStep(dstAddr, host, port)))
+}
+
+// unlistedNextStep is the next step for a MySQL endpoint keploy cannot tie to
+// the recording: list its port.
+func unlistedNextStep(dstAddr string, host netip.Addr, port uint32) string {
+	where := ""
+	if host.IsValid() && thisMachine(host) {
+		where = " A MySQL moved to another port of this machine (localhost) is never taken for the recorded one: only a listed port is."
+	}
+	return fmt.Sprintf("if %s is MySQL, add %d to mysqlPorts in keploy.yml, keeping the ports already listed there (a mysqlPorts list replaces the built-in 3306 and 4000): keploy then serves the recorded MySQL mocks on it.%s", dstAddr, port, where)
+}
+
+// unlistedEndpointMiss is the miss of a connection to a port the recording
+// never saw whose client closed it without sending anything, in a replay whose
+// recording holds MySQL: it waited for its server to speak first, as a MySQL
+// client does, and nothing answered it. Its next step names the port to list.
+func unlistedEndpointMiss(dstAddr string, host netip.Addr, port uint32, recorded []uint32) error {
+	why := fmt.Sprintf("the client closed its connection to a port the recording never saw without sending anything: it waited for its server to speak first, as a MySQL client does, and keploy answered nothing (the recording holds MySQL on ports %v)", recorded)
+	report := mismatch.NewReport(mismatch.ProtocolMySQL, "connection phase: server greeting").
+		WithDestination(dstAddr).
+		WithPhase(models.MatchPhaseNoRequest, 0).
+		WithDiff(why).
+		WithNextSteps(unlistedNextStep(dstAddr, host, port)).
+		Build()
+	return models.NewMockMismatchError(fmt.Errorf("mysql connection phase, server greeting: %s: %w", why, models.ErrNoMockMatched), report)
 }
 
 // wakeable reports whether conn takes a read deadline, which is what wakes a
@@ -1026,72 +1140,6 @@ func greetingDecided(ctx context.Context, buf []byte, matcher integrations.Integ
 	}
 	pktLen := int(buf[0]) | int(buf[1])<<8 | int(buf[2])<<16
 	return pktLen > maxHandshakePacket || len(buf) >= 4+pktLen
-}
-
-// readWithin reads once from conn under a deadline. A timeout is
-// reported as a normal (nil-byte, timeout-error) outcome rather than a
-// failure — "said nothing in time" is a legitimate probe result. The
-// deadline is always cleared so later reads are unaffected.
-//
-// Any bytes read before an error are returned, so no data is ever lost
-// to a mid-read failure.
-func readWithin(ctx context.Context, conn net.Conn, window time.Duration) ([]byte, error) {
-	if ctx != nil && ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(window)); err != nil {
-		return nil, err
-	}
-
-	// A read deadline is not cancellable, and this one can be seconds long.
-	// Tripping the deadline early is what actually unblocks the Read, so a
-	// Ctrl-C or an aborted test run does not have to sit through the rest of
-	// the window on every silent connection still in flight.
-	//
-	// The early return above covers a context that is already cancelled. This
-	// guard covers the other half: context.AfterFunc's stop() reports that the
-	// function has already started but does not wait for it, and it runs on its
-	// own goroutine — so a cancellation landing mid-read can call
-	// SetReadDeadline(now) AFTER the reset below, leaving a deadline in the past
-	// on a connection someone else is about to read. That surfaces as an
-	// immediate "i/o timeout" with data waiting, which is very hard to place
-	// from the outside. TestReadWithinLeavesNoDeadlineBehind pins the
-	// deterministic half; this guard closes the concurrent one, which cannot be
-	// tested without a fake conn that would deadlock on the same mutex.
-	var (
-		mu   sync.Mutex
-		done bool
-	)
-	if ctx != nil && ctx.Done() != nil {
-		stop := context.AfterFunc(ctx, func() {
-			mu.Lock()
-			defer mu.Unlock()
-			if !done {
-				_ = conn.SetReadDeadline(time.Now())
-			}
-		})
-		defer func() {
-			stop()
-			mu.Lock()
-			done = true
-			mu.Unlock()
-			_ = conn.SetReadDeadline(time.Time{})
-		}()
-	} else {
-		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	}
-
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if n > 0 {
-		return buf[:n], err
-	}
-	if err != nil && isTimeout(err) && ctx != nil && ctx.Err() != nil {
-		// The deadline we tripped ourselves — report the cancellation, not a
-		// timeout the caller would read as "the client stayed silent".
-		return nil, ctx.Err()
-	}
-	return nil, err
 }
 
 // replayConn wraps conn so the already-consumed prefix is handed back

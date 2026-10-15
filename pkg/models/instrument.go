@@ -245,8 +245,8 @@ type OutgoingOptions struct {
 	DisableMysqlAutoDetect bool
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only the
-	// inference that covers a moved endpoint is turned off. See
-	// Config.DisableMysqlEndpointDrift.
+	// judgement that covers a moved endpoint (by its container or host) is
+	// turned off. See Config.DisableMysqlEndpointDrift.
 	DisableMysqlEndpointDrift bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
