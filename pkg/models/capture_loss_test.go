@@ -77,3 +77,17 @@ func TestCaptureLossesTextShapesWhatItNames(t *testing.T) {
 		}
 	}
 }
+
+// Bytes written to a held connection that never reached the proxy are said in
+// their own words, with their count, never as an unnamed kind.
+func TestCaptureLossesTextSaysAppBytesLost(t *testing.T) {
+	s := (CaptureLosses{{Kind: CaptureLossAppBytesLost, Count: 3, What: "from 127.0.0.1:40000"}}).Text()
+	for _, want := range []string{"capture incomplete: ", "on 3 connection(s)", "never reached the proxy", "(from 127.0.0.1:40000)"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("%q lacks %q", s, want)
+		}
+	}
+	if strings.Contains(s, "of kind") {
+		t.Fatalf("%q names the kind without saying what it is", s)
+	}
+}

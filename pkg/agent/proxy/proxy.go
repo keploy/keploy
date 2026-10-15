@@ -292,6 +292,9 @@ type Proxy struct {
 	// untrackedConns counts the connections the proxy could not route
 	// (untracked.go).
 	untrackedConns atomic.Uint64
+	// paired holds the paired connections until the proxy is done with
+	// them, for the bytes a test's end waits for (pairbytes.go).
+	paired pairedConns
 
 	Listener net.Listener
 
@@ -2373,6 +2376,16 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// with it: the agent waits on the numbers the kernel gave the
 			// connections completed to this listener (accepts.go).
 			p.countAccept(raw)
+			// A paired connection is kept too, whatever the switch says
+			// (only a counted listener pairs one): its close is read
+			// before it happens (pairbytes.go).
+			if p.paired.holds(raw) {
+				if tracked == nil {
+					tracked = p.inflight.track(clientConn)
+					clientConn = tracked
+				}
+				tracked.beforeClose = func() { p.paired.closing(raw) }
+			}
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2386,6 +2399,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// the goroutine's deferred cleanup.
 			p.activeConns.Add(1)
 			clientConnErrGrp.Go(func() error {
+				// Last, once handleConnection has closed it: a test's end
+				// stops waiting for bytes on it (pairbytes.go).
+				defer p.paired.remove(raw)
 				defer p.activeConns.Done()
 				defer p.inflight.forget(tracked)
 				// A connection's end is a step of the agent's teardown once it

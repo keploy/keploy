@@ -272,11 +272,18 @@ func TestTheProxysRealLoopSettlesOnTheKernelsCount(t *testing.T) {
 // orig_dst_by_cookie entry, as connect4 leaves one.
 func appSocket(t *testing.T, h *Hooks) int {
 	t.Helper()
+	fd := redirectedSocket(t, h)
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	return fd
+}
+
+// redirectedSocket is appSocket for a test that closes the socket itself.
+func redirectedSocket(t *testing.T, h *Hooks) int {
+	t.Helper()
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = unix.Close(fd) })
 	cookie, err := unix.GetsockoptUint64(fd, unix.SOL_SOCKET, unix.SO_COOKIE)
 	if err != nil {
 		t.Fatal(err)
@@ -359,6 +366,9 @@ func TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt(t *testing.T) 
 	if lost := h.CaptureLosses(); len(lost) != 0 {
 		t.Fatalf("CaptureLosses = %+v, want none for a connection that sent nothing", lost)
 	}
+	if lost := a.Proxy.(interface{ CaptureLosses() models.CaptureLosses }).CaptureLosses(); len(lost) != 0 {
+		t.Fatalf("the proxy's CaptureLosses = %+v, want none for a connection that sent nothing", lost)
+	}
 }
 
 func mustTCPListenerConn(t *testing.T, ln net.Listener) syscallConner {
@@ -440,5 +450,56 @@ func TestANATedConnectionIsNotVerified(t *testing.T) {
 	}
 	if lost := h.CaptureLosses(); len(lost) != 1 || lost[0].Kind != models.CaptureLossAppConnLost {
 		t.Fatalf("the hooks' capture losses %+v: want the application connection lost", lost)
+	}
+}
+
+// An application-connection event the kernel had no room for ends a wait
+// parked on the application's connections at once, as unknown, through the
+// hooks' own reader: nothing else reads the counts here. Two connections
+// follow the drop; without the reader's check the second one's resolution
+// would settle the wait (a drop unseen), and the test fails at once.
+func TestADroppedAppConnEventEndsAParkedWait(t *testing.T) {
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	loadProxyConnObject(t, h)
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	p := proxy.New(zap.NewNop(), h, cfg)
+	p.SetListenerCounter(h)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan error, 1), make(chan error, 1)
+	go func() { done <- p.Serve(ctx, ready) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	port := p.Listener.Addr().(*net.TCPAddr).Port
+	info := structs.AgentInfo{DNSPort: -1, IsDocker: 1}
+	info.Proxy = structs.ProxyInfo{IP4: 0x7f000001, IP6: [4]uint32{0, 0, 0, 1}, Port: uint32(port)}
+	if err := h.SendAgentInfo(info); err != nil {
+		t.Fatal(err)
+	}
+	n, err := h.AppConnsEstablished(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := make(chan error, 1)
+	go func() { parked <- h.WaitAppConnsSettled(ctx, n+2) }()
+	// The kernel had no room for an event.
+	if err := h.objects.AppConnEventsDropped.Update(uint32(0), uint64(1), ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		s := redirectedSocket(t, h)
+		if err := unix.Connect(s, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.SetsockoptLinger(s, unix.SOL_SOCKET, unix.SO_LINGER, &unix.Linger{Onoff: 1, Linger: 0}); err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(s)
+	}
+	// No deadline but the test binary's -timeout.
+	if err := <-parked; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "no room") {
+		t.Fatalf("the wait parked on %d ended with %v, want unknown: the kernel had no room for an event", n+2, err)
 	}
 }

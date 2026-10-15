@@ -60,6 +60,12 @@ const (
 	// the connections undecided or used while that test ran (§3.2 as
 	// amended for class e), and never taints a later test.
 	CaptureLossRealUncaptured CaptureLossKind = "real_uncaptured"
+	// CaptureLossAppBytesLost: bytes the application had written to a
+	// connection the proxy holds (one it opened earlier, a pooled
+	// connection) never reached the proxy: the connection was reset, or the
+	// proxy closed it, first. What they carried was neither recorded nor
+	// mocked.
+	CaptureLossAppBytesLost CaptureLossKind = "app_bytes_lost"
 )
 
 // CaptureLoss is how many times one kind of capture loss happened in the
@@ -154,6 +160,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
 	case CaptureLossUnpairedConn:
 		return fmt.Sprintf("%d connection(s) reached keploy's proxy that it could not tie to a connection of the application's (another address in between, a NAT among the causes), so keploy could not tell where they were going and refused them", c.Count)
+	case CaptureLossAppBytesLost:
+		return fmt.Sprintf("on %d connection(s) to keploy's proxy, bytes the application had written never reached the proxy (the connection was reset, or closed, first), so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossAppConnLost:
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossRealUncaptured:
