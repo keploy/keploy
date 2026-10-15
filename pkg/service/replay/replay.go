@@ -2936,15 +2936,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.warnDependencyAssertionInert(testSetID, useMappingBased, isMappingEnabled, instrumentConsumedFetchErr != nil, false, noEligibleDeps, &depAssertionInertWarned)
 
 			// A mock-set mismatch normally means "re-record", so the response
-			// diff is suppressed as noise. With --assert-dependencies the test
-			// is about to be marked FAILED instead of demoted to OBSOLETE, so
-			// suppressing its diffs would hand the user a red test with no
-			// explanation. Knob off (the default) is byte-identical to before.
+			// diff is suppressed as noise. With --assert-dependencies or
+			// --strict-failure the test is about to be marked FAILED instead of
+			// demoted to OBSOLETE, so suppressing its diffs would hand the user a
+			// red test with no explanation. Knobs off (the default) preserve the
+			// historical behavior.
 			// Under the proven switch strict failure is always on, so a test
 			// whose mock set diverged is never demoted: its response diff is the
-			// explanation of its FAILED verdict and must be printed
-			// (assertTestMocks is on under the switch).
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
+			// explanation of its FAILED verdict and must be printed.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks(), r.strictFailure())
 
 			// Under the proven switch this test's misses are read now, once,
 			// with its response in, so the verdict, the result line, the
@@ -3783,9 +3783,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// written (attachStreamDepResults), from the filtered list the
 			// streamed test's own verdict reads.
 			//
-			// Under the switch a diverged mock set demotes nothing, so the
-			// diff of a failed answer is printed as the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+			// When dependency mismatches remain failures, the response diff is
+			// printed just as it is in the main replay loop.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks(), r.strictFailure())
 
 			if !ok {
 				// Handle streaming response type
@@ -3918,7 +3918,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks(), r.strictFailure())
 				}
 			}
 

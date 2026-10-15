@@ -185,9 +185,11 @@ func TestRunTestSetWiring(t *testing.T) {
 			// assertTestMocks, not AssertDependencies: the knob is read through
 			// r.assertTestMocks(), which answers for --assert-dependencies AND
 			// for the proven switch that turns the assertion on for everyone.
-			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks"},
-			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
-				"just marked FAILED with its response diff suppressed as 're-record noise'.",
+			// strictFailure, not StrictFailure, likewise preserves the proven
+			// switch while adding the explicit --strict-failure veto.
+			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks", "strictFailure"},
+			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies or " +
+				"--strict-failure just marked FAILED with its response diff suppressed as 're-record noise'.",
 		},
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",
@@ -287,6 +289,27 @@ func TestRunTestSetWiring(t *testing.T) {
 			t.Fatalf("RunTestSet's %s no longer passes all of %v.\nfound these identifier sets instead:\n\t%s\n\nWHY THIS MATTERS: %s",
 				target, tt.want, strings.Join(seen, "\n\t"), tt.why)
 		})
+	}
+}
+
+// All three response-diff decisions must use the shared predicate: once for
+// ordinary HTTP/gRPC replay and twice around streaming replay's mock drains.
+// Streaming-body mismatches may still force emitFailureLogs=false afterward to
+// avoid printing a second, misleading body diff.
+func TestFailureLogPredicateIsWiredOnEveryReplayPath(t *testing.T) {
+	_, fn := runTestSetSource(t)
+	calls := callArgIdents(fn, "shouldEmitFailureLogs")
+	if len(calls) != 3 {
+		t.Fatalf("expected three shouldEmitFailureLogs calls in RunTestSet, found %d", len(calls))
+	}
+
+	want := []string{"mockSetMismatch", "assertTestMocks", "strictFailure"}
+	for i, idents := range calls {
+		for _, identifier := range want {
+			if !idents[identifier] {
+				t.Fatalf("shouldEmitFailureLogs call %d does not pass %s; got identifiers %v", i+1, identifier, sortedKeys(idents))
+			}
+		}
 	}
 }
 
