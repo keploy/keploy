@@ -28,8 +28,8 @@ import (
 // array element. What may differ is only what is known:
 //
 //   - keploy.yml's noise: header names (test.globalNoise header), url
-//     patterns (url) and request-body paths (requestbody, with the request
-//     matcher's semantics: matcher.NoiseLookup);
+//     patterns (url) and request-body paths (requestbody: each names whole
+//     fields, never part of a field's name, matcher.NoiseLookup);
 //   - the static header list, minus the credentials and the payload hash
 //     (models.ProvenFlakyHeaderNoise);
 //   - what was learned onto the mock (MockSpec.ReqBodyNoise): by the learn
