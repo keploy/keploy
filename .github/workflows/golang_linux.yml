@@ -300,6 +300,86 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
 
+  # An async lane (keploy.yml async.lanes) whose value changes mid-recording.
+  # The app (test_workflow_scripts/golang/async_value_flip) polls a config
+  # service in the background; the value flips after the 7th GET /value. The
+  # replay served every epoch one test early (the test set's staging counted
+  # as a test window), and the prune deleted every epoch recorded after the
+  # first tests (no async epoch is ever consumed). keploy test, keploy test
+  # --remove-unused-mocks, keploy test again: every test must pass each time,
+  # and the prune must keep every epoch a replay serves, for an http and an
+  # httpPoll lane. record_latest_replay_build: the recorder is unchanged, so a
+  # released keploy's recording must replay and prune right.
+  async_value_flip:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: async lane value flip (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, replay, prune, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          WORK: ${{ runner.temp }}/async_value_flip
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/async_value_flip/golang-linux.sh"
+
+      - name: Upload async_value_flip recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: async-value-flip-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/async_value_flip/*/keploy/
+            ${{ runner.temp }}/async_value_flip/*/*.log
+            ${{ runner.temp }}/async_value_flip/*/mocks.recorded.yaml
+          if-no-files-found: warn
+          retention-days: 7
+
   golang_linux_replay:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x

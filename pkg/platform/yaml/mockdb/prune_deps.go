@@ -25,9 +25,19 @@ import (
 // the prune's; otherwise it is discarded and a second pass keeps those mocks
 // too, by their place in the file.
 
+// The prune also keeps every async epoch the replay can serve. An async lane's
+// mocks (models.AsyncMeta) are not consumed as other mocks are: the replay
+// serves a lane's timeline, the last epoch recorded at the position the test
+// set reached (async.Engine.Decide), to any poll, as often as polled. Whether
+// a poll fetched an epoch in one replay says only when the app polled: the
+// prune dropped every epoch after the first tests', and the next replay
+// answered the tests after a value changed with the value before it. The
+// epochs a later one at the same position supersedes are never served, and go.
+
 // pruneDeps gathers, over one pass of the prune, the links between the mocks
 // of the file: what the kept mocks require, and which dropped mocks provide
-// what. It holds keys and places, never mocks.
+// what; and the async epochs a replay can serve. It holds keys and places,
+// never mocks.
 type pruneDeps struct {
 	// seen counts the mocks the pass judged: the next one's place.
 	seen int
@@ -38,11 +48,57 @@ type pruneDeps struct {
 	// dropped are the dropped mocks that provide a key, by place: their names
 	// and the keys they require themselves, which keeping them makes needed.
 	dropped map[int]droppedProvider
+	// served are, per async lane and position, the epochs a replay serves
+	// there: the last recorded (the highest seq; every one of them on a tie,
+	// which the replay orders as it loads them).
+	served map[asyncPosition]*servedEpochs
 }
 
 type droppedProvider struct {
 	name     string
 	requires []string
+}
+
+// asyncPosition is a place in an async lane's timeline: the lane, and the
+// number of tests completed before its epochs take effect
+// (models.AsyncMeta.AnchorPos).
+type asyncPosition struct {
+	lane string
+	pos  int
+}
+
+type servedEpochs struct {
+	seq    int
+	epochs []servedEpoch
+}
+
+type servedEpoch struct {
+	place int
+	kept  bool
+	droppedProvider
+}
+
+// observeAsync notes m, the mock at place, if it is an async epoch.
+func (p *pruneDeps) observeAsync(m *models.Mock, place int, kept bool, deps models.MockDeps) {
+	a := m.Spec.Async
+	if a == nil {
+		return
+	}
+	at := asyncPosition{lane: a.Lane, pos: a.AnchorPos}
+	e := servedEpoch{place: place, kept: kept, droppedProvider: droppedProvider{name: m.Name}}
+	for _, r := range deps.Requires {
+		e.requires = append(e.requires, r.Key)
+	}
+	if p.served == nil {
+		p.served = map[asyncPosition]*servedEpochs{}
+	}
+	cur := p.served[at]
+	switch {
+	case cur == nil || a.Seq > cur.seq:
+		p.served[at] = &servedEpochs{seq: a.Seq, epochs: []servedEpoch{e}}
+	case a.Seq == cur.seq:
+		cur.epochs = append(cur.epochs, e)
+	}
 }
 
 // observe reads the links of the next mock of the file, which the pass kept
@@ -51,6 +107,7 @@ func (p *pruneDeps) observe(m *models.Mock, kept bool) {
 	place := p.seen
 	p.seen++
 	deps := models.DepsOf(m)
+	p.observeAsync(m, place, kept, deps)
 	if kept {
 		for _, r := range deps.Requires {
 			if p.need == nil {
@@ -78,24 +135,46 @@ func (p *pruneDeps) observe(m *models.Mock, kept bool) {
 	p.dropped[place] = d
 }
 
-// keepAlso is what the pass dropped and must keep: every dropped mock that
-// provides a key a kept mock requires, and, as keeping it makes its own
-// requirements needed, what those require in turn. Every provider of a needed
-// key is kept, so a replay resolves the key as it did before the prune. It
-// maps each mock's place in the file to its name; nil when the pass dropped
-// nothing a kept mock requires.
-func (p *pruneDeps) keepAlso() map[int]string {
-	if len(p.need) == 0 || len(p.providers) == 0 {
-		return nil
-	}
-	var out map[int]string
-	queue := make([]string, 0, len(p.need))
-	for key := range p.need {
-		queue = append(queue, key)
-	}
+// keptAlso is a mock the first pass dropped and the second keeps: its name,
+// and whether it is kept as an async epoch a replay serves (else as a mock a
+// kept mock requires).
+type keptAlso struct {
+	name     string
+	timeline bool
+}
+
+// keepAlso is what the pass dropped and must keep: every async epoch a replay
+// serves (see pruneDeps.served), every dropped mock that provides a key a kept
+// mock requires, and, as keeping it makes its own requirements needed, what
+// those require in turn. Every provider of a needed key is kept, so a replay
+// resolves the key as it did before the prune. It maps each mock's place in
+// the file to it; nil when the pass dropped nothing it must keep.
+func (p *pruneDeps) keepAlso() map[int]keptAlso {
+	var out map[int]keptAlso
 	queued := make(map[string]struct{}, len(p.need))
-	for _, key := range queue {
-		queued[key] = struct{}{}
+	queue := make([]string, 0, len(p.need))
+	enqueue := func(key string) {
+		if _, ok := queued[key]; !ok {
+			queued[key] = struct{}{}
+			queue = append(queue, key)
+		}
+	}
+	for key := range p.need {
+		enqueue(key)
+	}
+	for _, at := range p.served {
+		for _, e := range at.epochs {
+			if e.kept {
+				continue
+			}
+			if out == nil {
+				out = map[int]keptAlso{}
+			}
+			out[e.place] = keptAlso{name: e.name, timeline: true}
+			for _, req := range e.requires {
+				enqueue(req)
+			}
+		}
 	}
 	for len(queue) > 0 {
 		key := queue[0]
@@ -105,15 +184,12 @@ func (p *pruneDeps) keepAlso() map[int]string {
 				continue
 			}
 			if out == nil {
-				out = map[int]string{}
+				out = map[int]keptAlso{}
 			}
 			d := p.dropped[place]
-			out[place] = d.name
+			out[place] = keptAlso{name: d.name}
 			for _, req := range d.requires {
-				if _, ok := queued[req]; !ok {
-					queued[req] = struct{}{}
-					queue = append(queue, req)
-				}
+				enqueue(req)
 			}
 		}
 	}
@@ -121,13 +197,13 @@ func (p *pruneDeps) keepAlso() map[int]string {
 }
 
 // pruneVerdict judges, in a pass of the prune, each mock of the file in turn:
-// whether pruneKeeps keeps it, or the first pass found that a kept mock
-// requires it (keepAlso).
+// whether pruneKeeps keeps it, or the first pass found that a replay serves
+// it as an async epoch or a kept mock requires it (keepAlso).
 type pruneVerdict struct {
 	keeps func(*models.Mock) bool
 	// keepAlso is the first pass's keepAlso, for the second pass; nil in the
 	// first.
-	keepAlso map[int]string
+	keepAlso map[int]keptAlso
 	// deps gathers the links in the first pass.
 	deps pruneDeps
 	// place is the next mock's place in the file.
@@ -138,6 +214,10 @@ type pruneVerdict struct {
 	// them, and asDependencyNames names the first maxPrunedMocksLogged.
 	asDependency      int
 	asDependencyNames []string
+	// asTimeline counts the async epochs kept only because a replay serves
+	// them, and asTimelineNames names the first maxPrunedMocksLogged.
+	asTimeline      int
+	asTimelineNames []string
 }
 
 // judge reports whether the pass keeps m, the next mock of the file.
@@ -149,26 +229,33 @@ func (v *pruneVerdict) judge(m *models.Mock) (bool, error) {
 		v.deps.observe(m, kept)
 		return kept, nil
 	}
-	name, required := v.keepAlso[place]
+	also, required := v.keepAlso[place]
 	if !required {
 		return kept, nil
 	}
-	if name != m.Name {
+	if also.name != m.Name {
 		// The places are the first pass's: a file that changed between the
 		// passes would have the prune keep other mocks than the ones needed.
-		return false, fmt.Errorf("the mock file changed while it was pruned: mock %d is %q, the first pass read %q", place, m.Name, name)
+		return false, fmt.Errorf("the mock file changed while it was pruned: mock %d is %q, the first pass read %q", place, m.Name, also.name)
 	}
-	if !kept {
+	switch {
+	case kept:
+	case also.timeline:
+		v.asTimeline++
+		if len(v.asTimelineNames) < maxPrunedMocksLogged {
+			v.asTimelineNames = append(v.asTimelineNames, also.name)
+		}
+	default:
 		v.asDependency++
 		if len(v.asDependencyNames) < maxPrunedMocksLogged {
-			v.asDependencyNames = append(v.asDependencyNames, name)
+			v.asDependencyNames = append(v.asDependencyNames, also.name)
 		}
 	}
 	return true, nil
 }
 
-// secondPass reports whether the first pass dropped a mock that a mock it
-// kept requires, and sets v up for the pass that keeps it.
+// secondPass reports whether the first pass dropped a mock it must keep (see
+// keepAlso), and sets v up for the pass that keeps it.
 func (v *pruneVerdict) secondPass() bool {
 	if v.keepAlso != nil {
 		return false
