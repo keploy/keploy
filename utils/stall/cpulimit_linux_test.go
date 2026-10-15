@@ -1,6 +1,6 @@
 //go:build linux
 
-package relay
+package stall
 
 import (
 	"os"

@@ -1,6 +1,6 @@
 //go:build linux
 
-package relay
+package stall
 
 import (
 	"math"
@@ -10,12 +10,12 @@ import (
 	"strings"
 )
 
-// processCPULimit is the CPU bandwidth this process may use, in CPUs: the
+// ProcessCPULimit is the CPU bandwidth this process may use, in CPUs: the
 // tightest CFS quota on its cgroup or any ancestor (cgroup v2 cpu.max, v1
 // cpu.cfs_quota_us over cpu.cfs_period_us). A container run with --cpus 0.4,
 // or a pod with a CPU limit, has one. ok is false when there is none, or it
 // cannot be read.
-func processCPULimit() (float64, bool) {
+func ProcessCPULimit() (float64, bool) {
 	return cpuLimitFrom("/proc/self/cgroup", "/proc/self/mountinfo")
 }
 
