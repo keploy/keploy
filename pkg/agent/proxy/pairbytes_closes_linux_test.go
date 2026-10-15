@@ -324,3 +324,47 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		}
 	})
 }
+
+// The proxy's handler closes a connection with bytes it never read: its side
+// counts them received, and the close tosses them with a reset (tcp_close).
+// They were never captured, so the close charges a loss, whether a wait holds
+// the connection or not; a wait holding it settles on it.
+func TestAProxysCloseWithBytesUnreadIsALoss(t *testing.T) {
+	for _, waiting := range []bool{true, false} {
+		name := "no wait holds it"
+		if waiting {
+			name = "a wait holds it"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			if _, err := app.Write([]byte("publish 1\npublish 2\n")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil { // the handler takes the first call only
+				t.Fatal(err)
+			}
+			for received(t, proxySide) < 20 {
+				runtime.Gosched()
+			}
+			var targets []*pairTarget
+			if waiting {
+				var err error
+				if targets, err = p.pairTargets(1); err != nil || len(targets) != 1 || targets[0].want != 20 {
+					t.Fatalf("pairTargets = %v, %v; want one connection, 20 bytes written", targets, err)
+				}
+			}
+			_ = reader.Close() // 10 bytes unread: the close resets
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+				t.Fatalf("%d app_bytes_lost charged at the close, want 1: 10 bytes the application wrote were never read, and the close tossed them", l)
+			}
+			if waiting {
+				if err := p.waitPairTargets(context.Background(), targets); err != nil {
+					t.Fatalf("the wait: %v, want settled on the loss", err)
+				}
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+				t.Fatalf("%d app_bytes_lost charged, want 1: once per connection", l)
+			}
+		})
+	}
+}

@@ -45,7 +45,8 @@ type pairTarget struct {
 // made after it began cannot hold it back. A connection the proxy closed
 // short of what was written (anything that arrives at it now is answered
 // with a reset) is a capture loss (models.CaptureLossAppBytesLost), and does
-// not hold it back. The application's own reset is no loss: the kernel takes
+// not hold it back; so is one it closed with bytes unread, whenever a wait
+// holds it or not (pairClosing). The application's own reset is no loss: the kernel takes
 // a reset only at the sequence number it expects next, so every byte the
 // application had sent had arrived, and what its abort dropped unsent it
 // would have dropped without keploy.
@@ -346,6 +347,38 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 	if _, err := lookupTCP(app, pr); err == nil {
 		p.paired.visible.Store(true)
 	}
+}
+
+// pairClosing is a paired connection's beforeClose: its side as the proxy
+// closes it (closing), and a capture loss when the close tosses bytes the
+// proxy never read. Its side counts those received, so no wait would find
+// them missing. Bytes held that cannot be counted leave every wait unknown.
+func (p *Proxy) pairClosing(conn net.Conn) {
+	pc, unread, err := p.paired.closing(conn)
+	switch {
+	case pc == nil:
+	case err != nil:
+		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
+		p.logger.Warn("keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: no test's end can be verified from now on",
+			zap.String("from", pc.app.String()), zap.Error(err))
+	case unread > 0:
+		p.pairLost(pc)
+	}
+}
+
+// readUnread is how many bytes conn's socket holds unread (SIOCINQ): received
+// in order, never read.
+func readUnread(conn *net.TCPConn) (int, error) {
+	rc, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	var ierr error
+	if err := rc.Control(func(fd uintptr) { n, ierr = unix.IoctlGetInt(int(fd), unix.SIOCINQ) }); err != nil {
+		return 0, err
+	}
+	return n, ierr
 }
 
 // pairLost charges, once per connection, bytes the application wrote to pc
