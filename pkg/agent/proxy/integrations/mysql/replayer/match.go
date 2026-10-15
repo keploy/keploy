@@ -833,7 +833,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// before a mock may become a match candidate, and accumulates the
 	// rejection diagnostics (count / closest mock / field-level diffs) the
 	// mismatch report renders on a miss.
-	gate := newStrictGate(noiseEngine, logger, req.Header.Type, liveBody, liveBodyOK, userBodyNoise)
+	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveBody, liveBodyOK, userBodyNoise)
 
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
@@ -1796,7 +1796,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// updateMock, never on the shared pooled mock.
 	var detectedNoise map[string][]string
 	if liveBodyOK {
-		detectedNoise, _ = noiseEngine.Detect(matchedMock, liveBody, userBodyNoise)
+		if body, ok := gate.bodyFor(matchedMock); ok {
+			detectedNoise, _ = noiseEngine.Detect(matchedMock, body, executeBodyNoise(userBodyNoise, matchedMock, &req.PacketBundle))
+		}
 		if len(detectedNoise) > 0 {
 			paths := make([]string, 0, len(detectedNoise))
 			for p := range detectedNoise {
@@ -2162,18 +2164,58 @@ func preparePacketText(packet mysql.PacketBundle) string {
 	return msg.Query
 }
 
+// typesSentByBoth reports whether both COM_STMT_EXECUTEs carry their
+// parameters' types, unsigned flags and names on the wire
+// (new_params_bind_flag 1). A packet sent without them carries none: its
+// decoded ones are filled in, the statement's last sent types (or
+// FieldTypeString where none is known, see DecodeStmtExecute), and a released
+// recorder stored FieldTypeString for every one. Filled-in types are no
+// evidence either way, so they are compared only when both packets sent
+// theirs. The ones a flag-0 packet stands for were compared on the
+// statement's EXECUTE that sent them.
+func typesSentByBoth(expected, actual *mysql.StmtExecutePacket) bool {
+	return expected != nil && actual != nil && expected.NewParamsBindFlag == 1 && actual.NewParamsBindFlag == 1
+}
+
+// legacyRecorded reports whether a recorded COM_STMT_EXECUTE is one sent
+// without its types that a keploy older than the one reading such a packet
+// with its statement's types recorded: it typed every parameter
+// FieldTypeString, and read every value as a string
+// (mysql.StmtExecutePacket's LegacyParameters). One this keploy recorded
+// carries the statement's types, so it is legacyRecorded only when every
+// type was a string's, whose values both read alike.
+func legacyRecorded(p *mysql.StmtExecutePacket) bool {
+	if p == nil || p.NewParamsBindFlag == 1 || len(p.Parameters) == 0 {
+		return false
+	}
+	for _, param := range p.Parameters {
+		if param.Type != uint16(mysql.FieldTypeString) || param.Unsigned || param.Name != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// legacyRecordedMock is legacyRecorded for a mock's one request.
+func legacyRecordedMock(m *models.Mock) bool {
+	if m == nil || len(m.Spec.MySQLRequests) != 1 {
+		return false
+	}
+	exp, _ := m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+	return legacyRecorded(exp)
+}
+
 // sameParameterShape reports whether a recorded COM_STMT_EXECUTE (expected)
 // may have run the live one's statement (actual), as far as their bound
 // parameters show: as many, and each of the same type wherever both are
 // bound to a value (a NULL is sent with a type of its own) and both packets
-// carry their types (new_params_bind_flag; without it the decoder fills in a
-// default type, see DecodeStmtExecute).
+// sent their types (typesSentByBoth).
 func sameParameterShape(expected, actual *mysql.StmtExecutePacket) bool {
 	if expected == nil || actual == nil || expected.ParameterCount != actual.ParameterCount ||
 		len(expected.Parameters) != len(actual.Parameters) {
 		return false
 	}
-	if expected.NewParamsBindFlag != 1 || actual.NewParamsBindFlag != 1 {
+	if !typesSentByBoth(expected, actual) {
 		return true
 	}
 	for i := range expected.Parameters {
@@ -2239,7 +2281,9 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		matchCount++
 	}
 
-	// Match the parameters
+	// Match the parameters: their types, unsigned flags and names only when
+	// both packets sent them (typesSentByBoth).
+	typesSent := typesSentByBoth(expectedMessage, actualMessage)
 	var totalMatchedParams int
 	var allParamsMatched bool
 	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
@@ -2247,9 +2291,9 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 			ep := expectedMessage.Parameters[i]
 			ap := actualMessage.Parameters[i]
 
-			typeEqual := ep.Type == ap.Type
-			nameEqual := ep.Name == ap.Name
-			unsignedEqual := ep.Unsigned == ap.Unsigned
+			typeEqual := !typesSent || ep.Type == ap.Type
+			nameEqual := !typesSent || ep.Name == ap.Name
+			unsignedEqual := !typesSent || ep.Unsigned == ap.Unsigned
 			valueEqual := false
 			if unsignedEqual { // initial check to avoid comparing signed vs unsigned values
 				valueEqual = paramValueEqual(ep.Value, ap.Value, nc)
@@ -2264,6 +2308,27 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		if len(expectedMessage.Parameters) == totalMatchedParams {
 			allParamsMatched = true
 			logger.Debug("all parameters matched", zap.String("mock-name", mockName))
+		}
+
+		// An older keploy recorded a packet sent without types as it read
+		// it: every value a string (legacyRecorded), a small integer's
+		// bytes of garbage. Its replayer read the live packet the same way,
+		// and so this one does for such a recording (LegacyParameters).
+		if !allParamsMatched && legacyRecorded(expectedMessage) && len(actualMessage.LegacyParameters) == len(expectedMessage.Parameters) {
+			legacy := 0
+			for i, ep := range expectedMessage.Parameters {
+				if paramValueEqual(ep.Value, actualMessage.LegacyParameters[i].Value, nc) {
+					legacy++
+				}
+			}
+			if legacy > totalMatchedParams {
+				matchCount += legacy - totalMatchedParams
+				totalMatchedParams = legacy
+				if legacy == len(expectedMessage.Parameters) {
+					allParamsMatched = true
+					logger.Debug("all parameters matched as an older keploy read them", zap.String("mock-name", mockName))
+				}
+			}
 		}
 	}
 
