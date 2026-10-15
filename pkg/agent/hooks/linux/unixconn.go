@@ -498,5 +498,27 @@ func (h *Hooks) CaptureLossesErr() error {
 	if u != nil && u.off != "" {
 		return fmt.Errorf("keploy cannot see the application's calls over Unix sockets on this kernel, so whether a test made one cannot be told: %s", u.off)
 	}
+	// Under the proven switch, the watch on the application's non-DNS UDP
+	// (udpwatch.go).
+	h.udpMu.Lock()
+	w := h.udp
+	h.udpMu.Unlock()
+	if w != nil {
+		if err := w.failure(); err != nil {
+			return fmt.Errorf("keploy cannot tell whether the application's UDP got a reply from a real destination: %w", err)
+		}
+	}
 	return nil
+}
+
+// udpLosses are, under the proven switch, the replies the application's
+// non-DNS UDP got (udpwatch.go, CaptureLosses). Empty while not attached.
+func (h *Hooks) udpLosses() models.CaptureLosses {
+	h.udpMu.Lock()
+	w := h.udp
+	h.udpMu.Unlock()
+	if w == nil {
+		return nil
+	}
+	return w.snapshot()
 }

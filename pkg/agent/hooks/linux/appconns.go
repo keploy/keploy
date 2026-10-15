@@ -181,10 +181,12 @@ func (h *Hooks) WaitAppConnsSettled(ctx context.Context, n uint64) error {
 
 // CaptureLosses is what the hooks saw the application do that keploy could
 // not capture, besides the PID-map refusals: its connections lost before the
-// proxy got them (appConnLosses) and its AF_UNIX connects to sockets no member
-// of it owns (unixLosses).
+// proxy got them (appConnLosses), its AF_UNIX connects to sockets no member
+// of it owns (unixLosses) and, under the proven switch, replies its non-DNS
+// UDP got (udpLosses).
 func (h *Hooks) CaptureLosses() models.CaptureLosses {
-	return append(h.appConnLosses(), h.unixLosses()...)
+	out := append(h.appConnLosses(), h.unixLosses()...)
+	return append(out, h.udpLosses()...)
 }
 
 // appConnLosses are the application connections lost before the proxy got
