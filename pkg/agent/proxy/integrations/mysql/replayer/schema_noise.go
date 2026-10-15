@@ -154,8 +154,9 @@ type strictGate struct {
 	verdicts map[*models.Mock]gateVerdict
 
 	// legacyBody is the live body as an older keploy read the live packet
-	// (mysql.StmtExecutePacket's LegacyParameters), compared with what such
-	// a keploy recorded (legacyRecorded); read once, when first needed.
+	// (mysql.StmtExecutePacket's LegacyParameters, mysql.QueryPacket's
+	// LegacyQuery), compared with what such a keploy recorded
+	// (legacyRecordedMock); read once, when first needed.
 	legacyBody                   []byte
 	legacyBodyOK, legacyBodyRead bool
 }
@@ -170,12 +171,23 @@ func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 	if !g.legacyBodyRead {
 		g.legacyBodyRead = true
 		if g.live != nil {
-			if act, _ := g.live.Message.(*mysql.StmtExecutePacket); act != nil && act.LegacyParameters != nil {
-				read := *act
-				read.Parameters = act.LegacyParameters
-				bundle := *g.live
-				bundle.Message = &read
-				g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+			switch act := g.live.Message.(type) {
+			case *mysql.StmtExecutePacket:
+				if act != nil && act.LegacyParameters != nil {
+					read := *act
+					read.Parameters = act.LegacyParameters
+					bundle := *g.live
+					bundle.Message = &read
+					g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+				}
+			case *mysql.QueryPacket:
+				if readsLegacy(act) {
+					read := *act
+					read.Query, read.Parameters = act.LegacyQuery, act.LegacyParameters
+					bundle := *g.live
+					bundle.Message = &read
+					g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+				}
 			}
 		}
 	}
@@ -396,7 +408,8 @@ func queryBodyValue(sql string) any {
 // Deliberately EXCLUDED fields: StatementID (unstable across runs, remapped
 // query-aware by the matcher), Status/Flags/IterationCount/NullBitmap
 // (protocol plumbing already scored by matchStmtExecutePacketQueryAware, not
-// user data).
+// user data), and a COM_QUERY's query attributes unless the statement reads
+// one (readsQueryAttributes).
 func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
@@ -408,7 +421,7 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 			return nil, false
 		}
 		doc = map[string]any{"query": queryBodyValue(msg.Query)}
-		if len(msg.Parameters) > 0 {
+		if len(msg.Parameters) > 0 && readsQueryAttributes(msg.Query) {
 			doc["parameters"] = parametersByIndex(msg.Parameters)
 		}
 	case *mysql.StmtPreparePacket:
@@ -442,6 +455,21 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// readsQueryAttributes reports whether a COM_QUERY's statement reads its query
+// attributes: the server answers with them only through
+// mysql_query_attribute_string(). Any other statement's answer is the same
+// whatever attributes it carries, and a client sends ones that differ on
+// every call: Connector/J 8.1+ sends the caller's OpenTelemetry trace
+// (traceparent) with every statement. So they are compared, and drift as a
+// request field, only for a statement that reads one; for any other they
+// would make every call drift, and be learned as noise. A statement that
+// reads one without naming the function is not seen: a stored procedure
+// (CALL) or function (SELECT f()), a view, a trigger, or EXECUTE of a
+// statement prepared from a variable.
+func readsQueryAttributes(query string) bool {
+	return strings.Contains(strings.ToLower(query), "mysql_query_attribute_string")
 }
 
 // parametersByIndex converts a parameter slice to an index-keyed map (see

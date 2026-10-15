@@ -342,7 +342,9 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	// command packets
 	case payloadType == mysql.COM_QUERY:
 
-		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities)
+		// The older keploy's reading is read only at replay, to match what
+		// it recorded.
+		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities, decodeCtx.Mode == models.MODE_TEST)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}
