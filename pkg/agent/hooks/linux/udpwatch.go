@@ -81,6 +81,12 @@ type udpWatch struct {
 	mu     sync.Mutex
 	// epoch is the kernel's (udp_reply_epoch), moved on at each snapshot.
 	epoch uint32
+	// open are the reports of the epoch the kernel is in: charged by the
+	// snapshot that moves it on, never by an earlier one, whose count would
+	// then hold a report while its epoch, still open, hides the socket's
+	// next replies (a reply that lands between a snapshot's move and its
+	// read).
+	open []string
 	// err is why what the watch counted cannot be told any more: an epoch it
 	// could not move on, a count of the kernel's it could not read, a report
 	// it could not read (CaptureLossesErr). It stays.
@@ -190,15 +196,28 @@ func (w *udpWatch) watch(logger *zap.Logger) {
 			w.fail(fmt.Errorf("decode a UDP reply report of %d bytes: %w", len(rec.RawSample), err))
 			continue
 		}
-		what := fmt.Sprintf("UDP to %s answered from port %d", e.Dst, e.SrcPort)
-		w.losses.Add(models.CaptureLossUDPReply, what)
+		what := w.handle(e)
 		if !warned {
 			warned = true
 			logger.Warn("the application's UDP got a reply from the real destination: keploy neither records nor mocks UDP other than DNS",
 				zap.String("what", what), zap.Uint32("tgid", e.TGID),
-				zap.String("next_step", "add its port to bypassRules if it is meant to be live, or reach it over TCP"))
+				zap.String("next_step", "add a port-only bypassRules entry for it if it is meant to be live, or reach it over TCP"))
 		}
 	}
+}
+
+// handle counts a report by the epoch it came in: one of the epoch the
+// kernel is in waits for the snapshot that moves it on.
+func (w *udpWatch) handle(e udpReplyEvent) string {
+	what := fmt.Sprintf("UDP to %s answered from port %d", e.Dst, e.SrcPort)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e.Epoch == w.epoch {
+		w.open = append(w.open, what)
+	} else {
+		w.losses.Add(models.CaptureLossUDPReply, what)
+	}
+	return what
 }
 
 // fail notes why what the watch counted cannot be told any more; the first
@@ -224,7 +243,19 @@ func (w *udpWatch) failure() error {
 // again (k_udp.h), so a test after a long-lived socket's first reply still
 // sees its next one.
 func (w *udpWatch) snapshot() models.CaptureLosses {
+	w.closeEpoch()
+	return w.counts()
+}
+
+// closeEpoch charges the reports of the epoch the kernel is in, then moves
+// the kernel's epoch on.
+func (w *udpWatch) closeEpoch() {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, what := range w.open {
+		w.losses.Add(models.CaptureLossUDPReply, what)
+	}
+	w.open = nil
 	w.epoch++
 	if w.epoch == 0 {
 		w.epoch = 1 // 0 is the kernel's "never set"
@@ -232,7 +263,10 @@ func (w *udpWatch) snapshot() models.CaptureLosses {
 	if err := w.maps.UdpReplyEpoch.Update(uint32(0), w.epoch, ebpf.UpdateAny); err != nil && w.err == nil {
 		w.err = fmt.Errorf("move the UDP watch's epoch on: %w", err)
 	}
-	w.mu.Unlock()
+}
+
+// counts is what the watch charged, with what the kernel had no room for.
+func (w *udpWatch) counts() models.CaptureLosses {
 	out := w.losses.Snapshot()
 	var missed uint64
 	for _, m := range []*ebpf.Map{w.maps.UdpMemberSocksFailures, w.maps.UdpReplyEventsLost} {
