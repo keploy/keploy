@@ -168,10 +168,12 @@ func TestWithEvidence(t *testing.T) {
 	require.False(t, read.Tests[1].Evidence.Unread)
 }
 
-// The receipt counts the run's non-DNS misses under the proven switch only:
-// a receipt written with the switch off is what it was before the switch.
+// The receipt counts the run's misses that count against a test
+// (models.UnmatchedCall.CountsAgainstTest) under the proven switch only: a
+// receipt written with the switch off is what it was before the switch.
 func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
-	misses := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}, {Protocol: "DNS", ActualSummary: "A x"}}
+	misses := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}, {Protocol: "DNS", ActualSummary: "A x"},
+		{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest}}
 	t.Setenv(provenswitch.Env, "")
 	dir, _, _ := replayIn(t, replayCase{mockErrs: misses})
 	require.Nil(t, mustReceipt(t, dir).MissedData, "absent with the switch off")
@@ -183,7 +185,7 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	dir, _, _ = replayIn(t, replayCase{mockErrs: misses, mapped: true})
 	r := mustReceipt(t, dir)
 	require.NotNil(t, r.MissedData)
-	require.Equal(t, 1, *r.MissedData, "a DNS lookup is protocol-phase")
+	require.Equal(t, 1, *r.MissedData, "a DNS lookup is protocol-phase, and a connection that sent nothing made no call")
 }
 
 // Under the switch a run list conflicts with the deny list: --run-only is
