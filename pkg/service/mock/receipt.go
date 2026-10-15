@@ -210,6 +210,18 @@ type TestsReceipt struct {
 	// receipt's, in a record's what the recording lacks, so it is not taken
 	// as fully captured.
 	NotJudged models.CaptureLosses `yaml:"notJudged,omitempty" json:"notJudged,omitempty"`
+	// CaptureLosses is, in a record's file under the proven switch, what the
+	// agent could not capture that no test was charged with (design v14
+	// §3.2: a loss charges the test open when it happened and every later
+	// one, so this is a loss after the last test): no recording holds what
+	// it carried, so judging fails the run on it (§7.5, evidence charged to
+	// no test). What keploy cannot capture at all is NotJudged's, not this.
+	CaptureLosses models.CaptureLosses `yaml:"captureLosses,omitempty" json:"captureLosses,omitempty"`
+	// CaptureLossesUnread is, in a record's file under the proven switch, why
+	// keploy could not read what its agent could not capture after the last
+	// test: judging fails the run on it, as on CaptureLosses (a read that
+	// failed is never "none").
+	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
 }
 
 // empty reports whether the run reported no test and keploy refused

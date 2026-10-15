@@ -142,6 +142,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Every kind of capture loss, for the per-test taint under the
 		// proven switch. See pkg/agent/routes/capturelosses.go.
 		r.Get("/capturelosses", a.HandleCaptureLosses)
+		// What of it no test was charged with (a loss after the last test).
+		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct

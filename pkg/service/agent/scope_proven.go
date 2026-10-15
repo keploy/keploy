@@ -59,6 +59,11 @@ type provenWire struct {
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
 	charged []models.UnmatchedCall
+	// lossesCharged is the most the tests' ends charged of what the agent
+	// could not capture since the run began (chargeCaptureLosses), kind by
+	// kind: what the run lost beyond it was charged to no test
+	// (UnchargedCaptureLosses).
+	lossesCharged models.CaptureLosses
 	// claim is the live claim; zero when none.
 	claim claimant
 	// claims is every claim of the session, in order: from each one's time
@@ -750,6 +755,13 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	lost, err := a.captureLossesSince(ctx, mark)
 	if err == nil && len(lost) == 0 {
 		return ev, outcome
+	}
+	if err == nil {
+		a.provenMu.Lock()
+		// The most charged, kind by kind: tests of parallel instances
+		// end concurrently, and their reads land in either order.
+		a.proven.lossesCharged = a.proven.lossesCharged.Max(lost)
+		a.provenMu.Unlock()
 	}
 	if ev == nil {
 		ev = &models.ScopeEvidence{}

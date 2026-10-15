@@ -93,6 +93,24 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 	return captureLossMark{at: at, known: true}
 }
 
+// UnchargedCaptureLosses is what the agent could not capture since the run
+// began that no test was charged with: a loss charges the test open when it
+// happened and every test that ends after it (chargeCaptureLosses), so this
+// is what was lost after the last test ended. The CLI reads it once the
+// run's last test has ended; a record's judging fails the run on it (design
+// v14 §7.5: evidence charged to no test). A standing state (unix_unseen) is
+// kept by every mark and is in it whatever was charged.
+func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	a.provenMu.Lock()
+	mark, charged := a.proven.losses, a.proven.lossesCharged
+	a.provenMu.Unlock()
+	lost, err := a.captureLossesSince(ctx, mark)
+	if err != nil {
+		return nil, err
+	}
+	return lost.Since(charged), nil
+}
+
 // captureLossesSince is what was lost since the run began, at a test's end:
 // it taints the test open when it happened and every test after it (design
 // v14 §3.2), so every test that ends after a loss carries it. A mark or a read

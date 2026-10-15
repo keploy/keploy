@@ -1542,9 +1542,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
 			drainFrames()
 			// Read while the agent, which the app's stack carries, still
-			// runs: what it could not capture (mock.real).
+			// runs: what it could not capture (mock.real), and what it
+			// lost after the last test case.
 			if recordingStarted {
 				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
 			}
 		}
 		runAppCtxCancel()
@@ -1557,6 +1559,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// reached it too, and the app has stopped making calls.
 			if recordingStarted {
 				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
 		}
