@@ -3,6 +3,7 @@ package generic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -29,16 +29,6 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	if len(reqBuf) > 0 {
 		release, holding = integrations.HoldRequest(ctx), true
 	}
-	// Under the proven switch the parser ends when the application closes
-	// the connection, and keeps what a read returned with its deadline or
-	// its EOF: a connection left polling after its close is one a test's end
-	// waits on forever, and a request dropped there is a call never answered
-	// nor filed.
-	proven := provenswitch.On()
-	read := pUtil.ReadBytes
-	if proven {
-		read = pUtil.ReadBytesUntilEOF
-	}
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
@@ -52,30 +42,36 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				return
 			}
 
-			// To read the stream of request packets from the client
+			// To read the stream of request packets from the client. The
+			// connection's end is its EOF: read so that it is returned at once
+			// (ReadBytes retries an empty EOF, 50 ms apart, and under this 10
+			// ms deadline that retry comes back as a timeout, which hid the
+			// close and left the parser polling it for ever).
 			ended := false
 			for {
-				buffer, err := read(ctx, logger, clientConn)
+				buffer, err := pUtil.ReadBytesUntilEOF(ctx, logger, clientConn)
 				netErr, isNet := err.(net.Error)
 				timeout := isNet && netErr.Timeout()
-				atEOF := err != nil && err.Error() == "EOF"
-				// Applied this nolint to ignore the staticcheck error here because of readability
-				// nolint:staticcheck
-				if !timeout && err != nil && !atEOF {
+				atEOF := errors.Is(err, io.EOF) || (err != nil && err.Error() == "EOF")
+				if err != nil && !timeout && !atEOF {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
 					return
 				}
-				if (err == nil || proven) && len(buffer) > 0 {
+				// What a read returned with its deadline's timeout or its EOF
+				// is a request: a request as long as the read buffer (or a
+				// multiple) comes back with the next read's timeout, and one
+				// a close follows at once (a TLS 1.2 close_notify, or a full
+				// buffer's next read) with its EOF. Any other error has
+				// returned above.
+				if len(buffer) > 0 {
 					if !holding {
 						release, holding = integrations.HoldRequest(ctx), true
 					}
 					genericRequests = append(genericRequests, buffer)
-				} else if err == nil {
-					genericRequests = append(genericRequests, buffer)
 				}
 				if timeout || atEOF {
 					logger.Debug("the timeout for the client read in generic or EOF")
-					ended = proven && atEOF
+					ended = atEOF
 					break
 				}
 			}

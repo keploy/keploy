@@ -188,41 +188,45 @@ func TestAConnectionIsKeptBeforeItIsCountedAccepted(t *testing.T) {
 	}
 }
 
-// Under the switch the generic parser ends when the application closes its
-// connection once answered: its handler is done, and the connection held
-// nothing. Before, it polled the closed connection for ever, never done, and
-// a test's end waited on it for ever while the polling counted as progress
-// (review B2).
+// The generic parser ends when the application closes its connection once
+// answered, with the switch off as on: its handler is done, and the
+// connection held nothing. Before, it polled the closed connection for ever,
+// never done, and a test's end waited on it for ever while the polling
+// counted as progress (review B2).
 func TestTheGenericParserEndsWhenTheApplicationCloses(t *testing.T) {
-	t.Setenv("KEPLOY_PROVEN", "1")
-	tr := &inflight{}
-	app, proxy := acceptedPair(t, tr)
-	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "1")
-	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
-	ctx, cancel := context.WithCancel(integrations.WithRequestHolder(ctx, proxy))
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- generic.New(zap.NewNop()).MockOutgoing(ctx, proxy, nil, genericStore{}, models.OutgoingOptions{})
-	}()
-	if _, err := io.WriteString(app, "PING"); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, 4)
-	if _, err := io.ReadFull(app, got); err != nil || string(got) != "PONG" {
-		t.Fatalf("answer %q, %v", got, err)
-	}
-	_ = app.Close()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("the parser ended with %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the generic parser polled a connection the application closed and never ended")
-	}
-	if h := proxy.held.Load(); h != 0 {
-		t.Fatalf("held %d after the connection ended", h)
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", on)
+			tr := &inflight{}
+			app, proxy := acceptedPair(t, tr)
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "1")
+			ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+			ctx, cancel := context.WithCancel(integrations.WithRequestHolder(ctx, proxy))
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- generic.New(zap.NewNop()).MockOutgoing(ctx, proxy, nil, genericStore{}, models.OutgoingOptions{})
+			}()
+			if _, err := io.WriteString(app, "PING"); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, 4)
+			if _, err := io.ReadFull(app, got); err != nil || string(got) != "PONG" {
+				t.Fatalf("answer %q, %v", got, err)
+			}
+			_ = app.Close()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("the parser ended with %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the generic parser polled a connection the application closed and never ended")
+			}
+			if h := proxy.held.Load(); h != 0 {
+				t.Fatalf("held %d after the connection ended", h)
+			}
+		})
 	}
 }
 
