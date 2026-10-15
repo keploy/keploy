@@ -133,6 +133,15 @@ type StmtExecutePacket struct {
 	NullBitmap        []byte      `yaml:"null_bitmap" json:"null_bitmap"`
 	NewParamsBindFlag byte        `yaml:"new_params_bind_flag" json:"new_params_bind_flag"`
 	Parameters        []Parameter `yaml:"parameters" json:"parameters"`
+	// LegacyParameters are, for a packet sent without its parameter types
+	// (NewParamsBindFlag 0) and read at replay, the parameters a keploy
+	// older than the one that reads such a packet with its statement's
+	// types recorded from it: every value read as a length-encoded string,
+	// typed FieldTypeString. A small integer read so came out as bytes of
+	// garbage, and a recording of it is matched against these. Nil when that
+	// keploy could not read the packet at all (it recorded nothing), and
+	// never recorded.
+	LegacyParameters []Parameter `yaml:"-" json:"-"`
 }
 
 type Parameter struct {
