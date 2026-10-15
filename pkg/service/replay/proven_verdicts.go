@@ -327,6 +327,11 @@ type testEvidence struct {
 	// capture is what the agent could not capture while it or an earlier
 	// test of its set ran (FailureInfo.CaptureIncomplete).
 	capture models.CaptureLosses
+	// templates are the template variable places (or the refusal) a FAILED
+	// row of it failed on (TestResult.TemplateFailures). A row the mock
+	// set's divergence demoted to OBSOLETE before the hook is no evidence:
+	// it was not failed.
+	templates []models.TemplateFailure
 }
 
 // hookSnapshot is what the set's results said before the hook ran, under the
@@ -374,6 +379,7 @@ func cloneResult(r models.TestResult) models.TestResult {
 	r.FailureInfo.UnconsumedMocks = slices.Clone(r.FailureInfo.UnconsumedMocks)
 	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
 	r.FailureInfo.CaptureIncomplete = slices.Clone(r.FailureInfo.CaptureIncomplete)
+	r.TemplateFailures = slices.Clone(r.TemplateFailures)
 	return r
 }
 
@@ -393,7 +399,8 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 			snap.rows[r.TestCaseID] = cloneResult(r)
 		}
 		misses := dataPlaneCalls(r.FailureInfo.UnmatchedCalls)
-		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 {
+		templates := failedOnTemplates(r)
+		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 && len(templates) == 0 {
 			continue
 		}
 		e := snap.evidence[r.TestCaseID]
@@ -402,14 +409,28 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 		if len(e.capture) == 0 {
 			e.capture = slices.Clone(r.FailureInfo.CaptureIncomplete)
 		}
+		if len(e.templates) == 0 {
+			e.templates = slices.Clone(templates)
+		}
 		for _, c := range r.FailureInfo.Category {
-			if c == models.CallUnmatched || c == models.DependencyMissing || c == models.CaptureIncompleteCategory {
+			if c == models.CallUnmatched || c == models.DependencyMissing || c == models.CaptureIncompleteCategory ||
+				(len(templates) > 0 && (c == models.TemplateVariable || c == models.TestSetRefused)) {
 				e.categories = appendCategoryUnique(e.categories, c)
 			}
 		}
 		snap.evidence[r.TestCaseID] = e
 	}
 	return snap
+}
+
+// failedOnTemplates are the template variable places (or the refusal) a FAILED
+// row failed on: evidence the hook cannot clear. A row that was not failed
+// carries none, whatever it names.
+func failedOnTemplates(r models.TestResult) []models.TemplateFailure {
+	if r.Status != models.TestStatusFailed {
+		return nil
+	}
+	return r.TemplateFailures
 }
 
 // holdEvidenceFloor holds, under the proven switch, the set's verdicts against
@@ -425,8 +446,9 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 //     make a test vanish from the tally. A row of a test that did not exist
 //     before the hook is FAILED.
 //   - A test with evidence against it (a call it made that no mock answered,
-//     a recorded call it did not make, or a call keploy's agent could not
-//     capture while it or an earlier test ran, before the hook or still) counts
+//     a recorded call it did not make, a call keploy's agent could not
+//     capture while it or an earlier test ran, before the hook or still, or a
+//     template variable place it failed on before the hook) counts
 //     FAILED, unless every row of it is quarantined (IGNORED). When none of
 //     its rows is FAILED, every row that is not IGNORED is set FAILED;
 //     a test that has a FAILED row already counts FAILED, and its other rows
@@ -463,17 +485,20 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 	for _, id := range before.tests {
 		rows := rowsOf[id]
 		snap := before.evidence[id]
-		misses, unconsumed, capture, allIgnored, failedRow := false, false, false, true, -1
+		misses, unconsumed, capture, templates, allIgnored, failedRow := false, false, false, false, true, -1
 		for _, i := range rows {
 			misses = misses || dataPlaneMisses(results[i].FailureInfo.UnmatchedCalls) > 0
 			unconsumed = unconsumed || len(results[i].FailureInfo.UnconsumedMocks) > 0
 			capture = capture || len(results[i].FailureInfo.CaptureIncomplete) > 0
+			templates = templates || len(results[i].TemplateFailures) > 0
 			allIgnored = allIgnored && results[i].Status == models.TestStatusIgnored
 			if failedRow < 0 && results[i].Status == models.TestStatusFailed {
 				failedRow = i
 			}
 		}
-		if !misses && !unconsumed && !capture && len(snap.misses) == 0 && len(snap.unconsumed) == 0 && len(snap.capture) == 0 {
+		// A template failure counts only as the loop wrote it (snap): one a
+		// row names that was not failed before the hook is no evidence.
+		if !misses && !unconsumed && !capture && len(snap.misses) == 0 && len(snap.unconsumed) == 0 && len(snap.capture) == 0 && len(snap.templates) == 0 {
 			continue
 		}
 		// The row that carries the test's verdict, and so its evidence.
@@ -498,6 +523,16 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 		if !capture && len(snap.capture) > 0 {
 			v.FailureInfo.CaptureIncomplete = slices.Clone(snap.capture)
 		}
+		if len(snap.templates) > 0 {
+			if !templates {
+				v.TemplateFailures = slices.Clone(snap.templates)
+			}
+			// As markTemplateFailures writes it: a template failure is high
+			// risk, whatever the hook made of it. The set's tally reads the
+			// result's risk; JUnit the row's.
+			v.FailureInfo.Risk = models.High
+			v.Result.FailureInfo.Risk = models.High
+		}
 		if failedRow < 0 && !allIgnored {
 			for _, i := range rows {
 				if results[i].Status != models.TestStatusIgnored {
@@ -511,7 +546,7 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 			if r.Status != models.TestStatusFailed && r.Status != models.TestStatusIgnored {
 				continue
 			}
-			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 {
+			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 && len(r.TemplateFailures) == 0 {
 				continue
 			}
 			cats := slices.Clone(r.FailureInfo.Category)

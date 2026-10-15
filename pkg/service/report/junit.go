@@ -13,19 +13,24 @@ import (
 )
 
 type junitTestSuites struct {
-	XMLName  xml.Name         `xml:"testsuites"`
-	Tests    int              `xml:"tests,attr"`
-	Failures int              `xml:"failures,attr"`
-	Time     string           `xml:"time,attr"`
-	Suites   []junitTestSuite `xml:"testsuite"`
+	XMLName  xml.Name `xml:"testsuites"`
+	Tests    int      `xml:"tests,attr"`
+	Failures int      `xml:"failures,attr"`
+	// Errors counts the cases with no verdict (junitError). Omitted at 0, so a
+	// report with none stays byte-identical.
+	Errors int              `xml:"errors,attr,omitempty"`
+	Time   string           `xml:"time,attr"`
+	Suites []junitTestSuite `xml:"testsuite"`
 }
 
 type junitTestSuite struct {
 	Name     string `xml:"name,attr"`
 	Tests    int    `xml:"tests,attr"`
 	Failures int    `xml:"failures,attr"`
-	Skipped  int    `xml:"skipped,attr"`
-	Time     string `xml:"time,attr"`
+	// Errors counts the suite's cases with no verdict; omitted at 0.
+	Errors  int    `xml:"errors,attr,omitempty"`
+	Skipped int    `xml:"skipped,attr"`
+	Time    string `xml:"time,attr"`
 	// Properties carries suite-level facts that are not per-testcase. Emitted
 	// only when there is one, so a report without any stays byte-identical
 	// (the backward-compat contract this file documents). Today the only one
@@ -48,7 +53,9 @@ type junitTestCase struct {
 	Classname string        `xml:"classname,attr"`
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
-	Skipped   *junitSkipped `xml:"skipped,omitempty"`
+	// Error marks a case keploy could not judge (junitError).
+	Error   *junitError   `xml:"error,omitempty"`
+	Skipped *junitSkipped `xml:"skipped,omitempty"`
 	// SystemOut carries information that must reach a CI consumer WITHOUT
 	// changing the case's verdict — today, the dependencies a PASSED test
 	// stopped exercising. <system-out> is the JUnit element every consumer
@@ -63,6 +70,20 @@ type junitFailure struct {
 	Type    string `xml:"type,attr,omitempty"`
 	Text    string `xml:",chardata"`
 }
+
+// junitError is the <error> of a case keploy could not judge: its row says
+// PASSED (or OBSOLETE), but what keploy needed to judge it could not be read
+// or checked (models.FailureInfo.NotJudged), so nothing vouches for it. CI
+// systems count an <error> as a failed case, as they should: the run that
+// wrote the row exits non-zero, and its artifact must not read green.
+type junitError struct {
+	Message string `xml:"message,attr"`
+	Type    string `xml:"type,attr"`
+	Text    string `xml:",chardata"`
+}
+
+// notJudgedMessage is the <error message> of a case with no verdict.
+const notJudgedMessage = "not judged: keploy could not tell whether this test passed"
 
 type junitSkipped struct {
 	Message string `xml:"message,attr,omitempty"`
@@ -140,7 +161,7 @@ func (r *Report) generateJUnit(reports map[string]*models.TestReport) error {
 // rows reach <failure> on a FAILED case, the <skipped> body on an OBSOLETE one
 // and <system-out> on a green one (see depNonFailureBody).
 func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
-	var totalTests, totalFailures int
+	var totalTests, totalFailures, totalErrors int
 	var totalDuration time.Duration
 	suites := make([]junitTestSuite, 0, len(reports))
 
@@ -156,6 +177,7 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 		suite := buildJUnitSuite(name, rep)
 		totalTests += suite.Tests
 		totalFailures += suite.Failures
+		totalErrors += suite.Errors
 		if dur, err := parseTimeString(rep.TimeTaken); err == nil {
 			totalDuration += dur
 		} else {
@@ -167,6 +189,7 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 	return junitTestSuites{
 		Tests:    totalTests,
 		Failures: totalFailures,
+		Errors:   totalErrors,
 		Time:     fmtSeconds(totalDuration),
 		Suites:   suites,
 	}
@@ -174,7 +197,11 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 
 func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 	cases := make([]junitTestCase, 0, len(rep.Tests))
-	var failures, skipped int
+	var failures, errs, skipped int
+	// The proven model's evidence is rendered when the set was run under the
+	// switch (rep.Proven), whatever the switch of the process rendering it;
+	// for a report written before the marker, when the switch is on now.
+	proven := rep.Proven || provenswitch.On()
 
 	for _, t := range rep.Tests {
 		tc := junitTestCase{
@@ -183,10 +210,23 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 			Time:      fmtTestTime(t.TimeTaken),
 		}
 
+		// A case keploy could not judge is an <error>, whatever its row's
+		// status says, unless the row already fails it or keploy skipped
+		// it (TestResult.VerdictUnknown): nothing vouches for it, so its
+		// artifact must not read green. Its dependency detail is kept, as a
+		// passing case's is.
+		if why := t.VerdictUnknown(); len(why) > 0 {
+			errs++
+			tc.Error = &junitError{Message: notJudgedMessage, Type: "NotJudged", Text: strings.Join(why, "\n")}
+			tc.SystemOut = depNonFailureBody(t.Result.DepResult)
+			cases = append(cases, tc)
+			continue
+		}
+
 		switch t.Status {
 		case models.TestStatusFailed:
 			failures++
-			tc.Failure = buildFailure(t)
+			tc.Failure = failureOf(t, proven)
 		case models.TestStatusObsolete:
 			skipped++
 			tc.Skipped = &junitSkipped{
@@ -220,6 +260,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		Name:     name,
 		Tests:    rep.Total,
 		Failures: failures,
+		Errors:   errs,
 		Skipped:  skipped,
 		Time:     fmtSeconds(suiteDur),
 		Cases:    cases,
@@ -234,8 +275,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 	// so the suite gets one more test case, "keploy capture", failed with the
 	// reason: a FAILED set is never a green JUnit file. "unverified" adds no
 	// test case; the property says it. (Under the proven switch the set is
-	// also not judged; JUnit, which reads the tests and not the set's
-	// status, shows that as it shows every not-judged set.)
+	// also not judged: the "keploy verdict" case below says so.)
 	if cv := rep.CaptureVerification; cv != nil {
 		suite.Properties = &junitProperties{Property: []junitProperty{
 			{Name: "keploy.capture_verification", Value: string(cv.Status)},
@@ -255,6 +295,21 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 				},
 			})
 		}
+	}
+	// A set run under the switch that is INTERNAL_ERR for a reason no test
+	// carries (its capture count or its mock.real destinations could not be
+	// read, a result could not be written, its run ended part-way) has no
+	// verdict, whatever its cases say: a case of its own, an <error>, says
+	// so with the set's reason, as its NDJSON lines do.
+	if rep.Proven && rep.Status == string(models.TestSetStatusInternalErr) {
+		suite.Tests++
+		suite.Errors++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitVerdictCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Error:     &junitError{Message: notJudgedSetMessage, Type: "NotJudged", Text: rep.FailureReason},
+		})
 	}
 	// mock.real's rule 4 failed the set while its tests may all have
 	// passed: as an incomplete capture, a case of its own, failed.
@@ -279,11 +334,26 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 // carries, failed with the reason (buildJUnitSuite).
 const junitCaptureCase = "keploy capture"
 
+// junitVerdictCase is the test case a suite keploy could not judge carries,
+// with no verdict (buildJUnitSuite).
+const junitVerdictCase = "keploy verdict"
+
+// notJudgedSetMessage is its <error message>.
+const notJudgedSetMessage = "not judged: keploy could not tell whether this test set passed"
+
 // junitRealCase is the test case a suite mock.real's rule 4 failed carries,
 // failed with the reason (buildJUnitSuite).
 const junitRealCase = "keploy mock.real"
 
+// buildFailure is a failed case's <failure>, naming the proven model's
+// evidence when the switch is on now (failureOf).
 func buildFailure(t models.TestResult) *junitFailure {
+	return failureOf(t, provenswitch.On())
+}
+
+// failureOf is a failed case's <failure>; proven says the set was run under
+// the proven switch, whose evidence it then names.
+func failureOf(t models.TestResult, proven bool) *junitFailure {
 	var parts []string
 
 	if t.Kind == models.HTTP && !t.Result.StatusCode.Normal {
@@ -318,7 +388,7 @@ func buildFailure(t models.TestResult) *junitFailure {
 	// Under the proven switch the evidence that fails a test on its calls is
 	// named: each call that got no recorded answer, and each recorded call it
 	// did not make, by mock.
-	if provenswitch.On() {
+	if proven {
 		parts = append(parts, provenEvidenceLines(t.FailureInfo)...)
 		// Why a gRPC body that differs only in order failed, and the way
 		// out for a map field (configure proto files).
