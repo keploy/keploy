@@ -55,16 +55,22 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 }
 
 // closing notes, once the proxy begins closing conn, what its side had
-// received: the wait's answer for it from then on.
-func (s *pairedConns) closing(conn net.Conn) {
+// received: the wait's answer for it from then on. It returns conn's paired
+// connection (nil for one it does not keep, or whose close was noted) and how
+// many bytes its socket holds unread, read after its side: the close tosses
+// them with a reset (tcp_close), bytes the application wrote that its side
+// counts received and the proxy never read.
+func (s *pairedConns) closing(conn net.Conn) (*pairedConn, int, error) {
 	s.mu.Lock()
 	pc := s.byConn[conn]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
-		return
+		return nil, 0, nil
 	}
 	ps := readProxySide(pc.conn)
 	pc.atClose.Store(&ps)
+	unread, err := readUnread(pc.conn)
+	return pc, unread, err
 }
 
 // pairedConns are the paired connections the proxy holds, under the proven
