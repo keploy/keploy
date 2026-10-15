@@ -283,9 +283,15 @@ type Proxy struct {
 	acceptsErr error
 	// listenerCounter is the hooks' count of the listener's connections
 	// (SetListenerCounter); nil under the switch off. early holds what the
-	// canary accepted before its own connection, for the accept loop.
+	// canary accepted before its own connection, for the accept loop, until
+	// the proxy stops (closeEarly), under earlyMu: the loop's last round can
+	// still be taking one as the stop closes them.
 	listenerCounter agent.ListenerCounter
+	earlyMu         sync.Mutex
 	early           []net.Conn
+	// handingOver, a test's (nil otherwise), is called by an accept round
+	// with a kept connection it is about to hand over, before it does.
+	handingOver func(net.Conn)
 	// pairs holds each accepted connection's pairing (countAccept) until
 	// handleConnection takes its destination (pairedDest).
 	pairs sync.Map
@@ -2281,6 +2287,9 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if listener != nil {
 			listener.Close()
 		}
+		// What the canary kept for the accept loop and the loop has not
+		// taken, it never will.
+		p.closeEarly()
 		// What the listener never accepted, it never will: every wait on
 		// its count ends now, not after the slower steps below.
 		p.closeAccepts()
@@ -2336,9 +2345,16 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	for {
 		clientConnCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
+		// handedOver is closed once this round's accept has handed over
+		// what it got, or ended without anything.
+		handedOver := make(chan struct{})
 		go func() {
+			defer close(handedOver)
 			defer utils.Recover(p.logger)
 			if early := p.takeEarly(); early != nil {
+				if p.handingOver != nil {
+					p.handingOver(early)
+				}
 				clientConnCh <- early
 				return
 			}
@@ -2356,11 +2372,29 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}()
 		select {
 		case <-ctx.Done():
+			// This round's accept ends once the shutdown has closed the
+			// listener: what it hands over after the stop -- a connection
+			// the canary kept, or one it accepted -- is closed, not left
+			// open until the process exits.
+			go func() {
+				<-handedOver
+				select {
+				case c := <-clientConnCh:
+					_ = c.Close()
+				default:
+				}
+			}()
 			return nil
 		case err := <-errCh:
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
+			if ctx.Err() != nil {
+				// The proxy stopped as this round handed it over: nothing
+				// serves it.
+				_ = clientConn.Close()
+				return nil
+			}
 			// Under the proven switch the connection is kept from its
 			// accept on, so a test's end sees what it holds (inflight.go):
 			// kept before it is counted, or a wait that saw the count reach
