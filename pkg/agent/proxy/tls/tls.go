@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -115,6 +118,23 @@ func PassTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
 			return
 		}
 	}
+}
+
+// IsClientGiveUp reports whether err, from the proxy's side of a client-side
+// TLS handshake (HandleTLSConnection), is the client leaving without a word:
+// it closed or reset its connection -- its own cancel, a request timeout, its
+// stop -- and made no call keploy failed to capture. Every other failure lost
+// its call: a certificate alert keploy read (Go, Java, rustls), one it could
+// not (OpenSSL sends its TLS 1.3 alert in plaintext, which crypto/tls reads
+// as "bad record MAC"), any other alert, a ClientHello keploy's server
+// refused, a certificate keploy could not make. A client that rejects
+// keploy's certificate by closing without an alert (Node.js) reads as a give
+// up too: nothing on the wire tells the two apart.
+func IsClientGiveUp(err error) bool {
+	// neterr: syscall's ECONNRESET and EPIPE never match on Windows, whose
+	// sockets give Winsock's codes.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) || neterr.IsConnAborted(err)
 }
 
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
