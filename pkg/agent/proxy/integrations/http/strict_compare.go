@@ -320,13 +320,29 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			continue
 		}
 		lv := strings.Join(lvs, ",")
+		// A SigV4 Authorization is read by its parts before learned noise:
+		// its signature differs on every run, so a learner that reads the
+		// header whole (L, at record's full round) learns it, and that must
+		// not excuse its credential scope or signed headers (founder
+		// decision 25). A recorded value the obfuscator redacted is no
+		// SigV4 to read, and is excused below as before.
+		if name == "authorization" && !k.redacted(rv) {
+			if _, recSigV4 := parseSigV4Authorization(rv); recSigV4 {
+				parts, ok := sigV4AuthorizationDiffs(rv, lv, recDay, liveDay)
+				if !ok {
+					// The live one is no SigV4 (another scheme, SigV4A, a
+					// second line): noise learned on a SigV4 recording was
+					// learned for its signature, and excuses nothing else.
+					parts = []strictField{field(valueDiff(path, rv, lv))}
+				}
+				out = append(out, parts...)
+				continue
+			}
+		}
 		if k.learnedAt(path, "") || k.redacted(rv) {
 			continue
 		}
 		switch name {
-		case "authorization":
-			out = append(out, authorizationDiffs(rv, lvs, recDay, liveDay)...)
-			continue
 		case "x-amz-content-sha256":
 			if samePayloadHash(rv, lvs, sent) {
 				continue

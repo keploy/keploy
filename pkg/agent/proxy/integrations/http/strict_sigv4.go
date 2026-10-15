@@ -156,24 +156,22 @@ func sigV4ScopeDiffs(prefix string, rec, live sigV4Scope, recDay, liveDay string
 	return out
 }
 
-// authorizationDiffs compares a recorded Authorization header with the live
-// one: by its SigV4 parts when both are SigV4 (header.authorization.<part>),
-// whole otherwise. recDay and liveDay are each side's signing day (sigV4Day).
-func authorizationDiffs(rec string, live []string, recDay, liveDay string) []strictField {
-	lv := strings.Join(live, ",")
-	if rec == lv {
-		return nil
-	}
+// sigV4AuthorizationDiffs compares a recorded Authorization header with the
+// live one (its lines joined with ",") by their SigV4 parts
+// (header.authorization.<part>); ok is false when either is not SigV4, and
+// the header is then compared whole, as any header. recDay and liveDay are
+// each side's signing day (sigV4Day).
+func sigV4AuthorizationDiffs(rec, live, recDay, liveDay string) (out []strictField, ok bool) {
 	ra, rok := parseSigV4Authorization(rec)
-	la, lok := parseSigV4Authorization(lv)
+	la, lok := parseSigV4Authorization(live)
 	if !rok || !lok {
-		return []strictField{field(valueDiff("header.authorization", rec, lv))}
+		return nil, false
 	}
-	out := sigV4ScopeDiffs("header.authorization", ra.scope, la.scope, recDay, liveDay)
+	out = sigV4ScopeDiffs("header.authorization", ra.scope, la.scope, recDay, liveDay)
 	if ra.signedHeaders != la.signedHeaders {
 		out = append(out, field(valueDiff("header.authorization.signed_headers", ra.signedHeaders, la.signedHeaders)))
 	}
-	return out
+	return out, true
 }
 
 // samePayloadHash reports whether a live x-amz-content-sha256 is the recorded
