@@ -30,7 +30,8 @@ import (
 //   - keploy.yml's noise: header names (test.globalNoise header), url
 //     patterns (url) and request-body paths (requestbody, with the request
 //     matcher's semantics: matcher.NoiseLookup);
-//   - the static header list, minus the credentials (models.ProvenFlakyHeaderNoise);
+//   - the static header list, minus the credentials and the payload hash
+//     (models.ProvenFlakyHeaderNoise);
 //   - what was learned onto the mock (MockSpec.ReqBodyNoise): by the learn
 //     step, which names a field by its exact place (body.items[0].id,
 //     header.<name>, url.query.<name>, url.path.<i>), or by the request-body
@@ -43,8 +44,10 @@ import (
 // credentials (Authorization, the idempotency keys, the CSRF tokens) are
 // compared: a token minted in the test is a variable (A2), one from the
 // environment binds, one that drifts at record's F is learned as noise, and
-// anything else must be the recorded one. No score, no closest match: the
-// recording either is the call or does not answer it.
+// anything else must be the recorded one. An AWS SigV4 Authorization is
+// compared by its parts, its signature not at all (strict_sigv4.go). No
+// score, no closest match: the recording either is the call or does not
+// answer it.
 
 // strictNoise is the noise of the run's configuration the strict comparison
 // reads; each mock adds its own learned noise and obfuscated values.
@@ -159,7 +162,7 @@ func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []s
 	}
 	out = append(out, k.pathDiffs(recPath, livePath)...)
 	out = append(out, k.queryDiffs(recQuery, liveQuery)...)
-	out = append(out, k.headerDiffs(r.Header, input.header)...)
+	out = append(out, k.headerDiffs(r.Header, input.header, input.sentBody())...)
 	out = append(out, k.bodyDiffs(r, input)...)
 	return out
 }
@@ -225,8 +228,11 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // values (keploy.yml's url noise masked in both), a repeated parameter's in
 // any order, as the request matcher and the learn step read them (an app may
 // build them from a set); one value the mock learned (url.query.<name>) may
-// differ. Parameters keploy itself adds (keploy*) are not compared.
+// differ. Parameters keploy itself adds (keploy*) are not compared. A SigV4
+// presigned URL's signing parameters are read by their grammar
+// (presignedDiffs).
 func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
+	byGrammar, signing := presignedDiffs(rec, live)
 	names := map[string]bool{}
 	for name := range rec {
 		names[name] = true
@@ -237,6 +243,12 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 	var out []strictField
 	for _, name := range sortedNames(names) {
 		if strings.HasPrefix(strings.ToLower(name), "keploy") {
+			continue
+		}
+		if byGrammar[name] {
+			if name == amzCredential {
+				out = append(out, signing...)
+			}
 			continue
 		}
 		rv, inRec := rec[name]
@@ -267,8 +279,10 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 // header the mock learned (header.<name>) or whose recorded value the
 // obfuscator redacted may change its value, not go away. Content-Type is
 // compared by its media types, so a boundary minted per request is no
-// difference; User-Agent by its first product token's name.
-func (k strictKnown) headerDiffs(rec map[string]string, live http.Header) []strictField {
+// difference; User-Agent by its first product token's name; Authorization by
+// its SigV4 parts, and x-amz-content-sha256 with sent, the body the client
+// sent (strict_sigv4.go).
+func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent []byte) []strictField {
 	recH := make(map[string]string, len(rec))
 	for _, name := range sortedStringKeys(rec) {
 		ln := strings.ToLower(name)
@@ -288,6 +302,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header) []stri
 	for n := range liveH {
 		names[n] = true
 	}
+	recDay, liveDay := sigV4Days(recH, liveH)
 	var out []strictField
 	for _, name := range sortedNames(names) {
 		if name == "host" || name == "content-length" || strings.HasPrefix(name, "keploy") || k.n.header[name] {
@@ -305,8 +320,21 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header) []stri
 			continue
 		}
 		lv := strings.Join(lvs, ",")
-		if sameHeaderValue(name, rv, lvs) || k.learnedAt(path, "") || k.redacted(rv) {
+		if k.learnedAt(path, "") || k.redacted(rv) {
 			continue
+		}
+		switch name {
+		case "authorization":
+			out = append(out, authorizationDiffs(rv, lvs, recDay, liveDay)...)
+			continue
+		case "x-amz-content-sha256":
+			if samePayloadHash(rv, lvs, sent) {
+				continue
+			}
+		default:
+			if sameHeaderValue(name, rv, lvs) {
+				continue
+			}
 		}
 		out = append(out, field(valueDiff(path, rv, lv)))
 	}

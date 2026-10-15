@@ -55,7 +55,9 @@ name: Mock Mode Regression (Linux)
 # and asserts a read-back of another id fails with the variable as evidence.
 # Another replays keploy #4686's request-drift app under the proven switch and
 # asserts a call to another host or container fails naming it, while a
-# container configured the same on a new random port is matched by its key.
+# container configured the same on a new random port is matched by its key;
+# and an aws-sdk-go-v2 S3 app against LocalStack, whose SigV4-signed calls
+# replay under the switch while another region or key id fails naming it.
 on:
   workflow_call:
     inputs:
@@ -445,12 +447,15 @@ jobs:
   # repository, or with another body value must fail the test naming the
   # field, while a container configured the same on a new random port is
   # matched by its key; without the switch every case passes, as on main. Its
-  # own job: the mock-mode job above is near its timeout.
+  # own job: the mock-mode job above is near its timeout. Then an AWS SDK's
+  # SigV4-signed calls (founder decision 25): the Authorization header is
+  # compared by its parts, its signature not at all, so the set replays under
+  # the switch, and fails naming the part when the region or key id differs.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: proven strict-HTTP (record_replay_build)
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -487,6 +492,13 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
+
+      - name: Run proven strict-HTTP e2e (AWS SigV4 against LocalStack)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
 
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,
