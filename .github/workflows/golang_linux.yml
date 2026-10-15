@@ -231,6 +231,75 @@ jobs:
           cd samples-go/dns-dedup
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_dedup/golang-linux.sh
 
+  # keploy #4810: the mock prune kept a MySQL COM_STMT_EXECUTE and deleted the
+  # COM_STMT_PREPARE of its statement, so the next replay answered it with
+  # another test's EXECUTE. An app on go-sql-driver/mysql's default DSN
+  # prepares the same INSERT again for every order on one connection, and one
+  # order fails on a duplicate key (500). Record, keploy test
+  # --remove-unused-mocks, keploy test again: every test must pass both times,
+  # the pruned mocks must hold the PREPARE of every statement a kept mock
+  # names, and no test may be served another test's COM_STMT_EXECUTE. A copy
+  # of the recording damaged as an older keploy's prune left it must fail,
+  # say why, and serve no test another test's COM_STMT_EXECUTE. The app is in
+  # this repo (test_workflow_scripts/golang/mysql_prune_prepared). Not
+  # record_build_replay_latest: the released prune is the bug.
+  mysql_prune_prepared:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: mysql prune keeps prepared statements (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, prune, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
+
   golang_linux_replay:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x

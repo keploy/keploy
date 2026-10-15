@@ -183,11 +183,17 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if actualQuery != "" || closestQuery != "" {
 					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
 				}
+				if miss.why != "" {
+					diff = strings.TrimSpace(diff + "\n" + miss.why)
+				}
 				// Under schemaNoiseStrict a rejection is a drift verdict, not a
 				// missing recording — say WHICH fields drifted (FieldDiffs) and
 				// how to mark them, instead of the generic re-record hint.
 				nextSteps := "Re-record mocks if the SQL query has changed."
-				if miss.strictRejected > 0 {
+				switch {
+				case miss.nextSteps != "":
+					nextSteps = miss.nextSteps
+				case miss.strictRejected > 0:
 					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{

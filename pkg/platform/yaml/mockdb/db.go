@@ -275,29 +275,82 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.String("detectedFormat", string(detectedFormat)),
 		zap.Time("pruneBefore", pruneBefore))
 
-	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-		return err
-	}
-	defer reader.Close()
-
 	// One mock at a time: read, decode, judge, and write the ones that stay
 	// to the replacement before reading the next (see rewrite.go). Written
 	// back in the format read, so a prune never migrates the file's format.
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
+	// A second pass keeps what a kept mock requires (see prune_deps.go).
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
+		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
+	}}
+	st, err := ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+	if err == nil && st.again {
+		st, err = ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+	}
+	if err != nil {
+		return err
+	}
+
+	ys.Logger.Debug("pruned mocks successfully",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", st.total),
+		zap.Int("kept", st.kept),
+		zap.Int("pruned", st.pruned),
+		zap.Int("copiedVerbatim", st.copied),
+		zap.Int("keptAsDependency", verdict.asDependency),
+		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Any("prunedMocks", st.prunedMocks),
+		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
+		zap.Time("pruneBefore", pruneBefore))
+
+	return nil
+}
+
+// pruneStats are what one pass of the prune did, for its log.
+type pruneStats struct {
+	total, kept, pruned, copied int
+	prunedMocks                 []prunedMockInfo
+	// again says the pass was discarded: it dropped a mock that a mock it
+	// kept requires, and the verdict is set up for the pass that keeps it.
+	again bool
+}
+
+// recordPruned counts a mock the pass drops, and names it in the log's
+// list while that has room. Only when debug logging is enabled: on large
+// test sets the allocation and reflection cost of collecting
+// names/kinds/metadata is a significant overhead if the emitted log will be
+// dropped by the logger anyway.
+func (st *pruneStats) recordPruned(mock *models.Mock, debugEnabled bool) {
+	st.pruned++
+	if debugEnabled && len(st.prunedMocks) < maxPrunedMocksLogged {
+		if st.prunedMocks == nil {
+			st.prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+		}
+		st.prunedMocks = append(st.prunedMocks, prunedMockInfo{
+			Name:     mock.Name,
+			Kind:     string(mock.Kind),
+			Metadata: mock.Spec.Metadata,
+		})
+	}
+}
+
+// prunePass reads the yaml/json mock file once, judging each mock with
+// verdict, and puts the mocks it keeps in place of the file; or, in a first
+// pass that dropped a mock a kept one requires, discards what it wrote and
+// says so (pruneStats.again).
+func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, error) {
+	var st pruneStats
+	ext := "." + format.FileExtension()
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, format)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+		return st, err
+	}
+	defer reader.Close()
+
+	rw := newMockFileRewriter(ys.Logger, path, mockFileName, format)
 	defer rw.discard()
 
-	// Only build the per-mock log slice when debug logging is enabled
-	// — on large test sets the allocation and reflection cost of
-	// collecting names/kinds/metadata is a significant overhead if
-	// the emitted log will be dropped by the logger anyway.
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	total, kept, prunedCount, copied := 0, 0, 0, 0
-	var prunedMocks []prunedMockInfo
-	if debugEnabled {
-		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
-	}
 	fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	for {
 		doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
@@ -306,61 +359,51 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		if readErr != nil {
 			utils.LogError(ys.Logger, readErr, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-			return fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+			return st, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
 		}
 		if decodeErr != nil {
-			return fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+			return st, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		if doc.verbatim {
 			// A document this keploy cannot decode is not one it can judge,
 			// and a connection failure is not one it changes: copied through
 			// as it is (see fileDoc.verbatim).
 			if err := rw.copyDoc(doc); err != nil {
-				return err
+				return st, err
 			}
 			if !doc.incomplete {
-				copied++
+				st.copied++
 			}
 			continue
 		}
 		for _, mock := range doc.mocks {
-			total++
-			if pruneKeeps(mock, mockNames, pruneBefore, startupCutoffTime) {
+			st.total++
+			keep, err := verdict.judge(mock)
+			if err != nil {
+				return st, err
+			}
+			if keep {
 				if err := rw.write(mock); err != nil {
-					return err
+					return st, err
 				}
-				kept++
+				st.kept++
 				continue
 			}
-			prunedCount++
-			if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
-				prunedMocks = append(prunedMocks, prunedMockInfo{
-					Name:     mock.Name,
-					Kind:     string(mock.Kind),
-					Metadata: mock.Spec.Metadata,
-				})
-			}
+			st.recordPruned(mock, debugEnabled)
 		}
 	}
 
 	// Done reading: close before the replace, which some platforms refuse
 	// over a file that is still open.
 	_ = reader.Close()
-	if err := rw.commit(); err != nil {
-		return err
+	if verdict.secondPass() {
+		st.again = true
+		return st, nil
 	}
-
-	ys.Logger.Debug("pruned mocks successfully",
-		zap.String("testSetID", testSetID),
-		zap.Int("total", total),
-		zap.Int("kept", kept),
-		zap.Int("pruned", prunedCount),
-		zap.Int("copiedVerbatim", copied),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
-		zap.Time("pruneBefore", pruneBefore))
-
-	return nil
+	if err := verdict.checkPlaces(); err != nil {
+		return st, err
+	}
+	return st, rw.commit()
 }
 
 // updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
@@ -399,43 +442,14 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
-	rw, err := newGobFileRewriter(gobPath)
-	if err != nil {
-		return err
+	// A second pass keeps what a kept mock requires (see prune_deps.go).
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
+		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
+	}}
+	st, err := ys.prunePassGob(ctx, gobPath, verdict)
+	if err == nil && st.again {
+		st, err = ys.prunePassGob(ctx, gobPath, verdict)
 	}
-	defer rw.discard()
-
-	// See the YAML path above for why per-mock collection is gated on
-	// debug level — the gob path is the one most likely to hit
-	// ~10^5-mock test sets, so skipping the allocation when the log
-	// is a no-op matters more here.
-	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	total, kept, prunedCount := 0, 0, 0
-	var prunedMocks []prunedMockInfo
-	if debugEnabled {
-		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
-	}
-	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
-		// The gob stream has no per-line reader watching ctx, so a very
-		// large set checks it every ctxCheckEvery mocks.
-		if err := ctxErrEvery(ctx, total); err != nil {
-			return err
-		}
-		total++
-		if pruneKeeps(mock, mockNames, pruneBefore, startupCutoffTime) {
-			kept++
-			return rw.write(mock)
-		}
-		prunedCount++
-		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
-			prunedMocks = append(prunedMocks, prunedMockInfo{
-				Name:     mock.Name,
-				Kind:     string(mock.Kind),
-				Metadata: mock.Spec.Metadata,
-			})
-		}
-		return nil
-	})
 	if err != nil {
 		if ctx.Err() == nil {
 			utils.LogError(ys.Logger, err, "failed to prune gob mocks", zap.String("path", gobPath))
@@ -443,19 +457,63 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
-	if err := rw.commit(); err != nil {
-		return err
-	}
-
 	ys.Logger.Debug("pruned mocks successfully (gob)",
 		zap.String("testSetID", testSetID),
-		zap.Int("total", total),
-		zap.Int("kept", kept),
-		zap.Int("pruned", prunedCount),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
+		zap.Int("total", st.total),
+		zap.Int("kept", st.kept),
+		zap.Int("pruned", st.pruned),
+		zap.Int("keptAsDependency", verdict.asDependency),
+		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Any("prunedMocks", st.prunedMocks),
+		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 	return nil
+}
+
+// prunePassGob is prunePass for mocks.gob: the kept mocks are streamed into a
+// fresh single-encoder stream, which replaces the file once complete, unless
+// the pass is a first one to do again (pruneStats.again).
+func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *pruneVerdict) (pruneStats, error) {
+	var st pruneStats
+	rw, err := newGobFileRewriter(gobPath)
+	if err != nil {
+		return st, err
+	}
+	defer rw.discard()
+
+	// See prunePass for why per-mock collection is gated on debug level —
+	// the gob path is the one most likely to hit ~10^5-mock test sets, so
+	// skipping the allocation when the log is a no-op matters more here.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
+	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+		// The gob stream has no per-line reader watching ctx, so a very
+		// large set checks it every ctxCheckEvery mocks.
+		if err := ctxErrEvery(ctx, st.total); err != nil {
+			return err
+		}
+		st.total++
+		keep, err := verdict.judge(mock)
+		if err != nil {
+			return err
+		}
+		if keep {
+			st.kept++
+			return rw.write(mock)
+		}
+		st.recordPruned(mock, debugEnabled)
+		return nil
+	})
+	if err != nil {
+		return st, err
+	}
+	if verdict.secondPass() {
+		st.again = true
+		return st, nil
+	}
+	if err := verdict.checkPlaces(); err != nil {
+		return st, err
+	}
+	return st, rw.commit()
 }
 
 // PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
@@ -1421,6 +1479,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				zap.String("next_step", "re-record the test set"))
 		}
 		connFailures := 0
+		var deps models.MockDepsCheck
 		for _, mock := range mocks {
 			if mock.Kind == models.ConnectionFailure {
 				// gob has no per-kind decoder: a connection failure is
@@ -1432,9 +1491,11 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				}
 				connFailures++
 			}
+			deps.Add(mock)
 			r.route(mock, true)
 		}
 		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
+		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
 		if want&poolPerTest != 0 {
 			out.Filtered = pkg.FilterTcsMocks(ctx, ys.Logger, r.perTest, afterTime, beforeTime, false)
 		}
@@ -1482,6 +1543,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	hasContent := false
 	connFailures := 0
+	var deps models.MockDepsCheck
 	for {
 		doc, readErr, decodeErr := nextDoc(reader, logger, false)
 		if errors.Is(readErr, io.EOF) {
@@ -1506,10 +1568,12 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			if mock.Kind == models.ConnectionFailure {
 				connFailures++
 			}
+			deps.Add(mock)
 			r.route(mock, false)
 		}
 	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
+	warnUnmetRequirements(logger, testSetID, reader.Path(), deps.Unmet())
 
 	if want&poolPerTest != 0 {
 		if !hasContent {
