@@ -1318,18 +1318,35 @@ type mockRouter struct {
 	allPerTest []*models.Mock
 }
 
-// pruned reports whether the mapping prune drops the named mock: it is mapped
-// to a specific test and this run does not need it.
-func (r *mockRouter) pruned(name string) bool {
-	_, isMappedToSpecificTest := r.mocksThatHaveMappings[name]
-	_, isNeededForCurrentRun := r.mocksWeNeed[name]
-	return isMappedToSpecificTest && !isNeededForCurrentRun
+// pruned reports whether the mapping prune drops the mock: it is mapped to a
+// specific test and this run does not need it. A mock that is every test's by
+// statement is kept, whichever test's mapping names it (sharedByStatement).
+func (r *mockRouter) pruned(mock *models.Mock) bool {
+	_, isMappedToSpecificTest := r.mocksThatHaveMappings[mock.Name]
+	_, isNeededForCurrentRun := r.mocksWeNeed[mock.Name]
+	return isMappedToSpecificTest && !isNeededForCurrentRun && !sharedByStatement(mock)
+}
+
+// sharedByStatement reports whether a mock is served to every test because a
+// statement says so: its recorder stated it session or connection lifetime,
+// or it is a call the recorder stated per-test that keploy.yaml declares
+// shared (sessionCalls). A replay's mapping names it under the test that
+// consumed it, but it is not that test's alone: a run of other tests needs it
+// too (a connection's setup, a token another test fetched). A mock recorded
+// before lifetimes were stated is pruned by the mapping as it always was.
+func sharedByStatement(mock *models.Mock) bool {
+	if !mock.StatesLifetime() {
+		return false
+	}
+	mock.DeriveLifetime()
+	lt := mock.TestModeInfo.Lifetime
+	return lt == models.LifetimeSession || lt == models.LifetimeConnection
 }
 
 // route classifies one decoded mock. fromGob marks a mock read from mocks.gob,
 // whose per-test pool keeps the PostgresV2 dual-pool quirk.
 func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
-	pruned := r.pruned(mock.Name)
+	pruned := r.pruned(mock)
 	if pruned && r.want&(poolAllSession|poolAllPerTest) == 0 {
 		return
 	}
@@ -1430,7 +1447,7 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 	if r.want&poolSession != 0 {
 		out.Unfiltered = make([]*models.Mock, 0, len(out.AllSession))
 		for _, m := range out.AllSession {
-			if !r.pruned(m.Name) {
+			if !r.pruned(m) {
 				out.Unfiltered = append(out.Unfiltered, m)
 			}
 		}

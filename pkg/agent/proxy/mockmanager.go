@@ -131,6 +131,18 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+	// kept are the per-test recordings an exact match kept for its test's
+	// byte-identical repeats (integrations.RepeatKeeper), by key (a worker's
+	// view prefixes its scope). Guarded by cursorMu, and dropped with the
+	// per-test cursors at every staging.
+	kept map[string]struct{}
+
+	// spent are the per-test recordings of stateful dependencies a worker's
+	// test kept for its repeats, by name, once that test is over (Spend):
+	// Spent hides them from every reader but a later scope of the same test
+	// (scopedMockDb.Spent). Reset with the replay session.
+	spentMu sync.RWMutex
+	spent   map[string]struct{}
 
 	// vars holds the test variables this replay has bound (package
 	// variables): reset as each test case of keploy test and each test of
@@ -233,6 +245,14 @@ type MockManager struct {
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
 	windowsSeeded   *models.WindowSchedule
+
+	// statedKinds are the kinds of which a mock staged since the current
+	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
+	// set's recording serves each of their per-test mocks to its own test
+	// only (StatesLifetimes). A set's first staging hands over its whole
+	// recording; a later one only adds. Replaced, never mutated, under
+	// swapMu.
+	statedKinds atomic.Pointer[map[models.Kind]bool]
 
 	// windowSig is closed, and replaced by a fresh channel, every time the
 	// published test window changes (SetMocksWithWindow, SetCurrentTestWindow),
@@ -506,6 +526,9 @@ func (m *MockManager) IsClosed() bool {
 // references to the cleared trees still observe valid (empty) trees
 // rather than panicking.
 func (m *MockManager) ResetForReplaySession() {
+	m.spentMu.Lock()
+	m.spent = nil
+	m.spentMu.Unlock()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -1125,6 +1148,9 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // scope opens a test with no time bounds (SetScopeMocks); it is published
 // with the window, and every other staging closes one.
 func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
+	// Every staging starts the per-test stateful cursors over: a test's own
+	// recordings of a request advance their cursor within that test alone.
+	m.resetPerTestCursors()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1200,6 +1226,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
 			m.windowMu.Unlock()
+			// The previous set's recording is not this one's.
+			m.statedKinds.Store(nil)
 		}
 		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
 		// (session + connection) mocks in the startup pool during initial
@@ -1233,6 +1261,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			startupInit = append(startupInit, mk)
 		}
 	}
+	m.noteStatedLifetimes(filtered, unfiltered, explicitStartup)
 
 	// Pre-filter per-test mocks by the outer test window. Zero start or
 	// zero end means "no window" and we preserve the legacy behaviour
@@ -1770,6 +1799,87 @@ func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
 	m.cursors[key] = next
 }
 
+// Spend records that the test which kept the named per-test recordings of
+// stateful dependencies for its repeats is over (integrations.SpentReader).
+func (m *MockManager) Spend(names ...string) {
+	if len(names) == 0 {
+		return
+	}
+	m.spentMu.Lock()
+	defer m.spentMu.Unlock()
+	if m.spent == nil {
+		m.spent = make(map[string]struct{}, len(names))
+	}
+	for _, n := range names {
+		m.spent[n] = struct{}{}
+	}
+}
+
+// Spent reports whether mk is a per-test recording a test kept for its
+// repeats and is over with (Spend).
+func (m *MockManager) Spent(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	m.spentMu.RLock()
+	defer m.spentMu.RUnlock()
+	_, spent := m.spent[mk.Name]
+	return spent
+}
+
+// resetPerTestCursors drops every per-test stateful cursor
+// (models.IsPerTestSequenceKey), and keeps the reusable ones, whose
+// sequences run across tests.
+func (m *MockManager) resetPerTestCursors() {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	for k := range m.cursors {
+		if models.IsPerTestSequenceKey(k) {
+			delete(m.cursors, k)
+		}
+	}
+	m.kept = nil
+}
+
+// KeepForRepeats records that an exact match kept the recording key names for
+// its test's byte-identical repeats (integrations.RepeatKeeper).
+func (m *MockManager) KeepForRepeats(key string) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	m.kept[key] = struct{}{}
+}
+
+// KeptForRepeats returns whether an exact match kept a recording, by key, for
+// its test's repeats since the last staging: nil when none is. It reads a
+// copy, taken under one lock.
+func (m *MockManager) KeptForRepeats() func(key string) bool {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if len(m.kept) == 0 {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(m.kept))
+	for k := range m.kept {
+		kept[k] = struct{}{}
+	}
+	return func(key string) bool {
+		_, ok := kept[key]
+		return ok
+	}
+}
+
+// OwnedByOpenTest reports whether mk, a per-test mock served for the open
+// test (GetPerTestMocksInWindow), is that test's own: whether a test is open
+// (IsTestWindowActive). With none open (the staging before the first test,
+// between tests, or a replay that opens none) the per-test pool is every
+// test's recordings, none of them the call's own (integrations.TestOwner).
+func (m *MockManager) OwnedByOpenTest(*models.Mock) bool {
+	return m.IsTestWindowActive()
+}
+
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
 func clampCursor(cur, n int) int {
 	if cur > n-1 {
@@ -2021,6 +2131,49 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // overhead at all.
 func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return m.GetFilteredMocksInWindow()
+}
+
+// StatesLifetimes reports whether the recording of the set being replayed
+// states its kind mocks' lifetimes (models.Mock.StatesLifetime): a mock of the
+// kind staged since the set's boundary does. Its per-test mocks are then
+// served to their own test only, and a test that misses a call another test
+// recorded is told how to declare it shared (keploy.yaml sessionCalls). It
+// holds after the test's own mocks are consumed, which a scan of the pools
+// does not. See integrations.StatesLifetimes.
+func (m *MockManager) StatesLifetimes(kind models.Kind) bool {
+	if kinds := m.statedKinds.Load(); kinds != nil {
+		return (*kinds)[kind]
+	}
+	return false
+}
+
+// noteStatedLifetimes adds the kinds of which a mock of the slices states its
+// lifetime to statedKinds. Under swapMu.
+func (m *MockManager) noteStatedLifetimes(slices ...[]*models.Mock) {
+	cur := m.statedKinds.Load()
+	var next map[models.Kind]bool
+	for _, ms := range slices {
+		for _, mk := range ms {
+			if mk == nil || !mk.StatesLifetime() {
+				continue
+			}
+			if cur != nil && (*cur)[mk.Kind] {
+				continue
+			}
+			if next == nil {
+				next = map[models.Kind]bool{}
+				if cur != nil {
+					for k := range *cur {
+						next[k] = true
+					}
+				}
+			}
+			next[mk.Kind] = true
+		}
+	}
+	if next != nil {
+		m.statedKinds.Store(&next)
+	}
 }
 
 // GetConnectionMocks returns connection-scoped mocks (Lifetime ==

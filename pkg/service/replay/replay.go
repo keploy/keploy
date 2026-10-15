@@ -2946,24 +2946,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// (assertTestMocks is on under the switch).
 			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
 
-			// Under the proven switch this test's misses are read now, once,
-			// with its response in, so the verdict, the result line, the
-			// counters and the retry list all hold a miss. Every result written
-			// for this test below attaches this read (attachMisses): a second
-			// read would find the agent's channel drained.
-			var earlyMisses *testMisses
+			// This test's misses are read now, once, with its response in, so
+			// the verdict can hold a miss. Every result written for this test
+			// below attaches this read (attachMisses): a second read would find
+			// the agent's channel drained. Under the proven switch a miss fails
+			// the test, so the result line, the counters and the retry list all
+			// hold it (earlyMissed); with the switch off a miss keeps a test
+			// whose mock set diverged from being demoted to OBSOLETE (missed):
+			// it got no answer to a call, which is no sign its recording is out
+			// of date, and the demotion would turn its failure into a green run.
+			read := r.readMockErrors(runTestSetCtx)
+			missed := dataPlaneMisses(read.calls)
 			earlyMissed := 0
 			if provenswitch.On() {
-				read := r.readMockErrors(runTestSetCtx)
-				earlyMisses, earlyMissed = &read, dataPlaneMisses(read.calls)
+				earlyMissed = missed
 			}
 			attachMisses := func(res *models.TestResult) {
-				if earlyMisses == nil {
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, res)
-					return
+				r.attachReadMockErrors(read, testSetID, testCase.Name, res)
+				if provenswitch.On() {
+					missCategory(res)
 				}
-				r.attachReadMockErrors(*earlyMisses, testSetID, testCase.Name, res)
-				missCategory(res)
 			}
 			// The switch fails this test whatever its answer says when a call
 			// of it got no recorded answer or a recorded call of it was not
@@ -3149,6 +3151,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
 					zap.Int("unmatchedCalls", earlyMissed))
+			} else if missed > 0 && outcome.Status == models.TestStatusObsolete {
+				outcome = failOnMisses(outcome)
+				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED, not obsolete: calls it made got no recorded answer, and the report lists each under unmatched_calls",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.String("reason", vetoUnmatchedCallSwitchOff),
+					zap.Int("unmatchedCalls", missed))
 			}
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
@@ -3964,13 +3973,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testset", testSetID),
 					zap.Strings("unconsumedMocks", namesOf(streamUnconsumed)))
 			}
-			// Its misses too, read once, now, and attached below.
-			var streamMisses *testMisses
+			// Its misses too, read once, now, and attached below. Under the
+			// proven switch a miss fails the test (streamMissed); with it off a
+			// miss keeps a test whose mock set diverged from being demoted to
+			// OBSOLETE (streamCallsMissed), as in the request-response path.
+			streamRead := r.readMockErrors(runTestSetCtx)
+			streamCallsMissed := dataPlaneMisses(streamRead.calls)
 			streamMissed := 0
 			if provenswitch.On() {
-				read := r.readMockErrors(runTestSetCtx)
-				streamMisses = &read
-				if streamMissed = dataPlaneMisses(read.calls); streamMissed > 0 && !mockSetMismatch {
+				if streamMissed = streamCallsMissed; streamMissed > 0 && !mockSetMismatch {
 					r.logger.Error("calls this streaming test made got no recorded answer; failing it (KEPLOY_PROVEN=1); the report lists each under unmatched_calls",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
@@ -3979,12 +3990,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			// Every result written for this test below attaches that read.
 			attachStreamMisses := func(res *models.TestResult) {
-				if streamMisses == nil {
-					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, res)
-					return
+				r.attachReadMockErrors(streamRead, testSetID, tc.Name, res)
+				if provenswitch.On() {
+					missCategory(res)
 				}
-				r.attachReadMockErrors(*streamMisses, testSetID, tc.Name, res)
-				missCategory(res)
 			}
 			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
 			var streamOpts []httpMatcher.MatchOption
@@ -4067,10 +4076,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if len(streamUnconsumed) > 0 || streamMissed > 0 {
+				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 {
 					reason := vetoUnconsumedTestMock
-					if len(streamUnconsumed) == 0 {
+					switch {
+					case len(streamUnconsumed) > 0:
+					case provenswitch.On():
 						reason = vetoUnmatchedCall
+					default:
+						reason = vetoUnmatchedCallSwitchOff
 					}
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
@@ -4129,7 +4142,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamMissed == 0 {
+			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamCallsMissed == 0 {
 				// A template failure is never demoted to OBSOLETE, nor is a
 				// test that left one of its test mocks unconsumed, or one a
 				// call of which got no recorded answer, nor, under the proven

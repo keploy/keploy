@@ -314,6 +314,12 @@ func missCategory(r *models.TestResult) {
 // answer (KEPLOY_PROVEN=1).
 const vetoUnmatchedCall = "a call this test made got no recorded answer (" + provenswitch.Env + "=1)"
 
+// vetoUnmatchedCallSwitchOff is the reason a test whose mock set diverged is
+// FAILED rather than demoted to OBSOLETE, with the proven switch off, when a
+// call it made got no recorded answer: a miss is no sign its recording is out
+// of date, and the demotion would turn its failure into a green run.
+const vetoUnmatchedCallSwitchOff = "a call this test made got no recorded answer"
+
 // testEvidence is the evidence against a test, as its results carried it
 // before the BeforeTestResult hook ran: the calls of it no mock answered
 // (data-plane only), the recorded calls it did not make, and the categories
