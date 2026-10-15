@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"io"
 	"net"
 	"sort"
 	"sync"
@@ -38,8 +39,10 @@ type inflight struct {
 	conns map[*trackedConn]struct{}
 	// sig is closed, and replaced, at every change.
 	sig chan struct{}
-	// progress counts the changes, for the agent's watchdog.
+	// progress counts the changes that move work, anywhere.
 	progress atomic.Uint64
+	// ids numbers the connections kept, for PendingProgress.
+	ids atomic.Uint64
 }
 
 // trackedConn is an accepted connection inflight keeps: its reads tell when
@@ -47,6 +50,11 @@ type inflight struct {
 type trackedConn struct {
 	net.Conn
 	t *inflight
+	// id names it in PendingProgress.
+	id uint64
+	// progress counts what moved its own work: bytes read, a request held
+	// or released, its close.
+	progress atomic.Uint64
 	// reading counts the reads in progress: one is the handler waiting for
 	// the application's next bytes.
 	reading atomic.Int32
@@ -66,7 +74,7 @@ type trackedConn struct {
 
 // track keeps conn, and returns it wrapped so its reads are seen.
 func (t *inflight) track(conn net.Conn) *trackedConn {
-	tc := &trackedConn{Conn: conn, t: t}
+	tc := &trackedConn{Conn: conn, t: t, id: t.ids.Add(1)}
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
@@ -146,6 +154,28 @@ func (t *inflight) Pending(answers bool) int {
 	return n
 }
 
+// PendingProgress is, for each connection that holds work now (Pending), the
+// count of what moved its own work: a wait whose pending connections' counts
+// do not move is stuck, whatever moves elsewhere.
+func (t *inflight) PendingProgress(answers bool) map[uint64]uint64 {
+	t.mu.Lock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		conns = append(conns, tc)
+	}
+	t.mu.Unlock()
+	out := map[uint64]uint64{}
+	for _, tc := range conns {
+		if tc.forgotten.Load() {
+			continue
+		}
+		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0)) {
+			out[tc.id] = tc.progress.Load()
+		}
+	}
+	return out
+}
+
 // Unknown are the protocols of the connections, still kept, whose parser
 // reads ahead and does not say which requests it holds: whether they hold
 // one cannot be told, in a replay (answers). Sorted, each once.
@@ -191,25 +221,32 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	c.t.wake()
 	n, err := c.Conn.Read(b)
 	c.reading.Add(-1)
-	if n == 0 && isTimeout(err) {
-		// Waited out its deadline with nothing: no work moved.
+	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
+		// Nothing came: a deadline waited out by a parser polling an idle
+		// connection, or the end of one it reads again. No work moved.
 		c.t.wake()
 	} else {
-		c.t.changed()
+		c.moved()
 	}
 	return n, err
+}
+
+// moved is a change that moved c's own work: progress for c, and for all.
+func (c *trackedConn) moved() {
+	c.progress.Add(1)
+	c.t.changed()
 }
 
 // Hold marks a request c's parser read and holds, not yet answered
 // (integrations.RequestHolder); release unmarks it, once.
 func (c *trackedConn) Hold() (release func()) {
 	c.held.Add(1)
-	c.t.changed()
+	c.moved()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			c.held.Add(-1)
-			c.t.changed()
+			c.moved()
 		})
 	}
 }
@@ -230,7 +267,7 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 // connection holds the test's work, as a handler not blocked reading does.
 func (c *trackedConn) Close() error {
 	err := c.Conn.Close()
-	c.t.changed()
+	c.moved()
 	return err
 }
 
@@ -264,8 +301,10 @@ func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() 
 // InFlightUnknown implements agent.InFlightReader.
 func (p *Proxy) InFlightUnknown(answers bool) []string { return p.inflight.Unknown(answers) }
 
-// InFlightProgress implements agent.InFlightReader.
-func (p *Proxy) InFlightProgress() uint64 { return p.inflight.Progress() }
+// InFlightPendingProgress implements agent.InFlightReader.
+func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
+	return p.inflight.PendingProgress(answers)
+}
 
 var (
 	_ agent.InFlightReader       = (*Proxy)(nil)

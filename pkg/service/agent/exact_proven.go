@@ -198,14 +198,10 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		a.markDrops(drops)
 	default:
-		// A test case that ends is served the pool, and told it is not
-		// verified, when keploy cannot tell its calls settled.
-		if err := a.settledSince(ctx, true, "the test case"); err != nil {
-			if !errors.Is(err, errHoldsUnknown) && !errors.Is(err, errDropped) {
-				return err
-			}
-			unknown = err
-		}
+		// A test case that ends is served the pool whatever its settling
+		// found, and told it is not verified when keploy cannot tell its
+		// calls settled: the calls after it are the pool's either way.
+		unknown = a.settledSince(ctx, true, "the test case")
 	}
 	switch {
 	case ex.Stage:

@@ -191,8 +191,11 @@ type InFlightReader interface {
 	// InFlightChanged is closed at the next change of what InFlightPending
 	// reads: take it before reading.
 	InFlightChanged() <-chan struct{}
-	// InFlightProgress counts those changes, for a watchdog.
-	InFlightProgress() uint64
+	// InFlightPendingProgress is, for each connection that holds such work
+	// now (an opaque id), a count of what moved its own work, for a watchdog:
+	// a wait whose pending connections' counts do not move is stuck,
+	// whatever moves elsewhere.
+	InFlightPendingProgress(answers bool) map[uint64]uint64
 	// InFlightUnknown names the protocols of the accepted connections, in a
 	// replay (answers), whose parser reads ahead of its answers and does not
 	// say which requests it holds (integrations.RequestHolding): whether they

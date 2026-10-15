@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -38,9 +40,10 @@ import (
 // read, never filed after it.
 //
 // The wait has a minimal watchdog (design v14 §8.4): it wakes once a second
-// and counts the wake-ups in a row at which nothing moved (no accept, no
-// change of a connection's state). At settleStallLimit it fails the wait,
-// and the test is not judged. It counts its own wake-ups, not seconds: a
+// and counts, for each thing the wait waits on, the wake-ups in a row at which
+// it did not move (the accept and application connection counts; then each
+// connection that still holds work: its bytes, its held requests, its close).
+// At settleStallLimit it fails the wait, and the test is not judged. It counts its own wake-ups, not seconds: a
 // starved agent starves its watchdog equally, so load alone cannot trip it,
 // and a deadlock can.
 
@@ -116,13 +119,23 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	defer cancel(nil)
 	// The watchdog reads the counts at every wake-up: that read is also what
 	// ends an application connection's wait when the kernel dropped its
-	// event (WaitAppConnsSettled).
-	stop := a.watchSettle(ctx, cancel, func() uint64 {
+	// event (WaitAppConnsSettled). While the wait is for the counts, they
+	// are what must move; once it is for the connections' work, each
+	// connection that still holds some must.
+	var working atomic.Bool
+	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
 		c, err := a.ProxyConns(ctx)
-		if err != nil {
-			return ir.InFlightProgress()
+		if !working.Load() {
+			if err != nil {
+				return nil
+			}
+			return map[string]uint64{"counts": c.Accepted + c.AppSettled}
 		}
-		return c.Accepted + c.AppSettled + ir.InFlightProgress()
+		out := map[string]uint64{}
+		for id, n := range ir.InFlightPendingProgress(answers) {
+			out[strconv.FormatUint(id, 10)] = n
+		}
+		return out
 	})
 	defer stop()
 	if err := a.WaitProxySettled(ctx, counts); err != nil {
@@ -131,6 +144,7 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		}
 		return 0, err
 	}
+	working.Store(true)
 	for {
 		changed := ir.InFlightChanged()
 		if ir.InFlightPending(answers) == 0 {
@@ -181,15 +195,19 @@ func (d dropped) Error() string {
 
 func (d dropped) Is(target error) bool { return target == errDropped }
 
-// watchSettle is the settle wait's watchdog: progress is a count that moves
-// with every sign of progress. It cancels ctx with errNoProgress after
-// settleStallLimit wake-ups in a row at which progress did not move.
-func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc, progress func() uint64) (stop func()) {
+// watchSettle is the settle wait's watchdog. progress gives, at each
+// wake-up, a count for each thing the wait is waiting on (the counts of the
+// accepts and application connections while it waits for those; then each
+// connection that still holds work). It cancels ctx with errNoProgress once
+// one of them has not moved for settleStallLimit wake-ups in a row: a wait is
+// stuck when what it waits on does not move, whatever moves elsewhere. One
+// that stops being waited on drops out; a new one starts its count.
+func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc, progress func() map[string]uint64) (stop func()) {
 	wake, stopWake := settleWake(ctx)
 	quit, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		last, stalls := progress(), 0
+		last, stalls := progress(), map[string]int{}
 		for {
 			select {
 			case <-quit:
@@ -199,12 +217,22 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 					return
 				}
 			}
-			if now := progress(); now != last {
-				last, stalls = now, 0
-			} else {
-				stalls++
+			now := progress()
+			fire := false
+			for k, v := range now {
+				if was, ok := last[k]; ok && was == v {
+					stalls[k]++
+				} else {
+					stalls[k] = 0
+				}
+				fire = fire || stalls[k] >= settleStallLimit
 			}
-			fire := stalls >= settleStallLimit
+			for k := range stalls {
+				if _, ok := now[k]; !ok {
+					delete(stalls, k)
+				}
+			}
+			last = now
 			if fire {
 				cancel(errNoProgress)
 			}

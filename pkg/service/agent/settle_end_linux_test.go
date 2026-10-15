@@ -147,3 +147,43 @@ func TestATestDuringWhichTheListenerDroppedPacketsIsNotVerified(t *testing.T) {
 	err := a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
 	require.ErrorIs(t, err, errDropped)
 }
+
+// A test's begin, and keploy test's open of a test case, wait until the calls
+// made before are settled: one still in the proxy's hands is the pool's or
+// the previous test's, never this one's.
+func TestABeginWaitsForTheCallsMadeBefore(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	for _, open := range []struct {
+		name string
+		do   func() error
+	}{
+		{"the wire's begin", func() error {
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			if serr != nil {
+				return serr
+			}
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+			if serr != nil {
+				return serr
+			}
+			return nil
+		}},
+		{"keploy test's open", func() error {
+			return a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}})
+		}},
+	} {
+		t.Run(open.name, func(t *testing.T) {
+			p.set(0, 1) // a call made before is in the proxy's hands
+			opened := make(chan error, 1)
+			go func() { opened <- open.do() }()
+			select {
+			case err := <-opened:
+				t.Fatalf("opened while a call made before was in flight: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			p.set(0, 0)
+			require.NoError(t, <-opened)
+		})
+	}
+}

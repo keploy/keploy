@@ -796,7 +796,9 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// for every miss.
 	var settleErr error
 	if provenswitch.On() && a.replaying() {
-		settleErr = a.settledSince(ctx, true, "the run went on after its last read")
+		// keploy test reads a test case's misses after its end: what the
+		// listener dropped since is no test's, and is not compared here.
+		_, settleErr = a.settle(ctx, true)
 	}
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {
