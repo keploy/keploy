@@ -2172,3 +2172,66 @@ func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
 		}
 	}
 }
+
+// A mock reusable only by its recorder's statement (a MySQL SET stated
+// session, tagged "mocks") is attributed as a per-test mock is: a kept test's
+// window owns it (named as its mocks are), and a duplicate's window prunes it
+// with the duplicate's mocks. A mock reusable by its tag (the handshake,
+// "config") is flushed unowned in either, as before.
+func TestResolveRangeAttributesStatementOnlyReusableMocksAsPerTest(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	mysqlMock := func(typ, stated string) *models.Mock {
+		md := map[string]string{"type": typ, "connID": "c1"}
+		if stated != "" {
+			md[models.MetadataLifetimeKey] = stated
+		}
+		m := &models.Mock{Kind: models.MySQL, Name: typ, Spec: models.MockSpec{Metadata: md, ReqTimestampMock: now}}
+		m.DeriveLifetime()
+		return m
+	}
+	for _, keep := range []bool{true, false} {
+		ch := make(chan *models.Mock, 4)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		set := mysqlMock("mocks", models.MetadataLifetimeSession)
+		handshake := mysqlMock("config", models.MetadataLifetimeSession)
+		if !set.ReusableByStatementOnly() || handshake.ReusableByStatementOnly() {
+			t.Fatalf("fixture: SET reusable by statement only %v, handshake %v; want true, false", set.ReusableByStatementOnly(), handshake.ReusableByStatementOnly())
+		}
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, set, handshake)
+		mgr.mu.Unlock()
+
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", keep, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		switch {
+		case keep && (len(names) != 2 || !containsPrefix(names, "mock-") || !contains(names, "config")):
+			t.Fatalf("a kept window flushed %v; want the SET owned (renamed mock-...) and the handshake as is", names)
+		case !keep && (len(names) != 1 || names[0] != "config"):
+			t.Fatalf("a duplicate's window flushed %v; want the handshake only, the SET pruned with the duplicate's mocks", names)
+		}
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPrefix(ss []string, prefix string) bool {
+	for _, s := range ss {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}

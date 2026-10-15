@@ -584,6 +584,40 @@ func (r *Registry) currentFrame(w *worker) *frame {
 	return nil
 }
 
+// Owns reports whether the named mock is a recording of the test open to a
+// call from pid, resolved as View resolves it (currentTest): whether that
+// test's mapping names it. A boot, runner or unmapped mock, which View also
+// shows the call, is no test's own, and with no test open to pid nothing is.
+// known is false when pid has no view (View's ok), and owned is then false.
+func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
+	if pid == 0 {
+		return false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sets == nil {
+		return false, false
+	}
+	_, w := r.chain(pid)
+	if w == nil {
+		return false, false
+	}
+	st, ok := r.sets[r.setOf(w.dir)]
+	if !ok {
+		return false, false
+	}
+	test := r.currentTest(w)
+	if test == "" {
+		return false, true
+	}
+	for _, o := range st.Tests[test] {
+		if o.Name == name {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
