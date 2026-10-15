@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -28,6 +29,16 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	if len(reqBuf) > 0 {
 		release, holding = integrations.HoldRequest(ctx), true
 	}
+	// Under the proven switch the parser ends when the application closes
+	// the connection, and keeps what a read returned with its deadline or
+	// its EOF: a connection left polling after its close is one a test's end
+	// waits on forever, and a request dropped there is a call never answered
+	// nor filed.
+	proven := provenswitch.On()
+	read := pUtil.ReadBytes
+	if proven {
+		read = pUtil.ReadBytesUntilEOF
+	}
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
@@ -42,25 +53,38 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			// To read the stream of request packets from the client
+			ended := false
 			for {
-				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
+				buffer, err := read(ctx, logger, clientConn)
+				netErr, isNet := err.(net.Error)
+				timeout := isNet && netErr.Timeout()
+				atEOF := err != nil && err.Error() == "EOF"
 				// Applied this nolint to ignore the staticcheck error here because of readability
 				// nolint:staticcheck
-				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
+				if !timeout && err != nil && !atEOF {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
 					return
 				}
-				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
+				if (err == nil || proven) && len(buffer) > 0 {
+					if !holding {
+						release, holding = integrations.HoldRequest(ctx), true
+					}
+					genericRequests = append(genericRequests, buffer)
+				} else if err == nil {
+					genericRequests = append(genericRequests, buffer)
+				}
+				if timeout || atEOF {
 					logger.Debug("the timeout for the client read in generic or EOF")
+					ended = proven && atEOF
 					break
 				}
-				if !holding && len(buffer) > 0 {
-					release, holding = integrations.HoldRequest(ctx), true
-				}
-				genericRequests = append(genericRequests, buffer)
 			}
 
 			if len(genericRequests) == 0 {
+				if ended {
+					logger.Debug("the application closed the generic connection")
+					return
+				}
 				logger.Debug("the generic request buffer is empty")
 				continue
 			}
@@ -123,6 +147,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			holding = false
 			// Clear the genericRequests buffer for the next dependency call
 			genericRequests = [][]byte{}
+			if ended {
+				return
+			}
 			logger.Debug("the genericRequests after the iteration", zap.Int("length", len(genericRequests)))
 		}
 	}(errCh, genericRequests)

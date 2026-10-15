@@ -2281,10 +2281,21 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
-			// Its sequence number is taken before anything else: the
-			// agent waits on the numbers the kernel gave the connections
-			// completed to this listener (accepts.go).
-			p.countAccept(clientConn)
+			// Under the proven switch the connection is kept from its
+			// accept on, so a test's end sees what it holds (inflight.go):
+			// kept before it is counted, or a wait that saw the count reach
+			// it could find it nowhere and call the test settled while its
+			// request sat unread.
+			raw := clientConn
+			var tracked *trackedConn
+			if provenswitch.On() {
+				tracked = p.inflight.track(clientConn)
+				clientConn = tracked
+			}
+			// Its sequence number is taken before anything else is done
+			// with it: the agent waits on the numbers the kernel gave the
+			// connections completed to this listener (accepts.go).
+			p.countAccept(raw)
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2297,13 +2308,6 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// panics in some interleavings. Done() still runs in
 			// the goroutine's deferred cleanup.
 			p.activeConns.Add(1)
-			// Under the proven switch the connection is kept from its
-			// accept on, so a test's end sees what it holds (inflight.go).
-			var tracked *trackedConn
-			if provenswitch.On() {
-				tracked = p.inflight.track(clientConn)
-				clientConn = tracked
-			}
 			clientConnErrGrp.Go(func() error {
 				defer p.activeConns.Done()
 				defer p.inflight.forget(tracked)
@@ -2342,6 +2346,10 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	// tracked is the connection as the accept kept it (inflight.go), under
+	// the proven switch: srcConn is wrapped again below (a peek's reader, a
+	// prefix, TLS), and what a test's end reads of it goes to this one.
+	tracked, _ := srcConn.(*trackedConn)
 	// activeConns.Add/Done are paired at the goroutine-spawn site
 	// in the accept loop (see caller) to avoid the "Add concurrent
 	// with Wait" race sync.WaitGroup documents as a misuse.
@@ -2537,8 +2545,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Under the proven switch the accept kept the connection (inflight.go):
 	// a parser that reads ahead says through it which requests it holds
 	// (integrations.HoldRequest).
-	if tc, ok := srcConn.(*trackedConn); ok {
-		parserCtx = integrations.WithRequestHolder(parserCtx, tc)
+	if tracked != nil {
+		parserCtx = integrations.WithRequestHolder(parserCtx, tracked)
 	}
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
@@ -3517,8 +3525,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
-			if tc, ok := srcConn.(*trackedConn); ok {
-				tc.servedBy(parserType, matchedParser)
+			if tracked != nil {
+				tracked.servedBy(parserType, matchedParser)
 			}
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
