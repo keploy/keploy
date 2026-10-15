@@ -2332,17 +2332,11 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		meta["destAddr"] = sess.Opts.DstCfg.Addr
 	}
 
-	lifetime := models.LifetimePerTest
-	switch mockType {
-	case "config":
-		lifetime = models.LifetimeSession
-	case "connection":
-		lifetime = models.LifetimeConnection
-	default:
-		if models.IsMySQLSessionReusableCommandType(reqOp) {
-			lifetime = models.LifetimeSession
-		}
-	}
+	// The lifetime the mock is stated (statedLifetime), beside the type tag,
+	// and stamped in memory.
+	stated := statedLifetime(mockType, reqOp, requests)
+	meta[models.MetadataLifetimeKey] = stated
+	lifetime := lifetimeOf(stated, meta["connID"])
 	m := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,

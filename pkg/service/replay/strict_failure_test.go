@@ -175,3 +175,66 @@ func TestRunTestSet_ProvenSwitchCapturesInAnArrayAtItsIndex(t *testing.T) {
 		})
 	}
 }
+
+// With the switch off a test whose answer failed and whose mock set diverged
+// is demoted to OBSOLETE, which leaves its set green, unless a call it made
+// got no recorded answer: the miss explains the failure, not an out-of-date
+// recording, so the test stays FAILED and its set fails, in the main loop and
+// the streaming pass. A DNS miss is not a data-plane call and keeps the
+// demotion; so does a test with no miss.
+func TestAMissVetoesTheObsoleteDemotionWithTheSwitchOff(t *testing.T) {
+	miss := func(protocol, summary string) func() ([]models.UnmatchedCall, error) {
+		return func() ([]models.UnmatchedCall, error) {
+			return []models.UnmatchedCall{{Protocol: protocol, ActualSummary: summary}}, nil
+		}
+	}
+	for _, phase := range []string{"main loop", "streaming pass"} {
+		for _, c := range []struct {
+			name    string
+			miss    func() ([]models.UnmatchedCall, error)
+			want    models.TestStatus
+			wantSet models.TestSetStatus
+		}{
+			{"no miss", nil, models.TestStatusObsolete, models.TestSetStatusPassed},
+			{"a DNS miss", miss("DNS", "A auth.internal"), models.TestStatusObsolete, models.TestSetStatusPassed},
+			{"an HTTP miss", miss("HTTP", "POST /oauth/token"), models.TestStatusFailed, models.TestSetStatusFailed},
+		} {
+			t.Run(phase+"/"+c.name, func(t *testing.T) {
+				setSwitch(t, false)
+				h := newPartialRunHarness(t, 1, 0)
+				h.mappings.onDisk = map[string][]models.MockEntry{"test-1": {{Name: "mock-recorded", Kind: string(models.HTTP)}}}
+				hooks := prHooks{wrongBody: map[string]bool{"test-1": true}}
+				if phase == "streaming pass" {
+					h.streaming("test-1")
+					hooks.consumed = []models.MockState{{Name: "mock-other", Kind: models.HTTP}}
+				}
+				h.replayer.hookImpl = hooks
+				if c.miss != nil {
+					h.instr.mockErrorsFor = missesByTest(c.miss)
+				}
+				core, logs := observer.New(zap.InfoLevel)
+				h.replayer.logger = zap.New(core)
+
+				status := h.run(t)
+
+				got := resultOf(t, h, "test-1")
+				if got.Status != c.want || status != c.wantSet {
+					t.Fatalf("test %s, set %s; want test %s, set %s", got.Status, status, c.want, c.wantSet)
+				}
+				if c.miss != nil && len(got.FailureInfo.UnmatchedCalls) != 1 {
+					t.Fatalf("unmatched calls %+v; want the one miss attached to the test", got.FailureInfo.UnmatchedCalls)
+				}
+				if c.want != models.TestStatusFailed {
+					return
+				}
+				said := logs.FilterMessageSnippet("mock mapping mismatch detected").All()
+				if len(said) != 1 || !strings.Contains(said[0].Message, "as FAILED") || said[0].ContextMap()["reason"] != vetoUnmatchedCallSwitchOff {
+					t.Fatalf("the mismatch was said %+v; want once, as FAILED, for the miss", said)
+				}
+				if n := len(logs.FilterMessageSnippet("obsolete").All()) - len(logs.FilterMessageSnippet("not obsolete").All()); n != 0 {
+					t.Fatalf("the test was also said obsolete (%d lines)", n)
+				}
+			})
+		}
+	}
+}

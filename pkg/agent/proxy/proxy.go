@@ -239,6 +239,12 @@ type Proxy struct {
 	// scoped worker distinguish "another test's mock" from an unmapped shared
 	// recording. Guarded by workerScopeMu.
 	mappedUniverse map[string]struct{}
+	// retained are, by worker scope, the per-test recordings of stateful
+	// dependencies the scope was served and kept for its repeats (cursor
+	// mocks; scopedMockDb.MarkMockAsUsed). Consumed when the scope ends
+	// (endRetained), so no other test is served them. Guarded by
+	// workerScopeMu.
+	retained map[string][]retainedUse
 
 	// asyncEngine, when non-nil (config.Async.Lanes non-empty), tracks
 	// async-lane replay state: registered parsers and the per-test

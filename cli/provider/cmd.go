@@ -1160,6 +1160,20 @@ func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The calls keploy.yaml declares shared apply to every mock this process
+	// derives the lifetime of (loading a recording to replay it), and travel
+	// with the derived lifetime to the agent.
+	models.SetSessionCalls(c.cfg.SessionCalls)
+	for i, rule := range c.cfg.SessionCalls {
+		if problem := rule.Problem(); problem != "" {
+			c.logger.Warn("a sessionCalls rule in keploy.yaml matches no call",
+				zap.Int("rule", i),
+				zap.String("host", rule.Host),
+				zap.String("problem", problem),
+				zap.String("next_step", "name the call's host as its request does, for example host: auth.example.com or host: auth.example.com:8443, and narrow it with method and pathPrefix"))
+		}
+	}
+
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
 	// an early-return that would skip every subsequent validation step

@@ -9,7 +9,13 @@ package models
 //     input-independent answer (COM_PING, COM_STATISTICS, COM_DEBUG,
 //     COM_RESET_CONNECTION), or what an out-of-tree parser declared through
 //     RegisterSessionReusable;
-//   - DNS.
+//   - DNS;
+//   - a mock its recorder stated session or connection lifetime
+//     (MetadataLifetimeKey): the MySQL recorder states a connection's setup
+//     (SET, SHOW VARIABLES, USE), transaction control (BEGIN, COMMIT) and a
+//     prepared statement's lifecycle so, and they belong to the connection,
+//     not to the test whose window they were captured in. A mock stated
+//     per-test is data-plane, whatever its type tag.
 //
 // Every other mock is data-plane, whatever tier DeriveLifetime gives it: its
 // kind fallback makes an untagged HTTP, SQL or Generic mock session-tier, and
@@ -28,6 +34,9 @@ func (m *Mock) IsProtocolPhase() bool {
 	}
 	if WindowBound(m.Kind) {
 		return false
+	}
+	if lt, ok := statedLifetime(m); ok {
+		return lt != LifetimePerTest
 	}
 	switch m.Spec.Metadata["type"] {
 	case "config", "connection":
