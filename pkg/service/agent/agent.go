@@ -1336,6 +1336,16 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
 	case loadModeStrictWindow:
+		if cutoff, ok := stagingStartupCutoff(params); ok {
+			loaded, err = disk.LoadBefore(cutoff)
+			if err == nil {
+				a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
+					zap.Int("startupMocks", len(loaded)),
+					zap.Int("onDisk", disk.Len()),
+					zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
+			}
+			break
+		}
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
@@ -1355,6 +1365,28 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		zap.Int("loadedFromDisk", len(loaded)),
 		zap.Int("residentIneligible", len(resident)))
 	return dedupByName(resident, loaded), nil
+}
+
+// stagingStartupCutoff returns where a set's staging call stops reading the
+// on-disk store, and whether the call is one.
+//
+// The replayer stages a set before the app starts, with the window BaseTime to
+// now (replay.go's SendMockFilterParamsToAgent at set-up, on retry and for a
+// replacement agent). The proxy files everything it is staged with then as
+// app-startup traffic, and the set's first test refiles it to what was recorded
+// before that test (MockManager.setMocksWithWindowLocked). Reading the window
+// itself therefore brought the whole recording into memory only to stage it as
+// startup traffic, and a long recording OOM-killed the agent before its app
+// started. The startup traffic is what was recorded before the set's earliest
+// recorded test, which the staging call carries.
+//
+// A set whose tests carry no request time has no such test, so its staging
+// call reads the window it names.
+func stagingStartupCutoff(params models.MockFilterParams) (time.Time, bool) {
+	if !params.AfterTime.Equal(models.BaseTime) || params.FirstRecordedTestStart.IsZero() {
+		return time.Time{}, false
+	}
+	return params.FirstRecordedTestStart, true
 }
 
 const (
