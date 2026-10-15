@@ -93,23 +93,27 @@ func TestCaptureSynchronousLeavesOutAGivenUpRequest(t *testing.T) {
 }
 
 // A synchronous capture whose request's window was not given up records it on
-// the manager its window is on (the ctx's), and ends the window before handing
-// the mocks on: a send can wait on a full output channel, and a window open
-// meanwhile pins the hold. OnDrop runs inside those sends.
+// the manager its window is on (the ctx's), through ResolveKept: it takes
+// what was held for the request and ends the window, before it hands the
+// mocks on (a window open while its mocks are handed on pins the hold;
+// syncMock's TestResolveKeptEndsTheWindowBeforeItsSends holds ResolveKept to
+// that order). Here the request's mock reaches that manager's channel, and
+// the window is ended though nothing else closed it.
+//
+// It used to look from OnDrop, on a channel never read: the send waited its
+// 200 ms budget and dropped the mock inside the call. A send no longer waits
+// or decides anything in the call when the channel is full: it queues the
+// mock for a drainer, so that look saw no send at all.
 func TestCaptureSynchronousRecordsAKeptRequestAndEndsItsWindow(t *testing.T) {
 	mgr := syncMock.New(zap.NewNop())
-	mgr.SetOutputChannel(make(chan *models.Mock)) // never read: every send waits out its budget
+	out := make(chan *models.Mock, 1)
+	mgr.SetOutputChannel(out)
 	mgr.SetFirstRequestSignaled()
 	start := time.Now().Add(-time.Second)
 	w := mgr.OpenWindow(start, nil)
-	mgr.AddMock(&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: start.Add(time.Millisecond)},
-		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
-	openDuringSend := -1
-	mgr.OnDrop(func(*models.Mock) {
-		if openDuringSend < 0 {
-			openDuringSend = mgr.OpenWindows()
-		}
-	})
+	mock := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: start.Add(time.Millisecond)},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+	mgr.AddMock(mock)
 	tcChan := make(chan *models.TestCase, 1)
 	req := httptest.NewRequest(http.MethodGet, "http://app.local/kept/1", nil)
 	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
@@ -119,10 +123,15 @@ func TestCaptureSynchronousRecordsAKeptRequestAndEndsItsWindow(t *testing.T) {
 	default:
 		t.Fatal("a kept request was not recorded")
 	}
-	if openDuringSend != 0 {
-		t.Fatalf("%d windows open while the kept request's mocks were sent (-1: none was sent on its manager)", openDuringSend)
+	select {
+	case got := <-out:
+		if got != mock {
+			t.Fatal("the kept request's manager handed on another mock")
+		}
+	default:
+		t.Fatal("the kept request's mock was not sent on its window's manager")
 	}
 	if n := mgr.OpenWindows(); n != 0 {
-		t.Fatalf("%d windows still open", n)
+		t.Fatalf("%d windows still open: the kept request's window was not ended", n)
 	}
 }
