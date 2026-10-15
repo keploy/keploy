@@ -13,18 +13,28 @@ type SetEndHook interface {
 	SetEnd(testSetID string, end models.SetEnd)
 }
 
+// noteSetEnd keeps how a final report of the set RunTestSet is running ends
+// it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
+// a set with no test case to run, a set ignored whole, a set refused when it
+// loaded) notes it before writing it.
+func (r *Replayer) noteSetEnd(rep *models.TestReport) {
+	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
+}
+
 // tellSetEnd tells the hooks, when they take it (SetEndHook), how a run of
-// testSetID ended: status, and why, from the set's final report when this run
-// wrote one with that status, else from err, the error that ended it first.
+// testSetID ended: status, and why, from the final report this run of the set
+// noted when it says that status (noteSetEnd), else from err, the error that
+// ended it first: one before any final report, or the failure to write the
+// one at the set's end, which ends the set INTERNAL_ERR whatever it said.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
 	h, ok := r.hookImpl.(SetEndHook)
 	if !ok {
 		return
 	}
 	end := models.SetEnd{Status: status}
-	switch rep := r.setReport; {
-	case rep != nil && rep.TestSet == testSetID && rep.Status == string(status):
-		end.Why = rep.FailureReason
+	switch noted := r.setEnd; {
+	case noted != nil && noted.Status == status:
+		end.Why = noted.Why
 	case err != nil:
 		end.Why = err.Error()
 	}
