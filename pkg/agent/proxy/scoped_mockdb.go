@@ -131,7 +131,7 @@ func visibleIn(v workerView, m *models.Mock) bool {
 // one with no pid) sees the whole pool, held and spent recordings included,
 // and its consume deletes them from the store.
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
-	if err != nil {
+	if err != nil || s.passThrough() {
 		return mocks, err
 	}
 	if s.live {
@@ -227,7 +227,7 @@ func (s *scopedMockDb) usedUpIn(scope string) func(name string) bool {
 // keep) deletes even a scoped test's recording, as before.
 func (s *scopedMockDb) DeleteFilteredMock(mock models.Mock) bool {
 	h, ok := s.MockMemDb.(usedUpHolder)
-	if !ok {
+	if !ok || s.passThrough() {
 		return s.MockMemDb.DeleteFilteredMock(mock)
 	}
 	scope, own := s.openScopeOwns(&mock)
@@ -270,6 +270,9 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 	if !s.MockMemDb.MarkMockAsUsed(mock) {
 		return false
 	}
+	if s.passThrough() {
+		return true
+	}
 	// Only the open test's own: a recording every test may be served stays
 	// for the next.
 	if s.src != nil && !s.live && retainsForRepeats(&mock) && s.OwnedByOpenTest(&mock) {
@@ -284,6 +287,34 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 // connection for the connection's life, and under exact serving the parsers
 // on it must see that MarkMockAsUsed's false for a named mock is a refusal.
 func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
+
+// FindStagedNotOwned forwards the store's lookup of a staged mock the open
+// test does not own (integrations.StagedFinder), "" from a store that has
+// none: under exact serving a Generic miss on a view made before it began is
+// diagnosed as one on the bare manager is.
+func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	if f, ok := s.MockMemDb.(integrations.StagedFinder); ok {
+		return f.FindStagedNotOwned(kind, match)
+	}
+	return ""
+}
+
+var _ integrations.StagedFinder = (*scopedMockDb)(nil)
+
+// passThrough reports whether this view passes every read and consume
+// straight to the store it wraps: while the store serves each test exactly
+// its own mocks (exact serving, the proven switch), it alone decides what
+// every read shows and whether a consume may answer. A view made before
+// exact serving began, which serves its connection for the connection's
+// life, then narrows nothing by its worker's or start's scope, holds no
+// consumed recording of its own, keys no cursor or kept recording by its
+// scope, and hands each consume's answer, a refusal included, to the
+// parser, as the bare manager scopedFor hands a connection opened under
+// exact serving does. That holds while an agent serves one test process and
+// one open test at a time, as it does under the switch (scope_proven); once
+// workers run tests in parallel under it, the scoped cursors and kept
+// recordings this bypasses are needed again.
+func (s *scopedMockDb) passThrough() bool { return s.ExactServing() }
 
 // ConsumedTestMocks forwards the store's answered test mocks
 // (integrations.ExactConsumedReader), none when it keeps none, so a parser on
@@ -343,6 +374,9 @@ func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.
 // always wraps the mock manager, which has it.
 func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		if s.passThrough() {
+			return r.RangeSessionMocksWithKey(ix, key, fn)
+		}
 		v := s.current()
 		gone := s.consumed(v)
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
@@ -436,9 +470,12 @@ func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	if !ok {
 		return -1
 	}
-	if s.live {
+	switch {
+	case s.passThrough():
+		s.lastScope = ""
+	case s.live:
 		s.lastScope = starts.Default.Scope(s.pid)
-	} else {
+	default:
 		s.lastScope = s.current().scope
 	}
 	return c.MockCursorIndex(s.cursorKey(key), n)
@@ -650,6 +687,8 @@ func (s *scopedMockDb) keptKey(name string) string {
 // its worker's.
 func (s *scopedMockDb) scope() string {
 	switch {
+	case s.passThrough():
+		return ""
 	case s.live:
 		return starts.Default.Scope(s.pid)
 	case s.src != nil:
@@ -674,6 +713,9 @@ func (s *scopedMockDb) OwnedByOpenTest(m *models.Mock) bool {
 	if m == nil {
 		return false
 	}
+	if s.passThrough() {
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
 	if s.live {
 		if owned, known := starts.Default.Owns(s.pid, m.Name); known {
 			return owned
@@ -696,7 +738,7 @@ func (s *scopedMockDb) Spent(m *models.Mock) bool {
 	if !ok || !sr.Spent(m) {
 		return false
 	}
-	if s.live || s.src == nil {
+	if s.live || s.src == nil || s.passThrough() {
 		return true
 	}
 	_, mine := s.current().allow[m.Name]
