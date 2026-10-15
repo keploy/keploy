@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -576,6 +577,51 @@ func noteConsumers(consumers map[string][]string, test string, consumed []models
 			consumers[m.Name] = append(consumers[m.Name], test)
 		}
 	}
+}
+
+// markRecordedIn names, on each call of the set's results no mock answered
+// that is a recording its test does not own (FailureInfo.UnmatchedCalls,
+// NotOwned: the parser matched it to ClosestMock), the other test that owns
+// that recording (owners: each owned mock's tests, sorted), if one does: the
+// call is likely one that test recorded, such as a later exchange of a
+// connection it opened at record time and this test opened at replay. A
+// recording its own test owns too, or none owns (one recorded between tests),
+// is named with none. It returns "test: call (closest mock, recorded in test)"
+// for each it named.
+func markRecordedIn(results []models.TestResult, owners map[string][]string) []string {
+	var named []string
+	for i := range results {
+		r := &results[i]
+		for j := range r.FailureInfo.UnmatchedCalls {
+			c := &r.FailureInfo.UnmatchedCalls[j]
+			by := owners[c.ClosestMock]
+			if !c.NotOwned || c.ClosestMock == "" || len(by) == 0 || slices.Contains(by, r.TestCaseID) {
+				continue
+			}
+			c.RecordedIn = by[0]
+			named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, by[0]))
+		}
+	}
+	return named
+}
+
+// ownersOf is the tests that own each mock of the plan, by name, sorted.
+func (p *exactPlan) ownersOf() map[string][]string {
+	if p == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for test, names := range p.owned {
+		for _, n := range names {
+			if !slices.Contains(out[n], test) {
+				out[n] = append(out[n], test)
+			}
+		}
+	}
+	for _, tests := range out {
+		sort.Strings(tests)
+	}
+	return out
 }
 
 // markConsumedBy names, on each unconsumed test mock of the set's results

@@ -360,6 +360,14 @@ type UnmatchedCall struct {
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
+	// a recording the test does not own.
+	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// RecordedIn names, under the proven switch, the other test of the set
+	// that owns the recording a NotOwned call is (ClosestMock): the call is
+	// likely one that test recorded, such as a later exchange of a connection
+	// it opened, whose handshake was recorded there.
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
 }
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it

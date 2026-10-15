@@ -244,3 +244,73 @@ func TestUnderTheSwitchWindowOwnershipReadsBothPoolsAndEveryTestCase(t *testing.
 		t.Fatalf("pool %v, want %v: test-1's call is test-1's", pool, want)
 	}
 }
+
+// genericAt is a recorded Generic exchange whose request was recorded ms
+// milliseconds after attr0, as its recorder states it: a connection's
+// preamble session, a later exchange per-test (type "config" either way).
+func genericAt(name string, ms int, stated string) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.GENERIC, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "config", models.MetadataLifetimeKey: stated},
+		ReqTimestampMock: attrAt(ms), ResTimestampMock: attrAt(ms + 1),
+	}}
+}
+
+// genericState is a Generic exchange the agent reports consumed under exact
+// serving: a test mock though its type is "config" (MockState.DataPlane).
+func genericState(name string, ms int) models.MockState {
+	m := mongoAt(name, ms)
+	m.Kind, m.Type, m.DataPlane = models.GENERIC, "config", true
+	return m
+}
+
+// Under the switch a test owns the Generic exchanges its window holds after
+// their connection's preamble, and is judged for them: one it does not make
+// fails it, and one it makes counts though its type tag is "config". The
+// preamble is the pool's.
+func TestUnderTheSwitchATestIsJudgedForItsGenericExchanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		made map[string][]models.MockState
+		want models.TestStatus
+	}{
+		{"test-1 makes its exchange", map[string][]models.MockState{"test-1": {genericState("mock-get", 1020)}}, models.TestStatusPassed},
+		{"test-1 does not make it", map[string][]models.MockState{}, models.TestStatusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.mocks.filtered = []*models.Mock{
+				genericAt("mock-hello", 1010, models.MetadataLifetimeSession),
+				genericAt("mock-get", 1020, models.MetadataLifetimePerTest),
+			}
+			mappingFile(t, h, nil)
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, tc.made)}
+			_ = h.run(t)
+			if want := []string{"test-1:mock-get"}; !reflect.DeepEqual(exactOpened(h), want) {
+				t.Fatalf("opened %v, want %v", exactOpened(h), want)
+			}
+			if got := statusOf(t, h, "test-1"); got != tc.want {
+				t.Fatalf("test-1: %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A call no mock answered that is a recording its test does not own is named
+// with the first other test that owns it; one its own test owns too, one no
+// test owns, and one the parser only found near (not NotOwned), are not.
+func TestMarkRecordedInNamesTheTestThatOwnsTheRecording(t *testing.T) {
+	results := []models.TestResult{{TestCaseID: "test-2", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{ActualSummary: "auth", ClosestMock: "mock-auth", NotOwned: true},
+		{ActualSummary: "get", ClosestMock: "mock-get", NotOwned: true},
+		{ActualSummary: "boot", ClosestMock: "mock-boot", NotOwned: true},
+		{ActualSummary: "near", ClosestMock: "mock-auth"},
+	}}}}
+	plan := &exactPlan{owned: map[string][]string{"test-3": {"mock-auth"}, "test-1": {"mock-auth"}, "test-2": {"mock-get"}, "test-4": {"mock-get"}}}
+	named := markRecordedIn(results, plan.ownersOf())
+	calls := results[0].FailureInfo.UnmatchedCalls
+	if calls[0].RecordedIn != "test-1" || calls[1].RecordedIn != "" || calls[2].RecordedIn != "" || calls[3].RecordedIn != "" || len(named) != 1 {
+		t.Fatalf("recorded_in %q %q %q %q, named %v", calls[0].RecordedIn, calls[1].RecordedIn, calls[2].RecordedIn, calls[3].RecordedIn, named)
+	}
+}

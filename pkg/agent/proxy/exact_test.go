@@ -575,3 +575,56 @@ func TestOwnedByOpenTestUnderExactServingIsTheTestsMapping(t *testing.T) {
 		}
 	}
 }
+
+// Under exact serving a test's Generic exchange stated per-test (type
+// "config") answers once through the Generic parser's door, and is reported a
+// test mock (MockState.DataPlane), so the replay counts it as the test's. The
+// staged mocks (StagedMocks) include another test's, which no read shows.
+func TestAGenericTestMockIsReportedAsATestMock(t *testing.T) {
+	generic := func(name string, at time.Duration, stated string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.GENERIC, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config", models.MetadataLifetimeKey: stated},
+			ReqTimestampMock: exactT0.Add(at), ResTimestampMock: exactT0.Add(at + time.Millisecond),
+		}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}}
+	}
+	own := generic("own", 0, models.MetadataLifetimePerTest)
+	other := generic("other", time.Second, models.MetadataLifetimePerTest)
+	hello := generic("hello", 2*time.Second, models.MetadataLifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{own, other, hello})
+	mm.ServeExactPool("-", []string{"hello"})
+	mm.ServeExactTest("T", []*models.Mock{own})
+	// A miss's diagnosis finds a staged mock the open test does not own, by
+	// name: another test's, which no read shows; never the test's own.
+	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "other" }); got != "other" {
+		t.Fatalf("found %q, want another test's staged exchange", got)
+	}
+	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "own" }); got != "" {
+		t.Fatalf("found the test's own exchange %q", got)
+	}
+	var served *models.Mock
+	session, _ := mm.GetSessionMocks()
+	for _, m := range session {
+		if m.Name == "own" {
+			served = m
+		}
+		if m.Name == "other" {
+			t.Fatal("another test's exchange is read")
+		}
+	}
+	if served == nil {
+		t.Fatal("the test's exchange is not read where the Generic parser reads")
+	}
+	c := *served
+	if !mm.UpdateUnFilteredMock(served, &c) {
+		t.Fatal("the answer was refused")
+	}
+	var state *models.MockState
+	for _, s := range mm.GetConsumedMocks() {
+		if s.Name == "own" {
+			state = &s
+		}
+	}
+	if state == nil || !state.DataPlane || state.Type != "config" {
+		t.Fatalf("reported %+v, want a test mock of type config", state)
+	}
+}
