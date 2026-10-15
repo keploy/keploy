@@ -3,6 +3,8 @@
 package linux
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -40,5 +42,18 @@ func TestTheUDPWatchFailsWithoutItsObjectsUnderTheSwitch(t *testing.T) {
 	flags, err := h.startProvenUDP("/nonexistent-cgroup")
 	if err == nil || flags != 0 || h.udp != nil {
 		t.Fatalf("startProvenUDP with no objects under the switch = %#x, %v (watch %v); want 0 and an error", flags, err, h.udp)
+	}
+}
+
+// A watch that cannot tell what it counted (an epoch it could not move on, a
+// report it could not read) leaves the capture losses unknown, never 0.
+func TestAUDPWatchFailureIsUnknownNeverZero(t *testing.T) {
+	h := &Hooks{logger: zap.NewNop(), udp: &udpWatch{}}
+	if err := h.CaptureLossesErr(); err != nil {
+		t.Fatalf("a watch that has not failed: CaptureLossesErr = %v", err)
+	}
+	h.udp.fail(errors.New("a UDP reply report of 40 bytes"))
+	if err := h.CaptureLossesErr(); err == nil || !strings.Contains(err.Error(), "40 bytes") {
+		t.Fatalf("CaptureLossesErr = %v, want the watch's failure", err)
 	}
 }
