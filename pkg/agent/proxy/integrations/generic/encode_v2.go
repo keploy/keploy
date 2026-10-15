@@ -143,10 +143,15 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// its carried half too, which is reported for the same reason, and the
 	// incomplete flag can be set by the relay's goroutine after any check
 	// this function's caller made.
+	// exchanges counts the connection's exchanges flushed so far, those
+	// left out included (exchangeLifetime).
+	exchanges := 0
 	flushMock := func() (leftOutFor string, leftOut bool) {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
 			return "", false
 		}
+		lifetime := exchangeLifetime(exchanges)
+		exchanges++
 		reset := func() {
 			genericRequests = nil
 			genericResponses = nil
@@ -157,7 +162,8 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		}
 
 		metadata := map[string]string{
-			"type": "config",
+			"type":                     "config",
+			models.MetadataLifetimeKey: lifetime,
 		}
 		if sess.ClientConnID != "" {
 			metadata["connID"] = sess.ClientConnID

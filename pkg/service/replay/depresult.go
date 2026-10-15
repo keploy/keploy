@@ -190,7 +190,7 @@ func eligibleExpectedEntries(
 // protocol-phase mocks are left out.
 func consumedOutsideAssertion(m models.MockState) bool {
 	if provenswitch.On() {
-		return models.ExcludedFromDependencyAssertion(m.Kind) || m.Type == "config" || m.Type == "connection"
+		return models.ExcludedFromDependencyAssertion(m.Kind) || ((m.Type == "config" || m.Type == "connection") && !m.DataPlane)
 	}
 	return models.ExcludedFromDependencyAssertion(m.Kind) || isReusableTierState(m)
 }

@@ -4338,6 +4338,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", pairs))
 	}
+	// Under the proven switch a call no mock answered whose closest
+	// recording another test owns is named with that test: likely a call it
+	// recorded, such as a later exchange of a connection it opened (a
+	// Generic connection's handshake is recorded in the test that opened it).
+	if named := markRecordedIn(testCaseResults, r.exact.ownersOf()); len(named) > 0 {
+		r.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under unmatched_calls.recorded_in",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
 	// failed each already (earlyMissed, streamMissed); this finds one only if a

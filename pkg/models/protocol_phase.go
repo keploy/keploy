@@ -15,7 +15,8 @@ package models
 //     (SET, SHOW VARIABLES, USE), transaction control (BEGIN, COMMIT) and a
 //     prepared statement's lifecycle so, and they belong to the connection,
 //     not to the test whose window they were captured in. A mock stated
-//     per-test is data-plane, whatever its type tag.
+//     per-test is data-plane, whatever its type tag: a Generic exchange
+//     after its connection's first included.
 //
 // Every other mock is data-plane, whatever tier DeriveLifetime gives it: its
 // kind fallback makes an untagged HTTP, SQL or Generic mock session-tier, and
@@ -37,6 +38,15 @@ func (m *Mock) IsProtocolPhase() bool {
 	}
 	if lt, ok := statedLifetime(m); ok {
 		return lt != LifetimePerTest
+	}
+	// The Generic recorder states each exchange's lifetime too: a
+	// connection's first exchange, its preamble, session; every later one
+	// per-test (generic.exchangeLifetime). Its type tag stays "config", and
+	// serving does not read the statement (DeriveLifetime keeps every Generic
+	// mock session, as before the recorder made it), so a per-test exchange is
+	// a test mock here only: owned, and judged, under the proven switch.
+	if m.Kind == GENERIC && m.Spec.Metadata[MetadataLifetimeKey] == MetadataLifetimePerTest {
+		return false
 	}
 	switch m.Spec.Metadata["type"] {
 	case "config", "connection":
