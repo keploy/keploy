@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -1245,6 +1246,14 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 
 // CompareHTTPStream compares an expected HTTP response with a streaming response.
 // It returns whether they match, the captured body content, mismatch details (if any), and any error.
+//
+// Without the proven switch the comparison stops at the last recorded frame
+// (part, or byte), so a stream that goes on is not waited for. Under the
+// switch every response is compared whole (O-K): the stream is read to its
+// end, and a frame after the recorded ones is a difference (trailingFrame).
+// The read is bounded as the request is: the user's --api-timeout, or the
+// recorded duration plus 10 s (ComputeStreamingTimeoutSeconds), which fails
+// the test if the stream does not end by then.
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
@@ -1260,6 +1269,28 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 	default:
 		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
+}
+
+// trailingFrame is the mismatch of a frame the answer streamed after the
+// recorded ones (index of them): under the proven switch a stream is read to
+// its end, and one that goes on past its recording differs from it.
+func trailingFrame(index int, frame string) *StreamMismatchInfo {
+	return &StreamMismatchInfo{
+		FrameIndex:    index,
+		ExpectedFrame: "(the recorded stream ended)",
+		ActualFrame:   frame,
+		Reason:        fmt.Sprintf("the stream went on after its %d recorded frames", index),
+	}
+}
+
+// sseCommentsOnly reports whether an SSE frame holds comment lines alone.
+func sseCommentsOnly(fields []sseField) bool {
+	for _, f := range fields {
+		if !f.comment {
+			return false
+		}
+	}
+	return len(fields) > 0
 }
 
 func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
@@ -1406,6 +1437,7 @@ type expectedSSEFrame struct {
 }
 
 func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedSSEQueue(expectedResp)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1422,6 +1454,17 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				// A frame of comments alone (": ping") is a keepalive: it
+				// carries no event, and how many arrive depends on how long
+				// the stream took, so one after the recorded frames is not
+				// a difference.
+				if sseCommentsOnly(parseSSEFrame(frame)) {
+					continue
+				}
+				actualQueue = append(actualQueue, frame)
+				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1446,7 +1489,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1479,6 +1522,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1493,6 +1537,10 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional NDJSON data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1521,7 +1569,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1549,6 +1597,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 }
 
 func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1560,6 +1609,10 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		line := canonicalizePlainTextLine(scanner.Text())
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1582,7 +1635,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1610,6 +1663,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 }
 
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedBytes := expectedBinaryBytes(expectedResp)
 	expectedSize := len(expectedBytes)
 	actualSize := 0
@@ -1631,7 +1685,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 			}
 			actualSize += n
-			if actualSize >= expectedSize {
+			if actualSize >= expectedSize && !readToEnd {
 				if actualSize > expectedSize {
 					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
 						zap.Int("expected_size", expectedSize),
@@ -1968,6 +2022,7 @@ func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
 }
 
 func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	if strings.TrimSpace(boundary) == "" {
 		return false, "", nil, fmt.Errorf("missing multipart boundary for stream comparison")
 	}
@@ -1998,6 +2053,10 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, actualPart.describe())
+				return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), trailingFrame(len(expectedQueue), actualPart.describe()), nil
+			}
 			logger.Debug("received additional multipart stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_parts", len(expectedQueue)))
 			break
@@ -2022,7 +2081,7 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
 				zap.Int("matched_parts", nextExpected))
 			break

@@ -311,7 +311,7 @@ func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.Chec
 		literal := "write " + p.Placeholder.Key + "'s recorded value in place of the placeholder (as the test case was recorded)"
 		var why string
 		switch entry := r.noiseCovering(p, tc, global); {
-		case r.config.Test.SchemaMatch:
+		case r.schemaMatch():
 			why = "this use is inside an array and test.ignoreOrdering is on, and --schema-match compares no value, so " + untied + "; run this set without --schema-match, turn ignoreOrdering off for it, or " + literal
 		case entry != "":
 			why = "this use is inside an array and test.ignoreOrdering is on, and the noise entry " + entry + " covers its place, so " + untied + "; remove that noise entry (the variable is asserted anyway), turn ignoreOrdering off for this set, or " + literal
