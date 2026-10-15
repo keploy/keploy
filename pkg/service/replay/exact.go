@@ -19,10 +19,13 @@ import (
 //     data-plane ones). A test case the mapping omits, or lists with none,
 //     owns none, and so does every test case of an all-empty mapping: a call
 //     it makes is a miss. disableMapping does not apply.
-//   - A set with no mappings.yaml (a recording made without the switch)
-//     owns what its test windows held: each test case the test mocks recorded
-//     inside its own window, derived as keploy record derives mappings.yaml
-//     under the switch (windowOwnership, models.DeriveWindowMappings).
+//   - A set with no mappings.yaml (a recording made without the switch), or
+//     one keploy test wrote from what a replay consumed rather than keploy
+//     record (models.MappingSourceKeployTest), owns what its test windows
+//     held: each test case the test mocks recorded inside its own window,
+//     derived as keploy record derives mappings.yaml under the switch
+//     (windowOwnership, models.DeriveWindowMappings), documents this keploy
+//     cannot read included.
 //   - A mapping that cannot be read refuses the set.
 //   - Every mock no test case lists is the set's pool. It answers between
 //     test cases, beside the protocol-phase mocks, with reuse or
@@ -48,32 +51,64 @@ func (r *Replayer) exactServing() bool {
 }
 
 // provenMappings reads what each test case of testSetID owns, under the
-// proven switch: none for a set with no mapping store or no mappings.yaml
-// (whose ownership its test windows then give, windowOwnership), and an
-// error for a mapping that cannot be read.
-func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, error) {
+// proven switch, and an error for a mapping that cannot be read. It gives
+// none, and why, for a set whose ownership its test windows then give
+// (windowOwnership): one with no mapping store or no mappings.yaml, and one
+// whose mappings.yaml keploy test wrote (models.MappingSourceKeployTest),
+// which lists what a replay consumed, not what each test recorded. A
+// mappings.yaml with no source is trusted as recorded: one keploy test wrote
+// before it said so cannot be told from keploy record's.
+func (r *Replayer) provenMappings(ctx context.Context, testSetID string) (map[string][]models.MockEntry, string, error) {
+	const absent = "the test set has no mappings.yaml"
 	if r.mappingDB == nil {
-		return map[string][]models.MockEntry{}, nil
+		return map[string][]models.MockEntry{}, absent, nil
+	}
+	if mr, ok := r.mappingDB.(mappingReader); ok {
+		m, err := mr.GetMapping(ctx, testSetID)
+		if err != nil {
+			return nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		}
+		if m != nil && m.Source == models.MappingSourceKeployTest {
+			return map[string][]models.MockEntry{}, "the test set's mappings.yaml was written by keploy test, from what a replay consumed, not by keploy record", nil
+		}
+		mappings := map[string][]models.MockEntry{}
+		if m != nil {
+			for _, tc := range m.TestCases {
+				mappings[tc.ID] = tc.Mocks
+			}
+		}
+		return mappings, absent, nil
 	}
 	mappings, _, err := r.mappingDB.Get(ctx, testSetID)
 	if err != nil {
-		return nil, fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
+		return nil, "", fmt.Errorf("keploy cannot judge each test case of %s: its mappings.yaml cannot be read: %w; record the set again", testSetID, err)
 	}
 	if mappings == nil {
 		mappings = map[string][]models.MockEntry{}
 	}
-	return mappings, nil
+	return mappings, absent, nil
 }
 
-// windowOwnership is what each test case of testSetID owns when the set has
-// no mappings.yaml: the test mocks recorded inside its own window, the
-// earliest-opened one where two were open (models.DeriveWindowMappings), as
-// keploy record derives a recording's mappings.yaml under the switch (S3). A
-// recording made without the switch has none; replayed under it, a test case
-// owns what its window held, never nothing, and never another test's call.
-// cases are every test case of the set, run or not, so a mock of one not
-// selected is no other's. The replay never writes what it derives.
-func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, stored ...[]*models.Mock) map[string][]models.MockEntry {
+// mappingReader is the part of a mapping store that reads a set's whole
+// mappings.yaml, which says which keploy command wrote its test entries
+// (models.Mapping.Source): nil for no file.
+type mappingReader interface {
+	GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error)
+}
+
+// windowOwnership is what each test case of testSetID owns when no
+// mappings.yaml keploy record wrote says so (why, from provenMappings): the
+// test mocks recorded inside its own window, the earliest-opened one where
+// two were open (models.DeriveWindowMappings), as keploy record derives a
+// recording's mappings.yaml under the switch (S3). A recording made without
+// the switch has none; replayed under it, a test case owns what its window
+// held, never nothing, and never another test's call. cases are every test
+// case of the set, run or not, so a mock of one not selected is no other's.
+// stored is every mock read, both pools; skipped the documents the decoders
+// could not read (models.TestSetMocks.SkippedWindowed): a test case owns a
+// recorded call this keploy cannot serve, and is judged for it. The replay
+// never writes what it derives.
+func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, why string, skipped []models.WindowedMock, stored ...[]*models.Mock) map[string][]models.MockEntry {
 	windows := make([]models.TestWindow, 0, len(cases))
 	for _, tc := range cases {
 		windows = append(windows, models.RecordedWindow(tc))
@@ -89,6 +124,13 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, s
 			mocks = append(mocks, models.NewWindowedMock(mk))
 		}
 	}
+	for _, w := range skipped {
+		if w.Name == "" || seen[w.Name] {
+			continue
+		}
+		seen[w.Name] = true
+		mocks = append(mocks, w)
+	}
 	derived := models.DeriveWindowMappings(windows, mocks)
 	out := make(map[string][]models.MockEntry, len(derived.Tests))
 	mapped := 0
@@ -96,10 +138,12 @@ func (r *Replayer) windowOwnership(testSetID string, cases []*models.TestCase, s
 		out[tc.ID] = tc.Mocks
 		mapped += len(tc.Mocks)
 	}
-	r.logger.Info("this test set has no mappings.yaml: under KEPLOY_PROVEN each test case owns the calls recorded inside its own window, as keploy record maps a recording made under the switch",
+	r.logger.Info("under KEPLOY_PROVEN each test case of this test set owns the calls recorded inside its own window, as keploy record maps a recording made under the switch",
 		zap.String("testSetID", testSetID),
+		zap.String("reason", why),
 		zap.Int("numTests", len(out)),
-		zap.Int("ownedMocks", mapped))
+		zap.Int("ownedMocks", mapped),
+		zap.String("next_step", "record the test set again under KEPLOY_PROVEN for a mappings.yaml keploy record writes"))
 	if n := len(derived.Concurrent); n > 0 {
 		r.logger.Warn("some tests of this test set were recorded while another test's request was still open: a call recorded while two tests were open is owned by the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),

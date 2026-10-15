@@ -1588,7 +1588,7 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		if len(doc.mocks) == 0 {
-			addSkipped(&out, doc.name, doc.kind)
+			addSkippedDoc(&out, doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
 		}
 		for _, mock := range doc.mocks {
 			if mock.Kind == models.ConnectionFailure {

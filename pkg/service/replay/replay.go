@@ -1835,10 +1835,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// whose test windows say what each test case owns once its mocks are
 		// read (windowOwnership).
 		var fromWindows bool
+		// windowsWhy: why the test windows say what each test case owns.
+		var windowsWhy string
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
-			if expectedTestMockMappings, err = r.provenMappings(ctx, testSetID); err != nil {
+			if expectedTestMockMappings, windowsWhy, err = r.provenMappings(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
 			useMappingBased = true
@@ -1889,12 +1891,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil, nil, err
 		}
 		if fromWindows {
-			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, filtered, unfiltered)
+			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
-		addSkippedKinds(skipped)
+		addSkippedKinds(skipped.kinds)
 		if filtered == nil && unfiltered == nil {
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
@@ -4926,6 +4928,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
+	markWrittenByKeployTest(mappingDoc)
 	if len(passing) == 0 {
 		// The boot traffic belongs to no test, and a run where no test passed
 		// vouches for it no more than for the tests: the section on disk stays.
@@ -5254,15 +5257,15 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 //
 // The lookup is built here, before AfterGetMocks may change the mocks in place
 // (a mutator decrypts them, for one), so it describes them as they are on disk.
-// skipped is the documents the store's decoders skipped, by name, with their
-// kinds (models.TestSetMocks.Skipped); nil from a store that reads one pool per
+// skipped is the documents the store's decoders skipped (models.TestSetMocks
+// Skipped and SkippedWindowed); none from a store that reads one pool per
 // call.
-func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped map[string]models.Kind, err error) {
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
 	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
 	if !ok {
 		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, skippedDocs{}, err
 		}
 		allSession := unfiltered
 		if len(mocksThatHaveMappings) > 0 {
@@ -5273,13 +5276,21 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 				allSession = nil
 			}
 		}
-		return filtered, unfiltered, newMockLookup(filtered, allSession), nil, nil
+		return filtered, unfiltered, newMockLookup(filtered, allSession), skippedDocs{}, nil
 	}
 	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, skippedDocs{}, err
 	}
-	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), set.Skipped, nil
+	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+}
+
+// skippedDocs is the documents of a set's mock file the store's decoders
+// skipped: their kinds by name, and those whose request time could be read as
+// test windows see them (models.TestSetMocks).
+type skippedDocs struct {
+	kinds    map[string]models.Kind
+	windowed []models.WindowedMock
 }
 
 // readMockLookup reads the report's mock lookup for a test set whose mocks
