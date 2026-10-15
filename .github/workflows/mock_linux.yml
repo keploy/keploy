@@ -62,6 +62,9 @@ name: Mock Mode Regression (Linux)
 # publish, on a connection it opens and on one it keeps, with tc netem holding
 # every packet to keploy's proxy 1 s, and asserts the call is judged in its
 # own test: never in the next one, never not at all.
+# Another replays an app that passes keploy's own plain-text "no matching mock"
+# on with its 200 where JSON was recorded, and asserts the test fails on its
+# body, with the switch on and off.
 on:
   workflow_call:
     inputs:
@@ -513,6 +516,18 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
+
+      # A response body of another kind than the recorded one fails its test,
+      # with the switch on or off (O-K): an app that answers keploy's own
+      # plain-text "no matching mock" with its 200, where the test recorded
+      # JSON, passed as a non-JSON body that is not compared.
+      - name: Run body-kind e2e (a response body of another kind fails)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/body-kind/body-kind-linux.sh"
 
   # A fire-and-forget call is the test's own under the proven switch, however
   # late its bytes reach keploy's proxy (design v14 §5.2): on a connection the

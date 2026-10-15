@@ -510,7 +510,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false: a non-JSON body is compared only when it differs in kind from the recorded one - JSON against non-JSON, or empty against non-empty - or under KEPLOY_PROVEN=1, which compares every body)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")

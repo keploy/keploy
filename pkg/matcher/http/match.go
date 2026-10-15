@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -176,8 +177,20 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// forgiving a digest computed FROM those bytes.
 	bodyActuallyCompared := false
 
+	// A body that is no JSON is compared byte for byte with --compare-all,
+	// under the proven switch (every part of a response is compared there),
+	// and whenever the recorded and the live body differ in kind: JSON
+	// against no JSON, or an empty body against a non-empty one. Left
+	// uncompared, a test that recorded {"n":7} passed on the app's 200 with
+	// keploy's plain-text "no matching mock" in its place, or with no body at
+	// all. Only a non-JSON body of the recorded kind, with the switch off and
+	// no --compare-all, is still not compared, as before.
+	expectedJSON := jsonValid234([]byte(tc.HTTPResp.Body))
+	kindDiffers := expectedJSON != (bodyType == models.JSON) || (tc.HTTPResp.Body == "") != (actualResponse.Body == "")
+	compareNonJSON := compareAll || provenswitch.On() || kindDiffers
+
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !skipBody && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+	if !skipBody && bodyType == models.JSON && expectedJSON {
 		bodyActuallyCompared = true
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
@@ -198,8 +211,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		// Skip body comparison for non-JSON responses unless compareAll is enabled
-		if !compareAll && bodyType != models.JSON {
+		// Skip the comparison of a non-JSON body of the recorded kind, with
+		// the switch off and no --compare-all (compareNonJSON above).
+		if !compareNonJSON && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !skipBody {
@@ -274,7 +288,14 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
-		// If body matches but content-length differs, ignore the content-length difference
+		// If body matches but content-length differs, ignore the content-length
+		// difference. The body "matches" only when it was compared and was
+		// the same, when the test case's noise excludes it whole, or, with the
+		// switch off and no --compare-all, when it is a non-JSON body of the
+		// recorded kind, left uncompared and its length excused as before.
+		// A body of another kind is always compared, and under the switch
+		// every body is, so neither excuses a length that changed unless
+		// the test case's noise excludes the body whole.
 		if res.BodyResult[0].Normal {
 			for i := range res.HeadersResult {
 				if strings.ToLower(res.HeadersResult[i].Expected.Key) == "content-length" && !res.HeadersResult[i].Normal {
