@@ -214,7 +214,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
-				NotJudged: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
+				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
 			}, recordTests)
 		}
 	}()
