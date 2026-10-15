@@ -3,11 +3,14 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 )
 
 // setEndRecorder is the run's own hooks with SetEndHook: what a hook that
@@ -122,6 +125,62 @@ func TestEachTestSetsEndIsToldToTheHooks(t *testing.T) {
 		}
 	})
 
+	t.Run("a set refused when it loaded", func(t *testing.T) {
+		app := newBPApp(t)
+		run := newBasePathRun(t, app.URL, "test-1")
+		run.replayer.testDB = interruptedOnce{bpTestDB: run.tests, calls: new(int)}
+		h := recordSetEnds(run)
+
+		if _, err := run.start(t); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		rep := run.report.report
+		if rep == nil || rep.FailureReason == "" {
+			t.Fatalf("report %+v: want the refused set's report, with its reason", rep)
+		}
+		want := []setEndCall{{"test-set-0", models.SetEnd{Status: models.TestSetStatusFailed, Why: rep.FailureReason}}}
+		if got := h.told(); !slices.Equal(got, want) {
+			t.Fatalf("told %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("a run of a set is never told the reason of the run before it", func(t *testing.T) {
+		// The first run of the set is refused, with its reason; the second
+		// fails, with the same status, before any report: its own error.
+		app := newBPApp(t)
+		run := newBasePathRun(t, app.URL, "test-1")
+		run.replayer.config.Test.MaxFlakyChecks = 2
+		run.replayer.testDB = interruptedOnce{bpTestDB: run.tests, calls: new(int)}
+		h := recordSetEnds(run)
+
+		_, _ = run.start(t)
+
+		got := h.told()
+		if len(got) != 2 {
+			t.Fatalf("told %+v, want both runs", got)
+		}
+		if got[0].end.Status != models.TestSetStatusFailed || !strings.Contains(got[0].end.Why, "templatize") {
+			t.Fatalf("first run told %+v, want FAILED with the refusal", got[0].end)
+		}
+		if got[1].end.Status != models.TestSetStatusFailed || !strings.Contains(got[1].end.Why, "permission denied") {
+			t.Fatalf("second run told %+v, want FAILED with its own error", got[1].end)
+		}
+	})
+
+	t.Run("a set whose last report cannot be written", func(t *testing.T) {
+		app := newBPApp(t)
+		run := newBasePathRun(t, app.URL, "test-1")
+		run.replayer.reportDB = &refuseSecondReport{bpReportDB: run.report}
+		h := recordSetEnds(run)
+
+		_, _ = run.start(t)
+
+		want := []setEndCall{{"test-set-0", models.SetEnd{Status: models.TestSetStatusInternalErr, Why: "failed to insert report"}}}
+		if got := h.told(); !slices.Equal(got, want) {
+			t.Fatalf("told %+v, want %+v: the report it could not write said PASSED", got, want)
+		}
+	})
+
 	t.Run("a set that ends on an error before its report", func(t *testing.T) {
 		app := newBPApp(t)
 		run := newBasePathRun(t, app.URL, "test-1")
@@ -136,4 +195,35 @@ func TestEachTestSetsEndIsToldToTheHooks(t *testing.T) {
 			t.Fatalf("told %+v, want one end that is not PASSED and says why", got)
 		}
 	})
+}
+
+// interruptedOnce is a base-path run's test store whose first check of the
+// set finds what an interrupted keploy templatize left (the set is refused,
+// with that as its reason), and whose later checks cannot read the set.
+type interruptedOnce struct {
+	*bpTestDB
+	calls *int
+}
+
+func (s interruptedOnce) Interrupted(context.Context, string) error {
+	*s.calls++
+	if *s.calls == 1 {
+		return fmt.Errorf("%w: test-set-0 holds test-1.yaml.tmp: finish or undo the keploy templatize that wrote it", setfile.ErrReplaceInterrupted)
+	}
+	return errors.New("open keploy/test-set-0: permission denied")
+}
+
+// refuseSecondReport is a base-path run's report store that cannot write the
+// second report of a run: the set's last, after its first, RUNNING one.
+type refuseSecondReport struct {
+	*bpReportDB
+	n int
+}
+
+func (f *refuseSecondReport) InsertReport(ctx context.Context, runID, setID string, rep *models.TestReport) error {
+	f.n++
+	if f.n == 2 {
+		return errors.New("disk full")
+	}
+	return f.bpReportDB.InsertReport(ctx, runID, setID, rep)
 }
