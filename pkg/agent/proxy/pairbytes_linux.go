@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -361,10 +362,11 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 //
 // Over TLS (tc's layer) what is unread is read through the layer first: a
 // TLS client's goodbye ends with a close_notify -- go-sql-driver/mysql's
-// Close (COM_QUIT, then close_notify, then FIN), pgx's Terminate, gRPC's
-// GOAWAY -- which a handler done with the connection never reads, and which
-// carries no call. The socket's count cannot tell it from data; only plaintext
-// is a loss (tlsUnreadData).
+// Close (COM_QUIT, then close_notify, then FIN); pgx's Terminate and gRPC's
+// GOAWAY once the handler has read them -- which a handler done with the
+// connection never reads, and which carries no call. The socket's count
+// cannot tell it from data; only plaintext is a loss (tlsUnreadData), so a
+// Terminate or GOAWAY left unread still is one.
 //
 // keploy's own stop (ctx, the proxy's connections' context, done) closes
 // connections whatever they hold: nothing the application wrote is charged
@@ -406,13 +408,32 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 // Its write side is shut down first: the application, told the proxy is done
 // (its close_notify, if the layer's close sent one, then its FIN), ends its
 // own side, so a read that waits -- a record not all in yet -- ends at the
-// application's FIN, not on a clock. If that FIN never comes, the read holds
-// the close until keploy's stop (ctx) ends it, which charges nothing.
+// application's FIN, not on a clock. A read deadline its handler left (a
+// poll's, or a nudge's in the past) is cleared, and so is one another reader
+// of the connection sets while the read waits: either would end the read at
+// once, or on a clock, as a loss. If that FIN never comes, the read holds the
+// close until keploy's stop (ctx) ends it for good by shutting the read side
+// down, which no deadline another reader of the connection sets or clears
+// undoes; the stop charges nothing.
 func tlsUnreadData(ctx context.Context, conn *net.TCPConn, layer *tls.Conn) (data bool, err error) {
 	_ = conn.CloseWrite()
-	defer context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Unix(1, 0)) })()
+	_ = conn.SetReadDeadline(time.Time{})
+	defer context.AfterFunc(ctx, func() { _ = conn.CloseRead() })()
 	var b [1]byte
-	n, err := layer.Read(b[:])
+	var n int
+	for {
+		n, err = layer.Read(b[:])
+		// A deadline another reader of the connection set since (a
+		// parser's poll, re-armed before its next read, which waits behind
+		// this one) is no end of this read either: only the application's
+		// end or keploy's stop is. The layer keeps a record a timeout cut
+		// short.
+		if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) && ctx.Err() == nil {
+			_ = conn.SetReadDeadline(time.Time{})
+			continue
+		}
+		break
+	}
 	switch {
 	case n > 0:
 		return true, nil

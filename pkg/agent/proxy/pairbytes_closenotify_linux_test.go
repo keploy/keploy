@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -73,7 +74,7 @@ var tlsVersions = []struct {
 
 // A TLS client's goodbye -- its quit, then its close_notify and FIN, as
 // go-sql-driver/mysql's Close sends them (COM_QUIT; pgx's Terminate and
-// gRPC's GOAWAY end the same way) -- that the proxy's handler takes only the
+// gRPC's GOAWAY end with one too) -- that the proxy's handler takes only the
 // quit of (the MySQL replayer answers COM_QUIT with EOF and closes) leaves
 // the close_notify unread. It carries no call: no loss. Data behind the quit
 // still is one. The close_notify was charged a loss, for most closes of a
@@ -236,5 +237,125 @@ func TestAnUncountableCloseIsALossWithNoWaitHoldingIt(t *testing.T) {
 	}
 	if err := p.paired.failure(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("later waits: %v, want unknown (%v)", err, models.ErrProxyConnsUnsupported)
+	}
+}
+
+// The proxy's handshake takes the connection wrapped (util.Conn, as the main
+// path wraps it to give back what it peeked): its layer still reaches the
+// connection the proxy closes with care, through the wrapper's NetConn.
+func TestTheLayerReachesTheTrackedConnThroughAWrapper(t *testing.T) {
+	_, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	tracked := reader.(*trackedConn)
+	wrapped := &util.Conn{Conn: tracked, Reader: tracked, Logger: zap.NewNop()}
+	cli := tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example"})
+	errc := make(chan error, 1)
+	go func() { errc <- cli.Handshake() }()
+	if _, _, err := pTls.HandleTLSConnection(context.Background(), zap.NewNop(), wrapped, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	if tracked.tlsLayer.Load() == nil {
+		t.Fatal("the layer did not reach the tracked connection through util.Conn")
+	}
+}
+
+// A read deadline the handler left set -- a poll's, or a nudge's in the past
+// (relay's nudgeDeadline) -- is no end of the close's read: the close_notify
+// behind it is still no loss. The read failed at once on it, a loss: the very
+// false red the layer's read fixes.
+func TestACloseNotifyBehindALeftoverDeadlineIsNoLoss(t *testing.T) {
+	for _, v := range tlsVersions {
+		t.Run(v.name, func(t *testing.T) {
+			p, _, proxySide, _, srv, cli := tlsHeldPair(t, v.version)
+			if _, err := cli.Write([]byte{1, 0, 0, 0, 1}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(srv, make([]byte, 5)); err != nil {
+				t.Fatal(err)
+			}
+			_ = srv.SetReadDeadline(time.Unix(1, 0)) // left by the handler
+			_ = cli.Close()
+			for readProxySide(proxySide).state != tcpCloseWait {
+				runtime.Gosched()
+			}
+			_ = srv.Close()
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("app_bytes_lost = %d for a close_notify behind a deadline the handler left, want 0", l)
+			}
+		})
+	}
+}
+
+// A connection whose close is held reading what its socket holds still holds
+// work for a replay's test end (pending): its handler is not done, and a miss
+// it files once the close returns would land after an end that had passed.
+// The close's read looked like its handler waiting for the application.
+func TestAConnectionInItsCloseHoldsWork(t *testing.T) {
+	p, app, proxySide, tracked, srv, _ := tlsHeldPair(t, tls.VersionTLS12)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	tracked.beforeClose = func() { p.pairClosing(ctx, proxySide, tracked) }
+	// An application-data record's header for 100 bytes, and 10 of them.
+	if _, err := app.Write(append([]byte{23, 3, 3, 0, 100}, make([]byte, 10)...)); err != nil {
+		t.Fatal(err)
+	}
+	unreadArrived(t, proxySide, 15)
+	closed := make(chan struct{})
+	go func() { _ = srv.Close(); close(closed) }()
+	for tracked.unread() != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
+		select {
+		case <-closed:
+			t.Fatal("the close did not wait for the rest of a record not all in")
+		default:
+		}
+		runtime.Gosched()
+	}
+	if pending, _ := p.inflight.State(true); pending == 0 {
+		t.Fatal("a connection in its close reads as holding no work to a replay's test end")
+	}
+	stop()
+	<-closed
+}
+
+// Another reader of the connection re-arms a deadline while the close's read
+// waits for the rest of a record -- a parser's poll does, before its next
+// read -- and that is no end of the read either: the application ends in the
+// record's middle, which is no loss. The read ended on the deadline, and the
+// bytes were charged a loss.
+func TestADeadlineSetDuringTheClosesReadIsNoEndOfIt(t *testing.T) {
+	p, app, proxySide, tracked, srv, _ := tlsHeldPair(t, tls.VersionTLS12)
+	// An application-data record's header for 100 bytes, and 10 of them.
+	if _, err := app.Write(append([]byte{23, 3, 3, 0, 100}, make([]byte, 10)...)); err != nil {
+		t.Fatal(err)
+	}
+	unreadArrived(t, proxySide, 15)
+	sawEnd := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, app); close(sawEnd) }()
+	closed := make(chan struct{})
+	go func() { _ = srv.Close(); close(closed) }()
+	for tracked.unread() != 0 || tracked.reading.Load() == 0 { // the close reads on through the layer
+		select {
+		case <-closed:
+			t.Fatal("the close did not wait for the rest of a record not all in")
+		default:
+		}
+		runtime.Gosched()
+	}
+	_ = proxySide.SetReadDeadline(time.Unix(1, 0)) // another reader's
+	select {
+	case <-sawEnd: // the proxy's end reached the application
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the application never saw the proxy's end of the connection")
+	}
+	_ = app.Close()
+	select {
+	case <-closed:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the application's FIN did not end the close's read")
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("app_bytes_lost = %d, want 0: a deadline another reader set ended the close's read", l)
 	}
 }
