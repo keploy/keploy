@@ -173,9 +173,13 @@ for d in sys.stdin.read().split("\n---"):
 
 # record NAME PROVEN CMD CONTAINER: keploy records CMD, whose app listens at
 # $PORT, while the lane makes two calls through it; it is stopped once both
-# calls' test cases are written. The log is NAME.log.
+# calls' test cases are written. The log is NAME.log. A call that fails ends
+# the leg at once: keploy writes no test case for it, so waiting for two would
+# last until the job's timeout and print nothing. keploy is stopped then too,
+# the recording's end is waited for, and the log's tail is printed, with the
+# app's own output in it (an app whose handler raised resets the connection).
 record() {
-  local name=$1 proven=$2 cmd=$3 ctr=$4 log="$1.log" pid rc p before=$FAIL
+  local name=$1 proven=$2 cmd=$3 ctr=$4 log="$1.log" pid rc p before=$FAIL called=1
   sudo rm -rf keploy
   : > "$log"
   sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
@@ -183,9 +187,11 @@ record() {
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
     for p in /price/aapl /price/msft; do
-      curl -fsS -o /dev/null "http://127.0.0.1:$PORT$p" || { echo "FAIL: $name: GET $p through the app failed"; FAIL=1; }
+      curl -fsS -o /dev/null "http://127.0.0.1:$PORT$p" || { echo "FAIL: $name: GET $p through the app failed"; FAIL=1; called=0; }
     done
-    await "$log" "$pid" "Keploy has captured test cases" 2 || { echo "FAIL: $name: keploy did not write both calls' test cases"; FAIL=1; }
+    if [ "$called" -eq 1 ]; then
+      await "$log" "$pid" "Keploy has captured test cases" 2 || { echo "FAIL: $name: keploy did not write both calls' test cases"; FAIL=1; }
+    fi
     sudo kill -INT "$pid" 2>/dev/null
   else
     echo "FAIL: $name: keploy exited before the app listened"

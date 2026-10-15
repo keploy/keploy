@@ -145,8 +145,17 @@ do_record() {
     rec_keploy=$(jobs -p %%)
     wait_for_port 50051
     sleep 3
-    ./grpc-client &> "$client_log"
-    echo "Client finished sending gRPC request${label:+ (json)}."
+    # The client's own output is the evidence when it fails: under set -e a
+    # bare failing client ended the lane here, with keploy still running and
+    # the log unprinted. Its status is kept; keploy is stopped as usual first.
+    local client_rc=0
+    ./grpc-client &> "$client_log" || client_rc=$?
+    if [ "$client_rc" -ne 0 ]; then
+        echo "::error::the gRPC client exited $client_rc${label:+ (json)}; its output ($client_log):"
+        cat "$client_log"
+    else
+        echo "Client finished sending gRPC request${label:+ (json)}."
+    fi
     sleep 10
     kill_keploy_process
     # Wait for the recording to end, not for a fixed time. The stop drains
@@ -155,6 +164,7 @@ do_record() {
     # the agent's.
     wait_recording_end "$rec_pid" "$log" || exit 1
     check_for_errors "$log"
+    [ "$client_rc" -eq 0 ] || exit 1
 }
 
 # Record: Keploy wraps the server to capture incoming gRPC calls.
