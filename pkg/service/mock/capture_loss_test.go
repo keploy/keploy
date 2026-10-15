@@ -14,6 +14,8 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
@@ -226,7 +228,17 @@ func TestACallKeployCannotCaptureLeavesAMockRunUnverified(t *testing.T) {
 	require.False(t, r.Isolated)
 	require.Empty(t, r.FailedBy)
 	require.Contains(t, r.IsolationNote, "keploy cannot capture")
+	require.Equal(t, db, r.NotJudged, "the receipt says so as data, not text only")
 	require.Contains(t, logged(logs), "the test command called what keploy cannot capture")
+
+	// A real loss beside it takes the note; the data still says what keploy
+	// cannot capture.
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
+	dir, _, _ = replayIn(t, replayCase{losses: &lossCounter{after: append(models.CaptureLosses{tls}, db...)}, mapped: true, keployFails: true})
+	r = mustReceipt(t, dir)
+	require.NotContains(t, r.IsolationNote, "keploy cannot capture")
+	require.Contains(t, r.IsolationNote, "TLS handshake")
+	require.Equal(t, db, r.NotJudged)
 }
 
 func TestACallKeployCannotCaptureLeavesARecordingKept(t *testing.T) {
@@ -267,4 +279,36 @@ func TestAReceiptKeepsWhatLeftATestNotJudged(t *testing.T) {
 	require.NotNil(t, got[0].Evidence)
 	require.Equal(t, db(2), got[0].Evidence.NotJudged)
 	require.False(t, got[0].Evidence.Empty(), "a line with only its reason reads as keploy's failure")
+}
+
+// runnerLossInstr is a test-runner record whose agent counts capture losses.
+type runnerLossInstr struct {
+	*runnerInstr
+	*lossCounter
+}
+
+// A judged record's per-test file carries what the recording lacks because
+// keploy cannot capture it at all (TestsReceipt.NotJudged), so whatever
+// judges the recording does not take it as fully captured.
+func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	judgedBuild(t)
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+	dir := t.TempDir()
+	w := mark("orders::TestPure", 0, 10*time.Millisecond)
+	w.Outcome, w.Dir = models.ScopeOutcomePassed, "orders"
+	instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{w}}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), runnerLossInstr{instr, &lossCounter{after: db}}, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	require.NoError(t, svc.Record(context.Background()))
+	set := (&mockService{config: cfg}).setName()
+	r, err := ReadRecordTestsReceipt(dir, set)
+	require.NoError(t, err)
+	require.NotNil(t, r, "no per-test file")
+	require.Equal(t, db, r.NotJudged)
 }

@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -113,14 +114,31 @@ func TestTheUnixReportStaysUnloadedWithoutTheSwitch(t *testing.T) {
 }
 
 // A report that could not load under the switch is unknown, never 0.
-func TestAUnixReportThatCouldNotLoadIsAnError(t *testing.T) {
+func TestAUnixReportKeployCannotSeeThroughLeavesEveryTestNotJudged(t *testing.T) {
 	h := &Hooks{logger: zap.NewNop(), unix: &unixConn{off: "no trampoline"}}
-	err := h.CaptureLossesErr()
-	if err == nil || !strings.Contains(err.Error(), "no trampoline") {
-		t.Fatalf("CaptureLossesErr = %v, want the reason it could not load", err)
+	if err := h.CaptureLossesErr(); err != nil {
+		t.Fatalf("CaptureLossesErr = %v, want nil: a report keploy cannot see through is a standing unix_unseen, not an unknown count", err)
 	}
-	if got := h.unixLosses(); len(got) != 0 {
-		t.Fatalf("an unloaded report counted %+v", got)
+	got := h.unixLosses()
+	if len(got) != 1 || got[0].Kind != models.CaptureLossUnixUnseen || got[0].Count != 1 || !strings.Contains(got[0].What, "no trampoline") {
+		t.Fatalf("an unloaded report's losses %+v, want one unix_unseen naming why", got)
+	}
+
+	// A report that stopped (a ring keploy cannot read on): the same, with
+	// what it counted before.
+	d := newReportDrain()
+	d.stop(errors.New("ring broken"))
+	h = &Hooks{logger: zap.NewNop(), unix: &unixConn{drain: d}}
+	got = h.unixLosses()
+	if len(got) != 1 || got[0].Kind != models.CaptureLossUnixUnseen || !strings.Contains(got[0].What, "ring broken") {
+		t.Fatalf("a stopped report's losses %+v, want one unix_unseen naming why", got)
+	}
+	// One keploy closed is no loss.
+	d = newReportDrain()
+	d.stop(errReportClosed)
+	h = &Hooks{logger: zap.NewNop(), unix: &unixConn{drain: d}}
+	if got = h.unixLosses(); len(got) != 0 {
+		t.Fatalf("a report keploy closed: %+v, want none", got)
 	}
 }
 
