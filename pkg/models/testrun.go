@@ -44,6 +44,10 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// UnclaimedCalls are the calls the set's application made after its last
+	// test that no mock answered (proven switch): a pool miss no later test
+	// takes. They fail the set; JUnit fails a case of its own with them.
+	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
 	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
 	// so its results carry the proven model's evidence: a report renders it
 	// from this, not from the switch of the process rendering it. Set on

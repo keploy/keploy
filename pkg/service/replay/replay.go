@@ -204,6 +204,10 @@ type runShape struct {
 	// its recordings list that its run never reached, or that never
 	// answered. Empty otherwise.
 	realWhy string
+	// unclaimedWhy is why the calls the application made after the set's
+	// last test that no mock answered fail it (unclaimedCalls). Empty
+	// otherwise.
+	unclaimedWhy string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -250,7 +254,10 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 		if shape.stoppedEarly {
 			return partialRunReason
 		}
-		return shape.realWhy
+		if shape.realWhy != "" && shape.unclaimedWhy != "" {
+			return shape.realWhy + "; " + shape.unclaimedWhy
+		}
+		return shape.realWhy + shape.unclaimedWhy
 	case models.TestSetStatusInternalErr:
 		if shape.notJudged != "" {
 			return withUnverifiedNote(shape.notJudged, shape)
@@ -4398,6 +4405,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var realRun *models.RealRun
 	var realListed []string
 	realWhy, realUncaptured := "", ""
+	// unclaimed are the calls the application made after the set's last test
+	// that no mock answered (proven switch): no later test takes them, so
+	// they fail the set (unclaimed_calls.go).
+	var unclaimed []models.UnmatchedCall
+	unclaimedReason := ""
 	if provenswitch.On() {
 		var held []string
 		scored := len(testCaseResults)
@@ -4446,6 +4458,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// set's capture verdict (rule 2), with the set's other losses
 			// below: it fails the set, holds the prune, and fails JUnit.
 			realUncaptured = models.RealUncapturedLosses(realRun.Incomplete).Text()
+		}
+		// A call made after the set's last test that no mock answered is a
+		// pool miss no later test takes: it fails the set, named. A read that
+		// cannot vouch for every such call leaves the set unjudged. Only a
+		// set with a verdict to give is read: one that stopped otherwise
+		// (the app halted, the user aborted, keploy failed) keeps its status.
+		// And only once a test of it opened its window: before that, what
+		// the agent holds is the app's startup, which is no test's (the
+		// first test's window discards it).
+		//
+		// A stop that came after the loop (the app exited, the user
+		// stopped the run) is not in testSetStatus yet: resolveTestSetStatus
+		// below takes it from getErrStatus. Such a set is not read, and a
+		// read that fails because the set was stopped meanwhile (its ctx is
+		// cancelled) is the stop's, not the read's: the stop is its status,
+		// as before, and it is not marked not judged, which would also keep
+		// the run going (abortAfterTestSet) past an app that exited.
+		_, stoppedBefore := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil)
+		if captureOpened && !stoppedBefore && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			if len(calls) > 0 {
+				unclaimed = calls
+				unclaimedReason = unclaimedWhy(calls)
+				r.logUnclaimed(testSetID, calls)
+				if testSetStatus == models.TestSetStatusPassed {
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
+			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && stopped && runTestSetCtx.Err() != nil {
+				r.logger.Debug("the read of the calls made after the set's last test was cut short by the set's stop; the stop is its status",
+					zap.String("test-set", testSetID), zap.Error(unclaimedErr))
+				unclaimedErr = nil
+			}
+			if unclaimedErr != nil {
+				notJudged = alsoNotJudged(notJudged, "keploy could not read every call the application made after the set's last test that no mock answered: "+unclaimedErr.Error())
+				r.logger.Error("test-set is not judged: keploy could not read every call its application made after its last test; the run goes on to the next test-set",
+					zap.String("test-set", testSetID), zap.Int("callsRead", len(calls)), zap.Error(unclaimedErr))
+				testSetStatus = models.TestSetStatusInternalErr
+				r.markNotJudged(testSetID)
+			}
 		}
 		if len(consumedUnread) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
 			notJudged = consumedUnreadReason(consumedUnread)
@@ -4729,7 +4781,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy})),
+		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason})),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -4740,6 +4792,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Real:                realRun,
 		RealListed:          realListed,
 		RealFailure:         realWhy,
+		UnclaimedCalls:      unclaimed,
 		Proven:              provenswitch.On(),
 	}
 	r.noteSetEnd(testReport)

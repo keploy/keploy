@@ -4633,10 +4633,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // The replayer opens it for the first test of a test set. Misses retained
 // before it, with no window open (the app's startup, or a previous set's last
 // test's traffic), are not this test's: they are discarded so they don't
-// attach to it, and logged, so none is lost without a word. Under the proven
-// switch too they reach no verdict: a set whose last test's late or async call
-// missed after its last read stays judged on what was read. Closing that is
-// the round's own count of calls in flight at its end, not this window.
+// attach to it, and logged, so none is lost without a word. A miss made after
+// a set's last test is not left for the next set's first window: under the
+// proven switch the replayer reads it at the set's end (GetMockErrors) and it
+// fails the set. One made after that read reaches no verdict.
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
 func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }

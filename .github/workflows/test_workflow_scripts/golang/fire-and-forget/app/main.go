@@ -53,6 +53,18 @@ var (
 	}}
 )
 
+// afterPublish is a /d-after publish waiting for its /e-wait: release lets
+// it go, done closes once it is over.
+type afterPublish struct {
+	release chan struct{}
+	done    chan struct{}
+}
+
+var (
+	afterMu   sync.Mutex
+	afterByID = map[string]*afterPublish{}
+)
+
 func line(msg string, wrote func()) string {
 	keepMu.Lock()
 	defer keepMu.Unlock()
@@ -144,6 +156,41 @@ func main() {
 		fmt.Fprintf(w, "queued %s\n", id)
 	}
 	http.HandleFunc("/a-publish", pub)
+	// /d-after answers first, and publishes only once the answer has left:
+	// from a goroutine of its own, never waiting for the broker's reply,
+	// when /e-wait for the same id releases it. The publish is made after
+	// the test has its answer, inside the test /e-wait is: in a recording
+	// and in a replay alike, whatever the scheduler does. (keploy replays a
+	// set's tests in name order, so e-wait follows d-after.)
+	http.HandleFunc("/d-after", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		p := &afterPublish{release: make(chan struct{}), done: make(chan struct{})}
+		afterMu.Lock()
+		afterByID[id] = p
+		afterMu.Unlock()
+		go func() {
+			defer close(p.done)
+			<-p.release
+			publish(broker, "after "+id+os.Getenv("SUFFIX"), make(chan struct{}))
+		}()
+		fmt.Fprintf(w, "accepted %s\n", id)
+	})
+	// /e-wait releases /d-after's publish for its id and answers once the
+	// publish is over (the broker's reply read, or the publish failed), so a
+	// recording finds the whole call inside this test. An id with no publish
+	// pending answers at once.
+	http.HandleFunc("/e-wait", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		afterMu.Lock()
+		p := afterByID[id]
+		delete(afterByID, id)
+		afterMu.Unlock()
+		if p != nil {
+			close(p.release)
+			<-p.done
+		}
+		fmt.Fprintf(w, "done %s\n", id)
+	})
 	http.HandleFunc("/b-other", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(3 * time.Second)
 		fmt.Fprintln(w, "other")
