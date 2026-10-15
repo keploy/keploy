@@ -305,6 +305,76 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # MySQL COM_STMT_EXECUTEs sent without their parameter types
+  # (new_params_bind_flag 0): Connector/J re-executing a server-prepared
+  # statement without rebinding it, and Connector/J 5.1 rebinding it with the
+  # same types. keploy read their values as strings, so they failed to decode,
+  # their exchanges were not recorded and their test cases were left out. The
+  # app is in this repo (test_workflow_scripts/java/mysql_unbound_types), run
+  # with Connector/J 8.4 and 5.1 against a real MySQL 8.0: every request must
+  # be recorded, with its values, and replay, plain and --mock-noise-strict.
+  # Record and replay use this build: a released recorder drops these
+  # exchanges (or, for a small integer, records bytes of garbage), and a
+  # released replayer drops the connection on them. One more cell replays,
+  # with this build, what a released keploy (pinned in the script, before the
+  # fix) recorded of string-only ones, with a type that was never on the
+  # wire, and of small integers, as bytes of garbage.
+  mysql_unbound_types:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    name: mysql EXECUTE without parameter types (record_build_replay_build, record_v3.6.126_replay_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: |
+            .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom.xml
+            .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom51.xml
+
+      - name: Ensure yq
+        run: |
+          # The script reads the recorded mocks with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - name: Record and replay with Connector/J 8.4 and 5.1
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+          WORK: ${{ runner.temp }}/mysql_unbound_types
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_unbound_types/java-linux.sh"
+
+      - name: Upload mysql_unbound_types recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-unbound-types-recordings
+          path: |
+            ${{ runner.temp }}/mysql_unbound_types/*/keploy/
+            ${{ runner.temp }}/mysql_unbound_types/*/record.log
+            ${{ runner.temp }}/mysql_unbound_types/*/test-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
   async_config_poll:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x

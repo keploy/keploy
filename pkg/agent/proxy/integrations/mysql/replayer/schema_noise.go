@@ -89,6 +89,33 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 	return func(v string) bool { return nc.IsNoisy(v) }
 }
 
+// executeBodyNoise is the request-body noise a recorded COM_STMT_EXECUTE is
+// compared with the live one under, for the schema-noise engine: noise, plus
+// every parameter's type, unsigned flag and name unless both packets sent
+// them (typesSentByBoth). Any other request keeps noise as it is.
+func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *mysql.PacketBundle) map[string][]string {
+	if recorded == nil || live == nil || len(recorded.Spec.MySQLRequests) != 1 {
+		return noise
+	}
+	act, _ := live.Message.(*mysql.StmtExecutePacket)
+	exp, _ := recorded.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+	if act == nil || exp == nil || typesSentByBoth(exp, act) {
+		return noise
+	}
+	n := max(len(exp.Parameters), len(act.Parameters))
+	out := make(map[string][]string, len(noise)+3*n)
+	for k, v := range noise {
+		out[k] = v
+	}
+	for i := 0; i < n; i++ {
+		for _, field := range []string{"type", "unsigned", "name"} {
+			// An empty list ignores the field whatever its value.
+			out["parameters."+strconv.Itoa(i)+"."+field] = []string{}
+		}
+	}
+	return out
+}
+
 // strictGate applies schemaNoiseStrict enforcement while matchCommand scans
 // candidate mocks, and accumulates the diagnostics the mismatch report needs.
 // Consult allows() before a mock may become a match candidate: under
@@ -102,6 +129,7 @@ type strictGate struct {
 	engine        *schemanoise.Engine
 	logger        *zap.Logger
 	requestType   string
+	live          *mysql.PacketBundle
 	liveBody      []byte
 	liveBodyOK    bool
 	userBodyNoise map[string][]string
@@ -124,6 +152,37 @@ type strictGate struct {
 	// candidate the scan meets again (another of its packets, or the full scan
 	// after the in-window pass) is not diffed or logged a second time.
 	verdicts map[*models.Mock]gateVerdict
+
+	// legacyBody is the live body as an older keploy read the live packet
+	// (mysql.StmtExecutePacket's LegacyParameters), compared with what such
+	// a keploy recorded (legacyRecorded); read once, when first needed.
+	legacyBody                   []byte
+	legacyBodyOK, legacyBodyRead bool
+}
+
+// bodyFor is the live request body mock's recorded one is compared with: the
+// live packet as an older keploy read it when that keploy recorded mock
+// (legacyRecordedMock), else as this one reads it.
+func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
+	if !legacyRecordedMock(mock) {
+		return g.liveBody, g.liveBodyOK
+	}
+	if !g.legacyBodyRead {
+		g.legacyBodyRead = true
+		if g.live != nil {
+			if act, _ := g.live.Message.(*mysql.StmtExecutePacket); act != nil && act.LegacyParameters != nil {
+				read := *act
+				read.Parameters = act.LegacyParameters
+				bundle := *g.live
+				bundle.Message = &read
+				g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+			}
+		}
+	}
+	if !g.legacyBodyOK {
+		return g.liveBody, g.liveBodyOK
+	}
+	return g.legacyBody, true
 }
 
 type gateVerdict struct {
@@ -131,11 +190,12 @@ type gateVerdict struct {
 	drift   map[string][]string
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:        engine,
 		logger:        logger,
 		requestType:   requestType,
+		live:          live,
 		liveBody:      liveBody,
 		liveBodyOK:    liveBodyOK,
 		userBodyNoise: userBodyNoise,
@@ -148,9 +208,11 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	if !g.engine.StrictEnabled() || !g.liveBodyOK {
 		return true
 	}
+	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
+	body, _ := g.bodyFor(mock)
 	v, seen := g.verdicts[mock]
 	if !seen {
-		v.allowed, v.drift = g.engine.StrictReject(mock, g.liveBody, g.userBodyNoise)
+		v.allowed, v.drift = g.engine.StrictReject(mock, body, noise)
 		if g.verdicts == nil {
 			g.verdicts = make(map[*models.Mock]gateVerdict)
 		}
@@ -165,8 +227,8 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 		if recorded, ok := (mysqlNoiseAdapter{}).RecordedBody(mock); ok {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
-			known := g.engine.KnownNoise(mock, g.userBodyNoise)
-			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(g.liveBody), known, "body.", 96)
+			known := g.engine.KnownNoise(mock, noise)
+			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96)
 		}
 	}
 	if !seen {
