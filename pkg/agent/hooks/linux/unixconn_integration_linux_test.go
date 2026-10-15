@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -129,19 +128,13 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	startUnixHelper(t, "listen "+own)
 	startUnixHelper(t, "connect "+own)
 	startUnixHelper(t, "connect "+outside)
-	for {
-		got := h.CaptureLosses()
-		if len(got) == 1 && got[0].What == outside {
-			if got[0].Kind != models.CaptureLossUnixSocket || got[0].Count != 1 {
-				t.Fatalf("capture losses %+v, want one unix_socket loss, the outsider's socket: the member's own was counted", got)
-			}
-			return
-		}
-		if len(got) > 1 || (len(got) == 1 && got[0].Count > 1) {
-			t.Fatalf("capture losses %+v, want only the outsider's socket", got)
-		}
-		// No deadline: the test binary's -timeout bounds it.
-		time.Sleep(time.Millisecond)
+	// One read, after every report the kernel made is handled.
+	if err := h.DrainCaptureLosses(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := h.CaptureLosses()
+	if len(got) != 1 || got[0].What != outside || got[0].Kind != models.CaptureLossUnixSocket || got[0].Count != 1 {
+		t.Fatalf("capture losses %+v, want one unix_socket loss, the outsider's socket (the member's own not counted)", got)
 	}
 }
 
