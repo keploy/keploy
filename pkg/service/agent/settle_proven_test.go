@@ -155,10 +155,14 @@ func (s *settledProxy) InFlightChanged() <-chan struct{} {
 	return s.sig
 }
 
-func (s *settledProxy) InFlightProgress() uint64 {
+func (s *settledProxy) InFlightPendingProgress(bool) map[uint64]uint64 {
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	return s.progress
+	if s.pending == 0 {
+		return map[uint64]uint64{}
+	}
+	// One connection holds the work; its progress is the proxy's.
+	return map[uint64]uint64{1: s.progress}
 }
 
 // set changes what the proxy holds, as an accept or a read would.
@@ -308,4 +312,51 @@ func TestSettleWaitsForTheApplicationsConnectionsFirst(t *testing.T) {
 	}
 	p.set(2, 0)
 	require.NoError(t, <-done)
+}
+
+// The watchdog judges each thing the wait waits on apart: a connection that
+// holds work and does not move fails the wait at settleStallLimit wake-ups,
+// though another one moves at every wake-up (review S1: one stuck connection
+// and unrelated traffic never tripped it). One that stops being waited on
+// drops out.
+func TestTheSettleWatchdogFiresForTheOneThatDoesNotMove(t *testing.T) {
+	wake := manualWake(t)
+	prev := settleStallLimit
+	settleStallLimit = 3
+	t.Cleanup(func() { settleStallLimit = prev })
+	a := &Agent{logger: zap.NewNop()}
+	var mu sync.Mutex
+	busy := uint64(0)
+	waiting := map[string]bool{"stuck": true, "busy": true, "gone": true}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
+		mu.Lock()
+		defer mu.Unlock()
+		busy++
+		out := map[string]uint64{}
+		if waiting["stuck"] {
+			out["stuck"] = 7
+		}
+		if waiting["busy"] {
+			out["busy"] = busy
+		}
+		if waiting["gone"] {
+			out["gone"] = 1
+		}
+		return out
+	})
+	defer stop()
+	wake()
+	wake()
+	mu.Lock()
+	waiting["gone"] = false // no longer waited on: its count is dropped
+	mu.Unlock()
+	select {
+	case <-ctx.Done():
+		t.Fatal("the watchdog fired before the stuck connection reached its count")
+	default:
+	}
+	wake()
+	require.ErrorIs(t, context.Cause(ctx), errNoProgress, "a stuck connection beside a busy one")
 }
