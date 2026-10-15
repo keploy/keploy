@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -535,14 +536,20 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
 		}
+		// explained names the sets a case of which failed or has no verdict,
+		// shown or not: --test-case can leave such a set no case, and its
+		// failure is still a case's, not one no case explains.
+		var explained map[string]bool
 		if len(r.config.Report.TestCaseIDs) > 0 {
+			explained = make(map[string]bool, len(reports))
 			for name, rep := range reports {
+				explained[name] = slices.ContainsFunc(rep.Tests, redCase)
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
 				rep.Total = len(rep.Tests)
 				reports[name] = rep
 			}
 		}
-		return r.generateJUnit(reports)
+		return r.generateJUnit(reports, explained)
 	}
 
 	// --format json (NDJSON, one object per test result). Deliberately placed
