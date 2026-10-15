@@ -58,6 +58,10 @@ name: Mock Mode Regression (Linux)
 # container configured the same on a new random port is matched by its key;
 # and an aws-sdk-go-v2 S3 app against LocalStack, whose SigV4-signed calls
 # replay under the switch while another region or key id fails naming it.
+# Another (proven_fire_and_forget_linux) replays an app's fire-and-forget
+# publish, on a connection it opens and on one it keeps, with tc netem holding
+# every packet to keploy's proxy 1 s, and asserts the call is judged in its
+# own test: never in the next one, never not at all.
 on:
   workflow_call:
     inputs:
@@ -509,6 +513,76 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
+
+  # A fire-and-forget call is the test's own under the proven switch, however
+  # late its bytes reach keploy's proxy (design v14 §5.2): on a connection the
+  # application opens for it (the agent's count of the application's
+  # connections) and on one it opened at startup and keeps (the bytes on the
+  # connections the proxy holds). Every non-SYN packet to the proxy's port is
+  # held 1 s with tc netem, so a test's end reads while the call is still on
+  # its way: the call must be judged in its own test, never in the next one or
+  # not at all. Its own job: the mock-mode jobs above are near their timeouts.
+  proven_fire_and_forget_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven fire-and-forget (record_replay_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Ensure yq
+        run: |
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      # netem holds the packets; the runner's kernel ships it in
+      # linux-modules-extra, which the image may not have installed.
+      - name: Ensure sch_netem
+        run: |
+          if sudo modprobe sch_netem 2>/dev/null; then
+            echo "sch_netem loaded"
+            exit 0
+          fi
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" "linux-modules-extra-$(uname -r)"
+          sudo modprobe sch_netem
+
+      # The bytes wait's target under local transmit drops: a segment a full
+      # queue drops is counted twice in tcpi_bytes_sent, once in the target
+      # (pairbytes_qdisc_linux_test.go), in a network namespace of its own.
+      - name: Run the bytes wait's target under local drops (root)
+        run: |
+          set -o pipefail
+          go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
+          sudo unshare -n sh -c 'ip link set lo up && tc qdisc add dev lo root netem delay 1ms limit 3 && KEPLOY_QDISC_TEST=1 /tmp/proxy.test -test.run "^TestTheTargetCountsALocallyDroppedSegmentOnce$" -test.count=5 -test.v' | tee /tmp/qdisc.out
+          grep -q -- "--- PASS: TestTheTargetCountsALocallyDroppedSegmentOnce" /tmp/qdisc.out
+          if grep -q -- "--- SKIP" /tmp/qdisc.out; then echo "::error::the local-drop test skipped"; exit 1; fi
+
+      - name: Run proven fire-and-forget e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-fire-and-forget-linux.sh"
 
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,
