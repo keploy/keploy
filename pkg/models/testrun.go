@@ -43,6 +43,12 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
+	// so its results carry the proven model's evidence: a report renders it
+	// from this, not from the switch of the process rendering it. Set on
+	// every report a set run under the switch writes; absent for a set run
+	// without it.
+	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -234,6 +240,40 @@ type FailureInfo struct {
 	// could not be read, at the test's end or at its set's mark): the test
 	// has no verdict, and its set is not judged.
 	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+}
+
+// NotJudged is why the test has no verdict, whatever its status says: what
+// keploy could not read or check of it (UnmatchedCallsUnread,
+// TestMocksUnread, VariablesUnchecked, CaptureUnread), one reason each.
+// Empty for a judged test. Each is set only under the proven switch, so a
+// result written without it is never unjudged.
+func (fi FailureInfo) NotJudged() []string {
+	var why []string
+	if fi.UnmatchedCallsUnread {
+		why = append(why, "keploy could not read every call it made that no recorded mock answered")
+	}
+	if fi.TestMocksUnread {
+		why = append(why, "keploy could not read which of its recorded calls it made")
+	}
+	if fi.VariablesUnchecked != "" {
+		why = append(why, "keploy could not check what it captured against its dependency calls: "+fi.VariablesUnchecked)
+	}
+	if fi.CaptureUnread {
+		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	return why
+}
+
+// VerdictUnknown is why the test has no verdict although its row reads as
+// one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
+// (what could not be read can only add to why it failed) and for one keploy
+// skipped (IGNORED, which says it has no verdict). JUnit and the NDJSON mark
+// a test by this one predicate.
+func (r TestResult) VerdictUnknown() []string {
+	if r.Status == TestStatusFailed || r.Status == TestStatusIgnored {
+		return nil
+	}
+	return r.FailureInfo.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume

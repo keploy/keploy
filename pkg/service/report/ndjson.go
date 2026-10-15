@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -47,6 +48,20 @@ const EffectsSchemaVersion = "1"
 //	    }
 //	  ]
 //	}
+//
+// `verdict_unknown` and `verdict_unknown_reason` (optional, added within
+// schema_version "1"): `verdict_unknown: true` says keploy could not judge the
+// test, whatever "status" says: what it needed could not be read or checked
+// (the calls no mock answered, the recorded calls the test made, what it
+// captured, or whether every call was captured; KEPLOY_PROVEN=1). Its set is
+// not judged, and the run exits non-zero. The reason says what, one clause
+// each, joined by "; ". A consumer that reads "status" must read this first:
+// such a test's status can still say PASSED or OBSOLETE, and is no verdict.
+// Absent for a judged test, for a FAILED one (what could not be read can
+// only add to why it failed) and for an IGNORED one. A set run under the
+// switch that keploy could not judge for a reason no test carries
+// (INTERNAL_ERR) marks each of its other tests so, with the set's reason, as
+// its JUnit suite carries a "keploy verdict" error.
 //
 // `capture_verification` and `capture_verification_reason` (optional, added
 // within schema_version "1") are set-scoped and repeated on each of the set's
@@ -180,6 +195,11 @@ type testVerdict struct {
 	Kind              string   `json:"kind"`
 	Status            string   `json:"status"`
 	FailureCategories []string `json:"failure_categories,omitempty"`
+	// VerdictUnknown says keploy could not judge the test, whatever Status
+	// says (models.FailureInfo.NotJudged); VerdictUnknownReason says why.
+	// Optional, so no schema bump.
+	VerdictUnknown       bool   `json:"verdict_unknown,omitempty"`
+	VerdictUnknownReason string `json:"verdict_unknown_reason,omitempty"`
 	// TemplateFailures are the template variable places the test case failed
 	// on (models.TestResult.TemplateFailures). Optional, so no schema bump.
 	TemplateFailures []models.TemplateFailure `json:"template_failures,omitempty"`
@@ -243,6 +263,9 @@ func buildTestVerdict(runID, testSetID string, t models.TestResult, cv *models.C
 		DependenciesConsumed: t.Result.DepsConsumed,
 		Effects:              buildEffectRows(t),
 	}
+	if why := t.VerdictUnknown(); len(why) > 0 {
+		v.VerdictUnknown, v.VerdictUnknownReason = true, strings.Join(why, "; ")
+	}
 	if cv != nil {
 		v.CaptureVerification = string(cv.Status)
 		v.CaptureVerificationReason = cv.Reason
@@ -271,8 +294,13 @@ func buildTestVerdicts(runID string, reports map[string]*models.TestReport) []te
 		if testSetID == "" {
 			testSetID = name
 		}
+		setUnjudged := rep.Proven && rep.Status == string(models.TestSetStatusInternalErr)
 		for _, t := range rep.Tests {
-			out = append(out, buildTestVerdict(runID, testSetID, t, rep.CaptureVerification))
+			v := buildTestVerdict(runID, testSetID, t, rep.CaptureVerification)
+			if setUnjudged && !v.VerdictUnknown && t.Status != models.TestStatusFailed && t.Status != models.TestStatusIgnored {
+				v.VerdictUnknown, v.VerdictUnknownReason = true, rep.FailureReason
+			}
+			out = append(out, v)
 		}
 	}
 	return out

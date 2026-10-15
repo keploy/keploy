@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1096,6 +1097,13 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				if abortTestRun {
 					break
 				}
+			} else if provenswitch.On() {
+				// An IGNORED set has nothing a flaky check could find, and a
+				// set IGNORED under the switch ran its app to find none of its
+				// tests had a verdict: another attempt only runs it again.
+				// (Without the switch an IGNORED set is one the run skips
+				// whole, which starts nothing.)
+				break
 			}
 
 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
@@ -1207,6 +1215,23 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
+	// A run none of whose tests got a verdict (every test set, or every test,
+	// ignored or quarantined) verified nothing, so it does not pass, as a run
+	// with no tests to run does not. With the switch on or off: its exit code
+	// was 0. A run that failed already says why.
+	r.completeTestReportMu.RLock()
+	judged := r.totalTestPassed + r.totalTestFailed + r.totalTestObsolete
+	r.completeTestReportMu.RUnlock()
+	// verifiedNothing: the run fails for this alone, so no mock difference
+	// failed it, and its mismatch table (the misses of tests that got no
+	// verdict) is not shown as if one had.
+	verifiedNothing := false
+	if testRunResult && judged == 0 {
+		testRunResult, verifiedNothing = false, true
+		r.logger.Error("no test ran or got a verdict: every test set, or every test, of this run was ignored, so it verified nothing; the run fails",
+			zap.Strings("test_sets", testSets),
+			zap.String("next_step", "take a test set or test out of test.ignoredTests (or out of quarantine), or run only the test sets that should run with --test-sets"))
+	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -1266,7 +1291,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 			mismatchRows = actionable
 		}
-		if len(mismatchRows) > 0 && !r.config.DisableMapping {
+		if len(mismatchRows) > 0 && !r.config.DisableMapping && !verifiedNothing {
 			failuresByTestSet := make(map[string]bool)
 			for _, failure := range mismatchRows {
 				failuresByTestSet[failure.TestSetID] = true
@@ -1597,6 +1622,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored:   0,
 			TimeTaken: time.Since(startTime).String(),
 			CmdUsed:   r.config.Test.CmdUsed,
+			Proven:    provenswitch.On(),
 		}
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -1616,6 +1642,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored:   len(testCases),
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
+			Proven:    provenswitch.On(),
 		}
 		// Under the proven switch the report names each skipped test, with its
 		// reason, instead of counting them.
@@ -2241,6 +2268,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Status:    string(models.TestStatusRunning),
 		TimeTaken: time.Since(startTime).String(),
 		CmdUsed:   r.config.Test.CmdUsed,
+		Proven:    provenswitch.On(),
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -2425,9 +2453,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// variablesUnjudged names the tests whose captures could not be checked
 	// against what their dependency calls carried (proven switch): a
 	// keploy-side fault, so the set is not judged (testVariables);
-	// variablesWhy is the first reason.
+	// variablesWhy is each one's reason. Both are scoped to a test's last
+	// run, as consumedUnread is.
 	var variablesUnjudged []string
-	variablesWhy := ""
+	variablesWhy := map[string]string{}
 	variablesWarned := false
 	// consumptionUnread names every test, in any cycle and with the switch on or
 	// off, for which a read of what it consumed failed: what it consumed is not
@@ -2890,6 +2919,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testMocksUnread := testMocksUnknown(r.instrument && useMappingBased && isMappingEnabled, len(filteredExpectedNames), instrumentConsumedFetchErr)
 			if testMocksUnread {
 				consumedUnread = appendOnce(consumedUnread, testCase.Name)
+			} else {
+				// Scoped to the test's last run, whose row is the one kept
+				// (finalTestCaseResults): a --retry-passing cycle that read
+				// what it consumed clears an earlier cycle's unread read.
+				consumedUnread = slices.DeleteFunc(consumedUnread, func(n string) bool { return n == testCase.Name })
 			}
 
 			mockSetMismatch := false
@@ -3005,10 +3039,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				templateFailures = append(templateFailures, varFailures...)
 				if unjudged != "" {
 					variablesUnjudged = appendOnce(variablesUnjudged, testCase.Name)
-					if variablesWhy == "" {
-						variablesWhy = unjudged
-					}
+					variablesWhy[testCase.Name] = unjudged
 					variablesUnchecked = unjudged
+				} else {
+					// A --retry-passing-test cycle that checked it clears an
+					// earlier cycle's unchecked run (its row is the last's).
+					variablesUnjudged = slices.DeleteFunc(variablesUnjudged, func(n string) bool { return n == testCase.Name })
+					delete(variablesWhy, testCase.Name)
 				}
 				opts := resolved.opts
 				if failedOnItsOwn || len(varFailures) > 0 {
@@ -4273,14 +4310,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	// The prune's connection-error rule reads these back: unreadable or short of
-	// the verdicts, they cannot vouch for anything (fail closed).
-	scoredResults := 0
+	// the verdicts, they cannot vouch for anything (fail closed). They are
+	// counted by test, as the verdicts count them (verdictCounts): a test
+	// with two rows (an earlier cycle's and its last) is one test, so its
+	// second row cannot stand in for another test's lost one.
+	scoredTests := make(map[string]struct{}, len(testCaseResults))
 	for _, tr := range testCaseResults {
 		if tr.Status != models.TestStatusIgnored {
-			scoredResults++
+			scoredTests[tr.TestCaseID] = struct{}{}
 		}
 	}
-	resultsComplete := resultsErr == nil && scoredResults >= success+failure+obsolete
+	resultsComplete := resultsErr == nil && len(scoredTests) >= success+failure+obsolete
 
 	// Under the proven switch an unconsumed test mock a sibling consumed is
 	// named with that sibling.
@@ -4390,7 +4430,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.markNotJudged(testSetID)
 		}
 		if len(variablesUnjudged) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
-			notJudged = alsoNotJudged(notJudged, variablesUnjudgedReason(variablesUnjudged, variablesWhy))
+			notJudged = alsoNotJudged(notJudged, variablesUnjudgedReason(variablesUnjudged, variablesWhy[variablesUnjudged[0]]))
 			r.logger.Error("test-set is not judged: keploy could not check what some of its tests captured against what their dependency calls carried; the run goes on to the next test-set",
 				zap.String("test-set", testSetID),
 				zap.Strings("tests", variablesUnjudged))
@@ -4655,6 +4695,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Real:                realRun,
 		RealListed:          realListed,
 		RealFailure:         realWhy,
+		Proven:              provenswitch.On(),
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
