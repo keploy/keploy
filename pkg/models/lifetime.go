@@ -166,6 +166,14 @@ func (m *Mock) DeriveLifetime() {
 	if m.TestModeInfo.LifetimeDerived {
 		return
 	}
+	m.derive(true)
+}
+
+// derive is DeriveLifetime for a mock not derived yet. count says whether a
+// pre-tag recording's kind fallback counts in legacyKindFallbackFires, which
+// operators read as how many such mocks a replay loaded: false for a look at
+// a mock that is not loaded to be served (StatefulSequenceKey).
+func (m *Mock) derive(count bool) {
 	defer func() { m.TestModeInfo.LifetimeDerived = true }()
 
 	// A window-bound kind (a connection failure) is per-test whatever its tag,
@@ -261,7 +269,9 @@ func (m *Mock) DeriveLifetime() {
 		if kindSupportsCursor(m.Kind) {
 			m.TestModeInfo.Consume = ConsumeCursorSaturate
 		}
-		atomic.AddUint64(&legacyKindFallbackFires, 1)
+		if count {
+			atomic.AddUint64(&legacyKindFallbackFires, 1)
+		}
 		return
 	}
 
