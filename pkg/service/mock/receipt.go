@@ -123,13 +123,13 @@ type Receipt struct {
 	// than one test binary at once): keploy's verdict fails the run naming
 	// each. Absent with the switch off.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
-	// NotJudged is what the test command did that keploy cannot capture at
+	// CannotCapture is what the test command did that keploy cannot capture at
 	// all (decision 20: a call over a Unix socket, or Unix sockets keploy
 	// cannot see; CaptureLossKind.NotJudged), counted over the whole run
 	// from its base, one entry per kind with its latest What. Non-empty
 	// means the run has no verdict, whatever its tests' lines say: a call
 	// after the last test's read is on no line. Empty with the switch off.
-	NotJudged models.CaptureLosses `yaml:"notJudged,omitempty" json:"notJudged,omitempty"`
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -205,17 +205,17 @@ type TestsReceipt struct {
 	// those it first reached outside a test, and the capture_incomplete
 	// evidence charged to no test. nil without the switch.
 	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
-	// NotJudged is, under the proven switch, what the run did that keploy
-	// cannot capture at all (Receipt.NotJudged): in a replay's file the
+	// CannotCapture is, under the proven switch, what the run did that keploy
+	// cannot capture at all (Receipt.CannotCapture): in a replay's file the
 	// receipt's, in a record's what the recording lacks, so it is not taken
 	// as fully captured.
-	NotJudged models.CaptureLosses `yaml:"notJudged,omitempty" json:"notJudged,omitempty"`
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 	// CaptureLosses is, in a record's file under the proven switch, what the
 	// agent could not capture that no test was charged with (design v14
 	// §3.2: a loss charges the test open when it happened and every later
 	// one, so this is a loss after the last test): no recording holds what
 	// it carried, so judging fails the run on it (§7.5, evidence charged to
-	// no test). What keploy cannot capture at all is NotJudged's, not this.
+	// no test). What keploy cannot capture at all is CannotCapture's, not this.
 	CaptureLosses models.CaptureLosses `yaml:"captureLosses,omitempty" json:"captureLosses,omitempty"`
 	// CaptureLossesUnread is, in a record's file under the proven switch, why
 	// keploy could not read what its agent could not capture after the last
@@ -246,7 +246,7 @@ type TestReceipt struct {
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
-	// (NotJudged: a call keploy cannot capture at all, a Unix socket).
+	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).

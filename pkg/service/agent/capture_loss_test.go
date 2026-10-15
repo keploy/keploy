@@ -264,7 +264,7 @@ func TestACallKeployCannotCaptureLeavesTestsNotJudged(t *testing.T) {
 		w := windowOf(t, a, name)
 		require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
 		require.NotNil(t, w.Evidence)
-		require.Equal(t, db, w.Evidence.NotJudged)
+		require.Equal(t, db, w.Evidence.CannotCapture)
 		require.Empty(t, w.Evidence.CaptureIncomplete)
 		require.Contains(t, w.Evidence.Reason, "not judged")
 		require.Contains(t, w.Evidence.Reason, "/var/run/postgresql/.s.PGSQL.5432")
@@ -279,7 +279,7 @@ func TestACallKeployCannotCaptureLeavesTestsNotJudged(t *testing.T) {
 	h.losses = db
 	require.Empty(t, endPassed(t, a, "TestAfter").Action)
 	require.Nil(t, windowOf(t, a, "o::TestBefore").Evidence, "a test before the call is judged as it was")
-	require.Equal(t, db, windowOf(t, a, "o::TestAfter").Evidence.NotJudged)
+	require.Equal(t, db, windowOf(t, a, "o::TestAfter").Evidence.CannotCapture)
 
 	// An allow-listed call (nscd) never reaches the count: every test judged.
 	// (The hooks drop it: TestUnixAllowlist.)
@@ -357,7 +357,7 @@ func TestUnixSocketsKeployCannotSeeLeaveTestsNotJudged(t *testing.T) {
 		w := windowOf(t, a, name)
 		require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
 		require.NotNil(t, w.Evidence)
-		require.Equal(t, unseen, w.Evidence.NotJudged)
+		require.Equal(t, unseen, w.Evidence.CannotCapture)
 		require.Contains(t, w.Evidence.Reason, "not judged")
 	}
 }

@@ -747,17 +747,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
 		Refusals:       m.refusals,
-		NotJudged:      lostNotJudged,
+		CannotCapture:  lostNotJudged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-		Set:         name,
-		At:          started.UTC().Truncate(time.Second),
-		MocksDigest: digest,
-		Tests:       counts.tests,
-		Live:        m.live,
-		Mocked:      m.mocked,
-		Real:        realRun,
-		NotJudged:   lostNotJudged,
+		Set:           name,
+		At:            started.UTC().Truncate(time.Second),
+		MocksDigest:   digest,
+		Tests:         counts.tests,
+		Live:          m.live,
+		Mocked:        m.mocked,
+		Real:          realRun,
+		CannotCapture: lostNotJudged,
 	})
 	return keployFailure
 }
@@ -1834,7 +1834,7 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		// What keploy cannot capture at all leaves the test not judged,
 		// never failed: a line that dropped it would read as keploy's
 		// failure with no call to name.
-		ev.NotJudged = mergeCaptureLosses(ev.NotJudged, w.Evidence.NotJudged)
+		ev.CannotCapture = mergeCaptureLosses(ev.CannotCapture, w.Evidence.CannotCapture)
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {
