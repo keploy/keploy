@@ -10,6 +10,9 @@
 #   SIGKILL kills the app                 -> 137 (128 + SIGKILL: not a stop)
 #   --record-timer ends the recording     -> 0
 #   keploy is sent SIGINT while recording -> 0
+#   the agent the run started is killed    -> 1   (nothing more is captured:
+#                                                  the agent's exit is named,
+#                                                  #4790)
 # A stop is never a failure, and a recording that failed never exits 0. Before
 # #4772 an app that died exited 0 too. A recording whose agent cannot start is
 # mock-agent-cannot-start-linux.sh's.
@@ -110,6 +113,27 @@ else
   fail "sigint: the recording ended before its app ran"
 fi
 expect sigint 0 "Signal received: interrupt"
+
+# The agent the run started is killed mid-recording: nothing more is
+# captured, so the recording must fail, naming the agent's exit, instead of
+# ending 0 on the stop that comes after (#4790). The run is root here, so
+# the agent is a direct child with no sudo wrapper: the newest process whose
+# command is this binary's agent.
+MARK="$WORK/agent-killed/app-running"
+start agent-killed -c "sh -c 'touch $MARK; exec sleep 600'"
+until [ -e "$MARK" ]; do
+  kill -0 "$PID" 2>/dev/null || break
+  sleep 0.2
+done
+AGENT_PID="$(pgrep -n -f "$(basename "$BIN") agent" || true)"
+if [ ! -e "$MARK" ]; then
+  fail "agent-killed: the recording ended before its app ran"
+elif [ -z "$AGENT_PID" ]; then
+  fail "agent-killed: the run's agent process was not found"
+else
+  sudo kill -KILL "$AGENT_PID"
+fi
+expect agent-killed 1 "the keploy agent exited before the recording was stopped"
 
 sudo rm -rf "$WORK"
 if [ "$FAIL" -ne 0 ]; then

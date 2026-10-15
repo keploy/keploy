@@ -1163,6 +1163,37 @@ func (r *Recorder) composeAgentFailure() error {
 	return reader.ComposeAgentFailure()
 }
 
+// AgentExitReader is an optional Instrumentation extension for a recording
+// whose agent this client started (not docker compose: the project starts
+// that one): the agent process's own exit, reported once (nil for a clean
+// exit), or nil when this instrumentation did not start an agent.
+// AgentClient implements it.
+type AgentExitReader interface {
+	AgentExit() <-chan error
+}
+
+// agentExitError is the agent's own exit as the recording's failure, naming
+// it, with the code the agent's exit is tagged with kept (utils/exitcodes.go:
+// 3 for the kernel privileges it could not get, 6 for an environment it
+// cannot run in), which recordExitCode then ends this process with. Every
+// other exit is the exit itself: a generic keploy failure (1). A clean exit
+// (nil) says so: the agent went away on its own all the same.
+func agentExitError(exitErr error) error {
+	if exitErr == nil {
+		return errors.New("it exited on its own")
+	}
+	var ec interface{ ExitCode() int }
+	if errors.As(exitErr, &ec) {
+		switch ec.ExitCode() {
+		case utils.ExitPrivilegeRequired:
+			return fmt.Errorf("%w: %w", utils.ErrPrivilegeRequired, exitErr)
+		case utils.ExitEnvironmentUnsupported:
+			return fmt.Errorf("%w: %w", utils.ErrEnvironmentUnsupported, exitErr)
+		}
+	}
+	return exitErr
+}
+
 // appStoppedBySignal reports whether the app ended on SIGTERM or SIGINT
 // (exit 143 or 130: `docker stop`, `kill` or `kill -INT` on the app). That is
 // how an app is stopped, so it ends the recording normally, with exit 0, as
@@ -1938,6 +1969,19 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
+	// The agent this client started, watched for its exit from here on.
+	// Setup's readiness wait is the only reader of it, and it stops reading
+	// once the agent is up; an agent that dies after that, before the
+	// recording is stopped, fails the run (#4790). Under compose the project
+	// starts the agent -- this client never did -- and composeEnd reads its
+	// death from the project's end instead.
+	var agentExited <-chan error
+	if r.config.CommandType != string(utils.DockerCompose) {
+		if reader, ok := r.instrumentation.(AgentExitReader); ok {
+			agentExited = reader.AgentExit()
+		}
+	}
+
 	r.logger.Debug("Command type:", zap.String("commandType", r.config.CommandType))
 
 	if r.config.CommandType == string(utils.DockerCompose) {
@@ -2472,7 +2516,34 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	// Waiting for the error to occur in any of the go routines
 	select {
+	case exitErr := <-agentExited:
+		// The agent this client started went away before the recording was
+		// stopped: nothing more would be captured, and the run used to keep
+		// going with a silent agent and end 0 on the user's stop (#4790). A
+		// stop that has already begun is the user's, and is not this failure.
+		if ctx.Err() != nil {
+			return nil
+		}
+		stopReason = "the keploy agent exited before the recording was stopped, hence stopping keploy"
+		err = agentExitError(exitErr)
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	case appErr := <-appErrChan:
+		// In docker run mode the app shares the agent container's PID
+		// namespace, so an agent that died kills the app: the app's 137
+		// would blame it for the agent's death. When the agent's own exit is
+		// already in, the agent is named instead; the exit raises this
+		// select's own case when it is still on its way.
+		if agentExited != nil && r.config.CommandType == string(utils.DockerRun) {
+			select {
+			case exitErr := <-agentExited:
+				stopReason = "the keploy agent exited before the recording was stopped, hence stopping keploy"
+				err = agentExitError(exitErr)
+				utils.LogError(r.logger, err, stopReason)
+				return fmt.Errorf("%s: %w", stopReason, err)
+			default:
+			}
+		}
 		// Under compose the agent is a service in the project: when it
 		// crashes, compose stops the app over it (143 or 137), or never
 		// starts it (and may report 0), and the run is the agent's failure,
