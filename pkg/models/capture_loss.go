@@ -73,6 +73,11 @@ const (
 	// at all. It is not a loss of something keploy saw: the test it taints
 	// is NOT JUDGED (NotJudged), never failed.
 	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
+	// CaptureLossUDPReply (4c c): the application's UDP other than DNS got a
+	// reply; keploy leaves such UDP where the application sends it, so it was
+	// answered live, neither recorded nor mocked. Only under the proven
+	// switch.
+	CaptureLossUDPReply CaptureLossKind = "udp_reply"
 )
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
@@ -224,6 +229,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
+	case CaptureLossUDPReply:
+		return fmt.Sprintf("%d UDP socket(s) of the application got a reply from the real destination, which keploy neither records nor mocks (UDP other than DNS); add its port to bypassRules if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	default:

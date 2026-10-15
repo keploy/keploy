@@ -32,6 +32,10 @@ var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_sockops":      ebpf.AttachCGroupSockOps,
 	"k_udp4_sendmsg": ebpf.AttachCGroupUDP4Sendmsg,
 	"k_udp6_sendmsg": ebpf.AttachCGroupUDP6Sendmsg,
+	// Attached only under the proven switch (udpwatch.go).
+	"k_udp_ingress":      ebpf.AttachCGroupInetIngress,
+	"k_udp_egress":       ebpf.AttachCGroupInetEgress,
+	"k_udp_sock_release": ebpf.AttachCgroupInetSockRelease,
 }
 
 // DetectAndCleanOrphanedCgroupPrograms finds BPF programs attached to the
