@@ -455,6 +455,18 @@ const (
 	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
 
+// SetEnd is how keploy test ended one run of a test set (each attempt, when
+// maxFlakyChecks or --must-pass runs it again): the status its report has,
+// and why, as the report's FailureReason says, or the error that ended the
+// set before its report was written. A set can end neither PASSED nor FAILED
+// with only passing results (the app halted after some tests passed, or
+// keploy could not judge the set), and FAILED with none failing (a capture
+// loss after its last test): its results alone do not say how it ended.
+type SetEnd struct {
+	Status TestSetStatus `json:"status" yaml:"status"`
+	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+}
+
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	switch s {
 	case "RUNNING":
