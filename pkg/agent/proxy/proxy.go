@@ -2424,7 +2424,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					tracked = p.inflight.track(clientConn)
 					clientConn = tracked
 				}
-				tracked.beforeClose = func() { p.pairClosing(raw) }
+				tracked.beforeClose = func() { p.pairClosing(clientConnCtx, raw, tracked) }
 			}
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's

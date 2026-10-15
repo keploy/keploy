@@ -85,6 +85,34 @@ func preferH2From(ctx context.Context) bool {
 	return v
 }
 
+// TLSLayerHolder is a connection whose close the proxy reads before it
+// happens (pkg/agent/proxy's trackedConn): handed the TLS layer the proxy
+// serves over it, its close reads through that layer what its socket still
+// holds unread. A TLS client's close_notify, which carries no call, and data
+// look alike to the socket's own count of unread bytes -- TLS 1.3 encrypts
+// the alert -- and only the layer tells them apart.
+type TLSLayerHolder interface {
+	HoldTLSLayer(*tls.Conn)
+}
+
+// holdTLSLayer hands tlsConn to the first connection under conn that holds
+// one (TLSLayerHolder), through the wrappers between (their NetConn), if
+// there is one.
+func holdTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
+	c := conn
+	for i := 0; c != nil && i < 16; i++ { // a wrapper chain, never a cycle
+		if h, ok := c.(TLSLayerHolder); ok {
+			h.HoldTLSLayer(tlsConn)
+			return
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return
+		}
+		c = u.NetConn()
+	}
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
@@ -129,6 +157,10 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
 		return nil, false, err
 	}
+
+	// The connection the proxy closes with care is handed the layer: its
+	// close reads through it what its socket still holds (TLSLayerHolder).
+	holdTLSLayer(conn, tlsConn)
 
 	// 4. (Optional) Check what kind of connection happened
 	// You can log this to verify if the client actually used mTLS or just standard TLS

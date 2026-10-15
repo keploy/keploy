@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -77,6 +78,10 @@ type trackedConn struct {
 	// (pairbytes.go).
 	beforeClose func()
 	closeOnce   sync.Once
+	// tlsLayer is the TLS layer the proxy serves the connection over, once
+	// its handshake is done (HoldTLSLayer); nil for a plain one. Its close
+	// reads through it what the socket still holds (pairClosing).
+	tlsLayer atomic.Pointer[tls.Conn]
 	// unknown names the protocol of a parser serving it that reads ahead
 	// and does not mark what it holds (integrations.HoldsUnknown): whether
 	// it holds a request cannot be told.
@@ -379,6 +384,10 @@ func (c *trackedConn) Close() error {
 	c.moved()
 	return err
 }
+
+// HoldTLSLayer keeps the TLS layer the proxy serves c over
+// (pTls.TLSLayerHolder), for its close.
+func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
 // CloseWrite forwards a half-close to the conn underneath.
 func (c *trackedConn) CloseWrite() error {
