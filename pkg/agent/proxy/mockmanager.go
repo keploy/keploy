@@ -34,6 +34,9 @@ import (
 //	                          with hitMu as that leaf)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
+//	                         (prepareOutside reads the staged trees under the
+//	                          staging lock; nothing takes swapMu under it)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -678,8 +681,9 @@ const connectionSweepInterval = 1 * time.Minute
 
 func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	filtered, unfiltered = m.statelessMocks(kind, key)
-	// Under exact serving a mock a parser evicted is gone until the next
-	// begin or end, as from every other read.
+	// Under exact serving a mock a parser evicted is gone, as from every
+	// other read: until the next begin or end, or for a data-plane recording
+	// consumed outside every test, until the next staging.
 	if v := m.exactView(); v != nil {
 		filtered, unfiltered = v.unspent(filtered), v.unspent(unfiltered)
 	}
@@ -2280,8 +2284,8 @@ func (m *MockManager) noteStatedLifetimes(slices ...[]*models.Mock) {
 //     idle-sweeper doesn't reclaim an active connection.
 func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
 	mocks, err := m.connectionMocks(connID)
-	// Under exact serving a connection mock a parser evicted is gone until
-	// the next begin or end, as from every other read.
+	// Under exact serving a connection mock a parser evicted is gone, as from
+	// every other read (unspent).
 	if v := m.exactView(); v != nil && err == nil {
 		mocks = v.unspent(mocks)
 	}
