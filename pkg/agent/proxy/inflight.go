@@ -78,6 +78,11 @@ type trackedConn struct {
 	// (pairbytes.go).
 	beforeClose func()
 	closeOnce   sync.Once
+	// closing: its Close has begun. A read from then on is the close's own
+	// (pairClosing reads through the TLS layer what the socket holds) or one
+	// the close is ending, never its handler waiting for the application:
+	// until its handler is done (forget), and its miss filed, it holds work.
+	closing atomic.Bool
 	// tlsLayer is the TLS layer the proxy serves the connection over, once
 	// its handshake is done (HoldTLSLayer); nil for a plain one. Its close
 	// reads through it what the socket still holds (pairClosing).
@@ -168,7 +173,7 @@ func (t *inflight) Pending(answers bool) int {
 		if tc.forgotten.Load() {
 			continue
 		}
-		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0)) {
+		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0 || tc.closing.Load())) {
 			n++
 		}
 	}
@@ -203,7 +208,7 @@ func (t *inflight) State(answers bool) (pending int, unknown []string) {
 		// first read (servedBy).
 		unread := tc.unread()
 		reading, held, marks := tc.view()
-		if unread > 0 || (answers && (reading == 0 || held > 0)) {
+		if unread > 0 || (answers && (reading == 0 || held > 0 || tc.closing.Load())) {
 			pending++
 		}
 		if answers {
@@ -242,7 +247,7 @@ func (t *inflight) PendingProgress(answers bool) map[uint64]uint64 {
 		if tc.forgotten.Load() {
 			continue
 		}
-		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0)) {
+		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0 || tc.closing.Load())) {
 			out[tc.id] = tc.progress.Load()
 		}
 	}
@@ -377,6 +382,7 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 // (SQS's) has not filed the miss yet: until the proxy files it, the
 // connection holds the test's work, as a handler not blocked reading does.
 func (c *trackedConn) Close() error {
+	c.closing.Store(true)
 	if c.beforeClose != nil {
 		c.closeOnce.Do(c.beforeClose)
 	}
