@@ -278,7 +278,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	// One mock at a time: read, decode, judge, and write the ones that stay
 	// to the replacement before reading the next (see rewrite.go). Written
 	// back in the format read, so a prune never migrates the file's format.
-	// A second pass keeps what a kept mock requires (see prune_deps.go).
+	// A second pass keeps what a kept mock requires, and the async epochs a
+	// replay serves (see prune_deps.go).
 	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
 		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
 	}}
@@ -298,6 +299,8 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.Int("copiedVerbatim", st.copied),
 		zap.Int("keptAsDependency", verdict.asDependency),
 		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Int("keptAsAsyncEpoch", verdict.asTimeline),
+		zap.Strings("keptAsAsyncEpochMocks", verdict.asTimelineNames),
 		zap.Any("prunedMocks", st.prunedMocks),
 		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
@@ -442,7 +445,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
-	// A second pass keeps what a kept mock requires (see prune_deps.go).
+	// A second pass keeps what a kept mock requires, and the async epochs a
+	// replay serves (see prune_deps.go).
 	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
 		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
 	}}
@@ -464,6 +468,8 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		zap.Int("pruned", st.pruned),
 		zap.Int("keptAsDependency", verdict.asDependency),
 		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Int("keptAsAsyncEpoch", verdict.asTimeline),
+		zap.Strings("keptAsAsyncEpochMocks", verdict.asTimelineNames),
 		zap.Any("prunedMocks", st.prunedMocks),
 		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
