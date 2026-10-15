@@ -30,6 +30,14 @@ const (
 	// timeout, its own stop) made no call to lose and is not counted. Charged
 	// to the test it happened in only (PerTest).
 	CaptureLossTLSAbort CaptureLossKind = "tls_handshake_failed"
+	// CaptureLossTLSAbandoned: a client hung up on its TLS handshake with
+	// keploy's proxy once keploy had sent it its certificate, without a
+	// word (no alert). A client that does not trust keploy's CA may reject
+	// the certificate so -- Node.js does -- and one that gave up (a cancel,
+	// a timeout) looks the same, so whether a call was lost cannot be told:
+	// the test it happened in is NOT JUDGED (NotJudged), never failed and
+	// never passed. Charged to that test only (PerTest).
+	CaptureLossTLSAbandoned CaptureLossKind = "tls_handshake_abandoned"
 	// CaptureLossSTARTTLS: a parser asked to upgrade a connection to TLS
 	// (STARTTLS, Postgres SSLRequest) and keploy could not make the upgrade,
 	// so what followed was not parsed.
@@ -93,9 +101,18 @@ const (
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
 // without a verdict (decision 20), rather than failing them: a call keploy
-// cannot capture at all, as opposed to one it saw and lost.
+// cannot capture at all, or a TLS handshake abandoned without a word, which
+// keploy cannot tell lost a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned
+}
+
+// runScoped says a loss of kind k is counted from the run's base however far
+// back it was made (SinceWithin): what keploy cannot capture at all over a
+// connection that outlives tests (NotJudged), but for a test's own kind
+// (PerTest), which is counted from the test's mark as every other kind is.
+func (k CaptureLossKind) runScoped() bool {
+	return k.NotJudged() && !k.PerTest()
 }
 
 // Split is l's losses that fail a test (judged) and those that leave it
@@ -111,15 +128,25 @@ func (l CaptureLosses) Split() (judged, notJudged CaptureLosses) {
 	return judged, notJudged
 }
 
-// SinceWithin is what grew from base on for the losses that fail a test, and
-// from runBase on for those that leave it without a verdict: a call keploy
-// cannot capture at all is over a connection that outlives the test, the test
-// set and the session it was opened in, so the application's first one
-// taints every test after it in the run, however far back it was made.
+// SinceWithin is what grew from base on, but for what keploy cannot capture
+// at all over a connection that outlives tests (runScoped: a Unix socket),
+// from runBase on: that connection outlives the test, the test set and the
+// session it was opened in, so the application's first call over one taints
+// every test after it in the run, however far back it was made. A test's own
+// kind that leaves it without a verdict (an abandoned TLS handshake) is
+// counted from base, as the losses that fail a test are.
 func (l CaptureLosses) SinceWithin(base, runBase CaptureLosses) CaptureLosses {
-	judged, _ := l.Since(base).Split()
-	_, notJudged := l.Since(runBase).Split()
-	out := append(judged, notJudged...)
+	var out CaptureLosses
+	for _, c := range l.Since(base) {
+		if !c.Kind.runScoped() {
+			out = append(out, c)
+		}
+	}
+	for _, c := range l.Since(runBase) {
+		if c.Kind.runScoped() {
+			out = append(out, c)
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
 	return out
 }
@@ -142,6 +169,30 @@ func (l CaptureLosses) NotJudgedText() string {
 	return "not judged: " + strings.Join(parts, "; ") + ", so keploy cannot prove this test's calls were all captured"
 }
 
+// NotJudgedRemedy is what to do about losses that leave a test without a
+// verdict (Split's notJudged), for a next_step: reach a Unix-socket
+// dependency over TCP; make a TLS client that abandoned its handshake trust
+// keploy's CA. Empty for none.
+func (l CaptureLosses) NotJudgedRemedy() string {
+	var unix, tls bool
+	for _, c := range l {
+		switch c.Kind {
+		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
+			unix = true
+		case CaptureLossTLSAbandoned:
+			tls = true
+		}
+	}
+	var do []string
+	if unix {
+		do = append(do, "reach that dependency over a TCP address (mocked, or listed in mock.real)")
+	}
+	if tls {
+		do = append(do, "make the TLS client trust keploy's CA (for Node.js, NODE_EXTRA_CA_CERTS)")
+	}
+	return strings.Join(do, ", and ")
+}
+
 // CaptureLoss is how many times one kind of capture loss happened in the
 // agent's life, with what the latest one was (never a value the app sent);
 // for CaptureLossRealUncaptured, how many connections were charged to one
@@ -162,13 +213,14 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 
 // PerTest says a loss of kind k, in the agent's counts, is the test's it
 // happened in, not a taint of every later test (design v14 §3.2's taint,
-// which the agent-life kinds carry): a client whose TLS handshake failed lost
-// that one call, and its later calls are captured, or lost, on their own. One
-// between two tests is the next test's, as a miss between tests is.
+// which the agent-life kinds carry): a client whose TLS handshake failed, or
+// was abandoned, lost that one call or may have, and its later calls are
+// captured, or lost, on their own. One between two tests is the next test's,
+// as a miss between tests is.
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -317,6 +369,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
+	case CaptureLossTLSAbandoned:
+		return fmt.Sprintf("a client hung up on %d TLS handshake(s) with keploy's proxy once keploy had sent its certificate, without a word: a client that does not trust keploy's CA rejects it so (Node.js does) and one that gave up (a cancel, a timeout) looks the same, so whether a call was lost cannot be told; if the client does not trust keploy's CA, make it trust it (for Node.js, set NODE_EXTRA_CA_CERTS to keploy's CA certificate)", c.Count)
 	case CaptureLossUDPReply:
 		return fmt.Sprintf("the application's UDP was answered live %d time(s) (a socket counted once per read it was answered before), which keploy neither records nor mocks (UDP other than DNS); add a port-only bypassRules entry for it if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:

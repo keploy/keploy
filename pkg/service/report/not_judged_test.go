@@ -34,6 +34,7 @@ var notJudgedCases = []struct {
 	{"variables unchecked", models.FailureInfo{VariablesUnchecked: "the learn step's table could not be read"}, "the learn step's table could not be read"},
 	{"capture unread", models.FailureInfo{CaptureUnread: true}, "captured every call"},
 	{"cannot capture (decision 20)", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app/db.sock"}}}, "a Unix socket keploy cannot capture (1 time(s)) while this test or one before it ran (/run/app/db.sock)"},
+	{"an abandoned TLS handshake", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}}}, "set NODE_EXTRA_CA_CERTS to keploy's CA certificate) (to 10.0.0.1:443)"},
 }
 
 // A test keploy could not judge is not green in JUnit, whatever its row's

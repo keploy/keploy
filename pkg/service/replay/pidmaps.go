@@ -317,20 +317,20 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	if lastRead {
 		from = last
 	}
-	// What keploy cannot capture at all: only what is new since the set's
-	// last read (its tests already carry the rest), counted from the run's
-	// base when no test read. A standing unix_unseen is always new (no mark
-	// takes it away): such a set is not judged.
-	judged, _ := now.Since(from).Split()
+	// What keploy cannot capture at all over a connection that outlives
+	// tests: only what is new since the set's last read (its tests already
+	// carry the rest), counted from the run's base when no test read. A
+	// standing unix_unseen is always new (no mark takes it away): such a set
+	// is not judged. Every other kind, an abandoned TLS handshake too, from
+	// the set's last read or its mark (SinceWithin).
 	notFrom := r.lossRunBase
 	if lastRead {
 		notFrom = last
 	}
-	_, notJudged := now.Since(notFrom).Split()
 	// Not the PID-map refusals: the set's PID-map check
 	// (pidMapCaptureIncomplete) reports those, once.
 	var out models.CaptureLosses
-	for _, l := range append(judged, notJudged...) {
+	for _, l := range now.SinceWithin(from, notFrom) {
 		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
 			out = append(out, l)
 		}

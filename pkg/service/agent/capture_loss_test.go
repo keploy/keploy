@@ -457,3 +457,36 @@ func TestUnchargedCaptureLossesCountEachTestsOwnHandshakes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}, un, "the handshake before the claim was charged to no test")
 }
+
+// A client that abandoned its TLS handshake without a word once keploy's
+// certificate was out may have rejected it (Node.js does so): the test it
+// happened in is not judged -- never failed, the abandon on its window -- and
+// a later test is not charged with it.
+func TestAnAbandonedHandshakeLeavesOnlyItsTestNotJudged(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	lp := lossProxy{wireProxy: p}
+	a.Proxy = lp
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	ctx := context.Background()
+	abandoned := models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}}
+	_, serr := a.ProvenBegin(ctx, begin("TestDuring"))
+	require.Nil(t, serr)
+	lp.losses = abandoned
+	a.Proxy = lp
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestDuring", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, "not judged is never a failure")
+	require.Empty(t, endPassed(t, a, "TestAfter").Action)
+
+	w := windowOf(t, a, "o::TestDuring")
+	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+	require.NotNil(t, w.Evidence)
+	require.Equal(t, abandoned, w.Evidence.CannotCapture)
+	require.Empty(t, w.Evidence.CaptureIncomplete)
+	require.Contains(t, w.Evidence.Reason, "NODE_EXTRA_CA_CERTS")
+	require.Nil(t, windowOf(t, a, "o::TestAfter").Evidence, "a later test is not charged with it")
+	un, err := a.UnchargedCaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Empty(t, un, "it was charged to its test")
+}
