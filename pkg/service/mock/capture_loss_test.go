@@ -228,7 +228,7 @@ func TestACallKeployCannotCaptureLeavesAMockRunUnverified(t *testing.T) {
 	require.False(t, r.Isolated)
 	require.Empty(t, r.FailedBy)
 	require.Contains(t, r.IsolationNote, "keploy cannot capture")
-	require.Equal(t, db, r.NotJudged, "the receipt says so as data, not text only")
+	require.Equal(t, db, r.CannotCapture, "the receipt says so as data, not text only")
 	require.Contains(t, logged(logs), "the test command called what keploy cannot capture")
 
 	// A real loss beside it takes the note; the data still says what keploy
@@ -238,7 +238,7 @@ func TestACallKeployCannotCaptureLeavesAMockRunUnverified(t *testing.T) {
 	r = mustReceipt(t, dir)
 	require.NotContains(t, r.IsolationNote, "keploy cannot capture")
 	require.Contains(t, r.IsolationNote, "TLS handshake")
-	require.Equal(t, db, r.NotJudged)
+	require.Equal(t, db, r.CannotCapture)
 }
 
 func TestACallKeployCannotCaptureLeavesARecordingKept(t *testing.T) {
@@ -273,11 +273,11 @@ func TestAReceiptKeepsWhatLeftATestNotJudged(t *testing.T) {
 		return models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: n, What: "/var/run/postgresql/.s.PGSQL.5432"}}
 	}
 	got := withEvidence([]TestReceipt{{Name: "o::A", Outcome: "passed"}}, []models.ScopeWindow{
-		{Name: "o::A", Evidence: &models.ScopeEvidence{Reason: "keploy: not judged", NotJudged: db(1)}},
-		{Name: "o::A", Evidence: &models.ScopeEvidence{Reason: "keploy: not judged", NotJudged: db(2)}},
+		{Name: "o::A", Evidence: &models.ScopeEvidence{Reason: "keploy: not judged", CannotCapture: db(1)}},
+		{Name: "o::A", Evidence: &models.ScopeEvidence{Reason: "keploy: not judged", CannotCapture: db(2)}},
 	})
 	require.NotNil(t, got[0].Evidence)
-	require.Equal(t, db(2), got[0].Evidence.NotJudged)
+	require.Equal(t, db(2), got[0].Evidence.CannotCapture)
 	require.False(t, got[0].Evidence.Empty(), "a line with only its reason reads as keploy's failure")
 }
 
@@ -288,7 +288,7 @@ type runnerLossInstr struct {
 }
 
 // A judged record's per-test file carries what the recording lacks because
-// keploy cannot capture it at all (TestsReceipt.NotJudged), so whatever
+// keploy cannot capture it at all (TestsReceipt.CannotCapture), so whatever
 // judges the recording does not take it as fully captured.
 func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -310,5 +310,5 @@ func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
 	r, err := ReadRecordTestsReceipt(dir, set)
 	require.NoError(t, err)
 	require.NotNil(t, r, "no per-test file")
-	require.Equal(t, db, r.NotJudged)
+	require.Equal(t, db, r.CannotCapture)
 }

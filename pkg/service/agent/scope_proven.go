@@ -779,7 +779,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// leaves the test without a verdict, never failed: it is on the window,
 	// and in the reason, but the outcome stands.
 	judged, notJudged := lost.Split()
-	ev.NotJudged = notJudged
+	ev.CannotCapture = notJudged
 	if len(judged) == 0 {
 		if ev.Reason == "" {
 			ev.Reason = "keploy: " + notJudged.NotJudgedText() + "."
