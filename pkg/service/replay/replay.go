@@ -510,6 +510,11 @@ type Replayer struct {
 	lossMarked   bool
 	lossLast     models.CaptureLosses
 	lossLastRead bool
+	// lossRunBase is the run's first capture-loss mark, from which what
+	// keploy cannot capture at all is counted for the whole run (decision
+	// 20: a Unix-socket connection outlives the test set it was opened in).
+	lossRunBase    models.CaptureLosses
+	lossRunBaseSet bool
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -824,6 +829,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// are counted from here. A compose agent comes up with its project, in
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
+	r.lossRunBase, r.lossRunBaseSet = nil, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 	}
@@ -2487,8 +2493,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// A run that started no application (an agent already up, no -c) has
 	// not marked the capture losses its tests count from: its first test set
-	// marks them here, before its first test (proven switch).
+	// marks them here, before its first test (proven switch). Its application
+	// is up already, and may have opened a Unix-socket connection that every
+	// test rides on (decision 20): what keploy cannot capture at all is
+	// counted from the hooks' load, as the agent counts it, not from here.
 	if provenswitch.On() && !r.lossMarked {
+		if !r.lossRunBaseSet {
+			r.lossRunBase, r.lossRunBaseSet = nil, true
+		}
 		r.markCaptureLosses(runTestSetCtx)
 	}
 
@@ -4478,6 +4490,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// read as either (proven switch). A set already not judged for what its
 	// tests consumed says both.
 	// So has one whose capture could not be told (proven switch).
+	if uncapturable, what := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
+		r.logger.Error("test-set is not judged: the application called what keploy cannot capture while some of its tests ran ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", uncapturable),
+			zap.String("reason", what),
+			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
 	if unreadCapture := testsWithUnreadCapture(testCaseResults); len(unreadCapture) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		notJudged = alsoNotJudged(notJudged, unreadCaptureReason(unreadCapture))
 		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call while some of its tests ran; the run goes on to the next test-set",
@@ -4604,7 +4626,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
 	// next test set's tests count from here.
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
-	for _, t := range []string{late.Text(), realUncaptured} {
+	// A call keploy cannot capture at all (decision 20) is no loss of what it
+	// saw: below, it leaves the set without a verdict, never failed.
+	lateJudged, lateNotJudged := late.Split()
+	for _, t := range []string{lateJudged.Text(), realUncaptured} {
 		if t == "" {
 			continue
 		}
@@ -4616,6 +4641,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	if lateErr != nil && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = models.CaptureLossesUnverified(lateErr)
+	}
+	// A call keploy cannot capture at all after the set's last test
+	// (decision 20): the set has no verdict, as one whose count is lost.
+	if t := lateNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = t
 	}
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
@@ -7032,7 +7062,9 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		r.logger.Error("could not tell whether keploy's agent captured every call while this test ran; its test set is not judged",
 			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
 	case len(read.lost) > 0 && result != nil:
-		result.FailureInfo.CaptureIncomplete = read.lost
+		// A call keploy cannot capture at all (decision 20) leaves the test
+		// without a verdict; any other loss fails it.
+		result.FailureInfo.CaptureIncomplete, result.FailureInfo.CannotCapture = read.lost.Split()
 	}
 	// The connections keploy could neither capture nor relay as real while
 	// the test ran: capture incomplete, as a loss is, so the test fails with

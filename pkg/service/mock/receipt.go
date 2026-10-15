@@ -221,7 +221,8 @@ type TestReceipt struct {
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
-	// connections keploy could not capture.
+	// connections keploy could not capture; or what left it not judged
+	// (NotJudged: a call keploy cannot capture at all, a Unix socket).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).

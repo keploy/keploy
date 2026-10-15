@@ -909,3 +909,82 @@ func TestTheSetsTailLeavesPIDMapRefusalsToThePIDMapCheck(t *testing.T) {
 		t.Fatalf("the tail's losses %+v (%v), want the parser stall only", late, err)
 	}
 }
+
+// Decision 20 under the proven switch: a call keploy cannot capture at all (a
+// Unix socket) leaves the test open at the time, and every later one, without
+// a verdict, never FAILED; the set is not judged. Opened at the
+// application's startup, it leaves every test unjudged; opened mid-run, the
+// tests before it keep their verdicts.
+func TestUnderTheSwitchACallKeployCannotCaptureLeavesTestsNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+	for _, tc := range []struct {
+		name    string
+		answers []models.CaptureLosses // the mark, then a read as each test ends, then the set's end
+		judged  []string
+	}{
+		{name: "at startup", answers: []models.CaptureLosses{nil, db}, judged: nil},
+		{name: "mid-run", answers: []models.CaptureLosses{nil, nil, db}, judged: []string{"test-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 3, 0)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: tc.answers}
+			h.replayer.markPIDMaps(context.Background())
+			if status := h.run(t); status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+				t.Fatalf("status %q, not judged %v; want %q and not judged", status, h.replayer.notJudged("test-set-0"), models.TestSetStatusInternalErr)
+			}
+			var judged []string
+			for _, r := range h.report.report.Tests {
+				if r.Status == models.TestStatusFailed {
+					t.Fatalf("%s FAILED: a call keploy cannot capture never fails a test", r.TestCaseID)
+				}
+				if len(r.FailureInfo.CannotCapture) == 0 {
+					judged = append(judged, r.TestCaseID)
+				} else if r.FailureInfo.CannotCapture[0].What != db[0].What || len(r.FailureInfo.CaptureIncomplete) != 0 {
+					t.Fatalf("%s: not judged %+v, capture incomplete %+v", r.TestCaseID, r.FailureInfo.CannotCapture, r.FailureInfo.CaptureIncomplete)
+				}
+			}
+			if fmt.Sprint(judged) != fmt.Sprint(tc.judged) {
+				t.Fatalf("judged tests %v, want %v", judged, tc.judged)
+			}
+			if reason := h.report.report.FailureReason; !strings.Contains(reason, "keploy cannot capture") || !strings.Contains(reason, "/var/run/postgresql/.s.PGSQL.5432") {
+				t.Fatalf("the set's reason %q does not say what keploy cannot capture", reason)
+			}
+		})
+	}
+
+	// A later test set on the same agent counts it from the run's first
+	// mark: the connection outlives the set it was opened in.
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{db}}
+	h.replayer.lossRunBase, h.replayer.lossRunBaseSet = nil, true // the run began before the connect
+	h.replayer.markPIDMaps(context.Background())                  // this set's mark is after it
+	if status := h.run(t); status != models.TestSetStatusInternalErr {
+		t.Fatalf("a later test set: status %q, want not judged: the connect before its mark still serves its tests", status)
+	}
+}
+
+// An agent already up (no -c): the application is up before the run, so a
+// Unix-socket connection it opened at startup is in the counts already when
+// the run's first test set takes the run's first mark. What keploy cannot
+// capture at all is counted from the hooks' load, as the agent counts it, so
+// every test is not judged; counted from that mark, every test would be
+// judged on calls keploy never saw.
+func TestAnAgentUpRunCountsAUnixConnectionOpenedBeforeIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{db}}
+	// No mark before the set: RunTestSet takes the run's first.
+	if status := h.run(t); status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %q, not judged %v; want %q and not judged: the connection the application opened before the run serves its tests", status, h.replayer.notJudged("test-set-0"), models.TestSetStatusInternalErr)
+	}
+	for _, r := range h.report.report.Tests {
+		if r.Status == models.TestStatusFailed || len(r.FailureInfo.CannotCapture) == 0 {
+			t.Fatalf("%s: status %s, not judged %+v; want not judged, never failed", r.TestCaseID, r.Status, r.FailureInfo.CannotCapture)
+		}
+	}
+}

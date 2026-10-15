@@ -43,6 +43,11 @@ type captureWatch struct {
 	unverified []string
 	lost       models.CaptureLosses
 	readErr    error
+	// uncapturable are the test cases recorded while or after the
+	// application called what keploy cannot capture at all (decision 20),
+	// and notJudged what that was: said, never a failure.
+	uncapturable []string
+	notJudged    models.CaptureLosses
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -104,9 +109,14 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		}
 		return
 	}
-	if lost := now.Since(w.base); len(lost) > 0 {
+	judged, notJudged := now.Since(w.base).Split()
+	if len(judged) > 0 {
 		w.tainted = append(w.tainted, name)
-		w.lost = lost
+		w.lost = judged
+	}
+	if len(notJudged) > 0 {
+		w.uncapturable = append(w.uncapturable, name)
+		w.notJudged = notJudged
 	}
 }
 
@@ -127,6 +137,15 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.Strings("testCases", w.tainted),
 			zap.String("reason", w.lost.Text()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
+	}
+	if len(w.uncapturable) > 0 {
+		// Not a failure: keploy never had these calls to lose. The test
+		// cases are kept; a replay of them makes those calls for real.
+		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture: their calls over it are not in the mocks ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Strings("testCases", w.uncapturable),
+			zap.String("reason", w.notJudged.NotJudgedText()),
+			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then re-record these test cases"))
 	}
 	if len(w.unverified) > 0 {
 		failed = true

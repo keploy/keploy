@@ -238,6 +238,11 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 		return
 	}
 	r.lossMark = captureLossMark{at: at, known: true}
+	if !r.lossRunBaseSet {
+		// The run's first mark, before its application starts: what keploy
+		// cannot capture at all is counted from here for the whole run.
+		r.lossRunBase, r.lossRunBaseSet = at, true
+	}
 }
 
 // readCaptureLosses reads the agent's counts with no deadline of its own (the
@@ -271,7 +276,7 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 		return nil, err
 	}
 	r.lossLast, r.lossLastRead = now, true
-	return now.Since(r.lossMark.at), nil
+	return now.SinceWithin(r.lossMark.at, r.lossRunBase), nil
 }
 
 // endCaptureLosses reads, at a test set's end under the proven switch, what
@@ -302,10 +307,19 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	if lastRead {
 		from = last
 	}
-	// Not the PID-map refusals: the set's PID-map check (pidMapCaptureIncomplete)
-	// reports those, once.
+	// What keploy cannot capture at all: only what is new since the set's
+	// last read (its tests already carry the rest), counted from the run's
+	// base when no test read.
+	judged, _ := now.Since(from).Split()
+	notFrom := r.lossRunBase
+	if lastRead {
+		notFrom = last
+	}
+	_, notJudged := now.Since(notFrom).Split()
+	// Not the PID-map refusals: the set's PID-map check
+	// (pidMapCaptureIncomplete) reports those, once.
 	var out models.CaptureLosses
-	for _, l := range now.Since(from) {
+	for _, l := range append(judged, notJudged...) {
 		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
 			out = append(out, l)
 		}
