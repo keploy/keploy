@@ -18,6 +18,14 @@ import (
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
 func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	// Every report the kernel made before this read is counted first, so a
+	// call the application made before it is in it (a test's end, the run's
+	// last read), however late the agent's goroutines run.
+	if d, ok := a.Hooks.(coreAgent.CaptureLossDrainer); ok && a.Hooks != nil {
+		if err := d.DrainCaptureLosses(ctx); err != nil {
+			return nil, err
+		}
+	}
 	var out models.CaptureLosses
 	proxy, proxyCounts := a.Proxy.(coreAgent.CaptureLossReporter)
 	if proxyCounts && a.Proxy != nil {

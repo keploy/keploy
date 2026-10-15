@@ -85,6 +85,8 @@ type udpWatch struct {
 	// could not move on, a count of the kernel's it could not read, a report
 	// it could not read (CaptureLossesErr). It stays.
 	err error
+	// drain lets a read wait for every report before it (DrainCaptureLosses).
+	drain *reportDrain
 }
 
 // startProvenUDP starts the UDP watch under the proven switch only, and
@@ -117,7 +119,7 @@ func startUDPWatch(objs *bpfObjects, cg string) (*udpWatch, error) {
 		return nil, errors.New("keploy's BPF objects are not loaded: the UDP watch's programs and maps are missing")
 	}
 	// 2: the kernel reads an epoch never set (0) as 1.
-	w := &udpWatch{maps: objs, epoch: 2}
+	w := &udpWatch{maps: objs, epoch: 2, drain: newReportDrain()}
 	if err := objs.UdpReplyEpoch.Update(uint32(0), w.epoch, ebpf.UpdateAny); err != nil {
 		return nil, fmt.Errorf("set the UDP watch's epoch: %w", err)
 	}
@@ -163,12 +165,21 @@ func (w *udpWatch) watch(logger *zap.Logger) {
 	warned := false
 	for {
 		rec, err := w.rd.Read()
-		if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) {
-			return
-		}
-		if err != nil {
-			w.fail(fmt.Errorf("read a UDP reply report: %w", err))
+		switch {
+		case errors.Is(err, ringbuf.ErrFlushed):
+			// Every report before a read's flush is handled (drain).
+			w.drain.flushed()
 			continue
+		case errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed):
+			w.drain.stop(errReportClosed)
+			return
+		case err != nil:
+			// The ring cannot be read past here: nothing after can be
+			// counted.
+			err = fmt.Errorf("read a UDP reply report: %w", err)
+			w.fail(err)
+			w.drain.stop(err)
+			return
 		}
 		var e udpReplyEvent
 		if len(rec.RawSample) != udpReplyEventSize {

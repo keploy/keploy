@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,48 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	// Listening before the agent is registered: never a member.
 	startUnixHelper(t, "listen "+outside)
 
+	h := unixReportAgent(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// The report runs under the proven switch only.
+	t.Setenv(provenswitch.Env, "1")
+	h.startUnixConn(ctx)
+	h.unixMu.Lock()
+	off := h.unix.off
+	h.unixMu.Unlock()
+	if off != "" {
+		t.Fatalf("the AF_UNIX report did not load: %s", off)
+	}
+
+	// A member's own socket first, then the outsider's: the reports come in
+	// that order, so when the outsider's has been counted, the member's would
+	// have been too.
+	startUnixHelper(t, "listen "+own)
+	startUnixHelper(t, "connect "+own)
+	startUnixHelper(t, "connect "+outside)
+	for {
+		got := h.CaptureLosses()
+		if len(got) == 1 && got[0].What == outside {
+			if got[0].Kind != models.CaptureLossUnixSocket || got[0].Count != 1 {
+				t.Fatalf("capture losses %+v, want one unix_socket loss, the outsider's socket: the member's own was counted", got)
+			}
+			return
+		}
+		if len(got) > 1 || (len(got) == 1 && got[0].Count > 1) {
+			t.Fatalf("capture losses %+v, want only the outsider's socket", got)
+		}
+		// No deadline: the test binary's -timeout bounds it.
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// unixReportAgent loads keploy's main object as the agent does, registers this
+// process as the agent (in a PID namespace of its own: every process there
+// that calls socket() is a member), and returns the hooks, the AF_UNIX report
+// not yet started.
+func unixReportAgent(t *testing.T) *Hooks {
+	t.Helper()
 	spec, err := loadBpf()
 	if err != nil {
 		t.Fatal(err)
@@ -143,37 +186,65 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = unix.Close(fd)
+	return h
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	// The report runs under the proven switch only.
-	t.Setenv(provenswitch.Env, "1")
-	h.startUnixConn(ctx)
-	h.unixMu.Lock()
-	off := h.unix.off
-	h.unixMu.Unlock()
-	if off != "" {
-		t.Fatalf("the AF_UNIX report did not load: %s", off)
+// A read of the capture losses waits for every report the kernel made before
+// it: a member's connect whose report waits in the ring while the watch is
+// not reading (a starved goroutine, a loaded host) is in the read that
+// follows the connect, not a later one. The read is blocked in the drain
+// before the watch starts; without the drain it returns without the call.
+func TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt(t *testing.T) {
+	if !inOwnPIDNamespace(t) {
+		return
 	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.sock")
+	startUnixHelper(t, "listen "+outside) // before the agent: never a member
+	h := unixReportAgent(t)
+	t.Setenv(provenswitch.Env, "1")
+	u, err := loadUnixConn(&h.objects)
+	if err != nil {
+		t.Fatalf("the AF_UNIX report did not load: %v", err)
+	}
+	t.Cleanup(u.close)
+	h.unixMu.Lock()
+	h.unix = u
+	h.unixMu.Unlock()
 
-	// A member's own socket first, then the outsider's: the reports come in
-	// that order, so when the outsider's has been counted, the member's would
-	// have been too.
-	startUnixHelper(t, "listen "+own)
-	startUnixHelper(t, "connect "+own)
+	// The watch is not reading: the connect's report waits in the ring.
 	startUnixHelper(t, "connect "+outside)
+	type read struct {
+		losses models.CaptureLosses
+		err    error
+	}
+	done := make(chan read, 1)
+	go func() {
+		err := h.DrainCaptureLosses(context.Background())
+		done <- read{h.CaptureLosses(), err}
+	}()
 	for {
-		got := h.CaptureLosses()
-		if len(got) == 1 && got[0].What == outside {
-			if got[0].Kind != models.CaptureLossUnixSocket || got[0].Count != 1 {
-				t.Fatalf("capture losses %+v, want one unix_socket loss, the outsider's socket: the member's own was counted", got)
-			}
-			return
+		select {
+		case r := <-done:
+			t.Fatalf("the read returned %+v (%v) before the watch handled the report the kernel made before it", r.losses, r.err)
+		default:
 		}
-		if len(got) > 1 || (len(got) == 1 && got[0].Count > 1) {
-			t.Fatalf("capture losses %+v, want only the outsider's socket", got)
+		u.drain.mu.Lock()
+		w := u.drain.waiting
+		u.drain.mu.Unlock()
+		if w > 0 {
+			break
 		}
-		// No deadline: the test binary's -timeout bounds it.
-		time.Sleep(time.Millisecond)
+		runtime.Gosched()
+	}
+	go u.watch(zap.NewNop(), h.isMember)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if len(r.losses) != 1 || r.losses[0].Kind != models.CaptureLossUnixSocket || r.losses[0].What != outside || r.losses[0].Count != 1 {
+		t.Fatalf("the read after the connect: %+v, want the outsider's socket, once", r.losses)
 	}
 }
