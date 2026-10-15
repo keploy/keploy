@@ -70,19 +70,33 @@ func (p *Proxy) warnUncounted(err error) {
 // as settled. A connection that arrives at the listener before the canary's is
 // kept for the accept loop, counted there. It does nothing for an unmarked
 // listener.
-func (p *Proxy) canary(ln net.Listener) {
+//
+// The proxy's stop (ctx) ends it wherever it stands: its connect, which a
+// listener whose queue is full holds for as long as the kernel retries the
+// SYN, takes ctx, and its accept, which waits for a connection that may never
+// come, ends as the stop closes the listener (a stopping proxy accepts nothing
+// more). The proxy's shutdown, which removes the run's CA, runs only once the
+// proxy has said it is ready. Nothing else ended them, and a stop that came
+// then waited until the CLI killed the agent for want of progress, the CA
+// still installed.
+func (p *Proxy) canary(ctx context.Context, ln net.Listener) {
 	if _, err := p.markedListener(); err != nil {
 		return
 	}
+	defer context.AfterFunc(ctx, func() { _ = ln.Close() })()
 	port := ln.Addr().(*net.TCPAddr).Port
 	var c net.Conn
 	var err error
+	var d net.Dialer
 	for _, host := range []string{"127.0.0.1", "::1"} {
-		if c, err = net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port))); err == nil {
+		if c, err = d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port))); err == nil {
 			break
 		}
 	}
 	if err != nil {
+		if p.canaryStopped(ctx) {
+			return
+		}
 		err = fmt.Errorf("connect to the proxy's own listener to check the kernel's count: %w", err)
 		p.accepts.Fail(fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err))
 		p.warnUncounted(err)
@@ -93,6 +107,9 @@ func (p *Proxy) canary(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			if p.canaryStopped(ctx) {
+				return
+			}
 			err = fmt.Errorf("accept the proxy's own check of the kernel's count: %w", err)
 			p.accepts.Fail(fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err))
 			p.warnUncounted(err)
@@ -109,6 +126,23 @@ func (p *Proxy) canary(ln net.Listener) {
 		}
 		return
 	}
+}
+
+// canaryStopped reports whether the proxy's stop (ctx) is what ended the
+// canary. Then the count was never checked, and is unknown; and the
+// connections it kept for the accept loop are closed: that loop sees the stop
+// and returns, and must not hand one to a handler first.
+func (p *Proxy) canaryStopped(ctx context.Context) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	p.accepts.Fail(fmt.Errorf("%w: the proxy was stopped before it checked the kernel's count", models.ErrProxyConnsUnsupported))
+	for _, c := range p.early {
+		_ = c.Close()
+	}
+	p.early = nil
+	p.logger.Debug("the proxy was stopped while it checked the kernel's count of its connections")
+	return true
 }
 
 // takeEarly hands the accept loop a connection the canary accepted before its

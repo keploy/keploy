@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 
 	"strings"
 	"sync"
@@ -229,7 +230,7 @@ func TestTheCanaryKeepsAnEarlierConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer early.Close()
-	p.canary(ln)
+	p.canary(context.Background(), ln)
 	kept := p.takeEarly()
 	if kept == nil || kept.RemoteAddr().String() != early.LocalAddr().String() {
 		t.Fatalf("the canary kept %v, want the earlier connection from %v", kept, early.LocalAddr())
@@ -240,6 +241,131 @@ func TestTheCanaryKeepsAnEarlierConnection(t *testing.T) {
 	}
 	if n, err := p.Accepted(); err != nil || n != 1 {
 		t.Fatalf("after the canary: Accepted() = %d, %v; want 1", n, err)
+	}
+}
+
+// swallowingListener hands its accept only the connections from the ports in
+// pass; every other it closes as it comes, and says so on swallowed: the
+// canary's own connection never reaches the canary, as when another accept
+// takes it.
+type swallowingListener struct {
+	net.Listener
+	pass      map[int]bool
+	swallowed chan struct{}
+}
+
+func (l swallowingListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if ra, ok := c.RemoteAddr().(*net.TCPAddr); ok && l.pass[ra.Port] {
+			return c, nil
+		}
+		_ = c.Close()
+		select {
+		case l.swallowed <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// The proxy's stop ends a canary still waiting for its own connection: the
+// proxy's shutdown, which removes the run's CA, runs only once the proxy has
+// said it is ready. Nothing ended it, and a stop that came then waited until
+// the CLI killed the agent for want of progress, the CA still installed. The
+// count was never checked, so it is unknown; and the connection the canary
+// kept for the accept loop, which returns at the stop, is closed.
+func TestTheProxysStopEndsTheCanary(t *testing.T) {
+	p := New(zap.NewNop(), plainDestInfo{}, config.New())
+	p.SetListenerCounter(&fakeCounter{})
+	ln, err := p.listen(context.Background(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	early, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer early.Close()
+	l := swallowingListener{Listener: ln, pass: map[int]bool{early.LocalAddr().(*net.TCPAddr).Port: true},
+		swallowed: make(chan struct{}, 1)}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan struct{})
+	go func() { p.canary(ctx, l); close(done) }()
+	select {
+	case <-l.swallowed: // its own connection is gone: the canary waits for good
+	case <-done:
+		t.Fatal("the canary returned though its own connection never reached it")
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the canary never connected to the listener")
+	}
+	stop() // the proxy's stop
+	select {
+	case <-done:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the canary is still waiting for its own connection after the proxy's stop")
+	}
+	if n, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("Accepted() after a stop during the canary = %d, %v; want unknown, saying the proxy was stopped", n, err)
+	}
+	if p.takeEarly() != nil {
+		t.Fatal("the canary left the accept loop a connection it will never take")
+	}
+	_ = early.SetReadDeadline(time.Now().Add(time.Minute)) // only turns a hang into a failure
+	if _, err := early.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the connection the canary kept is still open after the stop (%v)", err)
+	}
+}
+
+// unclosableListener is a listener its Close does not reach: a connect whose
+// SYN a full queue dropped is not reached by the listener's close until the
+// kernel's next retry of it, which can be a minute away.
+type unclosableListener struct{ net.Listener }
+
+func (unclosableListener) Close() error { return nil }
+
+// The proxy's stop ends the canary's connect itself, not only by the
+// listener's close: a stop that came before the connect is its answer at
+// once, and the count, never checked, is unknown.
+func TestTheProxysStopEndsTheCanarysConnect(t *testing.T) {
+	p := New(zap.NewNop(), plainDestInfo{}, config.New())
+	p.SetListenerCounter(&fakeCounter{})
+	ln, err := p.listen(context.Background(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ctx, stop := context.WithCancel(context.Background())
+	stop() // the proxy's stop, before the canary's connect
+	p.canary(ctx, unclosableListener{ln})
+	if n, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("Accepted() after a stop before the canary's connect = %d, %v; want unknown, saying the proxy was stopped", n, err)
+	}
+}
+
+// start() hands the canary its stop: a stop that came before the canary ends
+// it, and start() still says it is ready, runs its shutdown, and returns; the
+// count, never checked, says the proxy was stopped.
+func TestAStopBeforeTheCanaryEndsTheStart(t *testing.T) {
+	cfg := config.New()
+	cfg.ProxyPort = 0
+	p := New(zap.NewNop(), plainDestInfo{}, cfg)
+	p.SetListenerCounter(&fakeCounter{})
+	ctx, stop := context.WithCancel(context.Background())
+	stop() // the proxy's stop, before its start
+	ready := make(chan error, 1)
+	if err := p.Serve(ctx, ready); err != nil {
+		t.Fatalf("start() after a stop = %v, want nil", err)
+	}
+	if err := <-ready; err != nil {
+		t.Fatalf("start() after a stop reported %v, want ready (nil)", err)
+	}
+	if n, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("Accepted() after a stop before the canary = %d, %v; want unknown, saying the proxy was stopped", n, err)
 	}
 }
 

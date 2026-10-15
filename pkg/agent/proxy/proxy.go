@@ -2219,8 +2219,8 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 	p.Listener = listener
 	// The kernel's count is proven before the proxy says it is ready
-	// (accepts.go).
-	p.canary(listener)
+	// (accepts.go); the stop ends the proof.
+	p.canary(ctx, listener)
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Handshakes are held from the first session whose connections dial
 	// their destination (ensureHandshakeHold); one already set is honoured
