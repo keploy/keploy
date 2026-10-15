@@ -22,18 +22,23 @@ type CaptureLossReader interface {
 // captureWatch is, under the proven switch, keploy record's account of what
 // the agent could not capture (design v14 §3.2, rule 12): processes the
 // kernel refused a place in the agent's PID maps, client-side TLS handshakes
-// that failed against keploy's CA, TLS upgrades keploy could not make,
-// counted from the moment the agent began capturing. A loss taints the test case being recorded when
-// it happened and every later one, so each test case is checked as it is
-// saved: the first whose check sees a loss and every one after it are named
-// at the end, and the recording fails. A test case whose check could not be
-// read is named as unverified, and fails the recording too. With the switch
-// off, or an agent that cannot count, it does nothing.
+// with keploy's proxy that failed other than by the client hanging up, TLS
+// upgrades keploy could not make, counted from the moment the agent began
+// capturing. A loss taints the test case being recorded when it happened and
+// every later one -- but for a test case's own kinds (models.PerTest), which
+// are the test case's they happened in -- so each test case is checked as it
+// is saved: every one whose check sees a loss is named at the end, and the
+// recording fails. A test case whose check could not be read is named as
+// unverified, and fails the recording too. With the switch off, or an agent
+// that cannot count, it does nothing.
 type captureWatch struct {
 	logger *zap.Logger
 	reader CaptureLossReader
 	off    bool
 	base   models.CaptureLosses
+	// last is the count as the previous test case was checked, which a test
+	// case's own kinds (models.PerTest) count from; nil before the first.
+	last models.CaptureLosses
 	// baseErr is why the count could not be read when capture began; every
 	// test case is then unverified.
 	baseErr error
@@ -96,7 +101,10 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	return w
 }
 
-// afterTestCase checks the count as test case name is saved.
+// afterTestCase checks the count as test case name is saved: an agent-life
+// loss since the recording began taints it, and a failed TLS handshake since
+// the previous check (models.PerTest) is its own. A check that failed leaves
+// the next one to count from the check before.
 func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	if w == nil || w.off {
 		return
@@ -117,15 +125,24 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		}
 		return
 	}
-	judged, notJudged := now.Since(w.base).Split()
+	test := w.last
+	if test == nil {
+		test = w.base
+	}
+	w.last = now
+	judged, notJudged := now.Charged(w.base, w.base, test).Split()
+	// Every loss so far: the reason names them all, not only this test
+	// case's own (an earlier one's failed handshake is still a reason the
+	// recording is incomplete), and each was charged to a test case by now.
+	allJudged, allNotJudged := now.Since(w.base).Split()
+	w.charged = w.charged.Max(allJudged)
 	if len(judged) > 0 {
 		w.tainted = append(w.tainted, name)
-		w.lost = judged
-		w.charged = w.charged.Max(judged)
+		w.lost = allJudged
 	}
 	if len(notJudged) > 0 {
 		w.uncapturable = append(w.uncapturable, name)
-		w.notJudged = notJudged
+		w.notJudged = allNotJudged
 	}
 }
 

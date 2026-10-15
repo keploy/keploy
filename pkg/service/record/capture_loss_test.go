@@ -67,6 +67,67 @@ func TestARecordingThatLostACaptureNamesTheTestCasesFromTheLossOn(t *testing.T) 
 	}
 }
 
+// A TLS client's rejection of keploy's certificate is the test case's it
+// happened in, not a taint of every later one: only the test cases recorded
+// while one happened are named. It named every test case from the first on.
+func TestARecordingNamesOnlyTheTestCasesATLSRejectionHappenedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, then each test case's check.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, tls(1), tls(1), tls(2)}}
+	w, failed, _ := record3(t, instr)
+	if !failed || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("failed %v, %s; want test-1 and test-3 tainted, not test-2, and the recording failed", failed, w)
+	}
+}
+
+// The recording's ERROR gives every loss as its reason, not only the last
+// tainted test case's own: test-1's failed handshake is still why the
+// recording is incomplete when test-3 is named for a PID-map refusal.
+func TestARecordingsReasonNamesEveryLossNotOnlyTheLast(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
+	both := models.CaptureLosses{pid(1)[0], tls}
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, {tls}, {tls}, both}}
+	w, failed, logs := record3(t, instr)
+	if !failed || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("failed %v, %s; want test-1 and test-3 tainted and the recording failed", failed, w)
+	}
+	errs := logs.FilterMessageSnippet("the recording is incomplete").All()
+	if len(errs) != 1 {
+		t.Fatalf("%d 'recording is incomplete' ERRORs, want 1", len(errs))
+	}
+	if r := fmt.Sprint(errs[0].ContextMap()["reason"]); r != both.Text() {
+		t.Fatalf("the ERROR's reason %q, want every loss: %q", r, both.Text())
+	}
+}
+
+// The final read charges no test case with what each test case's check
+// already saw: two test cases' own failed handshakes are both charged, so
+// nothing is left over for "after the last test case".
+func TestARecordingsFinalReadCountsEachTestCasesOwnHandshakes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, tls(1), tls(1), tls(2), tls(2)}}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if !w.finish("test-set-0") || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("%s; want test-1 and test-3 tainted and the recording failed", w)
+	}
+	if n := len(logs.FilterMessageSnippet("after the last test case").All()); n != 0 {
+		t.Fatalf("%d 'after the last test case' ERRORs, want none: every handshake was charged to a test case", n)
+	}
+}
+
 func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {

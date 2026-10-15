@@ -59,9 +59,9 @@ type provenWire struct {
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
 	charged []models.UnmatchedCall
-	// lossesCharged is the most the tests' ends charged of what the agent
-	// could not capture since the run began (chargeCaptureLosses), kind by
-	// kind: what the run lost beyond it was charged to no test
+	// lossesCharged is what the tests' ends charged of what the agent could
+	// not capture since the run began (chargeCaptureLosses), kind by kind:
+	// what the run lost beyond it was charged to no test
 	// (UnchargedCaptureLosses).
 	lossesCharged models.CaptureLosses
 	// claim is the live claim; zero when none.
@@ -102,8 +102,11 @@ type provenWire struct {
 	// mocked-local rows, NoteLive and NoteMocked).
 	topology topologyRows
 	// losses is the run's capture-loss counts at its start, which each
-	// test's end counts from (capture_loss.go).
-	losses captureLossMark
+	// test's end counts from (capture_loss.go); testLosses the counts as the
+	// previous test ended, which a test's own kinds (models.PerTest) count
+	// from (nil before the first test's end: the run's mark).
+	losses     captureLossMark
+	testLosses models.CaptureLosses
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -285,6 +288,18 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		if err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
+		}
+	}
+	if prev != me {
+		// A failed TLS handshake before this claim is the run's -- charged
+		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
+		// which counts every loss while the command ran -- as its misses
+		// are: not this process's first test's. A read that fails leaves
+		// that test to count from the previous test's end.
+		if now, err := a.CaptureLosses(ctx); err == nil {
+			a.provenMu.Lock()
+			a.proven.testLosses = now
+			a.provenMu.Unlock()
 		}
 	}
 	a.provenMu.Lock()
@@ -747,9 +762,11 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 }
 
 // chargeCaptureLosses adds to a test's evidence what the agent could not
-// capture since the run began (design v14 §3.2): a loss taints the test open
-// when it happened and every later one. In a replay the test then fails, with
-// the losses in its reason; a record keeps the evidence on the window for
+// capture that the test is charged (design v14 §3.2): a loss since the run
+// began taints the test open when it happened and every later one, but for a
+// test's own kinds (models.PerTest: a failed TLS handshake), which are the
+// test's they happened in. In a replay the test then fails, with the losses
+// in its reason; a record keeps the evidence on the window for
 // judging and answers as before (record instances never fail a test). A read
 // of the losses that failed is a test keploy cannot judge: failed in a
 // replay, and said on the window in a record.
@@ -760,17 +777,39 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 // the losses'.
 func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool, beganAt time.Time) (*models.ScopeEvidence, string) {
 	a.provenMu.Lock()
-	mark := a.proven.losses
+	mark, test := a.proven.losses, a.proven.testLosses
 	a.provenMu.Unlock()
-	lost, err := a.captureLossesSince(ctx, mark)
+	lost, now, err := a.captureLossesSince(ctx, mark, test)
+	if err == nil && now != nil {
+		// The next test's own losses count from here.
+		a.provenMu.Lock()
+		a.proven.testLosses = now
+		a.provenMu.Unlock()
+	}
 	if err == nil && len(lost) == 0 {
 		return ev, outcome
 	}
 	if err == nil {
+		// What the tests have been charged, kind by kind: a taint is
+		// charged whole to every test from it on, so the most any test's
+		// end saw since the run began (tests of parallel instances end
+		// concurrently, and their reads land in either order); a test's
+		// own kind (PerTest) only to the test it happened in, so the sum
+		// of what each test was charged -- what a test process's claim
+		// kept from its first test is charged to none.
+		var taint, own models.CaptureLosses
+		for _, c := range sinceRun(now, mark) {
+			if !c.Kind.PerTest() {
+				taint = append(taint, c)
+			}
+		}
+		for _, c := range lost {
+			if c.Kind.PerTest() {
+				own = append(own, c)
+			}
+		}
 		a.provenMu.Lock()
-		// The most charged, kind by kind: tests of parallel instances
-		// end concurrently, and their reads land in either order.
-		a.proven.lossesCharged = a.proven.lossesCharged.Max(lost)
+		a.proven.lossesCharged = a.proven.lossesCharged.Max(taint).Plus(own)
 		a.provenMu.Unlock()
 	}
 	if ev == nil {

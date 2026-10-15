@@ -1,9 +1,10 @@
 // Package captureloss counts the calls the agent intercepted and could not
 // record or mock (design v14 §3.2, rule 12: capture is never silent): a TLS
-// handshake a client aborted against keploy's CA, a STARTTLS upgrade keploy
-// could not make, and each later kind. The agent adds these counts to the
-// ones its hooks keep (Agent.CaptureLosses), and every test that ends after a
-// loss is charged with it under the proven switch.
+// client that rejected keploy's certificate, a STARTTLS upgrade keploy could
+// not make, and each later kind. The agent adds these counts to the ones its
+// hooks keep (Agent.CaptureLosses), and under the proven switch every test
+// that ends after a loss is charged with it -- but for a test's own kinds
+// (models.CaptureLossKind.PerTest), charged to the test they happened in.
 package captureloss
 
 import (
