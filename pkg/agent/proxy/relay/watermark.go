@@ -160,6 +160,38 @@ func (w *Watermark) Progress() uint64 {
 	return n
 }
 
+// HeldProgress is a count that moves whenever a parser that keeps the verdict
+// for a test case recorded over [start, end] from being final gets further:
+// the bytes consumed by the followed connections that carried bytes within
+// it and whose parser is not done with them (behind). One that gets past the
+// window, or returns, leaves the sum, which moves it too; one that returns
+// having consumed nothing leaves it as it was, and with it gone the verdict
+// is final unless another parser still holds it. What other connections do
+// (consume bytes outside the window, close) is not counted: it says nothing
+// of this verdict, and a busy capture would otherwise keep a test case whose
+// own parser has stopped held for as long as anything else moves. The hold
+// lets such a test case go unsettled only once it stops moving
+// (syncMock.HeldProgressor).
+func (w *Watermark) HeldProgress(_, _ string, start, end time.Time) uint64 {
+	if w == nil || end.IsZero() {
+		return 0
+	}
+	s, e := int64(0), end.UnixNano()
+	if !start.IsZero() {
+		s = start.UnixNano()
+	}
+	var n uint64
+	for _, c := range w.snapshot() {
+		if c.r.carriedNothingIn(s, e) {
+			continue
+		}
+		if ok, _ := c.r.passedThrough(e); !ok {
+			n += c.r.consumedBytes()
+		}
+	}
+	return n
+}
+
 // Following is how many connections the watermark follows.
 func (w *Watermark) Following() int {
 	if w == nil {
