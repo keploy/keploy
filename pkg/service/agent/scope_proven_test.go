@@ -1368,3 +1368,21 @@ func TestAnEndStopsServingTheTestBeforeItReadsTheOutcome(t *testing.T) {
 	require.GreaterOrEqual(t, len(p.events), 2)
 	require.Equal(t, []string{"pool", "outcome"}, p.events[:2], "the outcome was read while the test was still served")
 }
+
+// A connection whose client sent nothing (models.MatchPhaseNoRequest) made no
+// call: it fails no test, and the run still reads it, for its next step.
+func TestAConnectionThatSentNothingFailsNoTest(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestPlaceOrder"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestPlaceOrder", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1, "the run still reads it, for its next step")
+}

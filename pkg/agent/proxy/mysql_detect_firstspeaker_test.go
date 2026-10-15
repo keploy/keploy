@@ -330,9 +330,9 @@ func TestReplayClientSpeakingBeforeTheMocksArriveIsHandedOnAtOnce(t *testing.T) 
 		}
 		done <- probe
 	}()
-	// Past the old silence window, so the old probe was waiting on the mocks
+	// Past the 250ms the old probe gave a silent client, so it was waiting on the mocks
 	// by now; the probe under test decides on the bytes whenever they come.
-	time.Sleep(3 * defaultClientSilenceWindow)
+	time.Sleep(750 * time.Millisecond)
 	const hello = "AMQP\x00\x00\x09\x01"
 	if _, err := io.WriteString(app, hello); err != nil {
 		t.Fatal(err)

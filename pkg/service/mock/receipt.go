@@ -84,10 +84,11 @@ type Receipt struct {
 	Loaded   int `yaml:"loaded" json:"loaded"`
 	Consumed int `yaml:"consumed" json:"consumed"`
 	Missed   int `yaml:"missed" json:"missed"`
-	// MissedData counts, under the proven switch only, the misses other than
-	// DNS lookups, which are protocol-phase (the proxy answers an unrecorded
-	// name itself): what the proven model's verdict fails on. -1 when the
-	// misses were not read; absent with the switch off.
+	// MissedData counts, under the proven switch only, the misses that count
+	// against a test (models.UnmatchedCall.CountsAgainstTest: not DNS lookups,
+	// which are protocol-phase, nor connections that sent nothing): what the
+	// proven model's verdict fails on. -1 when the misses were not read;
+	// absent with the switch off.
 	MissedData *int `yaml:"missedData,omitempty" json:"missedData,omitempty"`
 	// Bypass lists the destinations configured to skip keploy (bypassRules,
 	// --pass-through-ports): calls to them reach the real service.

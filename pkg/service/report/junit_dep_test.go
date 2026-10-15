@@ -408,3 +408,15 @@ func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// A connection whose client sent nothing (models.MatchPhaseNoRequest) is no
+// call with no recorded answer: the JUnit evidence leaves it out, as the
+// verdict does.
+func TestProvenEvidenceLeavesOutAConnectionThatSentNothing(t *testing.T) {
+	lines := provenEvidenceLines(models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest},
+	}})
+	if len(lines) != 0 {
+		t.Fatalf("evidence lines = %q, want none", lines)
+	}
+}

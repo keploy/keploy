@@ -802,8 +802,10 @@ func (a *Agent) failClosedWindow(id, why string) {
 }
 
 // testEvidence is what fails the open test id at its end: its data-plane
-// misses (DNS is protocol-phase), and the test mocks it did not consume while
-// it was open (exact serving tells which). A failed read is an error.
+// misses (models.UnmatchedCall.CountsAgainstTest: DNS is protocol-phase, and
+// a connection that sent nothing made no call), and the test mocks it did not
+// consume while it was open (exact serving tells which). A failed read is an
+// error. Every miss is still charged to the run, so its next step is said.
 func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
@@ -813,7 +815,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses)
 	for _, m := range misses {
-		if strings.EqualFold(m.Protocol, "DNS") {
+		if !m.CountsAgainstTest() {
 			continue
 		}
 		ev.Misses = append(ev.Misses, sanitizedMiss(m))
