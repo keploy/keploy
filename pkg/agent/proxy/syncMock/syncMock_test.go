@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -2215,4 +2217,74 @@ func containsPrefix(ss []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+// Under the proven switch a Generic exchange its recorder stated per-test is a
+// test mock (models.Mock.IsProtocolPhase), so a --sync recording owns it by
+// its window and maps it to the test, though it is served from the session
+// tier; the connection's preamble, stated session, stays reusable. With the
+// switch off both are reusable, as every Generic exchange was.
+func TestResolveRangeOwnsAGenericTestMockUnderTheSwitch(t *testing.T) {
+	now := time.Now()
+	generic := func(name, stated string) *models.Mock {
+		return &models.Mock{Kind: models.GENERIC, Name: name, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config", "connID": "c1", models.MetadataLifetimeKey: stated},
+			ReqTimestampMock: now,
+		}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}}
+	}
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "0")
+		}
+		ch := make(chan *models.Mock, 4)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, generic("hello", models.MetadataLifetimeSession), generic("get", models.MetadataLifetimePerTest))
+		mgr.mu.Unlock()
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", true, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		switch {
+		case on && (len(names) != 2 || !contains(names, "hello") || !containsPrefix(names, "mock-")):
+			t.Fatalf("switch on: flushed %v; want the preamble as is and the exchange owned (renamed mock-...)", names)
+		case !on && (len(names) != 2 || !contains(names, "hello") || !contains(names, "get")):
+			t.Fatalf("switch off: flushed %v; want both reusable, as is", names)
+		}
+
+		// The other two sites read the same rule. A flush with no resolved
+		// window sends a reusable mock at once and keeps a test mock for its
+		// window; a duplicate's cleanup keeps a reusable mock and drops a test
+		// mock with the duplicate's.
+		flushed := func(run func(*SyncMockManager)) []string {
+			ch := make(chan *models.Mock, 4)
+			mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+			mgr.SetOutputChannel(ch)
+			mgr.mu.Lock()
+			mgr.buffer = append(mgr.buffer, generic("hello", models.MetadataLifetimeSession), generic("get", models.MetadataLifetimePerTest))
+			mgr.mu.Unlock()
+			run(mgr)
+			close(ch)
+			var out []string
+			for m := range ch {
+				out = append(out, m.Name)
+			}
+			return out
+		}
+		want := []string{"hello", "get"}
+		if on {
+			want = []string{"hello"}
+		}
+		if got := flushed(func(m *SyncMockManager) { m.FlushOwnedWindows() }); !reflect.DeepEqual(got, want) {
+			t.Fatalf("switch %v: a flush with no window sent %v, want %v", on, got, want)
+		}
+		if got := flushed(func(m *SyncMockManager) { m.DeleteMocksStrictlyBefore(now.Add(time.Second)) }); !reflect.DeepEqual(got, want) {
+			t.Fatalf("switch %v: a duplicate's cleanup sent %v, want %v", on, got, want)
+		}
+	}
 }

@@ -315,6 +315,15 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// StagedFinder is an optional MockMemDb extension under exact serving (the
+// proven switch): the name of a staged mock of kind, which the open test does
+// not own, for which match reports true, whatever the open view shows; "" for
+// none, or with no test open. For a miss's diagnosis only: the mock is never
+// handed out, nor served.
+type StagedFinder interface {
+	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

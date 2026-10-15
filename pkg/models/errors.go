@@ -254,6 +254,11 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// NotOwned says, under the proven switch, the call is ClosestMock, a
+	// recording the open test does not own (byte for byte, or at the per-test
+	// similarity): likely one another test recorded, which the replay names
+	// (UnmatchedCall.RecordedIn).
+	NotOwned bool
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

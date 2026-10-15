@@ -1015,6 +1015,13 @@ type MockState struct {
 	// window's test, and kept from the prune whatever the running test's
 	// verdict — instead of to the test that happened to be running.
 	CarryOver bool `json:"carryOver,omitempty"`
+	// DataPlane says the mock is a test mock (not Mock.IsProtocolPhase)
+	// though its Type says otherwise: a Generic exchange its recorder stated
+	// per-test keeps the type "config". Under the proven switch its
+	// consumption counts toward its test's. An agent that predates it reports
+	// none, and a newer replay then finds such a test mock unconsumed: the
+	// agent and the CLI are one keploy.
+	DataPlane bool `json:"dataPlane,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

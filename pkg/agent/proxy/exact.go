@@ -198,6 +198,42 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // it at each dispatch: exact serving can begin after a connection opened.
 func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
+// FindStagedNotOwned is, under exact serving with a test open, the name of
+// the first mock of kind staged in the manager's trees (per-test, session,
+// startup, in that order) that the open test does not own and match accepts,
+// whatever the open view shows (integrations.StagedFinder); "" for none. For a
+// miss's diagnosis only: the mock is never handed out, nor served.
+func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	v := m.exactView()
+	if v == nil || v.test == "" || match == nil {
+		return ""
+	}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	found := ""
+	for _, t := range trees {
+		if t == nil || found != "" {
+			continue
+		}
+		t.rangeValues(func(val interface{}) bool {
+			mk, ok := val.(*models.Mock)
+			if !ok || mk == nil || mk.Kind != kind {
+				return true
+			}
+			if _, own := v.index[mk.Name]; own {
+				return true
+			}
+			if match(mk) {
+				found = mk.Name
+				return false
+			}
+			return true
+		})
+	}
+	return found
+}
+
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer
 // at most one request, and the pool answers only protocol-phase requests.
@@ -571,6 +607,16 @@ func (m *MockManager) exactConsumeValue(mock models.Mock, evicts bool) exactVerd
 	return m.exactConsume(&mk, evicts)
 }
 
+// dataPlaneTyped is MockState.DataPlane for mk: a test mock whose type tag
+// says protocol-phase (a Generic exchange its recorder stated per-test).
+func dataPlaneTyped(mk *models.Mock) bool {
+	switch mk.Spec.Metadata["type"] {
+	case "config", "connection":
+		return !mk.IsProtocolPhase()
+	}
+	return false
+}
+
 // noteExactSpent records that a staged mock answered through a delete door,
 // and tells the parsers that keep an index that it is gone: until the view
 // changes, or for a data-plane recording consumed outside every test, until
@@ -583,6 +629,7 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		IsFiltered:       mk.TestModeInfo.IsFiltered,
 		SortOrder:        mk.TestModeInfo.SortOrder,
 		Type:             mk.Spec.Metadata["type"],
+		DataPlane:        dataPlaneTyped(mk),
 		Lifetime:         mk.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
@@ -606,6 +653,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		IsFiltered:       true,
 		SortOrder:        owned.TestModeInfo.SortOrder,
 		Type:             owned.Spec.Metadata["type"],
+		DataPlane:        dataPlaneTyped(owned),
 		Lifetime:         owned.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(owned.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(owned.Spec.ResTimestampMock),

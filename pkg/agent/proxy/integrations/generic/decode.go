@@ -111,6 +111,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				report := buildGenericMismatchReport(ctx, genericRequests, mockDb, answered)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+				} else if name := notOwnedExchange(genericRequests, mockDb); name != "" {
+					report.ClosestMock, report.NotOwned = name, true
+					report.NextSteps = notOwnedExchangeNextSteps(name)
 				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundError (covers
