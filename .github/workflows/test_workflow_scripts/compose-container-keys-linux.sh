@@ -197,6 +197,29 @@ record() {
   [ "$FAIL" -eq "$before" ] || tail -60 "$log"
 }
 
+# ended_at_markers NAME: the recording NAME's stop read each of the agent's
+# streams to the agent's end marker, after the agent said it held nothing more
+# from before the stop: keploy says so (at debug) for each drain, and neither
+# failed to ask for the markers nor gave a drain up. An agent docker compose
+# starts (not keploy) ends them so too: the recording names its streams to it.
+# keploy's own lines, not the agent's summary: compose forwards the agent's
+# log, and can drop its last lines as the stack stops.
+ended_at_markers() {
+  local log="$1.log" frames
+  for frames in "test cases" mocks mappings; do
+    if ! grep "read the stream to the keploy agent's end marker" "$log" | grep -q "\"frames\": \"$frames\""; then
+      echo "FAIL: $1: the $frames drain did not end at the agent's marker"
+      grep -n "end marker\|recording complete" "$log"
+      FAIL=1
+    fi
+  done
+  if grep -Eq 'could not ask the keploy agent to end its streams|teardown drain made no progress' "$log"; then
+    echo "FAIL: $1: a drain did not end at the agent's markers"
+    grep -En 'could not ask the keploy agent to end its streams|teardown drain made no progress' "$log"
+    FAIL=1
+  fi
+}
+
 # expect_keys WHAT WANT...: the /price mocks' keys are WANT's, one per argument.
 expect_keys() {
   local what=$1
@@ -223,6 +246,7 @@ dep_key() {
 
 echo "== 1. record a compose project under the proven switch =="
 LISTED="ckc-dep-$ID" KEPLOY_LANE_LOG=/w/compose.log record compose 1 "docker compose up" "ckc-app-$ID"
+ended_at_markers compose
 want=$(dep_key "compose") || FAIL=1
 expect_keys "the compose dependency was not recorded with its container's key" \
   "/price/aapl $want" "/price/msft $want"
@@ -232,6 +256,7 @@ echo "== 2. record a docker run app under the proven switch =="
 sudo docker network create "ckn-$ID" >/dev/null || { echo "FAIL: cannot create the network"; exit 1; }
 sudo docker run -d --name "ckd-dep-$ID" --network "ckn-$ID" -v "$PWD:/w:z" -w /w "$DEP_IMAGE" python dep.py >/dev/null || { echo "FAIL: cannot start the dependency"; exit 1; }
 record run 1 "docker run --rm --name ckd-app-$ID --network ckn-$ID -p $PORT:8080 -v $PWD:/w:z -w /w -e DEP_URL=http://ckd-dep-$ID:9411 -e LISTED=ckd-dep-$ID -e KEPLOY_LANE_LOG=/w/run.log $IMAGE python app.py" "ckd-app-$ID"
+ended_at_markers run
 want=$(dep_key "docker run") || FAIL=1
 expect_keys "the docker run dependency was not recorded with its container's key" \
   "/price/aapl $want" "/price/msft $want"
@@ -239,6 +264,7 @@ cleanup
 
 echo "== 3. without the switch nothing is keyed =="
 LISTED= KEPLOY_LANE_LOG= record compose-off "" "docker compose up" "ckc-app-$ID"
+ended_at_markers compose-off
 expect_keys "a recording made without the switch carries container keys" "/price/aapl -" "/price/msft -"
 if grep -E "gave keploy's agent the list|named a container destination|indexed a container" compose-off.log; then
   echo "FAIL: without the switch keploy read Docker for container keys, or gave its agent a list"
