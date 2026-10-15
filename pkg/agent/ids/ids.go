@@ -5,6 +5,7 @@ package ids
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ type Map struct {
 	banned map[string]bool
 	rep    *swapper
 	back   *swapper
+	times  *Map
 }
 
 var Default = &Map{}
@@ -68,11 +70,62 @@ func (m *Map) Pairs() map[string]string {
 func (m *Map) Empty() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.next) == 0
+	return len(m.next) == 0 && (m.times == nil || m.times.Empty())
+}
+
+// AddTime pairs a time the recording holds in field with the one this run
+// wrote there. A time is paired by field: one recorded second is often the
+// time of several fields, which this run writes in different seconds.
+func (m *Map) AddTime(field, old, cur string) {
+	if field == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.times == nil {
+		m.times = &Map{}
+	}
+	t := m.times
+	m.mu.Unlock()
+	t.Add(field+"\x00"+old, field+"\x00"+cur)
+}
+
+func (m *Map) timeMap() *Map {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.times
+}
+
+var timeField = regexp.MustCompile(`"(\w+)"\s*:\s*(?:\{\s*"\$date"\s*:\s*)?(?:\{\s*"\$numberLong"\s*:\s*)?"?(\d{19}|\d{16}|\d{13}|\d{10}|\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d))\b`)
+
+func swapTimes(s string, pairs map[string]string) string {
+	if len(pairs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range timeField.FindAllStringSubmatchIndex(s, -1) {
+		field, value := s[loc[2]:loc[3]], s[loc[4]:loc[5]]
+		to, ok := pairs[field+"\x00"+value]
+		if !ok {
+			continue
+		}
+		_, v, _ := strings.Cut(to, "\x00")
+		b.WriteString(s[last:loc[4]])
+		b.WriteString(v)
+		last = loc[5]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // Rewrite writes, in s, the value this run made in place of each recorded one.
 func (m *Map) Rewrite(s string) string {
+	if t := m.timeMap(); t != nil {
+		s = swapTimes(s, t.Pairs())
+	}
 	m.mu.Lock()
 	if len(m.next) == 0 {
 		m.mu.Unlock()
@@ -88,6 +141,13 @@ func (m *Map) Rewrite(s string) string {
 
 // Restore writes, in s, the recorded value in place of each one this run made.
 func (m *Map) Restore(s string) string {
+	if t := m.timeMap(); t != nil {
+		back := map[string]string{}
+		for old, cur := range t.Pairs() {
+			back[cur] = old
+		}
+		s = swapTimes(s, back)
+	}
 	m.mu.Lock()
 	if len(m.prev) == 0 {
 		m.mu.Unlock()
@@ -104,7 +164,7 @@ func (m *Map) Restore(s string) string {
 func (m *Map) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.next, m.prev, m.banned, m.rep, m.back = nil, nil, nil, nil, nil
+	m.next, m.prev, m.banned, m.rep, m.back, m.times = nil, nil, nil, nil, nil, nil
 }
 
 func New(pairs map[string]string) *Map {
@@ -256,9 +316,14 @@ func IsTime(s string) bool {
 }
 
 // Pair walks rec, a recorded value, and live, the value this run sent in its
-// place, and adds each id and time that differs between them, place by place.
-// Values are those encoding/json decodes, numbers as json.Number.
-func Pair(rec, live interface{}, add func(old, cur string)) {
+// place, and pairs in m each id and time that differs between them, place by
+// place: a time by the field it is in. Values are those encoding/json decodes,
+// numbers as json.Number.
+func (m *Map) Pair(rec, live interface{}) {
+	m.pair("", rec, live)
+}
+
+func (m *Map) pair(field string, rec, live interface{}) {
 	switch r := rec.(type) {
 	case map[string]interface{}:
 		l, ok := live.(map[string]interface{})
@@ -266,8 +331,14 @@ func Pair(rec, live interface{}, add func(old, cur string)) {
 			return
 		}
 		for k, rv := range r {
-			if lv, ok := l[k]; ok {
-				Pair(rv, lv, add)
+			lv, ok := l[k]
+			if !ok {
+				continue
+			}
+			if strings.HasPrefix(k, "$") {
+				m.pair(field, rv, lv)
+			} else {
+				m.pair(k, rv, lv)
 			}
 		}
 	case []interface{}:
@@ -276,31 +347,34 @@ func Pair(rec, live interface{}, add func(old, cur string)) {
 			return
 		}
 		for i := range r {
-			Pair(r[i], l[i], add)
+			m.pair(field, r[i], l[i])
 		}
 	case string:
 		if l, ok := live.(string); ok {
-			pairValue(r, l, add)
+			m.PairValue(field, r, l)
 		}
 	case json.Number:
 		if l, ok := live.(json.Number); ok {
-			pairValue(string(r), string(l), add)
+			m.PairValue(field, string(r), string(l))
 		}
 	}
 }
 
-func pairValue(rec, live string, add func(old, cur string)) {
-	if rec == live {
-		return
-	}
-	if IsID(rec) && IsID(live) || IsTime(rec) && IsTime(live) {
-		add(rec, live)
+// PairValue pairs a recorded value with the live one in its place: an id
+// wherever it is, a time by its field.
+func (m *Map) PairValue(field, rec, live string) {
+	switch {
+	case rec == live:
+	case IsID(rec) && IsID(live):
+		m.Add(rec, live)
+	case IsTime(rec) && IsTime(live):
+		m.AddTime(field, rec, live)
 	}
 }
 
 // PairJSON is Pair over two JSON documents; it pairs nothing when either is
 // not JSON.
-func PairJSON(rec, live []byte, add func(old, cur string)) {
+func (m *Map) PairJSON(rec, live []byte) {
 	r, ok := decode(rec)
 	if !ok {
 		return
@@ -309,7 +383,7 @@ func PairJSON(rec, live []byte, add func(old, cur string)) {
 	if !ok {
 		return
 	}
-	Pair(r, l, add)
+	m.Pair(r, l)
 }
 
 func decode(b []byte) (interface{}, bool) {
@@ -322,14 +396,16 @@ func decode(b []byte) (interface{}, bool) {
 	return v, true
 }
 
-// PairPath pairs the ids and times in the segments of two URL paths with the
-// same number of segments.
-func PairPath(rec, live string, add func(old, cur string)) {
+// PairPath pairs the ids in the segments of two URL paths with the same
+// number of segments.
+func (m *Map) PairPath(rec, live string) {
 	r, l := strings.Split(rec, "/"), strings.Split(live, "/")
 	if len(r) != len(l) {
 		return
 	}
 	for i := range r {
-		pairValue(r[i], l[i], add)
+		if r[i] != l[i] && IsID(r[i]) && IsID(l[i]) {
+			m.Add(r[i], l[i])
+		}
 	}
 }

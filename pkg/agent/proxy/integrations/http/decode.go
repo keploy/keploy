@@ -507,9 +507,9 @@ func learnIDs(stub *models.Mock, method, path string, body []byte) {
 		return
 	}
 	if u, err := url.Parse(stub.Spec.HTTPReq.URL); err == nil {
-		ids.PairPath(u.Path, path, ids.Default.Add)
+		ids.Default.PairPath(u.Path, path)
 	}
-	ids.PairJSON([]byte(stub.Spec.HTTPReq.Body), body, ids.Default.Add)
+	ids.Default.PairJSON([]byte(stub.Spec.HTTPReq.Body), body)
 }
 
 func swapIDs(stub *models.Mock) *models.Mock {

@@ -80,25 +80,18 @@ func TestANumberIsSwappedOnlyWhereItIsAWholeNumber(t *testing.T) {
 	}
 }
 
-func TestPairPairsEachIDAndTimeOfAPlace(t *testing.T) {
+func TestPairPairsEachIDAndATimeByItsField(t *testing.T) {
 	m := &Map{}
-	PairJSON([]byte(`{"data":{"_id":"11f4a513-bee3-45e7-bd44-62be219cdcfd","createdAt":1792054012,"name":"k","n":3,"list":[{"at":"2026-10-15T06:21:59Z"}]}}`),
-		[]byte(`{"data":{"_id":"5edbe3af-8cda-452a-8780-868f15a19ced","createdAt":1792100000,"name":"j","n":4,"list":[{"at":"2026-10-16T09:00:00Z"}]}}`), m.Add)
-	PairPath("/v1/keys/6ad092fc81cde9599b98d950/x", "/v1/keys/6ad092fc5b32851dc1de69be/x", m.Add)
-	PairPath("/v1/keys/a", "/v1/keys/a/b", m.Add)
-	want := map[string]string{
-		"11f4a513-bee3-45e7-bd44-62be219cdcfd": "5edbe3af-8cda-452a-8780-868f15a19ced",
-		"1792054012":                           "1792100000",
-		"2026-10-15T06:21:59Z":                 "2026-10-16T09:00:00Z",
-		"6ad092fc81cde9599b98d950":             "6ad092fc5b32851dc1de69be",
+	m.PairJSON([]byte(`{"data":{"_id":"11f4a513-bee3-45e7-bd44-62be219cdcfd","createdAt":1792054012,"authTime":1792054012,"name":"k","n":3,"list":[{"at":"2026-10-15T06:21:59Z"}]}}`),
+		[]byte(`{"data":{"_id":"5edbe3af-8cda-452a-8780-868f15a19ced","createdAt":1792100001,"authTime":1792100000,"name":"j","n":4,"list":[{"at":"2026-10-16T09:00:00Z"}]}}`))
+	m.PairPath("/v1/keys/6ad092fc81cde9599b98d950/x", "/v1/keys/6ad092fc5b32851dc1de69be/x")
+	m.PairPath("/v1/keys/a", "/v1/keys/a/b")
+	got := m.Rewrite(`{"_id":"11f4a513-bee3-45e7-bd44-62be219cdcfd","owner":"6ad092fc81cde9599b98d950","createdAt":{"$numberLong":"1792054012"},"authTime":1792054012,"at":"2026-10-15T06:21:59Z","other":1792054012,"$gt":{"$date":{"$numberLong":"1792054012"}}}`)
+	want := `{"_id":"5edbe3af-8cda-452a-8780-868f15a19ced","owner":"6ad092fc5b32851dc1de69be","createdAt":{"$numberLong":"1792100001"},"authTime":1792100000,"at":"2026-10-16T09:00:00Z","other":1792054012,"$gt":{"$date":{"$numberLong":"1792054012"}}}`
+	if got != want {
+		t.Fatalf("one recorded second, written by two fields in two live seconds, follows each field:\n got %s\nwant %s", got, want)
 	}
-	got := m.Pairs()
-	if len(got) != len(want) {
-		t.Fatalf("pairs = %v", got)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Fatalf("pairs = %v", got)
-		}
+	if back := m.Restore(want); back != `{"_id":"11f4a513-bee3-45e7-bd44-62be219cdcfd","owner":"6ad092fc81cde9599b98d950","createdAt":{"$numberLong":"1792054012"},"authTime":1792054012,"at":"2026-10-15T06:21:59Z","other":1792054012,"$gt":{"$date":{"$numberLong":"1792054012"}}}` {
+		t.Fatalf("restore: %s", back)
 	}
 }
