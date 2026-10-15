@@ -62,8 +62,8 @@ trap cleanup EXIT
 cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/outbound-fin-stall"
 
 echo "=== install python deps ==="
-python3 -m pip install --upgrade pip >/dev/null
-python3 -m pip install -r requirements.txt
+bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip --upgrade pip >/dev/null
+bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip -r requirements.txt
 
 echo "=== generate keploy config ==="
 # Only when the sample does not ship one. `config --generate` used to do

@@ -66,7 +66,7 @@ wait_for_port_free() {
 echo "coverage" >> requirements.txt
 
 # Install dependencies
-python -m pip install -r requirements.txt
+FETCH_PYTHON=python bash "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/fetch.sh" pip -r requirements.txt
 
 rm -rf keploy.yml
 

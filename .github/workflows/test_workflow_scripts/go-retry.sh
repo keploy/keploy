@@ -25,20 +25,28 @@
 # the first attempt with its own exit code. The pattern is shared with
 # docker-build-retry.sh rather than reinvented.
 #
-# WHY THE PROXY IS RETRIED BEFORE GOING DIRECT
+# THE PROXY LIST AND THE SCHEDULE: the lanes' shared fetch rule
 #
-# The observed failure is a transient HTTP/2 stream error, so the same proxy on
-# a fresh connection is both the cheapest retry (a zip GET, not a full VCS
-# fetch) and the likeliest to work. `direct` is also strictly riskier: for a
-# module whose upstream was renamed, deleted or retagged, direct fails
-# PERMANENTLY where the proxy would still serve it, turning a recoverable blip
-# into a red lane with a more confusing error. So: proxy on attempts 1-2,
-# direct from 3 — the schedule of the inline download_go_modules this replaces.
+# The same rule as keploy/enterprise's and keploy/ebpf's lane fetches
+# (.ci/scripts/fetch.sh, .woodpecker/fetch.sh): at most 5 attempts, waiting
+# attempt x 10 s between them, and Go modules through
+# GOPROXY="https://proxy.golang.org|direct" unless the caller set a GOPROXY.
 #
-# Set GO_RETRY_DIRECT_FROM to a number past max attempts to never go direct.
-# check-deprecated-deps.sh needs that: `go list -m -u` resolves the newest
-# release of every direct dependency, and under direct one renamed, deleted
-# or retagged upstream fails PERMANENTLY where the proxy would still serve it.
+# The pipe: each attempt asks the proxy first, and on ANY proxy error -- the
+# reset HTTP/2 stream above -- falls back to the module's origin within the
+# same attempt. Go's default comma list falls back only on 404/410, so a reset
+# stream failed the attempt outright. The proxy is still what serves a module
+# whenever it answers, so a renamed, deleted or retagged upstream that only the
+# proxy still has keeps working; the earlier schedule here (proxy on attempts
+# 1-2, then all-direct) and its GO_RETRY_DIRECT_FROM knob are gone, because
+# the pipe tries both on every attempt instead of trading one for the other.
+#
+# One consequence the transient set below accounts for: when the proxy and the
+# origin BOTH fail, Go reports the origin's error ("invalid version: git
+# ls-remote ...", "unrecognized import path ..."), which reads as permanent
+# even when the proxy's failure was a blip. Those are counted as transient, so
+# the next attempt goes back to the proxy; a module that truly does not exist
+# fails every attempt and is reported after the last.
 #
 # Usage:  source .../go-retry.sh
 #         go_retry build -o app .
@@ -88,13 +96,12 @@
 #   of one error at the point somebody is already setting the key up. The cost
 #   of NOT retrying the transient case is a red lane on an unrelated PR, which
 #   is what this file exists to prevent.
-GO_RETRY_RE=${GO_RETRY_RE:-'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF|permission denied \(publickey\)|kex_exchange_identification|connection closed by remote host'}
+GO_RETRY_RE=${GO_RETRY_RE:-'stream error: stream id|INTERNAL_ERROR; received from peer|tls handshake timeout|i/o timeout|connection reset by peer|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|429 Too Many Requests|too many requests|read "https?://[^"]*": unexpected EOF|permission denied \(publickey\)|kex_exchange_identification|connection closed by remote host|invalid version: git ls-remote|invalid version: unknown revision|unrecognized import path'}
 
 go_retry() {
   local attempt=1
-  local max_attempts="${GO_RETRY_MAX_ATTEMPTS:-4}"
-  local direct_from="${GO_RETRY_DIRECT_FROM:-3}"
-  local sleep_sec="${GO_RETRY_BACKOFF:-5}"
+  local max_attempts="${GO_RETRY_MAX_ATTEMPTS:-5}"
+  local backoff_base="${GO_RETRY_BACKOFF:-10}"
   local proxy rc out_f err_f fifo_f tee_pid
   # Explicit template so the names are greppable in a log and portable to BSD
   # mktemp — which is now load-bearing rather than precautionary:
@@ -112,11 +119,7 @@ go_retry() {
   while [ "$attempt" -le "$max_attempts" ]; do
     # Never override a GOPROXY the caller set on purpose (GOPROXY=off is an
     # assertion that nothing may touch the network).
-    if [ -n "${GOPROXY:-}" ] || [ "$attempt" -lt "$direct_from" ]; then
-      proxy="${GOPROXY:-https://proxy.golang.org,direct}"
-    else
-      proxy="direct"
-    fi
+    proxy="${GOPROXY:-https://proxy.golang.org|direct}"
 
     # An `if` condition is exempt from errexit, so a failing go does not abort
     # the CALLER while this function decides whether to retry. Deliberately not
@@ -179,9 +182,8 @@ go_retry() {
       rm -f "$out_f" "$err_f" "$fifo_f"
       return "$rc"
     fi
-    echo "go $* attempt ${attempt} failed transiently; retrying in ${sleep_sec}s (attempt $((attempt + 1))/${max_attempts})…" >&2
-    sleep "$sleep_sec"
-    sleep_sec=$((sleep_sec * 2))
+    echo "go $* attempt ${attempt} failed transiently; retrying in $((backoff_base * attempt))s (attempt $((attempt + 1))/${max_attempts})…" >&2
+    sleep "$((backoff_base * attempt))"
     attempt=$((attempt + 1))
   done
   # Reached only when max_attempts < 1 (e.g. a bad override): never silently

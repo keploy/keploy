@@ -11,6 +11,7 @@ name: Windows CI scripts
 # cases pin the self-hosted Windows jobs' timeouts, the go-dedup script's
 # compose-project hand-off, and the text of every "Recover stale runner state"
 # step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
+# The fetch job tests the lanes' shared fetch rule the same way.
 
 on:
   push:
@@ -37,3 +38,20 @@ jobs:
       - name: Test the Windows Docker cleanup scripts (pwsh)
         shell: pwsh
         run: ./.github/scripts/windows/reap-keploy-containers.tests.ps1
+
+  # The lanes' shared fetch rule (test_workflow_scripts/fetch.sh, go-retry.sh,
+  # docker-build-retry.sh, go-retry.ps1 and go-dedup's
+  # Invoke-DockerBuildWithRetry): the same rule as keploy/enterprise's and
+  # keploy/ebpf's lanes, tested with stubs, no network.
+  fetch:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test fetch.sh, go-retry.sh and docker-build-retry.sh (bash)
+        run: bash .github/workflows/test_workflow_scripts/fetch-test.sh
+
+      - name: Test go-retry.ps1 and the go-dedup docker build retry (pwsh)
+        shell: pwsh
+        run: ./.github/workflows/test_workflow_scripts/go-retry.tests.ps1

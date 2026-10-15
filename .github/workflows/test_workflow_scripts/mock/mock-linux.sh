@@ -34,11 +34,11 @@ if ! python3 -c "import pytest" 2>/dev/null; then
   # cross-interpreter `pip3` fallback, which could land pytest where
   # `python3 -m pytest` can't import it.)
   python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
-  python3 -m pip install --quiet --disable-pip-version-check pytest
+  bash "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/fetch.sh" pip --quiet --disable-pip-version-check pytest
 fi
 # pytest-cov writes the coverage report step 4 reads back through keploy.
 if ! python3 -c "import pytest_cov" 2>/dev/null; then
-  python3 -m pip install --quiet --disable-pip-version-check pytest-cov
+  bash "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/fetch.sh" pip --quiet --disable-pip-version-check pytest-cov
 fi
 
 # This lane's directory: the shared harness (keploy_v1.py, conftest_v1.py).
