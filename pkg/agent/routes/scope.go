@@ -100,18 +100,22 @@ func (a *Agent) HandleScopeBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if proven {
-			badScopeBody(w, r, "scope-begin", err)
+			// The run's to name: its harness cannot speak the wire.
+			a.refuse(w, r, scopeBodyErr("scope-begin", err))
 			return
 		}
 		http.Error(w, fmt.Sprintf("invalid scope-begin request: %v", err), http.StatusBadRequest)
 		return
 	}
-	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
-	req.At = runnerAt(0, set, start, req.At)
 	if proven {
+		// The proven wire (release1-cut §2.1) carries no pid, runner clock
+		// or folder: the claim names the test process, and the agent stamps
+		// each boundary itself. Nothing below reads them for it.
 		a.provenBegin(w, r, p, req)
 		return
 	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	// A test the replay gated out is told to skip before anything else: it
 	// opens no window and narrows no pool, so skipping it leaves the replay
 	// exactly as if it had never been begun — except for the record that it
@@ -156,18 +160,18 @@ func (a *Agent) HandleScopeEnd(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if proven {
-			badScopeBody(w, r, "scope-end", err)
+			a.refuse(w, r, scopeBodyErr("scope-end", err))
 			return
 		}
 		http.Error(w, fmt.Sprintf("invalid scope-end request: %v", err), http.StatusBadRequest)
 		return
 	}
-	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
-	req.At = runnerAt(0, set, start, req.At)
 	if proven {
 		a.provenEnd(w, r, p, req)
 		return
 	}
+	set, start := starts.Default.Start(uint32(req.Pid), req.Dir)
+	req.At = runnerAt(0, set, start, req.At)
 	starts.Default.End(uint32(req.Pid), req.Name, req.Suite, markTime(req.At))
 	if s, ok := a.svc.(scopeOutcomeNoter); ok {
 		if outcome := models.NormalizeScopeOutcome(req.Outcome); outcome != "" {
@@ -222,6 +226,13 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	var req models.ScopeTableReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid scope-table request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.Sets != nil && provenswitch.On() {
+		// Under the switch each test is served exactly its own mocks, the one
+		// path that decides (design v14 §5.2): app starts are retired, and no
+		// per-start table may widen what a test is served.
+		http.Error(w, "under KEPLOY_PROVEN this keploy agent serves no per-start table: app starts are retired", http.StatusUnprocessableEntity)
 		return
 	}
 	if req.Sets != nil {

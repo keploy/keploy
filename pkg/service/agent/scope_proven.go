@@ -5,17 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -55,8 +53,6 @@ type provenWire struct {
 	dir string
 	// open is the open test's ID, "" when none is.
 	open string
-	// atBegin is how often each mock had answered when the open test began.
-	atBegin map[string]uint64
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	skip map[string]string
 	// charged holds the misses the ends drained from the proxy, until the
@@ -73,12 +69,36 @@ type provenWire struct {
 	// pool is, in a replay, each key's pool slice (the CLI's scope table,
 	// models.ScopeTableReq.Pool); nil until the CLI sent one.
 	pool map[string][]string
+	// staged: the replay's mocks are staged on the proxy, which serves them
+	// exactly (exact_proven.go). Once per session.
+	staged bool
+	// servedSince is when exact serving began serving the open test
+	// (serveTestExactly): a miss made before it is no call of the test's.
+	servedSince time.Time
+	// realSaid names the recorded mocks already said to go to a mock.real
+	// destination (notReal).
+	realSaid map[string]bool
+	// unservable are the open test's mapped mocks the agent's store refused
+	// (variables this keploy cannot follow): nothing serves them, and its end
+	// counts each as a recorded call it did not make.
+	unservable []string
+	// drops are the proxy listener's drops read when the window now open
+	// began (a test's begin, or the previous end); dropsKnown says they were
+	// read (settle).
+	drops      uint64
+	dropsKnown bool
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
 	// closed: the run's windows were read at its end; nothing more is
 	// claimed or begun until the next session resets the wire.
 	closed bool
+	// topology is where the run's calls to local listeners went (LIVE and
+	// mocked-local rows, NoteLive and NoteMocked).
+	topology topologyRows
+	// losses is the run's capture-loss counts at its start, which each
+	// test's end counts from (capture_loss.go).
+	losses captureLossMark
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -86,12 +106,6 @@ type provenWire struct {
 type claimant struct {
 	pid   int
 	start uint64
-}
-
-// servedCounter is implemented by a proxy that counts how often each mock
-// answered.
-type servedCounter interface {
-	ServedCounts() map[string]uint64
 }
 
 // missCapturer is implemented by a proxy that keeps each test's misses
@@ -167,9 +181,16 @@ func (a *Agent) resetSession(ctx context.Context) error {
 		return fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
 	}
 	a.resetScopeState()
+	// What the run's tests count their capture losses from: read before
+	// provenMu, which is never held while calling into the hooks.
+	losses := a.markCaptureLosses(ctx)
 	a.provenMu.Lock()
-	a.proven = provenWire{}
+	a.proven = provenWire{losses: losses}
 	a.provenMu.Unlock()
+	if t := a.realTracker(); t != nil {
+		// A test the last session left open is no test of this one.
+		t.Interrupt()
+	}
 	return nil
 }
 
@@ -242,13 +263,13 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	// The previous claimer is gone: a test it left open can no longer end,
 	// and fails. (A test is begun only under a claim, so with no previous
 	// claimer none is open.)
-	stale, staleBegin := "", map[string]uint64(nil)
+	stale := ""
 	if prev != me {
-		stale, staleBegin = a.proven.open, a.proven.atBegin
+		stale = a.proven.open
 	}
 	a.provenMu.Unlock()
 	if stale != "" {
-		a.failOpen(ctx, stale, staleBegin, "the test process exited while the test was open")
+		a.failOpen(ctx, stale, "the test process exited while the test was open")
 	}
 	// The run's misses so far are taken before the claim is made: a claim
 	// whose read failed is not made, so its retry reads them again.
@@ -271,7 +292,8 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
 	if newClaim {
-		// The instance numbers its own containers outside its tests
+		// The instance is a scope of its own outside its tests: two
+		// containers configured the same are told apart only within one
 		// (containerkey).
 		containerkey.Default.BeginInstance()
 	}
@@ -288,7 +310,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 }
 
 // SetScopePool installs each key's pool slice for a replay (design v14 §5.2,
-// U21), and arms the current key's while no test is open.
+// U21), and serves the current key's while no test is open.
 func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err
@@ -304,32 +326,8 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	return a.applyPool(ctx)
 }
 
-// poolParams is the served pool while no test is open: the pool slice of the
-// current claim's key, else, before any claim, PoolKeyNone's; a pool mock
-// recorded without a key is in PoolKeyNone's. Beside it the reusable tier
-// is served as always. ok is false until the CLI sent the slices, which
-// leaves the whole pool armed, as before them.
-func (a *Agent) poolParams() (models.MockFilterParams, bool) {
-	a.provenMu.Lock()
-	pool, key := a.proven.pool, a.proven.key
-	a.provenMu.Unlock()
-	if pool == nil {
-		return models.MockFilterParams{}, false
-	}
-	if key == "" {
-		key = models.PoolKeyNone
-	}
-	return models.MockFilterParams{
-		MockMapping:     append([]string{}, pool[key]...),
-		ExactMapping:    true,
-		UseMappingBased: true,
-		AfterTime:       models.BaseTime,
-		BeforeTime:      time.Now(),
-	}, true
-}
-
-// applyPool arms the current key's pool slice (poolParams), unless a test is
-// open: its end arms it.
+// applyPool serves the current key's pool slice exactly (servePoolExactly),
+// unless a test is open: its end serves it.
 func (a *Agent) applyPool(ctx context.Context) error {
 	a.provenMu.Lock()
 	open := a.proven.open
@@ -337,20 +335,17 @@ func (a *Agent) applyPool(ctx context.Context) error {
 	if open != "" {
 		return nil
 	}
-	params, ok := a.poolParams()
-	if !ok {
-		return nil
-	}
-	return a.UpdateMockParams(ctx, params)
+	return a.servePoolExactly(ctx)
 }
 
-// claimWindows is the session's claims and refusals, as windows
-// (models.ScopeWindow.Claim, .Refused).
+// claimWindows is the session's claims, refusals and topology rows, as
+// windows (models.ScopeWindow.Claim, .Refused, .Live, .Mocked).
 func (a *Agent) claimWindows() []models.ScopeWindow {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	out := append([]models.ScopeWindow(nil), a.proven.claims...)
-	return append(out, a.proven.refusals...)
+	out = append(out, a.proven.refusals...)
+	return append(out, a.proven.topology.windows...)
 }
 
 // maxRefusals bounds the refusals a session keeps: past it, a harness that
@@ -358,14 +353,17 @@ func (a *Agent) claimWindows() []models.ScopeWindow {
 const maxRefusals = 64
 
 // NoteRefusal records a refusal of the run (models.RunRefusal): one the wire
-// answered a claim or a begin with, or one an integration made and told the
-// agent. The CLI's verdict names it. A refusal like the last one is kept
-// once.
+// answered a claim, a begin or an end with, or one an integration made and
+// told the agent. The CLI's verdict names it. A refusal like one already
+// kept is kept once: a harness refused at every test, by turns for its
+// begin and its end, never crowds out a refusal it has not made.
 func (a *Agent) NoteRefusal(r models.RunRefusal) {
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
-	if n := len(a.proven.refusals); n > 0 && *a.proven.refusals[n-1].Refused == r {
-		return
+	for _, w := range a.proven.refusals {
+		if *w.Refused == r {
+			return
+		}
 	}
 	if len(a.proven.refusals) >= maxRefusals {
 		return
@@ -411,7 +409,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"this test harness predates keploy's scope protocol v1: it cannot skip a test keploy quarantines, or it opens suite scopes",
 			"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
 	}
-	at := boundaryTime(req.At)
+	if serr := oldWireFields(req); serr != nil {
+		return models.ScopeBeginResp{}, serr
+	}
+	at := time.Now()
 	a.provenMu.Lock()
 	if a.proven.closed {
 		a.provenMu.Unlock()
@@ -442,11 +443,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 
 	// What judging the test at its end needs is checked before anything is
 	// opened: a begin that fails leaves nothing behind.
-	var counts map[string]uint64
 	var capture missCapturer
 	if a.replaying() {
-		var err error
-		if counts, err = a.servedCounts(); err != nil {
+		if _, err := a.exactServer(); err != nil {
 			return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy cannot judge "+id+": "+err.Error(), "run the keploy agent of this keploy version")
 		}
@@ -457,6 +456,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 	}
+	// The calls the application made before this begin are settled first
+	// (settle_proven.go): they are the pool's, or the previous test's, never
+	// this test's.
+	// A connection whose held requests cannot be told does not stop the
+	// begin: the test's end finds it, and the test is not verified.
+	drops, err := a.settle(ctx, a.replaying())
+	if err != nil && !errors.Is(err, errHoldsUnknown) {
+		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
+	}
+	// The test's end compares the listener's drops with these.
+	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
 	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
 		a.abandonWindow(id)
@@ -470,14 +481,45 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		// §5.1).
 		capture.ContinueTestErrorCapture()
 	}
+	if t := a.realTracker(); t != nil {
+		// The mock.real destinations its connections send bytes to from
+		// here are this test's.
+		t.BeginTest()
+	}
 	a.provenMu.Lock()
-	a.proven.open, a.proven.atBegin = id, counts
+	a.proven.open = id
 	a.provenMu.Unlock()
-	// The test's own containers are numbered from here, after the run's
-	// (containerkey); closeOpen goes back to the run's numbering however the
-	// test closes.
+	// The test is a scope of its own from here (containerkey); closeOpen
+	// goes back to the run's however the test closes.
 	containerkey.Default.BeginTest()
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+}
+
+// oldWireFields refuses a begin or an end that carries the old wire's
+// fields (release1-cut §2.1: no pid on the wire). The claim names the test
+// process, and the agent stamps each test's begin and end with its own
+// clock, so a pid, a runner's clock, a folder or a suite scope would decide
+// nothing, and a harness that sends them predates the protocol.
+func oldWireFields(req models.ScopeReq) *models.ScopeError {
+	var sent []string
+	if req.Pid != 0 {
+		sent = append(sent, "pid")
+	}
+	if !req.At.IsZero() {
+		sent = append(sent, "at")
+	}
+	if req.Dir != "" {
+		sent = append(sent, "dir")
+	}
+	if req.Suite {
+		sent = append(sent, "suite")
+	}
+	if len(sent) == 0 {
+		return nil
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrUpgradeIntegration,
+		"this test harness sends "+strings.Join(sent, ", ")+", which keploy's scope protocol v1 does not use: the claim names the test process, and keploy stamps each test's begin and end itself",
+		"upgrade the keploy integration of your test framework (go-sdk keploytest, keploy-pytest, @keploy/jest)")
 }
 
 // ProvenEnd closes the open test. An end without an outcome counts as
@@ -492,31 +534,59 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if req.Name == "" {
 		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest, "an end names its test", "send the name its begin sent")
 	}
-	at := boundaryTime(req.At)
+	at := time.Now()
 	a.provenMu.Lock()
 	id := models.TestID(req.Project, req.File, a.proven.key, req.Name)
-	open, atBegin := a.proven.open, a.proven.atBegin
+	open := a.proven.open
 	a.provenMu.Unlock()
+	if serr := oldWireFields(req); serr != nil {
+		// The test it names is failed and closed with keploy's reason:
+		// left open, it would be blamed on the next begin
+		// (one_test_at_a_time).
+		if open == id {
+			if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
+				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
+			}
+		}
+		return models.ScopeEndResp{}, serr
+	}
 	if open != id {
 		// A harness that ends a test it was told to skip is warned.
 		a.noteEndOfGated(id, 0)
-		msg := fmt.Sprintf("%s ended, but it is not the open test", id)
-		if open == "" {
-			msg = fmt.Sprintf("%s ended, but no test is open", id)
+		msg := fmt.Sprintf("%s ended, but no test is open", id)
+		if open != "" {
+			msg = fmt.Sprintf("%s ended while %s was the open test", id, open)
 		}
-		return models.ScopeEndResp{}, scopeErr(http.StatusConflict, models.ScopeErrNotOpen, msg,
+		serr := scopeErr(http.StatusConflict, models.ScopeErrNotOpen, msg,
 			"end a test once, with the name its begin sent, and only when its begin was not answered skip")
+		// With another test open, the harness ended a test it did not
+		// begin: the open test is failed and closed with keploy's reason
+		// (left open, every later begin would be refused as two tests at
+		// once), and the run names the cause. An end with no test open
+		// refuses only that call.
+		if open != "" {
+			if _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
+				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
+			}
+			a.NoteRefusal(serr.Refusal())
+		}
+		return models.ScopeEndResp{}, serr
 	}
 	outcome := models.NormalizeScopeOutcome(req.Outcome)
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
-	ev, err := a.closeOpen(ctx, id, outcome, at, atBegin, "")
+	ev, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
+		// A test keploy could not read is unread on its window (its
+		// verdict is keploy's not-judged); a failure to end it is the run's
+		// refusal already (endTest).
 		return models.ScopeEndResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
-	if !ev.Empty() {
+	// Record instances never answer fail (design v14 §5.3): a record's
+	// evidence (capture losses) is for judging, on the window.
+	if a.replaying() && ev != nil && (!ev.Empty() || ev.Reason != "") {
 		return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionFail, Reason: ev.Reason}, nil
 	}
 	return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
@@ -524,27 +594,27 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 
 // closeOpen ends the open test id (endTest) and clears it, whatever happens
 // on the way. With the wire held.
-func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, atBegin map[string]uint64, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
 	defer func() {
 		a.provenMu.Lock()
 		closed := a.proven.open == id
 		if closed {
-			a.proven.open, a.proven.atBegin = "", nil
+			a.proven.open = ""
 		}
 		a.provenMu.Unlock()
 		if closed {
-			// Connections from here on are numbered by the run again
-			// (containerkey).
+			// Connections from here on are the run's again, in a scope of
+			// their own until the next test (containerkey).
 			containerkey.Default.EndTest()
 		}
 	}()
-	return a.endTest(ctx, id, outcome, at, atBegin, why)
+	return a.endTest(ctx, id, outcome, at, why)
 }
 
 // failOpen ends, as failed, a test whose harness can no longer end it. With
 // the wire held.
-func (a *Agent) failOpen(ctx context.Context, id string, atBegin map[string]uint64, why string) {
-	if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), atBegin, why); err != nil {
+func (a *Agent) failOpen(ctx context.Context, id string, why string) {
+	if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
 		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
 	}
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
@@ -554,22 +624,81 @@ func (a *Agent) failOpen(ctx context.Context, id string, atBegin map[string]uint
 // read that failed is an error, and the test is recorded failed with it: a
 // test keploy could not judge never passes. A test that skipped itself is
 // not failed for the recorded calls it then never made.
-func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, atBegin map[string]uint64, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
+	// The test's calls are settled before it is judged (settle_proven.go):
+	// a call it made that the proxy has not yet taken or answered is its
+	// own, whatever the load. One keploy cannot settle leaves the test
+	// unjudged, and failed.
+	settleErr := a.settledSince(ctx, a.replaying(), id)
+	// The mock.real destinations the test used, and the connections keploy
+	// could neither capture nor relay as real while it was open: in a record
+	// as in a replay (design v14 §3.2, §4).
+	var uses []models.RealUse
+	var incomplete []models.CaptureIncomplete
+	if t := a.realTracker(); t != nil {
+		uses, incomplete = t.EndTest()
+	}
+	// When exact serving began serving the test: a miss made before it is
+	// no call of the test's (evidenceReason).
+	beganAt := a.servedSince()
 	if a.replaying() {
-		ev, readErr = a.testEvidence(ctx, id, atBegin, outcome != models.ScopeOutcomeSkipped)
-		switch {
-		case readErr != nil:
-			if ev == nil {
-				ev = &models.ScopeEvidence{}
-			}
-			ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
-			outcome = models.ScopeOutcomeFailed
-		case !ev.Empty():
-			ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed))
-			outcome = models.ScopeOutcomeFailed
+		// The test stops being served before what it did is read: a call
+		// that lands after the read cannot consume one of its mocks, so the
+		// outcome read is final (ExactTestOutcome reads the ended view).
+		// A pool that cannot be served is keploy's failure to end the test,
+		// not to read it: the end serves the pool again below (EndScopeAt)
+		// and, failing again, makes it the run's refusal.
+		if err := a.servePoolExactly(ctx); err != nil {
+			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
+		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
+	}
+	if len(incomplete) > 0 {
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.Incomplete = append(ev.Incomplete, incomplete...)
+	}
+	switch {
+	case readErr != nil:
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.Reason = "keploy: keploy could not tell what " + id + " did: " + readErr.Error()
+		ev.Unread = true
+		outcome = models.ScopeOutcomeFailed
+	case !ev.Empty() && a.replaying():
+		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
+		outcome = models.ScopeOutcomeFailed
+	case !ev.Empty():
+		// A record never fails a test: what keploy could not capture is
+		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
+		// and the test's outcome is its own against real infra.
+		ev.Reason = evidenceReason(id, ev, nil, beganAt)
+	}
+	if len(uses) > 0 {
+		a.noteScopeReal(id, uses)
+	}
+	// Before why: why goes in front of whatever reason the evidence gives.
+	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	if settleErr != nil {
+		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
+		if why == "" {
+			why = note
+		} else {
+			why += "; " + note
+		}
+		if readErr == nil {
+			readErr = settleErr
+		}
+		// Unsettled, what the test did cannot all have been read: it has
+		// no verdict of its own.
+		if ev == nil {
+			ev = &models.ScopeEvidence{}
+		}
+		ev.Unread = true
 	}
 	if why != "" {
 		if ev == nil {
@@ -584,13 +713,71 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, a
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
 		// The window closed with the outcome above; a test whose end failed
-		// is counted failed, as its end answer says.
+		// is counted failed, as its end answer says. Its mocks or its clock
+		// may not be put back, which taints every test after it: the run's
+		// to name, as keploy's own failure, whoever ended the test and
+		// whatever its read did.
 		a.failClosedWindow(id, "keploy: keploy could not end "+id+": "+err.Error())
+		a.NoteRefusal(models.RunRefusal{Code: models.ScopeErrInternal,
+			Message: "keploy could not end " + id + " (its mocks or its clock may not be put back, so the tests after it may have run on them): " + err.Error(),
+			Remedy:  "check the agent's log, and run the tests again"})
 		if readErr == nil {
 			readErr = err
 		}
 	}
 	return ev, readErr
+}
+
+// chargeCaptureLosses adds to a test's evidence what the agent could not
+// capture since the run began (design v14 §3.2): a loss taints the test open
+// when it happened and every later one. In a replay the test then fails, with
+// the losses in its reason; a record keeps the evidence on the window for
+// judging and answers as before (record instances never fail a test). A read
+// of the losses that failed is a test keploy cannot judge: failed in a
+// replay, and said on the window in a record.
+//
+// fromEvidence says ev's reason, if any, is keploy's text for its evidence
+// (evidenceReason, with beganAt), which is then written again with the
+// losses in it; any other reason (a read that failed) keeps its text, after
+// the losses'.
+func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool, beganAt time.Time) (*models.ScopeEvidence, string) {
+	a.provenMu.Lock()
+	mark := a.proven.losses
+	a.provenMu.Unlock()
+	lost, err := a.captureLossesSince(ctx, mark)
+	if err == nil && len(lost) == 0 {
+		return ev, outcome
+	}
+	if ev == nil {
+		ev = &models.ScopeEvidence{}
+	}
+	if err != nil {
+		ev.Reason = strings.TrimSpace("keploy: keploy could not tell whether every call of " + id + " was captured: " + err.Error() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		// As a test whose evidence could not be read: no verdict of its own.
+		ev.Unread = true
+		if a.replaying() {
+			outcome = models.ScopeOutcomeFailed
+		}
+		return ev, outcome
+	}
+	ev.CaptureIncomplete = lost
+	switch {
+	case fromEvidence:
+		// keploy's text for the evidence, written again with the losses
+		// first: the same text in a record (whose evidence is the
+		// connections keploy could not capture) as in a replay.
+		var mocks map[string]*models.Mock
+		if a.replaying() {
+			mocks = a.mocksFound(ev.Unconsumed)
+		}
+		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
+	default:
+		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+	}
+	if a.replaying() {
+		outcome = models.ScopeOutcomeFailed
+	}
+	return ev, outcome
 }
 
 // failClosedWindow marks the latest closed window of id failed, with why.
@@ -615,9 +802,9 @@ func (a *Agent) failClosedWindow(id, why string) {
 }
 
 // testEvidence is what fails the open test id at its end: its data-plane
-// misses (DNS is protocol-phase), and the data-plane mocks of its mapping it
-// did not consume while it was open. A failed read is an error.
-func (a *Agent) testEvidence(ctx context.Context, id string, atBegin map[string]uint64, unmade bool) (*models.ScopeEvidence, error) {
+// misses (DNS is protocol-phase), and the test mocks it did not consume while
+// it was open (exact serving tells which). A failed read is an error.
+func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
 	}
@@ -634,38 +821,24 @@ func (a *Agent) testEvidence(ctx context.Context, id string, atBegin map[string]
 	if err != nil {
 		return ev, fmt.Errorf("reading its misses: %w", err)
 	}
-	a.scopeMu.Lock()
-	names := append([]string(nil), a.scopeTable[id]...)
-	a.scopeMu.Unlock()
-	if len(names) == 0 || !unmade {
+	if !unmade {
 		return ev, nil
 	}
 	// A read that fails from here keeps the misses already found: they are
 	// this test's whatever else could not be told.
-	mocks, err := a.mocksByName(names)
+	es, err := a.exactServer()
 	if err != nil {
 		return ev, err
 	}
-	now, err := a.servedCounts()
-	if err != nil {
-		return ev, err
+	test, _, unconsumed, ok := es.ExactTestOutcome()
+	if !ok || test != id {
+		return ev, fmt.Errorf("keploy's proxy was not serving %s exactly at its end (it was serving %q)", id, test)
 	}
-	for _, n := range names {
-		if mocks[n].IsProtocolPhase() || now[n] > atBegin[n] {
-			continue
-		}
-		ev.Unconsumed = append(ev.Unconsumed, n)
-	}
+	a.provenMu.Lock()
+	unservable := append([]string(nil), a.proven.unservable...)
+	a.provenMu.Unlock()
+	ev.Unconsumed = append(unconsumed, unservable...)
 	return ev, nil
-}
-
-// servedCounts is how often each mock has answered this session.
-func (a *Agent) servedCounts() (map[string]uint64, error) {
-	c, ok := a.Proxy.(servedCounter)
-	if !ok || a.Proxy == nil {
-		return nil, errors.New("this keploy agent's proxy does not count which mocks answered")
-	}
-	return c.ServedCounts(), nil
 }
 
 // mocksByName finds every stored mock named, resident or on disk. A name the
@@ -679,10 +852,14 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 		return nil, errors.New("no mocks are loaded")
 	}
 	want := make(map[string]bool, len(names))
-	for _, n := range names {
-		want[n] = true
-	}
 	s.mu.RLock()
+	for _, n := range names {
+		// A mock the store refused was said as it was refused: it answers
+		// nothing (refusedOf).
+		if _, refused := s.refused[n]; !refused {
+			want[n] = true
+		}
+	}
 	for _, pool := range [][]*models.Mock{s.filtered, s.unfiltered} {
 		for _, m := range pool {
 			if m != nil && want[m.Name] {
@@ -722,6 +899,33 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	return out, nil
 }
 
+// servedSince is when exact serving began serving the open test; zero
+// when it does not.
+func (a *Agent) servedSince() time.Time {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.servedSince
+}
+
+// refusedOf is, in order, the names of names the agent's store refused that
+// are test mocks: a protocol-phase mock is no test's.
+func (a *Agent) refusedOf(names []string) []string {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, n := range names {
+		if s.refused[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // mocksFound is mocksByName for rendering only: what it cannot find is left out.
 func (a *Agent) mocksFound(names []string) map[string]*models.Mock {
 	m, err := a.mocksByName(names)
@@ -745,6 +949,42 @@ func (a *Agent) noteScopeEvidence(id string, ev *models.ScopeEvidence) {
 	meta := a.scopeMeta[k]
 	meta.evidence = ev
 	a.scopeMeta[k] = meta
+}
+
+// noteScopeReal attaches the mock.real destinations a test used to the
+// window id's end closes.
+func (a *Agent) noteScopeReal(id string, uses []models.RealUse) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: 0, name: id}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.real = uses
+	a.scopeMeta[k] = meta
+}
+
+// realTracking is implemented by a proxy that relays the run's mock.real
+// destinations (design v14 §4).
+type realTracking interface {
+	RealTracker() *realdeps.Tracker
+}
+
+// realTracker is what the run's REAL connections did; nil for a proxy that
+// relays none.
+func (a *Agent) realTracker() *realdeps.Tracker {
+	if a.Proxy == nil {
+		return nil
+	}
+	p, ok := a.Proxy.(realTracking)
+	if !ok {
+		return nil
+	}
+	return p.RealTracker()
 }
 
 // abandonWindow forgets a window a failed begin opened.
@@ -772,7 +1012,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	// The run is over: what a process still running claims or begins now
 	// would never be read.
 	a.proven.closed = true
-	id, atBegin, c := a.proven.open, a.proven.atBegin, a.proven.claim
+	id, c := a.proven.open, a.proven.claim
 	if id == "" {
 		a.provenMu.Unlock()
 		return nil
@@ -783,27 +1023,32 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	if procAlive(c.pid, c.start) {
 		why = fmt.Sprintf("the test was still open when keploy read the run's results: its process %d outlived the test command", c.pid)
 	}
-	a.failOpen(ctx, id, atBegin, why)
+	a.failOpen(ctx, id, why)
 	return nil
 }
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, and the call's shape: for HTTP
-// the method and the path's shape, for SQL the statement with its literals
-// written "?" (sqlShape). Never a value the app sent (a query's literals or
-// bound parameters, a path's IDs, a body). The next step is the matcher's
-// own fixed advice (nextStepOf).
+// the matcher's next step, when it happened, and the call's shape
+// (models.MissShape): for HTTP and gRPC the method and the target's shape,
+// for SQL the statement with its literals written "?". No body, no bound
+// parameter, no SQL literal, no query value, and no path segment that looks
+// like a value (models.PathShape says which do) or that a test variable's
+// place on the call names (VariablePlaces: one the miss names, one the
+// closest mock or a mock on the call's route declares, or one that holds a
+// value the test bound). The next step is the matcher's own fixed advice
+// (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At}
-	switch {
-	case isHTTP(m.Protocol):
-		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
-			out.ActualSummary = method + " " + pathShape(path)
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
+		Kind: m.Kind, Recorded: m.Recorded}
+	// A variable's path places name segments, not values: kept, so a shape
+	// of this miss (models.MissShape) still writes them {}. Any other place
+	// can name a JSON key that is a value.
+	for _, p := range m.VariablePlaces {
+		if models.IsPathPlace(p) {
+			out.VariablePlaces = append(out.VariablePlaces, p)
 		}
-	case isSQL(m.Protocol):
-		out.ActualSummary = sqlShape(m.ActualSummary)
 	}
 	if m.MatchPhase == models.MatchPhaseVariable {
 		// A test variable did not hold, or the closest mock's variables could
@@ -839,144 +1084,6 @@ func nextStepOf(m models.UnmatchedCall) string {
 	return m.NextSteps
 }
 
-// isSQL reports whether a miss's protocol speaks SQL, whose summary is the
-// statement keploy saw.
-func isSQL(protocol string) bool {
-	p := strings.ToLower(protocol)
-	return strings.Contains(p, "sql") || strings.Contains(p, "postgres")
-}
-
-// maxSQLText bounds a statement's shape.
-const maxSQLText = 160
-
-// sqlShape is a SQL statement with every quoted string and number written
-// "?". It fails closed: what it cannot read for certain is withheld, the rest
-// of the statement written "…": a literal holding a backslash (MySQL reads
-// \' as a quote by default, so where the literal ends depends on the
-// server's sql_mode), one never closed, a dollar quote ($tag$), and a
-// comment. MySQL's bound parameters ("params=[...]", which the replayer adds
-// to a prepared statement's summary) are dropped whole, and a backtick
-// identifier is kept only when it holds no quote. A quoted identifier
-// (Postgres "table") is written "?" too: hiding a name beats keeping a value.
-func sqlShape(q string) string {
-	if i := strings.Index(q, "params=["); i >= 0 {
-		q = q[:i]
-	}
-	var b strings.Builder
-	withheld := false
-	firstLiteral := -1
-scan:
-	for i := 0; i < len(q); {
-		c := q[i]
-		switch {
-		case c == '\'' || c == '"':
-			if firstLiteral < 0 {
-				firstLiteral = b.Len()
-			}
-			end, ok := closeQuote(q, i)
-			if !ok {
-				// A literal never closed leaves no quote of the statement
-				// paired for certain: everything from the first is withheld.
-				if end < 0 {
-					s := b.String()[:firstLiteral]
-					b.Reset()
-					b.WriteString(s)
-				}
-				b.WriteString("?")
-				withheld = true
-				break scan
-			}
-			b.WriteString("?")
-			i = end
-		case c == '`':
-			// A MySQL identifier: kept, as a name. One never closed, or
-			// holding a quote (which a reader would take for a literal's
-			// start), is withheld with the rest; so is a backslash, and
-			// Postgres's operator character.
-			end, ok := closeQuote(q, i)
-			if !ok || strings.ContainsAny(q[i+1:end-1], `'"`) {
-				if !ok && end < 0 && firstLiteral >= 0 {
-					s := b.String()[:firstLiteral]
-					b.Reset()
-					b.WriteString(s)
-				}
-				withheld = true
-				break scan
-			}
-			// A name keeps its letters; a run of digits in it is written
-			// "?", in case the span was misread (a Postgres operator, a
-			// multi-byte character set's trail byte).
-			b.WriteString(digitRuns.ReplaceAllString(q[i:end], "?"))
-			i = end
-		case c == '$' && i+1 < len(q) && isDigitByte(q[i+1]):
-			// A placeholder ($1): kept.
-			j := i + 1
-			for j < len(q) && isDigitByte(q[j]) {
-				j++
-			}
-			b.WriteString(q[i:j])
-			i = j
-		case c == '$', c == '#', strings.HasPrefix(q[i:], "--"), strings.HasPrefix(q[i:], "/*"):
-			// A dollar quote or a comment: withheld.
-			withheld = true
-			break scan
-		case isDigitByte(c) && (i == 0 || !isIdentByte(q[i-1])):
-			j := i
-			for j < len(q) && (isIdentByte(q[j]) || q[j] == '.') {
-				j++
-			}
-			b.WriteString("?")
-			i = j
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	out := strings.TrimSpace(sqlSpace.ReplaceAllString(b.String(), " "))
-	if withheld {
-		out += " …"
-	}
-	if len(out) > maxSQLText {
-		i := maxSQLText
-		for i > 0 && !utf8.RuneStart(out[i]) {
-			i--
-		}
-		out = out[:i] + "…"
-	}
-	return out
-}
-
-// closeQuote is the index past the quote that closes the literal opening at
-// q[i] (a doubled quote inside it is one quote), and false for a literal with
-// a backslash in it (index 0), or one never closed (index -1).
-func closeQuote(q string, i int) (int, bool) {
-	quote := q[i]
-	for j := i + 1; j < len(q); j++ {
-		switch q[j] {
-		case '\\':
-			return 0, false
-		case quote:
-			if j+1 < len(q) && q[j+1] == quote {
-				j++
-				continue
-			}
-			return j + 1, true
-		}
-	}
-	return -1, false
-}
-
-var (
-	sqlSpace  = regexp.MustCompile(`\s+`)
-	digitRuns = regexp.MustCompile(`[0-9]+`)
-)
-
-func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
-
-func isIdentByte(c byte) bool {
-	return c == '_' || isDigitByte(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
-}
-
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
 // as evidence keeps them (no value the app sent): they are counted, and
 // named in the run's summary, but no full request piles up across a run.
@@ -1004,12 +1111,6 @@ func errClosed() *models.ScopeError {
 		"this keploy run's results were read: the run is over, and nothing begun now would be judged", "run the tests through keploy again")
 }
 
-// isHTTP reports whether a miss's protocol is HTTP, whose summary is a method
-// and a path: "HTTP", "HTTP2" or "HTTP/2".
-func isHTTP(proto string) bool {
-	return strings.EqualFold(proto, "HTTP") || strings.EqualFold(proto, "HTTP2") || strings.EqualFold(proto, "HTTP/2")
-}
-
 // takeChargedMisses returns, once, the misses the ends drained from the proxy.
 func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 	a.provenMu.Lock()
@@ -1020,21 +1121,80 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 }
 
 // evidenceReason is keploy's text for a failed test (design v14 §5.3). It
-// names calls by method, destination and path shape, never by a recorded or
-// sent value.
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock) string {
+// names calls by method, destination and URL shape (models.PathShape), never
+// by a body or a query value.
+// beganAt is when the test began being served: a miss filed outside every
+// test whose call was made at or after it was made as the test ended (its
+// last call in flight, filed once the test stopped being served); one made
+// before it, before the test began, an extra call of another test's
+// included.
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time) string {
 	var what []string
+	for _, c := range ev.Incomplete {
+		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
+	}
+	// A miss whose call was made before the test began being served is no
+	// call of the test's, whatever kind it was filed with: one another test
+	// made, still in flight as that test ended, filed once this one began.
+	before := func(m models.UnmatchedCall) bool {
+		return !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
+	}
+	// One call made more often than recorded is said once: how often the
+	// test made it, and how often it was recorded.
+	extra := map[string]int{}
 	for _, m := range ev.Misses {
-		what = append(what, missText(m)+" had no recorded answer")
+		if m.Kind == models.MissExtraCall && !before(m) {
+			extra[missText(m)]++
+		}
+	}
+	for _, m := range ev.Misses {
+		if before(m) {
+			// Where it was made is not known: a miss is filed by the view
+			// served when it is filed, which may be after its own test.
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			continue
+		}
+		switch m.Kind {
+		case models.MissExtraCall:
+			call := missText(m)
+			if n, ok := extra[call]; ok {
+				what = append(what, fmt.Sprintf("%s was called %d times, recorded %d", call, m.Recorded+n, m.Recorded))
+				delete(extra, call)
+			}
+		case models.MissOutsideTest:
+			if !beganAt.IsZero() && !m.At.IsZero() {
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				continue
+			}
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+		default:
+			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
 	for _, n := range unmade {
 		what = append(what, "recorded call "+mockText(n, mocks[n])+" was never made")
 	}
+	if t := ev.CaptureIncomplete.Text(); t != "" {
+		if len(what) == 0 {
+			// Failed only for what keploy could not capture: re-recording
+			// or quarantining the test would hide keploy's own loss, so
+			// neither is offered; the loss's text says what was lost and
+			// why.
+			return "keploy: " + t + "."
+		}
+		// First: it says why the rest of the evidence may be short.
+		what = append([]string{t}, what...)
+	}
 	const most = 5
 	if len(what) > most {
 		what = append(what[:most], fmt.Sprintf("and %d more", len(what)-most))
+	}
+	if len(ev.Misses) == 0 && len(ev.Unconsumed) == 0 {
+		// Only connections keploy could not capture: each says what to
+		// change, and nothing the test did needs re-recording or quarantine.
+		return "keploy: " + strings.Join(what, "; ") + "."
 	}
 	return fmt.Sprintf("keploy: %s. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
 		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", strings.Join(what, "; "), id, shellQuote(id))
@@ -1053,38 +1213,19 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-var (
-	allDigits = regexp.MustCompile(`^[0-9]+$`)
-	hasDigit  = regexp.MustCompile(`[0-9]`)
-)
-
-// pathShape keeps a path's shape and drops its values: a segment of digits,
-// of eight or more characters with a digit in it (an ID, a hash, a UUID), or
-// with an @ (an email address), becomes {}; the query is dropped. A value
-// that looks like a word (a user name) is kept: the shape is a best effort.
-func pathShape(p string) string {
-	p, _, _ = strings.Cut(p, "?")
-	segs := strings.Split(p, "/")
-	for i, s := range segs {
-		if allDigits.MatchString(s) || (len(s) >= 8 && hasDigit.MatchString(s)) || strings.Contains(s, "@") {
-			segs[i] = "{}"
-		}
-	}
-	return strings.Join(segs, "/")
-}
-
-// missText names a miss: an HTTP request by method and path shape; any other
-// protocol by itself and its destination only, since its summary can hold
-// the values it sent (a query's literals).
+// missText names a miss: an HTTP or gRPC call by its method and target
+// shape (models.MissShape); any other protocol by itself and its destination
+// only, as one line of the reason (a SQL statement's shape is in the
+// evidence).
 func missText(m models.UnmatchedCall) string {
 	proto := strings.TrimSpace(m.Protocol)
 	s := "a call"
 	if proto != "" {
 		s = "a " + proto + " call"
 	}
-	if isHTTP(proto) {
-		if method, path, ok := strings.Cut(strings.TrimSpace(m.ActualSummary), " "); ok && method != "" {
-			s = method + " " + pathShape(path)
+	if models.IsPathProtocol(proto) {
+		if shape := models.MissShape(m); shape != "" {
+			s = shape
 		}
 	}
 	if m.Destination != "" {
@@ -1093,16 +1234,29 @@ func missText(m models.UnmatchedCall) string {
 	return s
 }
 
+// differsText names, for a miss's reason, the fields in which the call
+// differed from its closest recording: " (body.amount differs)", " (host and
+// header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
+func differsText(fields []string) string {
+	const most = 3
+	switch n := len(fields); {
+	case n == 0:
+		return ""
+	case n == 1:
+		return " (" + fields[0] + " differs)"
+	case n <= most:
+		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
+	default:
+		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+	}
+}
+
 func mockText(name string, m *models.Mock) string {
 	if m == nil {
 		return name
 	}
 	if m.Kind == models.HTTP && m.Spec.HTTPReq != nil {
-		where := pathShape(m.Spec.HTTPReq.URL)
-		if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
-			where = u.Host + pathShape(u.EscapedPath())
-		}
-		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, where, name)
+		return fmt.Sprintf("%s %s (%s)", m.Spec.HTTPReq.Method, models.MockURLShape(m), name)
 	}
 	return fmt.Sprintf("%s mock %s", m.Kind, name)
 }

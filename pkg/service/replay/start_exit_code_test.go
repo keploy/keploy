@@ -3,10 +3,13 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -98,5 +101,56 @@ func TestStartWhoseDeadlinePassesBeforeAnyTestExitsNonZero(t *testing.T) {
 	timedOut := func(ctx context.Context) ([]string, error) { return nil, ctx.Err() }
 	if got := startExitCode(t, ctx, timedOut); got != 1 {
 		t.Fatalf("a run that timed out exited %d, want 1", got)
+	}
+}
+
+// setupFailsInstrumentation is an agent that never comes up: its Setup fails
+// as AgentClient.Setup does.
+type setupFailsInstrumentation struct {
+	startInstrumentation
+	err error
+}
+
+func (s setupFailsInstrumentation) Setup(context.Context, string, models.SetupOptions) error {
+	return s.err
+}
+
+// Instrument keeps an agent's failure, tag and all: Start reads the tag from
+// it to arm the run's code before it flattens the error it returns.
+func TestInstrumentNamesWhyTheAgentCouldNotStart(t *testing.T) {
+	cause := fmt.Errorf("%w: the keploy agent could not start (exit status 3)", utils.ErrPrivilegeRequired)
+	r := NewReplayer(zap.NewNop(), nil, nil, nil, nil, nil, startTelemetry{}, setupFailsInstrumentation{err: cause}, nil, &config.Config{Command: "python3 app.py"}).(*Replayer)
+	_, err := r.Instrument(context.Background())
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("Instrument returned %v; want it to carry the agent's failure (%v)", err, cause)
+	}
+	if got := utils.ExitCodeFor(err); got != utils.ExitPrivilegeRequired {
+		t.Fatalf("the error maps to exit code %d, want %d", got, utils.ExitPrivilegeRequired)
+	}
+}
+
+// startReportDB answers the one read Start makes of the reports before it
+// instruments: the run ids, to name the next run.
+type startReportDB struct{ ReportDB }
+
+func (startReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
+
+// A `keploy test` whose setup failed for a tagged reason no layer armed
+// exits with that reason's code, and its error names the cause. The run's
+// error is flat (#4792), so the tag is read where Start still has it; such a
+// run used to be armed a bare 1.
+func TestStartWhoseAgentCannotStartExitsWithItsCode(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	cause := fmt.Errorf("%w: the keploy agent could not start (exit status 3)", utils.ErrPrivilegeRequired)
+	sets := func(context.Context) ([]string, error) { return []string{"test-set-0"}, nil }
+	r := NewReplayer(zap.NewNop(), startTestDB{list: sets}, nil, startReportDB{}, nil, nil, startTelemetry{}, setupFailsInstrumentation{err: cause}, nil, &config.Config{Command: "true"})
+	err := r.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), cause.Error()) {
+		t.Fatalf("Start returned %v; want it to name the agent's failure (%v)", err, cause)
+	}
+	if utils.ErrCode != utils.ExitPrivilegeRequired {
+		t.Fatalf("exit code %d, want %d", utils.ErrCode, utils.ExitPrivilegeRequired)
 	}
 }

@@ -1552,6 +1552,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
+		// Under the proven switch mock.real replaces every setting that made
+		// calls live (U18): their flags are refused here, their keploy.yml
+		// keys dropped at the end of this case.
+		if err := refusePassthroughFlags(cmd, passthroughFlags...); err != nil {
+			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
+			return err
+		}
+
 		// Before the command type: refusing an engine does not depend on it,
 		// and the --cmd-type checks would otherwise answer a podman command
 		// with a docker message. A base path sets the command aside below:
@@ -1666,7 +1674,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
+		if !provenswitch.On() {
+			// Under the switch the flag is refused above, and its keploy.yml
+			// default (bypassRules) is dropped below.
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
 
 		if cmd.Name() == "record" {
 			metadata, err := cmd.Flags().GetString("metadata")
@@ -1992,6 +2004,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.DisableMapping = disableMapping
 			}
 		}
+		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
 
 	case "normalize":
 		var err error
@@ -2687,7 +2700,18 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		utils.LogError(c.logger, err, "failed to read pass-through-ports")
 		return errors.New("failed to read pass-through-ports")
 	}
-	config.SetByPassPorts(c.cfg, bypassPorts)
+	if provenswitch.On() {
+		// keploy.yml's settings that made calls live go, mock.real replacing
+		// them (U18); the command's own --pass-through-ports, which keeps
+		// the app's ingress port off the proxy until the ingress row (PR 4),
+		// is kept.
+		dropPassthroughKeys(c.logger, c.cfg, "mock")
+		if cmd.Flags().Changed("pass-through-ports") {
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
+	} else {
+		config.SetByPassPorts(c.cfg, bypassPorts)
+	}
 
 	// Mock-set name.
 	if err := c.readMockSetName(cmd); err != nil {

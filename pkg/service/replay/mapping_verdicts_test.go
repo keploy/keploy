@@ -90,7 +90,7 @@ func consumedByWindow(h *prRun, byTest map[string][]models.MockState) func() []m
 	}
 	return func() []models.MockState {
 		h.instr.mu.Lock()
-		after := h.instr.lastParams.AfterTime
+		after := h.instr.windowAfter
 		h.instr.mu.Unlock()
 		return byTest[byStart[after.String()]]
 	}
@@ -257,9 +257,9 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 		{
 			// The same miss under the proven switch fails the test, though its
 			// answer matched and it consumed every recorded mock (so the
-			// switch's unconsumed-mock rule does not fail it): a FAILED test
-			// whose response matched keeps its recorded mapping, here without
-			// the mock-z it also consumed.
+			// switch's unconsumed-mock rule does not fail it). Under the
+			// switch only record writes mappings.yaml (S12): the file is
+			// left as recorded, the passing test-2's entry too.
 			name:      "failed under KEPLOY_PROVEN: a call no mock answered, response matched",
 			consumed1: []models.MockState{mongoAt("mock-a", 1010), mongoAt("mock-b", 1020), mongoAt("mock-z", 1030)},
 			miss1:     &models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "publish audit-event"},
@@ -268,8 +268,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 			want: []string{"mock-a", "mock-b"}, wantStatus: models.TestStatusFailed,
 		},
 		{
-			// The same, creating the file: the failed test gets no entry and
-			// stays on its recorded window.
+			// The same with no file: under the switch none is created.
 			name:      "failed under KEPLOY_PROVEN: a call no mock answered, default flag, no file",
 			consumed1: []models.MockState{mongoAt("mock-a", 1010), mongoAt("mock-z", 1030)},
 			miss1:     &models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "publish audit-event"},
@@ -352,7 +351,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 			if tc.miss1 != nil {
 				h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
 					h.instr.mu.Lock()
-					after := h.instr.lastParams.AfterTime
+					after := h.instr.windowAfter
 					h.instr.mu.Unlock()
 					if after.Equal(h.cases[0].HTTPReq.Timestamp) {
 						return []models.UnmatchedCall{*tc.miss1}, nil
@@ -369,6 +368,22 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 				t.Fatalf("precondition: test-2 should pass, got %s", got)
 			}
 			onDisk := mappedOnDisk(t, db)
+			if tc.proven {
+				// Under the switch only record writes mappings.yaml (S12).
+				var want map[string][]string
+				if tc.recorded != nil {
+					want = map[string][]string{}
+					for id, entries := range tc.recorded {
+						for _, e := range entries {
+							want[id] = append(want[id], e.Name)
+						}
+					}
+				}
+				if !reflect.DeepEqual(onDisk, want) {
+					t.Fatalf("under KEPLOY_PROVEN the replay changed mappings.yaml: %v, want it as recorded, %v", onDisk, want)
+				}
+				return
+			}
 			if onDisk == nil {
 				t.Fatal("no mappings.yaml after the run; want one that maps at least the passing test-2")
 			}
@@ -592,7 +607,7 @@ func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T
 			if missed {
 				h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
 					h.instr.mu.Lock()
-					after := h.instr.lastParams.AfterTime
+					after := h.instr.windowAfter
 					h.instr.mu.Unlock()
 					if after.Equal(h.cases[1].HTTPReq.Timestamp) {
 						return []models.UnmatchedCall{{Protocol: "MongoDB", ActualSummary: "find _SCHEMA"}}, nil
@@ -627,8 +642,9 @@ func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T
 
 // Under KEPLOY_PROVEN a test whose unanswered calls could not all be read has
 // no verdict (its set is INTERNAL_ERR, O-1): whatever its row says, its
-// consumption is not a pass's. --update-test-mapping still writes the set, so
-// the passing test-2 is the control.
+// consumption is not a pass's. Under the switch the replay writes no mapping
+// at all (S12), --update-test-mapping or not: the passing test-2 keeps its
+// recorded entry too.
 func TestRunTestSetUnderTheProvenSwitchAnUnreadMissKeepsTheRecordedMapping(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newPartialRunHarness(t, 2, 0)
@@ -649,7 +665,7 @@ func TestRunTestSetUnderTheProvenSwitchAnUnreadMissKeepsTheRecordedMapping(t *te
 	}
 	h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
 		h.instr.mu.Lock()
-		after := h.instr.lastParams.AfterTime
+		after := h.instr.windowAfter
 		h.instr.mu.Unlock()
 		if after.Equal(h.cases[0].HTTPReq.Timestamp) {
 			return nil, errors.New("the agent's miss channel overflowed")
@@ -670,8 +686,8 @@ func TestRunTestSetUnderTheProvenSwitchAnUnreadMissKeepsTheRecordedMapping(t *te
 	if want := []string{"mock-a", "mock-b"}; !reflect.DeepEqual(onDisk["test-1"], want) {
 		t.Fatalf("test-1's misses could not be read and mappings.yaml maps it to %v; want its recorded %v", onDisk["test-1"], want)
 	}
-	if want := []string{"mock-c", "mock-d"}; !reflect.DeepEqual(onDisk["test-2"], want) {
-		t.Fatalf("test-2 passed and mappings.yaml maps it to %v; want what it consumed, %v", onDisk["test-2"], want)
+	if want := []string{"mock-c"}; !reflect.DeepEqual(onDisk["test-2"], want) {
+		t.Fatalf("test-2 passed and mappings.yaml maps it to %v; under KEPLOY_PROVEN want its recorded %v", onDisk["test-2"], want)
 	}
 }
 
@@ -685,7 +701,7 @@ type consumedFailsFor struct {
 
 func (f consumedFailsFor) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	f.h.instr.mu.Lock()
-	after := f.h.instr.lastParams.AfterTime
+	after := f.h.instr.windowAfter
 	f.h.instr.mu.Unlock()
 	for _, tc := range f.h.cases {
 		if tc.Name == f.test && after.Equal(tc.HTTPReq.Timestamp) {

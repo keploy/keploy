@@ -12,6 +12,46 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	bpfMapAppConnEvents               = "app_conn_events"
+	bpfMapAppConnEventsDropped        = "app_conn_events_dropped"
+	bpfMapAppConns                    = "app_conns"
+	bpfMapAppConnsEstablished         = "app_conns_established"
+	bpfMapAppConnsOn                  = "app_conns_on"
+	bpfMapAppPortInfo                 = "app_port_info"
+	bpfMapBindEvents                  = "bind_events"
+	bpfMapExcludedPids                = "excluded_pids"
+	bpfMapKeployAgentKernelPidMap     = "keploy_agent_kernel_pid_map"
+	bpfMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
+	bpfMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
+	bpfMapKeployClientRegistrationMap = "keploy_client_registration_map"
+	bpfMapOrigDstByCookie             = "orig_dst_by_cookie"
+	bpfMapPendingBinds                = "pending_binds"
+	bpfMapPidMapInsertFailures        = "pid_map_insert_failures"
+	bpfMapProxyConnsEstablished       = "proxy_conns_established"
+	bpfMapProxyListenerMark           = "proxy_listener_mark"
+	bpfMapRedirectProxyMap            = "redirect_proxy_map"
+	bpfMapTargetNamespacePids         = "target_namespace_pids"
+	bpfProgK_bind4                    = "k_bind4"
+	bpfProgK_bind6                    = "k_bind6"
+	bpfProgK_connect4                 = "k_connect4"
+	bpfProgK_connect6                 = "k_connect6"
+	bpfProgK_getpeername4             = "k_getpeername4"
+	bpfProgK_getpeername6             = "k_getpeername6"
+	bpfProgK_postBind4                = "k_post_bind4"
+	bpfProgK_postBind6                = "k_post_bind6"
+	bpfProgK_processExit              = "k_process_exit"
+	bpfProgK_sockops                  = "k_sockops"
+	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
+	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
+	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
+	bpfProgK_udp6Sendmsg              = "k_udp6_sendmsg"
+	bpfProgSyscallProbeEntrySocket    = "syscall_probe_entry_socket"
+)
+
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -32,7 +72,7 @@ func loadBpf() (*ebpf.CollectionSpec, error) {
 //	*bpfMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadBpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadBpfObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadBpf()
 	if err != nil {
 		return err
@@ -75,6 +115,11 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
+	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
+	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
+	AppConnsEstablished         *ebpf.MapSpec `ebpf:"app_conns_established"`
+	AppConnsOn                  *ebpf.MapSpec `ebpf:"app_conns_on"`
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
@@ -84,6 +129,9 @@ type bpfMapSpecs struct {
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
+	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
+	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
+	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
@@ -114,6 +162,11 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
+	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
+	AppConns                    *ebpf.Map `ebpf:"app_conns"`
+	AppConnsEstablished         *ebpf.Map `ebpf:"app_conns_established"`
+	AppConnsOn                  *ebpf.Map `ebpf:"app_conns_on"`
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
@@ -123,12 +176,20 @@ type bpfMaps struct {
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
+	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
+	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
+	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.AppConnEvents,
+		m.AppConnEventsDropped,
+		m.AppConns,
+		m.AppConnsEstablished,
+		m.AppConnsOn,
 		m.AppPortInfo,
 		m.BindEvents,
 		m.ExcludedPids,
@@ -138,6 +199,9 @@ func (m *bpfMaps) Close() error {
 		m.KeployClientRegistrationMap,
 		m.OrigDstByCookie,
 		m.PendingBinds,
+		m.PidMapInsertFailures,
+		m.ProxyConnsEstablished,
+		m.ProxyListenerMark,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)

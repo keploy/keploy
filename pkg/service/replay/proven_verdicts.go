@@ -257,6 +257,48 @@ func failOnMisses(o testOutcome) testOutcome {
 	return o
 }
 
+// failTestsWithCaptureLoss fails, under the proven switch, every test that
+// would otherwise pass or be demoted while keploy's agent could not capture
+// every call (FailureInfo.CaptureIncomplete: since its test set began, so the
+// test running at the loss and every later one), adds CAPTURE_INCOMPLETE, and
+// names them.
+func failTestsWithCaptureLoss(results []models.TestResult) []string {
+	if !provenswitch.On() {
+		return nil
+	}
+	var failed []string
+	for i := range results {
+		r := &results[i]
+		if len(r.FailureInfo.CaptureIncomplete) == 0 {
+			continue
+		}
+		if r.Status == models.TestStatusPassed || r.Status == models.TestStatusObsolete {
+			r.Status = models.TestStatusFailed
+			failed = append(failed, r.TestCaseID)
+		}
+		if r.Status == models.TestStatusFailed {
+			r.FailureInfo.Category = appendCategoryUnique(slices.Clone(r.FailureInfo.Category), models.CaptureIncompleteCategory)
+		}
+	}
+	return failed
+}
+
+// anyTestLostCapture reports whether, under the proven switch, the agent lost
+// a call while one of these tests ran (FailureInfo.CaptureIncomplete): the
+// mocks recorded for a lost call were consumed by nobody, so the set's
+// consumption is no basis for the prune or mappings.yaml.
+func anyTestLostCapture(results []models.TestResult) bool {
+	if !provenswitch.On() {
+		return false
+	}
+	for i := range results {
+		if len(results[i].FailureInfo.CaptureIncomplete) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // missCategory adds UNMATCHED_CALL to a FAILED test whose call got no
 // recorded answer (under the proven switch), so the report, JUnit and the
 // NDJSON say why it failed.
@@ -280,6 +322,9 @@ type testEvidence struct {
 	misses     []models.UnmatchedCall
 	unconsumed []models.UnconsumedMock
 	categories []models.FailureCategory
+	// capture is what the agent could not capture while it or an earlier
+	// test of its set ran (FailureInfo.CaptureIncomplete).
+	capture models.CaptureLosses
 }
 
 // hookSnapshot is what the set's results said before the hook ran, under the
@@ -324,6 +369,7 @@ func cloneResult(r models.TestResult) models.TestResult {
 	r.FailureInfo.UnmatchedCalls = slices.Clone(r.FailureInfo.UnmatchedCalls)
 	r.FailureInfo.UnconsumedMocks = slices.Clone(r.FailureInfo.UnconsumedMocks)
 	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
+	r.FailureInfo.CaptureIncomplete = slices.Clone(r.FailureInfo.CaptureIncomplete)
 	return r
 }
 
@@ -343,14 +389,17 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 			snap.rows[r.TestCaseID] = cloneResult(r)
 		}
 		misses := dataPlaneCalls(r.FailureInfo.UnmatchedCalls)
-		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
+		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 {
 			continue
 		}
 		e := snap.evidence[r.TestCaseID]
 		e.misses = append(e.misses, misses...)
 		e.unconsumed = append(e.unconsumed, r.FailureInfo.UnconsumedMocks...)
+		if len(e.capture) == 0 {
+			e.capture = slices.Clone(r.FailureInfo.CaptureIncomplete)
+		}
 		for _, c := range r.FailureInfo.Category {
-			if c == models.CallUnmatched || c == models.DependencyMissing {
+			if c == models.CallUnmatched || c == models.DependencyMissing || c == models.CaptureIncompleteCategory {
 				e.categories = appendCategoryUnique(e.categories, c)
 			}
 		}
@@ -372,7 +421,8 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 //     make a test vanish from the tally. A row of a test that did not exist
 //     before the hook is FAILED.
 //   - A test with evidence against it (a call it made that no mock answered,
-//     or a recorded call it did not make, before the hook or still) counts
+//     a recorded call it did not make, or a call keploy's agent could not
+//     capture while it or an earlier test ran, before the hook or still) counts
 //     FAILED, unless every row of it is quarantined (IGNORED). When none of
 //     its rows is FAILED, every row that is not IGNORED is set FAILED;
 //     a test that has a FAILED row already counts FAILED, and its other rows
@@ -409,16 +459,17 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 	for _, id := range before.tests {
 		rows := rowsOf[id]
 		snap := before.evidence[id]
-		misses, unconsumed, allIgnored, failedRow := false, false, true, -1
+		misses, unconsumed, capture, allIgnored, failedRow := false, false, false, true, -1
 		for _, i := range rows {
 			misses = misses || dataPlaneMisses(results[i].FailureInfo.UnmatchedCalls) > 0
 			unconsumed = unconsumed || len(results[i].FailureInfo.UnconsumedMocks) > 0
+			capture = capture || len(results[i].FailureInfo.CaptureIncomplete) > 0
 			allIgnored = allIgnored && results[i].Status == models.TestStatusIgnored
 			if failedRow < 0 && results[i].Status == models.TestStatusFailed {
 				failedRow = i
 			}
 		}
-		if !misses && !unconsumed && len(snap.misses) == 0 && len(snap.unconsumed) == 0 {
+		if !misses && !unconsumed && !capture && len(snap.misses) == 0 && len(snap.unconsumed) == 0 && len(snap.capture) == 0 {
 			continue
 		}
 		// The row that carries the test's verdict, and so its evidence.
@@ -440,6 +491,9 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 		if !unconsumed && len(snap.unconsumed) > 0 {
 			v.FailureInfo.UnconsumedMocks = slices.Clone(snap.unconsumed)
 		}
+		if !capture && len(snap.capture) > 0 {
+			v.FailureInfo.CaptureIncomplete = slices.Clone(snap.capture)
+		}
 		if failedRow < 0 && !allIgnored {
 			for _, i := range rows {
 				if results[i].Status != models.TestStatusIgnored {
@@ -453,7 +507,7 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 			if r.Status != models.TestStatusFailed && r.Status != models.TestStatusIgnored {
 				continue
 			}
-			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
+			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 {
 				continue
 			}
 			cats := slices.Clone(r.FailureInfo.Category)

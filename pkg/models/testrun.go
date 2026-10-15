@@ -24,6 +24,48 @@ type TestReport struct {
 	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
 	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
 	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	// CaptureVerification is what keploy's check that its agent tracked every
+	// process of this test set found, when it found something: the capture
+	// was incomplete (a process went untracked; the set is FAILED, and its
+	// JUnit suite carries a failed "keploy capture" case), or could not be
+	// verified (the count could not be read). Absent when nothing was lost,
+	// and when nothing was checked (an agent that does not count, a run that
+	// does not mock): a report does not tell those two apart.
+	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+	// Real is what the set's run saw of mock.real beyond its test cases
+	// (proven switch): the destinations it reached, and the connections
+	// keploy could not capture outside them. RealListed are the
+	// destinations the recordings of its test cases that ran list. Absent
+	// without a mock.real list.
+	Real       *RealRun `json:"real,omitempty" yaml:"real,omitempty"`
+	RealListed []string `json:"realListed,omitempty" yaml:"real_listed,omitempty"`
+	// RealFailure is why mock.real failed the set (design v14 §8.2 rule 4):
+	// a destination the recordings list that the run never reached, or
+	// that never answered. JUnit fails a case of its own with it.
+	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+}
+
+// CaptureVerificationStatus is the outcome of checking that the agent tracked
+// every process of a test set.
+type CaptureVerificationStatus string
+
+const (
+	// CaptureIncomplete: a process went untracked (the kernel refused it a
+	// place in the agent's PID map), so its dependency calls may have reached
+	// the real service unmocked. The set is FAILED for it.
+	CaptureIncompleteStatus CaptureVerificationStatus = "incomplete"
+	// CaptureUnverified: the agent counts untracked processes, but keploy
+	// could not read the count, so the capture could not be confirmed. With
+	// the proven switch off the set's pass/fail is left as decided (only
+	// mock mode's --strict fails on it); with it on the set is not judged.
+	CaptureUnverifiedStatus CaptureVerificationStatus = "unverified"
+)
+
+// CaptureVerification is the capture-completeness outcome carried in a
+// TestReport (and the JUnit and json projections).
+type CaptureVerification struct {
+	Status CaptureVerificationStatus `json:"status" yaml:"status"`
+	Reason string                    `json:"reason" yaml:"reason"`
 }
 
 type TestCoverage struct {
@@ -99,6 +141,9 @@ type TestResult struct {
 	// failure without --strict-failure); the report still names the places.
 	// Absent when there is none.
 	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Real are the mock.real destinations the test case used while it ran
+	// (proven switch): its REAL rows. Absent when it used none.
+	Real []RealUse `json:"real,omitempty" yaml:"real,omitempty"`
 	// Variables are the test variables bound while the test case ran (proven
 	// switch): the values its request sent, and each value a dependency call
 	// carried where the learn step found it first, with where it was taken.
@@ -120,7 +165,10 @@ type TemplateFailure struct {
 	// refusal, why the placeholder cannot run and the edit to make.
 	Why string `json:"why" yaml:"why"`
 	// Refused marks a placeholder refused when the test set loaded: the test
-	// case was never sent, and there is no answer to accept.
+	// case was never sent, and there is no answer to accept. A refusal with
+	// no Placeholder refuses the test case's whole test set (one an
+	// interrupted keploy templatize left half-written; category
+	// TEST_SET_REFUSED), not a placeholder of it.
 	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
@@ -168,6 +216,24 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
+	// not capture that is charged to this test, each of which fails it:
+	//   - every kind but real_uncaptured: what the agent lost since the test
+	//     set began, as this test ended. A loss taints the test running when
+	//     it happened and every later test of the set (design v14 §3.2).
+	//   - real_uncaptured (class e, mock.real): the connections keploy could
+	//     neither capture nor relay as real that were undecided or used while
+	//     this test ran, counted for this test alone. One undecided across
+	//     several tests is charged to each; a test that never touched it is
+	//     not (§3.2 as amended for class e). keploy relays nothing of such a
+	//     connection, so no later test's calls escape capture through it.
+	// Empty with the switch off.
+	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
+	// CaptureUnread says, under KEPLOY_PROVEN=1, that keploy could not read
+	// whether its agent captured every call while this test ran (the count
+	// could not be read, at the test's end or at its set's mark): the test
+	// has no verdict, and its set is not judged.
+	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -241,8 +307,19 @@ type UnmatchedCall struct {
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
+	// places of a test variable on this call, under the proven switch only.
+	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Kind is where the call was made, under the proven switch (MissInTest,
+	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
+	// extra call, how many times the test recorded that call.
+	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
+	// which the call differs from its closest recording, without values.
+	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
 }
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
@@ -266,6 +343,18 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
+	// refused over its life, which under compose is the replay's: processes
+	// its hooks could not track. nil when it cannot count them, which is
+	// "unknown".
+	PIDMapRefusals *PIDMapRefusals `json:"pidMapRefusals,omitempty"`
+	// PIDMapRefusalsError is why hooks that count those refusals could not be
+	// read as the agent stopped; "" when they were read, or when the hooks do
+	// not count them at all. It is what tells the CLI "the count was lost"
+	// (completeness unproven: --strict fails it) from "this agent never
+	// counts" (an older agent, or hooks without PID maps), which a nil
+	// PIDMapRefusals alone cannot.
+	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -383,6 +472,10 @@ const (
 	// which fails it under KEPLOY_PROVEN=1. The calls are in
 	// FailureInfo.UnmatchedCalls.
 	CallUnmatched FailureCategory = "UNMATCHED_CALL"
+	// CaptureIncompleteCategory: keploy's agent could not capture every call
+	// while this test or one before it in its test set ran, which fails it
+	// under KEPLOY_PROVEN=1. The losses are in FailureInfo.CaptureIncomplete.
+	CaptureIncompleteCategory FailureCategory = "CAPTURE_INCOMPLETE"
 	// TemplateVariable means a template variable place of the expected
 	// response was not satisfied by the answer (a {{capture ...}} that found
 	// no value of its type, or a use that did not hold its key's value), or
@@ -390,6 +483,11 @@ const (
 	// placeholder it cannot run with, and never sent.
 	// TestResult.TemplateFailures names each place and why.
 	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
+	// TestSetRefused means keploy refused the test case's whole test set and
+	// ran none of it: an interrupted keploy templatize left the set
+	// half-written. The set's failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files and what to do.
+	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.

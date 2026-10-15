@@ -2132,8 +2132,12 @@ func TestLateMockInOverlappingWindowsGoesToTheKeptOne(t *testing.T) {
 type oneContainerAt string
 
 func (a oneContainerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
-	return containerkey.Container{ID: "c1", Image: "redis:7", Port: 6379}, dst.String() == string(a), nil
+	return containerkey.Container{ID: "c1", Image: "redis:7", Port: 6379, Fingerprint: "0123456789ab"}, dst.String() == string(a), nil
 }
+
+func (oneContainerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (oneContainerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (oneContainerAt) AwaitReadsOf(context.Context, []string)             {}
 
 func (oneContainerAt) Bind(context.Context)               {}
 func (oneContainerAt) Watch(context.Context, *zap.Logger) {}
@@ -2161,7 +2165,7 @@ func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
 		got := (<-ch).Spec.Metadata[containerkey.MetadataKey]
 		want := ""
 		if on {
-			want = "container:redis:7:6379#1"
+			want = "container:redis:6379@0123456789ab"
 		}
 		if got != want {
 			t.Fatalf("proven=%v: the mock's container key = %q, want %q", on, got, want)

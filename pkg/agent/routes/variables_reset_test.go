@@ -174,3 +174,34 @@ func TestAnAgentThatCannotBindRefusesGivenValues(t *testing.T) {
 		})
 	}
 }
+
+// Under exact serving keploy test sends three filters: the set's staging, a
+// test case's open, and the pool call between test cases. The staging and
+// the open begin a test's variables; the pool call begins none, so what the
+// test case's dependency calls bound stays readable until the next open, and
+// keploy test reads it after the pool call. A pool call that gives values is
+// refused before it applies: they would be bound nowhere.
+func TestExactServingsPoolCallKeepsTheTestCasesVariables(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name   string
+		body   string
+		code   int
+		events string
+	}{
+		{"staging", `{"filterParams":{"exact":{"stage":true,"pool":["mock-9"]}}}`, http.StatusOK, "filter reset"},
+		{"a test case's open", `{"filterParams":{"exact":{"test":"test-1","owned":["mock-1"]},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusOK, "filter reset bind:id=u1"},
+		{"the pool call", `{"filterParams":{"exact":{}}}`, http.StatusOK, "filter"},
+		{"a pool call that gives values", `{"filterParams":{"exact":{},"variables":[{"name":"id","value":"u1"}]}}`, http.StatusUnprocessableEntity, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			a := &Agent{logger: zap.NewNop(), svc: paramsSvc{events: &events}}
+			rec := httptest.NewRecorder()
+			a.UpdateMockParams(rec, httptest.NewRequest(http.MethodPost, "/agent/updatemockparams", strings.NewReader(tc.body)))
+			if rec.Code != tc.code || strings.Join(events, " ") != tc.events {
+				t.Fatalf("status %d, events %v; want %d and %q", rec.Code, events, tc.code, tc.events)
+			}
+		})
+	}
+}

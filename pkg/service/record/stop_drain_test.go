@@ -64,6 +64,12 @@ func tcAt(name string, at time.Time) *models.TestCase {
 	return &models.TestCase{Name: name, HTTPReq: models.HTTPReq{Timestamp: at}}
 }
 
+// grpcAt is a gRPC test case whose call completed at at.
+func grpcAt(name string, at time.Time) *models.TestCase {
+	return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: at.Add(-time.Millisecond)}, GrpcResp: models.GrpcResp{Timestamp: at}}
+}
+
 // The agent's parsers run behind the traffic: at the stop, a busy recording
 // still has mocks queued there (1,655 of 3,300 tests lost them at 110 req/s,
 // when the CLI stopped reading at the stop and gave its stream 30 s). They
@@ -227,14 +233,17 @@ func (c *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 
 // Under docker compose the agent is a service of the app's stack. The stop must
 // drain what it holds before taking the stack down: taking it down first lost
-// the mocks of 1,655 of 3,300 tests at 110 req/s.
+// the mocks of 1,655 of 3,300 tests at 110 req/s. Its agent says what it still
+// holds, as the real one does, so the drain ends on that and not on the
+// stream's quiet: the test's gaps between mocks are no bound on it.
 func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	f := &fakeInstr{
 		mappings: make(chan models.TestMockMapping),
 		incoming: make(chan *models.TestCase),
 		outgoing: make(chan *models.Mock),
 	}
-	instr := &composeInstr{fakeInstr: f, stackDown: make(chan struct{})}
+	const queued = 20
+	instr := &backlogComposeInstr{composeInstr: &composeInstr{fakeInstr: f, stackDown: make(chan struct{})}, held: queued + 1}
 	mockDB := &recMockDB{unencodable: map[string]bool{}}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK) // the compose agent's health check
@@ -262,6 +271,7 @@ func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	send := func(name string) bool {
 		select {
 		case f.outgoing <- mockAt(name, captured):
+			instr.taken.Add(1)
 			return true
 		case <-instr.stackDown:
 			return false
@@ -276,7 +286,6 @@ func TestStart_ComposeDrainsTheAgentBeforeTakingItsStackDown(t *testing.T) {
 	cancel()
 	// The agent still holds mocks captured before the stop: they must reach the
 	// sink while the stack, and the agent in it, is still up.
-	const queued = 20
 	for i := 0; i < queued; i++ {
 		if !send(fmt.Sprintf("queued-%d", i)) {
 			t.Fatalf("the stack (and the agent) went down with %d of %d queued mocks still to hand over", queued-i, queued)
@@ -413,9 +422,11 @@ func TestGetTestAndMockChans_NothingOfTrafficAfterTheStopIsRecorded(t *testing.T
 		}
 	}
 	send(h.f.incoming, tcAt("t-before", before))
+	send(h.f.incoming, grpcAt("g-before", before)) // a gRPC call is dated by its wire times too
 	send(h.f.outgoing, mockAt("m-before", before))
 	send(h.f.incoming, tcAt("t-after", after))
-	send(h.f.incoming, &models.TestCase{Name: "t-undated"}) // gRPC: cannot be told
+	send(h.f.incoming, grpcAt("g-after", after))
+	send(h.f.incoming, &models.TestCase{Name: "t-undated"}) // no wire times: cannot be told
 	send(h.f.outgoing, mockAt("m-after", after))
 	// The frame drains have taken what was queued; the mappings trail them.
 	time.Sleep(100 * time.Millisecond)
@@ -426,8 +437,36 @@ func TestGetTestAndMockChans_NothingOfTrafficAfterTheStopIsRecorded(t *testing.T
 	time.Sleep(mappingIdleGrace + 500*time.Millisecond)
 	send(h.f.mappings, models.TestMockMapping{TestName: "t-never-read", MockIDs: []string{"m-x"}})
 	wg.Wait()
-	if fmt.Sprint(tcs, mocks, maps) != "[t-before] [m-before] [t-before]" {
+	if fmt.Sprint(tcs, mocks, maps) != "[t-before g-before] [m-before] [t-before]" {
 		t.Fatalf("recorded test cases %v, mocks %v, mappings %v; want only what was served before the stop", tcs, mocks, maps)
+	}
+}
+
+// A frame already waiting when the forwarder first looks after the stop can
+// be taken before the stop is: select takes either. It is judged by the stop
+// all the same, or what the app served after the stop is recorded (docker
+// compose), whichever the select took first.
+func TestForwardUntilDrained_AFrameTakenOnceTheStopCameIsJudgedByIt(t *testing.T) {
+	t.Parallel()
+	const runs = 200 // select picks at random: each run is a coin toss without the fix
+	for i := 0; i < runs; i++ {
+		r := &Recorder{logger: zap.NewNop(), frameQuiet: 10 * time.Millisecond}
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := make(chan *models.TestCase, 1)
+		stream <- tcAt("after", time.Now().Add(time.Hour))
+		cancel() // the stop came before the forwarder looked
+		out := make(chan *models.TestCase, 1)
+		var afterStop []string
+		forwardUntilDrained(ctx, r, stream, out, make(chan struct{}), drainOpts[*models.TestCase]{
+			capturedAt:  testCaseCapturedAt,
+			dropped:     func(*models.TestCase) {},
+			closeStream: func() { close(stream) },
+			afterStop:   func(tc *models.TestCase) { afterStop = append(afterStop, tc.Name) },
+			kind:        "test cases",
+		})
+		if len(out) > 0 || len(afterStop) != 1 {
+			t.Fatalf("run %d: a test case served an hour after the stop was forwarded (%d) or not judged after it (%v)", i, len(out), afterStop)
+		}
 	}
 }
 
@@ -437,9 +476,16 @@ func TestTestCaseCapturedAtIsWhenItWasComplete(t *testing.T) {
 	if got := testCaseCapturedAt(&models.TestCase{HTTPReq: models.HTTPReq{Timestamp: req}, HTTPResp: models.HTTPResp{Timestamp: resp}}); !got.Equal(resp) {
 		t.Fatalf("got %v, want the response %v", got, resp)
 	}
+	// A gRPC call, by its response, else its request.
+	if got := testCaseCapturedAt(&models.TestCase{GrpcReq: models.GrpcReq{Timestamp: req}, GrpcResp: models.GrpcResp{Timestamp: resp}}); !got.Equal(resp) {
+		t.Fatalf("got %v for a gRPC test case, want its response %v", got, resp)
+	}
+	if got := testCaseCapturedAt(&models.TestCase{GrpcReq: models.GrpcReq{Timestamp: req}}); !got.Equal(req) {
+		t.Fatalf("got %v for a gRPC test case with no response time, want its request %v", got, req)
+	}
 	// Created is when the agent built it, possibly long after it ran.
 	if got := testCaseCapturedAt(&models.TestCase{Created: 100}); !got.IsZero() {
-		t.Fatalf("got %v for a gRPC test case, want it undated", got)
+		t.Fatalf("got %v for a test case with no wire times, want it undated", got)
 	}
 }
 

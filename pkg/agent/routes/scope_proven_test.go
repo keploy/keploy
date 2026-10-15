@@ -29,6 +29,7 @@ type wireSvc struct {
 	beginResp   models.ScopeBeginResp
 	beginErr    *models.ScopeError
 	endResp     models.ScopeEndResp
+	endErr      *models.ScopeError
 	oldBegun    string
 }
 
@@ -44,7 +45,7 @@ func (s *wireSvc) ProvenBegin(_ context.Context, req models.ScopeReq) (models.Sc
 
 func (s *wireSvc) ProvenEnd(_ context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError) {
 	s.ended = append(s.ended, req)
-	return s.endResp, nil
+	return s.endResp, s.endErr
 }
 
 func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string) error {
@@ -227,4 +228,72 @@ func TestRefusalsAreRecorded(t *testing.T) {
 	off := call(t, a.HandleRefusal, `{"code":"x","message":"y"}`)
 	require.Equal(t, http.StatusNotFound, off.Code)
 	require.Equal(t, "404 page not found\n", off.Body.String())
+}
+
+// Under the switch a begin or an end reads no pid, runner clock or folder
+// (release1-cut §2.1): the old wire's start lookup and clock mark never run,
+// and the body reaches the wire as it came, for it to refuse. Off the
+// switch the mark runs as before.
+func TestTheWireReadsNoPidOrRunnerClock(t *testing.T) {
+	was := OnMark
+	t.Cleanup(func() { OnMark = was })
+	var marks []int
+	OnMark = func(pid int, _ string, _ time.Time, _ []string) time.Duration {
+		marks = append(marks, pid)
+		return 0
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc := &wireSvc{beginResp: models.ScopeBeginResp{V: 1, Status: "ok"}, endResp: models.ScopeEndResp{V: 1, Status: "ok"}}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	call(t, a.HandleScopeBegin, `{"name":"TestA","canSkip":true,"pid":4242,"at":"2026-10-14T09:00:00Z"}`)
+	call(t, a.HandleScopeEnd, `{"name":"TestA","outcome":"passed","pid":4242}`)
+	if len(marks) != 0 {
+		t.Fatalf("under the switch the old wire's clock mark ran for pids %v", marks)
+	}
+	if len(svc.begun) != 1 || svc.begun[0].Pid != 4242 || svc.begun[0].At.IsZero() || len(svc.ended) != 1 {
+		t.Fatalf("the body did not reach the wire as it came: %+v / %+v", svc.begun, svc.ended)
+	}
+
+	t.Setenv(provenswitch.Env, "")
+	call(t, a.HandleScopeBegin, `{"name":"TestB","canSkip":true,"pid":4242}`)
+	if len(marks) != 1 || marks[0] != 0 {
+		t.Fatalf("off the switch the begin marks the runner's clock as before, got %v", marks)
+	}
+}
+
+// An end the wire refuses because its integration predates the protocol is
+// recorded for the run's verdict to name, as a begin's is; an end of a test
+// that is not open refuses only that call.
+func TestAnEndFromAnOldIntegrationIsRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &refusingSvc{}
+	svc.endErr = &models.ScopeError{Status: http.StatusUnprocessableEntity, Code: models.ScopeErrUpgradeIntegration, Message: "this test harness sends pid", Remedy: "upgrade"}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	rec := call(t, a.HandleScopeEnd, `{"name":"TestA","outcome":"passed","pid":4242}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	require.Len(t, svc.refusals, 1)
+	require.Equal(t, models.ScopeErrUpgradeIntegration, svc.refusals[0].Code)
+
+	svc.endErr = &models.ScopeError{Status: http.StatusConflict, Code: models.ScopeErrNotOpen, Message: "TestA ended, but no test is open", Remedy: "end a test once"}
+	rec = call(t, a.HandleScopeEnd, `{"name":"TestA","outcome":"passed"}`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Len(t, svc.refusals, 1, "an end of a test that is not open is not the run's refusal")
+
+	// Any other end the wire refuses is the run's: one that names no test,
+	// and a body that is not the protocol's (a begin's too).
+	svc.endErr = &models.ScopeError{Status: http.StatusBadRequest, Code: models.ScopeErrBadRequest, Message: "an end names its test", Remedy: "send the name"}
+	require.Equal(t, http.StatusBadRequest, call(t, a.HandleScopeEnd, `{"outcome":"passed"}`).Code)
+	require.Len(t, svc.refusals, 2)
+	require.Equal(t, http.StatusBadRequest, call(t, a.HandleScopeEnd, `{"name":`).Code)
+	require.Equal(t, http.StatusBadRequest, call(t, a.HandleScopeBegin, `not json`).Code)
+	require.Len(t, svc.refusals, 4)
+	require.Contains(t, svc.refusals[2].Message, "invalid scope-end request")
+	require.Contains(t, svc.refusals[3].Message, "invalid scope-begin request")
+
+	// An internal end answer is not refused here: the service names
+	// keploy's own failure once itself (endTest), and a test keploy could
+	// not read is its window's.
+	svc.endErr = &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: "keploy could not judge o::TestA", Remedy: "check the agent's log"}
+	require.Equal(t, http.StatusInternalServerError, call(t, a.HandleScopeEnd, `{"name":"TestA","outcome":"passed"}`).Code)
+	require.Len(t, svc.refusals, 4)
 }

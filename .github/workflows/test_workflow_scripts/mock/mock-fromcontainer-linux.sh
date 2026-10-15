@@ -11,6 +11,16 @@
 # tests around this necessarily model that behaviour rather than proving it,
 # which is why this lane exists.
 #
+# The session above runs without the proven switch: today's default, which
+# the flip deletes with the switch. Under KEPLOY_PROVEN=1, which the flip makes
+# the default, this release runs a mock record's test command natively only,
+# so --from-container is refused, and refused BEFORE keploy touches the user's
+# container: the same container, never stopped or restarted, nothing of
+# keploy's started.
+#
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Env: RECORD_BIN (the keploy binary under test), set by the calling workflow
 # from .github/actions/download-binary's `path` output. The agent image must be
 # loaded as ghcr.io/keploy/keploy:v3-dev - .github/actions/download-image does
@@ -21,6 +31,15 @@ set -uo pipefail
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 RECORD_BIN="${RECORD_BIN:-keploy}"
 APP=fc-app
 DEP=fc-dep
@@ -129,6 +148,33 @@ ANON_VOL_BEFORE="$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination
   exit 1
 }
 
+# identity: the container's id and when it last started. A stop and start,
+# or a rebuild, changes it.
+identity() {
+  sudo docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.State.Running}}' "$APP" 2>/dev/null
+}
+
+if half on; then
+echo "--- under the proven switch: refused, the container untouched ---"
+BEFORE="$(identity)"
+# keploy re-execs itself under sudo for --from-container, with sudo -E: the
+# switch goes with it.
+KEPLOY_PROVEN=1 "$RECORD_BIN" mock record --from-container "$APP" --name fc-proven --path . --local --disable-ansi > record-proven.log 2>&1
+RC=$?
+[ "$RC" -eq 1 ] || fail "under the switch --from-container should be refused with exit 1, got $RC"
+sudo grep -aqF "keploy mock record with KEPLOY_PROVEN runs the test command natively in this release" record-proven.log ||
+  fail "the refused --from-container record does not say this release runs the test command natively"
+AFTER="$(identity)"
+[ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ] ||
+  fail "under the switch keploy touched the user's container before refusing (before: '$BEFORE', after: '$AFTER')"
+[ "$(sudo docker ps -aq --filter "name=^${APP}-keploy\$" | wc -l | tr -d ' ')" = 0 ] ||
+  fail "under the switch keploy started its replica of the app before refusing"
+[ "$(sudo docker ps -aq --filter 'name=keploy-restore-backup' | wc -l | tr -d ' ')" = 0 ] ||
+  fail "under the switch keploy left a restore backup before refusing"
+[ -e keploy/fc-proven ] && fail "under the switch the refused record wrote a mock set"
+fi
+
+if half off; then
 echo "--- recording ---"
 "$RECORD_BIN" mock record --from-container "$APP" --name fc --path . --local --disable-ansi > record.log 2>&1 &
 REC_PID=$!
@@ -220,10 +266,14 @@ if sudo grep -aq "rebuilding it as it was" record.log; then
 else
   echo "  (no rebuild needed: this platform kept the endpoint, so only the restore contract was exercised)"
 fi
+fi
 
 if [ "$FAIL" -ne 0 ]; then
-  echo "--- keploy log ---"
-  sudo sed 's/\x1b\[[0-9;]*m//g' record.log | tail -60
+  for l in record-proven.log record.log; do
+    [ -f "$l" ] || continue
+    echo "--- keploy log ($l) ---"
+    sudo sed 's/\x1b\[[0-9;]*m//g' "$l" | tail -60
+  done
   echo "--- app container ---"
   sudo docker inspect "$APP" --format '{{json .NetworkSettings}}' 2>/dev/null | head -c 2000
   echo
@@ -231,4 +281,9 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "PASS: the container came back on its network, publishing its ports, with its data and its compose identity ($DOCS mocks recorded)"
+if half on; then
+  echo "PASS: under the switch --from-container was refused before keploy touched the container"
+fi
+if half off; then
+  echo "PASS: the container came back on its network, publishing its ports, with its data and its compose identity ($DOCS mocks recorded)"
+fi

@@ -308,6 +308,8 @@ func (h *anchorHooks) SetFreezeAnchor(_ context.Context, at time.Time) error {
 }
 
 func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
+	// The per-start table is the old wire's: the proven switch refuses it.
+	t.Setenv(provenswitch.Env, "")
 	h := &anchorHooks{}
 	prev := agent.ActiveHooks
 	agent.ActiveHooks = h

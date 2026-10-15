@@ -72,7 +72,7 @@ type MockFieldDiff struct {
 // right remediation (re-record vs add noise vs fix candidate selection).
 const (
 	MatchPhaseNoMocks    = "no_mocks"             // no mocks were available to compare for this protocol: the pool is empty, or none survived filtering
-	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys
+	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys (and, under the proven switch, the host)
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
 	MatchPhaseExhausted  = "no_match"             // full cascade ran and nothing matched
@@ -214,6 +214,26 @@ type MockMismatchReport struct {
 	// are redacted by the producing parser before they land here.
 	ClosestMockReq string // rendered request of the closest mock
 	ReceivedReq    string // rendered request the app actually sent
+	// MissKind is MissExtraCall when the matcher found the call identical to
+	// one the open test's own mocks had already answered (exact serving,
+	// under the proven switch), and Recorded is how many times that call was
+	// recorded for the test. The proxy files every other miss by where it was
+	// made. Empty without the switch.
+	MissKind string
+	Recorded int
+	// Differs names the compared fields in which the call differs from the
+	// closest recording (host, header.<name>, body.<path>, ...), never a
+	// value: the reason keploy gives for a failed test names them (proven
+	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
+	Differs []string
+	// VariablePlaces are, under the proven switch only, the URL path places
+	// (url.path[<n>]) of a test variable on this call: those declared by the
+	// closest mock or by a mock on the call's route (DeclaredPathPlaces), the
+	// place a variable miss names, and the segments that hold a value the
+	// test's variables have. The call holds the application's values there,
+	// which the miss's shape writes {} (MissShape); the summary then names
+	// the path escaped, as a place counts segments.
+	VariablePlaces []string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
@@ -248,6 +268,13 @@ type ParserError struct {
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
 	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
+	// MissKind is where the miss was made (MissInTest, MissExtraCall,
+	// MissOutsideTest), set by the proxy under exact serving; empty without
+	// the proven switch.
+	MissKind string
+	// Recorded is, for MissExtraCall, how many times the call was recorded
+	// for the test.
+	Recorded int
 }
 
 type ParserErrorType string

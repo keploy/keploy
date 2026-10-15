@@ -261,7 +261,11 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 	logger := m.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 	err := replayer.Replay(ctx, logger, src, dstCfg, mockDb, opts)
 	if err != nil && err != io.EOF {
-		utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
+		// A miss is not a decode failure: the replayer logs it where it
+		// finds it, and the proxy reports it with its mismatch report.
+		if !errors.Is(err, models.ErrNoMockMatched) {
+			utils.LogError(logger, err, "failed to decode the mysql message from the yaml")
+		}
 		return err
 	}
 	return nil

@@ -168,6 +168,20 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
 
+			// Its auth response is the client's credential, or derived
+			// from it: the password in clear under mysql_clear_password
+			// (PAM, LDAP, cloud IAM tokens), otherwise a scramble the
+			// greeting's salt, which a recording keeps, opens to a
+			// dictionary attack. Nothing reads it (replay matches a
+			// HandshakeResponse41 without it, as it is salt-dependent),
+			// so a decoded one keeps only its length, as zero bytes, and
+			// a recording never holds the credential. It is a new slice:
+			// the decoded one points into the caller's buffer, the bytes
+			// the client sent, which decoding never changes.
+			if len(pkt.AuthResponse) > 0 {
+				pkt.AuthResponse = make([]byte, len(pkt.AuthResponse))
+			}
+
 			pktType = mysql.HandshakeResponse41
 			lastOp = payloadType
 		case *mysql.SSLRequestPacket:

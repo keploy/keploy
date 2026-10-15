@@ -1,15 +1,83 @@
 // Mismatch-report diagnostics for the MySQL replayer: the data matchCommand
-// hands back on a "no matching mock" outcome and the formatting helpers
-// simulateCommandPhase uses to render it into a models.MockMismatchReport.
+// hands back on a "no matching mock" outcome, the formatting helpers
+// simulateCommandPhase uses to render it into a models.MockMismatchReport, and
+// the misses of the connection phase.
 package replayer
 
 import (
 	"fmt"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
+
+// The steps of the connection phase a connection miss names: what the client
+// was at when the recording held no answer for it.
+const (
+	stepGreeting           = "new connection" // the client waits to be greeted
+	stepHandshakeResponse  = mysql.HandshakeResponse41
+	stepAuthSwitchResponse = mysql.AuthSwithResponse
+	stepCachingSha2        = "caching_sha2_password authentication"
+	stepPublicKey          = "public key request"
+	stepEncryptedPassword  = "encrypted password"
+	stepPlainPassword      = "plain password"
+)
+
+// newConnectionMiss is a miss of the connection phase at step, of a client
+// that dialled dst: the client opened a MySQL connection, or sent a packet of
+// its handshake, and the recording holds no answer for it, for the reason
+// why. phase and candidates are the report's MatchPhase and CandidateCount.
+// why never holds a credential: a password mismatch names the step, not the
+// values.
+//
+// The replayer returns it without answering the client, and the proxy closes
+// the connection, so this miss is the only account of why the application's
+// connection failed. It wraps models.ErrNoMockMatched and carries its report,
+// as a command-phase miss does: the proxy keeps an error as a miss only then,
+// and drops any other. Returned before anything more is written to the client,
+// it reaches the proxy's reporter before the proxy closes the client's
+// connection, so it is queued for its test before the application sees the
+// connection fail.
+func newConnectionMiss(dst, step, why, phase string, candidates int) error {
+	next := "The application's MySQL handshake differs from the recorded one (user, database, client options or authentication exchange), or the recorded handshake ends before this step. Re-record with '" + mismatch.RecordCommand() + "' if the application's MySQL connection settings changed."
+	if phase == models.MatchPhaseNoMocks {
+		next = "The recording holds no complete MySQL handshake to answer this connection: it never recorded one, or the ones it holds are incomplete. Re-record with '" + mismatch.RecordCommand() + "' if the application's MySQL connections changed."
+	}
+	report := mismatch.NewReport(mismatch.ProtocolMySQL, "connection phase: "+step).
+		WithDestination(dst).
+		WithPhase(phase, candidates).
+		WithDiff(why).
+		WithNextSteps(next).
+		Build()
+	return models.NewMockMismatchError(fmt.Errorf("mysql connection phase, %s: %s: %w", step, why, models.ErrNoMockMatched), report)
+}
+
+// matchedHandshakeMiss is a miss of the connection phase at step after the
+// client's HandshakeResponse41 matched one recorded handshake: that one mock
+// was compared, and it holds no answer for step, for the reason why.
+func matchedHandshakeMiss(dst, step, why string) error {
+	return newConnectionMiss(dst, step, why, models.MatchPhaseExhausted, 1)
+}
+
+// unencodableMiss is a miss of the connection phase at step: the recorded
+// packet the client is to be answered with (what) cannot be encoded, err says
+// why, so the recording holds no answer replay can write. Nothing is written
+// for it.
+func unencodableMiss(dst, step, what string, err error) error {
+	return newConnectionMiss(dst, step, fmt.Sprintf("the recorded %s cannot be encoded: %v", what, err), models.MatchPhaseProtoError, 1)
+}
+
+// destinationOf is the upstream a client dialled, as a miss's report names it:
+// "" when unknown, or when the capture layer fabricated it (a report must not
+// name a server the application never dialled).
+func destinationOf(dstCfg *models.ConditionalDstCfg) string {
+	if dstCfg == nil || dstCfg.AddrFabricated {
+		return ""
+	}
+	return dstCfg.Addr
+}
 
 // mockMiss carries the diagnostics of a "no matching mock" outcome so the
 // caller can build a meaningful mismatch report: the closest candidate (name +
@@ -28,6 +96,41 @@ type mockMiss struct {
 	// hunt for a lost recording.
 	candidateCount int
 	matchPhase     string
+	// why and nextSteps, when set, are what the report says about the miss
+	// in place of the generic diff note and advice.
+	why       string
+	nextSteps string
+}
+
+// maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement
+// names.
+const maxUnknownStatementsNamed = 5
+
+// unknownStatementsMiss is the miss of a COM_STMT_EXECUTE whose test's
+// recording holds EXECUTE mocks that lost their statement (unknown, in pool
+// order): refused because the mock it would have served instead (instead)
+// was recorded for another test, or, with instead nil, matched by no mock.
+// candidates is the scan's candidate count.
+func unknownStatementsMiss(unknown []*models.Mock, instead *models.Mock, candidates int) *mockMiss {
+	names := make([]string, 0, min(len(unknown), maxUnknownStatementsNamed))
+	for _, m := range unknown[:min(len(unknown), maxUnknownStatementsNamed)] {
+		names = append(names, m.Name)
+	}
+	list := strings.Join(names, ", ")
+	if len(unknown) > len(names) {
+		list += fmt.Sprintf(" and %d more", len(unknown)-len(names))
+	}
+	why := fmt.Sprintf("this test's recording holds COM_STMT_EXECUTE mocks whose statement keploy cannot tell (%s): the mock does not record its query, and the COM_STMT_PREPARE of each is gone from the test set, which holds that connection's handshake or an earlier statement of it. One of them may be this command's own", list)
+	if instead != nil {
+		why += fmt.Sprintf(", so keploy does not answer it with %s, which was recorded for another test", instead.Name)
+	}
+	return &mockMiss{
+		closestMock:    unknown[0].Name,
+		candidateCount: candidates,
+		matchPhase:     models.MatchPhaseExhausted,
+		why:            why,
+		nextSteps:      "The COM_STMT_PREPARE mocks these EXECUTEs need were most likely deleted by an older keploy's mock prune (--remove-unused-mocks, or the prune after an auto-replay), which did not keep the mocks a kept mock needs. Re-record the test set with '" + mismatch.RecordCommand() + "', or restore its mocks from a copy made before the prune.",
+	}
 }
 
 // formatExecParams renders bound parameter values for mismatch reports,

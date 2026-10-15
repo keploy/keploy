@@ -28,6 +28,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/mock"
+	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -46,6 +48,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(code)
 	}
+	// A stop says Ctrl+C stops the agent now this long after its signal
+	// was seen (stopWatch): short, so a test's press waits little.
+	stopWatchOffer = 20 * time.Millisecond
 	os.Exit(m.Run())
 }
 
@@ -560,7 +565,7 @@ func TestComposeAgentFailureDecidesFromTheStoppedAgent(t *testing.T) {
 			name:  "the agent was killed mid-run, and the namespace took the app with it",
 			agent: ended("exited", 137, at),
 			app:   ended("exited", 137, at),
-			want:  "the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137",
+			want:  "the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 137",
 		},
 		{
 			name:  "the normal end: the app exited, and compose stopped the agent",
@@ -604,6 +609,66 @@ func TestComposeAgentFailureDecidesFromTheStoppedAgent(t *testing.T) {
 				t.Fatalf("logged %v, want %d remedy", logs.All(), remedies)
 			}
 		})
+	}
+}
+
+// The compose callers that ask whether the agent stopped the project (keploy
+// record, keploy mock) find out through these interfaces, which AgentClient
+// must keep satisfying: a signature that drifted would make each fall back,
+// silently, to blaming the project.
+var (
+	_ record.ComposeAgentFailureReader = (*AgentClient)(nil)
+	_ record.ComposeEndReader          = (*AgentClient)(nil)
+	_ mock.ComposeAgentFailureReader   = (*AgentClient)(nil)
+)
+
+// After keploy saw the agent ready, a compose recording ends as keploy's
+// failure when the agent crashed -- named as the agent stopping while the app
+// ran, or before compose started it, never as an agent that could not start,
+// and with nothing armed -- and as the project's failure when the project
+// stopped before compose started the app though compose reported 0. An app
+// that ran and ended with a code of its own keeps it, and so does a project
+// compose stopped the agent of after another service failed.
+func TestComposeEndAfterReady(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	crashed := &container.State{Status: "exited", ExitCode: 2}
+	neverStarted := &container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}
+	for _, tc := range []struct {
+		name    string
+		stopped app.StoppedAgent
+		appExit int
+		want    string // "" when the app's own end stands
+	}{
+		{"the agent crashed under the app", app.StoppedAgent{Container: "keploy-v3-x", Agent: crashed}, 143,
+			"the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 2"},
+		{"the agent crashed before compose started the app", app.StoppedAgent{Container: "keploy-v3-x", Agent: crashed, App: neverStarted}, 0,
+			"the keploy agent stopped before compose started the app: the keploy-agent container keploy-v3-x exited with code 2"},
+		{"another service failed; compose reported 0 for the app it never started", app.StoppedAgent{Container: "keploy-v3-x", Agent: &container.State{Status: "exited", ExitCode: 137}, App: neverStarted}, 0,
+			"compose never started the app (another of the project's services ended it), though it reported 0"},
+		{"another service failed; compose reported 1", app.StoppedAgent{Container: "keploy-v3-x", Agent: &container.State{Status: "exited", ExitCode: 137}, App: neverStarted}, 1, ""},
+		{"the app exited 42 of its own", app.StoppedAgent{Container: "keploy-v3-x", Agent: crashed}, 42, ""},
+		{"a clean end: the app exited 0, the agent stopped", app.StoppedAgent{Container: "keploy-v3-x", Agent: &container.State{Status: "exited"}, App: &container.State{Status: "exited", StartedAt: "2026-10-14T10:00:00Z"}}, 0, ""},
+	} {
+		err := composeEndAfterReady(tc.stopped, tc.appExit)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: got %v, want the app's own end to stand", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%s: got %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	if utils.ErrCode != 0 {
+		t.Fatalf("armed exit %d after the agent was ready, want nothing armed", utils.ErrCode)
+	}
+	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
+	a.apps.Store(uint64(0), &app.App{})
+	if err := a.ComposeEndAfterReady(143); err != nil {
+		t.Fatalf("nothing read from the stopped agent: got %v, want no failure", err)
 	}
 }
 

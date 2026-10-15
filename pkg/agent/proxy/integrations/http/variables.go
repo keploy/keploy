@@ -6,14 +6,15 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -36,9 +37,10 @@ import (
 //     before the call that binds it does not hold. An echo variable belongs
 //     to this call alone.
 //  3. Among the mocks that fit and hold, the first in record order answers;
-//     repeated recordings of one request answer in record order (the stateful
-//     cursor). It is consumed as any mock, its binds are committed, and it is
-//     served with each answer place holding its variable's value.
+//     reusable recordings of one call answer in record order, each once, then
+//     the last again (served marks, pickHit). It is consumed as any mock, its
+//     binds are committed, and it is served with each answer place holding
+//     its variable's value.
 //
 // No later pass sees such a mock. When one fits but its variables do not
 // hold, only an exact recording of this very call may still answer it;
@@ -97,10 +99,7 @@ func splitVariableMocks(pool []*models.Mock) (withVars, rest []*models.Mock) {
 		if tier(a) != tier(b) {
 			return tier(a) < tier(b)
 		}
-		if !a.Spec.ReqTimestampMock.Equal(b.Spec.ReqTimestampMock) {
-			return a.Spec.ReqTimestampMock.Before(b.Spec.ReqTimestampMock)
-		}
-		return a.Name < b.Name
+		return recordedBefore(a, b)
 	})
 	return withVars, rest
 }
@@ -309,7 +308,7 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 }
 
 func (v reqView) asReq(input *req) *req {
-	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw}
+	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw, encoded: input.sentBody()}
 	u := url.URL{}
 	if input.url != nil {
 		u = *input.url
@@ -406,9 +405,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	refuse := func(why string) (*varHit, *varProblem) {
 		// A declaration keploy cannot follow is refused, never served as
 		// literal. It is this call's evidence when the call is to the mock's
-		// route: its method and URL path, a segment it declares a variable's
-		// aside.
-		if !sameRoute(live, rec, m) {
+		// route: its destination (strict.go), method and URL path, a segment
+		// it declares a variable's aside.
+		if !sameRoute(live, rec, m) || !sameDestination(liveDestination(ctx, input), recordedDestination(m)) {
 			return nil, nil
 		}
 		return nil, &varProblem{
@@ -463,7 +462,14 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
+	return holdVariables(m, decls, liveAt, table, refuse)
+}
 
+// holdVariables checks the variables of m on a call that fits its recording
+// (liveAt holds the call's values at m's places): it returns the hit and what
+// it binds, or the evidence why they do not hold, or neither when the call is
+// another test's.
+func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
@@ -600,50 +606,50 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 }
 
 // fitsRecording reports whether the call (the recorded values put back) is
-// m's recorded request exactly, outside the known noise.
+// m's recorded request exactly, outside the known noise: the strict
+// comparison every other mock is matched with under the proven switch
+// (strictDiff, row S1), so a mock with variables is held to the same rules:
+// the destination, every header value (the credentials included) and the
+// body field by field. Known noise widens only this comparison: the
+// variables are checked at their places apart from it, so a noise entry over
+// a variable's place never excuses a wrong value there.
 func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	matched, err := h.SchemaMatch(ctx, asRecorded, []*models.Mock{m}, headerNoise, urlNoise, false)
-	if err != nil || len(matched) != 1 {
-		return false
-	}
-	recBody := m.Spec.HTTPReq.Body
-	if string(asRecorded.body) == recBody {
-		return true
-	}
-	if !variables.IsJSONDoc(recBody) || !variables.IsJSONDoc(string(asRecorded.body)) {
-		// A body that is not JSON holds no variable place: as recorded, or
-		// equal outside the obfuscator's values.
-		ok, _ := h.ExactBodyMatch(asRecorded.body, []*models.Mock{m})
-		return ok
-	}
-	var noise variables.Noise
-	for k, regs := range m.Spec.ReqBodyNoise {
-		noise.Add(k, regs)
-	}
-	for k, regs := range userBodyNoise {
-		noise.Add(k, regs)
-	}
-	if nc := util.NewNoiseChecker(m.Noise); nc != nil {
-		noise.RecordedValueIsNoise = nc.IsNoisy
-	}
-	return variables.SameJSONUnder(recBody, string(asRecorded.body), noise)
+	return len(strictDiff(asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
-// pickHit chooses the hit that answers: the first in record order, and among
-// repeated recordings of that very request, the one the stateful cursor is at.
-// commit advances the cursor once the call is answered (nil when none).
+// pickHit chooses the hit that answers: the first of hits, and among the
+// reusable (ConsumeCursorSaturate) recordings of this call whose variables
+// hold, the first in record order not yet served, else the last (a call past
+// them stays on it, as a saturating cursor does). Each recording's served
+// mark (servedPick) is the call's own: recordings of one call that differ
+// only at their variable places (a fresh key each, which the dependency
+// echoes) are taken in turn; a call whose set of fitting recordings grows
+// from one call to the next (an added header) carries on through them; and
+// two callers whose calls fit two sets of recordings (two tokens) each take
+// theirs in order. A recording whose variables do not hold (its variable not
+// yet bound, or another test's) is passed over and keeps its turn. Record
+// order is recordedBefore's, as splitVariableMocks orders a tier. commit
+// marks the answer served once the call is answered (nil when no mark
+// applies).
 func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
-	mocks := make([]*models.Mock, len(hits))
-	byMock := make(map[*models.Mock]*varHit, len(hits))
-	for i, hit := range hits {
+	first := hits[0]
+	cs, ok := mockDb.(integrations.MockCursor)
+	if !statefulMocks || !ok || first.mock.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		return first, nil
+	}
+	group := make([]*varHit, 0, len(hits))
+	for _, hit := range hits {
+		if hit.mock.TestModeInfo.Consume == models.ConsumeCursorSaturate {
+			group = append(group, hit)
+		}
+	}
+	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i].mock, group[j].mock) })
+	mocks := make([]*models.Mock, len(group))
+	for i, hit := range group {
 		mocks[i] = hit.mock
-		byMock[hit.mock] = hit
 	}
-	picked, commit := h.cursorPick(hits[0].mock, mocks, mockDb, statefulMocks)
-	if hit, ok := byMock[picked]; ok {
-		return hit, commit
-	}
-	return hits[0], nil
+	i, commit := servedPick(mocks, cs)
+	return group[i], commit
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its
@@ -785,7 +791,7 @@ func variableTable(mockDb integrations.MockMemDb) *variables.Table {
 // variableMismatchReport is the miss report of a call a recorded call fit
 // except for a test variable: the variable, the place, the value it has in
 // the test and the one the call sent, and what to do.
-func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock) *models.MockMismatchReport {
+func variableMismatchReport(request *http.Request, liveBody []byte, dest, actualKey string, diag *matchDiag, httpMocks []*models.Mock, table *variables.Table) *models.MockMismatchReport {
 	p := diag.variable
 	var diffs []models.MockFieldDiff
 	if p.place != "" && p.kind != "" {
@@ -815,36 +821,98 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 	if closest != nil {
 		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
 	}
-	return b.Build()
+	r := b.Build()
+	// The problem's own place, the path places the closest mock and the
+	// mocks on this call's route declare, and the segments that hold a value
+	// the test bound (routePathPlaces) hold the application's values: the
+	// miss's shape writes them {} (models.MissShape).
+	if models.IsPathPlace(p.place) {
+		r.VariablePlaces = append(r.VariablePlaces, p.place)
+	}
+	for _, place := range routePathPlaces(request, closest, pool, table) {
+		if !slices.Contains(r.VariablePlaces, place) {
+			r.VariablePlaces = append(r.VariablePlaces, place)
+		}
+	}
+	return r
+}
+
+// withRoutePlaces is r carrying, under the proven switch, the URL path places
+// a test variable holds on the call (routePathPlaces): segments that hold the
+// application's values, whatever else differs. The miss then names its path
+// escaped, as a place counts segments, so its shape writes them {}
+// (models.MissShape). A place of the closest mock off its route only writes
+// more {}. With the switch off, r is as built.
+func withRoutePlaces(r *models.MockMismatchReport, request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) *models.MockMismatchReport {
+	if !provenswitch.On() || r == nil || request.URL == nil {
+		return r
+	}
+	if places := routePathPlaces(request, closest, pool, table); len(places) > 0 {
+		r.ActualSummary = request.Method + " " + request.URL.EscapedPath()
+		r.VariablePlaces = places
+	}
+	return r
+}
+
+// routePathPlaces are the URL path places a test variable holds on a call:
+// those the closest mock declares; those of every mock in the pool whose
+// route the call is on (sameRoute: its method and path, the segments it
+// declares aside), so a closer recording without variables does not hide
+// them; and every segment that holds a value the test's variables have
+// (table), so a call made again after the mock that declares its place was
+// consumed, and left the pool, does not keep it. Under the proven switch
+// only.
+func routePathPlaces(request *http.Request, closest *models.Mock, pool []*models.Mock, table *variables.Table) []string {
+	out := models.DeclaredPathPlaces(closest)
+	live := reqView{method: request.Method}
+	if request.URL != nil {
+		live.segments = pathSegments(request.URL.EscapedPath())
+	}
+	if table != nil {
+		bound := map[string]bool{}
+		for _, b := range table.Snapshot() {
+			if b.Value != "" {
+				bound[b.Value] = true
+			}
+		}
+		for i, seg := range live.segments {
+			value, err := url.PathUnescape(seg)
+			if err == nil && bound[value] {
+				if place := fmt.Sprintf("url.path[%d]", i); !slices.Contains(out, place) {
+					out = append(out, place)
+				}
+			}
+		}
+	}
+	for _, m := range pool {
+		if m == nil || m.Spec.HTTPReq == nil || len(m.Spec.Variables) == 0 {
+			continue
+		}
+		rec, ok := recordedView(m.Spec.HTTPReq)
+		if !ok || !sameRoute(live, rec, m) {
+			continue
+		}
+		for _, place := range models.DeclaredPathPlaces(m) {
+			if !slices.Contains(out, place) {
+				out = append(out, place)
+			}
+		}
+	}
+	return out
 }
 
 // exactOnly answers a call whose variables did not hold in the recording it
-// fit, with an exact recording of this very call (a mock without variables),
-// if one is in the pool: the URL as recorded (configured url noise only) and
-// the body as recorded (the obfuscator's values aside). No lenient pass runs.
-// retry is true when another connection took the mock first.
-func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise map[string][]string, urlNoise []string, statefulMocks bool) (*models.Mock, bool, bool, error) {
+// fit, with a recording of this very call (a mock without variables), if one
+// is in the pool: the strict comparison every other mock is matched with
+// (strictServe, row S1). No lenient pass runs. retry is true when another
+// connection took the mock first.
+func (h *HTTP) exactOnly(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (*models.Mock, bool, bool, error) {
 	if len(pool) == 0 {
 		return nil, false, false, nil
 	}
-	schemaMatched, err := h.SchemaMatch(ctx, input, pool, headerNoise, urlNoise, false)
-	if err != nil || len(schemaMatched) == 0 {
-		return nil, false, false, err
-	}
-	ok, best := h.ExactBodyMatch(input.body, schemaMatched)
-	if !ok {
-		return nil, false, false, nil
-	}
-	best, commitCursor := h.cursorPick(best, schemaMatched, mockDb, statefulMocks)
-	served, claimed, err := h.claim(ctx, best, mockDb, nil, nil)
-	if err != nil {
-		return nil, false, false, err
-	}
-	if !claimed {
-		return nil, false, true, nil
-	}
-	if commitCursor != nil {
-		commitCursor()
+	served, _, retry, err := h.strictServe(ctx, input, pool, pool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+	if err != nil || retry || served == nil {
+		return nil, false, retry, err
 	}
 	return served, true, false, nil
 }

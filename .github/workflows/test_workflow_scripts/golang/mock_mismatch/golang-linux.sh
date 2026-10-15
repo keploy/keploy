@@ -964,6 +964,112 @@ if [ "$proven_strict_rc" -eq 0 ]; then
 fi
 echo "✓ KEPLOY_PROVEN=1 vetoed the OBSOLETE demotion: every test FAILED and the run exited $proven_strict_rc (step 9 without the switch: OBSOLETE, exit $strict_rc)"
 
+# 14. STRICT HTTP MATCHING UNDER THE PROVEN SWITCH (design v14 row S1). Step
+#     12b is the control: the recording as recorded replays green under the
+#     switch, so nothing below is a false red of the strict rules. Each case
+#     changes ONE compared field of the recorded pokeapi calls, in a copy of
+#     the unmutated recording, and checks both sides of the switch: without
+#     it the field is not compared and every test passes, with it the calls
+#     get no recorded answer, the report names the field, and the run is red.
+#
+# s1_case <name> <yq update of the recorded HTTP request> <a line the update
+# writes, grep -F> <field the report must name>
+s1_case() {
+    local name="$1" update="$2" written="$3" field="$4"
+    local dir="./s1-${name}-run"
+    rm -rf "$dir"
+    mkdir "$dir"
+    cp -a ./pristine-run/keploy "$dir/keploy"
+    rm -rf "$dir/keploy/reports"
+    local http changed
+    for mf in "$dir"/keploy/test-set-*/mocks.yaml; do
+        yq -i "(select(.kind == \"Http\") | .spec.req) |= ($update)" "$mf"
+    done
+    # yq rewrites a file whether or not its select matched: count what the
+    # update wrote, one per recorded HTTP call.
+    http=$(cat "$dir"/keploy/test-set-*/mocks.yaml | grep -c '^kind: Http$')
+    changed=$(cat "$dir"/keploy/test-set-*/mocks.yaml | grep -cF -- "$written")
+    if [ "$http" -eq 0 ] || [ "$changed" -ne "$http" ]; then
+        echo "::error::S1 case $name wrote '$written' on $changed of $http recorded HTTP calls"
+        exit 1
+    fi
+    for phase in off on; do
+        rm -rf "$dir/keploy/reports"
+        if [ "$phase" = on ]; then
+            KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path "$dir" --delay 7 --generateGithubActions=false 2>&1 | tee "s1_${name}_${phase}_logs.txt"
+        else
+            "$REPLAY_BIN" test -c "./http-pokeapi" --path "$dir" --delay 7 --generateGithubActions=false 2>&1 | tee "s1_${name}_${phase}_logs.txt"
+        fi
+        rc=${PIPESTATUS[0]}
+        if grep "WARNING: DATA RACE" "s1_${name}_${phase}_logs.txt"; then
+            echo "::error::Race condition detected in S1 case $name (switch $phase)"
+            exit 1
+        fi
+        "$REPLAY_BIN" report --format json --path "$dir" > "ndjson_s1_${name}_${phase}.txt" 2>/dev/null
+        if [ "$phase" = off ]; then
+            if [ "$rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' "ndjson_s1_${name}_${phase}.txt" > /dev/null; then
+                echo "::error::S1 case $name, control: without the switch the changed field is not compared, so every test must pass (exit $rc)"
+                jq -s 'map({test_case_id, status})' "ndjson_s1_${name}_${phase}.txt"
+                exit 1
+            fi
+            continue
+        fi
+        # Every test owns a pokeapi call (step 12a), so every test misses.
+        if [ "$rc" -eq 0 ] || ! jq -es 'length > 0 and all(.status == "FAILED")' "ndjson_s1_${name}_${phase}.txt" > /dev/null; then
+            echo "::error::S1 case $name: under KEPLOY_PROVEN=1 a call whose recorded $field differs must get no recorded answer and fail its test (exit $rc)"
+            jq -s 'map({test_case_id, status})' "ndjson_s1_${name}_${phase}.txt"
+            exit 1
+        fi
+        report=$(ls -1t "$dir"/keploy/reports/test-run-*/test-set-*-report.yaml | head -n 1)
+        if ! FIELD="$field" yq -e '[.tests[].failure_info.unmatched_calls[]?.field_diffs[]?.path] | any_c(. == strenv(FIELD))' "$report" > /dev/null; then
+            echo "::error::S1 case $name: under KEPLOY_PROVEN=1 the report must name $field as what differs in the call that got no recorded answer"
+            yq '.tests[].failure_info.unmatched_calls' "$report"
+            exit 1
+        fi
+    done
+    echo "✓ S1 $name: compared under KEPLOY_PROVEN=1 (the call missed, the report names $field), not compared without it"
+}
+
+# 14a. The host: the same request to another authority is another dependency.
+s1_case host '.header.Host = "pokeapi.invalid"' 'Host: pokeapi.invalid' host
+
+# 14b. A header value: another client (the User-Agent's product) is another
+#      caller.
+s1_case user-agent '.header["User-Agent"] = "curl/8.4.0"' 'User-Agent: curl/8.4.0' header.user-agent
+
+# 14c. A credential (design v14 §7.2 item 8): without the switch Authorization
+#      is on the static noise list, so a recording made with a token the app
+#      does not send still answers; with it, the credential is compared.
+s1_case credential '.header.Authorization = "Bearer recorded-token"' 'Authorization: Bearer recorded-token' header.authorization
+
+# 14d. NOT a difference: the same client in another version. The User-Agent
+#      is compared by its first product token's name, so this recording still
+#      answers under the switch (a false red here would fail every upgrade).
+rm -rf ./s1-ua-version-run
+mkdir ./s1-ua-version-run
+cp -a ./pristine-run/keploy ./s1-ua-version-run/keploy
+rm -rf ./s1-ua-version-run/keploy/reports
+for mf in ./s1-ua-version-run/keploy/test-set-*/mocks.yaml; do
+    yq -i '(select(.kind == "Http") | .spec.req.header["User-Agent"]) |= sub("/.*$"; "/99.0")' "$mf"
+done
+if ! grep -q 'User-Agent: .*/99.0' ./s1-ua-version-run/keploy/test-set-*/mocks.yaml; then
+    echo "::error::S1 case ua-version changed no recorded User-Agent"
+    exit 1
+fi
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./s1-ua-version-run --delay 7 --generateGithubActions=false 2>&1 | tee s1_ua_version_logs.txt
+ua_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" s1_ua_version_logs.txt; then
+    echo "::error::Race condition detected in S1 case ua-version"
+    exit 1
+fi
+"$REPLAY_BIN" report --format json --path ./s1-ua-version-run > ndjson_s1_ua_version.txt 2>/dev/null
+if [ "$ua_rc" -ne 0 ] || ! jq -es 'length > 0 and all(.status == "PASSED")' ndjson_s1_ua_version.txt > /dev/null; then
+    echo "::error::S1 case ua-version: under KEPLOY_PROVEN=1 a recording made by another version of the same client must still answer (exit $ua_rc)"
+    jq -s 'map({test_case_id, status})' ndjson_s1_ua_version.txt
+    exit 1
+fi
+echo "✓ S1 ua-version: another version of the same client still matches under KEPLOY_PROVEN=1"
+
 echo "mock-mismatch e2e passed:"
 echo "  - the forced HTTP /api/v2/ unmatched call was reported;"
 echo "  - with the tier as an ordinary recording leaves it, every dependency is"
@@ -979,4 +1085,8 @@ echo "    lists: the unmutated recording replays green, and a test fails when it
 echo "    does not make a call it recorded or a call got no recorded answer."
 echo "  - under KEPLOY_PROVEN=1 strict failure is on for everyone: the same run"
 echo "    FAILED its tests instead of demoting them to OBSOLETE, and went red."
+echo "  - under KEPLOY_PROVEN=1 HTTP matching is strict (S1): a recorded call to"
+echo "    another host, from another client or with a credential the app does not"
+echo "    send answers nothing, and the report names the field; another version"
+echo "    of the same client still answers."
 exit 0

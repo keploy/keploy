@@ -21,12 +21,26 @@ type junitTestSuites struct {
 }
 
 type junitTestSuite struct {
-	Name     string          `xml:"name,attr"`
-	Tests    int             `xml:"tests,attr"`
-	Failures int             `xml:"failures,attr"`
-	Skipped  int             `xml:"skipped,attr"`
-	Time     string          `xml:"time,attr"`
-	Cases    []junitTestCase `xml:"testcase"`
+	Name     string `xml:"name,attr"`
+	Tests    int    `xml:"tests,attr"`
+	Failures int    `xml:"failures,attr"`
+	Skipped  int    `xml:"skipped,attr"`
+	Time     string `xml:"time,attr"`
+	// Properties carries suite-level facts that are not per-testcase. Emitted
+	// only when there is one, so a report without any stays byte-identical
+	// (the backward-compat contract this file documents). Today the only one
+	// is capture verification: whether the agent tracked every process.
+	Properties *junitProperties `xml:"properties,omitempty"`
+	Cases      []junitTestCase  `xml:"testcase"`
+}
+
+type junitProperties struct {
+	Property []junitProperty `xml:"property"`
+}
+
+type junitProperty struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 type junitTestCase struct {
@@ -202,7 +216,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		suiteDur = estimateDuration(rep.Tests)
 	}
 
-	return junitTestSuite{
+	suite := junitTestSuite{
 		Name:     name,
 		Tests:    rep.Total,
 		Failures: failures,
@@ -210,7 +224,64 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		Time:     fmtSeconds(suiteDur),
 		Cases:    cases,
 	}
+	// Capture verification is a suite-level fact, so it is a property, emitted
+	// only when the run found something (a capture that was incomplete, or one
+	// that could not be verified): a report without it stays byte-identical.
+	//
+	// An incomplete capture failed the test set while its tests may all have
+	// passed (keploy cannot tell which test's calls the untracked process
+	// made). A JUnit consumer gates on <failure> elements, not on properties,
+	// so the suite gets one more test case, "keploy capture", failed with the
+	// reason: a FAILED set is never a green JUnit file. "unverified" adds no
+	// test case; the property says it. (Under the proven switch the set is
+	// also not judged; JUnit, which reads the tests and not the set's
+	// status, shows that as it shows every not-judged set.)
+	if cv := rep.CaptureVerification; cv != nil {
+		suite.Properties = &junitProperties{Property: []junitProperty{
+			{Name: "keploy.capture_verification", Value: string(cv.Status)},
+			{Name: "keploy.capture_verification.reason", Value: cv.Reason},
+		}}
+		if cv.Status == models.CaptureIncompleteStatus {
+			suite.Tests++
+			suite.Failures++
+			suite.Cases = append(suite.Cases, junitTestCase{
+				Name:      junitCaptureCase,
+				Classname: name,
+				Time:      fmtSeconds(0),
+				Failure: &junitFailure{
+					Message: "capture incomplete",
+					Type:    "CaptureIncomplete",
+					Text:    cv.Reason,
+				},
+			})
+		}
+	}
+	// mock.real's rule 4 failed the set while its tests may all have
+	// passed: as an incomplete capture, a case of its own, failed.
+	if why := rep.RealFailure; why != "" {
+		suite.Tests++
+		suite.Failures++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitRealCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Failure: &junitFailure{
+				Message: "mock.real destination not reached",
+				Type:    "RealNotReached",
+				Text:    why,
+			},
+		})
+	}
+	return suite
 }
+
+// junitCaptureCase is the test case a suite whose capture was incomplete
+// carries, failed with the reason (buildJUnitSuite).
+const junitCaptureCase = "keploy capture"
+
+// junitRealCase is the test case a suite mock.real's rule 4 failed carries,
+// failed with the reason (buildJUnitSuite).
+const junitRealCase = "keploy mock.real"
 
 func buildFailure(t models.TestResult) *junitFailure {
 	var parts []string
@@ -307,13 +378,26 @@ func depNonFailureBody(deps []models.DepResult) string {
 }
 
 // templateFailureLines is one line per template variable place a test case
-// failed on.
+// failed on, and for a test case of a test set refused whole, the set's
+// refusal, which is no template variable's.
 func templateFailureLines(fs []models.TemplateFailure) []string {
 	lines := make([]string, 0, len(fs))
 	for _, f := range fs {
+		if wholeSetRefusal(f) {
+			lines = append(lines, templateFailureLine(f))
+			continue
+		}
 		lines = append(lines, "template variable "+templateFailureLine(f))
 	}
 	return lines
+}
+
+// wholeSetRefusal reports whether f refuses a test case's whole test set (one
+// a killed keploy templatize left half-written; its category is
+// TEST_SET_REFUSED), which names no placeholder, rather than a placeholder of
+// the test case.
+func wholeSetRefusal(f models.TemplateFailure) bool {
+	return f.Refused && f.Placeholder == ""
 }
 
 // templateFailureLine is one template failure as the reports say it: where,
@@ -418,16 +502,29 @@ func fmtTestTime(timeTaken string) string {
 	return fmtSeconds(dur)
 }
 
-// provenEvidenceLines are a failed test's calls that got no recorded answer
-// (DNS left out, as the verdict leaves it out) and its unconsumed test mocks,
-// one line each, under the proven switch.
+// provenEvidenceLines are what keploy's agent could not capture while a failed
+// test or one before it ran, its calls that got no recorded answer (DNS left
+// out, as the verdict leaves it out) and its unconsumed test mocks, one line
+// each, under the proven switch. A call is named by its shape
+// (models.MissShape), and a capture loss by its kind and destination
+// (models.CaptureLosses.Text, which shapes any path in it), as the proven
+// model's evidence names them: the JUnit file is a CI artifact, and a call's
+// URL or statement can hold the values the app sent (an email, an ID, a
+// token).
 func provenEvidenceLines(fi models.FailureInfo) []string {
 	var lines []string
+	if t := fi.CaptureIncomplete.Text(); t != "" {
+		// First: it says why the rest of the evidence may be short.
+		lines = append(lines, t)
+	}
 	for _, c := range fi.UnmatchedCalls {
 		if strings.EqualFold(c.Protocol, "DNS") {
 			continue
 		}
-		line := fmt.Sprintf("call with no recorded answer: %s %s", c.Protocol, c.ActualSummary)
+		line := "call with no recorded answer: " + c.Protocol
+		if shape := models.MissShape(c); shape != "" {
+			line += " " + shape
+		}
 		if c.Destination != "" {
 			line += " (to " + c.Destination + ")"
 		}

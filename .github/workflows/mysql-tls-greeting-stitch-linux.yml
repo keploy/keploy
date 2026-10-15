@@ -468,7 +468,10 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: greeting-stitch e2e (real MySQL)
-    timeout-minutes: 25
+    # Six MySQL containers start in turn (three runs and three mutants), and
+    # each waits for as long as its server is starting: on a loaded runner a
+    # first init takes over two minutes. This only bounds a hang.
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -480,6 +483,44 @@ jobs:
 
       - name: Pooled connections opened before recording, two sessions, one greeting dial
         run: .github/workflows/test_workflow_scripts/mysql-tls-greeting-e2e.sh -race
+
+      # A real client's caching_sha2_password full authentication over TLS
+      # sends its password in clear inside the TLS: the recording holds its
+      # length and not the password (recorder/auth_redact.go).
+      - name: A TLS full authentication records no password
+        env:
+          KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
+        run: .github/workflows/test_workflow_scripts/mysql-tls-greeting-e2e.sh -race
+
+      - name: Record the password again, expect that e2e to FAIL
+        env:
+          KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
+        run: |
+          set -uo pipefail
+          f=pkg/agent/proxy/integrations/mysql/recorder/auth_redact.go
+          cp "$f" /tmp/auth-mutant.orig
+          perl -0pi -e 's/intgUtils\.EncodeBase64\(make\(\[\]byte, len\(pkt\.Payload\)\)\)/intgUtils.EncodeBase64(pkt.Payload)/' "$f"
+          if cmp -s "$f" /tmp/auth-mutant.orig; then
+            echo "::error::the mutant did not apply to $f; update it with the code it mutates"
+            exit 1
+          fi
+          if ! go vet ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/auth-mutant-build.log 2>&1; then
+            cat /tmp/auth-mutant-build.log
+            echo "::error::the mutant does not compile, so a failure would score a FALSE kill"
+            cp /tmp/auth-mutant.orig "$f"; exit 1
+          fi
+          if .github/workflows/test_workflow_scripts/mysql-tls-greeting-e2e.sh >/tmp/auth-mutant.log 2>&1; then
+            tail -40 /tmp/auth-mutant.log
+            echo "::error::VACUOUS E2E: the recorder keeps the password and the real-MySQL run still passes"
+            cp /tmp/auth-mutant.orig "$f"; exit 1
+          fi
+          if ! grep -E 'auth_redact_test.go:[0-9]+: .*(holds the password|want its length)' /tmp/auth-mutant.log; then
+            tail -40 /tmp/auth-mutant.log
+            echo "::error::the mutant failed the e2e for another reason than the password it records"
+            cp /tmp/auth-mutant.orig "$f"; exit 1
+          fi
+          echo "OK: recording the password fails the real-MySQL run, as it must."
+          cp /tmp/auth-mutant.orig "$f"
 
       # The end-to-end run must catch the two regressions it exists for. Each
       # mutant must compile, and the e2e must then FAIL.

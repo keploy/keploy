@@ -125,6 +125,11 @@ type MappedTestCase struct {
 	// proven switch; zero in recordings made before keploy kept it, and in
 	// those made without the switch.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
+	// Real is the mock.real destinations the test used while it was open in
+	// its recording (design v14 §4): its replay runs on the real clock, and
+	// the verdict fails when CI never reaches one. Written and read only
+	// under the proven switch; empty in recordings made without it.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -144,6 +149,7 @@ type persistedTestFormat struct {
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
 	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string  `json:"real,omitempty" yaml:"real,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -158,11 +164,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -183,6 +189,40 @@ func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
 		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
 	}
 	return at.At, nil
+}
+
+// errRecordedReal is a test entry whose real: is not a list of destinations.
+const errRecordedReal = "a test's mock.real destinations (real) are not a list of strings: %w"
+
+// recordedRealYAML is a test entry's real: under the proven switch. One that
+// is not a list of strings is an error, never a reason to read the entry
+// without it: its replay would run frozen and its verdict would not ask for
+// the destinations. With the switch off real: is not read.
+func recordedRealYAML(node *yaml.Node) ([]string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `yaml:"real"`
+	}
+	if err := node.Decode(&r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
+}
+
+// recordedRealJSON is recordedRealYAML for a JSON entry.
+func recordedRealJSON(data []byte) ([]string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `json:"real"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
 }
 
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
@@ -222,10 +262,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	rl, err := recordedRealYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At = at
+	tc.At, tc.Real = at, rl
 	return nil
 }
 
@@ -280,10 +324,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	rl, err := recordedRealJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At = at
+	tc.At, tc.Real = at, rl
 	return nil
 }
 

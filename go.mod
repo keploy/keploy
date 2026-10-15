@@ -35,6 +35,7 @@ require (
 	github.com/keploy/shlex v1.0.0
 	github.com/klauspost/compress v1.19.2
 	github.com/miekg/dns v1.1.57
+	github.com/moby/docker-image-spec v1.3.1
 	github.com/olekukonko/tablewriter v1.1.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
@@ -144,7 +145,6 @@ require (
 	github.com/minio/minlz v1.0.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
-	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect

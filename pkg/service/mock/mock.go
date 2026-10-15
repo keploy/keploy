@@ -51,6 +51,17 @@ type mockService struct {
 	// (windows with Refused set), which readWindows takes out of the
 	// windows it returns: the replay's receipt names them.
 	refusals []models.RunRefusal
+	// live and mocked are, under the proven switch, where the run's calls
+	// to local listeners went (windows with Live or Mocked set), which
+	// readWindows takes out of the windows it returns: the per-test
+	// receipts carry them to keploy's summary.
+	live   []models.LiveRow
+	mocked []models.MockedRow
+	// realListed is, under the proven switch, the mock.real destinations
+	// each test's recording lists (mappings.yaml real:), by test ID, read
+	// as a replay pushes the tests' clocks: the replay's receipt carries
+	// them, for the verdict's rule 4 and UNFROZEN rows.
+	realListed map[string][]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

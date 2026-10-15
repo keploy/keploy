@@ -34,6 +34,8 @@ const EffectsSchemaVersion = "1"
 //	  ],
 //	  "dependencies_checked":  true,
 //	  "dependencies_consumed": 7,
+//	  "capture_verification":        "incomplete",  // omitted when nothing was found
+//	  "capture_verification_reason": "capture incomplete: ...",
 //	  "effects": [
 //	    {
 //	      "name":     "deps[0] postgres PostgreSQL INSERT (presence)",
@@ -46,10 +48,19 @@ const EffectsSchemaVersion = "1"
 //	  ]
 //	}
 //
+// `capture_verification` and `capture_verification_reason` (optional, added
+// within schema_version "1") are set-scoped and repeated on each of the set's
+// verdicts: "incomplete" when the agent could not track a process of the set
+// (the set is FAILED for it, while each test's own "status" may still say
+// PASSED: keploy cannot tell whose calls the untracked process made), or
+// "unverified" when the count could not be read. Absent when nothing was
+// checked or nothing was found.
+//
 // `template_failures` (optional, added within schema_version "1") names each
 // template variable place the test case failed on (TEMPLATE_VARIABLE): where
 // in the response, the placeholder, and why; for a test case refused when its
-// set loaded, the refusal.
+// set loaded, the refusal. A test set refused whole (TEST_SET_REFUSED) gives
+// each test case one refusal with an empty placeholder.
 //
 // One `effects` entry per models.DepMetaResult, flattened with its parent row's
 // name and type so a consumer never has to walk a nested structure. `effects`
@@ -182,6 +193,11 @@ type testVerdict struct {
 	// "zero" on a field whose whole job is to be a magnitude.
 	DependenciesConsumed int         `json:"dependencies_consumed"`
 	Effects              []effectRow `json:"effects"`
+	// CaptureVerification is set-scoped: whether keploy confirmed the agent
+	// tracked every process of this test set ("incomplete"/"unverified").
+	// Repeated on each of the set's verdicts; absent when it was not checked.
+	CaptureVerification       string `json:"capture_verification,omitempty"`
+	CaptureVerificationReason string `json:"capture_verification_reason,omitempty"`
 }
 
 // buildEffectRows flattens a test's dependency rows into the wire shape. Pure
@@ -209,12 +225,12 @@ func buildEffectRows(t models.TestResult) []effectRow {
 }
 
 // buildTestVerdict projects one persisted test result onto the NDJSON schema.
-func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict {
+func buildTestVerdict(runID, testSetID string, t models.TestResult, cv *models.CaptureVerification) testVerdict {
 	var categories []string
 	for _, c := range t.FailureInfo.Category {
 		categories = append(categories, string(c))
 	}
-	return testVerdict{
+	v := testVerdict{
 		SchemaVersion:        EffectsSchemaVersion,
 		TestRunID:            runID,
 		TestSetID:            testSetID,
@@ -227,6 +243,11 @@ func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict 
 		DependenciesConsumed: t.Result.DepsConsumed,
 		Effects:              buildEffectRows(t),
 	}
+	if cv != nil {
+		v.CaptureVerification = string(cv.Status)
+		v.CaptureVerificationReason = cv.Reason
+	}
+	return v
 }
 
 // buildTestVerdicts projects a whole run. Test-set names are sorted so the
@@ -251,7 +272,7 @@ func buildTestVerdicts(runID string, reports map[string]*models.TestReport) []te
 			testSetID = name
 		}
 		for _, t := range rep.Tests {
-			out = append(out, buildTestVerdict(runID, testSetID, t))
+			out = append(out, buildTestVerdict(runID, testSetID, t, rep.CaptureVerification))
 		}
 	}
 	return out

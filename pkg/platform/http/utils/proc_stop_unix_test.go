@@ -29,10 +29,12 @@ func TestTerminateCommandSignalsAndNeverKills(t *testing.T) {
 	got := filepath.Join(dir, "got-term")
 	release := filepath.Join(dir, "release")
 	// On SIGTERM: note it, then keep "shutting down" until the test releases
-	// it -- a slow shutdown, longer than any grace a timer would allow.
-	script := `trap 'touch "$GOT"; while [ ! -e "$REL" ]; do sleep 0.05; done; exit 0' TERM
+	// it -- a slow shutdown, longer than any grace a timer would allow. Either
+	// loop also ends once the test binary has (killed at a timeout, which
+	// runs no cleanup): in its own process group, it looped for ever.
+	script := `trap 'touch "$GOT"; while [ ! -e "$REL" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done; exit 0' TERM
 touch "$READY"
-while :; do sleep 0.05; done`
+while kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done`
 	cmd := exec.Command("sh", "-c", script)
 	cmd.Env = append(os.Environ(), "READY="+ready, "GOT="+got, "REL="+release)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // mirror NewAgentCommand
@@ -100,7 +102,7 @@ func TestStdinGateEndsTheCopyOnceTheTerminalIsRestored(t *testing.T) {
 }
 
 // KillAgentCommand sends the agent the escalation signal, on which it kills
-// itself once no teardown work is in progress
+// itself once no teardown work in progress is making progress
 // (keployutils.EscalationSignal); at once (now), SIGKILL -- but not to sudo,
 // whose agent is root, which the user may not signal: sudo is sent the
 // escalation signal and hands it on. Here the stand-ins are scripts named
@@ -119,7 +121,8 @@ func TestKillAgentCommandKillsThroughSudo(t *testing.T) {
 		t.Run(fmt.Sprintf("%s/now=%v", tc.name, tc.now), func(t *testing.T) {
 			dir := t.TempDir()
 			bin, got, ready := filepath.Join(dir, tc.name), filepath.Join(dir, "got"), filepath.Join(dir, "ready")
-			script := "#!/bin/sh\ntrap 'echo usr2 > \"" + got + "\"; exit 0' USR2\ntouch \"" + ready + "\"\nwhile :; do sleep 0.01; done\n"
+			// Its loop ends once the test binary has (killed at a timeout).
+			script := "#!/bin/sh\ntrap 'echo usr2 > \"" + got + "\"; exit 0' USR2\ntouch \"" + ready + "\"\nwhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.01; done\n"
 			if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}

@@ -194,17 +194,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// frame stream it drains after the stop
 			// (models.DrainsAfterStopHeader): the client is draining what this
 			// agent captured before the stop, and stops the agent once it has
-			// (POST /agent/stop). A client that dies drops its streams (and
-			// the parent-death watchdog above stops a native agent); a second
-			// signal stops the agent at once.
-			utils.SetSignalHold(func(stopNow <-chan struct{}) {
+			// (POST /agent/stop). A client that dies drops its streams, and
+			// the parent-death watchdog above ends a native agent's stop that
+			// still holds for it (endForGoneClient). A
+			// repeated signal does not cut this short: it may be the first
+			// again, as the sudo that runs the agent hands it on
+			// (utils.SetSignalHold). The user's second Ctrl+C reaches the
+			// client, whose drain then ends and closes the streams; a client
+			// that must stop the agent regardless asks it over its API, or
+			// escalates (utils.DieOnEscalation), and either ends this wait.
+			utils.SetSignalHold(func() {
 				if routes.RecordingClients() == 0 {
 					return
 				}
-				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished, or at a second signal")
-				if !routes.WaitForRecordingClients(stopNow) {
-					logger.Warn("stopping the agent while a recording's client was still saving what it captured before the stop: what the client had not received yet is lost")
-				}
+				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished")
+				routes.WaitForRecordingClients()
 			})
 			go func() {
 				select {
@@ -240,15 +244,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
-				utils.LogError(logger, err, "failed to setup agent")
-				if agentFailed(ctx, err) {
-					// The specific code when the failure carries one: the CLI
-					// that launched this agent reads it back as its own
-					// (pkg/platform/http AgentClient.Setup), which is how a
-					// user is told "grant privileges" apart from "mount
-					// tracefs".
-					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+				if !agentFailed(ctx, err) {
+					// Stopped, not failed (agentFailed): Setup said so.
+					return nil
 				}
+				utils.LogError(logger, err, "failed to setup agent")
+				// The specific code when the failure carries one: the CLI
+				// that launched this agent reads it back as its own
+				// (pkg/platform/http AgentClient.Setup), which is how a user
+				// is told "grant privileges" apart from "mount tracefs".
+				utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 				return nil
 			}
 

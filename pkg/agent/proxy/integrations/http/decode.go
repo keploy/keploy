@@ -102,7 +102,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				raw:    reqBuf,
 			}
 
+			// Under the proven switch the request's destination is read once,
+			// as it comes: a use of its connection's container in the scope
+			// open now (containerkey), which every match of it then reads.
+			reqCtx := ctx
+			if provenswitch.On() {
+				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
+			}
+
 			if input.header.Get("Content-Encoding") != "" {
+				input.encoded = input.body
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -232,7 +241,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if dstCfg != nil {
 				ptPort = uint32(dstCfg.Port)
 			}
-			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url, request.Header); matched {
 				mode := rule.Mode
 				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 				served := "synthetic-200"
@@ -313,7 +322,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			ok, stub, diag, err := h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -325,6 +334,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				// Under exact serving: one call more than the test recorded?
+				if n := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation); n > 0 && report != nil {
+					report.MissKind, report.Recorded = models.MissExtraCall, n
+				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in

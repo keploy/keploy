@@ -15,15 +15,19 @@ package http
 // Each landed wherever the agent's shutdown happened to be (agentRun).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -33,37 +37,10 @@ import (
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
-
-// hangBound turns a regression that would hang a test into a failure. It is
-// not part of any assertion: every positive assertion waits on its event, and
-// this bound is only how long a test gives that event before saying it never
-// came.
-const hangBound = 2 * time.Minute
-
-// within runs f and fails the test if it has not returned within hangBound.
-func within(t *testing.T, what string, f func()) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() { f(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(hangBound):
-		t.Fatalf("%s did not return within %v", what, hangBound)
-	}
-}
-
-// returnsWithin reports whether done is closed within d. It asserts only that
-// something has NOT happened yet; every positive assertion waits on the event.
-func returnsWithin(done <-chan struct{}, d time.Duration) bool {
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
-}
 
 // closedAgentURL is the URL of an agent API nothing listens on: a stop
 // request to it is refused, as one to an agent that cannot be asked is.
@@ -129,14 +106,19 @@ func TestStopAgentNeverHangsUpTheAgentsTerminal(t *testing.T) {
 //
 // It writes with shell builtins alone: an external writer (mv, touch) it ran
 // as it was killed would go on writing in the test's directory after it.
-// The stop skips a report it reads half written.
+// The stop skips a report it reads half written. It ends once the test binary
+// that ran it has (killed at a timeout, which runs no cleanup): in a process
+// group of its own, it looped for ever, reparented to init. Run it with its
+// test's directory as its argument (fakeAgentCommand), which names it.
 const fakeNativeAgent = `report() {
   printf '{"seq":%d,"beat":%d,"steps":true,"done":%s}' "$1" "$2" "$3" > "$PROGRESS"
 }
 term=0
 trap 'term=1' TERM
+# busy: in the middle of teardown work, it does not die of the escalation.
+[ "$MODE" = busy ] && trap '' USR2
 : > "$READY"
-while [ "$term" = 0 ]; do sleep 0.01; done
+while [ "$term" = 0 ]; do kill -0 "$PPID" 2>/dev/null || exit 0; sleep 0.01; done
 : > "$GOT"
 beat=0
 while :; do
@@ -145,10 +127,20 @@ while :; do
     progressing) report "$beat" "$beat" false; [ "$beat" -ge 10 ] && exit 0 ;;
     stalled) report 1 "$beat" false ;;
     detached) report 1 "$beat" true ;;
-    endless) report "$beat" "$beat" false ;;
+    endless|busy) report "$beat" "$beat" false ;;
   esac
+  kill -0 "$PPID" 2>/dev/null || exit 0
   sleep 0.01
 done`
+
+// fakeAgentCommand runs fakeNativeAgent for the test whose directory is dir,
+// in a process group of its own, as keploy runs an agent.
+func fakeAgentCommand(dir string, env ...string) *exec.Cmd {
+	cmd := exec.Command("sh", "-c", fakeNativeAgent, "fake-agent", dir)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
 
 // stopNativeAgent, the native stop goroutine's call, against a real process:
 // the agent, which cannot be asked, gets SIGTERM, answered or not, and is
@@ -163,14 +155,20 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 	defer func(n uint64) { stallChecks = n }(stallChecks)
 	stallChecks = 3
 	for _, tc := range []struct {
-		mode      string
-		interrupt bool
-		wantKill  bool
+		mode string
+		// presses: the user's Ctrl+C presses while keploy waits, each once
+		// the stop has said a press stops the agent.
+		presses  int
+		wantKill bool
+		// atOnce: killed by SIGKILL (a press after the first), not the
+		// escalation.
+		atOnce bool
 	}{
 		{mode: "progressing"},
 		{mode: "stalled", wantKill: true},
 		{mode: "detached", wantKill: true},
-		{mode: "endless", interrupt: true, wantKill: true},
+		{mode: "endless", presses: 1, wantKill: true},
+		{mode: "busy", presses: 2, wantKill: true, atOnce: true},
 	} {
 		for _, ready := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/ready=%v", tc.mode, ready), func(t *testing.T) {
@@ -179,9 +177,7 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 				dir := t.TempDir()
 				readyFile, got := filepath.Join(dir, "ready"), filepath.Join(dir, "got-term")
 				progress := filepath.Join(dir, "teardown.json")
-				cmd := exec.Command("sh", "-c", fakeNativeAgent)
-				cmd.Env = append(os.Environ(), "READY="+readyFile, "GOT="+got, "PROGRESS="+progress, "MODE="+tc.mode)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd := fakeAgentCommand(dir, "READY="+readyFile, "GOT="+got, "PROGRESS="+progress, "MODE="+tc.mode)
 				if err := cmd.Start(); err != nil {
 					t.Fatal(err)
 				}
@@ -198,15 +194,27 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 						t.Fatalf("the agent exited before it was ready: %v", <-waited)
 					}
 				}
-				if tc.interrupt {
+				if tc.presses > 0 {
+					theStopWasASignal(t)
 					go func() {
-						for {
-							if _, err := os.Stat(progress); err == nil {
-								utils.MarkInterruptedAgain()
-								return
-							}
+						// Each pressed until heard: once the stop has said a
+						// press stops the agent (stopWatch), its teardown has
+						// begun, and, for the next, the offer before was
+						// answered (a press finds none standing).
+						for pressed, withdrawn := 0, true; pressed < tc.presses; {
 							if returnsWithin(run.gone, 5*time.Millisecond) {
 								return
+							}
+							if _, err := os.Stat(progress); err != nil {
+								continue
+							}
+							heard := utils.MarkInterruptedAgain()
+							switch {
+							case heard && withdrawn:
+								pressed++
+								withdrawn = false
+							case !heard:
+								withdrawn = true
 							}
 						}
 					}()
@@ -219,11 +227,12 @@ func TestStopNativeAgentByItsTeardownsProgress(t *testing.T) {
 					t.Fatal("the agent never got SIGTERM")
 				}
 				st := cmd.ProcessState.Sys().(syscall.WaitStatus)
-				// A verdict kills with the escalation signal (SIGUSR2, which
-				// kills this stand-in as it kills the agent); Ctrl+C pressed
-				// again with SIGKILL, at once.
+				// A verdict, and the first press, kill with the escalation
+				// signal (SIGUSR2, which kills this stand-in as it kills the
+				// agent once no teardown work in progress is making
+				// progress); a later press with SIGKILL, at once.
 				want := syscall.Signal(syscall.SIGUSR2)
-				if tc.interrupt {
+				if tc.atOnce {
 					want = syscall.SIGKILL
 				}
 				killed := st.Signaled() && st.Signal() == want
@@ -364,6 +373,12 @@ var stopTestContainer = fmt.Sprintf("keploy-stop-test-no-such-container-%d", os.
 // agent's teardown progress as the engine does, a tar stream, from
 // engineProgressFile(log), and logs each read's content to engineReads(log);
 // `cp` is not logged as a call.
+//
+// No invocation outlives its test (reapEngine): a `wait`, or a `cp` made to
+// hang (slowcp), also ends once the test is done with the engine, once its
+// directory is gone, and once the test binary that ran it is (killed at a
+// `go test` timeout, it runs no cleanup). Each looped for ever before,
+// reparented to init, holding a job slot.
 func fakeEngine(t *testing.T) (log, release string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -374,8 +389,17 @@ func fakeEngine(t *testing.T) (log, release string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
-if [ "$1" = cp ] && [ -e "` + filepath.Join(filepath.Dir(log), "slowcp") + `" ]; then
-  exec sleep 3600
+dir="` + dir + `"
+echo $$ >> "$dir/pids"
+# held: the test still holds this call -- it is not done with the engine, the
+# engine's directory is there, and the test binary that ran it lives.
+held() { [ ! -e "$dir/done" ] && [ -d "$dir" ] && kill -0 "$PPID" 2>/dev/null; }
+if [ "$1" = cp ]; then
+  echo cp >> "` + engineCps(log) + `"
+fi
+if [ "$1" = cp ] && [ -e "$dir/slowcp" ]; then
+  while held; do sleep 0.05; done
+  exit 1
 fi
 if [ "$1" = cp ]; then
   f="` + engineProgressFile(log) + `"
@@ -385,7 +409,7 @@ if [ "$1" = cp ]; then
 fi
 echo "$*" >> "` + log + `"
 if [ "$1" = wait ]; then
-  while [ ! -e "` + release + `" ]; do sleep 0.05; done
+  while [ ! -e "` + release + `" ] && held; do sleep 0.05; done
 fi
 if [ "$1" = kill ] && { [ "$2" != --signal ] || [ "$3" = SIGUSR2 ]; }; then
   : > "` + release + `"
@@ -396,9 +420,233 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
+	// Registered after t.TempDir, so it runs before the directory is removed.
+	t.Cleanup(func() { reapEngine(t, dir) })
 	return log, release
 }
+
+// reapEngine ends every invocation of the fake engine in dir that is still
+// running as its test ends -- a `wait` on a container a test never released,
+// or that does not exist, or a hanging `cp` -- and waits for each to exit.
+// The test is done with the engine (done), which lets each go. One still
+// running after hangBound is killed, and fails the test.
+func reapEngine(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "done"), nil, 0o644); err != nil {
+		t.Errorf("could not let the fake engine's calls go: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "pids"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Errorf("could not read the fake engine's pids: %v", err)
+	}
+	deadline := time.Now().Add(hangBound) // only turns a hang into a failure
+	for _, f := range strings.Fields(string(b)) {
+		var pid int
+		if _, err := fmt.Sscan(f, &pid); err != nil || pid <= 0 {
+			continue
+		}
+		for processRunning(t, pid, filepath.Join(dir, "docker")) {
+			if time.Now().After(deadline) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Errorf("the fake engine's process %d did not end with its test; killed it", pid)
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// processRunning reports whether pid is still running, as the process whose
+// arguments contain match (a fake engine's script, a fake agent's directory):
+// not gone, not exited awaiting its reaping, and not another process that has
+// since taken its pid. A process table it cannot read fails the test: taken
+// for "gone", it passed the tests that wait on it without checking anything.
+func processRunning(t *testing.T, pid int, match string) bool {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	var args string
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+			t.Fatalf("no process table to read (/proc): %v", err)
+		}
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		switch {
+		case os.IsNotExist(err) || errors.Is(err, syscall.ESRCH):
+			return false
+		case err != nil:
+			t.Fatalf("read process %d's arguments: %v", pid, err)
+		}
+		args = strings.ReplaceAll(string(b), "\x00", " ") // a zombie's are empty
+	} else {
+		out, err := exec.Command("ps", "-o", "stat=,args=", "-p", fmt.Sprint(pid)).Output()
+		var exit *exec.ExitError
+		switch {
+		case errors.As(err, &exit):
+			return false // no such process
+		case err != nil:
+			t.Fatalf("read process %d's arguments: %v", pid, err)
+		}
+		line := strings.TrimSpace(string(out))
+		if strings.HasPrefix(line, "Z") {
+			return false
+		}
+		args = line
+	}
+	return strings.Contains(args, match)
+}
+
+// A call to the fake engine that its test never let go -- a `wait` on a
+// container it never released, or that does not exist, or a `cp` made to
+// hang -- ends with the test, before the engine's directory is removed: one
+// that did not looped for ever, reparented to init.
+func TestAFakeEngineCallEndsWithItsTest(t *testing.T) {
+	for _, call := range []string{"wait", "cp"} {
+		var cmd *exec.Cmd
+		exited := make(chan error, 1)
+		t.Run(call, func(t *testing.T) {
+			log, _ := fakeEngine(t)
+			dir := filepath.Dir(log)
+			if call == "cp" {
+				if err := os.WriteFile(filepath.Join(dir, "slowcp"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd = exec.Command(filepath.Join(dir, "docker"), call, stopTestContainer)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			go func() { exited <- cmd.Wait() }()
+			within(t, "the call under way", func() {
+				for {
+					pids, _ := os.ReadFile(filepath.Join(dir, "pids"))
+					if strings.Contains(string(pids), fmt.Sprint(cmd.Process.Pid)) {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			})
+			// The test ends here, the call still held.
+		})
+		if cmd == nil || cmd.Process == nil {
+			continue // the subtest failed before the call began
+		}
+		select {
+		case <-exited:
+		case <-time.After(hangBound): // only turns a hang into a failure
+			_ = cmd.Process.Kill()
+			<-exited
+			t.Fatalf("a %s the test never let go was still running after its test ended", call)
+		}
+	}
+}
+
+// orphanEnv, set to "engine", "agent" or "agent-teardown", makes
+// TestOrphanHelper stand in for a test binary killed with a fake engine's
+// `wait`, or a fake native agent waiting for its stop or in its teardown,
+// under way.
+const orphanEnv = "KEPLOY_TEST_ORPHAN"
+
+// TestOrphanHelper starts a fake engine's `wait`, or a fake native agent, and
+// exits as a test binary killed at a `go test` timeout does: at once, its
+// cleanups not run. It says what it left running: its pid, and what its
+// arguments contain.
+func TestOrphanHelper(t *testing.T) {
+	what := os.Getenv(orphanEnv)
+	if what == "" {
+		t.Skip("a helper for TestATestsChildEndsWithTheTestBinary")
+	}
+	dir := t.TempDir()
+	var cmd *exec.Cmd
+	var match string
+	var started func() bool
+	switch what {
+	case "engine":
+		log, _ := fakeEngine(t)
+		match = filepath.Join(filepath.Dir(log), "docker")
+		cmd = exec.Command(match, "wait", stopTestContainer)
+		started = func() bool { return count(engineLines(t, log), "wait "+stopTestContainer) > 0 }
+	case "agent", "agent-teardown":
+		ready, got := filepath.Join(dir, "ready"), filepath.Join(dir, "got")
+		match = dir
+		cmd = fakeAgentCommand(dir, "READY="+ready, "GOT="+got, "PROGRESS="+filepath.Join(dir, "p"), "MODE=endless")
+		started = func() bool {
+			if _, err := os.Stat(ready); err != nil {
+				return false
+			}
+			if what == "agent" {
+				return true
+			}
+			_ = cmd.Process.Signal(syscall.SIGTERM) // its stop: it reports its teardown, endlessly
+			_, err := os.Stat(got)
+			return err == nil
+		}
+	default:
+		t.Fatalf("%s=%q", orphanEnv, what)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	hung := time.After(hangBound) // only turns a hang into a failure
+	for !started() {
+		select {
+		case err := <-exited:
+			t.Fatalf("the %s exited before it was under way: %v", what, err)
+		case <-hung:
+			_ = cmd.Process.Kill()
+			t.Fatalf("the %s never got under way", what)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	fmt.Printf("orphan %d %s\n", cmd.Process.Pid, match)
+	os.Exit(3)
+}
+
+// A test's child under way when its test binary dies -- killed at a timeout,
+// which runs no cleanup -- ends on its own: a fake engine's `wait` and a fake
+// native agent, each in a process group of its own, looped for ever,
+// reparented to init, holding a job slot.
+func TestATestsChildEndsWithTheTestBinary(t *testing.T) {
+	for _, what := range []string{"engine", "agent", "agent-teardown"} {
+		t.Run(what, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), hangBound) // only turns a hang into a failure
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOrphanHelper$", "-test.timeout="+hangBound.String())
+			cmd.Env = append(os.Environ(), orphanEnv+"="+what, "TMPDIR="+t.TempDir())
+			cmd.WaitDelay = time.Second
+			out, err := cmd.Output()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+				t.Fatalf("the helper did not exit as a killed binary would (%v): %s", err, out)
+			}
+			var pid int
+			var match string
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "orphan %d %s", &pid, &match); err != nil {
+				t.Fatalf("the helper did not say what it left running (%v): %q", err, out)
+			}
+			t.Cleanup(func() {
+				if processRunning(t, pid, match) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			// On the test's goroutine: processRunning may fail the test.
+			deadline := time.Now().Add(hangBound) // only turns a hang into a failure
+			for processRunning(t, pid, match) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the orphan %d did not end within %v of its test binary", pid, hangBound)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+// engineCps is where the fake engine notes each `cp` it is asked for: each
+// of a stop's reads of the agent's progress, one a poll.
+func engineCps(log string) string { return filepath.Join(filepath.Dir(log), "cps") }
 
 // engineProgressFile is where the fake engine's container holds the agent's
 // teardown progress (kdocker.AgentTeardownProgressFile).
@@ -528,7 +776,8 @@ func TestAnUnansweredAgentContainerIsSignalledAgainWhileWaited(t *testing.T) {
 // The agent's container is waited for while its teardown makes progress, and
 // killed only once it has stopped making any, or has detached everything and
 // is still there a check later -- with the escalation signal, on which the
-// agent dies once no teardown work is in progress (SIGUSR2), not SIGKILL.
+// agent dies once no teardown work in progress is making progress (SIGUSR2),
+// not SIGKILL.
 func TestTheAgentContainerIsKilledOnlyWhenItStopsProgressing(t *testing.T) {
 	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
 	dockerStopPoll = 5 * time.Millisecond
@@ -667,50 +916,172 @@ func TestStopAgentContainerForSignalsAndWaitsAnsweredOrNot(t *testing.T) {
 	}
 }
 
-// Ctrl+C pressed again while the agent's container is waited for kills it at
-// once (SIGKILL).
+// Ctrl+C pressed while the agent's container is waited for, once the stop
+// has said a press stops it, sends the escalation signal: the agent dies once
+// no teardown work in progress is making progress, here at once.
 func TestASecondCtrlCKillsTheAgentContainer(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
 	log, _ := fakeEngine(t)
 	ready := newAgentRun()
 	ready.ready.Store(true)
 	returned := make(chan struct{})
 	go func() { stopAgentContainerFor(zap.NewNop(), ready, stopTestContainer); close(returned) }()
 	awaitEngineWait(t, log, returned)
-	utils.MarkInterruptedAgain()
+	ctrlCWhileWaited(t)
 	within(t, "stopAgentContainerFor", func() { <-returned })
-	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill "+stopTestContainer; got != want {
-		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed again kills the container", got, want)
+	if got, want := strings.Join(engineCalls(t, log), " "), "kill --signal SIGTERM "+stopTestContainer+"|wait "+stopTestContainer+"|kill --signal SIGUSR2 "+stopTestContainer; got != want {
+		t.Fatalf("engine calls %q, want %q: Ctrl+C pressed escalates the container's stop", got, want)
 	}
 }
 
 // awaitAgentExit: the group waits for the agent's exit, and once the stop has
-// begun the user's second interrupt lets the group go, not the agent.
+// killed the agent at once at the user's Ctrl+C (run.letGo) it lets the group
+// go, not waiting for the agent to finish dying. An interrupt alone does not:
+// only the stop, which hears no copy of its own signal, says what one was.
 func TestAwaitAgentExitLetsGoOnASecondInterruptOnceStopping(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
 	a := &AgentClient{logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
 	reaped := make(chan error, 1)
+	run := newAgentRun()
 	returned := make(chan struct{})
 	var ok atomic.Bool
-	go func() { _, o := a.awaitAgentExit(ctx, reaped, 1); ok.Store(o); close(returned) }()
-	cancel()
-	if returnsWithin(returned, 200*time.Millisecond) {
-		t.Fatal("the group stopped waiting on the stop alone")
-	}
+	go func() { _, o := a.awaitAgentExit(ctx, reaped, run, 1); ok.Store(o); close(returned) }()
+	cancel() // the agent stop begins
 	utils.MarkInterruptedAgain()
-	<-returned
+	if returnsWithin(returned, 200*time.Millisecond) {
+		t.Fatal("the group stopped waiting on the stop, or on an interrupt its stop did not act on")
+	}
+	run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
+	within(t, "awaitAgentExit", func() { <-returned })
 	if ok.Load() {
 		t.Fatal("awaitAgentExit reported an exit it did not see")
 	}
 
-	utils.ResetInterruptedAgain()
 	reaped2 := make(chan error, 1)
 	reaped2 <- nil
-	if _, o := a.awaitAgentExit(context.Background(), reaped2, 1); !o {
+	if _, o := a.awaitAgentExit(context.Background(), reaped2, newAgentRun(), 1); !o {
 		t.Fatal("awaitAgentExit missed the exit")
+	}
+}
+
+// The user's Ctrl+C while keploy waits for a stopping agent, once the
+// recording's drains are done and their offers withdrawn: the stop says a
+// press stops the agent. One the CLI started directly is killed at once at
+// the press after the one that escalated, and the group lets go at that press
+// (awaitAgentExit, run.letGo): it does not wait out the teardown's bound to
+// then say a goroutine ignored its cancellation. One that runs under sudo (a
+// non-root user's), as root, cannot be killed at once: each press only sends
+// it the escalation signal again, and the group waits for its exit while its
+// stop holds the drains -- keploy never exits leaving a root agent running.
+// The press after the first had the group let go of it, still running.
+func TestAUsersCtrlCDuringTheAgentStopLetsTheGroupGo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		root bool
+	}{{"direct", false}, {"sudo", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			utils.MarkInterrupted() // the user's Ctrl+C stopped the recording
+			t.Cleanup(utils.ClearInterrupted)
+			core, logs := observer.New(zapcore.InfoLevel)
+			a := clientFor(closedAgentURL(t))
+			a.logger = zap.New(core)
+			run := newAgentRun()
+			run.ready.Store(true)
+			reaped := make(chan error, 1)
+			exit := sync.OnceFunc(func() { run.exited(); reaped <- nil })
+			t.Cleanup(exit)
+			ctx, cancel := context.WithCancel(context.Background())
+			var grp errgroup.Group
+			var beat atomic.Uint64
+			kills := make(chan bool, 64)
+			// nextKill returns whether the stop's next kill was to be at once.
+			nextKill := func(what string) bool {
+				t.Helper()
+				select {
+				case now := <-kills:
+					return now
+				case <-time.After(time.Minute): // only turns a hang into a failure
+					t.Fatalf("the stop made no kill at %s", what)
+					return false
+				}
+			}
+			grp.Go(func() error { a.awaitAgentExit(ctx, reaped, run, 1); return nil })
+			grp.Go(func() error {
+				<-ctx.Done()
+				a.endAgent(run, 1,
+					func() error { return nil }, // asked over its API
+					func() error { return nil },
+					func(now bool) error { kills <- now; return nil }, // busy removing its uprobes: no kill ends it here
+					killReach{noAtOnce: tc.root},
+					func(context.Context) (utils.TeardownProgress, bool) {
+						// The agent's own pid, which a running process has.
+						return utils.TeardownProgress{Seq: 1, Beat: beat.Add(1), Busy: true, Steps: true, Pid: os.Getpid()}, true
+					})
+				return nil
+			})
+			cancel() // setupCtxCancel: the agent stop begins
+			// Once the stop has read the agent's first report: a press before it
+			// has the escalation sent again at that report (stopWatch), a kill
+			// more than the presses make.
+			within(t, "the stop saying a press stops the agent", func() {
+				for logs.FilterMessageSnippet("Press Ctrl+C again to stop the keploy agent").Len() == 0 ||
+					logs.FilterMessageSnippet("Waiting for the keploy agent to finish shutting down").Len() == 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+			})
+			// The user presses Ctrl+C, as told: the agent, busy removing its
+			// uprobes, does not die of the escalation.
+			ctrlCWhileWaited(t)
+			if nextKill("the first press") {
+				t.Fatal("the first press killed the agent at once")
+			}
+			if !tc.root {
+				// The user presses again once asked: a kill at once, and
+				// the group lets go.
+				ctrlCAgainWhileWaited(t)
+				if !nextKill("the press after the second offer") {
+					t.Fatal("the press after the second offer was no kill at once")
+				}
+				// The bound only catches a group that never lets go; it
+				// lets go at once.
+				if _, timedOut := utils.DrainErrGroupStatus(a.logger, "record-setup", &grp, 30*time.Second); timedOut {
+					t.Fatalf("the user's Ctrl+C during the agent stop did not let the group go: %v", logs.FilterLevelExact(zapcore.ErrorLevel).All())
+				}
+				return
+			}
+			// Under sudo: no press stops keploy waiting. The user presses
+			// again anyway: the escalation again, and keploy goes on
+			// waiting, holding the drains.
+			utils.MarkInterruptedAgain()
+			nextKill("a press after the first")
+			if logs.FilterMessageSnippet("stop the keploy agent at once").Len() != 0 ||
+				logs.FilterMessageSnippet("stop waiting for the keploy agent").Len() != 0 {
+				t.Fatalf("the stop offered a press that would leave the agent under sudo running: %v", logs.All())
+			}
+			groupDone := make(chan struct{})
+			go func() { _ = grp.Wait(); close(groupDone) }()
+			select {
+			case <-run.letGo:
+				t.Fatal("the group let go of an agent under sudo, as root, still running")
+			case <-groupDone:
+				t.Fatal("the group ended with an agent under sudo, as root, still running")
+			default:
+			}
+			if !utils.AgentStopInProgress() {
+				t.Fatal("the stop of an agent under sudo let the drains go while it runs")
+			}
+			exit() // the agent ends its teardown and exits
+			// The bound only catches a group that never lets go.
+			if _, timedOut := utils.DrainErrGroupStatus(a.logger, "record-setup", &grp, 30*time.Second); timedOut {
+				t.Fatalf("the group did not end at the agent's exit: %v", logs.FilterLevelExact(zapcore.ErrorLevel).All())
+			}
+		})
 	}
 }
 
@@ -740,30 +1111,59 @@ func TestAwaitPreviousAgent(t *testing.T) {
 // An interrupt that came before the docker stop began does not force it:
 // `sudo pkill -INT -f keploy` signals sudo and keploy both, and sudo hands its
 // signal on, so one stop reaches keploy twice. The container gets its SIGTERM
-// and is waited for; an interrupt during the wait would kill it.
+// and is waited for, and the copy, whether it came before the stop or during
+// it, kills nothing: the stop offers a press only a whole period after its
+// signal came -- on the test's clock, which stands still, never.
 func TestAnInterruptBeforeTheDockerStopDoesNotForceIt(t *testing.T) {
-	utils.ResetInterruptedAgain()
-	t.Cleanup(utils.ResetInterruptedAgain)
-	utils.MarkInterruptedAgain()
-	for _, ready := range []bool{true, false} {
-		log, release := fakeEngine(t)
-		run := newAgentRun()
-		run.ready.Store(ready)
-		returned := make(chan struct{})
-		go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
-		awaitEngineWait(t, log, returned)
-		// Only that it has NOT been killed: the container is still running,
-		// so a stop that counted the earlier interrupt kills it at once.
-		_ = returnsWithin(returned, 100*time.Millisecond)
-		if err := os.WriteFile(release, nil, 0o644); err != nil {
-			t.Fatal(err)
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 10 * time.Millisecond
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
+	for _, copyAt := range []string{"before", "during"} {
+		for _, ready := range []bool{true, false} {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+			utils.MarkInterrupted() // the stop
+			if copyAt == "before" {
+				utils.MarkInterruptedAgain()
+			}
+			anInterruptedDockerStopIsNotForced(t, ready, copyAt == "during")
 		}
-		within(t, "stopAgentContainerFor", func() { <-returned })
-		calls := engineLines(t, log)
-		requireSignalledAndWaited(t, calls)
-		if count(calls, "kill "+stopTestContainer) != 0 {
-			t.Fatalf("ready=%v: an interrupt from before the stop forced it; calls %q", ready, calls)
-		}
+	}
+}
+
+func anInterruptedDockerStopIsNotForced(t *testing.T, ready, copyDuring bool) {
+	t.Helper()
+	log, release := fakeEngine(t)
+	run := newAgentRun()
+	run.ready.Store(ready)
+	returned := make(chan struct{})
+	go func() { stopAgentContainerFor(zap.NewNop(), run, stopTestContainer); close(returned) }()
+	awaitEngineWait(t, log, returned)
+	if copyDuring {
+		// Once the stop has polled the container a few times.
+		within(t, "the stop's polls", func() {
+			for {
+				if b, _ := os.ReadFile(engineCps(log)); bytes.Count(b, []byte("\n")) >= 3 {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+		utils.MarkInterruptedAgain()
+	}
+	// Only that it has NOT been killed: the container is still running, so
+	// a stop that took the copy for a press kills it.
+	_ = returnsWithin(returned, 100*time.Millisecond)
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "stopAgentContainerFor", func() { <-returned })
+	calls := engineLines(t, log)
+	requireSignalledAndWaited(t, calls)
+	if count(calls, "kill "+stopTestContainer) != 0 || count(calls, "kill --signal SIGUSR2 "+stopTestContainer) != 0 {
+		t.Fatalf("ready=%v, copy during the stop=%v: a copy of the stop forced it; calls %q", ready, copyDuring, calls)
 	}
 }
 

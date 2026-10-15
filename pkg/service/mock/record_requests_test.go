@@ -538,8 +538,9 @@ func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
 			dir := t.TempDir()
 			passed, failed := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
 			passed.Outcome, failed.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomeFailed
+			live := models.LiveRow{Test: "orders::TestA", Exe: "/usr/bin/node", Port: 3000}
 			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1")}),
-				windows: []models.ScopeWindow{passed, failed}}
+				windows: []models.ScopeWindow{passed, {Live: &live}, failed}}
 			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
 			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
 			cfg.Path = dir
@@ -559,6 +560,7 @@ func TestAFailedRecordLeavesItsPerTestResults(t *testing.T) {
 				{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 				{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
 			}, got.Tests)
+			require.Equal(t, []models.LiveRow{live}, got.Live, "the record's rows are left with its per-test results")
 			_, err = os.Stat(filepath.Join(dir, set, "mocks.yaml"))
 			require.NoError(t, err, "under the switch the recording is kept for judging to commit test by test")
 		})
@@ -704,4 +706,26 @@ func TestFoldRetries(t *testing.T) {
 		}
 	}
 	require.Equal(t, []time.Time{at(22)}, subs)
+}
+
+// Under the proven switch a test's mapping lists data-plane mocks only: a
+// protocol-phase mock made inside a test (a token fetch, a DNS lookup, a
+// MySQL ping) goes to the pool, which serves it to every test (design v14
+// §5.2). Without the switch nothing is marked protocol-phase, and mappings
+// are as they were.
+func TestAMappingListsDataPlaneMocksOnly(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100)}}
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(10)},
+		{name: "mock-1", ts: at(20), protocol: true},
+		{name: "mock-2", ts: at(30)},
+	}
+	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
+	require.Equal(t, []models.MockEntry{{Name: "mock-1"}}, startupMocks(windows, mocks, nil))
+	for i := range mocks {
+		mocks[i].protocol = false
+	}
+	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
+	require.Empty(t, startupMocks(windows, mocks, nil))
 }

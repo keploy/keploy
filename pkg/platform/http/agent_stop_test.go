@@ -50,6 +50,78 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	}
 }
 
+// hangBound turns a regression that would hang a test into a failure. It is
+// not part of any assertion: every positive assertion waits on its event, and
+// this bound is only how long a test gives that event before saying it never
+// came.
+const hangBound = 2 * time.Minute
+
+// within runs f and fails the test if it has not returned within hangBound.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(hangBound):
+		t.Fatalf("%s did not return within %v", what, hangBound)
+	}
+}
+
+// returnsWithin reports whether done is closed within d. It asserts only that
+// something has NOT happened yet; every positive assertion waits on the event.
+func returnsWithin(done <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// theStopWasASignal: the recording was stopped by the user's interrupt
+// (utils.Interrupted), which a stop's offer to stop the agent now waits on.
+func theStopWasASignal(t *testing.T) {
+	t.Helper()
+	utils.MarkInterrupted()
+	t.Cleanup(utils.ClearInterrupted)
+}
+
+// ctrlCWhileWaited is the user's Ctrl+C while keploy waits for a stopping
+// agent, pressed as told: once the stop has said a press stops the agent
+// (stopWatch's offer), which a press before does not count. It presses until
+// one is heard.
+func ctrlCWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for !utils.MarkInterruptedAgain() {
+		if time.Now().After(deadline) {
+			t.Fatal("no stop ever said Ctrl+C stops the agent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// ctrlCAgainWhileWaited is the user's next Ctrl+C, once the stop has answered
+// the one before (withdrawn its offer) and offered again: it presses until a
+// press has found no offer standing, and then one is heard.
+func ctrlCAgainWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	withdrawn := false
+	for {
+		heard := utils.MarkInterruptedAgain()
+		if withdrawn && heard {
+			return
+		}
+		withdrawn = withdrawn || !heard
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never offered again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // endAgent's decision on the CLI's stop. The agent is asked first, and one
 // that answers is not signalled. One that was up and is already going away is
 // signalled only if, after the grace, it has reported no teardown. One whose
@@ -144,7 +216,7 @@ func TestEndAgent(t *testing.T) {
 					run.exited()
 				}()
 			}
-			go func() { a.endAgent(run, 1, ask, terminate, kill, read); close(returned) }()
+			go func() { a.endAgent(run, 1, ask, terminate, kill, killReach{}, read); close(returned) }()
 			select {
 			case <-returned:
 			case <-time.After(time.Minute):
@@ -244,7 +316,8 @@ func TestTheStopRequestIsSentOnAConnectionOfItsOwn(t *testing.T) {
 
 // --from-container: the user's container is restored only once the agent
 // container, which holds the app's ports, has exited -- it is waited for, not
-// killed -- or once the user's second interrupt says not to wait.
+// killed -- or once its stop killed it at once at the user's Ctrl+C
+// (run.letGo), when there is no more to wait for.
 func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 	for _, interrupt := range []bool{false, true} {
 		utils.ResetInterruptedAgain()
@@ -270,7 +343,7 @@ func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 			t.Fatalf("interrupt=%v: started the user's container while the agent container still ran", interrupt)
 		}
 		if interrupt {
-			utils.MarkInterruptedAgain()
+			run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
 		} else {
 			run.exited()
 		}
@@ -288,11 +361,15 @@ func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
 // An interrupt that came before the stop does not force it: `sudo pkill -INT
 // -f keploy` signals sudo and keploy both, and sudo hands its signal on, so
 // one stop reaches keploy twice. The agent, asked to stop and making
-// progress, is waited for, not killed.
+// progress, is waited for, not killed. The stop offers a press only a whole
+// period after its signal came: on the test's clock, which stands still,
+// never -- the copy comes once the stop has polled the agent a few times.
 func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	t.Cleanup(utils.ResetInterruptedAgain)
-	utils.MarkInterruptedAgain() // the stop, delivered twice
+	theStopWasASignal(t)
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
 	a := &AgentClient{logger: zap.NewNop()}
 	run := newAgentRun()
 	run.ready.Store(true)
@@ -305,21 +382,26 @@ func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
 	returned := make(chan struct{})
 	go func() {
 		a.endAgent(run, 1, func() error { return nil }, func() error { return nil },
-			func(bool) error { killed.Store(true); run.exited(); return nil }, read)
+			func(bool) error { killed.Store(true); run.exited(); return nil }, killReach{}, read)
 		close(returned)
 	}()
 	hung := time.After(time.Minute) // only turns a hang into a failure
-	for reads.Load() < 5 {
-		select {
-		case <-returned:
-			t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
-		case <-hung:
-			t.Fatal("the stop never read the agent's progress")
-		case <-time.After(time.Millisecond):
+	readsTo := func(n uint64) {
+		for reads.Load() < n {
+			select {
+			case <-returned:
+				t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
+			case <-hung:
+				t.Fatal("the stop never read the agent's progress")
+			case <-time.After(time.Millisecond):
+			}
 		}
 	}
+	readsTo(3)
+	utils.MarkInterruptedAgain() // the copy of the stop, as it waits
+	readsTo(6)
 	if killed.Load() {
-		t.Fatal("an interrupt from before the stop forced it")
+		t.Fatal("a copy of the stop forced it")
 	}
 	run.exited()
 	select {

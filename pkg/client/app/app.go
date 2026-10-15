@@ -1846,9 +1846,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// report exit 0 for an app that never started (compose returns the app's
 	// exit-code-from value of 0 instead of the dependency-failed error). That race
 	// slips past this retry (cmdErr.Err == nil -> the gate's runErr check is false,
-	// so no retry) — but it fails in the SAFE direction: a never-started app simply
-	// surfaces as a clean stop, never a masked failure. So the retry catches
-	// most-but-not-all of this flake, never the wrong half.
+	// so no retry). keploy record does not pass it as a clean run: it reads the
+	// stopped app's container and fails a project whose app never started though
+	// compose reported 0 (record.composeEnd). keploy mock does not read it so yet,
+	// and can pass such a run. So the retry catches most-but-not-all of this
+	// flake.
 	//
 	// Gated STRICTLY by isTransientComposeDependencyFailure, which reads docker's
 	// own post-mortem state (the abort message is on the up's stderr, which keploy

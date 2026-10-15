@@ -202,6 +202,16 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	return uint64(b[0]), false, 1
 }
 
+// IsPublicKeyRequest reports whether packet (header included) is a client's
+// caching_sha2_password request for the server's public key: one byte, 0x02.
+// After a full authentication is asked for without TLS, a client sends it, or,
+// holding the server's key already (go-sql-driver's serverPubKey, mysql
+// --server-public-key-path, Connector/J's serverRSAPublicKeyFile), its password
+// encrypted with that key at once. Anything else there is that password.
+func IsPublicKeyRequest(packet []byte) bool {
+	return len(packet) == 5 && packet[0] == 1 && packet[1] == 0 && packet[2] == 0 && packet[4] == byte(mysql.RequestPublicKey)
+}
+
 func IsEOFPacket(data []byte) bool {
 	if len(data) < 5 {
 		return false // Packet is too short to be valid

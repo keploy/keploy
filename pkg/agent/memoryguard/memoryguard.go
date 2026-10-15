@@ -147,6 +147,14 @@ func IsRecordingPaused() bool {
 	return recordingPaused.Load()
 }
 
+// SetRecordingPausedForTest sets what IsRecordingPaused reports, as memory
+// pressure does, without telling the mock managers, and returns what puts the
+// previous value back. Tests only.
+func SetRecordingPausedForTest(paused bool) (restore func()) {
+	was := recordingPaused.Swap(paused)
+	return func() { recordingPaused.Store(was) }
+}
+
 // Start enables the memory guard when a Docker agent is running with a limit.
 func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB uint64) error {
 	resetAllPressure()

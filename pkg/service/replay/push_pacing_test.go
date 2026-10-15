@@ -160,7 +160,7 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 		wrongBody: map[string]bool{"test-2": true},
 		consumedFor: func() []models.MockState {
 			h.instr.mu.Lock()
-			after := h.instr.lastParams.AfterTime
+			after := h.instr.windowAfter
 			h.instr.mu.Unlock()
 			return byTest[byStart[after]]
 		},

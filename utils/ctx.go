@@ -58,20 +58,22 @@ func RegisterPreCancelHook(fn func()) {
 
 // signalHold, when set, is what the first stop signal waits on before it
 // cancels the root context (SetSignalHold).
-var signalHold atomic.Pointer[func(stopNow <-chan struct{})]
+var signalHold atomic.Pointer[func()]
 
 // SetSignalHold has the first SIGINT, SIGTERM or SIGHUP NewCtx receives wait,
 // before it cancels the root context, until hold returns: what the process is
-// still doing for someone else finishes first. A second signal while it waits
-// closes stopNow, and hold must then return at once; that signal also marks
-// the run InterruptedAgain. nil removes the hold.
+// still doing for someone else finishes first. A signal while it waits is
+// counted (RepeatInterrupts) and cuts nothing short: it may be the first
+// signal again, as sudo hands it on (holdUntilDone). Once the root context is
+// cancelled some other way (ExecCancel), the stop no longer waits for hold.
+// nil removes the hold.
 //
 // The keploy agent holds so: a recording's client (the CLI) owns its
 // lifetime, and the same signal often reaches both (`pkill -INT keploy`, a
 // container stop). Cancelled at once, the agent closed the streams the client
 // was still draining, and what its parsers still held from before the stop
 // was lost with it.
-func SetSignalHold(hold func(stopNow <-chan struct{})) {
+func SetSignalHold(hold func()) {
 	if hold == nil {
 		signalHold.Store(nil)
 		return
@@ -128,34 +130,189 @@ func MarkInterrupted() { interrupted.Store(true) }
 // ClearInterrupted is for tests, which share one process across cases.
 func ClearInterrupted() { interrupted.Store(false); interruptSignal.Store(0) }
 
-// interruptedAgain is closed when a second interrupt (SIGINT or SIGTERM)
-// arrives after the one that stopped the run: the user asking a stop that is
-// still finishing its work (a recording draining what the agent captured) to
-// give that up. InterruptedAgain returns it.
+// SetInterruptSignalForTest records n as the number of the signal that
+// stopped this run, as NewCtx's handler does (InterruptExitCode), and returns
+// what puts the one before back. Tests only.
+func SetInterruptSignalForTest(n int) (restore func()) {
+	old := interruptSignal.Swap(int32(n))
+	return func() { interruptSignal.Store(old) }
+}
+
+// interruptLatch is a channel closed once.
 type interruptLatch struct {
 	once sync.Once
 	ch   chan struct{}
 }
 
-var interruptedAgain atomic.Pointer[interruptLatch]
+// stopNow is closed by the interrupt that asks a stop still finishing its work
+// (a recording draining what the agent captured) to give that up: the first
+// that comes while the stop offers to end at one (OfferStopNow). StopNow
+// returns it.
+var stopNow atomic.Pointer[interruptLatch]
 
 func init() { ResetInterruptedAgain() }
 
-// InterruptedAgain is closed once a second interrupt has arrived. Work a stop
-// waits on for as long as it makes progress (a recording's drain) selects on
-// it, so the user can always end it.
-func InterruptedAgain() <-chan struct{} { return interruptedAgain.Load().ch }
-
-// MarkInterruptedAgain is what every interrupt after the first does; for
-// tests too.
-func MarkInterruptedAgain() {
-	l := interruptedAgain.Load()
-	l.once.Do(func() { close(l.ch) })
+// OfferStopNow says the stop under way has just told the user that one more
+// interrupt ends it at once ("press Ctrl+C again to stop now"): while the
+// offer stands, until withdraw is called, the next interrupt does (StopNow).
+// An interrupt before it is not the user's answer to it, whatever it was. A
+// single stop can arrive twice: a signal sent to both sudo and the keploy it
+// runs -- `sudo pkill -f keploy`, as CI stops a recording -- reaches keploy
+// once directly and once from sudo, which hands its own copy on, and the copy
+// comes as the first does, before keploy has said anything. Taken for a second
+// Ctrl+C, it gave a recording's drain up at its start, and what the agent
+// still held was lost.
+//
+// So an offer is made only once the stop's first signal has come (Interrupted):
+// before it, the copy of that signal would find the offer standing; and a
+// whole notice period after that signal was seen (StopNowNotice), whether the
+// signal began the stop or came while a stop that began on its own (the app
+// exits, a record timer) waited. The copy comes with the first, not a period
+// later -- unless sudo is held from handing it on (starved, or stopped), which
+// no time can tell from a press, as Go gives a signal's sender to no one. So
+// what a press after an offer does must be safe for a copy too: a drain that
+// gives up fails its run loudly, and an agent's stop answers a first offer by
+// having the agent die between teardown steps (as at a stall verdict), never
+// in one.
+//
+// next is closed by the first interrupt after this offer: a wait that must
+// hear only an interrupt given to it (an agent's stop, after the drains, where
+// a press that ended a drain must not kill the agent mid-teardown) selects on
+// it, not on StopNow. withdraw is called once the stop no longer waits, so the
+// offer does not stand for a later wait it did not tell the user of. With no
+// signal yet, nothing is offered: next is nil.
+func OfferStopNow() (next <-chan struct{}, withdraw func()) {
+	if !Interrupted() {
+		return nil, func() {}
+	}
 	repeatInterrupts.mu.Lock()
+	repeatInterrupts.offers++
+	next = repeatInterrupts.next
+	repeatInterrupts.mu.Unlock()
+	var once sync.Once
+	return next, func() {
+		once.Do(func() {
+			repeatInterrupts.mu.Lock()
+			repeatInterrupts.offers--
+			repeatInterrupts.mu.Unlock()
+		})
+	}
+}
+
+// StopNow returns a channel closed by the first interrupt that arrives while a
+// stop offers to end at one (OfferStopNow): the user asking a stop that said
+// one would end it at once to do so. Work a stop waits on for as long as it
+// makes progress (a recording's drain) selects on it, and offers it once it
+// has told the user, so the user can always end it.
+func StopNow() <-chan struct{} { return stopNow.Load().ch }
+
+// StopNowNotice paces a stop's offer to end at the user's next interrupt
+// (OfferStopNow) to the notices it gives while it waits: the offer is made at
+// the first notice that comes a whole notice period (as measured, not as
+// scheduled) after the stop's first signal was seen -- as the stop began, or
+// at the first notice to find it. The copy of that signal, which sudo hands
+// on, comes with it, not a period later; a notice read late (its loop was
+// busy) does not bring the offer forward. Not safe for concurrent use: the one
+// loop that gives the notices owns it.
+type StopNowNotice struct {
+	period time.Duration
+	// sawAt is when the stop's first signal was first seen to have come
+	// (zero: not yet).
+	sawAt time.Time
+	// next and withdraw are the offer's, once made (OfferStopNow).
+	next     <-chan struct{}
+	withdraw func()
+	// withdrawn: the stop no longer waits (Withdraw); nothing more is
+	// offered.
+	withdrawn bool
+}
+
+// noticeClock is StopNowNotice's clock (nil: time.Now): a test's to set
+// (SetNoticeClockForTest), while notices are given on other goroutines.
+var noticeClock atomic.Pointer[func() time.Time]
+
+func noticeNow() time.Time {
+	if c := noticeClock.Load(); c != nil {
+		return (*c)()
+	}
+	return time.Now()
+}
+
+// SetNoticeClockForTest has StopNowNotice read the time from now, and returns
+// what puts its own clock back. Tests only.
+func SetNoticeClockForTest(now func() time.Time) (restore func()) {
+	old := noticeClock.Swap(&now)
+	return func() { noticeClock.Store(old) }
+}
+
+// NewStopNowNotice starts the notices, every period, of a stop that begins
+// now. Call it before the notices' clock starts.
+func NewStopNowNotice(period time.Duration) *StopNowNotice {
+	n := &StopNowNotice{period: period}
+	if Interrupted() {
+		n.sawAt = noticeNow()
+	}
+	return n
+}
+
+// Next is called at each notice. It reports whether the notice says that
+// another interrupt stops it now: from this notice on (it makes the offer), or
+// since an earlier one.
+func (n *StopNowNotice) Next() (offering bool) {
+	switch {
+	case n.withdrawn:
+		return false
+	case n.withdraw != nil:
+	case n.sawAt.IsZero():
+		// The flag before the clock: a signal that comes between the two is
+		// then seen at the next notice, never stamped before it came.
+		if Interrupted() {
+			n.sawAt = noticeNow()
+		}
+	case noticeNow().Sub(n.sawAt) >= n.period:
+		n.next, n.withdraw = OfferStopNow()
+	}
+	return n.withdraw != nil
+}
+
+// Interrupt returns a channel closed by the first interrupt after the offer:
+// nil, which never is, until the offer is made, and once it is withdrawn.
+func (n *StopNowNotice) Interrupt() <-chan struct{} {
+	if n.withdrawn {
+		return nil
+	}
+	return n.next
+}
+
+// Withdraw withdraws the offer, if one was made: the stop no longer waits,
+// and the notice offers nothing more.
+func (n *StopNowNotice) Withdraw() {
+	n.withdrawn = true
+	if n.withdraw != nil {
+		n.withdraw()
+	}
+}
+
+// MarkInterruptedAgain is what every interrupt after the first does: it is
+// counted (RepeatInterrupts, InterruptedAfter), and, while a stop offers to
+// end at one (OfferStopNow), it ends that stop (StopNow). It reports whether
+// it did. For tests too.
+//
+// StopNow is closed before anything that waits on the repeat itself
+// (InterruptedAfter, an offer's next) is woken: whatever such a wait finds,
+// it finds a repeat that ended a stop to have ended it.
+func MarkInterruptedAgain() (stoppedNow bool) {
+	repeatInterrupts.mu.Lock()
+	defer repeatInterrupts.mu.Unlock()
+	stoppedNow = repeatInterrupts.offers > 0
+	if stoppedNow {
+		l := stopNow.Load()
+		l.once.Do(func() { close(l.ch) })
+	}
 	repeatInterrupts.n++
 	close(repeatInterrupts.next)
 	repeatInterrupts.next = make(chan struct{})
-	repeatInterrupts.mu.Unlock()
+	return stoppedNow
 }
 
 // repeatInterrupts counts the interrupts after the first
@@ -164,6 +321,8 @@ var repeatInterrupts struct {
 	mu   sync.Mutex
 	n    uint64
 	next chan struct{}
+	// offers is how many stops offer to end at the next one (OfferStopNow).
+	offers int
 }
 
 // RepeatInterrupts returns how many interrupts have arrived after the one
@@ -193,10 +352,11 @@ func InterruptedAfter(n uint64) <-chan struct{} {
 
 // ResetInterruptedAgain is for tests, which share one process across cases.
 func ResetInterruptedAgain() {
-	interruptedAgain.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.mu.Lock()
+	stopNow.Store(&interruptLatch{ch: make(chan struct{})})
 	repeatInterrupts.n = 0
 	repeatInterrupts.next = make(chan struct{})
+	repeatInterrupts.offers = 0
 	repeatInterrupts.mu.Unlock()
 }
 
@@ -286,26 +446,10 @@ func NewCtx() context.Context {
 		}
 
 		// What the process still does for someone else (SetSignalHold)
-		// finishes before the cancel; a second signal cuts it short.
-		// holdDone says it finished: nothing the process held for someone
-		// else is lost to a signal after it.
-		holdDone := false
+		// finishes before the cancel; a repeated signal does not cut it
+		// short (holdUntilDone).
 		if h := signalHold.Load(); h != nil {
-			stopNow := make(chan struct{})
-			held := make(chan struct{})
-			go func() {
-				defer close(held)
-				(*h)(stopNow)
-			}()
-			select {
-			case <-held:
-				holdDone = true
-			case sig2 := <-sigs:
-				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
-				MarkInterruptedAgain()
-				close(stopNow)
-				<-held
-			}
+			holdUntilDone(ctx, *h, sigs)
 		}
 
 		// After the hold, before the hooks and the cancel: see
@@ -333,24 +477,66 @@ func NewCtx() context.Context {
 		cancel()
 
 		// The stop can take a while: a recording drains what the agent
-		// captured before it, for as long as that keeps coming. A second
-		// interrupt gives that up (InterruptedAgain); without this, SIGINT
-		// stayed registered and unread, so Ctrl+C did nothing and only
-		// SIGKILL, which skips all cleanup, could end the process.
+		// captured before it, for as long as that keeps coming. Once it has
+		// told the user that another interrupt gives that up (OfferStopNow),
+		// the next one does (StopNow); without this, SIGINT stayed registered
+		// and unread, so Ctrl+C did nothing and only SIGKILL, which skips all
+		// cleanup, could end the process. One before that ends nothing: it
+		// may be the first one again (OfferStopNow).
+		// The line claims nothing: what a repeat does, the stop that acts on
+		// it says itself (a recording's drain: what the agent still held is
+		// not saved; an agent's stop: how it stops the agent), and one before
+		// any offer does nothing. It is said before the repeat is noted, so
+		// it comes before what the repeat makes happen, and outside the
+		// repeats' lock, which a stdout that does not drain must not hold.
 		for sig2 := range sigs {
-			if holdDone {
-				// An agent whose recording client finished with it (the
-				// hold returned): a signal now, often the client's own stop
-				// of it, cuts nothing short.
-				fmt.Printf("Signal received again: %s, stopping now\n", sig2)
-			} else {
-				fmt.Printf("Signal received again: %s, stopping now; what Keploy was still saving is not saved\n", sig2)
-			}
+			fmt.Printf("Signal received again: %s\n", sig2)
 			MarkInterruptedAgain()
 		}
 	}()
 
 	return ctx
+}
+
+// holdUntilDone runs hold, what the process still does for someone else, and
+// returns once it has: the first stop signal's cancel waits on it. A signal
+// that comes while it runs is counted (MarkInterruptedAgain) and said, and
+// cuts nothing short. The wait ends on events alone: hold returns (the
+// agent's recording client has closed its streams, or dropped them as it
+// died), or the root context is cancelled some other way (ExecCancel: the
+// agent's stop over its API, its escalation signal). The process then stops
+// as that asked, and the wait no longer holds up its stop; hold ends with the
+// streams it waits on.
+//
+// One stop can arrive twice. An agent a non-root CLI starts with `sudo -n`
+// runs under sudo, and `sudo pkill -INT -f keploy` signals the agent, and
+// sudo, which hands its own copy on: the copy comes as the first does, or, if
+// sudo or the agent is starved or frozen, any time later. Taken for a second
+// Ctrl+C, it cut the agent's hold short, and the agent closed the frame
+// streams its recording's client was still draining: what the client had not
+// received yet was lost, and the recording failed. No time tells a copy from
+// a second signal, as Go gives a signal's sender to no one. And none is
+// needed: the user's Ctrl+C reaches the CLI, not the agent (it runs in a
+// process group of its own); a second one there ends the CLI's drain, which
+// closes the streams this hold waits on; and a CLI that must stop the agent
+// regardless asks it over its API, or escalates (DieOnEscalation).
+func holdUntilDone(ctx context.Context, hold func(), sigs <-chan os.Signal) {
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		hold()
+	}()
+	for {
+		select {
+		case <-held:
+			return
+		case <-ctx.Done():
+			return
+		case sig2 := <-sigs:
+			fmt.Printf("Signal received again: %s; Keploy stops once its client has saved what it still holds for it (to stop sooner, stop the keploy command it serves)\n", sig2)
+			MarkInterruptedAgain()
+		}
+	}
 }
 
 // notifyHangups has a hang-up stop keploy as SIGTERM does: NewCtx takes the

@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -72,6 +73,9 @@ type replayCase struct {
 	// mapped: the set has per-test mappings (keploy mock record wrote them),
 	// which the proven switch requires.
 	mapped bool
+	// losses: the agent counts what it could not capture (GET
+	// /agent/capturelosses).
+	losses *lossCounter
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -133,7 +137,16 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	t.Cleanup(func() { utils.ErrCode = 0 })
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	svc := New(zap.New(core), instr, stubMockDB{}, mapDB, nil, nil, cfg)
+	var run Instrumentation = instr
+	if c.losses != nil {
+		run = lossReplayInstr{instr, c.losses}
+	}
+	var store MockDB = stubMockDB{}
+	if c.mapped && provenswitch.On() {
+		// Under the switch the mapping must name mocks the recording has.
+		store = named("mock-0")
+	}
+	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {
@@ -457,9 +470,11 @@ func (a *armsThenFails) Setup(ctx context.Context, cmd string, opts models.Setup
 	return a.runWrites.Setup(ctx, cmd, opts)
 }
 
-// A user's Ctrl+C is not a failure, wherever it lands: no error, exit 0, and
+// A user's Ctrl+C is not keploy's failure, wherever it lands: no error, and
 // the last completed run's receipt stays, since it still truthfully describes
-// that run. While the test command runs, the interrupt cancels the run's own
+// that run. Nor is it a pass: it exits 128+N for the signal (130 for SIGINT),
+// whatever the stopped runner reported (run-exit: its own 130 won Run's
+// select). While the test command runs, the interrupt cancels the run's own
 // context too, which is exactly what keploy's agent dying under it looks like
 // from there; only the caller's context tells the two apart.
 func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
@@ -489,6 +504,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			defer utils.SetInterruptSignalForTest(2)() // SIGINT, as NewCtx's handler records it
+			t.Cleanup(func() { utils.ErrCode = 0 })
 			base := newInstr(t, agentUpFromSetup, false, tc.runExit)
 			instr := &runWrites{composeInstr: base, onRun: cancel}
 			if tc.stage == "setup" {
@@ -503,8 +520,8 @@ func TestAnInterruptedReplayIsNotAFailure(t *testing.T) {
 			if err := New(zap.NewNop(), instr, stubMockDB{}, nil, nil, nil, cfg).Replay(ctx); err != nil {
 				t.Fatalf("an interrupted replay failed: %v", err)
 			}
-			if utils.ErrCode != 0 {
-				t.Fatalf("an interrupted replay exits %d", utils.ErrCode)
+			if utils.ErrCode != 130 {
+				t.Fatalf("an interrupted replay (SIGINT) exits %d, want 130: no pass for a run keploy never judged", utils.ErrCode)
 			}
 			if after, err := os.ReadFile(receiptPath); err != nil || !bytes.Equal(after, before) {
 				t.Fatalf("an interrupted replay replaced the last receipt (%v):\n%s", err, after)
@@ -945,14 +962,17 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 func TestRecordTestsReceipt(t *testing.T) {
 	keployDir := t.TempDir()
 	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	lost := &models.ScopeEvidence{CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}
 	windows := []models.ScopeWindow{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestA/case", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed, Evidence: &models.ScopeEvidence{}},
 		{Name: "suite", Suite: true},
 		{Name: "app", App: true},
 	}
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, windows, nil)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, windows)
 	got, err := ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -960,15 +980,31 @@ func TestRecordTestsReceipt(t *testing.T) {
 	require.Equal(t, []TestReceipt{
 		{Name: "orders::TestA", Outcome: models.ScopeOutcomePassed},
 		{Name: "orders::TestB", Outcome: models.ScopeOutcomeFailed},
-	}, got.Tests)
+		{Name: "orders::TestC", Outcome: models.ScopeOutcomePassed, Evidence: lost},
+		{Name: "orders::TestD", Outcome: models.ScopeOutcomePassed},
+	}, got.Tests, "a window's capture loss is kept for judging; empty evidence is not written")
 	ignore, err := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
 	require.NoError(t, err)
 	require.Contains(t, string(ignore), "/*/"+RecordTestsReceiptFile)
 
-	writeRecordTestsReceipt(zap.NewNop(), keployDir, "t2-go", at, nil, nil)
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at}, nil)
 	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
 	require.NoError(t, err)
 	require.Nil(t, got, "a record that named no test removes the stale file")
+
+	// What the run saw of mock.real writes no file for a record that named
+	// no test: judging says it reported none.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{
+		Reached: []string{"db:5432"}, Incomplete: []models.CaptureIncomplete{{Class: models.CaptureIncompleteRealName, Destination: "10.0.0.7:443"}}}}, nil)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	// With its tests, the record's file carries it.
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", At: at, Real: &models.RealRun{Reached: []string{"db:5432"}}}, windows)
+	got, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Equal(t, []string{"db:5432"}, got.Real.Reached)
 }
 
 // writeMapping writes keploy/set/mappings.yaml: one test, which made the
@@ -979,4 +1015,32 @@ func writeMapping(t *testing.T, keployDir string) {
 	if err := os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A run that reported no test leaves no per-test file, whatever rows it
+// saw: a record's file says the record reported its tests, and judging reads
+// a missing one as "the record reported no test" (a suite without keploy's
+// integration that called a local listener still makes rows).
+func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Live: []models.LiveRow{{Exe: "/app", Port: 8080}}})
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Nil(t, got, "a replay that reported no test left a per-test file")
+
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "t2-go", Mocked: []models.MockedRow{{Addr: "127.0.0.1:6379", Port: 6379}}}, nil)
+	gotRec, err := ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.Nil(t, gotRec, "a record that reported no test left a per-test file judging would read as complete")
+	_, err = os.Stat(filepath.Join(keployDir, "t2-go"))
+	require.True(t, os.IsNotExist(err), "a record that reported no test made its set's folder")
+
+	refused := models.RunRefusal{Code: "one_test_process_at_a_time", Message: "m"}
+	withRefusal := TestsReceipt{Set: "t2-go", Refusals: []models.RunRefusal{refused}, Live: []models.LiveRow{{Exe: "/app", Port: 8080}}}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, withRefusal, nil)
+	gotRec, err = ReadRecordTestsReceipt(keployDir, "t2-go")
+	require.NoError(t, err)
+	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
+	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
 }

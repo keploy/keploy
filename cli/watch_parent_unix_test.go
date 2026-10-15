@@ -6,8 +6,10 @@ import (
 	"context"
 	"math"
 	"os"
+	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -28,6 +30,26 @@ func TestParentAlive(t *testing.T) {
 	const neverAllocatedPID = math.MaxInt32
 	if parentAlive(neverAllocatedPID) {
 		t.Fatalf("parentAlive(%d) = true for an unallocated pid, want false", neverAllocatedPID)
+	}
+}
+
+// A client that dies while the agent's stop is under way -- holding for the
+// client's streams, which no repeated signal cuts short -- ends that stop
+// (ExecCancel): the agent does not wait on the streams of a client that is
+// gone. (Without a stop under way it signals itself SIGTERM, which this
+// process cannot take in a test.)
+func TestAGoneClientEndsAStopUnderWay(t *testing.T) {
+	utils.MarkInterrupted() // the stop under way
+	t.Cleanup(utils.ClearInterrupted)
+	cancelled := make(chan struct{})
+	var once sync.Once
+	utils.SetCancel(func() { once.Do(func() { close(cancelled) }) })
+	t.Cleanup(func() { utils.SetCancel(func() {}) })
+	endForGoneClient()
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("a gone client did not end the stop under way")
 	}
 }
 

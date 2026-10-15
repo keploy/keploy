@@ -54,6 +54,10 @@ const (
 	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
 	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
 	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing
+	// FailedByCaptureIncomplete: the agent could not track a process the test
+	// command ran (its PID map refused it), so that process's calls went to the
+	// real dependency, neither mocked nor counted (models.PIDMapRefusals).
+	FailedByCaptureIncomplete = "capture_incomplete"
 )
 
 // Receipt is what one `keploy mock replay` proved.
@@ -181,6 +185,29 @@ type TestsReceipt struct {
 	// Refusals are, in a record's file, what keploy refused during it
 	// (Receipt.Refusals): a record that reported no test says why.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// Live and Mocked are, under the proven switch, where the run's calls to
+	// local listeners went, each row naming the test open then (none:
+	// outside every test): a listener of the run's own process tree, called
+	// live (models.LiveRow), and any other local listener, recorded and
+	// mocked (models.MockedRow). keploy's summary lists them.
+	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
+	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
+	// Real is, under the proven switch, what the run saw of mock.real beyond
+	// its tests (design v14 §4, §8.2 rule 4): the destinations it reached,
+	// those it first reached outside a test, and the capture_incomplete
+	// evidence charged to no test. nil without the switch.
+	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
+}
+
+// empty reports whether the run reported no test and keploy refused
+// nothing: such a run leaves no per-test file, whatever rows it saw. A
+// record's file is what says the record reported its tests (judging reads a
+// missing one as "the record reported no test"), so rows alone, which a
+// suite without keploy's integration still makes, never write one; nor does
+// what the run saw of mock.real (its agent logs each connection it could not
+// capture).
+func (r TestsReceipt) empty() bool {
+	return len(r.Tests) == 0 && len(r.Refusals) == 0
 }
 
 // TestReceipt is one test's line in a TestsReceipt. Outcome is its latest
@@ -192,8 +219,16 @@ type TestReceipt struct {
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Evidence is, under the proven wire, what failed the test at its end:
-	// its misses and the recorded calls of its mapping it never made.
+	// its misses, the recorded calls of its mapping it never made, and the
+	// connections keploy could not capture.
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open: its REAL rows (design v14 §4).
+	Real []models.RealUse `yaml:"real,omitempty" json:"real,omitempty"`
+	// RealListed is, in a replay's file, the mock.real destinations the
+	// test's recording lists: the run must reach each (design v14 §8.2 rule
+	// 4), and the test ran on the real clock (§3.4, F3).
+	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner
@@ -255,19 +290,26 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 const RecordTestsReceiptFile = "last-record-tests.yaml"
 
 // writeRecordTestsReceipt writes RecordTestsReceiptFile: the verdict each
-// top-level test of the record reported as it ended, whether or not the
-// recording was kept. It makes the set's directory when the record kept
+// top-level test of the record reported as it ended, with the evidence the
+// proven wire left on its window, whether or not the recording was kept. It makes the set's directory when the record kept
 // nothing, since a test that failed against real infra is judged too.
-func writeRecordTestsReceipt(logger *zap.Logger, keployDir, set string, at time.Time, windows []models.ScopeWindow, refusals []models.RunRefusal) {
-	r := TestsReceipt{Set: set, At: at, Refusals: refusals}
+func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt, windows []models.ScopeWindow) {
+	set := r.Set
 	for _, w := range windows {
 		if w.App || w.Suite || parentOf(windows, w.Name) != "" {
 			continue
 		}
-		r.Tests = append(r.Tests, TestReceipt{Name: w.Name, Outcome: w.Outcome})
+		tr := TestReceipt{Name: w.Name, Outcome: w.Outcome, Real: w.Real}
+		// What keploy could not capture while the test ran (a record's
+		// window carries no misses): a verdict against real infra keploy
+		// did not see whole is no basis for judging the recording.
+		if ev := w.Evidence; ev != nil && (!ev.Empty() || ev.Reason != "") {
+			tr.Evidence = ev
+		}
+		r.Tests = append(r.Tests, tr)
 	}
 	dir := filepath.Join(keployDir, set)
-	if len(r.Tests) > 0 || len(r.Refusals) > 0 {
+	if !r.empty() {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			logger.Warn("could not write what each test did in this record", zap.String("dir", dir), zap.Error(err))
 			return
@@ -291,7 +333,7 @@ func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
 // one when the run named no tests: it would describe an earlier run.
 func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsReceipt) {
 	path := filepath.Join(dir, file)
-	if len(r.Tests) == 0 && len(r.Refusals) == 0 {
+	if r.empty() {
 		_ = os.Remove(path)
 		return
 	}

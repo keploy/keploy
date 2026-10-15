@@ -3,14 +3,21 @@ package containerkey
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"reflect"
+	"slices"
 	"sync"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -28,9 +35,17 @@ type fakeDocker struct {
 	mu         sync.Mutex
 	host       string
 	containers map[string]container.InspectResponse
+	// images is each image's configuration, by image ID; an image not here
+	// is one the daemon no longer has.
+	images     map[string]ImageConfig
+	imageReads int
+	// inspectErr and imageErr fail a container's inspect, or an image's;
+	// listErr fails the watch's list (placeErr, a list of one container).
+	inspectErr map[string]error
+	imageErr   map[string]error
 	listErr    error
-	// hang makes the list block until its context ends: a daemon that
-	// accepts and never answers.
+	// hang makes the watch's list block until its context ends: a daemon
+	// that accepts and never answers.
 	hang bool
 	// block holds the inspect of a container until its channel closes;
 	// entered is told each held inspect as it begins.
@@ -42,23 +57,65 @@ type fakeDocker struct {
 	listGate   chan struct{}
 	msgs       chan events.Message
 	errs       chan error
-	calls      int
-	inspects   int
-	closes     int
-	opts       events.ListOptions
+	// placeGate holds the list of one container (its placing) until its
+	// channel closes; placeEntered is told each held one as it begins.
+	placeGate    map[string]chan struct{}
+	placeEntered chan string
+	placeErr     error // fails every list of one container
+	// imageGate holds every image inspect until it closes; imageEntered is
+	// told each as it begins.
+	imageGate    chan struct{}
+	imageEntered chan string
+	calls        int
+	placeLists   int
+	inspects     int
+	closes       int
+	opts         events.ListOptions
 }
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{
-		host:       "unix:///var/run/docker.sock",
-		containers: map[string]container.InspectResponse{},
-		block:      map[string]chan struct{}{},
-		entered:    make(chan string, 64),
-		msgs:       make(chan events.Message),
+		host:         "unix:///var/run/docker.sock",
+		containers:   map[string]container.InspectResponse{},
+		images:       map[string]ImageConfig{},
+		block:        map[string]chan struct{}{},
+		entered:      make(chan string, 64),
+		placeGate:    map[string]chan struct{}{},
+		placeEntered: make(chan string, 64),
+		imageEntered: make(chan string, 64),
+		msgs:         make(chan events.Message),
 	}
 }
 
-func (f *fakeDocker) ContainerList(ctx context.Context, _ container.ListOptions) ([]container.Summary, error) {
+func (f *fakeDocker) ContainerList(ctx context.Context, opts container.ListOptions) ([]container.Summary, error) {
+	// A list of one container (the index placing one an event started) is
+	// answered at once, as the daemon answers lists from its own view, and
+	// is answered as of when it was asked: placeGate delays only its
+	// delivery. The hooks hold the watch's list only. It never waits on a
+	// held inspect.
+	ids := opts.Filters.Get("id")
+	if len(ids) > 0 {
+		f.mu.Lock()
+		f.placeLists++ // not a call a lookup or the watch's list made (calls)
+		out, err := f.listedLocked(ids), f.placeErr
+		var placeGate chan struct{}
+		if len(ids) == 1 {
+			placeGate = f.placeGate[ids[0]]
+		}
+		f.mu.Unlock()
+		if placeGate != nil {
+			f.placeEntered <- ids[0]
+			select {
+			case <-placeGate: // one per list; closing it lets every one through
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
 	f.mu.Lock()
 	before, gate := f.beforeList, f.listGate
 	f.mu.Unlock()
@@ -71,10 +128,7 @@ func (f *fakeDocker) ContainerList(ctx context.Context, _ container.ListOptions)
 	f.mu.Lock()
 	f.calls++
 	hang := f.hang
-	var out []container.Summary
-	for id, c := range f.containers {
-		out = append(out, summaryOf(id, c))
-	}
+	out := f.listedLocked(nil)
 	err := f.listErr
 	f.mu.Unlock()
 	if hang {
@@ -82,6 +136,22 @@ func (f *fakeDocker) ContainerList(ctx context.Context, _ container.ListOptions)
 		return nil, ctx.Err()
 	}
 	return out, err
+}
+
+// listedLocked is the running containers among ids (all, for none), as the
+// daemon lists them. f.mu is held.
+func (f *fakeDocker) listedLocked(ids []string) []container.Summary {
+	var out []container.Summary
+	for id, c := range f.containers {
+		if len(ids) > 0 && !slices.Contains(ids, id) {
+			continue
+		}
+		if c.State != nil && !c.State.Running {
+			continue
+		}
+		out = append(out, summaryOf(id, c))
+	}
+	return out
 }
 
 func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error) {
@@ -100,11 +170,41 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.inspectErr[id]; err != nil {
+		return container.InspectResponse{}, err
+	}
 	got, ok := f.containers[id]
 	if !ok {
 		return container.InspectResponse{}, notFound{}
 	}
 	return got, nil
+}
+
+func (f *fakeDocker) ImageInspect(ctx context.Context, id string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+	f.mu.Lock()
+	gate := f.imageGate
+	f.mu.Unlock()
+	if gate != nil {
+		f.imageEntered <- id
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return image.InspectResponse{}, ctx.Err()
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.imageReads++
+	if err := f.imageErr[id]; err != nil {
+		return image.InspectResponse{}, err
+	}
+	c, ok := f.images[id]
+	if !ok {
+		return image.InspectResponse{}, notFound{}
+	}
+	return image.InspectResponse{ID: id, Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{
+		Env: c.Env, Cmd: c.Cmd, Entrypoint: c.Entrypoint, Labels: c.Labels}}}, nil
 }
 
 // Events streams what the test sends, and, as the real client does, says the
@@ -253,17 +353,43 @@ func stopIndex(r *dockerIndex) {
 	}
 }
 
-// watching is an index of f that has its first list in.
+// watching is an index of f that has its first list in, and the reads of
+// the configurations of the containers it listed (none is held: f.block).
 func watching(t *testing.T, f *fakeDocker, addrs ...string) (*dockerIndex, chan string) {
 	t.Helper()
+	r, applied, _ := watchingPlaced(t, f, addrs...)
+	return r, applied
+}
+
+// watchingPlaced is watching, with placed told each container whose placing
+// loop ended (dockerIndex.placeDone, set before the watch starts).
+func watchingPlaced(t *testing.T, f *fakeDocker, addrs ...string) (*dockerIndex, chan string, chan string) {
+	t.Helper()
+	f.mu.Lock()
+	listed := map[string]bool{}
+	for id := range f.containers {
+		if f.block[id] == nil {
+			listed[id] = true
+		}
+	}
+	f.mu.Unlock()
 	r, applied := newIndex(f, addrs...)
+	placed := make(chan string, 64)
+	r.placeDone = func(id string) { placed <- id }
 	r.Watch(t.Context(), nil)
 	t.Cleanup(func() { stopIndex(r) })
+	for len(listed) > 0 {
+		delete(listed, <-applied)
+	}
 	for len(applied) > 0 {
 		<-applied
 	}
-	return r, applied
+	return r, applied, placed
 }
+
+// fpEmpty is the fingerprint of a container running() makes: no environment,
+// command, entrypoint or labels of its own.
+var fpEmpty = Fingerprint(Config{})
 
 func lookup(t *testing.T, r *dockerIndex, dst string) (Container, bool) {
 	t.Helper()
@@ -300,11 +426,11 @@ func testcontainers() *fakeDocker {
 func TestIndexFindsPublishedPortsOnThisHost(t *testing.T) {
 	r, _ := watching(t, testcontainers(), "10.0.0.5", "192.168.1.20")
 	for dst, want := range map[string]Container{
-		"127.0.0.1:49153":    {ID: "pg", Image: "postgres:16-alpine", Port: 5432},
-		"[::1]:49153":        {ID: "pg", Image: "postgres:16-alpine", Port: 5432},
-		"192.168.1.20:49153": {ID: "pg", Image: "postgres:16-alpine", Port: 5432}, // all addresses
-		"127.0.0.1:49200":    {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566},
-		"10.0.0.5:49300":     {ID: "redis", Image: "redis:latest", Port: 6379}, // bound to that address
+		"127.0.0.1:49153":    {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
+		"[::1]:49153":        {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
+		"192.168.1.20:49153": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty}, // all addresses
+		"127.0.0.1:49200":    {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty},
+		"10.0.0.5:49300":     {ID: "redis", Image: "redis:latest", Port: 6379, Fingerprint: fpEmpty}, // bound to that address
 	} {
 		got, ok := lookup(t, r, dst)
 		if !ok || got != want {
@@ -316,9 +442,9 @@ func TestIndexFindsPublishedPortsOnThisHost(t *testing.T) {
 func TestIndexFindsAContainersOwnIP(t *testing.T) {
 	r, _ := watching(t, testcontainers())
 	for dst, want := range map[string]Container{
-		"172.17.0.2:5432": {ID: "pg", Image: "postgres:16-alpine", Port: 5432},
-		"[fd00::2]:5432":  {ID: "pg", Image: "postgres:16-alpine", Port: 5432},
-		"172.17.0.3:4566": {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566},
+		"172.17.0.2:5432": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
+		"[fd00::2]:5432":  {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
+		"172.17.0.3:4566": {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty},
 	} {
 		got, ok := lookup(t, r, dst)
 		if !ok || got != want {
@@ -327,22 +453,44 @@ func TestIndexFindsAContainersOwnIP(t *testing.T) {
 	}
 }
 
-// The first list fills the index from what the list carries: it reads no
-// container on its own, unless the list shows its image as an image ID.
+// The first list fills the index from what the list carries, and every
+// container it lists has its configuration read beside it, for its
+// fingerprint: until that read is in, the container is in the index with
+// none, and Fingerprint waits for it.
 func TestIndexFillsFromTheList(t *testing.T) {
 	f := testcontainers()
 	f.set("moved", running("sha256:abcdef0123456789", "sha256:abcdef0123456789aa", nil, nat.PortMap{"80/tcp": published("0.0.0.0", "40100")}))
+	stuck := make(chan struct{})
+	f.block["pg"] = stuck
 	r, applied := newIndex(f)
 	r.Watch(t.Context(), nil)
 	t.Cleanup(func() { stopIndex(r) })
-	if id := <-applied; id != "moved" {
-		t.Fatalf("read %q on its own", id)
+	for i := 0; i < 3; i++ {
+		if id := <-applied; id == "pg" {
+			t.Fatal("a held read applied")
+		}
 	}
-	if _, inspects, _ := f.count(); inspects != 1 {
-		t.Fatalf("the first list read %d containers on their own, want only the one listed by image ID", inspects)
+	<-f.entered
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "pg" || c.Fingerprint != "" {
+		t.Fatalf("a listed container whose read is held = %+v, %v; want it, with no fingerprint yet", c, ok)
 	}
-	if c, _ := lookup(t, r, "127.0.0.1:40100"); c.ID != "moved" {
+	if c, _ := lookup(t, r, "127.0.0.1:40100"); c.ID != "moved" || c.Fingerprint != fpEmpty {
 		t.Fatalf("the container listed by image ID = %+v", c)
+	}
+	got := make(chan string, 1)
+	go func() {
+		fp, _ := r.Fingerprint(t.Context(), "pg")
+		got <- fp
+	}()
+	close(stuck)
+	if fp := <-got; fp != fpEmpty {
+		t.Fatalf("Fingerprint after the held read = %q", fp)
+	}
+	if _, inspects, _ := f.count(); inspects != 4 {
+		t.Fatalf("the first list read %d containers, want every one it listed", inspects)
+	}
+	if fp, ok := r.Fingerprint(t.Context(), "nobody"); ok || fp != "" {
+		t.Fatalf("Fingerprint of a container the index never held = %q, %v", fp, ok)
 	}
 }
 
@@ -710,8 +858,9 @@ func TestIndexKeepsAnImageID(t *testing.T) {
 	r, applied := newIndex(f)
 	r.Watch(t.Context(), nil)
 	t.Cleanup(func() { stopIndex(r) })
-	<-applied // the two listed by image ID are read on their own
-	<-applied
+	for i := 0; i < 3; i++ {
+		<-applied // every listed container's configuration is read
+	}
 	for dst, want := range map[string]string{
 		"127.0.0.1:40090": "feed1234abcd",
 		"127.0.0.1:40091": "sha256:feed1234abcd",
@@ -814,8 +963,8 @@ func TestAStuckImageIDReadHoldsUpNoSession(t *testing.T) {
 		t.Fatal("the listed containers are not indexed while an image-ID read is stuck")
 	}
 	close(stuck)
-	if id := <-applied; id != "moved" {
-		t.Fatalf("applied %q", id)
+	// The listed containers' own reads apply beside it.
+	for id := <-applied; id != "moved"; id = <-applied {
 	}
 	if c, ok := lookup(t, r, "127.0.0.1:40100"); !ok || c.Image != "sha256:abcdef0123456789" {
 		t.Fatalf("the image-ID container once read = %+v, %v", c, ok)
@@ -1003,4 +1152,560 @@ func hookCore(fn func()) zapcore.Core {
 		}
 		return nil
 	})
+}
+
+// A listed container whose configuration, or whose image, the daemon fails
+// to give keeps its entry with no fingerprint; the session keeps reading
+// Docker, and every other container keeps its key.
+func TestAFailedReadCostsOnlyItsContainersKey(t *testing.T) {
+	f := testcontainers()
+	f.inspectErr = map[string]error{"pg": errors.New("the daemon timed out")}
+	f.imageErr = map[string]error{"sha256:beef": errors.New("the daemon timed out")}
+	r, _ := watching(t, f)
+	st := current(r)
+	r.mu.Lock()
+	failed := st.err
+	r.mu.Unlock()
+	if failed != nil {
+		t.Fatalf("one failed read failed the watch: %v", failed)
+	}
+	for dst, want := range map[string]string{
+		"127.0.0.1:49153": "",      // pg: its inspect failed
+		"127.0.0.1:49200": "",      // ls: its image's inspect failed
+		"10.0.0.5:49300":  fpEmpty, // redis
+	} {
+		c, ok := lookup(t, r, dst)
+		if !ok || c.Fingerprint != want {
+			t.Fatalf("%s = %+v, %v; want fingerprint %q", dst, c, ok, want)
+		}
+	}
+	if fp, ok := r.Fingerprint(t.Context(), "pg"); ok || fp != "" {
+		t.Fatalf("Fingerprint of the unread container = %q, %v; want none, without waiting", fp, ok)
+	}
+}
+
+// The index answers Pending with the containers it is placing (ones an event
+// started), a container being possible at its host's loopback; AwaitReadsOf
+// waits for the placings asked, not for one started since.
+func TestTheIndexWaitsOnlyForThePlacingsAsked(t *testing.T) {
+	f := testcontainers()
+	r, _ := watching(t, f)
+	inspects := make(chan struct{})
+	defer close(inspects)
+	hold := func(id string) chan struct{} {
+		g := make(chan struct{})
+		f.mu.Lock()
+		f.placeGate[id] = g
+		f.block[id] = inspects // its configuration's read is held throughout
+		f.mu.Unlock()
+		f.set(id, running("nginx", "sha256:n", nil, nat.PortMap{}))
+		f.msgs <- start(id)
+		<-f.placeEntered
+		return g
+	}
+	first := hold("first")
+	ids, could := r.Pending(netip.MustParseAddrPort("127.0.0.1:6000"))
+	if !could || !reflect.DeepEqual(ids, []string{"first"}) {
+		t.Fatalf("Pending = %v, %v", ids, could)
+	}
+	second := hold("second") // started after, and still held when the first is placed
+	defer close(second)
+	done := make(chan struct{})
+	go func() {
+		r.AwaitReadsOf(t.Context(), ids)
+		close(done)
+	}()
+	close(first)
+	<-done
+}
+
+// What a connection waits for is the placing of a container an event
+// started, never a container's configuration: an inspect the daemon holds
+// (a container another operation holds), of a container an event started or
+// of one the first list placed, is in no Pending.
+func TestNoConfigurationReadIsPending(t *testing.T) {
+	f := testcontainers()
+	listed := make(chan struct{})
+	defer close(listed)
+	f.block["ls"] = listed // the first list's fingerprint read of ls, held
+	r, _ := watching(t, f)
+	<-f.entered
+	wedged := make(chan struct{})
+	defer close(wedged)
+	f.mu.Lock()
+	f.block["wedged"] = wedged
+	f.mu.Unlock()
+	f.set("wedged", running("nginx", "sha256:n", []string{"172.17.0.40"}, nat.PortMap{}))
+	f.msgs <- start("wedged")
+	<-f.entered // its inspect is held
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"wedged"}) // placed from the list
+	if c, ok := lookup(t, r, "172.17.0.40:80"); !ok || c.ID != "wedged" {
+		t.Fatalf("the started container is not placed while its inspect is held: %+v %v", c, ok)
+	}
+	if ids, _ := r.Pending(netip.MustParseAddrPort("127.0.0.1:6000")); len(ids) != 0 {
+		t.Fatalf("Pending = %v, want none: only configuration reads are in flight", ids)
+	}
+}
+
+// placingNow says whether the index is placing container id.
+func placingNow(r *dockerIndex, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur.placing[id]
+}
+
+// A container the first list shows by image ID (its tag moved: a pull or a
+// rebuild while it runs) is not being placed: no connection waits for it,
+// though its configuration's read is held.
+func TestAContainerListedByImageIDIsNotWaitedFor(t *testing.T) {
+	f := testcontainers()
+	held := make(chan struct{})
+	defer close(held)
+	f.block["moved"] = held
+	f.placeGate["moved"] = held // a placing of it would last
+	f.set("moved", running("sha256:abcdef0123456789", "sha256:abcdef0123456789aa", []string{"172.17.0.50"}, nat.PortMap{"80/tcp": published("0.0.0.0", "40100")}))
+	r, _ := newIndex(f)
+	t.Cleanup(func() { stopIndex(r) })
+	r.Watch(t.Context(), nil)
+	<-f.entered
+	if ids, _ := r.Pending(netip.MustParseAddrPort("127.0.0.1:6000")); slices.Contains(ids, "moved") {
+		t.Fatalf("Pending = %v: a connection would wait on a held configuration read", ids)
+	}
+}
+
+// Placing takes no read slot: configuration reads the daemon holds, in
+// every slot, never keep a container an event started from being placed.
+func TestPlacingTakesNoReadSlot(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	r.readSlots = make(chan struct{}, maxReads)
+	held := make(chan struct{})
+	defer close(held)
+	for i := 0; i < maxReads; i++ {
+		id := fmt.Sprintf("held%02d", i)
+		f.mu.Lock()
+		f.block[id] = held
+		f.mu.Unlock()
+		f.set(id, running("nginx", "sha256:n", nil, nat.PortMap{}))
+		f.msgs <- start(id)
+		<-f.entered
+	}
+	f.set("late", running("redis", "sha256:r", []string{"172.17.0.60"}, nat.PortMap{}))
+	f.msgs <- start("late")
+	fence(f) // late's event is applied: it is being placed
+	r.AwaitReadsOf(t.Context(), []string{"late"})
+	if c, ok := lookup(t, r, "172.17.0.60:6379"); !ok || c.ID != "late" {
+		t.Fatalf("late is not placed while every read slot is held: %+v %v", c, ok)
+	}
+}
+
+// A container the list does not show running (a network connect comes while
+// Docker starts it) ends its placing with the list's answer: no connection
+// waits for its inspect, which the start holds; its start places it.
+func TestAContainerNotRunningYetIsNotWaitedFor(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["booting"] = held
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", []string{"172.17.0.70"}, nat.PortMap{})
+	c.State.Running = false
+	f.set("booting", c)
+	f.msgs <- events.Message{Type: events.NetworkEventType, Action: events.ActionConnect, Actor: events.Actor{ID: "net1", Attributes: map[string]string{"container": "booting"}}}
+	fence(f)                                         // the connect is applied: booting is being placed
+	r.AwaitReadsOf(t.Context(), []string{"booting"}) // ends with the list's answer
+	if placingNow(r, "booting") {
+		t.Fatal("still placing")
+	}
+}
+
+// A container placed again (a network connect) keeps its fingerprint and
+// image: its key never waits on its configuration's read again.
+func TestPlacingAgainKeepsTheFingerprint(t *testing.T) {
+	f := testcontainers()
+	r, _ := watching(t, f)
+	before, ok := lookup(t, r, "127.0.0.1:49200")
+	if !ok || before.Fingerprint == "" {
+		t.Fatalf("ls = %+v", before)
+	}
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["ls"] = held
+	f.mu.Unlock()
+	f.msgs <- events.Message{Type: events.NetworkEventType, Action: events.ActionConnect, Actor: events.Actor{ID: "net1", Attributes: map[string]string{"container": "ls"}}}
+	<-f.entered // placed again from the list; its inspect is held
+	after, ok := lookup(t, r, "127.0.0.1:49200")
+	if !ok || after.Fingerprint != before.Fingerprint || after.Image != before.Image {
+		t.Fatalf("after a connect: %+v, %v (before %+v)", after, ok, before)
+	}
+}
+
+// A list answered after a newer event (a die) places nothing: the die wins.
+func TestAPlacingTheDieOvertookPlacesNothing(t *testing.T) {
+	f := newFakeDocker()
+	r, _, done := watchingPlaced(t, f)
+	g := make(chan struct{})
+	f.mu.Lock()
+	f.placeGate["gone"] = g
+	f.mu.Unlock()
+	f.set("gone", running("redis", "sha256:r", []string{"172.17.0.80"}, nat.PortMap{}))
+	f.msgs <- start("gone")
+	<-f.placeEntered // its list was answered as of now: it has it running
+	stopped := running("redis", "sha256:r", []string{"172.17.0.80"}, nat.PortMap{})
+	stopped.State.Running = false
+	f.set("gone", stopped) // Docker records the stop before it sends the die
+	f.msgs <- die("gone")
+	fence(f)
+	close(g)
+	for id := <-done; id != "gone"; id = <-done { // its late list is in
+	}
+	if c, ok := lookup(t, r, "172.17.0.80:6379"); ok {
+		t.Fatalf("a container that died while it was placed is indexed: %+v", c)
+	}
+	if placingNow(r, "gone") {
+		t.Fatal("a container that died is still being placed")
+	}
+}
+
+// Two containers of one image read at once read it once: the second takes
+// the first's read in flight.
+func TestAnImageIsReadOnceByContainersReadAtOnce(t *testing.T) {
+	f := newFakeDocker()
+	f.images["sha256:img"] = ImageConfig{Env: []string{"A=1"}}
+	r, _ := watching(t, f)
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.imageGate = gate
+	f.mu.Unlock()
+	shared := make(chan string, 4)
+	r.mu.Lock()
+	r.imageShared = func(id string) { shared <- id }
+	r.mu.Unlock()
+	for _, id := range []string{"one", "two"} {
+		f.set(id, running("redis", "sha256:img", nil, nat.PortMap{}))
+		f.msgs <- start(id)
+	}
+	<-f.imageEntered // the first container's read reads the image
+	select {
+	case <-shared: // the second takes that read
+	case id := <-f.imageEntered:
+		t.Fatalf("the image %s was read again by the second container", id)
+	}
+	close(gate)
+	for _, id := range []string{"one", "two"} {
+		if fp, ok := r.Fingerprint(t.Context(), id); !ok || fp == "" {
+			t.Fatalf("%s has no fingerprint", id)
+		}
+	}
+}
+
+// fence returns once every event sent to f before it is applied: the stream
+// hands events on one at a time, so it takes the second of these only once
+// the index has taken the first, which it does after applying every event
+// before it. (Dies of containers the index never held: nothing is read or
+// placed for them.)
+func fence(f *fakeDocker) {
+	f.msgs <- die("fence-1")
+	f.msgs <- die("fence-2")
+}
+
+// connect sends a network connect of container id.
+func connect(f *fakeDocker, id string) {
+	f.msgs <- events.Message{Type: events.NetworkEventType, Action: events.ActionConnect, Actor: events.Actor{ID: "net-" + id, Attributes: map[string]string{"container": id}}}
+}
+
+// Docker's order for a run: a network connect while the container is not
+// running yet, then its start. The start places it from the list though the
+// connect's read is still held (a container Docker holds while it starts).
+func TestAStartIsPlacedThoughAnEarlierReadIsHeld(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["booting"] = held
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", []string{"172.17.0.70"}, nat.PortMap{})
+	c.State.Running = false
+	f.set("booting", c)
+	connect(f, "booting")
+	<-f.entered // the connect's read is held
+	f.set("booting", running("redis", "sha256:r", []string{"172.17.0.70"}, nat.PortMap{}))
+	f.msgs <- start("booting")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"booting"})
+	if got, ok := lookup(t, r, "172.17.0.70:6379"); !ok || got.ID != "booting" {
+		t.Fatalf("not placed: %+v %v", got, ok)
+	}
+}
+
+// A connect of a container the first list holds, whose read is held, ends
+// its placing with the list: it does not wait for the held read.
+func TestAConnectOfAContainerWhoseReadIsHeldEndsItsPlacing(t *testing.T) {
+	f := testcontainers()
+	held := make(chan struct{})
+	defer close(held)
+	f.block["ls"] = held
+	r, _ := watching(t, f)
+	<-f.entered // ls's first read is held
+	connect(f, "ls")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"ls"})
+	if placingNow(r, "ls") {
+		t.Fatal("still placing")
+	}
+}
+
+// Docker's order with every read slot held: connect, then start. The start
+// is placed all the same.
+func TestPlacingTakesNoReadSlotInDockersOrder(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	r.readSlots = make(chan struct{}, maxReads)
+	held := make(chan struct{})
+	defer close(held)
+	for i := 0; i < maxReads; i++ {
+		id := fmt.Sprintf("held%02d", i)
+		f.mu.Lock()
+		f.block[id] = held
+		f.mu.Unlock()
+		f.set(id, running("nginx", "sha256:n", nil, nat.PortMap{}))
+		f.msgs <- start(id)
+		<-f.entered
+	}
+	c := running("redis", "sha256:r", []string{"172.17.0.60"}, nat.PortMap{})
+	c.State.Running = false
+	f.set("late", c)
+	connect(f, "late")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"late"})
+	f.set("late", running("redis", "sha256:r", []string{"172.17.0.60"}, nat.PortMap{}))
+	f.msgs <- start("late")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"late"})
+	if got, ok := lookup(t, r, "172.17.0.60:6379"); !ok || got.ID != "late" {
+		t.Fatalf("late is not placed while every read slot is held: %+v %v", got, ok)
+	}
+}
+
+// A die ends the placing of its container at once: it has nowhere to be.
+func TestADieEndsItsContainersPlacing(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	g := make(chan struct{})
+	defer close(g)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.placeGate["gone"] = g
+	f.block["gone"] = held
+	f.mu.Unlock()
+	f.set("gone", running("redis", "sha256:r", []string{"172.17.0.81"}, nat.PortMap{}))
+	f.msgs <- start("gone")
+	<-f.placeEntered
+	f.msgs <- die("gone")
+	fence(f)
+	if placingNow(r, "gone") {
+		t.Fatal("a container that died is still being placed")
+	}
+}
+
+// A list asked before a newer event ends no placing: the newer event's own
+// list does.
+func TestAListOlderThanAnEventEndsNoPlacing(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	g := make(chan struct{})
+	defer close(g)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.block["svc"] = held
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", []string{"172.17.0.82"}, nat.PortMap{})
+	c.State.Running = false // the first list does not show it
+	f.set("svc", c)
+	connect(f, "svc")
+	<-f.placeEntered // the connect's list is asked
+	f.msgs <- start("svc")
+	fence(f)
+	g <- struct{}{} // the connect's list answers: nothing
+	<-f.placeEntered
+	if !placingNow(r, "svc") {
+		t.Fatal("the connect's list ended the start's placing")
+	}
+}
+
+// A list that fails ends the placing: the call is compared by its authority,
+// never held.
+func TestAListThatFailsEndsThePlacing(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["svc"] = held
+	f.placeErr = errors.New("Error response from daemon: 500")
+	f.mu.Unlock()
+	f.set("svc", running("redis", "sha256:r", []string{"172.17.0.83"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"svc"})
+	if placingNow(r, "svc") {
+		t.Fatal("still placing")
+	}
+}
+
+// A read that finds where a started container is places it, though its list
+// is held: whichever answers first ends the placing.
+func TestAReadPlacesAContainerItsListHasNotYet(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	g := make(chan struct{})
+	defer close(g)
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.mu.Unlock()
+	f.set("svc", running("redis", "sha256:r", []string{"172.17.0.84"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	<-f.placeEntered // its list is held
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"svc"})
+	if got, ok := lookup(t, r, "172.17.0.84:6379"); !ok || got.ID != "svc" {
+		t.Fatalf("not placed by its read: %+v %v", got, ok)
+	}
+}
+
+// A started container the list shows by image ID is not placed from the
+// list: its repository is in its configuration only, and a key must not
+// carry an image ID (its read indexes it).
+func TestAContainerListedByImageIDIsNotPlacedFromTheList(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["byid"] = held
+	f.mu.Unlock()
+	f.set("byid", running("sha256:abcdef0123456789", "sha256:abcdef0123456789aa", []string{"172.17.0.85"}, nat.PortMap{}))
+	f.msgs <- start("byid")
+	fence(f)
+	r.AwaitReadsOf(t.Context(), []string{"byid"}) // the list answered
+	if got, ok := lookup(t, r, "172.17.0.85:80"); ok {
+		t.Fatalf("placed from the list by its image ID: %+v", got)
+	}
+}
+
+// A list that answers after the container's read keeps the fingerprint the
+// read put in: the list carries no configuration.
+func TestAListAfterTheReadKeepsTheFingerprint(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	g := make(chan struct{})
+	defer close(g)
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.mu.Unlock()
+	f.set("svc", running("redis", "sha256:r", []string{"172.17.0.90"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	<-f.placeEntered // its list is held
+	for id := range applied {
+		if id == "svc" {
+			break
+		}
+	}
+	c, ok := lookup(t, r, "172.17.0.90:6379")
+	if !ok || c.Fingerprint == "" {
+		t.Fatalf("the read did not index it with a fingerprint: %+v %v", c, ok)
+	}
+	fp := c.Fingerprint
+	changed := make(chan struct{}, 1)
+	r.setChanged(changed)
+	g <- struct{}{} // the list answers after the read, at the same event
+	<-changed
+	if c, ok := lookup(t, r, "172.17.0.90:6379"); !ok || c.Fingerprint != fp {
+		t.Fatalf("the list dropped the read's fingerprint: %+v %v (want %s)", c, ok, fp)
+	}
+	if got, ok := r.Fingerprint(t.Context(), "svc"); !ok || got != fp {
+		t.Fatalf("Fingerprint = %q %v", got, ok)
+	}
+}
+
+// An event during a container's list runs its placing once more, and only
+// once: Docker connects a container, then starts it.
+func TestAnEventDuringAListPlacesOnceMore(t *testing.T) {
+	f := newFakeDocker()
+	r, _, done := watchingPlaced(t, f)
+	g := make(chan struct{})
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.block["svc"] = held
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", []string{"172.17.0.91"}, nat.PortMap{})
+	c.State.Running = false
+	f.set("svc", c)
+	connect(f, "svc")
+	<-f.placeEntered // the connect's list is held
+	f.set("svc", running("redis", "sha256:r", []string{"172.17.0.91"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	fence(f)
+	close(g)
+	if id := <-done; id != "svc" {
+		t.Fatalf("placing ended for %s", id)
+	}
+	f.mu.Lock()
+	n := f.placeLists
+	f.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("%d lists of svc, want 2: the connect's and the start's", n)
+	}
+	if got, ok := lookup(t, r, "172.17.0.91:6379"); !ok || got.ID != "svc" {
+		t.Fatalf("not placed: %+v %v", got, ok)
+	}
+}
+
+// A die during a container's list ends its placing, and no event that came
+// before it reruns the list: a dead container has nowhere to be placed.
+func TestADieDuringAListStopsTheRerun(t *testing.T) {
+	f := newFakeDocker()
+	r, _, done := watchingPlaced(t, f)
+	g := make(chan struct{})
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.placeGate["svc"] = g
+	f.block["svc"] = held
+	f.mu.Unlock()
+	c := running("redis", "sha256:r", []string{"172.17.0.92"}, nat.PortMap{})
+	c.State.Running = false
+	f.set("svc", c)
+	connect(f, "svc")
+	<-f.placeEntered // the connect's list is held
+	f.set("svc", running("redis", "sha256:r", []string{"172.17.0.92"}, nat.PortMap{}))
+	f.msgs <- start("svc")
+	stopped := running("redis", "sha256:r", []string{"172.17.0.92"}, nat.PortMap{})
+	stopped.State.Running = false
+	f.set("svc", stopped) // Docker records the stop before it sends the die
+	f.msgs <- die("svc")
+	fence(f)
+	close(g)
+	if id := <-done; id != "svc" {
+		t.Fatalf("placing ended for %s", id)
+	}
+	f.mu.Lock()
+	n := f.placeLists
+	f.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d lists of svc, want 1: the die ended its placing", n)
+	}
+	if got, ok := lookup(t, r, "172.17.0.92:6379"); ok {
+		t.Fatalf("a dead container is indexed: %+v", got)
+	}
 }

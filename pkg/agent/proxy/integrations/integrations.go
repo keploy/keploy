@@ -280,7 +280,9 @@ type MockMemDb interface {
 // n, and is called only once the response is actually served, so a failed or
 // retried match does not skip a recording. The agent's MockManager implements
 // it, and every MockMemDb wrapper must forward it — a wrapper that drops it
-// silently turns stateful replay off for the calls it wraps.
+// silently turns stateful replay off for the calls it wraps. A key need not
+// name a request: the HTTP variable pass keeps a served mark per recording in
+// the same store (n = 2), under keys no request's cursor uses.
 //
 // A peek and the commit after it must come from the same goroutine, with no
 // other peek of the same store in between: a wrapper may resolve per peek what
@@ -299,6 +301,18 @@ type MockCursor interface {
 // mock that declares a variable place.
 type VariableStore interface {
 	Variables() *variables.Table
+}
+
+// ExactConsumedReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (design v14 §5.2, under the proven
+// switch): each test mock answers at most one request, so once it answered
+// it is in no read. ConsumedTestMocks returns the open test's mocks that have
+// answered, in the order they did (none while no test is open), so a matcher
+// that finds no mock for a call can tell a call the test made once more than
+// it recorded (models.MissExtraCall, with MockMismatchReport.Recorded) from
+// one it never recorded. A matcher must only read them: they answer nothing.
+type ExactConsumedReader interface {
+	ConsumedTestMocks() []*models.Mock
 }
 
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
@@ -565,7 +579,11 @@ type WindowAware interface {
 	SetCurrentTestWindow(start, end time.Time)
 
 	// IsTestWindowActive reports whether a non-zero test window has been
-	// set via SetCurrentTestWindow or SetMocksWithWindow. Parsers that
+	// set via SetCurrentTestWindow or SetMocksWithWindow, or a test of keploy
+	// mock replay begun without a worker pid is open (SetScopeMocks; any
+	// other window staging or SetCurrentTestWindow closes it): a window with
+	// no recorded-time bounds, for which CurrentTestWindow reads zero and
+	// FirstTestWindowStart does not move. Parsers that
 	// partition their index into per-test and session tiers consult this
 	// at dispatch time to decide which tier a live query should be served
 	// from: true = inside a test-body window (route to per-test index),
@@ -585,6 +603,12 @@ type WindowAware interface {
 	// same underlying value FirstTestWindowStart below exposes as a
 	// timestamp — "has this set's first test fired" and "when did it fire"
 	// are one field, so they share that per-set lifetime.
+	//
+	// One exception: while a test of keploy mock replay begun without a
+	// worker pid is open (SetScopeMocks), this reports true with
+	// IsTestWindowActive, and false again once it ends; the scope sets no
+	// FirstTestWindowStart. Such a replay serves between tests as before the
+	// first test.
 	//
 	// Parsers use this alongside IsTestWindowActive to distinguish
 	// "app bootstrap" (before first test) from "between tests" (after
@@ -631,7 +655,10 @@ type WindowAware interface {
 
 	// CurrentTestWindow returns the [start, end] request-timestamp bounds of
 	// the outer test currently being replayed, or (zero, zero) when no window
-	// is active. Matchers that receive per-test data mocks via the session
+	// is active or the active one has no recorded-time bounds (a test of
+	// keploy mock replay begun without a worker pid; IsTestWindowActive tells
+	// the two apart). A caller must not read zero bounds as "nothing is in
+	// the window". Matchers that receive per-test data mocks via the session
 	// pool (the enterprise agent lax-promotes them and relies on the
 	// MockManager for strict windowing) use this to tell an in-window mock
 	// from a stale earlier-test mock when disambiguating repeated identical

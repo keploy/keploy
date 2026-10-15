@@ -1642,6 +1642,10 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			FieldDiffs:       call.FieldDiffs,
 			ClosestMockReq:   call.ClosestMockReq,
 			ReceivedReq:      call.ReceivedReq,
+			MissKind:         call.Kind,
+			Recorded:         call.Recorded,
+			Differs:          call.Differs,
+			VariablePlaces:   call.VariablePlaces,
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
