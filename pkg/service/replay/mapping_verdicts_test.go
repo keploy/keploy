@@ -1089,3 +1089,19 @@ func TestRunTestSetRetryPassingKeepsTheMappingOfATestThatFailedALaterCycle(t *te
 		t.Fatalf("test-3 passed every cycle and mappings.yaml maps it to %v; want what it consumed (mock-d, mock-x)", got)
 	}
 }
+
+// keploy test names itself the source of the test entries it writes, and
+// leaves the file's source alone when it writes the startup section only.
+func TestMarkWrittenByKeployTestOnlyWithTestEntries(t *testing.T) {
+	entries := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "test-1"}}}
+	markWrittenByKeployTest(entries)
+	if entries.Source != models.MappingSourceKeployTest {
+		t.Fatalf("test entries: source %q", entries.Source)
+	}
+	startupOnly := &models.Mapping{Startup: []models.MockEntry{{Name: "boot"}}}
+	markWrittenByKeployTest(startupOnly)
+	if startupOnly.Source != "" {
+		t.Fatalf("startup only: source %q, want the file's kept", startupOnly.Source)
+	}
+	markWrittenByKeployTest(nil)
+}
