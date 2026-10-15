@@ -66,6 +66,14 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// CaptureLossDrainer is the optional extension implemented by hooks whose
+// counts of capture losses are fed by reports the kernel makes: before a read
+// of them, DrainCaptureLosses waits until every report made before it has
+// been counted, so a call the application made before the read is in it.
+type CaptureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
 // CaptureLossErrReporter is the optional extension implemented by hooks whose
 // count of a capture loss could not start (under the proven switch): while
 // CaptureLossesErr is not nil, what it would count is unknown, never 0, and

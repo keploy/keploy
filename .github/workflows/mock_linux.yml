@@ -643,9 +643,9 @@ jobs:
           # Both binaries run, whichever fails: one's failure does not hide
           # the other's results.
           rc=0
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss' -test.v | tee /tmp/pidmap.out || rc=1
           sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
-          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
+          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
           exit $rc

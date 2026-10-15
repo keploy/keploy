@@ -303,3 +303,42 @@ type switchingHooks struct {
 }
 
 func (h *switchingHooks) CaptureLosses() models.CaptureLosses { return h.losses }
+
+// drainingHooks record whether their reports were drained before their
+// losses were read.
+type drainingHooks struct {
+	countingHooks
+	err     error
+	drained *bool
+	order   *[]string
+}
+
+func (h drainingHooks) DrainCaptureLosses(context.Context) error {
+	*h.order = append(*h.order, "drain")
+	*h.drained = true
+	return h.err
+}
+
+func (h drainingHooks) CaptureLosses() models.CaptureLosses {
+	*h.order = append(*h.order, "read")
+	return nil
+}
+
+// A read of the capture losses drains the hooks' reports first, so a call the
+// application made before the read is in it; a drain that fails leaves the
+// read unknown (not "unsupported", which leaves every test as it was).
+func TestTheAgentDrainsTheHooksReportsBeforeItReadsThem(t *testing.T) {
+	ctx := context.Background()
+	a, _ := wireAgent(t, models.MODE_TEST)
+	var order []string
+	drained := false
+	a.Hooks = drainingHooks{drained: &drained, order: &order}
+	_, err := a.CaptureLosses(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"drain", "read"}, order)
+
+	a.Hooks = drainingHooks{err: errors.New("the report ended"), drained: &drained, order: &order}
+	_, err = a.CaptureLosses(ctx)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}

@@ -127,6 +127,9 @@ type unixConn struct {
 
 	mu    sync.Mutex
 	known map[uint64]bool // dgram peer inode -> owned by a member
+
+	// drain lets a read wait for every report before it (DrainCaptureLosses).
+	drain *reportDrain
 }
 
 // sharedMaps are the main object's maps by their BPF names, which unixconn
@@ -213,7 +216,7 @@ func loadUnixConnWith(objs *bpfObjects, fallback bool) (*unixConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load the unixconn object: %w", err)
 	}
-	u := &unixConn{coll: coll, lost: coll.Maps["unix_connect_events_lost"], known: map[uint64]bool{}, fallback: fallback, self: uint32(os.Getpid())}
+	u := &unixConn{coll: coll, lost: coll.Maps["unix_connect_events_lost"], known: map[uint64]bool{}, fallback: fallback, self: uint32(os.Getpid()), drain: newReportDrain()}
 	if fallback {
 		for name, tp := range unixFallbackPrograms {
 			l, err := link.Tracepoint("syscalls", tp, coll.Programs[name], nil)
@@ -261,16 +264,24 @@ func (u *unixConn) watch(logger *zap.Logger, member func(tgid uint32) bool) {
 	warned := false
 	for {
 		rec, err := u.rd.Read()
-		if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) {
-			return
-		}
-		if err != nil {
-			logger.Debug("failed to read an AF_UNIX connect report", zap.Error(err))
+		switch {
+		case errors.Is(err, ringbuf.ErrFlushed):
+			// Every report before a read's flush is handled (drain).
+			u.drain.flushed()
 			continue
+		case errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed):
+			u.drain.stop(errReportClosed)
+			return
+		case err != nil:
+			// The ring cannot be read past here: nothing after can be
+			// judged.
+			u.drain.stop(fmt.Errorf("read an AF_UNIX report: %w", err))
+			return
 		}
 		var e unixConnectEvent
 		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
-			logger.Debug("failed to decode an AF_UNIX connect report", zap.Error(err))
+			// A call keploy cannot judge: counted, never dropped.
+			u.losses.Add(models.CaptureLossUnixSocket, "a report keploy could not read")
 			continue
 		}
 		if !u.judge(e, member) {
@@ -487,6 +498,32 @@ func (h *Hooks) unixLosses() models.CaptureLosses {
 	return u.snapshot()
 }
 
+// DrainCaptureLosses waits until the hooks' watches have handled every
+// report the kernel made before it was called, so the read that follows
+// counts a call the application made before it, on a loaded host too: the
+// report of its calls over Unix sockets and, under the proven switch, the
+// watch on its non-DNS UDP. No clock (reportDrain); ctx ends it. An error
+// leaves what they counted unknown.
+func (h *Hooks) DrainCaptureLosses(ctx context.Context) error {
+	h.unixMu.Lock()
+	u := h.unix
+	h.unixMu.Unlock()
+	if u != nil && u.off == "" && u.rd != nil {
+		if err := u.drain.wait(ctx, u.rd.Flush); err != nil {
+			return fmt.Errorf("wait for keploy's report of the application's calls over Unix sockets: %w", err)
+		}
+	}
+	h.udpMu.Lock()
+	w := h.udp
+	h.udpMu.Unlock()
+	if w != nil && w.rd != nil {
+		if err := w.drain.wait(ctx, w.rd.Flush); err != nil {
+			return fmt.Errorf("wait for keploy's watch on the application's UDP: %w", err)
+		}
+	}
+	return nil
+}
+
 // CaptureLossesErr is why a count the hooks keep under the proven switch could
 // not start: the report of the application's calls over Unix sockets, on a
 // kernel that loads it neither way. What it would count is unknown, never 0,
@@ -497,6 +534,11 @@ func (h *Hooks) CaptureLossesErr() error {
 	h.unixMu.Unlock()
 	if u != nil && u.off != "" {
 		return fmt.Errorf("keploy cannot see the application's calls over Unix sockets on this kernel, so whether a test made one cannot be told: %s", u.off)
+	}
+	if u != nil && u.drain != nil {
+		if err := u.drain.failure(); err != nil {
+			return fmt.Errorf("keploy's report of the application's calls over Unix sockets has stopped, so whether a test made one cannot be told: %w", err)
+		}
 	}
 	// Under the proven switch, the watch on the application's non-DNS UDP
 	// (udpwatch.go).
