@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -258,6 +259,97 @@ func TestReplayNeverTakesAnotherPortOfThisMachineForTheRecordedMySQL(t *testing.
 				models.MODE_TEST, models.OutgoingOptions{MysqlPorts: []uint32{3307}}, zap.NewNop())
 			if err != nil || !listed.IsMySQL || listed.Reason != "configured-port" {
 				t.Fatalf("with 3307 in mysqlPorts: IsMySQL=%v reason %q err %v, want true/configured-port", listed.IsMySQL, listed.Reason, err)
+			}
+		})
+	}
+}
+
+// The Docker host is shared like this machine: an application in a container
+// reaches every service on the host at its network's gateway (172.17.0.1 on
+// Docker's default bridge, where host.docker.internal and host-gateway point
+// too), so another port of it is not taken for the recorded MySQL there; nor
+// is another port of an address of this machine's own. The client is read
+// instead, and when it gives up, the miss names the port to list and the host
+// it is on. A listed port is MySQL.
+func TestReplayNeverTakesAnotherPortOfTheDockerHostForTheRecordedMySQL(t *testing.T) {
+	gateway := netip.MustParseAddr("172.17.0.1")
+	gateway6 := netip.MustParseAddr("fde2:5ad0:1727::1")
+	lan := netip.MustParseAddr("192.168.1.10")
+	for _, tc := range []struct {
+		name, recorded, live string
+		docker               bool
+		own, gateways        []netip.Addr
+		host                 string // the next step names it
+	}{
+		{"the container's gateway", "172.17.0.1:3306", "172.17.0.1:3307", true, nil, []netip.Addr{gateway}, "the Docker host (172.17.0.1, the container's gateway)"},
+		{"the gateway written IPv4-mapped", "[::ffff:172.17.0.1]:3306", "[172.17.0.1]:3307", true, nil, []netip.Addr{gateway}, "the Docker host (172.17.0.1, the container's gateway)"},
+		{"an IPv6 gateway", "[fde2:5ad0:1727::1]:3306", "[fde2:5ad0:1727::1]:3307", true, nil, []netip.Addr{gateway6}, "the Docker host (fde2:5ad0:1727::1, the container's gateway)"},
+		{"natively, the Docker bridge's address is this machine's", "172.17.0.1:3306", "172.17.0.1:3307", false, []netip.Addr{lan, gateway}, nil, "this machine (172.17.0.1, an address of its own)"},
+		{"an address of this machine's own", "192.168.1.10:3306", "192.168.1.10:3307", false, []netip.Addr{lan}, nil, "this machine (192.168.1.10, an address of its own)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testProxy(t)
+			p.IsDocker = tc.docker
+			p.readNetns = func() (own, gateways []netip.Addr) { return tc.own, tc.gateways }
+			p.errChannel = make(chan error, 4)
+			recordedMySQL(p, tc.recorded, "")
+			client := newSilentClient()
+			done := replayProbe(context.Background(), p, client, tc.live, zap.NewNop())
+			if probe := readOrVerdict(t, done, client); probe != nil {
+				t.Fatalf("IsMySQL=%v reason %q: another port of %s was judged without the client", probe.IsMySQL, probe.Reason, tc.live)
+			}
+			_ = client.Close() // the application gave up waiting for a greeting
+			if probe := awaitEvent(t, done, "the probe's verdict once the client left"); probe.IsMySQL {
+				t.Fatalf("reason %q: another port of a shared host was served as MySQL", probe.Reason)
+			}
+			if n := client.clocksUsed(); n != 0 {
+				t.Fatalf("the probe waited on %d clock(s)", n)
+			}
+			var miss models.ParserError
+			select {
+			case err := <-p.errChannel:
+				pe, ok := err.(models.ParserError)
+				if !ok || pe.MismatchReport == nil {
+					t.Fatalf("reported %v, want a miss with a report", err)
+				}
+				miss = pe
+			default:
+				t.Fatal("no miss was reported for the connection that waited to be greeted")
+			}
+			if next := miss.MismatchReport.NextSteps; !strings.Contains(next, "add 3307 to mysqlPorts") || !strings.Contains(next, "another port of "+tc.host+" is never taken") {
+				t.Fatalf("the miss's next step is %q; want it to say to add 3307 to mysqlPorts, naming %s", next, tc.host)
+			}
+
+			listed, err := p.probeMysql(context.Background(), newSilentClient(), tc.live, nil, 3307,
+				models.MODE_TEST, models.OutgoingOptions{MysqlPorts: []uint32{3307}}, zap.NewNop())
+			if err != nil || !listed.IsMySQL || listed.Reason != "configured-port" {
+				t.Fatalf("with 3307 in mysqlPorts: IsMySQL=%v reason %q err %v, want true/configured-port", listed.IsMySQL, listed.Reason, err)
+			}
+		})
+	}
+}
+
+// A gateway is the Docker host only for an application in a container: a
+// native application's default gateway is a router, another machine, and a
+// recorded MySQL host there, or any other recorded host that is no gateway of
+// the container's, still matches with its port moved.
+func TestReplayStillTakesAMovedPortOnARecordedHostThatIsNoSharedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name, recorded, live string
+		docker               bool
+		gateways             []netip.Addr
+	}{
+		{"natively, the default gateway", "192.168.1.1:3306", "192.168.1.1:3307", false, []netip.Addr{netip.MustParseAddr("192.168.1.1")}},
+		{"in a container, a host other than its gateway", "10.1.2.3:3306", "10.1.2.3:3307", true, []netip.Addr{netip.MustParseAddr("172.17.0.1")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testProxy(t)
+			p.IsDocker = tc.docker
+			p.readNetns = func() (own, gateways []netip.Addr) { return nil, tc.gateways }
+			recordedMySQL(p, tc.recorded, "")
+			probe := verdict(t, p, newSilentClient(), tc.live)
+			if !probe.IsMySQL || probe.Reason != "recorded-endpoint-moved" {
+				t.Fatalf("IsMySQL=%v reason %q, want true/recorded-endpoint-moved", probe.IsMySQL, probe.Reason)
 			}
 		})
 	}
@@ -620,5 +712,26 @@ func TestReplayRecordingNamedForContainersJudgesAContainerByItsKeyAlone(t *testi
 	recordedMySQL(p, "10.0.0.5:3306", "")
 	if probe := judge(p, "c2"); !probe.IsMySQL || probe.Reason != "recorded-endpoint-moved" {
 		t.Fatalf("IsMySQL=%v reason %q: the previous test set's stamp outlived its replacement", probe.IsMySQL, probe.Reason)
+	}
+}
+
+// Whether a recorded host is shared is read from the network namespace: it is
+// asked outside the registry's lock, so no connection's look at the registry
+// waits on that read.
+func TestASharedHostIsAskedOutsideTheRegistrysLock(t *testing.T) {
+	p := testProxy(t)
+	recordedMySQL(p, "10.1.2.3:3306", "")
+	asked := 0
+	why, ok := p.mysqlPorts.recordedEndpointMoved(netip.MustParseAddr("10.1.2.3"), "", false, false, false, func(netip.Addr) bool {
+		asked++
+		if !p.mysqlPorts.mu.TryLock() {
+			t.Error("the shared host was asked with the registry's lock held")
+		} else {
+			p.mysqlPorts.mu.Unlock()
+		}
+		return true
+	})
+	if ok || asked != 1 {
+		t.Fatalf("matched %v (%q), the shared host asked %d time(s); want no match, asked once", ok, why, asked)
 	}
 }

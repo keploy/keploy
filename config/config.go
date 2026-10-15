@@ -54,8 +54,9 @@ type Config struct {
 	// defaults (3306, 4000). Needed in replay for a MySQL endpoint that
 	// moved since the recording and is neither the recorded container nor
 	// the recorded host (see DisableMysqlEndpointDrift; another port of
-	// this machine, localhost, always needs listing), and when detection is
-	// disabled (DisableMysqlAutoDetect).
+	// this machine (localhost, or any address of its own), or of the Docker
+	// host at the container's gateway, always needs listing), and when
+	// detection is disabled (DisableMysqlAutoDetect).
 	MysqlPorts []uint32 `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection.
 	// With detection on (the default), keploy identifies MySQL on any
@@ -71,9 +72,10 @@ type Config struct {
 	// Leave it on (the default) unless a dependency is being misread. Replay
 	// serves MySQL on a port the recording never saw only when the
 	// connection reaches the container the recording reached MySQL in, or
-	// the host it reached it on (never this machine) with the port moved,
-	// and its client has not spoken; any other moved endpoint, another
-	// localhost port among them, needs its port in MysqlPorts. A non-MySQL
+	// the host it reached it on (never this machine, nor the Docker host at
+	// the container's gateway) with the port moved, and its client has not
+	// spoken; any other moved endpoint, another localhost port among them,
+	// needs its port in MysqlPorts. A non-MySQL
 	// service on the recorded host (a client-first one that had not spoken
 	// yet) can still be answered with a handshake it did not ask for: this
 	// is the escape hatch for that, and unlike DisableMysqlAutoDetect it
