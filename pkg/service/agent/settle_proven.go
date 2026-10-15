@@ -24,13 +24,16 @@ import (
 //     WaitProxySettled on the counts it read);
 //  2. no accepted connection holds bytes the proxy has not read;
 //  3. in a replay, no accepted connection holds a request the proxy read and
-//     has not answered: its handler is blocked reading it, its parser holds
-//     none it read ahead (integrations.HoldRequest), and its handler is done
-//     with it if it closed. A record skips it: a relayed request waits for
-//     its real server, which the end never waits on.
+//     has not answered: its handler is blocked reading it, or waits out an
+//     answer the dependency held idle (integrations.MarkIdle: a long poll
+//     that has caught up with the recording), its parser holds none it read
+//     ahead (integrations.HoldRequest), and its handler is done with it if
+//     it closed. A record skips it: a relayed request waits for its real
+//     server, which the end never waits on.
 //
 // Each step waits on an event: an accept, a read beginning or returning, a
-// request held or released, a connection closing. No clock decides. A test
+// request held or released, an idle wait marked or released, a connection
+// closing. No clock decides. A test
 // whose calls keploy cannot count (models.ErrProxyConnsUnsupported, or hooks
 // not loaded) is not settled: "unknown" is never "none in flight". Nor is one
 // with a connection whose parser reads ahead and does not say what it holds,
