@@ -48,6 +48,37 @@ func HoldRequest(ctx context.Context) (release func()) {
 	return func() {}
 }
 
+// UnknownMarker is a connection whose parser can say that, for a while,
+// whether it holds a request cannot be told.
+type UnknownMarker interface {
+	// MarkUnknown marks it so until release, called once (later calls do
+	// nothing); protocol names it in what keploy says.
+	MarkUnknown(protocol string) (release func())
+}
+
+// MarkUnknown says that, until release, whether the parser of ctx's
+// connection holds a request cannot be told: a parser that marks its holds
+// (RequestHolding) but has a state it cannot mark exactly, such as Mongo's
+// moreToCome group, open until a later frame ends it, which may come only in
+// the next test. A test's end that finds the mark leaves the test not
+// verified, never passed, and does not wait for the mark to go. Without the
+// proven switch, or for a connection the proxy does not keep, it marks
+// nothing.
+//
+// The parser marks before it reads on with the state open, and releases the
+// mark before it reads again once the state ends, after the requests the mark
+// covered are held (HoldRequest) or answered: in between, its handler is not
+// blocked reading, so a test's end waits for it. A mark released while the
+// parser is already reading on with those requests unanswered leaves them
+// neither marked nor held. The holder WithRequestHolder carries is also the
+// marker: a stand-in holder that is not an UnknownMarker drops every mark.
+func MarkUnknown(ctx context.Context, protocol string) (release func()) {
+	if m, ok := ctx.Value(requestHolderKey{}).(UnknownMarker); ok && m != nil {
+		return m.MarkUnknown(protocol)
+	}
+	return func() {}
+}
+
 // RequestHolding is the optional capability of a parser that marks every
 // request it holds (HoldRequest). The proxy type-asserts the parser it
 // serves a connection with, as it does GapResyncCapable.

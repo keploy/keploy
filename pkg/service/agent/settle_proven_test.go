@@ -105,6 +105,10 @@ type settledProxy struct {
 	drops uint64
 }
 
+func (s *settledProxy) InFlightState(answers bool) (int, []string) {
+	return s.InFlightPending(answers), s.InFlightUnknown(answers)
+}
+
 func (s *settledProxy) InFlightUnknown(answers bool) []string {
 	s.smu.Lock()
 	defer s.smu.Unlock()

@@ -29,10 +29,11 @@ import (
 // (integrations.HoldRequest: a parser that reads ahead is blocked reading
 // while it still holds one), and its socket holds no unread byte. Each change
 // of a connection's state (a read begins or returns, a request is held or
-// released, the connection closes) wakes whoever waits on Changed, so a wait
-// never polls a clock. Progress, for the agent's watchdog, counts only the
-// changes that move work: a read that returns bytes or ends the connection, a
-// hold, a release, an accept, a close. A read that waited out its deadline
+// released, a mark that it cannot tell is set or released, the connection
+// closes) wakes whoever waits on Changed, so a wait never polls a clock.
+// Progress, for the agent's watchdog, counts only the changes that move work:
+// a read that returns bytes or ends the connection, a hold, a release, a mark
+// or its release, an accept, a close. A read that waited out its deadline
 // with nothing (a parser polling an idle connection) is no progress.
 type inflight struct {
 	mu    sync.Mutex
@@ -55,6 +56,11 @@ type trackedConn struct {
 	// progress counts what moved its own work: bytes read, a request held
 	// or released, its close.
 	progress atomic.Uint64
+	// mu orders each change of reading, held and unknownFor against State's
+	// read of the three (view): a parser hands a request from one to another
+	// (busy, then held, then reading on; busy, then marked, then reading on;
+	// marked, then busy), so no order of separate reads sees every hand-off.
+	mu sync.Mutex
 	// reading counts the reads in progress: one is the handler waiting for
 	// the application's next bytes.
 	reading atomic.Int32
@@ -70,6 +76,11 @@ type trackedConn struct {
 	// and does not mark what it holds (integrations.HoldsUnknown): whether
 	// it holds a request cannot be told.
 	unknown atomic.Pointer[string]
+	// unknownFor counts the marks its parser holds that what it holds cannot
+	// be told for now (MarkUnknown), and unknownWhat names the protocol of
+	// the latest.
+	unknownFor  atomic.Int32
+	unknownWhat atomic.Pointer[string]
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
@@ -154,6 +165,58 @@ func (t *inflight) Pending(answers bool) int {
 	return n
 }
 
+// State is Pending and Unknown read as one view: how many accepted
+// connections still hold work, and the protocols of those whose parser does
+// not say, or says it cannot tell for now, what they hold (Unknown). A wait
+// that read the two apart could see a connection unknown and not pending, then
+// known and not pending, while between the reads its parser ended the state
+// it could not tell (a moreToCome group's last frame read) and went on
+// answering: neither read sees it pending, and the wait would call it
+// settled. Within a connection, separate reads in any order miss a hand-off
+// (busy to held to reading on, busy to marked, marked to busy): its socket is
+// read first, then its counts at one instant (view).
+func (t *inflight) State(answers bool) (pending int, unknown []string) {
+	t.mu.Lock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		conns = append(conns, tc)
+	}
+	t.mu.Unlock()
+	seen := map[string]bool{}
+	for _, tc := range conns {
+		if tc.forgotten.Load() {
+			continue
+		}
+		// The socket first: a request leaves it before the read that took
+		// it returns. Then the counts at one instant (view). Then the
+		// parser the proxy noted, which it notes before that parser's
+		// first read (servedBy).
+		unread := tc.unread()
+		reading, held, marks := tc.view()
+		if unread > 0 || (answers && (reading == 0 || held > 0)) {
+			pending++
+		}
+		if answers {
+			if p := tc.unknown.Load(); p != nil {
+				seen[*p] = true
+			}
+			if marks > 0 {
+				if p := tc.unknownWhat.Load(); p != nil {
+					seen[*p] = true
+				}
+			}
+		}
+	}
+	if len(seen) > 0 {
+		unknown = make([]string, 0, len(seen))
+		for p := range seen {
+			unknown = append(unknown, p)
+		}
+		sort.Strings(unknown)
+	}
+	return pending, unknown
+}
+
 // PendingProgress is, for each connection that holds work now (Pending), the
 // count of what moved its own work: a wait whose pending connections' counts
 // do not move is stuck, whatever moves elsewhere.
@@ -177,8 +240,9 @@ func (t *inflight) PendingProgress(answers bool) map[uint64]uint64 {
 }
 
 // Unknown are the protocols of the connections, still kept, whose parser
-// reads ahead and does not say which requests it holds: whether they hold
-// one cannot be told, in a replay (answers). Sorted, each once.
+// reads ahead and does not say which requests it holds, or says that for now
+// it cannot tell (MarkUnknown): whether they hold one cannot be told, in a
+// replay (answers). Sorted, each once.
 func (t *inflight) Unknown(answers bool) []string {
 	if !answers {
 		return nil
@@ -191,6 +255,11 @@ func (t *inflight) Unknown(answers bool) []string {
 		}
 		if p := tc.unknown.Load(); p != nil {
 			seen[*p] = true
+		}
+		if tc.unknownFor.Load() > 0 {
+			if p := tc.unknownWhat.Load(); p != nil {
+				seen[*p] = true
+			}
 		}
 	}
 	t.mu.Unlock()
@@ -217,10 +286,10 @@ func (c *trackedConn) servedBy(t integrations.IntegrationType, parser any) {
 func (t *inflight) Progress() uint64 { return t.progress.Load() }
 
 func (c *trackedConn) Read(b []byte) (int, error) {
-	c.reading.Add(1)
+	c.count(&c.reading, 1)
 	c.t.wake()
 	n, err := c.Conn.Read(b)
-	c.reading.Add(-1)
+	c.count(&c.reading, -1)
 	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
 		// Nothing came: a deadline waited out by a parser polling an idle
 		// connection, or the end of one it reads again. No work moved.
@@ -229,6 +298,21 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 		c.moved()
 	}
 	return n, err
+}
+
+// count changes one of c's counts under c.mu (view).
+func (c *trackedConn) count(n *atomic.Int32, delta int32) {
+	c.mu.Lock()
+	n.Add(delta)
+	c.mu.Unlock()
+}
+
+// view is c's reads in progress, held requests and marks, read at one
+// instant.
+func (c *trackedConn) view() (reading, held, marks int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reading.Load(), c.held.Load(), c.unknownFor.Load()
 }
 
 // moved is a change that moved c's own work: progress for c, and for all.
@@ -240,12 +324,29 @@ func (c *trackedConn) moved() {
 // Hold marks a request c's parser read and holds, not yet answered
 // (integrations.RequestHolder); release unmarks it, once.
 func (c *trackedConn) Hold() (release func()) {
-	c.held.Add(1)
+	c.count(&c.held, 1)
 	c.moved()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			c.held.Add(-1)
+			c.count(&c.held, -1)
+			c.moved()
+		})
+	}
+}
+
+// MarkUnknown marks that, until release, whether c's parser holds a request
+// cannot be told (integrations.UnknownMarker): a test's end that finds the
+// mark leaves the test not verified, and does not wait for it. release
+// unmarks it, once.
+func (c *trackedConn) MarkUnknown(protocol string) (release func()) {
+	c.unknownWhat.Store(&protocol)
+	c.count(&c.unknownFor, 1)
+	c.moved()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.count(&c.unknownFor, -1)
 			c.moved()
 		})
 	}
@@ -292,14 +393,13 @@ func (c *trackedConn) unread() int {
 	return socketUnread(c.raw)
 }
 
-// InFlightPending implements agent.InFlightReader.
-func (p *Proxy) InFlightPending(answers bool) int { return p.inflight.Pending(answers) }
-
 // InFlightChanged implements agent.InFlightReader.
 func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() }
 
-// InFlightUnknown implements agent.InFlightReader.
-func (p *Proxy) InFlightUnknown(answers bool) []string { return p.inflight.Unknown(answers) }
+// InFlightState implements agent.InFlightReader.
+func (p *Proxy) InFlightState(answers bool) (pending int, unknown []string) {
+	return p.inflight.State(answers)
+}
 
 // InFlightPendingProgress implements agent.InFlightReader.
 func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
@@ -309,5 +409,6 @@ func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 var (
 	_ agent.InFlightReader       = (*Proxy)(nil)
 	_ integrations.RequestHolder = (*trackedConn)(nil)
+	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ syscall.Conn               = (*trackedConn)(nil)
 )
