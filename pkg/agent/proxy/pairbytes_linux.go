@@ -64,9 +64,13 @@ type pairTarget struct {
 // closed, or the application's socket cannot be seen while its connection is
 // alive at the proxy's side and no application socket has ever been seen (it
 // is in another network namespace than the proxy's, which keploy never sets
-// up). Once one has been seen, an application socket that is gone is one
-// whose FIN or reset is on its way: the wait waits for it (it ends the
-// handler's read).
+// up), or the proxy closed its side of one whose orphaned socket shows neither
+// the application's FIN taken nor bytes refused (orphanTookFIN): the
+// application's end went after the close (its own reset, or one refusing
+// bytes it wrote before the close), or the proxy's side is one FIN short with
+// that FIN, or a byte the orphan will refuse, still to come. Once one has been
+// seen, an application socket that is gone is one whose FIN or reset is on
+// its way: the wait waits for it (it ends the handler's read).
 func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
 	pending, err := p.pairTargets(n)
 	if err != nil {
@@ -217,12 +221,40 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// dropped, as it would have without keploy.
 		return true, nil
 	case closed:
-		// Short of what was written, and the proxy closed it: what arrives
-		// now is answered with a reset.
+		// Short of what was written, and the proxy closed it. An orphan
+		// that took the application's FIN refused nothing: the shortfall
+		// is that FIN, which what was written counts once the application
+		// has closed (its socket in LAST_ACK, its FIN not yet acknowledged,
+		// when the wait began). One short with the orphan still waiting
+		// for a FIN (FIN_WAIT1/2): that FIN, or a byte the orphan will
+		// refuse, is on its way, and no event of the wait's says which.
+		// Otherwise what arrives now is answered with a reset: a loss.
+		d, took, err := orphanTookFIN(pc)
+		switch {
+		case took:
+			return true, nil
+		case err == nil && t.want-ps.received == 1 && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
+			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and that FIN, or a byte its orphaned socket will refuse, is still on its way", models.ErrProxyConnsUnsupported, pc.app)
+		}
 		p.pairLost(pc)
 		return true, nil
 	}
 	return false, nil
+}
+
+// orphanTookFIN reads the proxy's socket of pc, orphaned when the proxy closed
+// its side: it took the application's FIN in sequence when it is in TIME_WAIT,
+// CLOSING (both ends closed at once) or LAST_ACK (the FIN arrived as the proxy
+// closed). An orphan answers any byte that arrives after its close with a
+// reset that destroys it, and a close with bytes unread resets at once, so one
+// that took the FIN refused nothing: every byte the application wrote before
+// its FIN had arrived before the proxy closed.
+func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
+	d, err := lookupTCP(pc.proxy, pc.app)
+	if err != nil {
+		return d, false, err
+	}
+	return d, d.state == tcpTimeWait || d.state == tcpClosing || d.state == tcpLastAck, nil
 }
 
 // side is the proxy's side of pc: read from its socket while the proxy holds
@@ -282,8 +314,9 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 		// byte it wrote, reached the proxy's orphaned socket, or a reset
 		// ended it: its own, or the orphan's refusing bytes that arrived
 		// after the close, bytes written before it and never captured. The
-		// orphan tells the FIN (TIME_WAIT); nothing tells the resets apart.
-		if d, err := lookupTCP(pc.proxy, pc.app); err == nil && d.state == tcpTimeWait {
+		// orphan tells the FIN (orphanTookFIN); nothing tells the resets
+		// apart.
+		if _, took, _ := orphanTookFIN(pc); took {
 			return true, nil
 		}
 		return false, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, went after the proxy closed its side, and whether bytes it wrote before that close were refused cannot be told", models.ErrProxyConnsUnsupported, pc.app)

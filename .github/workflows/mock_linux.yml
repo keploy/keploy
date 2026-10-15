@@ -569,13 +569,20 @@ jobs:
       # The bytes wait's target under local transmit drops: a segment a full
       # queue drops is counted twice in tcpi_bytes_sent, once in the target
       # (pairbytes_qdisc_linux_test.go), in a network namespace of its own.
-      - name: Run the bytes wait's target under local drops (root)
+      # And the clean close whose FIN the wait finds unacknowledged
+      # (pairbytes_closes_linux_test.go), which needs a socket filter.
+      - name: Run the bytes wait's root tests (local drops, an unacknowledged FIN)
         run: |
           set -o pipefail
           go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
           sudo unshare -n sh -c 'ip link set lo up && tc qdisc add dev lo root netem delay 1ms limit 3 && KEPLOY_QDISC_TEST=1 /tmp/proxy.test -test.run "^TestTheTargetCountsALocallyDroppedSegmentOnce$" -test.count=5 -test.v' | tee /tmp/qdisc.out
           grep -q -- "--- PASS: TestTheTargetCountsALocallyDroppedSegmentOnce" /tmp/qdisc.out
           if grep -q -- "--- SKIP" /tmp/qdisc.out; then echo "::error::the local-drop test skipped"; exit 1; fi
+          # As root, which any kernel lets attach a socket filter to a TCP
+          # socket (Linux 7 refuses an unprivileged one, and the test skips).
+          sudo /tmp/proxy.test -test.run "^TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss$" -test.count=5 -test.v | tee /tmp/lastack.out
+          grep -q -- "--- PASS: TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss" /tmp/lastack.out
+          if grep -q -- "--- SKIP" /tmp/lastack.out; then echo "::error::the LAST_ACK test skipped"; exit 1; fi
 
       - name: Run proven fire-and-forget e2e
         env:
