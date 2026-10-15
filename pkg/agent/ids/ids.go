@@ -20,6 +20,7 @@ type Map struct {
 	rep    *swapper
 	back   *swapper
 	times  *Map
+	first  bool
 }
 
 var Default = &Map{}
@@ -34,6 +35,16 @@ func (m *Map) Add(old, cur string) {
 		m.next, m.prev, m.banned = map[string]string{}, map[string]string{}, map[string]bool{}
 	}
 	if m.banned[old] || m.banned[cur] {
+		return
+	}
+	if m.first {
+		if _, ok := m.next[old]; !ok {
+			m.next[old] = cur
+			if _, ok := m.prev[cur]; !ok {
+				m.prev[cur] = old
+			}
+			m.rep, m.back = nil, nil
+		}
 		return
 	}
 	if was, ok := m.next[old]; ok {
@@ -75,14 +86,16 @@ func (m *Map) Empty() bool {
 
 // AddTime pairs a time the recording holds in field with the one this run
 // wrote there. A time is paired by field: one recorded second is often the
-// time of several fields, which this run writes in different seconds.
+// time of several fields, which this run writes in different seconds. The
+// first pair of a recorded time holds: documents written in one recorded
+// second keep one time, so their recorded order holds.
 func (m *Map) AddTime(field, old, cur string) {
 	if field == "" {
 		return
 	}
 	m.mu.Lock()
 	if m.times == nil {
-		m.times = &Map{}
+		m.times = &Map{first: true}
 	}
 	t := m.times
 	m.mu.Unlock()

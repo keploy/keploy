@@ -95,3 +95,18 @@ func TestPairPairsEachIDAndATimeByItsField(t *testing.T) {
 		t.Fatalf("restore: %s", back)
 	}
 }
+
+func TestDocumentsWrittenInOneRecordedSecondKeepOneTime(t *testing.T) {
+	m := &Map{}
+	m.AddTime("created_at", "1792055846", "1792066198")
+	m.AddTime("created_at", "1792055846", "1792066199")
+	got := m.Rewrite(`[{"v":1,"created_at":1792055846},{"v":2,"created_at":1792055846}]`)
+	if want := `[{"v":1,"created_at":1792066198},{"v":2,"created_at":1792066198}]`; got != want {
+		t.Fatalf("a recorded tie stays a tie, so its order holds:\n got %s\nwant %s", got, want)
+	}
+	m.Add("aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb")
+	m.Add("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc")
+	if got := m.Rewrite("aaaaaaaaaaaaaaaaaaaaaaaa"); got != "aaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("an id paired two ways is still dropped: %s", got)
+	}
+}
