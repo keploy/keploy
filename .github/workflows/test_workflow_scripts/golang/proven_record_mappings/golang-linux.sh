@@ -25,6 +25,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #      own window, derived as step 1's record derived them (S12), so every
 #      test passes with its dependencies checked, and no mappings.yaml is
 #      created (only record writes it).
+#   5. a connection pool warmed at startup (pooled-connection-linux.sh),
+#      recorded with handshakes held and without: keploy decides the pooled
+#      connection by its client speaking first and adds no connection to it,
+#      a call made over it after it sat unused since the app started is
+#      mapped to the test that made it, and the recordings replay green.
 #
 # CI sources this script from a `bash -e` step: a command that is expected to
 # fail runs where errexit does not apply (an `if`, a `||` list).
@@ -262,3 +267,8 @@ created=( ./unmapped-run/keploy/test-set-*/mappings.yaml )
 shopt -u nullglob
 [ ${#created[@]} -eq 0 ] || fail "under KEPLOY_PROVEN=1 the replay created ${created[*]}; only record writes mappings.yaml" "${created[@]}"
 echo "✓ under KEPLOY_PROVEN=1 a set without mappings.yaml owns what its test windows held, replays green, and the replay writes no mappings.yaml"
+
+# ---------------------------------------------------------------------------
+# 5. A connection pool warmed at startup.
+# ---------------------------------------------------------------------------
+bash "$(dirname "${BASH_SOURCE[0]}")/pooled-connection-linux.sh"

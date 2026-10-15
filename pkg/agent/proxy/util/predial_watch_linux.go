@@ -123,3 +123,45 @@ func ReceivedNothing(conn net.Conn) bool {
 	})
 	return nothing
 }
+
+// Waiting reports what the socket under conn holds for its reader, without
+// reading it: bytes, or the peer's close. Both are false when nothing waits,
+// or when there is no socket to look at. A Go read whose deadline has already
+// passed fails without looking at the socket, so a read stopped by a deadline
+// before it began cannot say whether anything had arrived; this can.
+//
+// Wrappers are looked through by NetConn, so data says only that the socket
+// holds bytes: a Read of a wrapper that transforms them (a *tls.Conn) may still
+// block. firstRead.stop in the proxy reads at once on data, so it relies on its
+// conn being bare or a byte-transparent wrapper (util.Conn).
+func Waiting(conn net.Conn) (data, closed bool) {
+	for i := 0; ; i++ {
+		if _, ok := conn.(syscall.Conn); ok {
+			break
+		}
+		if i == 8 || conn == nil { // bounded: a cycle must not hang
+			return false, false
+		}
+		u, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return false, false
+		}
+		conn = u.NetConn()
+	}
+	rc, err := conn.(syscall.Conn).SyscallConn()
+	if err != nil {
+		return false, false
+	}
+	var b [1]byte
+	_ = rc.Control(func(fd uintptr) {
+		n, _, rerr := unix.Recvfrom(int(fd), b[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		switch {
+		case rerr == nil:
+			data, closed = n > 0, n == 0
+		case errors.Is(rerr, unix.EAGAIN), errors.Is(rerr, unix.EINTR):
+		default:
+			closed = true
+		}
+	})
+	return data, closed
+}

@@ -2675,6 +2675,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// The probe may consume bytes off either socket and may dial
 	// upstream, so its connections are adopted unconditionally — both
 	// on the MySQL path and on the fall-through to generic dispatch.
+	// An upstream it dialled and did not keep becomes this connection's
+	// pre-dialled one, for the dial below to take.
 	probe, err := p.probeMysql(parserCtx, srcConn, dstAddr, predialed, uint32(destInfo.Port), rule.Mode, outgoingOpts, p.logger)
 	if probe != nil {
 		if probe.SrcConn != nil {
@@ -2683,9 +2685,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if probe.DstConn != nil {
 			dstConn = probe.DstConn
 		}
+		if probe.Predialed != nil {
+			predialed = probe.Predialed
+			defer predialed.CloseIfUnused()
+		}
 	}
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to dial the conn to destination server while probing for MySQL", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+		switch {
+		case refusedLocally(err):
+			p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+		case errors.Is(err, errLookIncomplete):
+			utils.LogError(p.logger, err, "keploy could not tell whether this connection speaks MySQL, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
+		default:
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+		}
 		return err
 	}
 	p.logger.Debug("mysql probe result",
