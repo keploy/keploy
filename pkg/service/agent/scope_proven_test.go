@@ -31,6 +31,8 @@ func init() { agentPID = -1 }
 // a test drives by counting answers in served.
 type wireProxy struct {
 	coreAgent.Proxy
+	// Every call is in hand and answered when a test settles.
+	settledProxy
 	mu        sync.Mutex
 	misses    []models.UnmatchedCall
 	missErr   error
@@ -149,8 +151,9 @@ func wireAgent(t *testing.T, mode models.Mode) (*Agent, *wireProxy) {
 	cfg.Agent.Mode = mode
 	cfg.Agent.ClientNSPID = uint32(os.Getppid())
 	// Hooks that count capture losses and have lost nothing, marked as a
-	// session start marks them (resetSession).
-	a := &Agent{logger: zap.NewNop(), Proxy: p, config: cfg, Hooks: countingHooks{}}
+	// session start marks them (resetSession), and that count the
+	// connections completed to the proxy (settle_proven.go).
+	a := &Agent{logger: zap.NewNop(), Proxy: p, config: cfg, Hooks: &countHooks{}}
 	a.proven.losses = a.markCaptureLosses(context.Background())
 	return a, p
 }

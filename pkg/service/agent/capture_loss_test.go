@@ -106,7 +106,7 @@ func TestACaptureLossCountThatCannotBeReadFailsTheReplayedTest(t *testing.T) {
 		{"a failed read", func(a *Agent) {
 			a.Hooks = countingHooks{err: errors.New("bad file descriptor")}
 		}, "bad file descriptor"},
-		{"hooks that counted at the start and no longer can", func(a *Agent) { a.Hooks = loadedHooks{} }, "cannot tell whether it captured every call"},
+		{"hooks that counted at the start and no longer can", func(a *Agent) { a.Hooks = uncountedHooks{} }, "cannot tell whether it captured every call"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _ := wireAgent(t, models.MODE_TEST)
@@ -145,7 +145,7 @@ func TestACaptureLossMarkThatCouldNotBeReadFailsTheReplayedTests(t *testing.T) {
 // leave every test as it was, as the PID-map check leaves a session.
 func TestHooksThatNeverCountLeaveTheTestsAsTheyWere(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
-	a.Hooks = loadedHooks{}
+	a.Hooks = uncountedHooks{}
 	require.NoError(t, a.resetSession(context.Background()))
 	claimSelf(t, a)
 	require.Empty(t, endPassed(t, a, "TestA").Action)
@@ -174,7 +174,7 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	require.Equal(t, models.CaptureLossPIDMap, got[1].Kind)
 	require.Equal(t, uint64(2), got[1].Count)
 
-	a.Hooks = loadedHooks{}
+	a.Hooks = uncountedHooks{}
 	got, err = a.CaptureLosses(ctx)
 	require.NoError(t, err, "a proxy that counts is enough")
 	require.Equal(t, models.CaptureLosses{tls}, got)

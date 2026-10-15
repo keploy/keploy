@@ -208,7 +208,7 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 	p.realTracker.Dialed(connID, dec.Label, err == nil)
 	if err != nil {
 		logger.Debug("a mock.real destination refused or could not be reached; the app sees its connection reset", zap.Error(err))
-		if tc, ok := client.(*net.TCPConn); ok {
+		if tc, ok := tcpConnOf(client); ok {
 			_ = tc.SetLinger(0)
 		}
 		return nil
@@ -403,4 +403,20 @@ func (p *Proxy) RealDestination(m *models.Mock) (string, bool) {
 		return "", false
 	}
 	return st.list.Recorded(m)
+}
+
+// tcpConnOf is the TCP connection under c, through the conns that wrap one
+// and say so (NetConn, as *tls.Conn and the proxy's trackedConn do).
+func tcpConnOf(c net.Conn) (*net.TCPConn, bool) {
+	for i := 0; c != nil && i < 8; i++ {
+		if tc, ok := c.(*net.TCPConn); ok {
+			return tc, true
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil, false
+		}
+		c = u.NetConn()
+	}
+	return nil, false
 }

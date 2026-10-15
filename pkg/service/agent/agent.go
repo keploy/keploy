@@ -788,7 +788,20 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	// Under the proven switch a replay's read of its misses waits, as a
+	// test's end does, until every call the application made is in the
+	// proxy's hands and answered (settle_proven.go): the run's last read
+	// included, so a call made after the last test's end is read, never
+	// filed after it. One keploy cannot settle is a read that cannot vouch
+	// for every miss.
+	var settleErr error
+	if provenswitch.On() && a.replaying() {
+		settleErr = a.settledSince(ctx, true, "the run went on after its last read")
+	}
 	errs, err := a.Proxy.GetMockErrors(ctx)
+	if settleErr != nil && err == nil {
+		err = fmt.Errorf("%w: keploy could not tell that every call reached it: %v", models.ErrUnmatchedCallsUnread, settleErr)
+	}
 	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
 		// A read that failed is answered without its list over HTTP: the
 		// misses the wire charged stay for the read that succeeds. A read

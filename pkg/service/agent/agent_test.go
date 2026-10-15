@@ -244,6 +244,7 @@ func TestSetGracefulShutdownTellsTheIngressItIsStopping(t *testing.T) {
 // the Linux hooks do.
 type countingHooks struct {
 	loadedHooks
+	noConns
 	refusals models.PIDMapRefusals
 	err      error
 }
@@ -251,6 +252,29 @@ type countingHooks struct {
 func (h countingHooks) PIDMapRefusals(context.Context) (models.PIDMapRefusals, error) {
 	return h.refusals, h.err
 }
+
+// uncountedHooks are hooks that count no PID-map refusals (other platforms',
+// an older build's) but do count the connections completed to the proxy, so
+// a test's end settles (settle_proven.go) and only the capture-loss check
+// cannot tell.
+type uncountedHooks struct {
+	loadedHooks
+	noConns
+}
+
+// noConns are hooks that count the connections to the proxy
+// (coreAgent.ProxyConnsReporter), and none was made: a test's end settles at
+// once (countHooks counts some).
+type noConns struct{}
+
+func (noConns) MarkProxyListener(syscall.RawConn) error { return nil }
+func (noConns) ProxyConnPair(syscall.RawConn) (coreAgent.ProxyConnPairing, error) {
+	return coreAgent.ProxyConnPairing{}, errors.New("no connection was counted")
+}
+func (noConns) ProxyConnsEstablished(context.Context) (uint64, error) { return 0, nil }
+func (noConns) AppConnsEstablished(context.Context) (uint64, error)   { return 0, nil }
+func (noConns) AppConnsSettled() (uint64, error)                      { return 0, nil }
+func (noConns) WaitAppConnsSettled(context.Context, uint64) error     { return nil }
 
 // The agent answers what its hooks counted. With hooks that do not count
 // (other platforms', an older build's) it answers "unknown": a zero count from
