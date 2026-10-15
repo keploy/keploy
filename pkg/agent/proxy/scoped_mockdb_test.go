@@ -467,3 +467,47 @@ func TestAViewOverAStoreThatCannotServeExactlyForwardsNothing(t *testing.T) {
 	require.False(t, integrations.ExactServing(view))
 	require.Nil(t, view.ConsumedTestMocks())
 }
+
+// A worker's view made before exact serving began serves its connection for
+// the connection's life. While the manager serves each test exactly its own
+// mocks, the view passes everything straight through: it narrows no read by
+// the worker's old scope, so the open test's own mocks are read on it; and it
+// holds no consumed recording of its own, so the manager's refusal of a stale
+// copy (one read before the test began again) reaches the parser.
+func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	b := exactMock("b", time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a, b}, nil)
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a", "b"})
+	const worker = 4101
+	p.SetWorkerScope(worker, []string{"a"})
+	view := p.scopedFor(worker, mm)
+	if view == integrations.MockMemDb(mm) {
+		t.Fatal("precondition: the worker's connection got the bare manager")
+	}
+
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T", []*models.Mock{b})
+	pt, _ := view.GetPerTestMocksInWindow()
+	equalNames(t, "the open test's mocks on the old view", pt, "b")
+	if got := view.(integrations.StagedFinder).FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return true }); got != "a" {
+		t.Fatalf("a miss's diagnosis on the old view found %q, want a, staged and not the open test's", got)
+	}
+
+	// The test begins again: the copy read before it is stale, and the
+	// manager refuses it.
+	p.SetWorkerScope(worker, []string{"b"})
+	stale := *pt[0]
+	mm.ServeExactTest("T", []*models.Mock{b})
+	if view.DeleteFilteredMock(stale) {
+		t.Fatal("a consume the manager refuses answered through the old view")
+	}
+	fresh, _ := view.GetPerTestMocksInWindow()
+	if len(fresh) != 1 || !view.DeleteFilteredMock(*fresh[0]) {
+		t.Fatalf("the test's own mock, read now, was not consumed: %v", exactNames(fresh))
+	}
+	if view.DeleteFilteredMock(*fresh[0]) {
+		t.Fatal("a test mock answered twice through the old view")
+	}
+}
