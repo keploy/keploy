@@ -72,22 +72,24 @@ func WithoutSpent(db MockMemDb, mocks []*models.Mock) []*models.Mock {
 	return out
 }
 
-// TestOwner is the optional part of a MockMemDb that tells whether a per-test
-// mock it serves for the open test (GetPerTestMocksInWindow) is that test's
-// own: a test is open to the call, and the mock is its recording (its
-// mapping names it or, for a store that serves a test by window, the mock is
-// in the window's pool). A mock every test may see because it belongs to no
-// test (one mapped to none), and every mock while no test is open (before
-// the first test, between tests, or a replay that opens none), is no test's
-// own: a test's rules for its own recordings (consumed once served, or kept
-// for its repeats) do not apply to it, and it is served as a reusable one.
+// TestOwner is the optional part of a MockMemDb that tells whether a mock it
+// serves, from whichever of its pools, is the open test's own: a test is
+// open to the call, and the mock is its recording (its mapping names it or,
+// for a store that serves a test by window, the mock is in the per-test pool
+// GetPerTestMocksInWindow serves for it). A mock every test may see because
+// it belongs to no test (one mapped to none), and every mock while no test is
+// open (before the first test, between tests, or a replay that opens none),
+// is no test's own: a test's rules for its own recordings (consumed once
+// served, or kept for its repeats) do not apply to it, and it is served as a
+// reusable one. A worker's test, whose recordings a replay may stage in its
+// reusable tiers, owns them there too.
 type TestOwner interface {
 	OwnedByOpenTest(m *models.Mock) bool
 }
 
 // OwnedByOpenTest reports whether m, a per-test mock db serves for the open
-// test, is that test's own (TestOwner). A db that does not tell owns every
-// mock it serves for the test, as before it could.
+// test (GetPerTestMocksInWindow), is that test's own (TestOwner). A db that
+// does not tell owns every mock it serves for the test, as before it could.
 func OwnedByOpenTest(db MockMemDb, m *models.Mock) bool {
 	if o, ok := db.(TestOwner); ok {
 		return o.OwnedByOpenTest(m)

@@ -121,13 +121,17 @@ type keepForRepeatsKey struct{}
 // open test's own (openTestOwner), for updateMock.
 type ownedKey struct{}
 
-// openTestOwner returns whether a mock is the open test's own recording: in
-// the per-test pool the store serves for the test (perTest) and the test's
-// (integrations.OwnedByOpenTest). A test's rules for its recordings, consumed
+// openTestOwner returns whether a mock is the open test's own recording, as
+// the store tells it (integrations.TestOwner), from whichever pool it is
+// served; a store that does not tell owns the mocks of the per-test pool it
+// serves for the test (perTest). A test's rules for its recordings, consumed
 // once served or kept for its byte-identical repeats, and a cursor that starts
 // over with each test, apply to its own only; every other recording, as with
 // no test open, is served as a reusable one. For one match's goroutine.
 func openTestOwner(mockDb integrations.MockMemDb, perTest []*models.Mock) func(*models.Mock) bool {
+	if o, tells := mockDb.(integrations.TestOwner); tells {
+		return o.OwnedByOpenTest
+	}
 	var pool map[*models.Mock]struct{}
 	return func(m *models.Mock) bool {
 		if pool == nil {
@@ -137,7 +141,7 @@ func openTestOwner(mockDb integrations.MockMemDb, perTest []*models.Mock) func(*
 			}
 		}
 		_, in := pool[m]
-		return in && integrations.OwnedByOpenTest(mockDb, m)
+		return in
 	}
 }
 

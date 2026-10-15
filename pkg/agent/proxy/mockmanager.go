@@ -136,6 +136,11 @@ type MockManager struct {
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
 	// per-test cursors at every staging.
 	kept map[string]struct{}
+	// usedUp are the recordings a worker's test consumed, held for the test
+	// instead of deleted, so a run of the same test again is served them
+	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
+	// cursorMu, and dropped with the per-test cursors at every staging.
+	usedUp map[string]struct{}
 
 	// spent are the per-test recordings of stateful dependencies a worker's
 	// test kept for its repeats, by name, once that test is over (Spend):
@@ -1839,6 +1844,58 @@ func (m *MockManager) resetPerTestCursors() {
 		}
 	}
 	m.kept = nil
+	m.usedUp = nil
+}
+
+// holdUsedUp records that the recording key names (a scope and a name) was
+// consumed in that scope, as DeleteFilteredMock records a delete: false when
+// it already was. The revisions move as a delete moves them, so a parser that
+// caches what it read reads again.
+func (m *MockManager) holdUsedUp(key string, kind models.Kind) bool {
+	m.cursorMu.Lock()
+	if _, held := m.usedUp[key]; held {
+		m.cursorMu.Unlock()
+		return false
+	}
+	if m.usedUp == nil {
+		m.usedUp = make(map[string]struct{})
+	}
+	m.usedUp[key] = struct{}{}
+	m.cursorMu.Unlock()
+	m.bumpRevisionKind(kind)
+	m.bumpRevisionAll()
+	return true
+}
+
+// usedUpKeys returns whether a recording, by key, is held used up
+// (holdUsedUp): nil when none is. It reads a copy, taken under one lock.
+func (m *MockManager) usedUpKeys() func(key string) bool {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return snapshotKeys(m.usedUp)
+}
+
+// spentNames returns whether a recording, by name, is spent (Spend): nil
+// when none is. It reads a copy, taken under one lock.
+func (m *MockManager) spentNames() func(name string) bool {
+	m.spentMu.RLock()
+	defer m.spentMu.RUnlock()
+	return snapshotKeys(m.spent)
+}
+
+// snapshotKeys returns a lookup in a copy of set, or nil when set is empty.
+func snapshotKeys(set map[string]struct{}) func(string) bool {
+	if len(set) == 0 {
+		return nil
+	}
+	cp := make(map[string]struct{}, len(set))
+	for k := range set {
+		cp[k] = struct{}{}
+	}
+	return func(k string) bool {
+		_, ok := cp[k]
+		return ok
+	}
 }
 
 // KeepForRepeats records that an exact match kept the recording key names for
@@ -1858,26 +1915,55 @@ func (m *MockManager) KeepForRepeats(key string) {
 func (m *MockManager) KeptForRepeats() func(key string) bool {
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	if len(m.kept) == 0 {
-		return nil
-	}
-	kept := make(map[string]struct{}, len(m.kept))
-	for k := range m.kept {
-		kept[k] = struct{}{}
-	}
-	return func(key string) bool {
-		_, ok := kept[key]
-		return ok
-	}
+	return snapshotKeys(m.kept)
 }
 
-// OwnedByOpenTest reports whether mk, a per-test mock served for the open
-// test (GetPerTestMocksInWindow), is that test's own: whether a test is open
-// (IsTestWindowActive). With none open (the staging before the first test,
-// between tests, or a replay that opens none) the per-test pool is every
-// test's recordings, none of them the call's own (integrations.TestOwner).
-func (m *MockManager) OwnedByOpenTest(*models.Mock) bool {
-	return m.IsTestWindowActive()
+// OwnedByOpenTest reports whether mk is the open test's own recording
+// (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
+// the per-test pool served for it: under exact serving, the test's mapping
+// (ServeExactTest); else the per-test tier, by the test's recorded window when
+// it has one, as GetPerTestMocksInWindow serves it. With no test open (the staging before the
+// first test, between tests, or a replay that opens none) no mock is.
+func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	if v := m.exactView(); v != nil {
+		// The open test's test mocks (ServeExactTest), by name: its index
+		// is fixed when the view is made.
+		_, owned := v.index[mk.Name]
+		return v.test != "" && owned
+	}
+	m.windowMu.RLock()
+	active := m.windowActiveLocked()
+	start, end := m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	if !active {
+		return false
+	}
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+	if !tree.holds(mk.TestModeInfo, mk) {
+		return false
+	}
+	if start.IsZero() || end.IsZero() {
+		return true
+	}
+	return inRecordedWindow(mk, start, end)
+}
+
+// inRecordedWindow is GetFilteredMocksInWindow's test of one mock against a
+// test's recorded window: its request inside it, or no recorded times.
+func inRecordedWindow(mk *models.Mock, start, end time.Time) bool {
+	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() {
+		return true
+	}
+	if res.Before(req) {
+		return false
+	}
+	return !req.Before(start) && !req.After(end)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].

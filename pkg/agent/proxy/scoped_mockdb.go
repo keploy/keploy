@@ -122,25 +122,145 @@ func visibleIn(v workerView, m *models.Mock) bool {
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
-// that belong to no test (absent from the universe of mapped names).
+// that belong to no test (absent from the universe of mapped names), less what
+// its open test consumed (DeleteFilteredMock). With no test open to the worker
+// it is the whole pool less what ended tests consumed (spent).
+//
+// That holds for the calls a scoped view serves. A call served the bare
+// manager (scopedFor: a connection opened before any worker registered, or
+// one with no pid) sees the whole pool, held and spent recordings included,
+// and its consume deletes them from the store.
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
-	if s.live && err == nil {
-		return byStart(s.pid, mocks), nil
-	}
 	if err != nil {
 		return mocks, err
 	}
+	if s.live {
+		return without(byStart(s.pid, mocks), s.consumed(workerView{})), nil
+	}
 	v := s.current()
+	gone := s.consumed(v)
 	if v.allow == nil || v.universe == nil {
-		return mocks, nil
+		return without(mocks, gone), nil
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if visibleIn(v, m) {
+		if visibleIn(v, m) && (gone == nil || !gone(m.Name)) {
 			out = append(out, m)
 		}
 	}
 	return out, nil
+}
+
+// consumed returns whether this view, resolved as v for one read, hides a
+// recording, by name, as consumed: one the test open to it consumed
+// (DeleteFilteredMock) or, with no test open, one an ended test consumed
+// (spent). nil when it hides none.
+func (s *scopedMockDb) consumed(v workerView) func(name string) bool {
+	switch {
+	case s.live:
+		return s.usedUpIn(starts.Default.Scope(s.pid))
+	case s.src == nil:
+		return nil
+	case v.allow == nil || v.universe == nil:
+		if sl, ok := s.MockMemDb.(spentLister); ok {
+			return sl.spentNames()
+		}
+		return nil
+	}
+	return s.usedUpIn(v.scope)
+}
+
+// without returns mocks less those whose name drop reports, mocks itself when
+// drop is nil.
+func without(mocks []*models.Mock, drop func(name string) bool) []*models.Mock {
+	if drop == nil {
+		return mocks
+	}
+	out := mocks[:0:0]
+	for _, m := range mocks {
+		if m != nil && drop(m.Name) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// usedUpHolder is the store's record of the recordings a worker's test
+// consumed (MockManager.holdUsedUp), and spentLister its record of what ended
+// tests consumed (MockManager.Spend).
+type usedUpHolder interface {
+	holdUsedUp(key string, kind models.Kind) bool
+	usedUpKeys() func(key string) bool
+}
+
+type spentLister interface {
+	spentNames() func(name string) bool
+}
+
+// usedUpIn returns whether a recording, by name, was consumed in scope: nil
+// when none was.
+func (s *scopedMockDb) usedUpIn(scope string) func(name string) bool {
+	if scope == "" {
+		return nil
+	}
+	h, ok := s.MockMemDb.(usedUpHolder)
+	if !ok {
+		return nil
+	}
+	held := h.usedUpKeys()
+	if held == nil {
+		return nil
+	}
+	prefix := keptPrefix(scope)
+	return func(name string) bool { return held(prefix + name) }
+}
+
+// DeleteFilteredMock consumes mock. A recording of the test open to this
+// worker (its mapping names it) is held used up for the test instead of
+// deleted from the store: no later read of the test shows it, and once the
+// test ends it is spent (Proxy.noteRetained), so no call between tests is
+// served it, while a run of the same test again (a retry, -count=2, a watch
+// mode rerun), a new scope, is served it afresh, as a test begun without a
+// worker pid is (MockManager.SetScopeMocks). Any other mock is consumed by
+// the store. A call served the bare manager instead of a scoped view (see
+// keep) deletes even a scoped test's recording, as before.
+func (s *scopedMockDb) DeleteFilteredMock(mock models.Mock) bool {
+	h, ok := s.MockMemDb.(usedUpHolder)
+	if !ok {
+		return s.MockMemDb.DeleteFilteredMock(mock)
+	}
+	scope, own := s.openScopeOwns(&mock)
+	if !own {
+		return s.MockMemDb.DeleteFilteredMock(mock)
+	}
+	if !h.holdUsedUp(keptPrefix(scope)+mock.Name, mock.Kind) {
+		return false // consumed already, as a delete of a deleted mock
+	}
+	s.MockMemDb.MarkMockAsUsed(mock)
+	if !s.live && s.src != nil {
+		s.src.noteRetained(scope, s.MockMemDb, mock)
+	}
+	return true
+}
+
+// openScopeOwns returns the scope of the test open to this worker and whether
+// mock is that test's recording: its mapping names it.
+func (s *scopedMockDb) openScopeOwns(mock *models.Mock) (string, bool) {
+	switch {
+	case s.live:
+		scope := starts.Default.Scope(s.pid)
+		owned, known := starts.Default.Owns(s.pid, mock.Name)
+		return scope, scope != "" && known && owned
+	case s.src != nil:
+		v := s.current()
+		if v.allow == nil || v.scope == "" {
+			return "", false
+		}
+		_, mine := v.allow[mock.Name]
+		return v.scope, mine
+	}
+	return "", false
 }
 
 // MarkMockAsUsed forwards a match that keeps the mock, and records a stateful
@@ -201,8 +321,9 @@ func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.
 func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
 		v := s.current()
+		gone := s.consumed(v)
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !visibleIn(v, mk) || fn(mk)
+			return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -663,6 +784,13 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	born := p.scopeSeq
 	p.workerScopeMu.Unlock()
 	return &scopedMockDb{MockMemDb: mgr, src: p, chain: chain, born: born}
+}
+
+// WorkerViewForTest is the mock view a call from pid gets (scopedFor), for the
+// tests of a parser outside this package that serve it as a scoped worker's
+// call.
+func (p *Proxy) WorkerViewForTest(pid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
+	return p.scopedFor(pid, mgr)
 }
 
 // ancestorChain is pid and its ancestors, nearest first, read from /proc once

@@ -545,3 +545,33 @@ func TestAnEvictedMockIsGoneFromTheStatelessAndConnectionReads(t *testing.T) {
 	got, _ = mm.GetConnectionMocks("c1")
 	equalNames(t, "after the next end", got, "conn")
 }
+
+// Under exact serving a mock is the open test's own when the test's mapping
+// names it (ServeExactTest), whatever else the test holds; with no test open
+// none is.
+func TestOwnedByOpenTestUnderExactServingIsTheTestsMapping(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	b := exactMock("b", time.Second, models.LifetimePerTest)
+	other := exactMock("other", 2*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a, b, other}, nil)
+	mm.ServeExactPool("k", nil)
+	for _, m := range []*models.Mock{a, b, other} {
+		if mm.OwnedByOpenTest(m) {
+			t.Fatalf("with no test open %s is owned", m.Name)
+		}
+	}
+	for _, tc := range []struct {
+		owned []*models.Mock
+		want  map[string]bool
+	}{
+		{[]*models.Mock{a, b}, map[string]bool{"a": true, "b": true, "other": false}},
+		{[]*models.Mock{a}, map[string]bool{"a": true, "b": false, "other": false}},
+	} {
+		mm.ServeExactTest("T", tc.owned)
+		for _, m := range []*models.Mock{a, b, other} {
+			if got := mm.OwnedByOpenTest(m); got != tc.want[m.Name] {
+				t.Errorf("test owning %d mocks: OwnedByOpenTest(%s) = %v, want %v", len(tc.owned), m.Name, got, tc.want[m.Name])
+			}
+		}
+	}
+}
