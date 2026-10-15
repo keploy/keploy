@@ -7,6 +7,7 @@ package linux
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -197,23 +197,25 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 	if want := "ready connect443=<nil> send443=operation not permitted sendto443=operation not permitted"; strings.TrimSpace(line) != want {
 		t.Fatalf("helper: %q, want %q: a connect() to UDP 443 through, the datagrams refused (EPERM)", line, want)
 	}
-	// replies is the udp_reply count, once it reaches at least n; each read
-	// moves the kernel's epoch on.
-	replies := func(n uint64) models.CaptureLoss {
+	// replies is the udp_reply count, read once every report the kernel
+	// made before the read is in (DrainCaptureLosses): one read, no polling.
+	// Each read moves the kernel's epoch on.
+	replies := func() models.CaptureLoss {
 		t.Helper()
-		for {
-			if err := h.CaptureLossesErr(); err != nil {
-				t.Fatal(err)
-			}
-			for _, l := range h.CaptureLosses() {
-				if l.Kind == models.CaptureLossUDPReply && l.Count >= n {
-					return l
-				}
-			}
-			time.Sleep(time.Millisecond) // no deadline but the test binary's -timeout
+		if err := h.DrainCaptureLosses(context.Background()); err != nil {
+			t.Fatal(err)
 		}
+		if err := h.CaptureLossesErr(); err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range h.CaptureLosses() {
+			if l.Kind == models.CaptureLossUDPReply {
+				return l
+			}
+		}
+		return models.CaptureLoss{}
 	}
-	if l := replies(1); l.Count != 1 || !strings.Contains(l.What, fmt.Sprintf("127.0.0.1:%d answered from port %d", port, port)) {
+	if l := replies(); l.Count != 1 || !strings.Contains(l.What, fmt.Sprintf("127.0.0.1:%d answered from port %d", port, port)) {
 		t.Fatalf("udp_reply loss %+v, want one, naming 127.0.0.1:%d", l, port)
 	}
 	// The same socket answered again, after the read above: counted again.
@@ -223,7 +225,7 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 	if line, _ := out.ReadString('\n'); strings.TrimSpace(line) != "ready again" {
 		t.Fatalf("helper: %q, want its second exchange answered", line)
 	}
-	if l := replies(2); l.Count != 2 {
+	if l := replies(); l.Count != 2 {
 		t.Fatalf("udp_reply loss %+v, want two: the socket's second reply came after a read", l)
 	}
 }
