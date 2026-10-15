@@ -47,7 +47,10 @@ type DecodeContext struct {
 	// so the entry is cleared at both points.
 	LongDataParams map[uint32]map[uint16]bool
 
-	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
+	// StmtIDToQuery maps the connection's prepared statements, by ID, to
+	// their queries. Replay sets it when a COM_STMT_PREPARE matches; record
+	// sets it when a COM_STMT_PREPARE_OK answers one, and records the query
+	// on each command that names the statement (mysql.MetaQuery).
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
