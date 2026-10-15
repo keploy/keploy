@@ -1027,3 +1027,52 @@ func TestAnAgentUpRunCountsAUnixConnectionOpenedBeforeIt(t *testing.T) {
 		}
 	}
 }
+
+// Under the proven switch a TLS handshake a client abandoned without a word
+// once keploy's certificate was out (Node.js's rejection reads so) leaves the
+// test it happened in without a verdict -- never FAILED, never PASSED -- and
+// the set not judged; the tests before and after it keep their verdicts. One
+// abandoned before a later set's mark is not that set's, whatever the run's
+// base (a Unix-socket connection would be).
+func TestUnderTheSwitchAnAbandonedHandshakeLeavesOnlyItsTestNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	abandoned := models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.9:443"}}
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	// The mark, then a read as each test ends (the last repeating): while
+	// test-2 ran.
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, abandoned}}
+	h.replayer.markPIDMaps(context.Background())
+	if status := h.run(t); status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %q, not judged %v; want %q and not judged", status, h.replayer.notJudged("test-set-0"), models.TestSetStatusInternalErr)
+	}
+	for _, r := range h.report.report.Tests {
+		if r.Status == models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+			t.Fatalf("%s: %s %+v: an abandoned handshake never fails a test", r.TestCaseID, r.Status, r.FailureInfo.CaptureIncomplete)
+		}
+		want := models.CaptureLosses(nil)
+		if r.TestCaseID == "test-2" {
+			want = abandoned
+		}
+		if fmt.Sprint(r.FailureInfo.CannotCapture) != fmt.Sprint(want) || (len(r.FailureInfo.NotJudged()) > 0) != (want != nil) {
+			t.Fatalf("%s: not judged %+v (%v), want %+v", r.TestCaseID, r.FailureInfo.CannotCapture, r.FailureInfo.NotJudged(), want)
+		}
+	}
+	if reason := h.report.report.FailureReason; !strings.Contains(reason, "test-2") || !strings.Contains(reason, "NODE_EXTRA_CA_CERTS") || !strings.Contains(reason, "to 10.0.0.9:443") {
+		t.Fatalf("the set's reason %q does not name the test, the destination and the CA-trust remedy", reason)
+	}
+	if cv := h.report.report.CaptureVerification; cv != nil && strings.Contains(cv.Reason, "abandoned") {
+		t.Fatalf("capture_verification %+v charges the set's tail with test-2's handshake", cv)
+	}
+
+	// A later test set whose mark is after it: none of its tests, and not
+	// its tail.
+	h = newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{abandoned}}
+	h.replayer.lossRunBase, h.replayer.lossRunBaseSet = nil, true // the run began before it
+	h.replayer.markPIDMaps(context.Background())                  // this set's mark is after it
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("a later test set: status %q, want PASSED: the handshake was abandoned before its mark", status)
+	}
+}

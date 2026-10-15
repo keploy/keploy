@@ -55,6 +55,45 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	}
 }
 
+// A TLS handshake a client abandoned without a word once keploy's
+// certificate was out is the test's it happened in (PerTest), counted from
+// the test's mark, never the run's base, and leaves it without a verdict
+// (NotJudged): the reason names the destination and the CA-trust remedy.
+func TestAnAbandonedHandshakeIsATestsOwnAndLeavesItNotJudged(t *testing.T) {
+	k := CaptureLossTLSAbandoned
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() || !CaptureLossUnixSocket.runScoped() || CaptureLossTLSAbort.runScoped() {
+		t.Fatal("an abandoned handshake is a test's own and not judged; a Unix socket is the run's")
+	}
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n, What: "to a:443"}} }
+	// Abandoned before the set's mark: not the set's, whatever the run's
+	// base (a Unix-socket call before it would be).
+	if got := at(2).SinceWithin(at(2), nil); len(got) != 0 {
+		t.Fatalf("SinceWithin = %+v: one before the mark is not this set's", got)
+	}
+	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := at(1).NotJudgedText()
+	for _, want := range []string{"not judged: ", "hung up on 1 TLS handshake(s)", "without a word", "NODE_EXTRA_CA_CERTS", "(to a:443)"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || strings.Contains(r, "TCP address") {
+		t.Fatalf("remedy %q: trust keploy's CA, and nothing of a Unix socket", r)
+	}
+	if r := append(at(1), CaptureLoss{Kind: CaptureLossUnixSocket, Count: 1}).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || !strings.Contains(r, "TCP address") {
+		t.Fatalf("remedy %q: both", r)
+	}
+	if got := at(1).Plus(CaptureLosses{{Kind: k, Count: 2, What: "to b:443"}, {Kind: CaptureLossPIDMap, Count: 1}}); !reflect.DeepEqual(got, CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}, {Kind: k, Count: 3, What: "to b:443"}}) {
+		t.Fatalf("Plus = %+v", got)
+	}
+}
+
 func TestCaptureLossesTextSaysWhatWasNotCaptured(t *testing.T) {
 	if CaptureLosses(nil).Text() != "" {
 		t.Fatal("no losses, no text")

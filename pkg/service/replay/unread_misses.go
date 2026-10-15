@@ -94,21 +94,35 @@ func unreadCaptureReason(tests []string) string {
 
 // testsKeployCannotCapture names, under the proven switch, the tests of a set
 // during or after which the application called what keploy cannot capture at
-// all (FailureInfo.CannotCapture, decision 20: a Unix socket), and says what:
-// they have no verdict, and the set is not judged. Never a failure.
-func testsKeployCannotCapture(results []models.TestResult) ([]string, string) {
+// all (FailureInfo.CannotCapture, decision 20: a Unix socket), or during which
+// a client abandoned its TLS handshake without a word, and says what: they
+// have no verdict, and the set is not judged. Never a failure.
+func testsKeployCannotCapture(results []models.TestResult) ([]string, models.CaptureLosses) {
 	if !provenswitch.On() {
-		return nil, ""
+		return nil, nil
 	}
 	var out []string
-	var what models.CaptureLosses
+	var standing, own models.CaptureLosses
 	for _, r := range results {
-		if len(r.FailureInfo.CannotCapture) > 0 {
-			out = append(out, r.TestCaseID)
-			what = r.FailureInfo.CannotCapture // the latest test's: counts only grow
+		if len(r.FailureInfo.CannotCapture) == 0 {
+			continue
+		}
+		out = append(out, r.TestCaseID)
+		var latest models.CaptureLosses
+		for _, c := range r.FailureInfo.CannotCapture {
+			if c.Kind.PerTest() {
+				// A test's own (an abandoned TLS handshake): each
+				// test's, so the set's is their sum.
+				own = own.Plus(models.CaptureLosses{c})
+			} else {
+				latest = append(latest, c)
+			}
+		}
+		if len(latest) > 0 {
+			standing = latest // the latest test's: these counts only grow
 		}
 	}
-	return out, what.NotJudgedText()
+	return out, standing.Plus(own)
 }
 
 // notCapturableReason is the test-set report's reason for a set left unjudged

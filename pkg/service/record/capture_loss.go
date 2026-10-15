@@ -61,6 +61,13 @@ type captureWatch struct {
 	charged  models.CaptureLosses
 	final    models.CaptureLosses
 	finalErr error
+	// chargedNotJudged and finalNotJudged are charged's and final's
+	// counterparts for what leaves a test case without a verdict: an
+	// abandoned TLS handshake beyond the most the checks saw was after the
+	// last test case, said (a Unix socket's is every test case's from the
+	// first on already).
+	chargedNotJudged models.CaptureLosses
+	finalNotJudged   models.CaptureLosses
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -136,6 +143,7 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	// recording is incomplete), and each was charged to a test case by now.
 	allJudged, allNotJudged := now.Since(w.base).Split()
 	w.charged = w.charged.Max(allJudged)
+	w.chargedNotJudged = w.chargedNotJudged.Max(allNotJudged)
 	if len(judged) > 0 {
 		w.tainted = append(w.tainted, name)
 		w.lost = allJudged
@@ -174,7 +182,7 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 		w.finalErr = err
 		return
 	}
-	w.final, _ = now.Since(w.base).Split()
+	w.final, w.finalNotJudged = now.Since(w.base).Split()
 }
 
 // finish says, at ERROR, which test cases were recorded while the agent could
@@ -196,13 +204,28 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
 	}
 	if len(w.uncapturable) > 0 {
-		// Not a failure: keploy never had these calls to lose. The test
-		// cases are kept; a replay of them makes those calls for real.
-		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture: their calls over it are not in the mocks ("+provenswitch.Env+"=1)",
+		// Not a failure: keploy never had these calls to lose, or cannot
+		// tell it lost one (an abandoned TLS handshake). The test cases are
+		// kept; a replay of them makes those calls for real.
+		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture, or while a TLS client abandoned its handshake: such calls are not in the mocks ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.uncapturable),
 			zap.String("reason", w.notJudged.NotJudgedText()),
-			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then re-record these test cases"))
+			zap.String("next_step", w.notJudged.NotJudgedRemedy()+", then re-record these test cases"))
+	}
+	// A handshake abandoned after the last test case was checked: charged to
+	// no test case, and said, never a failure.
+	var abandonedLate models.CaptureLosses
+	for _, c := range w.finalNotJudged.Since(w.chargedNotJudged) {
+		if c.Kind.PerTest() {
+			abandonedLate = append(abandonedLate, c)
+		}
+	}
+	if len(abandonedLate) > 0 {
+		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: whether a call was lost cannot be told, and no test case holds it ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", abandonedLate.NotJudgedText()),
+			zap.String("next_step", abandonedLate.NotJudgedRemedy()+", then re-record"))
 	}
 	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
 		failed = true

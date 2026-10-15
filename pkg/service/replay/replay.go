@@ -4561,13 +4561,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// read as either (proven switch). A set already not judged for what its
 	// tests consumed says both.
 	// So has one whose capture could not be told (proven switch).
-	if uncapturable, what := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+	if uncapturable, lost := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		what := lost.NotJudgedText()
 		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
-		r.logger.Error("test-set is not judged: the application called what keploy cannot capture while some of its tests ran ("+provenswitch.Env+"=1)",
+		r.logger.Error("test-set is not judged: the application called what keploy cannot capture, or a TLS client abandoned its handshake, while some of its tests ran ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", uncapturable),
 			zap.String("reason", what),
-			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then run the test-set again"))
+			zap.String("next_step", lost.NotJudgedRemedy()+", then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
 	}

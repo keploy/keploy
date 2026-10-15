@@ -2,6 +2,10 @@ package proxy
 
 import (
 	"context"
+	"net"
+	"time"
+
+	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
@@ -11,8 +15,9 @@ import (
 
 // CaptureLosses counts, by kind, the calls the proxy intercepted and could not
 // record or mock since it started: a client-side TLS handshake that failed
-// other than by the client giving it up (chargeClientHandshake), a TLS upgrade
-// it could not make. Each only ever grows.
+// other than by the client giving it up, and one it abandoned silently once
+// keploy's certificate was out (chargeClientHandshake), a TLS upgrade it could
+// not make. Each only ever grows.
 func (p *Proxy) CaptureLosses() models.CaptureLosses {
 	return p.losses.Snapshot()
 }
@@ -60,16 +65,35 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 }
 
 // chargeClientHandshake counts a client-side TLS handshake with the proxy
-// that failed (err) as a capture loss when it lost a call: the client
-// rejected the certificate keploy answered with (it does not trust keploy's
-// CA), keploy refused its hello, or keploy could not make its certificate.
-// Its call is then neither recorded nor mocked: the test's it happened in
-// under the proven switch. A client that gave the handshake up -- a cancel, a
-// timeout, its own stop (pTls.IsClientGiveUp) -- made no call to lose, and one
-// a stopping agent cut short is no loss of a test's.
-func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr string) {
-	if err == nil || ctx.Err() != nil || pTls.IsClientGiveUp(err) {
-		return
+// that failed (err, from pTls.HandleTLSConnection) as a capture loss when it
+// lost a call: the client rejected the certificate keploy answered with (it
+// does not trust keploy's CA), keploy refused its hello, or keploy could not
+// make its certificate. Its call is then neither recorded nor mocked: the
+// test's it happened in under the proven switch. A client that gave the
+// handshake up (pTls.IsClientGiveUp) once keploy had sent its certificate
+// (pTls.CertificateSent) is abandoned: it may have rejected the certificate
+// without a word -- Node.js does so -- or given up (a cancel, a timeout), and
+// nothing on the wire tells the two apart, so its test is not judged rather
+// than failed or passed. One that gave up before keploy answered rejected
+// nothing and made no call to lose, and one a stopping agent cut short is no
+// loss of a test's. It returns the handshake's own error, for the caller to
+// return as before.
+func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr string) error {
+	switch {
+	case err == nil || ctx.Err() != nil:
+	case !pTls.IsClientGiveUp(err):
+		p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
+	case pTls.CertificateSent(err):
+		p.losses.Add(models.CaptureLossTLSAbandoned, "to "+dstAddr)
 	}
-	p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
+	return pTls.HandshakeCause(err)
+}
+
+// handleClientTLS is pTls.HandleTLSConnection returning the handshake's own
+// error (pTls.HandshakeCause), for a parser's TLS upgrader (the record path's
+// util.ConnTLSUpgrader): the parsers above it tell a client's EOF apart by
+// identity, as before.
+func handleClientTLS(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
+	c, isMTLS, err := pTls.HandleTLSConnection(ctx, logger, conn, backdate)
+	return c, isMTLS, pTls.HandshakeCause(err)
 }
