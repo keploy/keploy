@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -374,6 +375,36 @@ func TestRunTestSet_AStreamedTestWhoseLastReadFailedLeavesTheSetUnjudged(t *test
 	}
 }
 
+// Under --retry-passing-test a test's row is its last cycle's, and so is
+// whether what it consumed was read: a test whose first cycle's read failed
+// and whose next cycle's read did has its verdict, and its set is judged
+// (P019). The unread list kept every cycle's, and left the set not judged. A
+// cycle runs again, the passing tests only, when one of its tests failed:
+// test-2 fails on its answer.
+func TestRunTestSet_AnUnreadConsumptionALaterCycleReadLeavesTheSetJudged(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.RetryPassing = true
+	mappedTo(h, sessionTierHTTP("mock-1"))
+	calls := &atomic.Int32{}
+	// The set's first read, then test-1's in the first cycle, which fails;
+	// test-2's, and test-1's again in the second cycle.
+	h.replayer.hookImpl = failsNthConsumedRead{prHooks: prHooks{
+		consumed:  []models.MockState{{Name: "mock-1", Kind: models.HTTP}},
+		wrongBody: map[string]bool{"test-2": true},
+	}, n: 2, calls: calls}
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("set %s (%s); want FAILED, judged: test-1's last cycle read what it consumed, and test-2 failed", status, h.report.report.FailureReason)
+	}
+	if calls.Load() < 4 {
+		t.Fatalf("%d reads; test-1 was not run again in a second cycle", calls.Load())
+	}
+	if resultOf(t, h, "test-1").FailureInfo.TestMocksUnread {
+		t.Fatal("test-1's row says what it consumed was not read; its last cycle read it")
+	}
+}
+
 func TestVerdictCountsCountsEachTestOnceByItsWorstResult(t *testing.T) {
 	results := []models.TestResult{
 		{TestCaseID: "a", Status: models.TestStatusPassed},
@@ -664,15 +695,67 @@ func TestRunTestSet_AHookCannotPassATestWithEvidenceAgainstIt(t *testing.T) {
 }
 
 // The per-test verdicts drive the set only when every test's result row is
-// there to count. A failed test whose row could not be written would
-// otherwise leave no FAILED row, and the set would read as PASSED.
+// there to count. A failed test whose row the store lost would otherwise
+// leave no FAILED row, and the set would read as PASSED: the loop's own
+// tally, which counted it FAILED, stands. The store loses it on the read
+// back, after the loop wrote it, so nothing but this guard can tell. The rows
+// are counted by test (P021): another test's second row (one an earlier
+// cycle left) does not stand in for the lost one, as it did.
 func TestRunTestSet_AMissingResultRowDoesNotPassTheSet(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dup  string
+	}{
+		{"the failed test's row is lost", ""},
+		{"and the passed test's row is read twice", "test-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-2": true}}
+			h.report.dropOnRead = "test-2"
+			h.report.dupOnRead = tc.dup
+			if status := h.run(t); status != models.TestSetStatusFailed {
+				t.Fatalf("set %s with test-2 FAILED and its row lost; want FAILED, as the loop counted it", status)
+			}
+		})
+	}
+}
+
+// A test that failed on a template variable place keeps its verdict
+// whatever the hook does (P004): the floor held the evidence of calls, and
+// let a hook pass a test the answer failed on a template variable, clearing
+// what it failed on. A test the mock set's divergence demoted to OBSOLETE
+// before the hook was not failed, and the floor leaves it as it is.
+func TestHoldEvidenceFloorHoldsATemplateFailure(t *testing.T) {
 	setSwitch(t, true)
-	h := newPartialRunHarness(t, 2, 0)
-	h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-2": true}}
-	h.report.failInsertOf = map[string]error{"test-2": errors.New("report store is unwritable")}
-	if status := h.run(t); status == models.TestSetStatusPassed {
-		t.Fatalf("set %s with test-2 FAILED and its row unwritten; want it not PASSED", status)
+	tf := []models.TemplateFailure{{Where: "body.id", Placeholder: "{{string .id}}", Why: `must equal "42", got "43"`}}
+	refused := []models.TemplateFailure{{Where: "request body", Placeholder: "{{int .n}}", Why: "no such key", Refused: true}}
+	before := []models.TestResult{
+		{TestCaseID: "test-1", Status: models.TestStatusFailed, TemplateFailures: tf, FailureInfo: models.FailureInfo{Category: []models.FailureCategory{models.TemplateVariable}}},
+		{TestCaseID: "test-2", Status: models.TestStatusObsolete, TemplateFailures: tf},
+		{TestCaseID: "test-3", Status: models.TestStatusFailed, TemplateFailures: refused, FailureInfo: models.FailureInfo{Category: []models.FailureCategory{models.TemplateVariable}}},
+	}
+	snap := snapshotEvidence(before)
+	// The hook passes test-1 and clears what it failed on, leaves test-2,
+	// and passes test-3 keeping its refusal.
+	after := []models.TestResult{
+		{TestCaseID: "test-1", Status: models.TestStatusPassed},
+		{TestCaseID: "test-2", Status: models.TestStatusObsolete, TemplateFailures: tf},
+		{TestCaseID: "test-3", Status: models.TestStatusPassed, TemplateFailures: refused},
+	}
+	got, held := holdEvidenceFloor(after, snap)
+	if r := got[0]; r.Status != models.TestStatusFailed || len(r.TemplateFailures) != 1 || r.TemplateFailures[0].Where != "body.id" || !hasCategory(r, models.TemplateVariable) || r.FailureInfo.Risk != models.High || r.Result.FailureInfo.Risk != models.High {
+		t.Fatalf("test-1 %s, template failures %+v, categories %v; want FAILED with its template failure, TEMPLATE_VARIABLE and HIGH risk back", r.Status, r.TemplateFailures, r.FailureInfo.Category)
+	}
+	if got[1].Status != models.TestStatusObsolete {
+		t.Fatalf("test-2 %s; a test demoted before the hook is not failed by the floor", got[1].Status)
+	}
+	if got[2].Status != models.TestStatusFailed || !hasCategory(got[2], models.TemplateVariable) {
+		t.Fatalf("test-3 %s, categories %v; want FAILED: it was refused, never sent", got[2].Status, got[2].FailureInfo.Category)
+	}
+	if !slices.Equal(held, []string{"test-1", "test-3"}) {
+		t.Fatalf("held %v; want test-1 and test-3", held)
 	}
 }
 
