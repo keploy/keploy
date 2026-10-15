@@ -115,3 +115,23 @@ func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
 		t.Fatal("an instrumentation without the count failed the recording")
 	}
 }
+
+// Decision 20: test cases recorded while or after the application called what
+// keploy cannot capture at all (a Unix socket) are named at WARN; the
+// recording does not fail for it.
+func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, nil, db}})
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	if w.finish("test-set-0") {
+		t.Fatal("the recording failed for a call keploy cannot capture")
+	}
+	warns := logs.FilterMessageSnippet("keploy cannot capture").All()
+	if len(warns) != 1 || fmt.Sprint(warns[0].ContextMap()["testCases"]) != "[test-2 test-3]" {
+		t.Fatalf("WARN lines %+v, want one naming test-2 and test-3", warns)
+	}
+}

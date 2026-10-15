@@ -91,3 +91,29 @@ func unreadCaptureReason(tests []string) string {
 	return fmt.Sprintf("not judged: keploy could not read whether its agent captured every call while %d test(s) ran (%s); check the agent's log for why its count could not be read, then run the test-set again",
 		len(tests), strings.Join(tests, ", "))
 }
+
+// testsKeployCannotCapture names, under the proven switch, the tests of a set
+// during or after which the application called what keploy cannot capture at
+// all (FailureInfo.CannotCapture, decision 20: a Unix socket), and says what:
+// they have no verdict, and the set is not judged. Never a failure.
+func testsKeployCannotCapture(results []models.TestResult) ([]string, string) {
+	if !provenswitch.On() {
+		return nil, ""
+	}
+	var out []string
+	var what models.CaptureLosses
+	for _, r := range results {
+		if len(r.FailureInfo.CannotCapture) > 0 {
+			out = append(out, r.TestCaseID)
+			what = r.FailureInfo.CannotCapture // the latest test's: counts only grow
+		}
+	}
+	return out, what.NotJudgedText()
+}
+
+// notCapturableReason is the test-set report's reason for a set left unjudged
+// by tests whose calls keploy cannot capture.
+func notCapturableReason(tests []string, what string) string {
+	return fmt.Sprintf("not judged: %d test(s) ran while the application called what keploy cannot capture (%s): %s",
+		len(tests), strings.Join(tests, ", "), strings.TrimPrefix(what, "not judged: "))
+}

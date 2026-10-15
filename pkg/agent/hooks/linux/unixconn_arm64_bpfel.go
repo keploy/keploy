@@ -37,8 +37,17 @@ const (
 	unixconnMapTargetNamespacePids         = "target_namespace_pids"
 	unixconnMapUnixConnectEvents           = "unix_connect_events"
 	unixconnMapUnixConnectEventsLost       = "unix_connect_events_lost"
+	unixconnMapUnixPending                 = "unix_pending"
+	unixconnMapUnixSendsSeen               = "unix_sends_seen"
 	unixconnProgK_unixDgramConnect         = "k_unix_dgram_connect"
+	unixconnProgK_unixDgramSendmsg         = "k_unix_dgram_sendmsg"
 	unixconnProgK_unixStreamConnect        = "k_unix_stream_connect"
+	unixconnProgK_unixSysEnterConnect      = "k_unix_sys_enter_connect"
+	unixconnProgK_unixSysEnterSendmsg      = "k_unix_sys_enter_sendmsg"
+	unixconnProgK_unixSysEnterSendto       = "k_unix_sys_enter_sendto"
+	unixconnProgK_unixSysExitConnect       = "k_unix_sys_exit_connect"
+	unixconnProgK_unixSysExitSendmsg       = "k_unix_sys_exit_sendmsg"
+	unixconnProgK_unixSysExitSendto        = "k_unix_sys_exit_sendto"
 )
 
 // loadUnixconn returns the embedded CollectionSpec for unixconn.
@@ -83,8 +92,15 @@ type unixconnSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type unixconnProgramSpecs struct {
-	K_unixDgramConnect  *ebpf.ProgramSpec `ebpf:"k_unix_dgram_connect"`
-	K_unixStreamConnect *ebpf.ProgramSpec `ebpf:"k_unix_stream_connect"`
+	K_unixDgramConnect    *ebpf.ProgramSpec `ebpf:"k_unix_dgram_connect"`
+	K_unixDgramSendmsg    *ebpf.ProgramSpec `ebpf:"k_unix_dgram_sendmsg"`
+	K_unixStreamConnect   *ebpf.ProgramSpec `ebpf:"k_unix_stream_connect"`
+	K_unixSysEnterConnect *ebpf.ProgramSpec `ebpf:"k_unix_sys_enter_connect"`
+	K_unixSysEnterSendmsg *ebpf.ProgramSpec `ebpf:"k_unix_sys_enter_sendmsg"`
+	K_unixSysEnterSendto  *ebpf.ProgramSpec `ebpf:"k_unix_sys_enter_sendto"`
+	K_unixSysExitConnect  *ebpf.ProgramSpec `ebpf:"k_unix_sys_exit_connect"`
+	K_unixSysExitSendmsg  *ebpf.ProgramSpec `ebpf:"k_unix_sys_exit_sendmsg"`
+	K_unixSysExitSendto   *ebpf.ProgramSpec `ebpf:"k_unix_sys_exit_sendto"`
 }
 
 // unixconnMapSpecs contains maps before they are loaded into the kernel.
@@ -112,6 +128,8 @@ type unixconnMapSpecs struct {
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.MapSpec `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.MapSpec `ebpf:"unix_connect_events_lost"`
+	UnixPending                 *ebpf.MapSpec `ebpf:"unix_pending"`
+	UnixSendsSeen               *ebpf.MapSpec `ebpf:"unix_sends_seen"`
 }
 
 // unixconnVariableSpecs contains global variables before they are loaded into the kernel.
@@ -161,6 +179,8 @@ type unixconnMaps struct {
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.Map `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.Map `ebpf:"unix_connect_events_lost"`
+	UnixPending                 *ebpf.Map `ebpf:"unix_pending"`
+	UnixSendsSeen               *ebpf.Map `ebpf:"unix_sends_seen"`
 }
 
 func (m *unixconnMaps) Close() error {
@@ -186,6 +206,8 @@ func (m *unixconnMaps) Close() error {
 		m.TargetNamespacePids,
 		m.UnixConnectEvents,
 		m.UnixConnectEventsLost,
+		m.UnixPending,
+		m.UnixSendsSeen,
 	)
 }
 
@@ -199,14 +221,28 @@ type unixconnVariables struct {
 //
 // It can be passed to loadUnixconnObjects or ebpf.CollectionSpec.LoadAndAssign.
 type unixconnPrograms struct {
-	K_unixDgramConnect  *ebpf.Program `ebpf:"k_unix_dgram_connect"`
-	K_unixStreamConnect *ebpf.Program `ebpf:"k_unix_stream_connect"`
+	K_unixDgramConnect    *ebpf.Program `ebpf:"k_unix_dgram_connect"`
+	K_unixDgramSendmsg    *ebpf.Program `ebpf:"k_unix_dgram_sendmsg"`
+	K_unixStreamConnect   *ebpf.Program `ebpf:"k_unix_stream_connect"`
+	K_unixSysEnterConnect *ebpf.Program `ebpf:"k_unix_sys_enter_connect"`
+	K_unixSysEnterSendmsg *ebpf.Program `ebpf:"k_unix_sys_enter_sendmsg"`
+	K_unixSysEnterSendto  *ebpf.Program `ebpf:"k_unix_sys_enter_sendto"`
+	K_unixSysExitConnect  *ebpf.Program `ebpf:"k_unix_sys_exit_connect"`
+	K_unixSysExitSendmsg  *ebpf.Program `ebpf:"k_unix_sys_exit_sendmsg"`
+	K_unixSysExitSendto   *ebpf.Program `ebpf:"k_unix_sys_exit_sendto"`
 }
 
 func (p *unixconnPrograms) Close() error {
 	return _UnixconnClose(
 		p.K_unixDgramConnect,
+		p.K_unixDgramSendmsg,
 		p.K_unixStreamConnect,
+		p.K_unixSysEnterConnect,
+		p.K_unixSysEnterSendmsg,
+		p.K_unixSysEnterSendto,
+		p.K_unixSysExitConnect,
+		p.K_unixSysExitSendmsg,
+		p.K_unixSysExitSendto,
 	)
 }
 

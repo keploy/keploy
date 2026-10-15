@@ -541,7 +541,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// Under the proven switch, every other loss of capture during the run
 	// fails it the same way: each test after it already failed with it, and
 	// this covers a loss after the last test too.
-	lost, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	lostAll, lostErr := m.captureLossesDuring(ctx, lossesBase)
 	if parent.Err() != nil {
 		// The user's Ctrl+C came while keploy read the agent's counts (what
 		// it served and missed, its PID maps, its capture losses): a read it
@@ -551,6 +551,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// comes after this one. Not judged: 128+N (the deferred rule above).
 		return nil
 	}
+	// A call keploy cannot capture at all (decision 20) does not fail the
+	// run: it leaves it unverified, below.
+	lost, lostNotJudged := lostAll.Split()
 	if t := lost.Text(); t != "" {
 		if captureIncomplete == "" {
 			captureIncomplete = t
@@ -654,6 +657,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			m.logger.Warn("this replay is not verified: keploy could not read whether the agent "+unread+", so a call may have reached the real dependency unmocked",
 				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
 		}
+	}
+	// The test command called what keploy cannot capture at all (decision
+	// 20: a Unix socket; only counted under the proven switch, where the
+	// tests it served are not judged): no loss of what keploy saw, so not a
+	// failure, but nothing proves the run isolated either.
+	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = t
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real)"))
 	}
 
 	// 12. What the run proved -- decided once, so the log line below and the
@@ -1816,6 +1829,10 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		// Counts since the run began: each attempt carries the run's, so
 		// keep one per kind, the latest (largest).
 		ev.CaptureIncomplete = mergeCaptureLosses(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete)
+		// What keploy cannot capture at all leaves the test not judged,
+		// never failed: a line that dropped it would read as keploy's
+		// failure with no call to name.
+		ev.NotJudged = mergeCaptureLosses(ev.NotJudged, w.Evidence.NotJudged)
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {

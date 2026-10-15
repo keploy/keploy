@@ -94,6 +94,12 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	if !inOwnPIDNamespace(t) {
 		return
 	}
+	// The syscall tracepoints, as on a kernel without BPF trampolines,
+	// when asked (the test binary is re-run in the namespace with it).
+	if os.Getenv("KEPLOY_UNIX_TEST_FALLBACK") == "1" {
+		unixFallbackOnly = true
+		t.Cleanup(func() { unixFallbackOnly = false })
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}

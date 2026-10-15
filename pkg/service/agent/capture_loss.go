@@ -108,5 +108,9 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark) (m
 		// was lost, which is not "never counted".
 		return nil, err
 	}
-	return now.Since(mark.at), nil
+	// What keploy cannot capture at all is counted from the hooks' load, not
+	// the session's start: the application may open its Unix-socket
+	// connection before its first test claims the session, and every test
+	// after that rides on it (decision 20).
+	return now.SinceWithin(mark.at, nil), nil
 }

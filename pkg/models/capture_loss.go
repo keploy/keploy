@@ -66,12 +66,65 @@ const (
 	// proxy closed it, first. What they carried was neither recorded nor
 	// mocked.
 	CaptureLossAppBytesLost CaptureLossKind = "app_bytes_lost"
-	// CaptureLossUnixSocket (4c a): a process of the application connected
-	// to a Unix socket no process of it owns, and that is not allowlisted (a
-	// bus, the journal, the Docker daemon, a name service): a call over it
-	// goes nowhere keploy's proxy sees, neither recorded nor mocked.
+	// CaptureLossUnixSocket (4c a, decision 20): a process of the
+	// application connected, or sent a datagram, to a Unix socket no process
+	// of it owns and that is not on the allow-list (UnixAllowList): a call
+	// over it goes nowhere keploy's proxy sees, so keploy cannot capture it
+	// at all. It is not a loss of something keploy saw: the test it taints
+	// is NOT JUDGED (NotJudged), never failed.
 	CaptureLossUnixSocket CaptureLossKind = "unix_socket"
 )
+
+// NotJudged reports whether a loss of kind k leaves the tests it taints
+// without a verdict (decision 20), rather than failing them: a call keploy
+// cannot capture at all, as opposed to one it saw and lost.
+func (k CaptureLossKind) NotJudged() bool {
+	return k == CaptureLossUnixSocket
+}
+
+// Split is l's losses that fail a test (judged) and those that leave it
+// without a verdict (notJudged, CaptureLossKind.NotJudged).
+func (l CaptureLosses) Split() (judged, notJudged CaptureLosses) {
+	for _, c := range l {
+		if c.Kind.NotJudged() {
+			notJudged = append(notJudged, c)
+		} else {
+			judged = append(judged, c)
+		}
+	}
+	return judged, notJudged
+}
+
+// SinceWithin is what grew from base on for the losses that fail a test, and
+// from runBase on for those that leave it without a verdict: a call keploy
+// cannot capture at all is over a connection that outlives the test, the test
+// set and the session it was opened in, so the application's first one
+// taints every test after it in the run, however far back it was made.
+func (l CaptureLosses) SinceWithin(base, runBase CaptureLosses) CaptureLosses {
+	judged, _ := l.Since(base).Split()
+	_, notJudged := l.Since(runBase).Split()
+	out := append(judged, notJudged...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// NotJudgedText is keploy's sentence for losses that leave a test without a
+// verdict (Split's notJudged): what keploy cannot capture, and that it
+// therefore cannot prove the test's calls were all captured.
+func (l CaptureLosses) NotJudgedText() string {
+	if len(l) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, c := range l {
+		s := captureLossText(c)
+		if c.What != "" {
+			s += " (" + c.What + ")"
+		}
+		parts = append(parts, s)
+	}
+	return "not judged: " + strings.Join(parts, "; ") + ", so keploy cannot prove this test's calls were all captured"
+}
 
 // CaptureLoss is how many times one kind of capture loss happened in the
 // agent's life, with what the latest one was (never a value the app sent);
@@ -172,7 +225,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	case CaptureLossUnixSocket:
-		return fmt.Sprintf("the application made %d connect(s) to Unix sockets keploy does not see, so calls over them were neither recorded nor mocked; reach such a dependency over a TCP address", c.Count)
+		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
