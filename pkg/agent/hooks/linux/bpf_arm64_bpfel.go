@@ -35,6 +35,11 @@ const (
 	bpfMapProxyListenerMark           = "proxy_listener_mark"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
+	bpfMapUdpMemberSocks              = "udp_member_socks"
+	bpfMapUdpMemberSocksFailures      = "udp_member_socks_failures"
+	bpfMapUdpReplyEpoch               = "udp_reply_epoch"
+	bpfMapUdpReplyEvents              = "udp_reply_events"
+	bpfMapUdpReplyEventsLost          = "udp_reply_events_lost"
 	bpfProgK_bind4                    = "k_bind4"
 	bpfProgK_bind6                    = "k_bind6"
 	bpfProgK_connect4                 = "k_connect4"
@@ -49,6 +54,9 @@ const (
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
 	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
 	bpfProgK_udp6Sendmsg              = "k_udp6_sendmsg"
+	bpfProgK_udpEgress                = "k_udp_egress"
+	bpfProgK_udpIngress               = "k_udp_ingress"
+	bpfProgK_udpSockRelease           = "k_udp_sock_release"
 	bpfProgSyscallProbeEntrySocket    = "syscall_probe_entry_socket"
 )
 
@@ -108,6 +116,9 @@ type bpfProgramSpecs struct {
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_sendmsg"`
+	K_udpEgress             *ebpf.ProgramSpec `ebpf:"k_udp_egress"`
+	K_udpIngress            *ebpf.ProgramSpec `ebpf:"k_udp_ingress"`
+	K_udpSockRelease        *ebpf.ProgramSpec `ebpf:"k_udp_sock_release"`
 	SyscallProbeEntrySocket *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -134,6 +145,11 @@ type bpfMapSpecs struct {
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
+	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
+	UdpMemberSocksFailures      *ebpf.MapSpec `ebpf:"udp_member_socks_failures"`
+	UdpReplyEpoch               *ebpf.MapSpec `ebpf:"udp_reply_epoch"`
+	UdpReplyEvents              *ebpf.MapSpec `ebpf:"udp_reply_events"`
+	UdpReplyEventsLost          *ebpf.MapSpec `ebpf:"udp_reply_events_lost"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -181,6 +197,11 @@ type bpfMaps struct {
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
+	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
+	UdpMemberSocksFailures      *ebpf.Map `ebpf:"udp_member_socks_failures"`
+	UdpReplyEpoch               *ebpf.Map `ebpf:"udp_reply_epoch"`
+	UdpReplyEvents              *ebpf.Map `ebpf:"udp_reply_events"`
+	UdpReplyEventsLost          *ebpf.Map `ebpf:"udp_reply_events_lost"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -204,6 +225,11 @@ func (m *bpfMaps) Close() error {
 		m.ProxyListenerMark,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
+		m.UdpMemberSocks,
+		m.UdpMemberSocksFailures,
+		m.UdpReplyEpoch,
+		m.UdpReplyEvents,
+		m.UdpReplyEventsLost,
 	)
 }
 
@@ -231,6 +257,9 @@ type bpfPrograms struct {
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.Program `ebpf:"k_udp6_sendmsg"`
+	K_udpEgress             *ebpf.Program `ebpf:"k_udp_egress"`
+	K_udpIngress            *ebpf.Program `ebpf:"k_udp_ingress"`
+	K_udpSockRelease        *ebpf.Program `ebpf:"k_udp_sock_release"`
 	SyscallProbeEntrySocket *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -250,6 +279,9 @@ func (p *bpfPrograms) Close() error {
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,
 		p.K_udp6Sendmsg,
+		p.K_udpEgress,
+		p.K_udpIngress,
+		p.K_udpSockRelease,
 		p.SyscallProbeEntrySocket,
 	)
 }
