@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -82,22 +83,31 @@ func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, tim
 
 // DrainErrGroupProgress is DrainErrGroupStatus bounded by progress instead of by
 // a fixed time: it waits for as long as progress() keeps changing, and gives up
-// only once it has not changed for stall. A group that is still draining (a
-// recording's sinks writing what the agent held at the stop) is never cut off
-// for taking long; one that is wedged costs stall. Same contract as
-// DrainErrGroupStatus otherwise: timedOut means a goroutine may still be running.
-func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, stall time.Duration, progress func() uint64) (err error, timedOut bool) {
+// only once it has not changed for bound, in the time this process could run
+// (utils/stall), not wall time: a CLI starved of CPU (a loaded host, a frozen
+// laptop) has not seen the group stall, only not run. A group that is still
+// draining (a recording's sinks writing what the agent held at the stop) is
+// never cut off for taking long; one that is wedged costs bound. Same contract
+// as DrainErrGroupStatus otherwise: timedOut means a goroutine may still be
+// running.
+func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
+	return drainErrGroupProgress(nil, logger, name, g, bound, progress)
+}
+
+// drainErrGroupProgress is DrainErrGroupProgress on clk (nil: the process's
+// own runnable clock).
+func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *errgroup.Group, bound time.Duration, progress func() uint64) (err error, timedOut bool) {
 	done := make(chan struct{})
 	var werr error
 	go func() { werr = g.Wait(); close(done) }()
-	for !WaitWhileProgressing(done, stall, progress) {
+	for !waitWhileProgressing(clk, done, bound, progress) {
 		// An agent stop still in progress is waited for; once it ends, the
 		// rest of the group gets the bound again.
 		idle, inProgress := agentStopsIdle()
 		if !inProgress {
 			logger.Error("teardown drain made no progress; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
 				zap.String("group", name),
-				zap.Duration("stalledFor", stall))
+				zap.Duration("stalledFor", bound))
 			return nil, true
 		}
 		logger.Info("waiting for the keploy agent to finish stopping before giving up on the rest of the teardown",
@@ -111,19 +121,29 @@ func DrainErrGroupProgress(logger *zap.Logger, name string, g *errgroup.Group, s
 }
 
 // WaitWhileProgressing waits for done for as long as progress() keeps changing,
-// and reports false once it has not changed for stall (true: done closed).
-func WaitWhileProgressing(done <-chan struct{}, stall time.Duration, progress func() uint64) bool {
-	t := time.NewTicker(min(max(stall/10, time.Millisecond), time.Second))
-	defer t.Stop()
-	last, lastMoved := progress(), time.Now()
+// and reports false once it has not changed for bound, in the time this
+// process could run (utils/stall) (true: done closed).
+func WaitWhileProgressing(done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
+	return waitWhileProgressing(nil, done, bound, progress)
+}
+
+// waitWhileProgressing is WaitWhileProgressing on clk (nil: the process's own
+// runnable clock). It looks at progress every tenth of the bound, at most a
+// second (stall.CheckEvery) of wall time, before it looks at the stall: a change
+// starts the stall again.
+func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
+	m := stall.NewMeter(clk, bound)
+	defer m.Stop()
+	last := progress()
 	for {
 		select {
 		case <-done:
 			return true
-		case now := <-t.C:
+		case <-m.Wait():
 			if p := progress(); p != last {
-				last, lastMoved = p, now
-			} else if now.Sub(lastMoved) >= stall {
+				last = p
+				m.Reset()
+			} else if m.Expired() {
 				return false
 			}
 		}

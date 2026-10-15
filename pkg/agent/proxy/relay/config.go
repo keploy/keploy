@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -48,7 +49,7 @@ const (
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
 	// receives every chunk. And it is time the process could RUN, not wall
-	// time (see stallMeter): a starved process's parser cannot read either.
+	// time (utils/stall): a starved process's parser cannot read either.
 	// It only elapses when the parser frees nothing at all for this long,
 	// which is taken as "gone" — the whole remaining queue is then abandoned
 	// at once and reported, rather than the wait being re-entered per chunk.
@@ -155,9 +156,9 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
-	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
-	// process's own clocks. Tests set it to drive the window.
-	stallClock stallClock
+	// stallClock measures ConsumerStallGrace (stall.Meter); nil is the
+	// process's own runnable clock. Tests set it to drive the window.
+	stallClock stall.Clock
 	// beforeTee, when set, runs on a forwarder after it has written a chunk
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.

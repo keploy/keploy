@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -492,14 +493,14 @@ func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
 // tempting. Deciding once and abandoning the remainder gets both: this must
 // finish in ONE window regardless of how much is queued.
 //
-// The window is time the process could run (stallMeter), so it is measured
+// The window is time the process could run (utils/stall), so it is measured
 // on an injected clock, not in wall time: on a starved host one window of run
 // time is many of wall time, and a wall-clock bound here would fail there
 // for the behaviour the window exists to have.
 func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	t.Parallel()
 	const queued = 200
-	clk := newFakeStallClock(onTime)
+	clk := &stall.ManualClock{Step: stall.OnTime}
 	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
 
 	for i := 0; i < queued; i++ {
@@ -510,8 +511,8 @@ func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	tt.waitDone()
 
 	// Per-chunk re-decision would take queued windows of samples.
-	if got, want := clk.waits(), int(testStallGrace/stallTick); got != want {
-		t.Errorf("teardown sampled %d ticks with %d chunks queued, want one window of %d: the stall verdict is being "+
+	if got, want := clk.Waits, int(testStallGrace/stall.CheckEvery(testStallGrace)); got != want {
+		t.Errorf("teardown looked %d times with %d chunks queued, want one window of %d: the stall verdict is being "+
 			"re-taken per chunk instead of once for the connection", got, queued, want)
 	}
 	if n := rec.count(DropConsumerGone); n != 1 {

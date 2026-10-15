@@ -49,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -478,9 +479,34 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 const mockHandoffBuffer = 1024
 
 // mockHandoffGrace bounds how long the decoder waits for the consumer to take a
-// mock before giving up on it. Only reachable if the consumer has stopped
-// draining entirely; a busy one drains in milliseconds.
+// mock before giving up on it, in the time this process could run
+// (utils/stall), not wall time: a CLI starved of CPU has a consumer that could
+// not run either. Only reachable if the consumer has stopped draining
+// entirely; a busy one drains in milliseconds.
 const mockHandoffGrace = 30 * time.Second
+
+// handOff offers m to ch, and reports whether it was taken before ch's reader
+// took nothing for grace of the time the process could run (on clk; nil: the
+// process's own).
+func handOff[T any](ch chan<- T, m T, clk stall.Clock, grace time.Duration) bool {
+	select {
+	case ch <- m:
+		return true
+	default:
+	}
+	meter := stall.NewMeter(clk, grace)
+	defer meter.Stop()
+	for {
+		select {
+		case ch <- m:
+			return true
+		case <-meter.Wait():
+			if meter.Expired() {
+				return false
+			}
+		}
+	}
+}
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
@@ -619,10 +645,7 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		// is logged as an error, because the alternative - a mock set
 		// indistinguishable from one where the call never happened - is
 		// what made this class of bug take an investigation to find.
-		select {
-		case mockChan <- &mock:
-			// Send the decoded mock to the channel
-		case <-time.After(mockHandoffGrace):
+		if !handOff(mockChan, &mock, nil, mockHandoffGrace) {
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
