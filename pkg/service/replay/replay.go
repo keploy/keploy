@@ -515,6 +515,9 @@ type Replayer struct {
 	// 20: a Unix-socket connection outlives the test set it was opened in).
 	lossRunBase    models.CaptureLosses
 	lossRunBaseSet bool
+	// setReport is the final report of the test set RunTestSet is running,
+	// once it has one: why the set ended as it did (tellSetEnd).
+	setReport *models.TestReport
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -1031,7 +1034,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
+			r.setReport = nil
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
+			r.tellSetEnd(testSet, testSetStatus, err)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -4734,6 +4739,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealFailure:         realWhy,
 		Proven:              provenswitch.On(),
 	}
+	r.setReport = testReport
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
 	reportCtx := context.WithoutCancel(runTestSetCtx)
