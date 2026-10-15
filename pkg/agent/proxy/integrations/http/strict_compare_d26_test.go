@@ -25,7 +25,7 @@ func TestStrictHonoursALearnedMask(t *testing.T) {
 	note := "order 1234 placed at 2026-10-14T10:00:41Z"
 	noteMask := d26Mask(t, note, "order 1234 placed at 2026-10-14T10:01:42Z")
 	tsMask := d26Mask(t, "2026-10-14T10:00:41Z", "2026-10-14T10:01:42Z")
-	sentMask := d26Mask(t, "sent Wed, 14 Oct 2026 10:00:41 GMT", "sent Wed, 14 Oct 2026 10:01:42 GMT")
+	sentMask := d26Mask(t, "sent Wed, 14 Oct 2026 10:00:41 +0000", "sent Wed, 14 Oct 2026 10:01:42 +0000")
 
 	t.Run("a JSON body field", func(t *testing.T) {
 		ct := map[string]string{"Content-Type": "application/json"}
@@ -43,12 +43,12 @@ func TestStrictHonoursALearnedMask(t *testing.T) {
 	})
 
 	t.Run("a header", func(t *testing.T) {
-		rec := recorded("m", "/v1/orders", map[string]string{"X-Sent": "sent Wed, 14 Oct 2026 10:00:41 GMT"}, "")
+		rec := recorded("m", "/v1/orders", map[string]string{"X-Sent": "sent Wed, 14 Oct 2026 10:00:41 +0000"}, "")
 		rec.Spec.ReqBodyNoise = map[string][]string{"header.x-sent": sentMask}
-		if got, diag := strictMatch(t, sent("/v1/orders", map[string]string{"X-Sent": "sent Mon, 02 Nov 2026 08:15:00 GMT"}, ""), nil, nil, nil, rec); got == nil {
+		if got, diag := strictMatch(t, sent("/v1/orders", map[string]string{"X-Sent": "sent Mon, 02 Nov 2026 13:45:00 +0530"}, ""), nil, nil, nil, rec); got == nil {
 			t.Fatalf("a header whose clock read moved was not excused: %v", differs(diag))
 		}
-		if got, diag := strictMatch(t, sent("/v1/orders", map[string]string{"X-Sent": "held Mon, 02 Nov 2026 08:15:00 GMT"}, ""), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.x-sent") {
+		if got, diag := strictMatch(t, sent("/v1/orders", map[string]string{"X-Sent": "held Mon, 02 Nov 2026 08:15:00 +0000"}, ""), nil, nil, nil, rec); got != nil || !hasField(differs(diag), "header.x-sent") {
 			t.Fatalf("a header changed outside its clock read: served %v, differs %v", got != nil, differs(diag))
 		}
 	})

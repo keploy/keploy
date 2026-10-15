@@ -54,15 +54,19 @@ func TestClockMaskComparesWhatDidNotDrift(t *testing.T) {
 
 // Every layout of a whole instant is masked in place.
 func TestClockMaskLayouts(t *testing.T) {
-	const rfc = "Mon, 02 Jan 2006 15:04:05 MST"
+	const rfc = time.RFC1123Z
 	recEpoch := "1760436041123"
 	liveEpoch := "1760436102623"
 	for _, tc := range []struct {
 		name, rec, live string
 		also, never     []string
 	}{
-		{"RFC 1123 in a sentence", "sent Wed, 14 Oct 2026 10:00:41 GMT by a", "sent " + lead(t, rfc, "Wed, 14 Oct 2026 10:00:41 GMT") + " by a",
-			[]string{"sent Thu, 15 Oct 2026 09:00:00 GMT by a"}, []string{"sent Thu, 15 Oct 2026 09:00:00 GMT by b"}},
+		// A numeric offset reads the same on any host's zone: another one
+		// is still a read of the layout.
+		{"RFC 1123 with an offset, in a sentence", "sent Wed, 14 Oct 2026 10:00:41 +0000 by a", "sent " + lead(t, rfc, "Wed, 14 Oct 2026 10:00:41 +0000") + " by a",
+			[]string{"sent Thu, 15 Oct 2026 14:30:00 +0530 by a"}, []string{"sent Thu, 15 Oct 2026 09:00:00 +0000 by b"}},
+		{"ISO 8601 in another zone", "at 2026-10-14T10:00:41Z ok", "at 2026-10-14T10:01:42Z ok",
+			[]string{"at 2026-10-14T15:31:42+05:30 ok", "at 2026-10-14 15:31:42 ok"}, []string{"at 2026-10-14T15:31:42+05:30 OK"}},
 		{"epoch milliseconds, whole", recEpoch, liveEpoch,
 			[]string{"1760999999999"}, []string{"abc", "1760436041123 "}},
 		{"epoch inside a key", "cache:user-7:" + recEpoch, "cache:user-7:" + liveEpoch,
@@ -138,6 +142,22 @@ func TestClockMaskOnlyForAClockOnlyDrift(t *testing.T) {
 		{"RFC 1123 with a zone name", "Wed, 14 Oct 2026 10:00:41 PDT", "Wed, 14 Oct 2026 10:01:42 PDT"},
 		{"a time of day beside a moved instant", "2026-10-14T10:00:41Z (10:00:41)", "2026-10-14T10:01:42Z (10:01:42)"},
 		{"a UUID v1", "id a8a2f0b0-a7a5-11f1-8000-0242ac120002", "id " + uuidV1Lead(t, "a8a2f0b0-a7a5-11f1-8000-0242ac120002")},
+		// A part of the instant beside the read that its layout's pattern
+		// does not read, or a zone the read names (round-2 review): written
+		// otherwise on a host in another zone.
+		{"Go's Time.String in IST", "2026-10-14 10:00:41.123456789 +0530 IST", "2026-10-14 10:01:42.623456789 +0530 IST"},
+		{"Go's Time.String in UTC", "2026-10-14 10:00:41.123456789 +0000 UTC", "2026-10-14 10:01:42.623456789 +0000 UTC"},
+		{"Java's ZonedDateTime", "2026-10-14T10:00:41.123+05:30[Asia/Kolkata]", "2026-10-14T10:01:42.623+05:30[Asia/Kolkata]"},
+		{"a region ID after a space", "2026-10-14 10:00:41 Asia/Kolkata", "2026-10-14 10:01:42 Asia/Kolkata"},
+		{"Python's %Z in IST", "2026-10-14 10:00:41 IST", "2026-10-14 10:01:42 IST"},
+		{"Python's %Z in UTC", "2026-10-14 10:00:41 UTC", "2026-10-14 10:01:42 UTC"},
+		{"RFC 1123 in GMT", "sent Wed, 14 Oct 2026 10:00:41 GMT by a", "sent Wed, 14 Oct 2026 10:01:42 GMT by a"},
+		{"RFC 5322 with a zone comment", "Wed, 14 Oct 2026 10:00:41 +0530 (IST)", "Wed, 14 Oct 2026 10:01:42 +0530 (IST)"},
+		{"compact with an offset", "20261014T100041+0530", "20261014T100142+0530"},
+		{"a day name before", "Wed 2026-10-14T00:30:41+05:30", "Wed 2026-10-14T00:31:42+05:30"},
+		{"a day name after", "2026-10-14T10:00:41Z, Wednesday", "2026-10-14T10:01:42Z, Wednesday"},
+		{"a month name before", "Oct. 2026-10-14", "Oct. 2026-10-15"},
+		{"PM after", "2026-10-14 10:00:41 PM", "2026-10-14 10:01:42 PM"},
 	} {
 		if mask := ClockMask(tc.rec, tc.live); mask != "" {
 			t.Errorf("%s: mask %q", tc.name, mask)

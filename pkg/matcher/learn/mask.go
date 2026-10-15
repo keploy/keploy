@@ -30,6 +30,10 @@ const maxMaskedValue = 4096
 //     Oct 14 10:00:41 UTC 2026"), or a time-ordered UUID, whose node and
 //     clock sequence are the host's. Kept literal, they would refuse a later
 //     replay on another date, in another zone or on another host;
+//   - a read that moved has a part of its instant beside it that its
+//     layout's pattern did not read, or names its zone (hostZone): kept
+//     literal, it would refuse a replay on a host in another zone (a laptop
+//     in IST recording, CI in UTC replaying);
 //   - the recorded value is longer than maxMaskedValue.
 func ClockMask(recorded, live string) string {
 	if len(recorded) > maxMaskedValue {
@@ -41,6 +45,9 @@ func ClockMask(recorded, live string) string {
 	}
 	for _, m := range reads {
 		if lay := clockLayouts[m.lay]; lay.wraps || lay.timeWord != nil {
+			return ""
+		}
+		if hostZone(recorded, m.rec) || hostZone(live, m.live) {
 			return ""
 		}
 	}
@@ -61,6 +68,35 @@ func ClockMask(recorded, live string) string {
 		return ""
 	}
 	return mask
+}
+
+// The parts of an instant a layout's pattern does not read, beside a read of
+// it (hostZone).
+var (
+	// zoneAfter: a zone written after the read (an offset, "+0530" or
+	// " +05:30"; an abbreviation, "IST"; a comment, "(IST)"; a region ID,
+	// "[Asia/Kolkata]" or "Asia/Kolkata"), or AM or PM.
+	zoneAfter = regexp.MustCompile(`^[ \t]*(?:[+-]\d{2}(?::?\d{2})?(?:[^0-9]|$)|[A-Z]{2,5}(?:[^A-Za-z0-9]|$)|(?i:am|pm)(?:[^A-Za-z0-9]|$)|[(\[]|[A-Z][a-z]+/[A-Za-z_])`)
+	// dayOrMonth is a day or month name, which an instant's date and zone
+	// decide.
+	dayOrMonth = `(?i:mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday|` +
+		`jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)`
+	nameBefore = regexp.MustCompile(`(?:^|[^A-Za-z0-9])` + dayOrMonth + `\.?,?[ \t]*$`)
+	nameAfter  = regexp.MustCompile(`^[ \t]*,?[ \t]*` + dayOrMonth + `(?:[^A-Za-z0-9]|$)`)
+	// zoneNamed: a read that ends in the name of its zone, which is the
+	// host's as often as not (a UTC host writes "UTC" where an IST one
+	// writes "IST", which no layout reads).
+	zoneNamed = regexp.MustCompile(`(?:UTC|GMT)$`)
+)
+
+// hostZone reports whether the clock read of s at span is not its instant
+// whole: a part of the instant is beside it that its layout's pattern did not
+// read (a zone after it, AM or PM, a day or month name before or after it),
+// or it names its zone. Such a read is written otherwise on a host in another
+// zone, in more than what its layout's pattern lets change.
+func hostZone(s string, span [2]int) bool {
+	before, read, after := s[:span[0]], s[span[0]:span[1]], s[span[1]:]
+	return zoneAfter.MatchString(after) || nameAfter.MatchString(after) || nameBefore.MatchString(before) || zoneNamed.MatchString(read)
 }
 
 // Masked reports whether noise learned at a leaf with patterns excuses its

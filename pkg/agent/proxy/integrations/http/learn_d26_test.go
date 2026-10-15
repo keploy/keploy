@@ -23,8 +23,8 @@ func d26At(t *testing.T, layout, recorded string) string {
 // part of the request, so what did not drift is still compared (founder
 // decision 26); a value that drifted otherwise is learned whole.
 func TestLearnMatchMasksAClockOnlyDrift(t *testing.T) {
-	const iso, rfc = time.RFC3339, time.RFC1123
-	recNote, recSent := "order 1234 placed at 2026-10-14T10:00:41Z", "Wed, 14 Oct 2026 10:00:43 GMT"
+	const iso, rfc = time.RFC3339, time.RFC1123Z
+	recNote, recSent := "order 1234 placed at 2026-10-14T10:00:41Z", "Wed, 14 Oct 2026 10:00:43 +0000"
 	liveNote := "order 1234 placed at " + d26At(t, iso, "2026-10-14T10:00:41Z")
 	liveSent := d26At(t, rfc, recSent)
 	h, n, opts := learnOn(t)
@@ -41,7 +41,7 @@ func TestLearnMatchMasksAClockOnlyDrift(t *testing.T) {
 	}
 	for _, tc := range []struct{ path, later, changed string }{
 		{"body.note", "order 1234 placed at 2026-11-02T08:15:00Z", "order 1235 placed at 2026-11-02T08:15:00Z"},
-		{"header.x-sent-at", "Mon, 02 Nov 2026 08:15:00 GMT", "Mon, 02 Nov 2026 08:15:00 UTC+1"},
+		{"header.x-sent-at", "Mon, 02 Nov 2026 13:45:00 +0530", "Mon, 02 Nov 2026 08:15:00 UTC+1"},
 		{"url.query.since", "2026-11-02T08:15:00Z", "yesterday"},
 	} {
 		pats := got[tc.path]
@@ -118,24 +118,37 @@ func TestWhatFLearnsReplaysWithAMaskBesideAVariable(t *testing.T) {
 	}
 }
 
-// A value whose moved read is only part of an instant (a time of day beside
-// a date and zone no layout reads) is learned whole, so a replay on another
-// date or in another zone is still served (round-1 review of decision 26).
+// A value whose moved read is not its instant whole (a time of day beside a
+// date and zone no layout reads; a zone, an abbreviation or a region ID
+// after a timestamp) is learned whole, so a replay on another date, or on a
+// host in another zone, is still served (round-1 and round-2 reviews of
+// decision 26): a laptop in IST records, CI in UTC replays.
 func TestLearnMatchLearnsAPartialInstantWhole(t *testing.T) {
-	h, n, opts := learnOn(t)
-	const rec = "Wed Oct 14 10:00:41 UTC 2026"
-	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+rec+`"}`, nil, `{"ok":true}`)}}
-	if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/events", `{"at":"Wed Oct 14 10:01:42 UTC 2026"}`, nil), db, n, opts); err != nil || miss != nil || served == nil {
-		t.Fatalf("served %v miss %+v err %v", served, miss, err)
-	}
-	pats, ok := db.consumed[0].Spec.ReqBodyNoise["body.at"]
-	if !ok || len(pats) != 0 {
-		t.Fatalf("learned %v, want body.at whole", db.consumed[0].Spec.ReqBodyNoise)
-	}
-	later := learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+rec+`"}`, nil, `{"ok":true}`)
-	later.Spec.ReqBodyNoise = db.consumed[0].Spec.ReqBodyNoise
-	db = &learnDb{perTest: []*models.Mock{later}}
-	if served, err := h.learnedMatch(context.Background(), live("POST", "/v1/events", `{"at":"Thu Nov 05 04:30:41 IST 2026"}`, nil), db, n, models.OutgoingOptions{}); err != nil || served == nil {
-		t.Fatalf("a later date in another zone was refused: %v", err)
+	for _, tc := range []struct{ name, rec, f, ci string }{
+		{"Date.toString", "Wed Oct 14 10:00:41 UTC 2026", "Wed Oct 14 10:01:42 UTC 2026", "Thu Nov 05 04:30:41 IST 2026"},
+		{"Go's Time.String", "2026-10-14 10:00:41.123456789 +0530 IST", "2026-10-14 10:01:42.623456789 +0530 IST", "2026-11-05 04:30:41.123456789 +0000 UTC"},
+		{"Java's ZonedDateTime", "2026-10-14T10:00:41.123+05:30[Asia/Kolkata]", "2026-10-14T10:01:42.623+05:30[Asia/Kolkata]", "2026-11-05T04:30:41.123Z[UTC]"},
+		{"Python's %Z, recorded in UTC", "2026-10-14 10:00:41 UTC", "2026-10-14 10:01:42 UTC", "2026-11-05 10:00:41 IST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+tc.rec+`"}`, nil, `{"ok":true}`)}}
+			if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/events", `{"at":"`+tc.f+`"}`, nil), db, n, opts); err != nil || miss != nil || served == nil {
+				t.Fatalf("served %v miss %+v err %v", served, miss, err)
+			}
+			pats, ok := db.consumed[0].Spec.ReqBodyNoise["body.at"]
+			if !ok || len(pats) != 0 {
+				t.Fatalf("learned %v, want body.at whole", db.consumed[0].Spec.ReqBodyNoise)
+			}
+			later := learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+tc.rec+`"}`, nil, `{"ok":true}`)
+			later.Spec.ReqBodyNoise = db.consumed[0].Spec.ReqBodyNoise
+			db = &learnDb{perTest: []*models.Mock{later}}
+			if served, err := h.learnedMatch(context.Background(), live("POST", "/v1/events", `{"at":"`+tc.ci+`"}`, nil), db, n, models.OutgoingOptions{}); err != nil || served == nil {
+				t.Fatalf("a later date in another zone was refused: %v", err)
+			}
+			if got, diag := strictMatch(t, live("POST", "/v1/events", `{"at":"`+tc.ci+`"}`, nil), nil, nil, nil, later); got == nil {
+				t.Fatalf("the strict matcher refused a later date in another zone: %v", differs(diag))
+			}
+		})
 	}
 }
