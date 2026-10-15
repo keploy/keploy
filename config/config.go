@@ -131,6 +131,10 @@ type Async struct {
 
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
+	// TestSetsFromCommandLine says TestSets is the command line's own
+	// (-t/--testsets), not keploy.yml's: with the proven switch off, only a
+	// name the command line gave that is not recorded is refused.
+	TestSetsFromCommandLine bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Record struct {
@@ -447,6 +451,12 @@ type Test struct {
 	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
 	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
 
+	// SelectedFromCommandLine says SelectedTests is the command line's own
+	// (-t/--test-sets), not keploy.yml's: with the proven switch off, only a
+	// name the command line gave that is not recorded is refused; one
+	// keploy.yml inherited is left out with a warning (Replayer.selectTestSets).
+	SelectedFromCommandLine bool `json:"-" yaml:"-" mapstructure:"-"`
+
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
 	// published-port gates, AppReadyProbeAddr, and the resolved
@@ -647,11 +657,27 @@ func GetByPassPorts(conf *Config) []uint {
 	return ports
 }
 
+// SetSelectedTests selects the test sets testSets names for a run. A
+// comma-separated flag keeps the space after each comma (-t "test-set-1,
+// test-set-2", the help text's own example, gives " test-set-2"), so each name
+// is trimmed, and a blank one is no name.
 func SetSelectedTests(conf *Config, testSets []string) {
 	conf.Test.SelectedTests = make(map[string][]string)
-	for _, testSet := range testSets {
+	for _, testSet := range TestSetNames(testSets) {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+
+// TestSetNames is the test set names a flag's values give: each trimmed, the
+// blank ones left out.
+func TestSetNames(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func SetSelectedServices(conf *Config, services []string) {
@@ -663,9 +689,11 @@ func SetSelectedContractTests(conf *Config, tests []string) {
 	conf.Contract.Tests = tests
 }
 
+// SetSelectedTestSets selects the test sets testSets names for a report,
+// trimmed as SetSelectedTests trims them.
 func SetSelectedTestSets(conf *Config, testSets []string) {
 	conf.Report.SelectedTestSets = make(map[string][]string)
-	for _, testSet := range testSets {
+	for _, testSet := range TestSetNames(testSets) {
 		conf.Report.SelectedTestSets[testSet] = []string{}
 	}
 }
