@@ -2288,3 +2288,63 @@ func TestResolveRangeOwnsAGenericTestMockUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// Under the proven switch every test mock (not models.Mock.IsProtocolPhase)
+// is owned by its window in a --sync recording, whatever tier serving gives it:
+// a Postgres v1/v2 data mock the lax kind fallback serves from the session
+// tier included. Its handshake (type config) and an async-egress mock stay
+// reusable. With the switch off all are reusable, as before.
+func TestResolveRangeOwnsEveryTestMockUnderTheSwitch(t *testing.T) {
+	now := time.Now()
+	mk := func(name string, kind models.Kind, typ string, async bool) *models.Mock {
+		m := &models.Mock{Kind: kind, Name: name, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": typ, "connID": "c1"},
+			ReqTimestampMock: now,
+		}}
+		if async {
+			m.Spec.Async = &models.AsyncMeta{}
+		}
+		m.DeriveLifetime()
+		return m
+	}
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "0")
+		}
+		pool := []*models.Mock{
+			mk("pg-handshake", models.PostgresV2, "config", false),
+			mk("pg-select", models.PostgresV2, "mocks", false),
+			mk("pg1-select", models.Postgres, "mocks", false),
+			mk("async", models.PostgresV2, "mocks", true),
+		}
+		if pool[1].TestModeInfo.Lifetime != models.LifetimeSession {
+			t.Skip("the lax kind fallback is off (KEPLOY_STRICT_MOCK_WINDOW): the data mocks are per-test already")
+		}
+		ch := make(chan *models.Mock, 8)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, pool...)
+		mgr.mu.Unlock()
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", true, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		owned := 0
+		for _, n := range names {
+			if strings.HasPrefix(n, "mock-") {
+				owned++
+			}
+		}
+		switch {
+		case on && (len(names) != 4 || owned != 2 || !contains(names, "pg-handshake") || !contains(names, "async")):
+			t.Fatalf("switch on: flushed %v; want both data mocks owned (renamed mock-...), the handshake and the async mock as is", names)
+		case !on && (len(names) != 4 || owned != 0):
+			t.Fatalf("switch off: flushed %v; want all four reusable, as is", names)
+		}
+	}
+}

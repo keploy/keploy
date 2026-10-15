@@ -1882,11 +1882,14 @@ const (
 // attributedReusable reports whether mock is attributed as a reusable mock,
 // owned by no test window: a session or connection mock, but for one reusable
 // only by its recorder's statement (a MySQL SET, BEGIN or COMMIT;
-// models.Mock.ReusableByStatementOnly), and, under the proven switch, a Generic
-// exchange its recorder stated per-test. That one is served from the session
-// tier, as every Generic exchange is with the switch off, and is a test mock
-// all the same (models.Mock.IsProtocolPhase): under the switch it is owned by
-// its window, as record maps it, so the replay serves it to its test.
+// models.Mock.ReusableByStatementOnly), and, under the proven switch, a test
+// mock (models.Mock.IsProtocolPhase, not async-egress). Serving gives some
+// test mocks the session tier: a Generic exchange its recorder stated
+// per-test, a Postgres v1/v2 data mock the lax kind fallback promotes
+// (models.Mock.DeriveLifetime). Under the switch each is owned by its window,
+// as a recording made without --sync maps it from its window, so the replay
+// serves it to its test: an unowned test mock is the pool's, which serves no
+// data-plane mock while a test is open.
 func attributedReusable(mock *models.Mock) bool {
 	lt := mock.TestModeInfo.Lifetime
 	if lt != models.LifetimeSession && lt != models.LifetimeConnection {
@@ -1895,7 +1898,7 @@ func attributedReusable(mock *models.Mock) bool {
 	if mock.ReusableByStatementOnly() {
 		return false
 	}
-	return !(mock.Kind == models.GENERIC && provenswitch.On() && !mock.IsProtocolPhase())
+	return !(provenswitch.On() && !mock.IsProtocolPhase() && !mock.IsAsync())
 }
 
 // flushTakeLocked is what the next FlushOwnedWindows does with mock, and the
