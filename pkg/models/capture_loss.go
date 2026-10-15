@@ -241,7 +241,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	case CaptureLossUDPReply:
-		return fmt.Sprintf("%d UDP socket(s) of the application got a reply from the real destination, which keploy neither records nor mocks (UDP other than DNS); add its port to bypassRules if it is meant to be live, or reach it over TCP", c.Count)
+		return fmt.Sprintf("the application's UDP got %d reply(ies) from the real destination, which keploy neither records nor mocks (UDP other than DNS); add a port-only bypassRules entry for it if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	case CaptureLossUnixUnseen:

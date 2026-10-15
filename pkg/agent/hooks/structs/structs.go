@@ -23,8 +23,9 @@ const (
 	FlagKernelPortAlloc uint32 = 1 << 1
 	// FlagProvenUDP (bit 2), set under the proven switch with the UDP
 	// watch's programs attached (udpwatch.go): the cgroup hooks register a
-	// member's non-DNS UDP sockets, report the first reply each gets, and
-	// refuse sends to UDP port 443 (QUIC), so clients fall back to TCP.
+	// member's non-DNS UDP sockets, report the first reply each gets in each
+	// of the watch's epochs, and refuse datagrams to UDP port 443 (QUIC), so
+	// clients fall back to TCP.
 	FlagProvenUDP uint32 = 1 << 2
 )
 

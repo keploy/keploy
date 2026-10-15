@@ -7,7 +7,10 @@ package linux
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -16,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -26,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // udpHelperEnv makes a re-executed test binary a UDP client: it connects a
@@ -63,16 +68,16 @@ func runUDPHelper(port string) int {
 	other, _ := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	terr := unix.Sendto(other, []byte("q"), 0, quicAt)
 	fmt.Printf("ready connect443=%v send443=%v sendto443=%v\n", cerr, serr, terr)
-	if _, err := in.ReadString('\n'); err != nil {
-		return 0
+	for {
+		if _, err := in.ReadString('\n'); err != nil {
+			return 0
+		}
+		if err := exchange(); err != nil {
+			fmt.Println("helper:", err)
+			return 3
+		}
+		fmt.Println("ready again")
 	}
-	if err := exchange(); err != nil {
-		fmt.Println("helper:", err)
-		return 3
-	}
-	fmt.Println("ready again")
-	_, _ = in.ReadString(0)
-	return 0
 }
 
 // Under the proven switch, keploy's own object: the application's UDP that a
@@ -128,13 +133,13 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = l.Close() })
 	}
-	w, err := startUDPWatch(&h.objects, cg)
-	if err != nil {
-		t.Fatal(err)
+	// As the hooks' load does: the watch, then the flag it returns.
+	t.Setenv(provenswitch.Env, "1")
+	flags, err := h.startProvenUDP(cg)
+	if err != nil || flags&structs.FlagProvenUDP == 0 {
+		t.Fatalf("startProvenUDP under the switch = %#x, %v; want FlagProvenUDP", flags, err)
 	}
-	t.Cleanup(w.close)
-	go w.watch(zap.NewNop())
-	h.udp = w
+	t.Cleanup(func() { h.udp.close() })
 
 	var info structs.AgentInfo
 	info.KeployAgentNsPid = uint32(os.Getpid())
@@ -143,7 +148,7 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 	}
 	info.IsDocker = 1
 	info.DNSPort = -1
-	info.Flags = structs.FlagProvenUDP
+	info.Flags = flags
 	if err := h.SendAgentInfo(info); err != nil {
 		t.Fatal(err)
 	}
@@ -243,4 +248,188 @@ func cgroupV2Root(t *testing.T) string {
 	}
 	t.Fatal("no cgroup v2 mount")
 	return ""
+}
+
+// A reply of a long-lived socket that lands between a read's move of the
+// epoch and its count (the run's mark, here) is charged by the next read,
+// not that one: its epoch stays open into test 1, where the kernel reports
+// the socket's live reply no more, so test 1 still carries the loss. The
+// watch goroutine is not started: the ring is read by hand, to its end, so
+// the interleaving is exact.
+func TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest(t *testing.T) {
+	if !inOwnPIDNamespace(t) {
+		return
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := loadBpf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := spec.Programs["k_sockops"]; p != nil {
+		p.Type = ebpf.SockOps
+		p.AttachType = ebpf.AttachCGroupSockOps
+	}
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	if err := spec.LoadAndAssign(&h.objects, nil); err != nil {
+		t.Fatalf("load keploy's BPF object: %v", err)
+	}
+	t.Cleanup(func() { _ = h.objects.Close() })
+	h.agentRegistrationMap = h.objects.KeployAgentRegistrationMap
+	sock, err := link.Tracepoint("syscalls", "sys_enter_socket", h.objects.SyscallProbeEntrySocket, nil)
+	if err != nil {
+		t.Fatalf("attach sys_enter_socket: %v", err)
+	}
+	t.Cleanup(func() { _ = sock.Close() })
+	root := cgroupV2Root(t)
+	cg, err := os.MkdirTemp(root, "keploy-udp-epoch-")
+	if err != nil {
+		t.Fatalf("create a cgroup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cg) })
+	for _, p := range []struct {
+		prog   *ebpf.Program
+		attach ebpf.AttachType
+	}{
+		{h.objects.K_connect4, ebpf.AttachCGroupInet4Connect},
+		{h.objects.K_udp4Sendmsg, ebpf.AttachCGroupUDP4Sendmsg},
+	} {
+		l, err := link.AttachCgroup(link.CgroupOptions{Path: cg, Attach: p.attach, Program: p.prog})
+		if err != nil {
+			t.Fatalf("attach: %v", err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+	}
+	w, err := startUDPWatch(&h.objects, cg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.close)
+	h.udp = w // no watch goroutine: drained by hand below
+
+	var info structs.AgentInfo
+	info.KeployAgentNsPid = uint32(os.Getpid())
+	if info.KeployAgentInode, info.KeployAgentDev, err = GetSelfInodeNumber(); err != nil {
+		t.Fatal(err)
+	}
+	info.IsDocker = 1
+	info.DNSPort = -1
+	info.Flags = structs.FlagProvenUDP
+	if err := h.SendAgentInfo(info); err != nil {
+		t.Fatal(err)
+	}
+	client := structs.ClientInfo{Mode: 1, ClientNSPID: 0x7ffffff0}
+	for i := range client.PassThroughPorts {
+		client.PassThroughPorts[i] = -1
+	}
+	if err := h.objects.KeployClientRegistrationMap.Update(uint64(0), client, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(fd)
+
+	echo, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echo.Close() })
+	go func() {
+		buf := make([]byte, 16)
+		for {
+			_, from, err := echo.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = echo.WriteTo([]byte("pong"), from)
+		}
+	}()
+	port := echo.LocalAddr().(*net.UDPAddr).Port
+	cgf, err := os.Open(cg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cgf.Close()
+	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd.Env = append(os.Environ(), udpHelperEnv+"="+strconv.Itoa(port))
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Wait() })
+	out := bufio.NewReader(stdout)
+	if line, _ := out.ReadString('\n'); !strings.HasPrefix(line, "ready connect443=") {
+		t.Fatalf("helper: %q", line)
+	}
+	again := func() {
+		t.Helper()
+		if _, err := stdin.Write([]byte("again\n")); err != nil {
+			t.Fatal(err)
+		}
+		if line, _ := out.ReadString('\n'); strings.TrimSpace(line) != "ready again" {
+			t.Fatalf("helper: %q", line)
+		}
+	}
+	// The ingress program runs before the datagram is queued, so once the
+	// helper read its reply, any report is committed in the ring: a
+	// non-blocking read to the ring's end handles every one.
+	drain := func() {
+		t.Helper()
+		w.rd.SetDeadline(time.Unix(1, 0)) // a deadline past: read to the ring's end, never wait
+		for {
+			rec, err := w.rd.Read()
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var e udpReplyEvent
+			if len(rec.RawSample) != udpReplyEventSize {
+				t.Fatalf("report of %d bytes", len(rec.RawSample))
+			}
+			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
+				t.Fatal(err)
+			}
+			w.handle(e)
+		}
+	}
+	udp := func(ls models.CaptureLosses) uint64 {
+		for _, l := range ls {
+			if l.Kind == models.CaptureLossUDPReply {
+				return l.Count
+			}
+		}
+		return 0
+	}
+
+	drain()
+	if n := udp(h.CaptureLosses()); n != 1 {
+		t.Fatalf("first reply: udp_reply %d, want 1", n)
+	}
+	// The run's mark (resetSession -> Agent.CaptureLosses -> snapshot), with
+	// the socket answered between the epoch's move and the read, and the
+	// report handled by then.
+	w.closeEpoch()
+	again()
+	drain()
+	mark := w.counts()
+	// Test 1: the same socket answered live.
+	again()
+	drain()
+	now := h.CaptureLosses()
+	if err := h.CaptureLossesErr(); err != nil {
+		t.Fatal(err)
+	}
+	lost := now.Since(mark)
+	t.Logf("mark %+v; test 1's end %+v; charged to test 1: %+v", mark, now, lost)
+	if udp(lost) == 0 {
+		t.Fatalf("FALSE PASS: the socket was answered live during test 1, and test 1 has no udp_reply loss")
+	}
 }

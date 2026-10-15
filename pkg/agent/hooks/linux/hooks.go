@@ -680,9 +680,13 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 
 	// The UDP watch reads the objects' ring buffer: closed before them.
+	// The watch stays, failed: a read after the hooks unloaded is unknown,
+	// never 0.
 	h.udpMu.Lock()
-	h.udp.close()
-	h.udp = nil
+	if h.udp != nil {
+		h.udp.close()
+		h.udp.fail(errors.New("the UDP watch was closed with the hooks"))
+	}
 	h.udpMu.Unlock()
 
 	// Close eBPF objects with proper synchronization
