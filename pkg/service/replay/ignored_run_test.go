@@ -140,9 +140,12 @@ func TestARunThatVerifiedNothingPrintsNoMismatchTable(t *testing.T) {
 			rs[i].Status = models.TestStatusIgnored
 		}
 	}}
-	h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+	// Each test missed a call; the app made none after the last test (that
+	// fails the set: unclaimed_calls_test.go).
+	charges := func() ([]models.UnmatchedCall, error) {
 		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /charges"}}, nil
 	}
+	h.instr.mockErrorsFor = misses(charges, charges)
 	core, logs := observer.New(zap.InfoLevel)
 	h.replayer.logger = zap.New(core)
 	h.replayer.config.Command = "./app"

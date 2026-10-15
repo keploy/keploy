@@ -61,7 +61,9 @@ name: Mock Mode Regression (Linux)
 # Another (proven_fire_and_forget_linux) replays an app's fire-and-forget
 # publish, on a connection it opens and on one it keeps, with tc netem holding
 # every packet to keploy's proxy 1 s, and asserts the call is judged in its
-# own test: never in the next one, never not at all.
+# own test: never in the next one, never not at all. The same job replays a
+# publish the app makes after it answered a test (P101), and asserts it is
+# judged in the test it was made in, failing the set and keploy test.
 # Another replays an app that passes keploy's own plain-text "no matching mock"
 # on with its 200 where JSON was recorded, and asserts the test fails on its
 # body, with the switch on and off.
@@ -606,6 +608,16 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-fire-and-forget-linux.sh"
+
+      # A publish the app makes after it answered a test is judged in the test
+      # open when it is made (P101): a changed one fails that test, the set,
+      # and keploy test.
+      - name: Run proven after-answer e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-after-answer-linux.sh"
 
   # The hooks' side of a full PID map, against keploy's own BPF object on the
   # runner's kernel: live processes fill target_namespace_pids (loaded small,

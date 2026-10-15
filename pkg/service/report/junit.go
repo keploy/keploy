@@ -341,6 +341,31 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			},
 		})
 	}
+	// The calls its application made after its last test that no mock
+	// answered failed the set while its tests may all have passed: a case
+	// of its own, failed, naming them.
+	if calls := rep.UnclaimedCalls; len(calls) > 0 {
+		lines := make([]string, 0, len(calls))
+		for _, c := range calls {
+			l := strings.TrimSpace(c.Protocol + " " + c.ActualSummary)
+			if c.Destination != "" {
+				l += " to " + c.Destination
+			}
+			lines = append(lines, l)
+		}
+		suite.Tests++
+		suite.Failures++
+		suite.Cases = append(suite.Cases, junitTestCase{
+			Name:      junitUnclaimedCase,
+			Classname: name,
+			Time:      fmtSeconds(0),
+			Failure: &junitFailure{
+				Message: "a call after the last test got no recorded answer",
+				Type:    "UnclaimedCall",
+				Text:    strings.Join(lines, "\n"),
+			},
+		})
+	}
 	// A set whose status fails the run (it failed, its app halted or
 	// faulted, keploy erred or a script faulted part-way, it had no tests to
 	// run) is never a green suite, with the switch on or off: when no case of
@@ -359,6 +384,11 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 	}
 	return suite
 }
+
+// junitUnclaimedCase is the test case a suite whose application made a call
+// after its last test that no mock answered carries, failed with the calls
+// (buildJUnitSuite).
+const junitUnclaimedCase = "keploy calls after the last test"
 
 // junitCaptureCase is the test case a suite whose capture was incomplete
 // carries, failed with the reason (buildJUnitSuite).
