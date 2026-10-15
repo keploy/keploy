@@ -136,11 +136,24 @@ var CredentialHeaders = []string{
 	"x-xsrf-token",
 }
 
-// ProvenFlakyHeaderNoise is FlakyHeaderNoise without the CredentialHeaders:
-// the static list a request is matched with under the proven switch.
+// PayloadHashHeaders are the request headers that carry a hash of the
+// request's own body, which a signature covers: under the proven switch they
+// leave the static list too, and the strict matcher compares each with the
+// body it hashes (founder decision 25): a hash must be the hash of the body
+// the client sent, a literal (UNSIGNED-PAYLOAD) the recorded one.
+var PayloadHashHeaders = []string{
+	"x-amz-content-sha256",
+}
+
+// ProvenFlakyHeaderNoise is FlakyHeaderNoise without the CredentialHeaders and
+// the PayloadHashHeaders: the static list a request is matched with under the
+// proven switch.
 func ProvenFlakyHeaderNoise() map[string][]string {
 	nm := FlakyHeaderNoise()
 	for _, h := range CredentialHeaders {
+		delete(nm, h)
+	}
+	for _, h := range PayloadHashHeaders {
 		delete(nm, h)
 	}
 	return nm

@@ -38,6 +38,18 @@ type req struct {
 	header http.Header
 	body   []byte
 	raw    []byte
+	// encoded is the body as the client sent it, before its Content-Encoding
+	// was undone into body; nil when it had none.
+	encoded []byte
+}
+
+// sentBody is the body as the client sent it: what a hash of the payload
+// it sent (x-amz-content-sha256) is a hash of.
+func (r *req) sentBody() []byte {
+	if r.encoded != nil {
+		return r.encoded
+	}
+	return r.body
 }
 
 // matchDiag captures where the match cascade stopped when no mock matched, so
