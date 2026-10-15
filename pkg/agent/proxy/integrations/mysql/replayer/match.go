@@ -966,6 +966,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// The live statement's facts, derived on the first comparison and reused for
 	// every other candidate (see liveQuery). The live identity is liveStatement.
 	live := liveQuery{identity: liveStatement}
+	// liveLegacy is the same for the live statement as a keploy that did not
+	// read query attributes' names read it (mysql.QueryPacket's LegacyQuery),
+	// for the COM_QUERYs such a keploy recorded (legacyRecordedQuery).
+	var liveLegacy liveQuery
 
 	// evaluated keeps what each candidate's comparison returned during the
 	// in-window pass, so the full scan that follows a fruitless one reuses it
@@ -992,7 +996,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if ev, seen := evaluated[key]; seen {
 			return ev.ok, ev.score, ev.recorded
 		}
-		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, &live, getQuery)
+		lq := &live
+		// A COM_QUERY an older keploy recorded with its query attributes
+		// read out of step is compared with the live one read the same way.
+		if exp, _ := recorded.Message.(*mysql.QueryPacket); legacyRecordedQuery(exp) {
+			if act, _ := req.Message.(*mysql.QueryPacket); readsLegacy(act) {
+				if !liveLegacy.ready {
+					liveLegacy.fill(act.LegacyQuery)
+				}
+				lq = &liveLegacy
+			}
+		}
+		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
 		if evaluated != nil {
 			evaluated[key] = evalResult{ok: ok, score: c, recorded: id}
 		}
@@ -2196,13 +2211,52 @@ func legacyRecorded(p *mysql.StmtExecutePacket) bool {
 	return true
 }
 
-// legacyRecordedMock is legacyRecorded for a mock's one request.
+// legacyRecordedQuery reports whether a recorded COM_QUERY carrying query
+// attributes is one a keploy older than the one reading their names recorded
+// (mysql.QueryPacket's LegacyQuery): it read no name. The protocol sends one
+// with every attribute, so this keploy records them.
+func legacyRecordedQuery(p *mysql.QueryPacket) bool {
+	if p == nil || len(p.Parameters) == 0 {
+		return false
+	}
+	for _, param := range p.Parameters {
+		if param.Name != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// readsLegacy reports whether a live COM_QUERY is compared with a recording
+// legacyRecordedQuery holds as an older keploy read it (its LegacyQuery): that
+// keploy could read it, and it names an attribute, so this keploy would have
+// recorded the name. A live one naming none (an attribute named "") is read as
+// this keploy reads it: a recording of it holds no name either way.
+func readsLegacy(act *mysql.QueryPacket) bool {
+	if act == nil || act.LegacyQuery == "" {
+		return false
+	}
+	for _, p := range act.Parameters {
+		if p.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyRecordedMock is legacyRecorded, or legacyRecordedQuery, for a mock's
+// one request.
 func legacyRecordedMock(m *models.Mock) bool {
 	if m == nil || len(m.Spec.MySQLRequests) != 1 {
 		return false
 	}
-	exp, _ := m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
-	return legacyRecorded(exp)
+	switch exp := m.Spec.MySQLRequests[0].Message.(type) {
+	case *mysql.StmtExecutePacket:
+		return legacyRecorded(exp)
+	case *mysql.QueryPacket:
+		return legacyRecordedQuery(exp)
+	}
+	return false
 }
 
 // sameParameterShape reports whether a recorded COM_STMT_EXECUTE (expected)
