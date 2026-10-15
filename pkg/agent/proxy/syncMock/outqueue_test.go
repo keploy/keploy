@@ -31,15 +31,22 @@ func sendOwnedAndWait(t *testing.T, m *SyncMockManager, mock *models.Mock, owner
 	}
 }
 
-// waitOutQueue waits for m's out queue to be delivered or given up.
+// waitOutQueue waits for m's out queues, every lane's, to be delivered or
+// given up.
 func waitOutQueue(t *testing.T, m *SyncMockManager) {
 	t.Helper()
 	deadline := time.After(time.Minute) // only turns a hang into a failure
 	for {
 		m.outQueueMu.Lock()
-		drained, draining := m.outDrained, m.outDraining
+		var drained chan struct{}
+		if m.out != nil && m.out.draining {
+			drained = m.out.drained
+		}
+		for l := range m.outOld {
+			drained = l.drained
+		}
 		m.outQueueMu.Unlock()
-		if !draining {
+		if drained == nil {
 			return
 		}
 		select {
@@ -193,9 +200,13 @@ func TestTheOutQueueIsBoundedByBytes(t *testing.T) {
 	}
 }
 
-// A new session's channel gives the old one's queue up, and its drainer
-// retires without touching the new one's.
-func TestANewChannelGivesTheOldQueueUp(t *testing.T) {
+// A new session's channel does not give the old one's queue up: the old
+// session's consumer may still read (its stop drains its stream), and gets
+// every mock queued for it, in order, while the new channel gets the new
+// session's. Before, the switch dropped the old queue: a DaemonSet agent's
+// manager whose session changed lost what its old consumer was a channel
+// behind on.
+func TestANewChannelLetsTheOldQueueReachItsConsumer(t *testing.T) {
 	old := make(chan *models.Mock, 1)
 	old <- &models.Mock{Name: "filler"}
 	clk := &stall.ManualClock{}
@@ -205,26 +216,36 @@ func TestANewChannelGivesTheOldQueueUp(t *testing.T) {
 	outcome := make(chan bool, 2)
 	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { outcome <- d })
 	m.send(&models.Mock{Name: "b"}, "test-b", func(d bool) { outcome <- d })
-	// The drainer has a in hand, blocked on the old channel: only the
-	// channel's abandon gives it up (b is in the queue SetOutputChannel takes).
-	waitClockPending(t, clk)
+	waitClockPending(t, clk) // the drainer has a in hand, the old channel full
 	fresh := make(chan *models.Mock, 4)
 	m.SetOutputChannel(fresh)
-	for i := 0; i < 2; i++ {
-		select {
-		case d := <-outcome:
-			if d {
-				t.Fatal("a mock of the old session was said to be delivered")
-			}
-		case <-time.After(time.Minute): // only turns a hang into a failure
-			t.Fatal("the old session's queue was not given up")
-		}
+	if !m.OutQueuedTo(old) || m.OutQueuedTo(fresh) {
+		t.Fatalf("after the switch: queued to the old channel %v, to the new %v; want the old only", m.OutQueuedTo(old), m.OutQueuedTo(fresh))
 	}
 	if !sendOwnedAndWait(t, m, &models.Mock{Name: "c"}, "test-c") {
 		t.Fatal("the new session's mock was not delivered")
 	}
 	if got := <-fresh; got.Name != "c" {
 		t.Fatalf("the new channel carried %q, want c", got.Name)
+	}
+	for _, want := range []string{"filler", "a", "b"} { // the old consumer reads on
+		select {
+		case got := <-old:
+			if got.Name != want {
+				t.Fatalf("the old channel carried %q, want %q", got.Name, want)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("the old channel never carried %q", want)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if !<-outcome {
+			t.Fatal("a mock the old consumer took was said to be dropped")
+		}
+	}
+	waitOutQueue(t, m)
+	if d := m.DropCount(); d != 0 || m.OutQueued() {
+		t.Fatalf("%d dropped, still queued %v: want none of either", d, m.OutQueued())
 	}
 }
 
@@ -261,76 +282,91 @@ func TestAControlFrameDoesNotOvertakeTheQueue(t *testing.T) {
 	m := New(nil)
 	m.SetOutputChannel(ch)
 	m.outQueueMu.Lock()
-	m.outDraining = true // a drainer with mocks in hand
+	m.out.draining = true // a drainer with mocks in hand
 	m.outQueueMu.Unlock()
 	if m.trySendControlFrame(&models.Mock{Name: "revoke"}) {
 		t.Fatal("a control frame was sent before the mocks queued ahead of it")
 	}
 	m.outQueueMu.Lock()
-	m.outDraining = false
+	m.out.draining = false
 	m.outQueueMu.Unlock()
 	if !m.trySendControlFrame(&models.Mock{Name: "revoke"}) {
 		t.Fatal("a control frame with nothing queued before it was not sent")
 	}
 }
 
-// A new session's channel tells the old queue's drops with no lock held: a
-// queued mock's done takes mu (sendTaken's sentClaimDone), which AddMock holds
-// while it reads the channel (outChanStatus). Told under outChanMu's writer
-// lock, the two wait on each other for ever.
-func TestANewChannelTellsTheOldQueuesDropsWithNoLockHeld(t *testing.T) {
+// A new session's channel decides nothing of the old queue's mocks, under no
+// lock: a queued mock's done takes mu (sendTaken's sentClaimDone), which
+// AddMock holds while it reads the channel (outChanStatus), and a done told
+// under outChanMu's writer lock would wait on it for ever.
+func TestANewChannelDecidesNothingUnderItsLock(t *testing.T) {
 	old := make(chan *models.Mock, 1)
 	old <- &models.Mock{Name: "filler"}
 	m := New(nil)
 	m.outClock, m.outStall = &stall.ManualClock{}, time.Hour
 	m.SetOutputChannel(old)
 	m.send(&models.Mock{Name: "a"}, "", nil) // the drainer's mock in hand
-	entered := make(chan struct{})
+	decided := make(chan struct{}, 1)
 	m.send(&models.Mock{Name: "b"}, "", func(bool) {
-		close(entered)
+		decided <- struct{}{}
 		m.mu.Lock() // as sentClaimDone does
 		m.mu.Unlock()
 	})
 	m.mu.Lock() // AddMock, about to read the channel
 	switched := make(chan struct{})
 	go func() { m.SetOutputChannel(make(chan *models.Mock, 1)); close(switched) }()
-	<-entered
+	select {
+	case <-switched:
+	case <-time.After(10 * time.Second): // only turns a deadlock into a failure
+		m.mu.Unlock()
+		t.Fatal("SetOutputChannel waited while AddMock held mu")
+	}
 	read := make(chan struct{})
 	go func() { m.outChanStatus(); close(read) }()
 	select {
 	case <-read:
 	case <-time.After(10 * time.Second): // only turns a deadlock into a failure
 		m.mu.Unlock()
-		t.Fatal("AddMock's read of the channel waited on a new channel's drop, which waited on AddMock's mu: deadlock")
+		t.Fatal("AddMock's read of the channel waited on the switch")
 	}
 	m.mu.Unlock()
 	select {
-	case <-switched:
-	case <-time.After(time.Minute): // only turns a hang into a failure
-		t.Fatal("SetOutputChannel never returned")
+	case <-decided:
+		t.Fatal("the switch decided a mock of the old queue")
+	default:
 	}
 }
 
-// The old queue's drops are the old session's: none of their owners is
-// revoked on the new session's stream, whose tests may carry the same names.
+// The old queue's drops (its consumer stopped taking) are the old session's,
+// and reported as any drop: none of their owners is revoked on the new
+// session's stream, whose tests may carry the same names.
 func TestANewChannelRevokesNothingOfTheOldQueueOnIt(t *testing.T) {
 	old := make(chan *models.Mock, 1)
 	old <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
 	m := New(nil)
-	m.outClock, m.outStall = &stall.ManualClock{}, time.Hour
+	m.outClock, m.outStall = clk, time.Hour
 	m.SetOutputChannel(old)
 	m.SetRevokeCapable(true)
 	outcome := make(chan bool, 2)
 	m.send(&models.Mock{Name: "a"}, "test-a", func(d bool) { outcome <- d })
 	m.send(&models.Mock{Name: "b"}, "test-b", func(d bool) { outcome <- d })
+	waitClockPending(t, clk)
 	fresh := make(chan *models.Mock, 4)
 	m.SetOutputChannel(fresh)
+	clk.Advance(time.Hour) // the old consumer took nothing for the bound
 	for i := 0; i < 2; i++ {
 		select {
-		case <-outcome:
+		case d := <-outcome:
+			if d {
+				t.Fatal("a mock no consumer took was said to be delivered")
+			}
 		case <-time.After(time.Minute): // only turns a hang into a failure
 			t.Fatal("the old session's queue was not given up")
 		}
+	}
+	if !m.WasMockDroppedForTC("test-a") || m.DropCount() != 2 {
+		t.Fatalf("the old queue's drops were not reported: %d dropped, test-a recorded %v", m.DropCount(), m.WasMockDroppedForTC("test-a"))
 	}
 	m.drainPendingRevokes()
 	select {
@@ -366,12 +402,7 @@ func TestCloseOutChanLeavesANewSessionsChannelOpen(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	fresh := make(chan *models.Mock, 1)
-	m.SetOutputChannel(fresh) // gives the old queue up: the close goes on
-	select {
-	case <-closed:
-	case <-time.After(time.Minute): // only turns a hang into a failure
-		t.Fatal("CloseOutChan never returned")
-	}
+	m.SetOutputChannel(fresh) // the old queue goes on to its consumer
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -383,14 +414,27 @@ func TestCloseOutChanLeavesANewSessionsChannelOpen(t *testing.T) {
 	if got := <-fresh; got.Name != "b" {
 		t.Fatalf("the new channel carried %q, want b", got.Name)
 	}
-	<-old // the filler
+	for _, want := range []string{"filler", "a"} { // the old consumer reads on
+		if got := <-old; got.Name != want {
+			t.Fatalf("the old channel carried %q, want %q", got.Name, want)
+		}
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("CloseOutChan never returned once its queue was delivered")
+	}
 	select {
 	case _, ok := <-old:
 		if ok {
-			t.Fatal("the old channel carried a mock after its queue was given up")
+			t.Fatal("the old channel carried a mock past its queue")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the channel CloseOutChan was asked to close was never closed: its consumer never ends")
+	}
+	m.sendToOutChan(&models.Mock{Name: "c"}) // the new channel is open
+	if got := <-fresh; got.Name != "c" {
+		t.Fatalf("the new channel carried %q, want c", got.Name)
 	}
 }
 
@@ -540,5 +584,99 @@ func TestOutQueuedUntilTheQueueIsOnTheChannel(t *testing.T) {
 	waitOutQueue(t, m)
 	if m.OutQueued() {
 		t.Fatal("the queue is on the channel, and still OutQueued")
+	}
+}
+
+// A startup mock sent for a claim, taken by a test of the old session while
+// it was on its way, and dropped by its replaced lane (its consumer stopped
+// taking): the drop is told to that test, and revoked on no stream, least of
+// all the new session's, whose tests may carry the same names.
+func TestAReplacedLanesClaimedDropRevokesNothingOnTheNewStream(t *testing.T) {
+	old := make(chan *models.Mock) // no reader
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(old, maps, true)
+	clk := &stall.ManualClock{}
+	mgr.outClock, mgr.outStall = clk, time.Hour
+	mgr.SetRevokeCapable(true)
+	start := time.Now().Add(-time.Second)
+	w := mgr.OpenWindow(start, nil)
+	call := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(call)
+	mgr.FlushOwnedWindows()  // sent for the claim, noted, and queued (no reader)
+	waitClockPending(t, clk) // its drainer has it in hand
+	w.Keep()
+	mgr.ResolveKept(w, start, time.Now(), "test-3", true) // takes it on its way
+	w.Close()
+	fresh := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(fresh)
+	clk.Advance(time.Hour) // the old consumer took nothing for the bound
+	waitOutQueue(t, mgr)
+	if !mgr.WasMockDroppedForTC("test-3") {
+		t.Fatal("fixture: test-3 was not told its mock was dropped")
+	}
+	mgr.drainPendingRevokes()
+	select {
+	case f := <-fresh:
+		t.Fatalf("the new session's stream carried a %s frame %v for the old session's drop", f.Kind, f.Spec.Metadata)
+	default:
+	}
+}
+
+// A channel set again while its replaced lane still delivers to it gets that
+// lane back: one lane per channel, so what is sent to it now waits behind what
+// was queued for it before, and is not raced to the channel by a second
+// drainer.
+func TestAChannelSetAgainKeepsItsQueueInOrder(t *testing.T) {
+	a := make(chan *models.Mock, 1)
+	a <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
+	m := New(nil)
+	m.outClock, m.outStall = clk, time.Hour
+	m.SetOutputChannel(a)
+	m.sendToOutChan(&models.Mock{Name: "1"})
+	m.sendToOutChan(&models.Mock{Name: "2"})
+	waitClockPending(t, clk) // the drainer has 1 in hand, 2 queued
+	m.SetOutputChannel(make(chan *models.Mock, 4))
+	m.SetOutputChannel(a) // the first channel again
+	m.outQueueMu.Lock()
+	lanes := 0
+	if m.out != nil && m.out.ch == a {
+		lanes++
+	}
+	for l := range m.outOld {
+		if l.ch == a {
+			lanes++
+		}
+	}
+	m.outQueueMu.Unlock()
+	if lanes != 1 {
+		t.Fatalf("%d lanes deliver to one channel, want 1", lanes)
+	}
+	m.sendToOutChan(&models.Mock{Name: "3"})
+	for _, want := range []string{"filler", "1", "2", "3"} {
+		select {
+		case got := <-a:
+			if got.Name != want {
+				t.Fatalf("the channel carried %q, want %q", got.Name, want)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("%q never came", want)
+		}
+	}
+}
+
+// A revoke queued for one channel is not sent on a channel set after it: the
+// batch drainPendingRevokes took is its epoch's (trySendControlFrameFor).
+func TestARevokeOfAnEarlierChannelIsNotSentOnALaterOne(t *testing.T) {
+	m := New(nil)
+	m.SetOutputChannel(make(chan *models.Mock, 1))
+	before := m.revokeEpoch.Load()
+	fresh := make(chan *models.Mock, 1)
+	m.SetOutputChannel(fresh)
+	if m.trySendControlFrameFor(&models.Mock{Name: "revoke"}, before) {
+		t.Fatal("a revoke of the earlier channel's epoch was sent on the new channel")
+	}
+	if !m.trySendControlFrame(&models.Mock{Name: "revoke"}) {
+		t.Fatal("a revoke of the current channel's epoch was not sent")
 	}
 }
