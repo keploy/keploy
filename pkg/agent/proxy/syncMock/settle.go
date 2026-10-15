@@ -403,8 +403,10 @@ type PendingExplainer interface {
 // `before` (BacklogState): a test case the recorder's stream holds for its
 // verdict that ended by then, one the ingress is still building or has queued
 // for the stream, a mock requested by then that the manager has yet to hand on
-// (handOnPendingBefore), or, as each Backlog watermark tells, a capture reader
-// or parser that has not got past it. Known only when a Backlog watermark is set:
+// (handOnPendingBefore), a mapping of a test from before it that the manager
+// has decided and not yet put on the mapping stream (mappingOwedBefore), or, as
+// each Backlog watermark tells, a capture reader or parser that has not got
+// past it. Known only when a Backlog watermark is set:
 // without one nothing can tell whether a parser is behind.
 func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	var st BacklogState
@@ -442,6 +444,9 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 		if why := m.handOnPendingBefore(before); why != "" {
 			pending(why)
 		}
+	}
+	if !st.Pending && m.mappingOwedBefore(before) {
+		pending("a test's mapping from before it is not yet on the agent's mapping stream")
 	}
 	for _, b := range backlogs {
 		if st.Pending {

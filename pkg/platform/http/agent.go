@@ -14,6 +14,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,9 @@ const (
 
 // TODO: Need to refactor this file
 type AgentClient struct {
+	// streamEnds says, for each frame stream (models.FrameStream), whether
+	// the agent ended the latest one with its end marker (StreamEnded).
+	streamEnds   sync.Map
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
@@ -196,9 +200,16 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 // kubelet stops a sidecar with its pod), and an agent that held for the
 // client would only be killed at that stop's timeout. Every request that
 // opens the stream carries it, a reconnection too.
+//
+// The stream carries its recording's token too (models.StreamEndTokenHeader),
+// whoever started the agent: the recording's stop asks the agent to end the
+// streams of that token (EndRecordingStreams).
 func (a *AgentClient) markDrainsAfterStop(ctx context.Context, req *http.Request) {
 	if models.DrainsAfterStop(ctx) && a.startedAgent.Load() {
 		req.Header.Set(models.DrainsAfterStopHeader, "true")
+	}
+	if tok := models.StreamEndToken(ctx); tok != "" {
+		req.Header.Set(models.StreamEndTokenHeader, tok)
 	}
 }
 
@@ -241,6 +252,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
+	ended := a.newStreamEnd(models.TestCaseStream)
 
 	// The first response's framing is checked here, where it can still fail
 	// the call; see readIncoming for the rest.
@@ -259,7 +271,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readIncoming(ctx, res, tcChan)
+			done := a.readIncoming(ctx, res, tcChan, ended)
 			if res.Body != nil {
 				if err := res.Body.Close(); err != nil {
 					utils.LogError(a.logger, err, "failed to close response body for incoming request")
@@ -283,7 +295,9 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 // stream ends, in the stream's framing (multipart, or a legacy JSON stream).
 // It reports whether the stream must not go on: ctx is done, or the response
 // cannot be read at all.
-func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase) (done bool) {
+//
+// A stream the agent ends with its end marker sets ended, and is done.
+func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	contentType := res.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -295,13 +309,32 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 			utils.LogError(a.logger, nil, "missing multipart boundary in content-type", zap.String("content-type", contentType))
 			return true
 		}
-		return a.readIncomingParts(ctx, res, boundary, tcChan)
+		return a.readIncomingParts(ctx, res, boundary, tcChan, ended)
 	}
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
 
+// sayAgentSummary says, in this client's own log, what the agent's summary of
+// the session says it lost (models.StreamEndSummary): for an agent this client
+// did not start (docker compose's, kubelet's), whose own log reaches the user
+// through compose or kubelet.
+func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
+	if s.LeftOutInFlight > 0 {
+		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+			zap.Uint64("test_cases", s.LeftOutInFlight))
+	}
+	if s.Unsettled > 0 {
+		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+			zap.Int("test_cases", s.Unsettled))
+	}
+	if s.MassSuppressed {
+		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
+			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
+	}
+}
+
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
-func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase) (done bool) {
+func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
 	var pendingTestCase *models.TestCase
 
@@ -322,6 +355,19 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			break
 		}
 
+		if part.FormName() == models.StreamEndPart {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams): no more to read, nor to resume.
+			// Its marker says what the session lost: said here for an agent
+			// this client did not start, whose own log reaches the user
+			// through compose or kubelet, and can be cut off as it stops.
+			var sum models.StreamEndSummary
+			if err := json.NewDecoder(part).Decode(&sum); err == nil && !a.startedAgent.Load() {
+				a.sayAgentSummary(sum)
+			}
+			ended.Store(true)
+			return true
+		}
 		if part.FormName() == "metadata" {
 			var tc models.TestCase
 			if err := json.NewDecoder(part).Decode(&tc); err != nil {
@@ -500,6 +546,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	// recording arrives. A decoded mock waiting there was the widest of the
 	// three places a trailing mock could be lost.
 	mockChan := make(chan *models.Mock, mockHandoffBuffer)
+	ended := a.newStreamEnd(models.MockStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -514,7 +561,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			stream.close()
 		}()
 		for {
-			dropped := a.readMocks(res, mockChan)
+			dropped := a.readMocks(res, mockChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
@@ -535,8 +582,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 // readMocks hands the mocks of one outgoing stream to mockChan until the
 // stream ends. It reports whether it dropped one because the consumer stopped
-// taking them, after which the stream must not go on.
-func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock) (dropped bool) {
+// taking them, or the agent ended the stream with its end marker (ended is
+// set), after which the stream must not go on.
+func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock, ended *atomic.Bool) (stop bool) {
 	decoder := gob.NewDecoder(res.Body)
 	for {
 		var mock models.Mock
@@ -547,6 +595,12 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 			}
 			utils.LogError(a.logger, err, "failed to decode mock from stream")
 			break
+		}
+		if mock.Kind == models.StreamEndKind {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 
 		// Offer the mock rather than racing the context for it.
@@ -633,6 +687,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	res.Body = conn.body(res.Body)
 
 	mappingChan := make(chan models.TestMockMapping)
+	ended := a.newStreamEnd(models.MappingStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -647,7 +702,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readMappings(ctx, res, mappingChan)
+			done := a.readMappings(ctx, res, mappingChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getmappings")
 			}
@@ -668,7 +723,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 // readMappings hands the mappings of one mappings stream to mappingChan until
 // the stream ends. It reports whether ctx is done, after which the stream must
 // not go on.
-func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping) (done bool) {
+func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping, ended *atomic.Bool) (done bool) {
 	decoder := json.NewDecoder(res.Body)
 	for {
 		var mapping models.TestMockMapping
@@ -677,6 +732,12 @@ func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mapp
 				utils.LogError(a.logger, err, "failed to decode mapping from stream")
 			}
 			return false
+		}
+		if mapping.StreamEnd {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 		select {
 		case <-ctx.Done():
@@ -3464,18 +3525,64 @@ func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (mode
 		return models.AgentBacklog{}, fmt.Errorf("the agent answered %s", resp.Status)
 	}
 	var out struct {
-		Pending   bool   `json:"pending"`
-		Progress  uint64 `json:"progress"`
-		WaitingOn string `json:"waitingOn"`
+		Pending    bool   `json:"pending"`
+		Progress   uint64 `json:"progress"`
+		WaitingOn  string `json:"waitingOn"`
+		EndMarkers bool   `json:"endMarkers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return models.AgentBacklog{}, err
 	}
-	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn}
+	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn, EndMarkers: out.EndMarkers}
 	if out.Pending {
 		b.Verdict = models.BacklogPending
 	}
 	return b, nil
+}
+
+// EndRecordingStreams asks the agent to end the frame streams of the
+// recording whose token is token (models.StreamEndPath, StreamEndTokenHeader):
+// each puts on its stream what it still has, then its end marker
+// (StreamEnded), and ends; one this client reopens after that ends at once. A
+// recording's stop asks once the agent has said it holds nothing more from
+// before it, if the agent said it can (models.AgentBacklog.EndMarkers).
+func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) error {
+	if a.conf.Agent.AgentURI == "" {
+		return errors.New("no agent to end the streams of")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent answered %s", resp.Status)
+	}
+	return nil
+}
+
+// StreamEnded reports whether the agent ended the latest stream of kind with
+// its end marker (EndRecordingStreams): every frame it had for this client is
+// read. A stream that ended any other way (the agent went away) did not.
+func (a *AgentClient) StreamEnded(kind models.FrameStream) bool {
+	if v, ok := a.streamEnds.Load(kind); ok {
+		return v.(*atomic.Bool).Load()
+	}
+	return false
+}
+
+// newStreamEnd is the end flag of a new stream of kind (StreamEnded).
+func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
+	ended := new(atomic.Bool)
+	a.streamEnds.Store(kind, ended)
+	return ended
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.

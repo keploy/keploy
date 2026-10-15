@@ -54,6 +54,14 @@ var agentReadyFilePath = kdocker.AgentReadyFile
 // point where the recording has quietly become unrepresentative.
 const massSuppressionPercent = 25
 
+// massSuppressed reports whether a session that sent sent test cases and
+// suppressed suppressed of them suppressed a large share
+// (massSuppressionPercent): its summary says so at WARN.
+func massSuppressed(sent, suppressed int) bool {
+	total := sent + suppressed
+	return total > 0 && suppressed*100/total >= massSuppressionPercent
+}
+
 // firstCARefusalLog ensures we emit exactly one Info-level line the
 // first time /agent/ready is called before the CA bundle is written.
 // This is the observability signal operators rely on — subsequent
@@ -87,6 +95,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		r.Post("/stop", a.Stop)
 		r.Get("/record/pending", a.HandlePending)
+		r.Post(models.StreamEndPath, a.HandleEndStreams)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
@@ -493,6 +502,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
+	// Closed once this stream's client, told the agent holds nothing more
+	// from before its stop, asks the agent to end its streams. Taken before
+	// the headers go out: once they are flushed the client may ask.
+	ending, endingClosed := streamEnding(r)
+	defer endingClosed()
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	a.logger.Debug("Incoming stream connection established and headers flushed")
@@ -693,8 +707,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 	// summarize says what this session recorded, and what it lost, however the
-	// stream ends (endedBy): the capture closing tc, or the stream ending
-	// under it, which is how a native or docker recording ends (the ingress
+	// stream ends (endedBy): the capture closing tc, its client asking the
+	// agent to end it (HandleEndStreams), or the stream ending under it, which is how a native or docker recording ends (the ingress
 	// never closes tc): its client closes it once its stop's drain is done. A
 	// write that fails as the client goes cannot be told from a client that
 	// went away (net/http ends the request's context on either), and with an
@@ -716,8 +730,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// operator has a materially thinner recording than they
 		// think, and must be told at a level they actually see.
 		logRecordingComplete := a.logger.Info
-		if total := tcsSentSoFar + tcsSuppressedSoFar; total > 0 &&
-			tcsSuppressedSoFar*100/total >= massSuppressionPercent {
+		if massSuppressed(tcsSentSoFar, tcsSuppressedSoFar) {
 			logRecordingComplete = a.logger.Warn
 		}
 		// Read once: the warning and the summary say the same.
@@ -741,7 +754,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Duration("held_up_to", testCaseHoldMax))
 		}
 		logRecordingComplete("agent: recording complete",
-			// How the stream ended: "capture" (it closed its channel), or
+			// How the stream ended: "capture" (it closed its channel),
+			// "end" (its client asked the agent to end it, after it was
+			// told the agent held nothing more from before its stop), or
 			// "client" (the stream ended under it).
 			zap.String("ended_by", endedBy),
 			zap.Int("tcs_sent_to_cli", tcsSentSoFar),
@@ -798,6 +813,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Before the hold's Drain (deferred earlier, so run later): what it still
 	// holds is counted first.
 	defer summarize()
+	// take hands a test case the ingress built to the hold, or, without one,
+	// to the stream. It reports false once the stream is broken.
+	take := func(t *models.TestCase) bool {
+		if hold == nil {
+			return send(t)
+		}
+		hold.Add(t, "", "")
+		return true
+	}
 	for {
 		var tickC <-chan time.Time
 		if holdTick != nil {
@@ -806,6 +830,54 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			a.logger.Debug("Client closed the connection or context was cancelled")
+			return
+		case <-ending:
+			// What the ingress already queued goes first, and what the hold
+			// lets go, then the marker: the client ends its drain on it, not
+			// on a quiet bound that a test case still on its way here could
+			// outlast. What the hold still holds is not final, and is what
+			// the app served after the client's stop (the agent said it held
+			// nothing from before it): the summary counts it.
+		drain:
+			for {
+				select {
+				case t, ok := <-tc:
+					if !ok {
+						break drain
+					}
+					if !take(t) {
+						return
+					}
+				default:
+					break drain
+				}
+			}
+			if hold != nil && !release() {
+				return
+			}
+			// The marker carries what the session lost (the summary's
+			// warnings): a client tears an agent's compose stack down once
+			// its drains end at the markers, and compose can drop the
+			// agent's last log lines with it.
+			header := textproto.MIMEHeader{}
+			header.Set("Content-Disposition", `form-data; name="`+models.StreamEndPart+`"`)
+			part, err := mw.CreatePart(header)
+			if err != nil {
+				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
+				return
+			}
+			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
+				TestCasesSent:       tcsSentSoFar,
+				TestCasesSuppressed: tcsSuppressedSoFar,
+				LeftOutInFlight:     leftOut.LeftOut(),
+				Unsettled:           tcsUnsettled,
+				MassSuppressed:      massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+			}); err != nil {
+				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
+				return
+			}
+			flusher.Flush()
+			endedBy = "end"
 			return
 		case <-tickC:
 			if !release() {
@@ -883,6 +955,12 @@ type PendingResponse struct {
 	Progress uint64 `json:"progress"`
 	// WaitingOn says what is pending, when it can be told.
 	WaitingOn string `json:"waitingOn,omitempty"`
+	// EndMarkers: the answer counts the mappings owed for tests from before
+	// the time asked about, and the agent ends a recording client's frame
+	// streams, each with a marker after all it had, when it asks
+	// (models.StreamEndPath, HandleEndStreams). Absent from an agent that
+	// predates it, whose client ends its drains on quiet.
+	EndMarkers bool `json:"endMarkers,omitempty"`
 }
 
 // HandlePending tells a recording's stop whether the agent may still hand over
@@ -906,7 +984,23 @@ func (a *Agent) HandlePending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: st.Pending, Progress: st.Progress, WaitingOn: st.WaitingOn})
+	_ = json.NewEncoder(w).Encode(PendingResponse{Pending: st.Pending, Progress: st.Progress, WaitingOn: st.WaitingOn, EndMarkers: true})
+}
+
+// HandleEndStreams ends a recording's frame streams (POST
+// models.StreamEndPath?token=, the token its streams carry): each puts on its
+// stream what it still has, then its end marker, and ends. The client asks
+// once the agent has said it holds nothing more from before its stop
+// (HandlePending), so its drains end on those markers, every frame it was
+// owed read, and not on a stream's quiet.
+func (a *Agent) HandleEndStreams(w http.ResponseWriter, r *http.Request) {
+	tok := r.URL.Query().Get("token")
+	if tok == "" {
+		http.Error(w, "token names the recording whose streams to end", http.StatusBadRequest)
+		return
+	}
+	endRecordingStreams(tok)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -945,62 +1039,98 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Streaming outgoing mocks to client")
 
+	// Closed once this stream's client, told the agent holds nothing more
+	// from before its stop, asks the agent to end its streams. Taken before
+	// the headers go out: once they are flushed the client may ask.
+	ending, endingClosed := streamEnding(r)
+	defer endingClosed()
 	// Flush the headers to establish the connection immediately
 	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
 
+	// put streams m. It reports false once the stream is no longer viable.
+	put := func(m *models.Mock) bool {
+		starts.Default.Stamp(m)
+		if err := enc.Encode(m); err != nil {
+			// enc.Encode(m) folds two distinct failure modes into
+			// one error: (a) per-mock serialization errors (an
+			// un-encodable Go type inside m's Spec, e.g. a postgres
+			// cell whose type isn't yet covered by
+			// PostgresV3Cell.GobEncode) and (b) write errors
+			// against w (client gone, broken pipe, connection
+			// reset, use of closed network connection). They MUST
+			// be handled differently:
+			//
+			//   (a) skip + continue — the producer keeps pushing
+			//       onto mockChan and a return here would silently
+			//       drop every subsequent mock for the rest of the
+			//       recording. RCA May 2026: a single [16]uint8
+			//       case in a uuid[] column truncated 22 tests'
+			//       worth of mocks because this handler exited at
+			//       the first encode error.
+			//
+			//   (b) return — the stream is no longer viable;
+			//       continuing would tight-loop draining mockChan
+			//       while every Encode reproduces the same write
+			//       error, spamming logs.
+			//
+			// utils.IsShutdownError matches the (b) cases (EOF,
+			// connection refused/reset, broken pipe, use of closed
+			// network connection); everything else is treated as
+			// (a).
+			if utils.IsShutdownError(err) {
+				a.logger.Debug("outgoing stream client gone; ending mock stream",
+					zap.Error(err),
+				)
+				return false
+			}
+			a.logger.Error("gob encode failed; skipping this mock and continuing the stream",
+				zap.Error(err),
+				zap.String("mockKind", string(m.Kind)),
+				zap.String("mockName", m.Name),
+				zap.String("next_step", "the named mock was DROPPED from this recording. Inspect the error to identify the unsupported Go type, then extend the gob encoder for that mock kind (e.g. PostgresV3Cell.Gob{En,De}code + the codec catalogue for postgres mocks) and re-record. Until that lands, replays of test cases that depend on this mock will report no candidates from the matcher."),
+			)
+			return true
+		}
+		flusher.Flush()
+		return true
+	}
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-ending:
+			// What the channel already holds goes first, then the marker:
+			// the client ends its drain on the marker, not on a quiet bound
+			// that a mock still on its way here could outlast.
+		drain:
+			for {
+				select {
+				case m, ok := <-mockChan:
+					if !ok {
+						break drain
+					}
+					if !put(m) {
+						return
+					}
+				default:
+					break drain
+				}
+			}
+			if err := enc.Encode(&models.Mock{Kind: models.StreamEndKind}); err != nil {
+				a.logger.Debug("could not end the outgoing stream with its marker", zap.Error(err))
+				return
+			}
+			flusher.Flush()
 			return
 		case m, ok := <-mockChan:
 			if !ok {
 				return
 			}
-			starts.Default.Stamp(m)
-			if err := enc.Encode(m); err != nil {
-				// enc.Encode(m) folds two distinct failure modes into
-				// one error: (a) per-mock serialization errors (an
-				// un-encodable Go type inside m's Spec, e.g. a postgres
-				// cell whose type isn't yet covered by
-				// PostgresV3Cell.GobEncode) and (b) write errors
-				// against w (client gone, broken pipe, connection
-				// reset, use of closed network connection). They MUST
-				// be handled differently:
-				//
-				//   (a) skip + continue — the producer keeps pushing
-				//       onto mockChan and a return here would silently
-				//       drop every subsequent mock for the rest of the
-				//       recording. RCA May 2026: a single [16]uint8
-				//       case in a uuid[] column truncated 22 tests'
-				//       worth of mocks because this handler exited at
-				//       the first encode error.
-				//
-				//   (b) return — the stream is no longer viable;
-				//       continuing would tight-loop draining mockChan
-				//       while every Encode reproduces the same write
-				//       error, spamming logs.
-				//
-				// utils.IsShutdownError matches the (b) cases (EOF,
-				// connection refused/reset, broken pipe, use of closed
-				// network connection); everything else is treated as
-				// (a).
-				if utils.IsShutdownError(err) {
-					a.logger.Debug("outgoing stream client gone; ending mock stream",
-						zap.Error(err),
-					)
-					return
-				}
-				a.logger.Error("gob encode failed; skipping this mock and continuing the stream",
-					zap.Error(err),
-					zap.String("mockKind", string(m.Kind)),
-					zap.String("mockName", m.Name),
-					zap.String("next_step", "the named mock was DROPPED from this recording. Inspect the error to identify the unsupported Go type, then extend the gob encoder for that mock kind (e.g. PostgresV3Cell.Gob{En,De}code + the codec catalogue for postgres mocks) and re-record. Until that lands, replays of test cases that depend on this mock will report no candidates from the matcher."),
-				)
-				continue
+			if !put(m) {
+				return
 			}
-			flusher.Flush()
 		}
 	}
 }
@@ -1024,6 +1154,12 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Closed once this stream's client, told the agent holds nothing more
+	// from before its stop, mappings included, asks the agent to end its
+	// streams. Taken before the headers go out: once they are flushed the
+	// client may ask.
+	ending, endingClosed := streamEnding(r)
+	defer endingClosed()
 	// Establish the stream now, as the test-case and mock streams do, not
 	// with the first mapping: the client's request returns only once the
 	// headers arrive. A recording that emits no mappings (a DaemonSet or
@@ -1037,6 +1173,30 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-ending:
+			// What the channel already holds goes first, then the marker:
+			// the client ends its mapping drain on it, not on a quiet bound
+			// that a mapping still on its way here could outlast.
+		drain:
+			for {
+				select {
+				case mapping, ok := <-mappingChan:
+					if !ok {
+						break drain
+					}
+					if err := enc.Encode(mapping); err != nil {
+						return
+					}
+				default:
+					break drain
+				}
+			}
+			if err := enc.Encode(models.TestMockMapping{StreamEnd: true}); err != nil {
+				a.logger.Debug("could not end the mapping stream with its marker", zap.Error(err))
+				return
+			}
+			flusher.Flush()
 			return
 		case mapping, ok := <-mappingChan:
 			if !ok {

@@ -185,16 +185,23 @@ type SyncMockManager struct {
 	mu          sync.Mutex
 	buffer      []*models.Mock
 	mappingChan chan<- models.TestMockMapping
+	// mappingsOwed is what a stop waits for of the mapping stream
+	// (mappings_owed.go): its own lock, a leaf.
+	mappingsOwed mappingsOwed
 
 	// mappingOverflow holds mappings the recorder was not ready to take. The
 	// capture path must never block, but a mapping must never be dropped either
 	// (a lost one becomes a no_mocks failure at replay), so overflow is queued
 	// here and handed over by a single drainer goroutine. Guarded by
-	// mappingOverflowMu, which is a leaf: never take m.mu while holding it.
+	// mappingOverflowMu: never take m.mu while holding it (only
+	// mappingsOwed.mu nests inside it).
 	mappingOverflowMu sync.Mutex
-	mappingOverflow   []models.TestMockMapping
+	mappingOverflow   []owedMapping
 	mappingDraining   bool
 	mappingStreamCtx  context.Context
+	// mappingStreamCh is the stream mappingStreamCtx is for: a mapping read
+	// for another (replaced) one is not queued behind it (sendMapping).
+	mappingStreamCh chan<- models.TestMockMapping
 	// mappingGen identifies the current stream. Bumped on every
 	// SetMappingChannel so a drainer left over from a previous stream retires
 	// instead of clearing the new stream's queue.
@@ -658,16 +665,22 @@ const mappingOverflowCap = 10000
 // queue into a channel nobody reads — and so it cannot clear a queue that is no
 // longer its own.
 func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<- models.TestMockMapping) {
+	// The stream and its generation change together, under mu: a mapping
+	// owed (oweMapping, under mu) is owed to the generation of the stream it
+	// is sent on, so the forgiveness below never takes the debt of a mapping
+	// sent on the new stream.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.mappingChan = ch
-	m.mu.Unlock()
 
 	m.mappingOverflowMu.Lock()
 	m.mappingStreamCtx = streamCtx
+	m.mappingStreamCh = ch
 	// Anything the previous stream never handed over belongs to a recording that
-	// has already ended.
+	// has already ended: no stop waits for it any more.
 	m.mappingOverflow = nil
 	m.mappingGen++
+	m.forgiveMappingsBefore(m.mappingGen)
 	// The previous drainer (if any) retires on its generation check, so this
 	// stream starts with no drainer and the next overflow spawns a fresh one.
 	m.mappingDraining = false
@@ -689,17 +702,32 @@ func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<-
 // and handed over by a single drainer goroutine that CAN block. Ordering: once a
 // drainer is live every mapping queues behind it, so the fast path can never
 // overtake an entry the drainer is mid-send on.
-func (m *SyncMockManager) sendMapping(ch chan<- models.TestMockMapping, entry models.TestMockMapping) {
+//
+// paid, when set, is the mapping's debt to a recording's stop (oweMapping):
+// paid once the mapping is on ch, or once it is lost (and said to be).
+func (m *SyncMockManager) sendMapping(ch chan<- models.TestMockMapping, entry models.TestMockMapping, paid func()) {
+	pay := func() {
+		if paid != nil {
+			paid()
+		}
+	}
+	queued := owedMapping{entry: entry, paid: paid}
 	m.mappingOverflowMu.Lock()
+	if m.forReplacedStreamLocked(ch) {
+		m.mappingOverflowMu.Unlock()
+		pay()
+		return
+	}
 	if m.mappingDraining {
 		// A drainer is live — it may be mid-send with overflow momentarily empty,
 		// so gate on the drainer, not on the queue length, or this would overtake.
 		if len(m.mappingOverflow) >= mappingOverflowCap {
 			m.mappingOverflowMu.Unlock()
 			m.reportMappingOverflowFull()
+			pay()
 			return
 		}
-		m.mappingOverflow = append(m.mappingOverflow, entry)
+		m.mappingOverflow = append(m.mappingOverflow, queued)
 		m.mappingOverflowMu.Unlock()
 		return
 	}
@@ -707,24 +735,39 @@ func (m *SyncMockManager) sendMapping(ch chan<- models.TestMockMapping, entry mo
 
 	select {
 	case ch <- entry:
+		pay()
 		return
 	default:
 	}
 
 	m.mappingOverflowMu.Lock()
+	if m.forReplacedStreamLocked(ch) {
+		m.mappingOverflowMu.Unlock()
+		pay()
+		return
+	}
 	if m.mappingDraining {
 		// Another caller started a drainer while we were trying the fast path.
-		m.mappingOverflow = append(m.mappingOverflow, entry)
+		m.mappingOverflow = append(m.mappingOverflow, queued)
 		m.mappingOverflowMu.Unlock()
 		return
 	}
-	m.mappingOverflow = append(m.mappingOverflow, entry)
+	m.mappingOverflow = append(m.mappingOverflow, queued)
 	m.mappingDraining = true
 	gen := m.mappingGen
 	streamCtx := m.mappingStreamCtx
 	m.mappingOverflowMu.Unlock()
 
 	go m.drainMappingOverflow(ch, streamCtx, gen)
+}
+
+// forReplacedStreamLocked reports whether ch is a mapping stream since
+// replaced (SetMappingChannel came between a sender's read of the stream and
+// its send): the mapping went with its recording, and its debt with it
+// (forgiveMappingsBefore). Queued, it would hold every mapping of the new
+// stream behind a send nobody takes. The caller holds mappingOverflowMu.
+func (m *SyncMockManager) forReplacedStreamLocked(ch chan<- models.TestMockMapping) bool {
+	return ch != m.mappingStreamCh
 }
 
 // reportMappingOverflowFull logs the only case in which a mapping is still lost:
@@ -761,23 +804,36 @@ func (m *SyncMockManager) drainMappingOverflow(ch chan<- models.TestMockMapping,
 			m.mappingOverflowMu.Unlock()
 			return
 		}
-		entry := m.mappingOverflow[0]
+		queued := m.mappingOverflow[0]
 		m.mappingOverflow = m.mappingOverflow[1:]
 		m.mappingOverflowMu.Unlock()
 
 		select {
-		case ch <- entry:
+		case ch <- queued.entry:
+			if queued.paid != nil {
+				queued.paid()
+			}
 		case <-done:
 			// The recorder's stream is gone, so this can never be delivered. That
 			// is real data loss — say so loudly; it was silent before.
 			m.mappingOverflowMu.Lock()
 			if m.mappingGen != gen {
 				// A new stream took over while we blocked; its queue is not ours
-				// to clear and its drainer slot is not ours to release.
+				// to clear and its drainer slot is not ours to release. The
+				// mapping in hand is lost with the old stream, and owes no stop
+				// (the new stream forgave the old ones' debts, this one's too).
 				m.mappingOverflowMu.Unlock()
+				if queued.paid != nil {
+					queued.paid()
+				}
 				return
 			}
 			lost := len(m.mappingOverflow) + 1
+			for _, o := range append(m.mappingOverflow, queued) {
+				if o.paid != nil {
+					o.paid()
+				}
+			}
 			m.mappingOverflow = nil
 			m.mappingDraining = false
 			m.mappingOverflowMu.Unlock()
@@ -1548,6 +1604,9 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
 	hold := m.holdStateLocked()
 	m.noteTaken(mocksToSend)
+	// Owed before the mocks go: a stop asked between the two sends waits for
+	// the mappings too (mappings_owed.go).
+	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 	m.mu.Unlock()
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
@@ -1569,7 +1628,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 			if len(ids) == 0 {
 				continue
 			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
 		}
 	}
 	// Deliver any queued deferred-orphan revokes on the same open stream. Runs
@@ -3658,6 +3717,14 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	bufferLenAfter := len(m.buffer)
 	mocksToSendLen := len(mocksToSend)
 	m.noteTaken(mocksToSend)
+	// Owed before the mocks go: a stop asked between the two sends waits for
+	// the mappings too (mappings_owed.go). The test's own is timed by its
+	// window's start.
+	var paidEntry func()
+	if mappingEntry != nil {
+		paidEntry = m.oweMapping(start)
+	}
+	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 
 	m.mu.Unlock()
 	m.reportGivenUp(gaveUp, LostToHoldBound)
@@ -3702,7 +3769,9 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// mapping send under an equivalent guard.
 	m.sendTaken(mocksToSend)
 	if mappingEntry != nil && mappingChan != nil {
-		m.sendMapping(mappingChan, *mappingEntry)
+		m.sendMapping(mappingChan, *mappingEntry, paidEntry)
+	} else if paidEntry != nil {
+		paidEntry()
 	}
 	// Retroactive mapping entries for mocks late-binned into past windows. These
 	// are a DELTA for an already-resolved test, not its full set, so the recorder
@@ -3714,7 +3783,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			if len(ids) == 0 {
 				continue
 			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
 		}
 	}
 }
@@ -3855,6 +3924,8 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
 	bufferLenAfter, hold := len(m.buffer), m.holdStateLocked()
 	m.noteTaken(mocksToSend)
+	// Owed before the mocks go (mappings_owed.go).
+	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 	m.mu.Unlock()
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
@@ -3882,7 +3953,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			if len(ids) == 0 {
 				continue
 			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids})
+			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
 		}
 	}
 }
