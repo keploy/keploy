@@ -276,12 +276,17 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 		// Its reset: every byte it had sent had arrived (pairReached).
 		return true, nil
 	case closed:
-		// The proxy closed its side first and receives nothing more: there
-		// is nothing to wait for. What the application wrote after the
-		// close cannot be read (its socket is gone), and a write after the
-		// peer's close is refused with a reset with keploy or without it:
-		// no app_bytes_lost is charged on a count that cannot be read.
-		return true, nil
+		// The proxy closed its side while the application's was open (what
+		// it read as it closed holds no FIN or reset from it), and the
+		// application's socket has gone since: either its FIN, after every
+		// byte it wrote, reached the proxy's orphaned socket, or a reset
+		// ended it: its own, or the orphan's refusing bytes that arrived
+		// after the close, bytes written before it and never captured. The
+		// orphan tells the FIN (TIME_WAIT); nothing tells the resets apart.
+		if d, err := lookupTCP(pc.proxy, pc.app); err == nil && d.state == tcpTimeWait {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, went after the proxy closed its side, and whether bytes it wrote before that close were refused cannot be told", models.ErrProxyConnsUnsupported, pc.app)
 	case p.paired.visible.Load():
 		// The application's sockets are seen from here, so this one is
 		// gone with its FIN or reset on its way (a held packet, a loaded
