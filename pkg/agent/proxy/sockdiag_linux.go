@@ -17,6 +17,7 @@ import (
 // them (include/net/tcp_states.h).
 const (
 	tcpEstablished = 1
+	tcpFinWait1    = 4
 	tcpTimeWait    = 6
 	tcpClose       = 7
 	tcpCloseWait   = 8

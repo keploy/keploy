@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -171,4 +172,155 @@ func TestTheProxysCloseThenTheApplicationsFINSettles(t *testing.T) {
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
 		t.Fatalf("%d losses, want none", l)
 	}
+}
+
+// The clean end with the wait beginning while the application's FIN is not yet
+// acknowledged (its socket in LAST_ACK: a loaded host deferring the ACK's
+// softirq, a held packet) settles with no loss: what the application wrote
+// counts that FIN, which the proxy's side, read as it closed, never received,
+// but its orphan took it (TIME_WAIT), so nothing was refused. A drop-all
+// filter on the application's socket holds the proxy's ACK off.
+func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T) {
+	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
+	}
+	rc, err := app.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) {
+		drop := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+		serr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{Len: 1, Filter: &drop[0]})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if errors.Is(serr, unix.EPERM) {
+		// Linux 7 refuses an unprivileged filter on a TCP socket (a UDP
+		// one, or root, is let through). CI's root step runs this test
+		// as root; TestAProxysCloseOneFINShortIsJudgedByItsOrphan covers
+		// the judgement here.
+		t.Skipf("this kernel refuses an unprivileged socket filter on a TCP socket: %v", serr)
+	}
+	if serr != nil {
+		t.Fatalf("attach a drop-all filter to the application's socket: %v", serr)
+	}
+	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+	_ = app.Close()
+	for {
+		d, err := lookupTCP(local, remote)
+		if err != nil {
+			t.Fatalf("the application's socket after its close: %v", err)
+		}
+		if d.state == tcpLastAck {
+			break
+		}
+		runtime.Gosched()
+	}
+	// The FIN reaches the orphan, retransmitted if need be: only a reset
+	// (which nothing here sends) would end it first.
+	for {
+		d, err := lookupTCP(remote, local)
+		if err != nil {
+			t.Fatalf("the proxy's orphaned socket went before the application's FIN reached it: %v", err)
+		}
+		if d.state == tcpTimeWait {
+			break
+		}
+		runtime.Gosched()
+	}
+	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+		t.Fatalf("WaitPairedBytes: %v, want settled: every byte the application wrote, and its FIN, reached the proxy", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none: every byte the application wrote, and its FIN, reached the proxy", l)
+	}
+}
+
+// pairReached on a connection the proxy closed one short of what the
+// application wrote (what appWritten reads once the application has closed,
+// its FIN not yet acknowledged: the bytes and the FIN), on the kernel's own
+// sockets, with no socket filter: an orphan that took the FIN (TIME_WAIT)
+// refused nothing and settles with no loss; one still waiting for a FIN
+// (FIN_WAIT2) cannot tell it from a byte it will refuse, so the wait answers
+// unknown; two short is a loss, whatever the orphan holds.
+func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
+	closedPair := func(t *testing.T) (*Proxy, *pairedConn, *net.TCPConn, proxySide) {
+		t.Helper()
+		p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+		if _, err := app.Write([]byte("publish 1\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+			t.Fatal(err)
+		}
+		_ = reader.Close()
+		if _, err := app.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
+		}
+		p.paired.mu.Lock()
+		pc := p.paired.byConn[proxySide]
+		p.paired.mu.Unlock()
+		if pc == nil {
+			t.Fatal("the paired connection is not kept")
+		}
+		ps, closed := pc.side()
+		if !closed || ps.err != nil || ps.received != 10 {
+			t.Fatalf("the proxy's side: closed %v, received %d (%v), want closed after 10", closed, ps.received, ps.err)
+		}
+		return p, pc, app, ps
+	}
+	orphanIn := func(t *testing.T, pc *pairedConn, state uint8) {
+		t.Helper()
+		for {
+			d, err := lookupTCP(pc.proxy, pc.app)
+			if err != nil {
+				t.Fatalf("the proxy's orphaned socket: %v", err)
+			}
+			if d.state == state {
+				return
+			}
+			runtime.Gosched()
+		}
+	}
+
+	t.Run("its orphan took the FIN", func(t *testing.T) {
+		p, pc, app, ps := closedPair(t)
+		_ = app.Close()
+		orphanIn(t, pc, tcpTimeWait)
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+		if !ok || err != nil {
+			t.Fatalf("pairReached = %v, %v; want settled", ok, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+			t.Fatalf("%d app_bytes_lost charged, want none: the orphan took the FIN, so it refused nothing", l)
+		}
+	})
+
+	t.Run("its orphan still waits for a FIN", func(t *testing.T) {
+		p, pc, _, ps := closedPair(t)
+		orphanIn(t, pc, tcpFinWait2)
+		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1})
+		if ok || !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("one short = %v, %v; want unknown (%v): the FIN, or a byte the orphan will refuse, is still to come", ok, err, models.ErrProxyConnsUnsupported)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+			t.Fatalf("one short: %d app_bytes_lost charged, want none (unknown)", l)
+		}
+		ok, err = p.pairReached(&pairTarget{pc: pc, want: ps.received + 2})
+		if !ok || err != nil {
+			t.Fatalf("two short = %v, %v; want resolved as a loss", ok, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Fatalf("two short: %d app_bytes_lost charged, want 1: at least one byte the application wrote will be refused", l)
+		}
+	})
 }
