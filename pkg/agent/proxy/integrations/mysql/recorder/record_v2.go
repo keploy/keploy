@@ -1739,6 +1739,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			continue
 		}
 
+		stampStatementQuery(decodeCtx, cmdPkt)
+
 		// No-response commands: emit immediately with empty response,
 		// matching the legacy recorder shape. Response timestamp is
 		// the command arrival time since no server response exists.
@@ -1858,6 +1860,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			continue
 		}
 		lastEnd = later(reqTs, resTs)
+		rememberPrepared(decodeCtx, cmdPkt, respBundle)
 
 		mockType := "mocks"
 		if cmdPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
