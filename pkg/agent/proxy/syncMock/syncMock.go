@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -337,13 +338,38 @@ type SyncMockManager struct {
 	// buffer and are never emitted.
 	unboundWarnOnce sync.Once
 
-	// dropCount tracks send-path drops caused by outChan being full
-	// past the bounded send budget. Sampled to an Error so customers
+	// dropCount tracks send-path drops: the out queue's byte bound
+	// reached, or its consumer stalled (send). Sampled to an Error so customers
 	// get a loud signal without the log-flood anti-pattern. Using
 	// the typed atomic.Uint64 wrapper removes the 32-bit-alignment
 	// footgun that a bare uint64 + sync/atomic.AddUint64 would carry
 	// if this struct ever got embedded or reordered.
 	dropCount atomic.Uint64
+
+	// outQueue holds, in order, the mocks a full outChan has not taken yet
+	// (send), outQueueBytes their size; outDraining says a drainer
+	// (drainOutQueue) is delivering them, and outDrained is closed when it
+	// ends. outGen, outAbandon and outClosing are the channel's:
+	// SetOutputChannel bumps the first and closes the second when it sets a
+	// new channel, giving the old one's queue up; CloseOutChan closes the
+	// third, so the drainer gives up on a consumer that stopped sooner
+	// (outCloseStall). Guarded by outQueueMu, taken (when both are) after
+	// outChanMu; droppedMu, sendingMu and the drop hook's locks are never
+	// taken under it.
+	outQueueMu    sync.Mutex
+	outQueue      []queuedMock
+	outQueueBytes int64
+	outDraining   bool
+	outDrained    chan struct{}
+	outGen        uint64
+	outAbandon    chan struct{}
+	outClosing    chan struct{}
+	// outClock, outStall and outCloseStall measure the drainer's stall
+	// (outChanStall, outCloseStall): the process's own runnable clock and
+	// those bounds unless a test sets them.
+	outClock      stall.Clock
+	outStall      time.Duration
+	outCloseStall time.Duration
 
 	// droppedMu guards droppedTCNames / droppedTCOrder. It is a DEDICATED
 	// LEAF lock: it is only ever taken while (optionally) holding
@@ -417,7 +443,7 @@ type SyncMockManager struct {
 	// real post-count drop, so without this counter totalAdded would
 	// over-report deliverable mocks. Accounting identity at shutdown:
 	//   totalAdded = forwarded + still_in_buffer + outChanClosedDrops
-	//                + sendBudget drops (dropCount)
+	//                + out-queue drops (dropCount)
 	outChanClosedDrops atomic.Int64
 
 	// pressure holds every span during which memory pressure was active: one
@@ -631,21 +657,52 @@ func (m *SyncMockManager) NextTestID() int64 {
 // A distinct channel pointer means a new session (re-record), and
 // only then do we clear the closed flag.
 func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
-	m.outChanMu.Lock()
-	defer m.outChanMu.Unlock()
-	if out != m.outChan {
-		m.outChan = out
-		m.outChanClosed = false
-		// New session (distinct channel = re-record): drop any revokes still
-		// queued from a prior session so a name orphaned there can't be
-		// delivered onto THIS session's /outgoing stream. droppedMu is a leaf;
-		// taking it here under outChanMu.Lock keeps the same outChanMu→droppedMu
-		// order the send path already uses (outChanMu.RLock→recordDroppedTC), so
-		// there is no new lock-ordering hazard.
-		m.droppedMu.Lock()
-		m.pendingRevokes = nil
-		m.droppedMu.Unlock()
+	m.outChanMu.RLock()
+	same := out == m.outChan
+	m.outChanMu.RUnlock()
+	if same {
+		// The hot path (once per accepted connection): no writer lock, which
+		// would wait out a sender holding the read lock.
+		return
 	}
+	m.outChanMu.Lock()
+	if out == m.outChan {
+		m.outChanMu.Unlock()
+		return
+	}
+	m.outChan = out
+	m.outChanClosed = false
+	// A new channel abandons the old one's queue: its consumer has gone
+	// with its session, and its drainer, blocked on it, retires.
+	m.outQueueMu.Lock()
+	lost := m.outQueue
+	var oldDrained chan struct{}
+	if m.outDraining {
+		oldDrained = m.outDrained
+	}
+	processOutQueued.Add(-m.outQueueBytes)
+	m.outQueue, m.outQueueBytes, m.outDraining, m.outDrained = nil, 0, false, nil
+	m.outGen++
+	if m.outAbandon != nil {
+		close(m.outAbandon)
+	}
+	m.outAbandon, m.outClosing = make(chan struct{}), make(chan struct{})
+	m.outQueueMu.Unlock()
+	m.outChanMu.Unlock()
+	// Told with no lock held (toldDropped): a queued mock's done takes mu
+	// (sendTaken's sentClaimDone), which AddMock holds while it reads the
+	// channel (outChanStatus), and the drop hook may take locks of its own.
+	m.dropQueued(lost, "the channel was replaced by a new session's")
+	if oldDrained != nil {
+		<-oldDrained // it gives up the mock in hand at once (abandon)
+	}
+	// New session (distinct channel = re-record): drop any revokes still
+	// queued from a prior session, those of the old queue's drops just told
+	// among them, so a name orphaned there can't be delivered onto THIS
+	// session's /outgoing stream. droppedMu is a leaf.
+	m.droppedMu.Lock()
+	m.pendingRevokes = nil
+	m.droppedMu.Unlock()
 }
 
 // mappingOverflowCap bounds the queue of mappings the recorder has not taken yet.
@@ -872,17 +929,37 @@ func (m *SyncMockManager) dropLogger() *zap.Logger {
 	return m.logger
 }
 
-// sendBudget is how long sendToOutChan will wait for outChan to drain
-// before dropping the mock. 200 ms is sized conservatively: large
-// enough to absorb a GC pause on an oversubscribed CI runner or a
-// transient downstream consumer stall, small enough that shutdown
-// latency (CloseOutChan grabbing the write lock) is imperceptible.
-// The historical code used a non-blocking send with `default: drop`
-// which silently lost pre-first-request mocks under burst —
-// customers saw "some calls didn't replay" with no actionable
-// signal. See the commit that introduced this budget for the
-// customer-facing flake it resolves.
-const sendBudget = 200 * time.Millisecond
+// outQueueMaxBytes bounds the mocks queued for full outChans (outQueue), by
+// every manager of the process together (processOutQueued): a mock that would
+// take them past this is dropped. Bytes decide a loss on the way out, not a
+// time: the queue holds as much again as the CLI's outChan itself (its 16,384
+// slots of 4 KiB, pkg/service/agent), on top of it. One bound for the process,
+// as the hold's (MaxHeldBytes): a DaemonSet agent runs a manager per app, all
+// of whose channels one consumer (the k8s-proxy upload) takes, and a bound
+// per manager would queue it once per app when that consumer stalls.
+const outQueueMaxBytes int64 = 64 << 20
+
+// processOutQueued is what every manager of the process holds queued
+// (outQueueBytes, summed): moved under each manager's outQueueMu with its own.
+var processOutQueued atomic.Int64
+
+// outChanStall is how long the queue's drainer waits for outChan's consumer
+// to take a mock, in the time the process could run (utils/stall), before it
+// gives up on every mock queued: a consumer that took nothing for that long,
+// however busy the host, has stopped (the CLI went away, the k8s-proxy
+// upload wedged). One that takes anything starts the wait again, so a slow
+// consumer loses nothing to it.
+const outChanStall = 30 * time.Second
+
+// outCloseStall is outChanStall once CloseOutChan waits on the drainer. A
+// stop's teardown takes no step while it waits, and the CLI that stops the
+// agent kills a teardown that takes none for utils.TeardownStallChecks of the
+// agent's beats (about as many seconds of its time), cutting short what comes
+// after the close: the nsswitch reset, the hooks' detach, the CA's removal.
+// The consumer is often gone by then (a recording's client ends its streams
+// before it stops the agent); one still reading takes a mock far more often
+// than this.
+const outCloseStall = 5 * time.Second
 
 // sendDropSampleRate controls Warn emission under sustained overflow.
 // Emitting per-drop under a stuck consumer would flood the log and
@@ -892,45 +969,294 @@ const sendBudget = 200 * time.Millisecond
 // recorder loop being drowned by its own logging.
 const sendDropSampleRate uint64 = 1024
 
-// sendToOutChan is the single send path to outChan. Holds outChanMu
-// read-lock across the whole observation + send so CloseOutChan (the
-// writer-lock holder) cannot interleave a close between our
-// not-closed check and the chansend.
-//
-// Tries a non-blocking send first (the fast, jitter-free common case
-// where the consumer is keeping up). When the channel is momentarily
-// full, falls through to a bounded block (sendBudget) before
-// dropping. Holding the read-lock across the bounded wait only
-// lengthens CloseOutChan's shutdown path by at most sendBudget —
-// acceptable because every RLock holder is doing the same thing. The
-// alternative (silent drop after zero wait) was the source of a
-// customer-facing recording-loss flake and is strictly worse than a
-// 200 ms worst-case shutdown delay.
-func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
-	m.sendToOutChanOwned(mock, "")
+// queuedMock is a mock waiting in outQueue for outChan.
+type queuedMock struct {
+	mock  *models.Mock
+	owner string
+	size  int64
+	done  func(delivered bool)
 }
 
-// sendToOutChanOwned is sendToOutChan with the owning test name threaded
-// through so a capacity drop can be attributed to the TC that owns the mock.
-// When owner != "" and the mock is genuinely undeliverable — the outChan is
-// closed/nil, or the bounded send budget is exhausted — the owner is recorded
-// via recordDroppedTC so record.go suppresses (rather than streams) that TC at
-// replay. owner == "" (session/connection/startup/anonymous) records nothing.
-// See sendToOutChan's doc comment for the locking rationale. Reports whether
-// the mock was delivered.
-func (m *SyncMockManager) sendToOutChanOwned(mock *models.Mock, owner string) bool {
-	if m.trySendOwned(mock, owner) {
-		return true
+// sendToOutChan hands mock to outChan (send), with no owner and nothing to
+// tell.
+func (m *SyncMockManager) sendToOutChan(mock *models.Mock) {
+	m.send(mock, "", nil)
+}
+
+// send hands mock to outChan without ever blocking its caller (a parser, the
+// ingress's ResolveRange, the flush ticker): at once when the channel has
+// room and no mock is queued before it, else queued (outQueue) for the one
+// drainer (drainOutQueue), which delivers the queue in order as the consumer
+// takes it. done, when set, is told once the mock is delivered (true) or
+// dropped (false), after a drop is recorded; owner, when set, is the test the
+// mock belongs to, recorded on a drop (recordDroppedTC) so that test is left
+// out rather than replayed without it.
+//
+// A mock is dropped only when it cannot be delivered: outChan is closed or
+// was never set, the queue holds outQueueMaxBytes already, or the consumer
+// took nothing for outChanStall of runnable time (every queued mock then).
+// It used to be dropped once outChan stayed full for 200 ms of wall time:
+// a consumer behind by a full channel lost what came next to any pause
+// longer than that, a GC on a starved host or a disk flush, and its test
+// cases were left out of a recording that otherwise succeeded.
+func (m *SyncMockManager) send(mock *models.Mock, owner string, done func(bool)) {
+	tell := func(delivered bool) {
+		if done != nil {
+			done(delivered)
+		}
 	}
-	// Told outside outChanMu: the hook may take locks of its own.
+	m.outChanMu.RLock()
+	if m.outChanClosed || m.outChan == nil {
+		// Genuinely undeliverable → a real drop. Record the owner (under the
+		// outChanMu.RLock already held; droppedMu is a leaf lock) so the
+		// orphaned TC is suppressed instead of reaching replay mock-less.
+		if owner != "" {
+			m.recordDroppedTC(owner)
+		}
+		m.outChanMu.RUnlock()
+		m.toldDropped(mock)
+		tell(false)
+		return
+	}
+	// trySend sends at once when nothing is queued before mock. Under
+	// outQueueMu.
+	trySend := func() bool {
+		if m.outDraining {
+			return false
+		}
+		select {
+		case m.outChan <- mock:
+			return true
+		default:
+			return false
+		}
+	}
+	m.outQueueMu.Lock()
+	if trySend() {
+		m.outQueueMu.Unlock()
+		m.outChanMu.RUnlock()
+		tell(true)
+		return
+	}
+	m.outQueueMu.Unlock()
+	// Sized outside outQueueMu: the walk is up to mockSizeNodes values for a
+	// large database mock, and the drainer and every other send wait on that
+	// lock. outChanMu's read lock, still held, keeps the channel as it is.
+	size := mockSize(mock)
+	m.outQueueMu.Lock()
+	if trySend() { // the drainer ended, or the consumer took, meanwhile
+		m.outQueueMu.Unlock()
+		m.outChanMu.RUnlock()
+		tell(true)
+		return
+	}
+	// The bound is on what waits behind another: a mock with nothing before
+	// it (no drainer) is queued whatever its size (the parser holds it
+	// already), else a mock past the bound, or one sized at it (mockSize's
+	// cap), could never wait at all. A drainer's mock in hand is not counted:
+	// it is out of the queue.
+	if m.outDraining && processOutQueued.Load()+size > outQueueMaxBytes {
+		m.outQueueMu.Unlock()
+		m.dropOut(mock, owner, "the mocks queued for the consumer already hold their byte bound")
+		m.outChanMu.RUnlock()
+		m.toldDropped(mock)
+		tell(false)
+		return
+	}
+	m.outQueue = append(m.outQueue, queuedMock{mock: mock, owner: owner, size: size, done: done})
+	m.outQueueBytes += size
+	processOutQueued.Add(size)
+	if !m.outDraining {
+		m.outDraining = true
+		m.outDrained = make(chan struct{})
+		go m.drainOutQueue(m.outChan, m.outGen, m.outAbandon, m.outClosing, m.outDrained)
+	}
+	m.outQueueMu.Unlock()
+	m.outChanMu.RUnlock()
+}
+
+// drainOutQueue delivers outQueue to out, in order, as its consumer takes
+// it, and ends once the queue is empty (closing drained). It takes each mock
+// out of the queue before it sends it, so the mock in hand is its alone, and
+// sends without outChanMu: CloseOutChan does not close out before drained is
+// closed, and a new channel (SetOutputChannel) abandons this one (abandon, a
+// new gen). It gives the mock in hand and every queued one up once the
+// consumer has taken nothing for outChanStall of runnable time (outCloseStall
+// once the channel is closing), or the channel is abandoned.
+func (m *SyncMockManager) drainOutQueue(out chan<- *models.Mock, gen uint64, abandon, closing <-chan struct{}, drained chan struct{}) {
+	defer close(drained)
+	meter := stall.NewMeter(m.outClock, m.outStallBound())
+	defer func() { meter.Stop() }() // the meter deliverQueued left
+	for {
+		m.outQueueMu.Lock()
+		if m.outGen != gen {
+			// Superseded: the new channel owns the queue and the drainer
+			// slot now (SetOutputChannel gave this one's mocks up).
+			m.outQueueMu.Unlock()
+			return
+		}
+		if len(m.outQueue) == 0 {
+			m.outQueue, m.outDraining = nil, false // do not keep a burst's backing array
+			m.outQueueMu.Unlock()
+			return
+		}
+		q := m.outQueue[0]
+		m.outQueue[0] = queuedMock{}
+		m.outQueue = m.outQueue[1:]
+		m.outQueueBytes -= q.size
+		processOutQueued.Add(-q.size)
+		m.outQueueMu.Unlock()
+
+		if !m.deliverQueued(out, q.mock, &meter, abandon, &closing) {
+			why := "the consumer took no mock for the stall bound of the time the process could run"
+			select {
+			case <-abandon:
+				why = "the channel was replaced by a new session's"
+			default:
+			}
+			m.dropQueued([]queuedMock{q}, why)
+			m.giveUpOutQueue(gen, why)
+			return
+		}
+		meter.Reset() // the consumer took one
+		if q.done != nil {
+			q.done(true)
+		}
+	}
+}
+
+// deliverQueued sends mock on out, and reports false once out's consumer
+// has taken nothing for *meter's bound, or out is abandoned. Once the channel
+// is closing (*closing fires), the bound is outCloseStall from then on: *meter
+// is replaced, and *closing is set nil. A look is armed only while the
+// consumer is behind, and once per look, not once per mock.
+func (m *SyncMockManager) deliverQueued(out chan<- *models.Mock, mock *models.Mock, meter **stall.Meter, abandon <-chan struct{}, closing *<-chan struct{}) bool {
+	select {
+	case out <- mock:
+		return true
+	default:
+	}
+	wait := (*meter).Wait()
+	for {
+		select {
+		case out <- mock:
+			return true
+		case <-abandon:
+			return false
+		case <-*closing:
+			*closing = nil
+			(*meter).Stop()
+			*meter = stall.NewMeter(m.outClock, m.outCloseStallBound())
+			wait = (*meter).Wait()
+		case <-wait:
+			if (*meter).Expired() {
+				return false
+			}
+			wait = (*meter).Wait()
+		}
+	}
+}
+
+// giveUpOutQueue drops every mock queued for generation gen (the drainer
+// gave up on its consumer), and frees the drainer slot.
+func (m *SyncMockManager) giveUpOutQueue(gen uint64, why string) {
+	m.outQueueMu.Lock()
+	if m.outGen != gen {
+		m.outQueueMu.Unlock()
+		return
+	}
+	lost := m.outQueue
+	processOutQueued.Add(-m.outQueueBytes)
+	m.outQueue, m.outQueueBytes, m.outDraining = nil, 0, false
+	m.outQueueMu.Unlock()
+	m.dropQueued(lost, why)
+}
+
+// dropQueued drops mocks taken out of the queue, and tells each.
+func (m *SyncMockManager) dropQueued(lost []queuedMock, why string) {
+	for _, q := range lost {
+		m.dropOut(q.mock, q.owner, why)
+		m.toldDropped(q.mock)
+		if q.done != nil {
+			q.done(false)
+		}
+	}
+}
+
+// OutQueued reports whether mocks a send handed over are still on their way
+// to outChan: queued behind a full channel, or in its drainer's hand. A flush
+// (FlushOwnedWindows) returns once its mocks are sent, not once they are on
+// the channel: a consumer that ends its read when a flush has returned and the
+// channel is empty ends it only once this is false too.
+func (m *SyncMockManager) OutQueued() bool {
+	if m == nil {
+		return false
+	}
+	m.outQueueMu.Lock()
+	defer m.outQueueMu.Unlock()
+	return m.outDraining
+}
+
+// outStallBound is the drainer's stall bound: outChanStall unless a test set
+// outStall.
+func (m *SyncMockManager) outStallBound() time.Duration {
+	if m.outStall > 0 {
+		return m.outStall
+	}
+	return outChanStall
+}
+
+// outCloseStallBound is the drainer's stall bound once the channel is closing:
+// outCloseStall unless a test set outCloseStall, and never past
+// outStallBound.
+func (m *SyncMockManager) outCloseStallBound() time.Duration {
+	if m.outCloseStall > 0 {
+		return m.outCloseStall
+	}
+	return min(outCloseStall, m.outStallBound())
+}
+
+// toldDropped tells OnDrop's fn of a dropped mock. Called with no lock held:
+// the hook may take locks of its own.
+func (m *SyncMockManager) toldDropped(mock *models.Mock) {
 	if fn := m.onDrop.Load(); fn != nil {
 		(*fn)(mock)
 	}
-	return false
+}
+
+// dropOut counts and reports a mock dropped on its way to a consumer that
+// could not take it (why), and records its owner (recordDroppedTC).
+func (m *SyncMockManager) dropOut(mock *models.Mock, owner, why string) {
+	n := m.dropCount.Add(1)
+	if owner != "" {
+		m.recordDroppedTC(owner)
+	}
+	// The existing per-1024 sampled Error fires at n==1 AND every
+	// subsequent 1024th drop. Per-Copilot review on #4176, the
+	// "your recording is now lossy" wording lives on the same n==1
+	// branch rather than as a separate Warn so operators see one
+	// clear signal at the moment capture goes lossy, instead of
+	// two separate lines that may interleave with other logs.
+	// Subsequent sampled emissions stay terse to avoid drowning a
+	// stuck consumer's goroutine in its own logging.
+	if n == 1 || n%sendDropSampleRate == 0 {
+		msg := "syncMock outChan overflow; mock dropped — consumer can't keep up with mock production"
+		if n == 1 {
+			msg = "syncMock outChan overflow on FIRST drop — mock recording is now LOSSY for this session; subsequent overflow drops are silent except for the per-1024 sampled line. Reduce concurrent test load, or investigate consumer-side stalls (slow disk / network to k8s-proxy) before re-running for a clean recording."
+		}
+		m.dropLogger().Error(msg,
+			zap.Uint64("dropsSoFar", n),
+			zap.String("why", why),
+			zap.String("mock_kind", string(mock.Kind)),
+			zap.Duration("stall_bound", m.outStallBound()),
+			zap.Int64("queue_bound_bytes", outQueueMaxBytes),
+		)
+	}
 }
 
 // OnDrop has fn told of every mock dropped on the outChan capacity path (the
-// channel closed, or the send budget spent). The test cases that used such a
+// channel closed or never set, the queue's byte bound reached, or its
+// consumer stalled: send). The test cases that used such a
 // mock lack it: a capture whose test cases are not named (proxyless, a
 // DaemonSet) cannot find them by owner, as WasMockDroppedForTC does, and
 // leaves out those that ran while the mock was requested instead. fn must not
@@ -946,68 +1272,21 @@ func (m *SyncMockManager) OnDrop(fn func(*models.Mock)) {
 	m.onDrop.Store(&fn)
 }
 
-// trySendOwned is sendToOutChanOwned's send; false when the mock was dropped.
-func (m *SyncMockManager) trySendOwned(mock *models.Mock, owner string) bool {
-	m.outChanMu.RLock()
-	defer m.outChanMu.RUnlock()
-	if m.outChanClosed || m.outChan == nil {
-		// Genuinely undeliverable → a real drop. Record the owner (under the
-		// outChanMu.RLock already held; droppedMu is a leaf lock) so the
-		// orphaned TC is suppressed instead of reaching replay mock-less.
-		if owner != "" {
-			m.recordDroppedTC(owner)
-		}
-		return false
-	}
-	select {
-	case m.outChan <- mock:
-		return true
-	default:
-	}
-	// Fast path full. Bounded block so normal scheduling jitter
-	// doesn't cost us a mock.
-	timer := time.NewTimer(sendBudget)
-	select {
-	case m.outChan <- mock:
-		timer.Stop()
-		return true
-	case <-timer.C:
-		n := m.dropCount.Add(1)
-		if owner != "" {
-			m.recordDroppedTC(owner)
-		}
-		// The existing per-1024 sampled Error fires at n==1 AND every
-		// subsequent 1024th drop. Per-Copilot review on #4176, the
-		// "your recording is now lossy" wording lives on the same n==1
-		// branch rather than as a separate Warn so operators see one
-		// clear signal at the moment capture goes lossy, instead of
-		// two separate lines that may interleave with other logs.
-		// Subsequent sampled emissions stay terse to avoid drowning a
-		// stuck consumer's goroutine in its own logging.
-		if n == 1 || n%sendDropSampleRate == 0 {
-			msg := "syncMock outChan overflow; mock dropped — consumer can't keep up with mock production"
-			if n == 1 {
-				msg = "syncMock outChan overflow on FIRST drop — mock recording is now LOSSY for this session; subsequent overflow drops are silent except for the per-1024 sampled line. Reduce concurrent test load, upgrade to a release with a larger outChan capacity, or investigate consumer-side stalls (slow disk / network to k8s-proxy) before re-running for a clean recording."
-			}
-			m.dropLogger().Error(msg,
-				zap.Uint64("dropsSoFar", n),
-				zap.Int("outChanCap", cap(m.outChan)),
-				zap.Duration("budget", sendBudget),
-			)
-		}
-		return false
-	}
-}
-
 // trySendControlFrame attempts a NON-blocking send of a reserved-Kind control
 // frame (a revoke) on outChan. Returns true iff delivered. Unlike
-// sendToOutChanOwned it does NOT bump dropCount and does NOT record a drop or
+// send it does NOT bump dropCount and does NOT record a drop or
 // fire the "recording is lossy" log — a control frame is not a mock. If the
 // channel is closed/nil or full, it returns false and the caller re-queues.
 func (m *SyncMockManager) trySendControlFrame(mock *models.Mock) bool {
 	m.outChanMu.RLock()
 	defer m.outChanMu.RUnlock()
 	if m.outChanClosed || m.outChan == nil {
+		return false
+	}
+	m.outQueueMu.Lock()
+	defer m.outQueueMu.Unlock()
+	if m.outDraining {
+		// Mocks are queued before it: it does not overtake them.
 		return false
 	}
 	select {
@@ -1060,12 +1339,13 @@ func (m *SyncMockManager) noteTaken(batch []ownedMock) {
 func (m *SyncMockManager) sendTaken(batch []ownedMock) {
 	for _, om := range batch {
 		// Read before the send: once delivered, the mock is the consumer's.
-		name, at := om.mock.Name, om.mock.Spec.ReqTimestampMock
-		delivered := m.sendToOutChanOwned(om.mock, om.owner)
-		if om.noted {
-			m.sentClaimDone(name, at, delivered)
-		}
-		m.sent(om.mock)
+		name, at, noted, mk := om.mock.Name, om.mock.Spec.ReqTimestampMock, om.noted, om.mock
+		m.send(om.mock, om.owner, func(delivered bool) {
+			if noted {
+				m.sentClaimDone(name, at, delivered)
+			}
+			m.sent(mk)
+		})
 	}
 }
 
@@ -1366,8 +1646,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	case bound && !m.firstReqSeen:
 		m.noteSending(mock) // under mu: it leaves no gap for PendingIn
 		m.mu.Unlock()
-		m.sendToOutChan(mock)
-		m.sent(mock)
+		m.send(mock, "", func(bool) { m.sent(mock) })
 		return
 	default:
 		m.buffer = append(m.buffer, mock)
@@ -1407,8 +1686,7 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) {
 		return
 	}
 	m.noteSending(mock)
-	defer m.sent(mock)
-	m.sendToOutChan(mock)
+	m.send(mock, "", func(bool) { m.sent(mock) })
 }
 
 // CloseOutChan flushes any still-attributable buffered mocks and then
@@ -1442,15 +1720,43 @@ func (m *SyncMockManager) CloseOutChan() {
 	// discarded here and orphan its test case.
 	m.FlushOwnedWindows()
 
+	// Closed to senders first: what comes after is dropped as closed. What
+	// is queued already goes on to a consumer that still reads (an older
+	// client's stop drains the stream until it closes): the channel is closed
+	// once the drainer has delivered it, or given it up on a consumer that
+	// took nothing for outCloseStall (a client that ended its streams, or is
+	// gone).
 	m.outChanMu.Lock()
-	defer m.outChanMu.Unlock()
 	if m.outChanClosed {
+		m.outChanMu.Unlock()
 		return
 	}
-	if m.outChan != nil {
-		close(m.outChan)
-	}
 	m.outChanClosed = true
+	ch := m.outChan
+	m.outQueueMu.Lock()
+	var drained chan struct{}
+	if m.outDraining {
+		drained = m.outDrained
+	}
+	if m.outClosing != nil {
+		close(m.outClosing)
+		m.outClosing = nil
+	}
+	m.outQueueMu.Unlock()
+	m.outChanMu.Unlock()
+	if drained != nil {
+		<-drained
+	}
+
+	// ch, not m.outChan: a new session's channel set meanwhile
+	// (SetOutputChannel) is open, and its senders send on it. Nothing sends
+	// on ch any more: its drainer has ended, and a send reaches only the
+	// channel set now, if it is open.
+	m.outChanMu.Lock()
+	defer m.outChanMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 // flushTake is what FlushOwnedWindows does with a buffered mock
@@ -1623,8 +1929,8 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 		}
 	}
 
-	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
-	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	// Send AFTER releasing m.mu — the send takes outChanMu and the out
+	// queue's lock, and tells each mock's outcome under locks of its own.
 	m.sendTaken(mocksToSend)
 	if mappingChan != nil {
 		for tn, ids := range lateMappings {
@@ -3771,7 +4077,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		ce.Write(fields...)
 	}
 
-	// Route mock sends through sendToOutChanOwned so the close-vs-send
+	// Route mock sends through send (sendTaken) so the close-vs-send
 	// race is serialized the same way AddMock does it, and a capacity
 	// drop is attributed to the owning TC. Mapping channel is never
 	// closed by the shutdown path today — if that ever changes, lift the
@@ -3955,8 +4261,8 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		}
 	}
 
-	// Send AFTER releasing m.mu — sendToOutChan takes outChanMu and may
-	// block up to sendBudget; holding m.mu across it would wedge AddMock.
+	// Send AFTER releasing m.mu — the send takes outChanMu and the out
+	// queue's lock, and tells each mock's outcome under locks of its own.
 	m.sendTaken(mocksToSend)
 	if mappingChan != nil {
 		for tn, ids := range lateMappings {
