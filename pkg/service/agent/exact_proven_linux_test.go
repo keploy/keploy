@@ -75,8 +75,8 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 
 // noteMiss files a miss the matcher reported, as the proxy does
 // (sendMockNotFoundError, GetMockErrors): by the view served when it is
-// filed, an extra call as its matcher found it, and stamped with when its
-// report was built.
+// filed, an extra call as its matcher found it, with the fields its report
+// says differ, and stamped with when its report was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -87,7 +87,7 @@ func (p *servingProxy) noteMiss(err error) {
 	}
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
-		uc.ActualSummary, uc.Destination = rep.ActualSummary, rep.Destination
+		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -226,6 +226,29 @@ func TestOneCallMoreThanRecordedIsAnExtraCall(t *testing.T) {
 	require.Len(t, ev.Misses, 1)
 	require.Equal(t, models.MissExtraCall, ev.Misses[0].Kind)
 	require.Equal(t, 2, ev.Misses[0].Recorded)
+	require.Empty(t, ev.Unconsumed)
+}
+
+// A call a test makes after the recording closest to it answered is
+// diagnosed against that recording all the same (keploy S1's "(path
+// differs)"): answered, the recording is in no read, and the miss named no
+// recording at all ("no_mocks"; enterprise lane 2's replay-miss on keploy
+// v3.6.127). The answered recording is only compared: the call is still a
+// miss in the test, not an extra call, and its recording was consumed once.
+func TestAMissAfterItsRecordingAnsweredNamesWhatDiffers(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/stock/book", "3", t0)},
+		map[string][]string{"o::TestMiss": {"mock-1"}}, map[string][]string{})
+	got, e := runTest(t, a, p, "TestMiss", "/stock/book", "/reserve/book")
+	require.Equal(t, "200 3", got[0])
+	require.True(t, strings.HasPrefix(got[1], "502"), "the changed call has no recorded answer: %s", got[1])
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (path differs)")
+	ev := windowOf(t, a, "o::TestMiss").Evidence
+	require.NotNil(t, ev)
+	require.Len(t, ev.Misses, 1)
+	require.Equal(t, models.MissInTest, ev.Misses[0].Kind)
+	require.Equal(t, []string{"path"}, ev.Misses[0].Differs)
 	require.Empty(t, ev.Unconsumed)
 }
 
