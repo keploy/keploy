@@ -675,9 +675,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, but nothing proves the run isolated either.
 	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = t
-		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture ("+provenswitch.Env+"=1)",
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, or a TLS client abandoned its handshake ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
-			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real)"))
+			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 	}
 
 	// 12. What the run proved -- decided once, so the log line below and the
@@ -1835,7 +1835,10 @@ func provenCount(n int) *int {
 }
 
 // mergeCaptureLosses is a and b, one entry per kind: the one with the larger
-// count (the counts are since the run began, so the later attempt's).
+// count (the counts are since the run began, so the later attempt's), but for
+// a test's own kind (models.CaptureLossKind.PerTest: a TLS handshake that
+// failed or was abandoned), which each attempt was charged its own of, so
+// the two added.
 func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 	out := append(models.CaptureLosses(nil), a...)
 	for _, l := range b {
@@ -1843,7 +1846,13 @@ func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 		for i := range out {
 			if out[i].Kind == l.Kind {
 				found = true
-				if l.Count > out[i].Count {
+				switch {
+				case l.Kind.PerTest():
+					out[i].Count += l.Count
+					if l.What != "" {
+						out[i].What = l.What
+					}
+				case l.Count > out[i].Count:
 					out[i] = l
 				}
 			}
@@ -1883,7 +1892,8 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 			ev.Unread, ev.Reason = true, w.Evidence.Reason
 		}
 		// Counts since the run began: each attempt carries the run's, so
-		// keep one per kind, the latest (largest).
+		// keep one per kind, the latest (largest); a test's own kinds,
+		// each attempt's, added.
 		ev.CaptureIncomplete = mergeCaptureLosses(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete)
 		// What keploy cannot capture at all leaves the test not judged,
 		// never failed: a line that dropped it would read as keploy's

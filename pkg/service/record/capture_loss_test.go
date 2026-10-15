@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -125,6 +126,38 @@ func TestARecordingsFinalReadCountsEachTestCasesOwnHandshakes(t *testing.T) {
 	}
 	if n := len(logs.FilterMessageSnippet("after the last test case").All()); n != 0 {
 		t.Fatalf("%d 'after the last test case' ERRORs, want none: every handshake was charged to a test case", n)
+	}
+}
+
+// A TLS handshake a client abandoned without a word is said for the test
+// case it happened in, never a failure, and a later test case is not named
+// for it; one after the last test case is said too, charged to none.
+func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ab := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, ab(1), ab(1), ab(2)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	if fmt.Sprint(w.uncapturable) != "[test-2]" {
+		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
+	}
+	during := logs.FilterMessageSnippet("abandoned its handshake: such calls are not in the mocks").All()
+	if len(during) != 1 || !strings.Contains(fmt.Sprint(during[0].ContextMap()["next_step"]), "trust keploy's CA") {
+		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
+	}
+	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") {
+		t.Fatalf("%d lines for the late one, want one WARN naming 1 handshake: %+v", len(late), late)
 	}
 }
 

@@ -98,11 +98,17 @@ func TestAMockRunsCaptureLossesAreWhatGrewWhileItRan(t *testing.T) {
 }
 
 // A receipt keeps one loss per kind, the latest attempt's (the counts are
-// since the run began).
+// since the run began), but for a test's own kinds (a TLS handshake that
+// failed or was abandoned), which each attempt was charged its own of: added.
 func TestMergeCaptureLossesKeepsOnePerKind(t *testing.T) {
-	a := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "a"}}
-	b := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 2, What: "b"}, {Kind: models.CaptureLossParserStall, Count: 1}}
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 2, What: "b"}, {Kind: models.CaptureLossParserStall, Count: 1}}, mergeCaptureLosses(a, b))
+	a := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 1, What: "a"}, {Kind: models.CaptureLossTLSAbort, Count: 1, What: "a"}, {Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "a"}}
+	b := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 2, What: "b"}, {Kind: models.CaptureLossTLSAbort, Count: 2, What: "b"}, {Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "b"}, {Kind: models.CaptureLossDropped, Count: 1}}
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossParserStall, Count: 2, What: "b"},
+		{Kind: models.CaptureLossTLSAbort, Count: 3, What: "b"},
+		{Kind: models.CaptureLossTLSAbandoned, Count: 2, What: "b"},
+		{Kind: models.CaptureLossDropped, Count: 1},
+	}, mergeCaptureLosses(a, b))
 }
 
 // Under the proven switch, a replay during which keploy lost a call fails as

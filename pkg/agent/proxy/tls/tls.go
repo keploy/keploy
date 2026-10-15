@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -137,6 +138,39 @@ func IsClientGiveUp(err error) bool {
 		neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) || neterr.IsConnAborted(err)
 }
 
+// HandshakeError is a client-side handshake with keploy's proxy that failed
+// (HandleTLSConnection's error): Err, and whether keploy had produced the
+// certificate it answers the client with, so the client had it, or was being
+// sent it, when the handshake failed.
+type HandshakeError struct {
+	Err             error
+	CertificateSent bool
+}
+
+func (e *HandshakeError) Error() string { return e.Err.Error() }
+
+func (e *HandshakeError) Unwrap() error { return e.Err }
+
+// CertificateSent reports whether err, from HandleTLSConnection, failed once
+// keploy had sent the client its certificate (HandshakeError): a client that
+// hangs up then, without a word, may have rejected it -- Node.js does so --
+// or given up, and nothing on the wire tells the two apart. One that hung up
+// before rejected nothing.
+func CertificateSent(err error) bool {
+	var he *HandshakeError
+	return errors.As(err, &he) && he.CertificateSent
+}
+
+// HandshakeCause is the handshake's own error under a HandshakeError: what
+// a caller that tells errors apart by identity (io.EOF) compares.
+func HandshakeCause(err error) error {
+	var he *HandshakeError
+	if errors.As(err, &he) {
+		return he.Err
+	}
+	return err
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
@@ -151,6 +185,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	caPrivKey := ca.signer
 	caCertParsed := ca.cert
 
+	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
@@ -160,7 +195,13 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					cert, err := CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					if err == nil {
+						// crypto/tls sends it next, in the server's
+						// first flight.
+						certSent.Store(true)
+					}
+					return cert, err
 				},
 				ClientAuth: tls.RequestClientCert,
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -179,7 +220,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	err := tlsConn.Handshake()
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
-		return nil, false, err
+		return nil, false, &HandshakeError{Err: err, CertificateSent: certSent.Load()}
 	}
 
 	// The connection the proxy closes with care is handed the layer: its

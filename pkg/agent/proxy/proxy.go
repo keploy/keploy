@@ -2899,7 +2899,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, handleClientTLS)
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3245,7 +3245,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				speculativeDial.abandon()
 				speculativeDial = nil
 			}
-			p.chargeClientHandshake(ctx, err, dstAddr)
+			err = p.chargeClientHandshake(ctx, err, dstAddr)
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
@@ -3656,7 +3656,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, handleClientTLS)
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
