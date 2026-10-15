@@ -129,7 +129,13 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			if err != nil {
 				return nil
 			}
-			return map[string]uint64{"counts": c.Accepted + c.AppSettled}
+			// The bytes on the connections the proxy holds are the wait's
+			// last part (WaitProxySettled): their arrivals move it too.
+			v := c.Accepted + c.AppSettled
+			if pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter); ok {
+				v += pb.PairedBytesProgress()
+			}
+			return map[string]uint64{"counts": v}
 		}
 		out := map[string]uint64{}
 		for id, n := range ir.InFlightPendingProgress(answers) {

@@ -80,6 +80,9 @@ type acceptingProxy struct {
 	drops    uint64
 	parked   chan uint64
 	onRead   func()
+	// bytesWaited hears each WaitPairedBytes, bytesErr is its answer.
+	bytesWaited chan uint64
+	bytesErr    error
 }
 
 func (p *acceptingProxy) Accepted() (uint64, error) {
@@ -103,6 +106,16 @@ func (p *acceptingProxy) WaitAccepted(ctx context.Context, n uint64) error {
 	}
 	return p.Counter.WaitAccepted(ctx, n)
 }
+
+// WaitPairedBytes answers bytesErr, and hears each wait's number on
+// bytesWaited when that is set.
+func (p *acceptingProxy) WaitPairedBytes(_ context.Context, n uint64) error {
+	if p.bytesWaited != nil {
+		p.bytesWaited <- n
+	}
+	return p.bytesErr
+}
+func (p *acceptingProxy) PairedBytesProgress() uint64 { return 0 }
 func (p *acceptingProxy) ListenDrops() (uint64, error) {
 	if p.unmarked != nil {
 		return 0, p.unmarked
@@ -307,6 +320,78 @@ func TestWaitProxySettledThenWaitsForThePairedConnectionsAccept(t *testing.T) {
 		t.Fatalf("WaitProxySettled: %v", err)
 	}
 }
+
+// Last, WaitProxySettled waits for the bytes on the paired connections the
+// proxy holds (a pooled connection's call opens no connection), for the
+// application connections the read counted, only once every one of them is
+// settled and every paired one accepted; the proxy's answer is the wait's. A
+// proxy that cannot wait for the bytes is unknown, never settled.
+func TestWaitProxySettledLastWaitsForTheBytesOnThePairedConnections(t *testing.T) {
+	hooks := &connHooks{app: 3, appParked: make(chan uint64, 1)}
+	proxy := &acceptingProxy{parked: make(chan uint64, 1), bytesWaited: make(chan uint64, 1)}
+	a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
+	c, err := a.ProxyConns(context.Background())
+	if err != nil || c.AppConns != 3 {
+		t.Fatalf("ProxyConns = %+v, %v", c, err)
+	}
+	hooks.countApp(9) // later connections: not the read's
+	done := make(chan error, 1)
+	go func() { done <- a.WaitProxySettled(context.Background(), c) }()
+	<-hooks.appParked
+	select {
+	case n := <-proxy.bytesWaited:
+		t.Fatalf("waited for the bytes on the paired connections up to %d with the application's connections unsettled", n)
+	case err := <-done:
+		t.Fatalf("WaitProxySettled returned %v with the application's connections unsettled", err)
+	default:
+	}
+	hooks.count(1)
+	hooks.appSettled.Add(1)
+	hooks.appSettled.Add(2)
+	hooks.appSettled.Add(3)
+	if n := <-proxy.parked; n != 1 {
+		t.Fatalf("waits for the proxy's %d, want 1", n)
+	}
+	select {
+	case n := <-proxy.bytesWaited:
+		t.Fatalf("waited for the bytes on the paired connections up to %d before the paired one was accepted", n)
+	case err := <-done:
+		t.Fatalf("WaitProxySettled returned %v before the paired connection was accepted", err)
+	default:
+	}
+	proxy.Add(1)
+	if n := <-proxy.bytesWaited; n != 3 {
+		t.Fatalf("waited for the bytes on the paired connections up to %d, want the read's 3", n)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("WaitProxySettled: %v", err)
+	}
+
+	// The proxy's answer is the wait's. (No one hears the waits from here.)
+	hooks.appParked, proxy.parked, proxy.bytesWaited = nil, nil, nil
+	lost := fmt.Errorf("%w: cannot tell", models.ErrProxyConnsUnsupported)
+	proxy.bytesErr = lost
+	if err := a.WaitProxySettled(context.Background(), c); !errors.Is(err, lost) {
+		t.Fatalf("WaitProxySettled with the bytes unknown: %v, want the proxy's error", err)
+	}
+	// A proxy that cannot wait for them: unknown.
+	a.Proxy = &acceptingProxyNoBytes{p: proxy}
+	if err := a.WaitProxySettled(context.Background(), c); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("WaitProxySettled with a proxy that cannot wait for the bytes: %v, want unknown", err)
+	}
+}
+
+// acceptingProxyNoBytes is an acceptingProxy without WaitPairedBytes.
+type acceptingProxyNoBytes struct {
+	coreAgent.Proxy
+	p *acceptingProxy
+}
+
+func (p *acceptingProxyNoBytes) Accepted() (uint64, error) { return p.p.Accepted() }
+func (p *acceptingProxyNoBytes) WaitAccepted(ctx context.Context, n uint64) error {
+	return p.p.WaitAccepted(ctx, n)
+}
+func (p *acceptingProxyNoBytes) ListenDrops() (uint64, error) { return p.p.ListenDrops() }
 
 // markingProxy can have its listener marked, and notes the order of the calls
 // the agent makes.

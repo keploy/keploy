@@ -73,15 +73,19 @@ func (a *Agent) ProxyConns(ctx context.Context) (models.ProxyConnCounts, error) 
 // WaitProxySettled returns once every call the application had started when
 // counts was read is in the proxy's hands: every application connection
 // numbered up to counts.AppConns is settled (its proxy side completed, or it
-// was lost, a capture loss charged to the open test), and then every
-// connection the kernel has completed to the proxy by that moment has been
-// accepted. An application connection whose connect() returned before the
-// read is waited for even while its final ACK has not reached the proxy's
-// side (a loaded host, a held or dropped packet). Connections made after the
-// read cannot hold it back. It has no deadline of its own, and ends with
-// ctx's error, or with an error when the counts cannot be read, a count was
-// lost, or the listener closes. A test's begin and end call it with the counts
-// they read.
+// was lost, a capture loss charged to the open test), then every connection
+// the kernel has completed to the proxy by that moment has been accepted, and
+// then the proxy's side of every live connection paired with one of those has
+// received the bytes the application had written to it (a call on a pooled
+// connection, which opens no connection; bytes that can no longer arrive are a
+// capture loss). An application connection whose connect() returned before
+// the read is waited for even while its final ACK has not reached the proxy's
+// side, and a call written to an open connection even while its bytes have
+// not (a loaded host, a held or dropped packet). Connections made, and bytes
+// written, after the wait began cannot hold it back. It has no deadline of its
+// own, and ends with ctx's error, or with an error when the counts cannot be
+// read, a count was lost, the bytes cannot be told, or the listener closes. A
+// test's begin and end call it with the counts they read.
 func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCounts) error {
 	h, _, err := a.proxyConnSides()
 	if err != nil {
@@ -99,7 +103,15 @@ func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCou
 	if err != nil {
 		return err
 	}
-	return a.WaitProxyAccepted(ctx, max(now.Established, counts.Established))
+	if err := a.WaitProxyAccepted(ctx, max(now.Established, counts.Established)); err != nil {
+		return err
+	}
+	// Every paired connection is now the proxy's: the bytes written to them.
+	pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter)
+	if !ok {
+		return fmt.Errorf("%w: this agent's proxy cannot wait for the bytes on its connections", models.ErrProxyConnsUnsupported)
+	}
+	return pb.WaitPairedBytes(ctx, counts.AppConns)
 }
 
 // WaitProxyAccepted returns once the proxy has accepted every connection the
