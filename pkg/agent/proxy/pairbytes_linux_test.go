@@ -63,7 +63,7 @@ func heldPair(t *testing.T, network, addr string) (p *Proxy, app, proxySide *net
 	p = &Proxy{logger: zap.NewNop()}
 	p.paired.add(proxySide, 1)
 	tracked := p.inflight.track(proxySide)
-	tracked.beforeClose = func() { p.paired.closing(proxySide) }
+	tracked.beforeClose = func() { p.pairClosing(proxySide) }
 	t.Cleanup(func() { p.inflight.forget(tracked) })
 	return p, app, proxySide, tracked
 }
