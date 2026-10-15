@@ -234,3 +234,72 @@ func TestACaptureLossCountThatCouldNotStartIsUnknownNeverNone(t *testing.T) {
 	_, err = a.CaptureLosses(ctx)
 	require.NoError(t, err, "a count that started")
 }
+
+// unixHooks are hooks that count PID-map refusals (none) and saw the
+// application call over Unix sockets.
+type unixHooks struct {
+	countingHooks
+	losses models.CaptureLosses
+}
+
+func (h unixHooks) CaptureLosses() models.CaptureLosses { return h.losses }
+
+// Decision 20: a call over a Unix socket keploy cannot capture leaves the test
+// open at the time, and every later one, without a verdict, never failed: the
+// replayed test's outcome stands, and its window carries NotJudged. One the
+// application made before the session began, as a connection pool opened at
+// startup does, counts too. A real loss beside it still fails the test.
+func TestACallKeployCannotCaptureLeavesTestsNotJudged(t *testing.T) {
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+
+	// Opened at startup, before the session: every test is not judged.
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = unixHooks{losses: db}
+	claimSelf(t, a)
+	for _, name := range []string{"TestA", "TestB"} {
+		e := endPassed(t, a, name)
+		require.Empty(t, e.Action, "%s: never failed for what keploy cannot capture", name)
+	}
+	for _, name := range []string{"o::TestA", "o::TestB"} {
+		w := windowOf(t, a, name)
+		require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+		require.NotNil(t, w.Evidence)
+		require.Equal(t, db, w.Evidence.NotJudged)
+		require.Empty(t, w.Evidence.CaptureIncomplete)
+		require.Contains(t, w.Evidence.Reason, "not judged")
+		require.Contains(t, w.Evidence.Reason, "/var/run/postgresql/.s.PGSQL.5432")
+	}
+
+	// Opened mid-run: the tests before it are judged, untouched.
+	a, _ = wireAgent(t, models.MODE_TEST)
+	h := &switchingHooks{}
+	a.Hooks = h
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestBefore").Action)
+	h.losses = db
+	require.Empty(t, endPassed(t, a, "TestAfter").Action)
+	require.Nil(t, windowOf(t, a, "o::TestBefore").Evidence, "a test before the call is judged as it was")
+	require.Equal(t, db, windowOf(t, a, "o::TestAfter").Evidence.NotJudged)
+
+	// An allow-listed call (nscd) never reaches the count: every test judged.
+	// (The hooks drop it: TestUnixAllowlist.)
+
+	// A real loss beside it fails the test.
+	a, _ = wireAgent(t, models.MODE_TEST)
+	a.Hooks = unixHooks{losses: append(models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 1}}, db...)}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(context.Background(), begin("TestC"))
+	require.Nil(t, serr)
+	a.Hooks = unixHooks{losses: append(models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 2}}, db...)}
+	e, serr := a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestC", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action, "the parser stall is a real loss")
+}
+
+// switchingHooks are unixHooks whose count the test changes between tests.
+type switchingHooks struct {
+	countingHooks
+	losses models.CaptureLosses
+}
+
+func (h *switchingHooks) CaptureLosses() models.CaptureLosses { return h.losses }

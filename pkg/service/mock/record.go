@@ -449,7 +449,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// keep a recording that is short of an untracked process's calls.
 	pidCheck := m.pidMapRefusedDuring(persistCtx, pidBase, "record")
 	// So is what else it could not capture (under the proven switch).
-	lostLosses, lostErr := m.captureLossesDuring(persistCtx, lossesBase)
+	lostAll, lostErr := m.captureLossesDuring(persistCtx, lossesBase)
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
 		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
@@ -484,7 +484,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	// Under the proven switch, any other loss of capture during the run:
 	// the recording misses what was lost, so it is not kept either.
-	//     (Read above, before the stream closed.)
+	//     (Read above, before the stream closed.) A call keploy cannot
+	//     capture at all (decision 20) does not discard the recording: it is
+	//     said below.
+	lostLosses, lostNotJudged := lostAll.Split()
 	if t := lostLosses.Text(); t != "" {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
@@ -519,6 +522,14 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Error(err),
 			zap.String("next_step", "re-record the mock set"))
 		return err
+	}
+	// 8b'. The test command called what keploy cannot capture at all: the
+	//      recording lacks those calls, and a replay of it would make them
+	//      for real. Kept, not vouched for in silence.
+	if t := lostNotJudged.NotJudgedText(); t != "" {
+		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture: those calls are not in it ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then record again"))
 	}
 	// 8b. The agent counts, but its count could not be read: nothing shows a
 	//     process went untracked, and nothing shows none did. The recording

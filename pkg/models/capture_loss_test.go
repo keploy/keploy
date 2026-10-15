@@ -91,3 +91,39 @@ func TestCaptureLossesTextSaysAppBytesLost(t *testing.T) {
 		t.Fatalf("%q names the kind without saying what it is", s)
 	}
 }
+
+// A call keploy cannot capture at all (decision 20: a Unix socket) leaves a
+// test without a verdict; every other loss fails it. And it is counted from
+// the run's base, not the test set's mark: the connection outlives both.
+func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
+	unixAt := func(n uint64) CaptureLoss {
+		return CaptureLoss{Kind: CaptureLossUnixSocket, Count: n, What: "/tmp/db.sock"}
+	}
+	tls := CaptureLoss{Kind: CaptureLossTLSAbort, Count: 2}
+	judged, notJudged := CaptureLosses{tls, unixAt(1)}.Split()
+	if len(judged) != 1 || judged[0] != tls || len(notJudged) != 1 || notJudged[0] != unixAt(1) {
+		t.Fatalf("Split = %+v, %+v", judged, notJudged)
+	}
+	if !CaptureLossUnixSocket.NotJudged() || CaptureLossTLSAbort.NotJudged() || CaptureLossPIDMap.NotJudged() {
+		t.Fatal("only a Unix socket is not judged")
+	}
+	text := CaptureLosses{unixAt(3)}.NotJudgedText()
+	for _, w := range []string{"not judged:", "Unix socket keploy cannot capture", "/tmp/db.sock", "cannot prove this test's calls were all captured"} {
+		if !strings.Contains(text, w) {
+			t.Errorf("%q does not say %q", text, w)
+		}
+	}
+	if strings.Contains(text, "capture incomplete") {
+		t.Errorf("%q calls it a capture loss", text)
+	}
+	// The set's mark is after the connect; the run's base before it.
+	now := CaptureLosses{tls, unixAt(1)}
+	mark := CaptureLosses{tls, unixAt(1)}
+	got := now.SinceWithin(mark, nil)
+	if len(got) != 1 || got[0].Kind != CaptureLossUnixSocket {
+		t.Fatalf("SinceWithin = %+v, want the Unix socket only, from the run's base", got)
+	}
+	if got := now.SinceWithin(mark, CaptureLosses{unixAt(1)}); len(got) != 0 {
+		t.Fatalf("SinceWithin with the connect before the run's base = %+v, want nothing", got)
+	}
+}

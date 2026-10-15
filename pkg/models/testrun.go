@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -240,11 +241,18 @@ type FailureInfo struct {
 	// could not be read, at the test's end or at its set's mark): the test
 	// has no verdict, and its set is not judged.
 	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
+	// all that the application did while this test or one before it ran
+	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
+	// see): the test has no verdict (NotJudged), and its set is not judged.
+	// Never a failure.
+	CannotCapture CaptureLosses `json:"not_judged,omitempty" yaml:"not_judged,omitempty"`
 }
 
 // NotJudged is why the test has no verdict, whatever its status says: what
 // keploy could not read or check of it (UnmatchedCallsUnread,
-// TestMocksUnread, VariablesUnchecked, CaptureUnread), one reason each.
+// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
+// capture at all (CannotCapture, decision 20), one reason each.
 // Empty for a judged test. Each is set only under the proven switch, so a
 // result written without it is never unjudged.
 func (fi FailureInfo) NotJudged() []string {
@@ -260,6 +268,9 @@ func (fi FailureInfo) NotJudged() []string {
 	}
 	if fi.CaptureUnread {
 		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	if len(fi.CannotCapture) > 0 {
+		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
 	}
 	return why
 }

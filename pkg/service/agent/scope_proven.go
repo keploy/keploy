@@ -544,7 +544,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// left open, it would be blamed on the next begin
 		// (one_test_at_a_time).
 		if open == id {
-			if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
+			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
 				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
 			}
 		}
@@ -565,7 +565,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// once), and the run names the cause. An end with no test open
 		// refuses only that call.
 		if open != "" {
-			if _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
+			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
 				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
 			}
 			a.NoteRefusal(serr.Refusal())
@@ -576,7 +576,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
-	ev, err := a.closeOpen(ctx, id, outcome, at, "")
+	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its
 		// verdict is keploy's not-judged); a failure to end it is the run's
@@ -585,8 +585,10 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
 	// Record instances never answer fail (design v14 §5.3): a record's
-	// evidence (capture losses) is for judging, on the window.
-	if a.replaying() && ev != nil && (!ev.Empty() || ev.Reason != "") {
+	// evidence (capture losses) is for judging, on the window. Nor does a
+	// replayed test that is only not judged (decision 20): its window says
+	// so, and its outcome stands.
+	if a.replaying() && outcome == models.ScopeOutcomeFailed && ev != nil && (!ev.Empty() || ev.Reason != "") {
 		return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionFail, Reason: ev.Reason}, nil
 	}
 	return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
@@ -594,7 +596,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 
 // closeOpen ends the open test id (endTest) and clears it, whatever happens
 // on the way. With the wire held.
-func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	defer func() {
 		a.provenMu.Lock()
 		closed := a.proven.open == id
@@ -614,7 +616,7 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 // failOpen ends, as failed, a test whose harness can no longer end it. With
 // the wire held.
 func (a *Agent) failOpen(ctx context.Context, id string, why string) {
-	if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
+	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
 		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
 	}
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
@@ -624,7 +626,7 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 // read that failed is an error, and the test is recorded failed with it: a
 // test keploy could not judge never passes. A test that skipped itself is
 // not failed for the recorded calls it then never made.
-func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
 	// The test's calls are settled before it is judged (settle_proven.go):
@@ -724,8 +726,9 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if readErr == nil {
 			readErr = err
 		}
+		outcome = models.ScopeOutcomeFailed
 	}
-	return ev, readErr
+	return ev, outcome, readErr
 }
 
 // chargeCaptureLosses adds to a test's evidence what the agent could not
@@ -760,7 +763,20 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		}
 		return ev, outcome
 	}
-	ev.CaptureIncomplete = lost
+	// A call keploy cannot capture at all (decision 20: over a Unix socket)
+	// leaves the test without a verdict, never failed: it is on the window,
+	// and in the reason, but the outcome stands.
+	judged, notJudged := lost.Split()
+	ev.NotJudged = notJudged
+	if len(judged) == 0 {
+		if ev.Reason == "" {
+			ev.Reason = "keploy: " + notJudged.NotJudgedText() + "."
+		} else {
+			ev.Reason = strings.TrimSpace(ev.Reason + " Also " + notJudged.NotJudgedText() + ".")
+		}
+		return ev, outcome
+	}
+	ev.CaptureIncomplete = judged
 	switch {
 	case fromEvidence:
 		// keploy's text for the evidence, written again with the losses
@@ -772,7 +788,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		}
 		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
 	default:
-		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		ev.Reason = strings.TrimSpace("keploy: " + judged.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
 	if a.replaying() {
 		outcome = models.ScopeOutcomeFailed

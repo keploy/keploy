@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/models"
@@ -26,12 +27,20 @@ import (
 	"go.keploy.io/server/v3/utils"
 )
 
-// The AF_UNIX connect report (keploy/ebpf unixconn.c): the application's
-// connects to Unix sockets no member of it owns, a call that goes nowhere the
-// proxy sees, neither recorded nor mocked (design v14 §3.2 (a)). The kernel
-// reports each successful one; the agent drops the allowlisted ones and
-// counts the rest as capture losses (unix_socket), which a test that ends
-// after one is charged with under the proven switch.
+// The AF_UNIX report (keploy/ebpf unixconn.c, decision 20): the application's
+// calls over Unix sockets, which go nowhere keploy's proxy sees, so keploy
+// cannot capture them at all. The kernel reports each successful connect, and
+// each process's first datagram to an address; the agent drops the
+// allow-listed destinations (unixAllowlist) and the ones a member of the
+// application, or keploy's agent, owns, and counts the rest as
+// models.CaptureLossUnixSocket, which leaves the test open at the time and
+// every later one NOT JUDGED under the proven switch, never failed.
+//
+// Two ways to the same reports: fexit, where a BPF trampoline attaches, and
+// otherwise (arm64 before 6.0) the syscall tracepoints, which know no peer:
+// there the agent finds who listens on the path. An owner that cannot be
+// found, a path the kernel could not read, and a report that found no room
+// are each counted: unknown is never safe.
 
 // unixConnectEvent mirrors struct unix_connect_event (keploy/ebpf k_unix.h).
 type unixConnectEvent struct {
@@ -41,9 +50,20 @@ type unixConnectEvent struct {
 	Kind     uint32
 	PathLen  uint32
 	Path     [108]byte
+	Flags    uint32
 }
 
-const unixConnectDgram = 2
+// The report's kinds (k_unix.h).
+const (
+	unixConnectStream  = 1 // fexit: a stream connect; a member's or the agent's peer is not reported
+	unixConnectDgram   = 2 // fexit: a datagram connect, with the peer's inode
+	unixSendDgram      = 3 // fexit: a process's first datagram to an address
+	unixSyscallConnect = 4 // tracepoints: connect(2) that succeeded
+	unixSyscallSend    = 5 // tracepoints: a process's first sendto/sendmsg(2) to an address
+)
+
+// unixPathUnread flags a report whose address the kernel could not read.
+const unixPathUnread = 1
 
 // path is the address connected to: a path, or "@name" for an abstract one.
 func (e unixConnectEvent) path() string {
@@ -58,23 +78,25 @@ func (e unixConnectEvent) path() string {
 	return string(bytes.TrimRight(p, "\x00"))
 }
 
-// unixAllowlist are the Unix sockets the application may reach without a
-// loss: the desktop and system buses, the journal, the Docker daemon, and the
-// name services glibc asks on a host lookup (design v14 §3.2 (a); 08's
-// allowlist). A pattern is a path.Match pattern; "@" starts an abstract name.
+// unixAllowlist are the Unix sockets the application may call without keploy
+// leaving a test unjudged (decision 20): ones that carry no dependency
+// traffic of the application's. Both paths, fexit and the tracepoints, read
+// this one table, and so do the tests. A pattern is a path.Match pattern; "@"
+// starts an abstract name. Not the Docker daemon's socket: an application
+// that drives Docker (testcontainers) has a real dependency there. keploy's
+// own sockets are excused by their owner, keploy's agent, not by path.
 var unixAllowlist = []string{
-	// D-Bus
+	// name services glibc asks on a host lookup: nscd, SSSD,
+	// systemd-resolved, systemd's userdb, avahi
+	"/var/run/nscd/socket", "/run/nscd/socket", "/var/lib/sss/pipes/*",
+	"/run/systemd/resolve/io.systemd.Resolve", "/run/systemd/resolve/io.systemd.Resolve.*",
+	"/run/systemd/userdb/*", "/run/avahi-daemon/socket", "/var/run/avahi-daemon/socket",
+	// syslog and journald
+	"/dev/log", "/run/systemd/journal/*", "/var/run/systemd/journal/*",
+	// D-Bus, the system and the session bus
 	"/run/dbus/system_bus_socket", "/var/run/dbus/system_bus_socket", "/run/user/*/bus", "@/tmp/dbus-*",
 	// X11 and Wayland
 	"/tmp/.X11-unix/X*", "@/tmp/.X11-unix/X*", "/run/user/*/wayland-*",
-	// journald and syslog
-	"/run/systemd/journal/*", "/var/run/systemd/journal/*", "/dev/log",
-	// the Docker daemon (rootful and rootless)
-	"/var/run/docker.sock", "/run/docker.sock", "/run/user/*/docker.sock",
-	// name services: nscd, SSSD, systemd-resolved, avahi, systemd's userdb
-	"/var/run/nscd/socket", "/run/nscd/socket", "/var/lib/sss/pipes/*",
-	"/run/systemd/resolve/io.systemd.Resolve", "/run/avahi-daemon/socket", "/var/run/avahi-daemon/socket",
-	"/run/systemd/userdb/*",
 }
 
 // unixAllowed reports whether the application may connect to p unreported.
@@ -96,6 +118,12 @@ type unixConn struct {
 	lost   *ebpf.Map
 	losses captureloss.Counter
 	off    string
+	// fallback: the syscall tracepoints report, not fexit (no trampoline);
+	// why is the attach error that chose it.
+	fallback bool
+	why      string
+	// self is keploy's agent's TGID: a socket it holds is keploy's own.
+	self uint32
 
 	mu    sync.Mutex
 	known map[uint64]bool // dgram peer inode -> owned by a member
@@ -116,13 +144,60 @@ func sharedMaps(objs *bpfObjects) map[string]*ebpf.Map {
 	return out
 }
 
+// unixFallbackOnly makes loadUnixConn take the syscall tracepoints on any
+// kernel: for tests, which prove the fallback where fexit would attach.
+var unixFallbackOnly = false
+
+// unixFexitPrograms are unixconn's fexit programs; unixFallbackPrograms its
+// syscall tracepoint programs, by tracepoint, for a kernel where those cannot
+// attach.
+var (
+	unixFexitPrograms    = []string{"k_unix_stream_connect", "k_unix_dgram_connect", "k_unix_dgram_sendmsg"}
+	unixFallbackPrograms = map[string]string{
+		"k_unix_sys_enter_connect": "sys_enter_connect",
+		"k_unix_sys_exit_connect":  "sys_exit_connect",
+		"k_unix_sys_enter_sendto":  "sys_enter_sendto",
+		"k_unix_sys_exit_sendto":   "sys_exit_sendto",
+		"k_unix_sys_enter_sendmsg": "sys_enter_sendmsg",
+		"k_unix_sys_exit_sendmsg":  "sys_exit_sendmsg",
+	}
+)
+
 // loadUnixConn loads unixconn beside objs, sharing its maps, and attaches its
-// fexit programs. A kernel that cannot (arm64 before 6.0 has no BPF
-// trampoline) leaves the report off, and says why.
+// fexit programs; where those cannot load or attach (arm64 before 6.0 has no
+// BPF trampoline), it loads unixconn again without them and attaches its
+// syscall tracepoints instead, which every kernel has.
 func loadUnixConn(objs *bpfObjects) (*unixConn, error) {
+	if unixFallbackOnly {
+		u, err := loadUnixConnWith(objs, true)
+		if err == nil {
+			u.why = "the fallback was asked for"
+		}
+		return u, err
+	}
+	u, ferr := loadUnixConnWith(objs, false)
+	if ferr == nil {
+		return u, nil
+	}
+	u, err := loadUnixConnWith(objs, true)
+	if err != nil {
+		return nil, fmt.Errorf("%w (and the fallback to the syscall tracepoints: %v)", ferr, err)
+	}
+	u.why = ferr.Error()
+	return u, nil
+}
+
+func loadUnixConnWith(objs *bpfObjects, fallback bool) (*unixConn, error) {
 	spec, err := loadUnixconn()
 	if err != nil {
 		return nil, fmt.Errorf("read the unixconn object: %w", err)
+	}
+	if fallback {
+		for name, ps := range spec.Programs {
+			if ps.Type == ebpf.Tracing { // a kernel without trampolines may not even load them
+				delete(spec.Programs, name)
+			}
+		}
 	}
 	shared := sharedMaps(objs)
 	repl := map[string]*ebpf.Map{}
@@ -138,14 +213,25 @@ func loadUnixConn(objs *bpfObjects) (*unixConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load the unixconn object: %w", err)
 	}
-	u := &unixConn{coll: coll, lost: coll.Maps["unix_connect_events_lost"], known: map[uint64]bool{}}
-	for _, name := range []string{"k_unix_stream_connect", "k_unix_dgram_connect"} {
-		l, err := link.AttachTracing(link.TracingOptions{Program: coll.Programs[name]})
-		if err != nil {
-			u.close()
-			return nil, fmt.Errorf("attach %s (a kernel without BPF trampolines?): %w", name, err)
+	u := &unixConn{coll: coll, lost: coll.Maps["unix_connect_events_lost"], known: map[uint64]bool{}, fallback: fallback, self: uint32(os.Getpid())}
+	if fallback {
+		for name, tp := range unixFallbackPrograms {
+			l, err := link.Tracepoint("syscalls", tp, coll.Programs[name], nil)
+			if err != nil {
+				u.close()
+				return nil, fmt.Errorf("attach %s to syscalls:%s: %w", name, tp, err)
+			}
+			u.links = append(u.links, l)
 		}
-		u.links = append(u.links, l)
+	} else {
+		for _, name := range unixFexitPrograms {
+			l, err := link.AttachTracing(link.TracingOptions{Program: coll.Programs[name]})
+			if err != nil {
+				u.close()
+				return nil, fmt.Errorf("attach %s (a kernel without BPF trampolines?): %w", name, err)
+			}
+			u.links = append(u.links, l)
+		}
 	}
 	if u.rd, err = ringbuf.NewReader(coll.Maps["unix_connect_events"]); err != nil {
 		u.close()
@@ -170,7 +256,7 @@ func (u *unixConn) close() {
 }
 
 // watch reads the reports until the reader is closed, and counts each one the
-// allowlist and the peer's owner do not excuse.
+// allow-list and the owner do not excuse.
 func (u *unixConn) watch(logger *zap.Logger, member func(tgid uint32) bool) {
 	warned := false
 	for {
@@ -192,29 +278,91 @@ func (u *unixConn) watch(logger *zap.Logger, member func(tgid uint32) bool) {
 		}
 		if !warned {
 			warned = true
-			logger.Warn("the application connected to a Unix socket keploy does not see: a call over it is neither recorded nor mocked",
-				zap.String("socket", e.path()), zap.Uint32("tgid", e.TGID),
-				zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real)"))
+			fields := []zap.Field{zap.String("socket", unixWhat(e)), zap.Uint32("tgid", e.TGID),
+				zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real)")}
+			if u.fallback {
+				fields = append(fields, zap.String("seen_by", "the syscall tracepoints: this kernel ("+kernelName()+") has no BPF trampoline"))
+			}
+			logger.Warn("the application called a Unix socket keploy cannot capture: the test open at the time and every later one are not judged", fields...)
 		}
 	}
 }
 
-// judge counts e unless it is allowlisted or its peer is a member's, and
-// reports whether it counted it.
+// unixWhat names e's destination for the reason: its path, or why there is
+// none.
+func unixWhat(e unixConnectEvent) string {
+	switch p := e.path(); {
+	case e.Flags&unixPathUnread != 0:
+		return "an address keploy could not read"
+	case p == "" || p == "@":
+		return "an unnamed socket"
+	default:
+		return p
+	}
+}
+
+// judge counts e unless its destination is allow-listed or owned by a member
+// of the application or by keploy's agent, and reports whether it counted it.
+// An owner that cannot be found is no excuse: unknown is never safe.
 func (u *unixConn) judge(e unixConnectEvent, member func(tgid uint32) bool) bool {
 	p := e.path()
-	if unixAllowed(p) {
+	readable := e.Flags&unixPathUnread == 0
+	if readable && unixAllowed(p) {
 		return false
 	}
-	if e.Kind == unixConnectDgram && e.PeerIno != 0 && u.ownedByMember(e.PeerIno, member) {
-		return false
+	switch {
+	case !readable:
+	case e.Kind == unixConnectStream:
+		// The kernel left out a member's or the agent's listener.
+	case e.Kind == unixConnectDgram && e.PeerIno != 0:
+		if u.ownedByMember(e.PeerIno, member) {
+			return false
+		}
+	default:
+		// No peer in the report: whoever is bound to the path.
+		if u.pathOwnedByMember(p, member) {
+			return false
+		}
 	}
-	what := p
-	if what == "" {
-		what = "an unnamed socket"
-	}
-	u.losses.Add(models.CaptureLossUnixSocket, what)
+	u.losses.Add(models.CaptureLossUnixSocket, unixWhat(e))
 	return true
+}
+
+// pathOwnedByMember reports whether every socket bound to p (a path, or
+// "@name" for an abstract one) is held by a member of the application or by
+// keploy's agent; false when none is found, or one is held by anyone else.
+func (u *unixConn) pathOwnedByMember(p string, member func(tgid uint32) bool) bool {
+	inos := unixInodesBoundTo(p)
+	if len(inos) == 0 {
+		return false
+	}
+	for _, ino := range inos {
+		if !u.ownedByMember(ino, member) {
+			return false
+		}
+	}
+	return true
+}
+
+// unixInodesBoundTo are the inodes of the sockets /proc/net/unix lists at p:
+// the listener or the bound datagram socket, and a listener's accepted ends.
+func unixInodesBoundTo(p string) []uint64 {
+	b, err := os.ReadFile("/proc/net/unix")
+	if err != nil {
+		return nil
+	}
+	var out []uint64
+	for _, line := range strings.Split(string(b), "\n")[1:] {
+		// Num RefCount Protocol Flags Type St Inode Path
+		f := strings.Fields(line)
+		if len(f) < 8 || f[7] != p {
+			continue
+		}
+		if ino, err := strconv.ParseUint(f[6], 10, 64); err == nil && ino != 0 {
+			out = append(out, ino)
+		}
+	}
+	return out
 }
 
 // ownedByMember reports whether a member of the application holds the socket
@@ -232,7 +380,7 @@ func (u *unixConn) ownedByMember(ino uint64, member func(tgid uint32) bool) bool
 	procs, _ := os.ReadDir("/proc")
 	for _, d := range procs {
 		tgid, err := strconv.ParseUint(d.Name(), 10, 32)
-		if err != nil || !member(uint32(tgid)) {
+		if err != nil || (u.self == 0 || uint32(tgid) != u.self) && !member(uint32(tgid)) {
 			continue
 		}
 		fds, _ := os.ReadDir("/proc/" + d.Name() + "/fd")
@@ -264,7 +412,7 @@ func (u *unixConn) snapshot() models.CaptureLosses {
 				return out
 			}
 		}
-		out = append(out, models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: lost, What: "connects whose reports found no room"})
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: lost, What: "calls whose reports found no room"})
 	}
 	return out
 }
@@ -284,8 +432,8 @@ func (h *Hooks) isMember(tgid uint32) bool {
 // startUnixConn loads the report and watches it until ctx ends, under the
 // proven switch only: nothing reads it without the switch (as with the
 // application's connection count, markProxyListener), so nothing attaches. A
-// kernel that cannot load it gets a WARN, once, and the report stays off: what
-// it would count is unknown (CaptureLossesErr).
+// kernel that can load it neither way gets a WARN, once, and the report stays
+// off: what it would count is unknown (CaptureLossesErr).
 func (h *Hooks) startUnixConn(ctx context.Context) {
 	if !provenswitch.On() {
 		return
@@ -294,12 +442,16 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	u, err := loadUnixConn(&h.objects)
 	h.objectsMutex.RUnlock()
 	if err != nil {
-		h.logger.Warn("keploy cannot see the application's AF_UNIX connects on this kernel: a call over a Unix socket to a dependency is neither recorded nor mocked, and keploy cannot say so",
-			zap.Error(err), zap.String("next_step", "reach dependencies over TCP addresses; on arm64, a 6.0 or later kernel lets keploy see these connects"))
+		h.logger.Warn("keploy cannot see the application's calls over Unix sockets on this kernel: a call over one to a dependency is neither recorded nor mocked, and keploy cannot say so",
+			zap.Error(err), zap.String("next_step", "reach dependencies over TCP addresses"))
 		h.unixMu.Lock()
 		h.unix = &unixConn{off: err.Error()}
 		h.unixMu.Unlock()
 		return
+	}
+	if u.fallback {
+		h.logger.Info("keploy sees the application's calls over Unix sockets at the syscall tracepoints: this kernel has no BPF trampoline",
+			zap.String("kernel", kernelName()), zap.String("fexit", u.why))
 	}
 	h.unixMu.Lock()
 	h.unix = u
@@ -312,6 +464,15 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		<-ctx.Done()
 		u.close()
 	}()
+}
+
+// kernelName is this kernel's release and architecture, as uname gives them.
+func kernelName() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return "unknown"
+	}
+	return unix.ByteSliceToString(u.Machine[:]) + " " + unix.ByteSliceToString(u.Release[:])
 }
 
 // unixLosses are the application's AF_UNIX connects to sockets no member of
