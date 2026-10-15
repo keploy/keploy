@@ -562,8 +562,8 @@ jobs:
           # the other's results.
           rc=0
           sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported' -test.v | tee /tmp/pidmap.out || rc=1
-          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies' -test.v | tee -a /tmp/pidmap.out || rc=1
-          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies; do
+          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
+          for t in TestAProcessThePIDMapRefusesIsReported TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
           exit $rc

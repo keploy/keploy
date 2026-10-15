@@ -120,7 +120,12 @@ func (p *Proxy) canary(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		ok := p.countAccept(conn)
+		if ok {
+			p.checkPairedBytes(c, conn)
+		}
 		_ = conn.Close()
+		// Never handled: nothing else would forget it, were it paired.
+		p.paired.remove(conn)
 		if ok {
 			p.logger.Debug("the kernel counts the connections to the proxy's listener")
 		}
@@ -179,6 +184,12 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 		return false
 	}
 	p.pairs.Store(pairKey(conn), pairing)
+	if pairing.AppSeq != 0 && pairing.Dst != nil {
+		// Held until the proxy is done with it: a test's end waits for the
+		// bytes the application writes to it (pairbytes.go).
+		p.paired.add(tc, pairing.AppSeq)
+		p.proveAppVisible(tc)
+	}
 	p.accepts.Add(pairing.Seq)
 	if _, err := p.accepts.Accepted(); err != nil {
 		p.failCount(err)
@@ -240,6 +251,7 @@ func (p *Proxy) closeAccepts() {
 	p.acceptsLn = nil
 	p.acceptsMu.Unlock()
 	p.accepts.Fail(errListenerClosed)
+	p.paired.fail(errListenerClosed)
 }
 
 // ListenMarked listens at addr the way the proxy does when the hooks count the
@@ -349,4 +361,5 @@ func (p *Proxy) Serve(ctx context.Context, ready chan<- error) error {
 var (
 	_ agent.AcceptCounter      = (*Proxy)(nil)
 	_ agent.ListenerCountTaker = (*Proxy)(nil)
+	_ agent.PairedBytesWaiter  = (*Proxy)(nil)
 )

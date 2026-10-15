@@ -66,6 +66,11 @@ type trackedConn struct {
 	raw syscall.RawConn
 	// forgotten: its handler is done with it (forget).
 	forgotten atomic.Bool
+	// beforeClose, when set (by the accept, before the handler runs), runs
+	// once as Close begins, while the socket can still be read
+	// (pairbytes.go).
+	beforeClose func()
+	closeOnce   sync.Once
 	// unknown names the protocol of a parser serving it that reads ahead
 	// and does not mark what it holds (integrations.HoldsUnknown): whether
 	// it holds a request cannot be told.
@@ -266,6 +271,9 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 // (SQS's) has not filed the miss yet: until the proxy files it, the
 // connection holds the test's work, as a handler not blocked reading does.
 func (c *trackedConn) Close() error {
+	if c.beforeClose != nil {
+		c.closeOnce.Do(c.beforeClose)
+	}
 	err := c.Conn.Close()
 	c.moved()
 	return err

@@ -174,10 +174,13 @@ type AcceptCounter interface {
 type ProxyConnCounter interface {
 	ProxyConns(ctx context.Context) (models.ProxyConnCounts, error)
 	// WaitProxySettled returns once every application connection counts
-	// numbered (AppConns) is resolved, and the proxy has accepted every
-	// connection the kernel completed to it by then; or with ctx's error.
-	// Connections made after counts was read cannot hold it back. No
-	// deadline of its own; it looks again at each resolution and accept.
+	// numbered (AppConns) is resolved, the proxy has accepted every
+	// connection the kernel completed to it by then, and the proxy's side of
+	// every live connection paired with one of those has received the bytes
+	// the application had written to it (a pooled connection's call); or
+	// with ctx's error. Connections made, and bytes written, after counts
+	// was read cannot hold it back. No deadline of its own; it looks again at
+	// each resolution, accept and arrival.
 	WaitProxySettled(ctx context.Context, counts models.ProxyConnCounts) error
 	// WaitProxyAccepted returns once the proxy has accepted every connection
 	// the kernel numbered 1..n on its side, or with ctx's error.
@@ -208,6 +211,24 @@ type InFlightReader interface {
 	// say which requests it holds (integrations.RequestHolding): whether they
 	// hold one cannot be told, so a test's end is not verified.
 	InFlightUnknown(answers bool) []string
+}
+
+// PairedBytesWaiter is the optional extension of a proxy that holds the
+// connections the kernel paired with the application's (under the proven
+// switch) and can wait for the bytes on them: WaitPairedBytes returns once
+// the proxy's side of every such connection paired with an application
+// connection numbered 1..appConns has received every byte the application had
+// written to it when the wait began. Bytes that can no longer arrive (the
+// connection was reset, or the proxy closed it, first) are a capture loss
+// (models.CaptureLossAppBytesLost). No deadline of its own: each read the
+// proxy makes on such a connection, and its close, wakes it. A proxy that
+// cannot tell answers an error wrapping models.ErrProxyConnsUnsupported.
+type PairedBytesWaiter interface {
+	WaitPairedBytes(ctx context.Context, appConns uint64) error
+	// PairedBytesProgress counts the waits' progress (a waited-for
+	// connection received more, or was resolved), for a watchdog: it only
+	// ever grows.
+	PairedBytesProgress() uint64
 }
 
 type AuxiliaryProxyHook interface {

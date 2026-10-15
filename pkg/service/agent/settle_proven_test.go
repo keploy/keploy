@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,7 @@ var (
 	_ coreAgent.ProxyConnsReporter = uncountedHooks{}
 	_ coreAgent.AcceptCounter      = &settledProxy{}
 	_ coreAgent.InFlightReader     = &settledProxy{}
+	_ coreAgent.PairedBytesWaiter  = &settledProxy{}
 )
 
 // settledProxy is the part of a proxy a test's settling reads
@@ -103,6 +105,13 @@ type settledProxy struct {
 	unknown []string
 	// drops: the packets the kernel dropped at the listener.
 	drops uint64
+	// bytesWait, when set, is WaitPairedBytes; bytesProgress its progress.
+	bytesWait     func(context.Context, uint64) error
+	bytesProgress atomic.Uint64
+	// inWork, when set, is closed at the settle's first look at the
+	// connections' work: its wait for the counts (WaitProxySettled) is over.
+	inWork   chan struct{}
+	workOnce sync.Once
 }
 
 func (s *settledProxy) InFlightUnknown(answers bool) []string {
@@ -140,9 +149,24 @@ func (s *settledProxy) WaitAccepted(ctx context.Context, n uint64) error {
 	}
 }
 
+// WaitPairedBytes: it holds no paired connection with bytes still on their
+// way, unless the test set bytesWait.
+func (s *settledProxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+	if s.bytesWait != nil {
+		return s.bytesWait(ctx, n)
+	}
+	return nil
+}
+
+// PairedBytesProgress is what the test set bytesProgress to.
+func (s *settledProxy) PairedBytesProgress() uint64 { return s.bytesProgress.Load() }
+
 func (s *settledProxy) InFlightPending(bool) int {
 	s.smu.Lock()
 	defer s.smu.Unlock()
+	if s.inWork != nil {
+		s.workOnce.Do(func() { close(s.inWork) })
+	}
 	return s.pending
 }
 
@@ -257,11 +281,15 @@ func TestTheSettleWatchdogCountsWakeUpsWithoutProgress(t *testing.T) {
 	a, h, p := settleAgent()
 	h.established = 1
 	p.set(1, 1)
+	p.inWork = make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		_, err := a.settle(context.Background(), true)
 		done <- err
 	}()
+	// The wake-ups below weigh the connection's work: the wait for the
+	// counts, whose progress is another key, must be over first.
+	<-p.inWork
 	wake()
 	wake()
 	p.set(1, 1) // progress, still pending
@@ -274,6 +302,57 @@ func TestTheSettleWatchdogCountsWakeUpsWithoutProgress(t *testing.T) {
 	default:
 	}
 	wake()
+	err := <-done
+	require.True(t, errors.Is(err, errNoProgress), "%v", err)
+}
+
+// While the wait is for the bytes on the connections the proxy holds (the
+// counts settled: nothing more to accept or resolve), their arrivals are the
+// progress the watchdog weighs: a wait whose bytes keep arriving is never
+// failed for want of a count that moves, and one whose bytes stop is, at
+// settleStallLimit wake-ups.
+func TestTheSettleWatchdogWeighsThePairedBytes(t *testing.T) {
+	// The watchdog wakes when the test says, as manualWake has it, but a
+	// wake-up it can no longer take (it fired, and stopped) ends the test
+	// with the settle's answer instead of blocking.
+	wakeCh, woken := make(chan struct{}), make(chan struct{})
+	prevWake, prevWoken := settleWake, settleWoken
+	settleWake = func(context.Context) (<-chan struct{}, func()) { return wakeCh, func() {} }
+	settleWoken = func() { woken <- struct{}{} }
+	t.Cleanup(func() { settleWake, settleWoken = prevWake, prevWoken })
+	prev := settleStallLimit
+	settleStallLimit = 3
+	t.Cleanup(func() { settleStallLimit = prev })
+	a, h, p := settleAgent()
+	h.established = 1
+	p.set(1, 0)
+	inBytes := make(chan struct{})
+	p.bytesWait = func(ctx context.Context, _ uint64) error {
+		close(inBytes)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(context.Background(), true)
+		done <- err
+	}()
+	wake := func(what string) {
+		select {
+		case wakeCh <- struct{}{}:
+			<-woken
+		case err := <-done:
+			t.Fatalf("the watchdog stopped %s: the settle ended with %v", what, err)
+		}
+	}
+	<-inBytes
+	for i := 0; i < 2*settleStallLimit; i++ {
+		p.bytesProgress.Add(1) // bytes arrived
+		wake("while the bytes kept arriving")
+	}
+	for i := 0; i < settleStallLimit; i++ {
+		wake("before its count")
+	}
 	err := <-done
 	require.True(t, errors.Is(err, errNoProgress), "%v", err)
 }
