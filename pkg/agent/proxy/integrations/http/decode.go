@@ -336,9 +336,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Under exact serving: one call more than the test recorded?
 				// Any other miss is diagnosed against the test's answered
 				// recordings too (answeredDiag): they are in no read now.
-				n := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				// Both read the request's destination as it came (reqCtx): a
+				// reading now would be a use of its connection's container in
+				// the scope open now, the next test's once a test ended.
+				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				if n == 0 {
-					diag = h.answeredDiag(ctx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
+					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {

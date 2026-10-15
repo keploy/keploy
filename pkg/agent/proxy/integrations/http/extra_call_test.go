@@ -1,14 +1,21 @@
 package http
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // answeredDb is a mockMemDb whose open test has answered the mocks answered
@@ -120,5 +127,96 @@ func TestTheAnsweredMocksLeaveOtherDiagnosesAlone(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	if matched, diag := missOf(t, getTo("/reserve/book", answeredHost), db); diag != matched {
 		t.Fatalf("without the switch the diagnosis changed: %+v", diag)
+	}
+}
+
+// lateIndex places addresses as containerIndex does, and reads the
+// configuration of the container late only at its second read: the first
+// finds it unread. The second read first runs boundary.
+type lateIndex struct {
+	containerIndex
+	late     string
+	boundary func()
+	mu       sync.Mutex
+	reads    int
+}
+
+func (r *lateIndex) Fingerprint(_ context.Context, id string) (string, bool) {
+	if id != r.late {
+		return "", false
+	}
+	r.mu.Lock()
+	r.reads++
+	n := r.reads
+	r.mu.Unlock()
+	if n == 1 {
+		return "", false
+	}
+	if n == 2 {
+		r.boundary()
+	}
+	return fpQueue, true
+}
+
+func (r *lateIndex) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
+// A miss is diagnosed against the destination decode read once, when its
+// request came, in the scope open then: the extra-call check and the
+// answered mocks' diagnosis read no other. A reading made at diagnosis is a
+// use of the connection's container in whatever scope is open by then, the
+// next test's when a test boundary passed meanwhile: there it withheld the
+// key of the next test's own container, configured the same, which that
+// test called alone.
+func TestAMissIsDiagnosedWhereItsRequestCame(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const lateAddr, otherAddr = "127.0.0.1:50001", "127.0.0.1:50002"
+	idx := &lateIndex{containerIndex: containerIndex{
+		lateAddr:  localstack("late", ""),
+		otherAddr: localstack("other", fpQueue),
+	}, late: "late"}
+	k := containerkey.NewKeyer(idx)
+	var once sync.Once
+	nextTest := func() { once.Do(func() { k.EndTest(); k.BeginTest() }) }
+	idx.boundary = nextTest
+	k.BeginTest()
+	k.Name(zap.NewNop(), "c1", lateAddr)
+	ctx := containerkey.WithConn(context.Background(), k, "c1")
+	db := answeredDb{mockMemDb: &mockMemDb{}, answered: []*models.Mock{onHost("stock", "/stock/book", "localhost:50001")}}
+
+	app, prox := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: lateAddr}, db, models.OutgoingOptions{})
+	}()
+	if _, err := io.WriteString(app, "GET /reserve/book HTTP/1.1\r\nHost: localhost:50001\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatalf("the app got no answer: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("answered %d, want the miss's 502", resp.StatusCode)
+	}
+	_ = app.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return after the miss")
+	}
+	if n := idx.readCount(); n != 1 {
+		t.Errorf("the connection's container was read %d times for one request, want once, as it came", n)
+	}
+
+	nextTest()
+	k.Name(zap.NewNop(), "c2", otherAddr)
+	if _, st := containerkey.StateFromContext(containerkey.WithConn(context.Background(), k, "c2")); st != containerkey.Keyed {
+		t.Fatalf("the next test's call to its own container was %v, want keyed: the miss used its connection's container in the next test", st)
 	}
 }
