@@ -182,6 +182,27 @@ func (l CaptureLosses) Since(base CaptureLosses) CaptureLosses {
 	return out
 }
 
+// Max is l and o merged kind by kind, each with the larger count (its What
+// with it): two reads of losses counted from one base, taken in either order
+// (the ends of parallel tests' reads), are as much as the later one. Sorted
+// by kind.
+func (l CaptureLosses) Max(o CaptureLosses) CaptureLosses {
+	at := make(map[CaptureLossKind]int, len(l)+len(o))
+	var out CaptureLosses
+	for _, c := range append(append(CaptureLosses(nil), l...), o...) {
+		if i, ok := at[c.Kind]; ok {
+			if c.Count > out[i].Count {
+				out[i] = c
+			}
+			continue
+		}
+		at[c.Kind] = len(out)
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
 // Text is keploy's sentence for the losses, for a test's reason: what was
 // not captured, and that the test's verdict therefore rests on calls keploy
 // never saw.

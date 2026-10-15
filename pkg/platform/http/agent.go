@@ -1661,6 +1661,39 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 	return losses, nil
 }
 
+// GetUnchargedCaptureLosses asks the agent what it could not capture since
+// the run began that no test was charged with: what was lost after the last
+// test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
+// is ErrCaptureLossesUnsupported.
+func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent for the capture losses no test was charged with: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/uncharged")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get the capture losses no test was charged with", res, rawBody)
+	}
+	var losses models.CaptureLosses
+	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses no test was charged with: %w", err)
+	}
+	return losses, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {

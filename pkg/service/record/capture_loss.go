@@ -48,6 +48,14 @@ type captureWatch struct {
 	// and notJudged what that was: said, never a failure.
 	uncapturable []string
 	notJudged    models.CaptureLosses
+	// charged is the most the test cases' checks saw lost (judged kinds),
+	// kind by kind; final is what the final read (afterTestCases) saw lost,
+	// whose excess over charged no test case is charged with (a test case
+	// the drain saves after the final read is checked, and charged, after
+	// it); finalErr is why that read failed.
+	charged  models.CaptureLosses
+	final    models.CaptureLosses
+	finalErr error
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -113,11 +121,43 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	if len(judged) > 0 {
 		w.tainted = append(w.tainted, name)
 		w.lost = judged
+		w.charged = w.charged.Max(judged)
 	}
 	if len(notJudged) > 0 {
 		w.uncapturable = append(w.uncapturable, name)
 		w.notJudged = notJudged
 	}
+}
+
+// afterTestCases is the final read, once the app is stopped and before the
+// agent may stop: what was lost after the last test case was checked is
+// charged to no test case, so no test case's mocks miss it, and the
+// recording fails on it (design v14 §7.5: evidence charged to no test).
+// Without it a loss after the last test case went unsaid.
+func (w *captureWatch) afterTestCases(ctx context.Context) {
+	if w == nil || w.off || w.baseErr != nil {
+		return
+	}
+	// No deadline of its own (rule 15), as the base read: the agent's
+	// answer ends it, or the second interrupt, which gives the stop's waits
+	// up (the read is then "not verified", and the recording fails).
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRead()
+	go func() {
+		select {
+		case <-utils.StopNow():
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
+	now, err := w.reader.GetCaptureLosses(readCtx)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err != nil {
+		w.finalErr = err
+		return
+	}
+	w.final, _ = now.Since(w.base).Split()
 }
 
 // finish says, at ERROR, which test cases were recorded while the agent could
@@ -146,6 +186,20 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.Strings("testCases", w.uncapturable),
 			zap.String("reason", w.notJudged.NotJudgedText()),
 			zap.String("next_step", "reach that dependency over a TCP address (mocked, or listed in mock.real), then re-record these test cases"))
+	}
+	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
+		failed = true
+		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call after the last test case was recorded, and no test case holds what those calls carried ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", afterLast.Text()),
+			zap.String("next_step", "fix what the reason names, then re-record"))
+	}
+	if w.finalErr != nil {
+		failed = true
+		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call after the last test case was recorded ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Error(w.finalErr),
+			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
 	if len(w.unverified) > 0 {
 		failed = true
