@@ -117,3 +117,25 @@ func TestWhatFLearnsReplaysWithAMaskBesideAVariable(t *testing.T) {
 		t.Fatal("a note that changed outside its clock read was served")
 	}
 }
+
+// A value whose moved read is only part of an instant (a time of day beside
+// a date and zone no layout reads) is learned whole, so a replay on another
+// date or in another zone is still served (round-1 review of decision 26).
+func TestLearnMatchLearnsAPartialInstantWhole(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const rec = "Wed Oct 14 10:00:41 UTC 2026"
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+rec+`"}`, nil, `{"ok":true}`)}}
+	if served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/events", `{"at":"Wed Oct 14 10:01:42 UTC 2026"}`, nil), db, n, opts); err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	pats, ok := db.consumed[0].Spec.ReqBodyNoise["body.at"]
+	if !ok || len(pats) != 0 {
+		t.Fatalf("learned %v, want body.at whole", db.consumed[0].Spec.ReqBodyNoise)
+	}
+	later := learnRecorded("mock-0", 0, "POST", "/v1/events", `{"at":"`+rec+`"}`, nil, `{"ok":true}`)
+	later.Spec.ReqBodyNoise = db.consumed[0].Spec.ReqBodyNoise
+	db = &learnDb{perTest: []*models.Mock{later}}
+	if served, err := h.learnedMatch(context.Background(), live("POST", "/v1/events", `{"at":"Thu Nov 05 04:30:41 IST 2026"}`, nil), db, n, models.OutgoingOptions{}); err != nil || served == nil {
+		t.Fatalf("a later date in another zone was refused: %v", err)
+	}
+}

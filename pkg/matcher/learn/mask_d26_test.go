@@ -52,8 +52,7 @@ func TestClockMaskComparesWhatDidNotDrift(t *testing.T) {
 	}
 }
 
-// Every layout of a clock read is masked in place, and a time-ordered UUID
-// by its time words alone.
+// Every layout of a whole instant is masked in place.
 func TestClockMaskLayouts(t *testing.T) {
 	const rfc = "Mon, 02 Jan 2006 15:04:05 MST"
 	recEpoch := "1760436041123"
@@ -68,14 +67,8 @@ func TestClockMaskLayouts(t *testing.T) {
 			[]string{"1760999999999"}, []string{"abc", "1760436041123 "}},
 		{"epoch inside a key", "cache:user-7:" + recEpoch, "cache:user-7:" + liveEpoch,
 			[]string{"cache:user-7:1760999999999"}, []string{"cache:user-8:1760999999999"}},
-		{"time of day", "slot 10:00:41 room 4", "slot 10:01:42 room 4",
-			[]string{"slot 23:59:59 room 4"}, []string{"slot 23:59:59 room 5"}},
 		{"compact", "X-Amz-Date=20261014T100041Z;k=v", "X-Amz-Date=20261014T100142Z;k=v",
 			[]string{"X-Amz-Date=20270101T000000Z;k=v"}, []string{"X-Amz-Date=20270101T000000Z;k=w"}},
-		// A version-1 UUID: its first three groups are its time, the last
-		// two its clock sequence and node, compared.
-		{"UUID v1", "id a8a2f0b0-a7a5-11f1-8000-0242ac120002", "id " + uuidV1Lead(t, "a8a2f0b0-a7a5-11f1-8000-0242ac120002"),
-			[]string{"id 00000000-0000-1000-8000-0242ac120002"}, []string{"id 00000000-0000-1000-8000-0242ac120003"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mask := ClockMask(tc.rec, tc.live)
@@ -124,7 +117,8 @@ func hexN(v uint64, n int) string {
 
 // No mask where the value drifted in more than its clock reads, where no
 // clock read moved by the lead, where a clock read moved only in an escaped
-// form, or where the value is longer than a mask holds: the value is then
+// form, where a read that moved is only part of an instant (a time of day, a
+// UUID), or where the value is longer than a mask holds: the value is then
 // learned whole, as before.
 func TestClockMaskOnlyForAClockOnlyDrift(t *testing.T) {
 	long := strings.Repeat("x", maxMaskedValue)
@@ -135,6 +129,15 @@ func TestClockMaskOnlyForAClockOnlyDrift(t *testing.T) {
 		{"an unmoved changed read beside a moved one", "a 2026-10-14T10:00:41Z b 2026-01-01", "a 2026-10-14T10:01:42Z b 2026-01-05"},
 		{"moved only in its escaped form", "at=2026-10-14T10%3A00%3A41Z", "at=2026-10-14T10%3A01%3A42Z"},
 		{"longer than a mask holds", long + " 2026-10-14T10:00:41Z", long + " 2026-10-14T10:01:42Z"},
+		// A read that is only part of an instant (round-1 review): what is
+		// beside it, kept literal, would refuse a later replay on another
+		// date, in another zone, or on another host.
+		{"a time of day", "slot 10:00:41 room 4", "slot 10:01:42 room 4"},
+		{"Date.toString", "Wed Oct 14 10:00:41 UTC 2026", "Wed Oct 14 10:01:42 UTC 2026"},
+		{"a date and a time of day apart", "on 2026-10-14 at 10:00:41", "on 2026-10-14 at 10:01:42"},
+		{"RFC 1123 with a zone name", "Wed, 14 Oct 2026 10:00:41 PDT", "Wed, 14 Oct 2026 10:01:42 PDT"},
+		{"a time of day beside a moved instant", "2026-10-14T10:00:41Z (10:00:41)", "2026-10-14T10:01:42Z (10:01:42)"},
+		{"a UUID v1", "id a8a2f0b0-a7a5-11f1-8000-0242ac120002", "id " + uuidV1Lead(t, "a8a2f0b0-a7a5-11f1-8000-0242ac120002")},
 	} {
 		if mask := ClockMask(tc.rec, tc.live); mask != "" {
 			t.Errorf("%s: mask %q", tc.name, mask)

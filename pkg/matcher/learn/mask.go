@@ -3,7 +3,6 @@ package learn
 import (
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -15,14 +14,23 @@ const maxMaskedValue = 4096
 
 // ClockMask is the mask of a value that drifted only by F's clock (founder
 // decision 26): an anchored pattern of the recorded value in which each
-// clock read that moved by FullRoundLead (movedReads) stands as any read of
-// its layout, and everything else as it was recorded, so that what did not
-// drift ("order 1234 placed at <ts>") is still compared. A layout read by
-// its words (a time-ordered UUID) masks its time words alone. It is "" when
-// the value drifted in more than its clock reads (the live value is not the
-// recorded one outside them), when a clock read moved only in another form
-// of the value (an escaped or encoded one), and for a recorded value longer
-// than maxMaskedValue: the value is then learned whole.
+// clock read that moved by FullRoundLead (movedReads) stands as any match of
+// its layout's pattern (whatever its precision or zone: a formatter that
+// drops a fraction's trailing zeros reads the clock all the same), and
+// everything else as it was recorded, so that what did not drift ("order
+// 1234 placed at <ts>") is still compared. It is "", and the value is then
+// learned whole, when:
+//
+//   - the value drifted in more than its clock reads (the live value is not
+//     the recorded one outside them);
+//   - a clock read moved only in another form of the value (an escaped or
+//     encoded one);
+//   - a read that moved is only part of an instant: a time of day, whose
+//     date, zone or AM/PM beside it may be in a form no layout reads ("Wed
+//     Oct 14 10:00:41 UTC 2026"), or a time-ordered UUID, whose node and
+//     clock sequence are the host's. Kept literal, they would refuse a later
+//     replay on another date, in another zone or on another host;
+//   - the recorded value is longer than maxMaskedValue.
 func ClockMask(recorded, live string) string {
 	if len(recorded) > maxMaskedValue {
 		return ""
@@ -31,13 +39,18 @@ func ClockMask(recorded, live string) string {
 	if len(reads) == 0 {
 		return ""
 	}
+	for _, m := range reads {
+		if lay := clockLayouts[m.lay]; lay.wraps || lay.timeWord != nil {
+			return ""
+		}
+	}
 	sort.Slice(reads, func(i, j int) bool { return reads[i].rec[0] < reads[j].rec[0] })
 	var b strings.Builder
 	b.WriteString("^")
 	at := 0
 	for _, m := range reads {
 		b.WriteString(regexp.QuoteMeta(recorded[at:m.rec[0]]))
-		b.WriteString(spanPattern(clockLayouts[m.lay], recorded[m.rec[0]:m.rec[1]]))
+		b.WriteString("(?:" + clockLayouts[m.lay].re.String() + ")")
 		at = m.rec[1]
 	}
 	b.WriteString(regexp.QuoteMeta(recorded[at:]))
@@ -48,33 +61,6 @@ func ClockMask(recorded, live string) string {
 		return ""
 	}
 	return mask
-}
-
-// spanPattern is the pattern a clock read of layout lay, recorded as span,
-// stands as in a mask: any read of the layout (whatever its precision or
-// zone: a formatter that drops a fraction's trailing zeros reads the clock
-// all the same), or, for a layout read by its words, the span with each time
-// word as any hexadecimal word of its length and the other words as
-// recorded.
-func spanPattern(lay clockLayout, span string) string {
-	if lay.timeWord == nil {
-		return "(?:" + lay.re.String() + ")"
-	}
-	var b strings.Builder
-	i := 0
-	for _, seg := range segmentsBy(span, isWord) {
-		switch {
-		case !seg.word:
-			b.WriteString(regexp.QuoteMeta(seg.text))
-			continue
-		case lay.timeWord(span, i):
-			b.WriteString("[0-9a-fA-F]{" + strconv.Itoa(len(seg.text)) + "}")
-		default:
-			b.WriteString(regexp.QuoteMeta(seg.text))
-		}
-		i++
-	}
-	return b.String()
 }
 
 // Masked reports whether noise learned at a leaf with patterns excuses its
