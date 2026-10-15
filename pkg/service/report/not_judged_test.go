@@ -33,6 +33,7 @@ var notJudgedCases = []struct {
 	{"test mocks unread", models.FailureInfo{TestMocksUnread: true}, "which of its recorded calls it made"},
 	{"variables unchecked", models.FailureInfo{VariablesUnchecked: "the learn step's table could not be read"}, "the learn step's table could not be read"},
 	{"capture unread", models.FailureInfo{CaptureUnread: true}, "captured every call"},
+	{"cannot capture (decision 20)", models.FailureInfo{CannotCapture: models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/run/app/db.sock"}}}, "a Unix socket keploy cannot capture (1 time(s)) while this test or one before it ran (/run/app/db.sock)"},
 }
 
 // A test keploy could not judge is not green in JUnit, whatever its row's
