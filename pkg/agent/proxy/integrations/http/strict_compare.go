@@ -36,7 +36,9 @@ import (
 //     step, which names a field by its exact place (body.items[0].id,
 //     header.<name>, url.query.<name>, url.path.<i>), or by the request-body
 //     learner it replaces (body.items[].id). A learned field's value may
-//     change; its type and its presence may not;
+//     change; its type and its presence may not. A field learned with a
+//     mask (a value that drifted only by F's clock, founder decision 26)
+//     may change only where the mask lets it: its clock reads;
 //   - a recorded value the obfuscator redacted (Mock.Noise).
 //
 // The User-Agent is compared by its first product token's name, so an SDK's
@@ -79,25 +81,11 @@ type strictKnown struct {
 
 // learnedAt reports whether the mock learned the field at exact (the learn
 // step's dialect: that field or a container of it) or at legacy (the
-// request-body learner's dialect, by its exact key).
-func (k strictKnown) learnedAt(exact, legacy string) bool {
-	if len(k.learned) == 0 {
-		return false
-	}
-	if _, ok := k.learned[exact]; ok {
-		return true
-	}
-	if legacy != "" && legacy != exact {
-		if _, ok := k.learned[legacy]; ok {
-			return true
-		}
-	}
-	for p := range k.learned {
-		if strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[") {
-			return true
-		}
-	}
-	return false
+// request-body learner's dialect, by its exact key), its value recorded as
+// rec and sent as live: a field learned with a mask (a clock read's, founder
+// decision 26) only when the mask matches both (learnedHolds).
+func (k strictKnown) learnedAt(exact, legacy, rec, live string, scalar bool) bool {
+	return learnedHolds(k.learned, exact, legacy, rec, live, scalar)
 }
 
 // redacted reports whether a recorded value is one the obfuscator redacted.
@@ -212,7 +200,7 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	if len(rs) == len(ls) {
 		same := true
 		for i := range rs {
-			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "") {
+			if rs[i] != ls[i] && !k.learnedAt("url.path."+strconv.Itoa(i), "", rs[i], ls[i], true) {
 				same = false
 				break
 			}
@@ -262,10 +250,11 @@ func (k strictKnown) queryDiffs(rec, live url.Values) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", strings.Join(lv, ", ")))
 			continue
 		}
-		if sameMembers(maskValues(rv, k.n.url), maskValues(lv, k.n.url)) {
+		mrv, mlv := maskValues(rv, k.n.url), maskValues(lv, k.n.url)
+		if sameMembers(mrv, mlv) {
 			continue
 		}
-		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "") {
+		if len(rv) == 1 && len(lv) == 1 && k.learnedAt("url.query."+name, "", mrv[0], mlv[0], true) {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, strings.Join(rv, ", "), strings.Join(lv, ", ")))
@@ -339,7 +328,7 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
-		if k.learnedAt(path, "") || k.redacted(rv) {
+		if k.learnedAt(path, "", rv, lv, true) || k.redacted(rv) {
 			continue
 		}
 		switch name {
@@ -479,12 +468,20 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 			out = append(out, shaped(path, shape, models.DiffKindMissingInMock, "", ""))
 			continue
 		}
-		if sameMembers(rv, lv) || k.learnedAt(path, "") || redacted[key] {
+		if sameMembers(rv, lv) || k.learnedAt(path, "", sortedJoin(rv), sortedJoin(lv), true) || redacted[key] {
 			continue
 		}
 		out = append(out, shaped(path, shape, models.DiffKindValueChanged, "", ""))
 	}
 	return out
+}
+
+// sortedJoin is a form key's values as the learn step reads them: sorted,
+// joined by ", ".
+func sortedJoin(vs []string) string {
+	vs = append([]string(nil), vs...)
+	sort.Strings(vs)
+	return strings.Join(vs, ", ")
 }
 
 // redactedFormKeys are the keys of a recorded form one of whose "key=value"
@@ -530,7 +527,7 @@ func (k strictKnown) multipartDiffs(recCT, rec, liveCT string, live []byte) []st
 			return append(out, bodyChanged())
 		case bytes.Equal(rp[i].data, lp[i].data):
 			continue
-		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "") || k.redacted(string(rp[i].data))):
+		case rp[i].file == "" && (k.n.body.Covers(rp[i].name, "", false) || k.learnedAt(path, "", string(rp[i].data), string(lp[i].data), true) || k.redacted(string(rp[i].data))):
 			continue
 		}
 		out = append(out, shaped(path, "body."+shapeKey(rp[i].name), models.DiffKindValueChanged, "", ""))
@@ -598,7 +595,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 	if isScalar(r) && k.redacted(scalarText(r)) {
 		return
 	}
-	learned = learned || k.learnedAt(exact, name)
+	learned = learned || k.learnedAt(exact, name, scalarText(r), scalarText(l), isScalar(r) && isScalar(l))
 	if jsonKind(r) != jsonKind(l) {
 		*out = append(*out, shaped(name, shape, models.DiffKindTypeChanged, jsonKind(r), jsonKind(l)))
 		return

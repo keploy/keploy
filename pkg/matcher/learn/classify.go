@@ -104,6 +104,12 @@ type Learned struct {
 	// Why, of an unaccounted drift, is why it cannot be noise. It never
 	// holds a value.
 	Why string
+	// Mask, of noise that drifted only by F's clock, is the pattern its
+	// value is excused by from then on (ClockMask, Masked): the recorded
+	// value with each clock read that moved standing as any read of its
+	// layout, so the rest of it is still compared (founder decision 26). ""
+	// when the leaf is learned whole.
+	Mask string
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -162,6 +168,10 @@ func Classify(dc *DriftCache, drift []string, live, rec Shape, at time.Time, ear
 			if why := echoedPart(dc, dc.of(r.Value, l.Value), resp); why != "" {
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
+		}
+		// Noise that drifted only by F's clock is masked, not learned whole.
+		if ln.Kind == KindNoise {
+			ln.Mask = ClockMask(r.Value, l.Value)
 		}
 		out = append(out, ln)
 	}

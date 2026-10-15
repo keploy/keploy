@@ -10,7 +10,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -3738,7 +3738,9 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
 			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
 			if len(prev.ReqBodyNoise) > 0 {
-				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
+				// A leaf learned whole by either pairing stays whole; one
+				// masked by both is excused by either's mask.
+				mock.ReqBodyNoise = learn.MergeMasks(prev.ReqBodyNoise, mock.ReqBodyNoise)
 			}
 		}
 	}

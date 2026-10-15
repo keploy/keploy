@@ -57,30 +57,18 @@ var clockLayouts = []clockLayout{
 // (a millisecond read moves by the lead plus that).
 func clockOf(recorded, live string) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
-	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
-	for _, lay := range clockLayouts {
-		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
-		for k := 0; k < len(rm) && k < len(lm); k++ {
-			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
-			if rs == ls || !moved(lay, rs, ls) {
-				continue
+	for _, m := range movedReads(recorded, live) {
+		lay := clockLayouts[m.lay]
+		rs, ls := recorded[m.rec[0]:m.rec[1]], live[m.live[0]:m.live[1]]
+		rw, lw := wordsBy(rs, isWord), wordsBy(ls, isWord)
+		for i, w := range rw {
+			if lay.timeWord == nil || lay.timeWord(rs, i) {
+				c.rec[w] = true
 			}
-			for i := rm[k][0]; i < rm[k][1]; i++ {
-				takenR[i] = true
-			}
-			for i := lm[k][0]; i < lm[k][1]; i++ {
-				takenL[i] = true
-			}
-			rw, lw := wordsBy(rs, isWord), wordsBy(ls, isWord)
-			for i, w := range rw {
-				if lay.timeWord == nil || lay.timeWord(rs, i) {
-					c.rec[w] = true
-				}
-			}
-			for i, w := range lw {
-				if lay.timeWord == nil || lay.timeWord(ls, i) {
-					c.live[w] = true
-				}
+		}
+		for i, w := range lw {
+			if lay.timeWord == nil || lay.timeWord(ls, i) {
+				c.live[w] = true
 			}
 		}
 	}
@@ -103,6 +91,38 @@ func clockOf(recorded, live string) clockSet {
 	}
 	c.whole = c.whole && changed
 	return c
+}
+
+// movedRead is one clock read of a drifted value that moved by
+// FullRoundLead: its layout (an index of clockLayouts) and where it stands in
+// the recorded value (rec) and in the live one (live).
+type movedRead struct {
+	lay       int
+	rec, live [2]int
+}
+
+// movedReads are the clock reads of a drifted value that moved by
+// FullRoundLead, as clockOf reads them, in layout order.
+func movedReads(recorded, live string) []movedRead {
+	var out []movedRead
+	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
+	for li, lay := range clockLayouts {
+		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
+		for k := 0; k < len(rm) && k < len(lm); k++ {
+			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
+			if rs == ls || !moved(lay, rs, ls) {
+				continue
+			}
+			for i := rm[k][0]; i < rm[k][1]; i++ {
+				takenR[i] = true
+			}
+			for i := lm[k][0]; i < lm[k][1]; i++ {
+				takenL[i] = true
+			}
+			out = append(out, movedRead{lay: li, rec: [2]int{rm[k][0], rm[k][1]}, live: [2]int{lm[k][0], lm[k][1]}})
+		}
+	}
+	return out
 }
 
 // clockMatches are the places of s that hold an instant in layout lay, at

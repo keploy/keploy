@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -822,13 +823,17 @@ func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				noise[k] = v
 			}
 		}
-		for k := range noise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
-			}
-		}
 		if len(noise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+			// A leaf learned whole stays whole; a leaf masked (a clock
+			// read's mask, founder decision 26) is excused by every mask
+			// learned for it, and widens to whole once learned whole.
+			merged := learn.MergeMasks(mock.Spec.ReqBodyNoise, noise)
+			for k := range noise {
+				if have, ok := mock.Spec.ReqBodyNoise[k]; !ok || !slices.Equal(have, merged[k]) {
+					added = append(added, k+" (noise)")
+				}
+			}
+			mock.Spec.ReqBodyNoise = merged
 		}
 	}
 	for k := range mock.Spec.ReqBodyNoise {

@@ -686,7 +686,8 @@ func TestLearnMatchAnEarlierPlaceThatDidNotDriftIsNoSource(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("a drifting timestamp was refused: %+v", miss)
 	}
-	if !reflect.DeepEqual(db.consumed[1].Spec.ReqBodyNoise, map[string][]string{"body.at": {}}) {
+	// Noise that drifted only by F's clock, masked (founder decision 26).
+	if want := learn.ClockMask("2026-10-14T10:00:00Z", "2026-10-14T10:01:01Z"); want == "" || !reflect.DeepEqual(db.consumed[1].Spec.ReqBodyNoise, map[string][]string{"body.at": {want}}) {
 		t.Fatalf("noise %v", db.consumed[1].Spec.ReqBodyNoise)
 	}
 }

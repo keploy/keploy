@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -77,39 +78,55 @@ type NetworkTrafficDoc struct {
 // the single `noise:` key.
 //
 //   - Req   — request-body field paths to ignore during schema/strict matching
-//     (e.g. "body.tier_type"). A plain list of paths: the strict path only ever
-//     honoured "ignore this whole field", so per-path regex values are not kept.
+//     (e.g. "body.tier_type"). A plain list of paths, each ignored whole
+//     unless Mask lists it.
 //   - Value — exact-match value regexes written by the enterprise obfuscator
 //     (the former top-level `noise:` list, models.Mock.Noise).
+//   - Mask  — the paths of Req the learn step learned with a mask (a value
+//     that drifted only by record's full-round clock, founder decision 26),
+//     each with its patterns: the path is ignored only where one of them
+//     matches. Written and read only under the proven switch, and only for a
+//     path with patterns, so a mock without one is written as before; without
+//     the switch, or in a keploy that does not read it, the path is ignored
+//     whole.
 //
 // For backward compatibility the custom unmarshalers also accept the OLD shape
 // where `noise:` was a bare string list — that decodes into Value. New writes
 // only emit this unified mapping.
 type DocNoise struct {
-	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
-	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
+	Req   []string            `json:"req,omitempty" yaml:"req,omitempty"`
+	Value []string            `json:"value,omitempty" yaml:"value,omitempty"`
+	Mask  map[string][]string `json:"mask,omitempty" yaml:"mask,omitempty"`
 }
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
 // model fields: the obfuscator value-regex list (models.Mock.Noise) and the
-// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Only the field
-// PATHS of the schema-noise map are persisted — the per-path regex values are
-// intentionally dropped (unused on the strict path). Returns nil when there is
-// nothing to write so `omitempty` drops the `noise:` key entirely. Req paths are
-// sorted for deterministic output.
+// kind-agnostic schema-noise map (models.MockSpec.ReqBodyNoise). Every field
+// PATH of the schema-noise map is written to Req, and, under the proven
+// switch, the patterns of a path that has some (a learned mask) to Mask; a
+// path's patterns are dropped otherwise. Returns nil when there is nothing to
+// write so `omitempty` drops the `noise:` key entirely. Req paths are sorted
+// for deterministic output.
 func NewDocNoise(value []string, reqBodyNoise map[string][]string) *DocNoise {
 	var req []string
+	var mask map[string][]string
 	if len(reqBodyNoise) > 0 {
 		req = make([]string, 0, len(reqBodyNoise))
-		for path := range reqBodyNoise {
+		for path, pats := range reqBodyNoise {
 			req = append(req, path)
+			if len(pats) > 0 && provenswitch.On() {
+				if mask == nil {
+					mask = map[string][]string{}
+				}
+				mask[path] = append([]string(nil), pats...)
+			}
 		}
 		sort.Strings(req)
 	}
 	if len(req) == 0 && len(value) == 0 {
 		return nil
 	}
-	return &DocNoise{Req: req, Value: value}
+	return &DocNoise{Req: req, Value: value, Mask: mask}
 }
 
 // ValueNoise returns the obfuscator value-regex list (models.Mock.Noise). nil-safe.
@@ -134,12 +151,23 @@ func pathsToNoiseMap(paths []string) map[string][]string {
 }
 
 // ResolveReqBodyNoise returns the request-body schema noise for a decoded doc,
-// taken from the unified noise.req list. Returns nil when it is absent.
+// taken from the unified noise.req list, and, under the proven switch, each
+// path's patterns from noise.mask (a path of req it does not list has none).
+// Returns nil when it is absent.
 func ResolveReqBodyNoise(noise *DocNoise) map[string][]string {
-	if noise != nil && len(noise.Req) > 0 {
-		return pathsToNoiseMap(noise.Req)
+	if noise == nil || len(noise.Req) == 0 {
+		return nil
 	}
-	return nil
+	out := pathsToNoiseMap(noise.Req)
+	if !provenswitch.On() {
+		return out
+	}
+	for path, pats := range noise.Mask {
+		if _, ok := out[path]; ok && len(pats) > 0 {
+			out[path] = append([]string(nil), pats...)
+		}
+	}
+	return out
 }
 
 // UnmarshalYAML accepts both the new mapping shape ({req: [...], value: [...]})

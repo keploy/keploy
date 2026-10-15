@@ -463,9 +463,12 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// What the learn step learned as noise at one exact place of this call
 	// (a path segment, a query value, a header value, one element of an
 	// array) is not compared either: its recorded value is put back there
-	// too, the place's presence and JSON type still required.
+	// too, the place's presence and JSON type still required. Noise learned
+	// with a mask (a clock read's, founder decision 26) is put back only
+	// where the mask matches both values: elsewhere the call is compared as
+	// it came.
 	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
-	for k := range m.Spec.ReqBodyNoise {
+	for k, pats := range m.Spec.ReqBodyNoise {
 		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
 		if !ok {
 			continue // a body path in the matcher's dialect: the body noise
@@ -484,6 +487,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		l, ok := live.read(place)
 		if !ok || l.body && l.kind != r.kind {
 			return nil, nil
+		}
+		if !learn.Masked(pats, r.value, true) || !learn.Masked(pats, l.value, true) {
+			continue
 		}
 		if asRecorded, ok = asRecorded.putBack(place, r); !ok {
 			return nil, nil

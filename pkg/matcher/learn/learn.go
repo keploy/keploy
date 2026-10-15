@@ -4,7 +4,9 @@
 // recorded mock answers exactly is paired with the recorded mock it drifted
 // from, and every value that drifted is learned as one of three things:
 //
-//   - noise: not compared from then on, its type still enforced;
+//   - noise: not compared from then on, its type still enforced; a value
+//     that drifted only by F's clock is masked instead (ClockMask): only its
+//     clock reads are not compared, the rest of it still is;
 //   - an echo: the mock's answer echoes the value, so it is a variable of
 //     that call alone, bound at the request and answered with the live value
 //     where the recorded answer held it;
@@ -97,7 +99,10 @@ type Known interface {
 	// Excused reports whether the leaf is not compared by value, and whether
 	// its type is still enforced (typed). leaf is the recorded leaf, or the
 	// live one when the recording lacks it. A typed leaf must also be
-	// present on both sides; an untyped one may be missing from either.
+	// present on both sides; an untyped one may be missing from either. A
+	// typed excuse may depend on the leaf's value (noise learned with a
+	// mask, Masked): a drifted value is excused only when the live leaf is
+	// too.
 	Excused(leaf Leaf) (excused, typed bool)
 }
 
@@ -175,6 +180,12 @@ func Compare(live, rec Shape, known Known) Diff {
 			ref = l
 		}
 		excused, typed := known.Excused(ref)
+		// Learned noise (typed) may excuse a value by its patterns (a clock
+		// read's mask, Masked): the live value must be one it excuses too.
+		valueExcused := excused
+		if excused && typed && inRec && inLive {
+			valueExcused, _ = known.Excused(l)
+		}
 		switch {
 		case !inRec || !inLive:
 			if excused && !typed {
@@ -192,7 +203,7 @@ func Compare(live, rec Shape, known Known) Diff {
 			}
 			d.Structural = p + " changed type"
 			return d
-		case l.Value == r.Value || excused:
+		case l.Value == r.Value || valueExcused:
 			continue
 		case r.Unnamed:
 			d.Structural = p + " drifted, and no path names it alone"

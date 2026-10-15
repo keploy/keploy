@@ -298,12 +298,13 @@ type httpKnown struct {
 // noise and obfuscated values excuse type and presence.
 // What the learn step learned names a leaf by its exact path, an array
 // position included; noise learned before it (by the request-body learner
-// it replaces) names it in the request matcher's dialect.
+// it replaces) names it in the request matcher's dialect. Noise learned with
+// a mask excuses only a value the mask matches (learnedHolds).
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	if learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise) {
+	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
+	if learnedHolds(k.learned, l.Path, l.Noise, l.Value, l.Value, scalar) {
 		return true, true
 	}
-	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
 	switch {
 	case strings.HasPrefix(l.Noise, "body."):
 		if k.n.body.Covers(strings.TrimPrefix(l.Noise, "body."), l.Value, scalar) {
@@ -320,21 +321,29 @@ func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
 	return false, false
 }
 
-func hasKey(m map[string][]string, k string) bool {
-	_, ok := m[k]
-	return ok
-}
-
-// learnedCovers reports whether learned noise names the leaf at path: the
-// leaf itself, or a container holding it. Unlike keploy.yml's noise, a
-// learned entry names exactly the field that drifted, never a field whose
-// name it happens to contain, nor another element of its array.
-func learnedCovers(learned map[string][]string, path string) bool {
-	if _, ok := learned[path]; ok {
+// learnedHolds reports whether noise learned onto a mock excuses the value
+// at exact (the learn step's dialect: that leaf, or a container of it learned
+// whole) or at legacy (the request-body learner's dialect, by its exact
+// key), recorded as rec and sent as live: an entry naming the leaf excuses
+// it whole when it lists no pattern, else only when both values are scalars
+// one of its patterns matches (a clock read's mask, founder decision 26). An
+// entry naming a container excuses what it holds only when learned whole.
+// Unlike keploy.yml's noise, a learned entry names exactly the field that
+// drifted, never a field whose name it happens to contain, nor another
+// element of its array.
+func learnedHolds(learned map[string][]string, exact, legacy, rec, live string, scalar bool) bool {
+	if len(learned) == 0 {
+		return false
+	}
+	at := func(key string) bool {
+		pats, ok := learned[key]
+		return ok && learn.Masked(pats, rec, scalar) && learn.Masked(pats, live, scalar)
+	}
+	if at(exact) || legacy != "" && legacy != exact && at(legacy) {
 		return true
 	}
-	for p := range learned {
-		if strings.HasPrefix(path, p+".") || strings.HasPrefix(path, p+"[") {
+	for p, pats := range learned {
+		if len(pats) == 0 && (strings.HasPrefix(exact, p+".") || strings.HasPrefix(exact, p+"[")) {
 			return true
 		}
 	}
@@ -832,6 +841,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
+			if l.Mask != "" {
+				// It drifted only by F's clock: only its clock reads are
+				// excused (founder decision 26).
+				p.noise[r.Path] = []string{l.Mask}
+			}
 
 		case learn.KindVariable:
 			from := l.From
@@ -1013,7 +1027,7 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 	}
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
 		if len(p.noise) > 0 {
-			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
+			spec.ReqBodyNoise = learn.MergeMasks(spec.ReqBodyNoise, p.noise)
 		}
 		// What was learned rides out on the consumed mock's state, never on
 		// what the pool serves next: a reused mock stays the recording the

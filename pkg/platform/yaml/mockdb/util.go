@@ -42,8 +42,8 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		Start:        mock.Start,
 		Async:        mock.Spec.Async,
 		// Unified noise block: the obfuscator value-regexes (mock.Noise) plus the
-		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; regex
-		// values are dropped). Request-body noise is only non-empty for a kind whose
+		// request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys; a
+		// learned mask's patterns in noise.mask). Request-body noise is only non-empty for a kind whose
 		// parser implements the schema-noise adapter and learned drift (HTTP, plus
 		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
 		// write, so omitempty keeps the noise key out of the doc entirely.
@@ -313,7 +313,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Async: mock.Spec.Async,
 		// Unified noise block (see DocNoise): obfuscator value-regexes (mock.Noise)
 		// plus request-body schema-noise field PATHS (mock.Spec.ReqBodyNoise keys;
-		// regex values dropped). Set before the mapper/per-kind projection runs so it
+		// a learned mask's patterns in noise.mask). Set before the mapper/per-kind projection runs so it
 		// survives regardless of the spec envelope. NewDocNoise returns nil when
 		// empty, so omitempty drops the key.
 		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
