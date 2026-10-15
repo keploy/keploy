@@ -113,6 +113,17 @@ func (db *TreeDb) delete(key interface{}) bool {
 	return true
 }
 
+// holds reports whether the entry at key is the mock want names (sameMock).
+func (db *TreeDb) holds(key models.TestModeInfo, want *models.Mock) bool {
+	if want == nil {
+		return false
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	v, found := db.rbt.Get(key)
+	return found && sameMock(v, *want)
+}
+
 // deleteMock removes the entry at key only when it is the mock the caller
 // means. See sameMock for why the key alone is not enough.
 func (db *TreeDb) deleteMock(key interface{}, want models.Mock) bool {
