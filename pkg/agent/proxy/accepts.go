@@ -116,7 +116,7 @@ func (p *Proxy) canary(ctx context.Context, ln net.Listener) {
 			return
 		}
 		if ra, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || ra.Port != mine || !ra.IP.IsLoopback() {
-			p.early = append(p.early, conn)
+			p.keepEarly(conn)
 			continue
 		}
 		ok := p.countAccept(conn)
@@ -142,23 +142,44 @@ func (p *Proxy) canaryStopped(ctx context.Context) bool {
 		return false
 	}
 	p.accepts.Fail(fmt.Errorf("%w: the proxy was stopped before it checked the kernel's count", models.ErrProxyConnsUnsupported))
-	for _, c := range p.early {
-		_ = c.Close()
-	}
-	p.early = nil
+	p.closeEarly()
 	p.logger.Debug("the proxy was stopped while it checked the kernel's count of its connections")
 	return true
 }
 
+// keepEarly keeps a connection the canary accepted before its own, for the
+// accept loop.
+func (p *Proxy) keepEarly(c net.Conn) {
+	p.earlyMu.Lock()
+	defer p.earlyMu.Unlock()
+	p.early = append(p.early, c)
+}
+
 // takeEarly hands the accept loop a connection the canary accepted before its
-// own, in the order they came.
+// own, in the order they came; none once the proxy's stop has closed them
+// (closeEarly).
 func (p *Proxy) takeEarly() net.Conn {
+	p.earlyMu.Lock()
+	defer p.earlyMu.Unlock()
 	if len(p.early) == 0 {
 		return nil
 	}
 	c := p.early[0]
 	p.early = p.early[1:]
 	return c
+}
+
+// closeEarly closes every connection the canary kept that the accept loop has
+// not taken: the proxy has stopped, and nothing will take them. Under earlyMu,
+// so a take in the loop's last round either gets a connection (which that
+// round hands over, or closes at the stop) or none.
+func (p *Proxy) closeEarly() {
+	p.earlyMu.Lock()
+	defer p.earlyMu.Unlock()
+	for _, c := range p.early {
+		_ = c.Close()
+	}
+	p.early = nil
 }
 
 // countAccept records an accepted connection's sequence number, as the kernel
