@@ -5693,13 +5693,30 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return r.compareHTTPResp(tc, actualResponse, testSetID, emitFailureLogs)
 }
 
+// schemaMatch reports whether a response is compared by its body's schema
+// alone (test.schemaMatch, --schema-match). Never under the proven switch,
+// where every response body is compared (design v14 U18: the setting is
+// deleted at the flip): a schema match passes a value that changed, a field
+// that was added and a reorder of same-shaped elements, so a response that
+// differs would pass. The setting is then ignored, said once.
+func (r *Replayer) schemaMatch() bool {
+	if !r.config.Test.SchemaMatch {
+		return false
+	}
+	if provenswitch.On() {
+		r.noteIgnored("schemaMatch (--schema-match)", "every response body is compared, value by value")
+		return false
+	}
+	return true
+}
+
 // compareHTTPResp is CompareHTTPResp with the matcher's options added.
 func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
-	if r.config.Test.SchemaMatch {
+	if r.schemaMatch() {
 		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
@@ -5716,7 +5733,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
-	if r.config.Test.SchemaMatch {
+	if r.schemaMatch() {
 		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
