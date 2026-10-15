@@ -747,6 +747,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
 		Refusals:       m.refusals,
+		NotJudged:      lostNotJudged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:         name,
@@ -756,6 +757,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Live:        m.live,
 		Mocked:      m.mocked,
 		Real:        realRun,
+		NotJudged:   lostNotJudged,
 	})
 	return keployFailure
 }

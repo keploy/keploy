@@ -198,6 +198,9 @@ func (m *mockService) Record(ctx context.Context) error {
 	// after it: a restore puts the previous set back, or removes a fresh one.
 	var recordTests []models.ScopeWindow
 	var recordReal *models.RealRun
+	// recordNotJudged is what the recording lacks because keploy cannot
+	// capture it at all (decision 20), for whatever judges the recording.
+	var recordNotJudged models.CaptureLosses
 	recordJudged := false
 	defer func() {
 		// Only a build that judges the record reads these results; written
@@ -206,6 +209,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
+				NotJudged: recordNotJudged,
 			}, recordTests)
 		}
 	}()
@@ -488,6 +492,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     capture at all (decision 20) does not discard the recording: it is
 	//     said below.
 	lostLosses, lostNotJudged := lostAll.Split()
+	recordNotJudged = lostNotJudged
 	if t := lostLosses.Text(); t != "" {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))

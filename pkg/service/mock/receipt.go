@@ -123,6 +123,13 @@ type Receipt struct {
 	// than one test binary at once): keploy's verdict fails the run naming
 	// each. Absent with the switch off.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// NotJudged is what the test command did that keploy cannot capture at
+	// all (decision 20: a call over a Unix socket, or Unix sockets keploy
+	// cannot see; CaptureLossKind.NotJudged), counted over the whole run
+	// from its base, one entry per kind with its latest What. Non-empty
+	// means the run has no verdict, whatever its tests' lines say: a call
+	// after the last test's read is on no line. Empty with the switch off.
+	NotJudged models.CaptureLosses `yaml:"notJudged,omitempty" json:"notJudged,omitempty"`
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -198,6 +205,11 @@ type TestsReceipt struct {
 	// those it first reached outside a test, and the capture_incomplete
 	// evidence charged to no test. nil without the switch.
 	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
+	// NotJudged is, under the proven switch, what the run did that keploy
+	// cannot capture at all (Receipt.NotJudged): in a replay's file the
+	// receipt's, in a record's what the recording lacks, so it is not taken
+	// as fully captured.
+	NotJudged models.CaptureLosses `yaml:"notJudged,omitempty" json:"notJudged,omitempty"`
 }
 
 // empty reports whether the run reported no test and keploy refused
