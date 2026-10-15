@@ -659,6 +659,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		CmdUsed:       r.config.Test.CmdUsed,
 		Proven:        provenswitch.On(),
 	}
+	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
 		return true, err

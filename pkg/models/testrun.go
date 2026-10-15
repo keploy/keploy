@@ -456,9 +456,9 @@ const (
 )
 
 // SetEnd is how keploy test ended one run of a test set (each attempt, when
-// maxFlakyChecks or --must-pass runs it again): the status its report has,
-// and why, as the report's FailureReason says, or the error that ended the
-// set before its report was written. A set can end neither PASSED nor FAILED
+// maxFlakyChecks or --must-pass runs it again): the status the run ended it
+// with, and why, as the set's final report's FailureReason says, or the error
+// that ended the set before such a report was written. A set can end neither PASSED nor FAILED
 // with only passing results (the app halted after some tests passed, or
 // keploy could not judge the set), and FAILED with none failing (a capture
 // loss after its last test): its results alone do not say how it ended.

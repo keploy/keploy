@@ -510,9 +510,10 @@ type Replayer struct {
 	lossMarked   bool
 	lossLast     models.CaptureLosses
 	lossLastRead bool
-	// setReport is the final report of the test set RunTestSet is running,
-	// once it has one: why the set ended as it did (tellSetEnd).
-	setReport *models.TestReport
+	// setEnd is how the final report of the test set RunTestSet is running
+	// ends it, once it has one (noteSetEnd): the status it says, and why
+	// (tellSetEnd). Reset before each run of a set.
+	setEnd *models.SetEnd
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -1033,7 +1034,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
-			r.setReport = nil
+			r.setEnd = nil
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
 			if err != nil {
@@ -1629,6 +1630,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			CmdUsed:   r.config.Test.CmdUsed,
 			Proven:    provenswitch.On(),
 		}
+		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
@@ -1663,6 +1665,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testReport.Ignored = len(rows)
 		}
 
+		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
@@ -4702,7 +4705,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealFailure:         realWhy,
 		Proven:              provenswitch.On(),
 	}
-	r.setReport = testReport
+	r.noteSetEnd(testReport)
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
 	reportCtx := context.WithoutCancel(runTestSetCtx)
