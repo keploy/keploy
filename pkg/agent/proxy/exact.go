@@ -97,6 +97,8 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // it at each dispatch: exact serving can begin after a connection opened.
 func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
+var _ integrations.ExactServingReader = (*MockManager)(nil)
+
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer
 // at most one request, and the pool answers only protocol-phase requests.

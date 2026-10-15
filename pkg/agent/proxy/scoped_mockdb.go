@@ -278,6 +278,29 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 	return true
 }
 
+// ExactServing forwards the store's exact serving
+// (integrations.ExactServingReader). scopedFor hands a connection opened under
+// exact serving the bare manager, but a view made before it began serves its
+// connection for the connection's life, and under exact serving the parsers
+// on it must see that MarkMockAsUsed's false for a named mock is a refusal.
+func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
+
+// ConsumedTestMocks forwards the store's answered test mocks
+// (integrations.ExactConsumedReader), none when it keeps none, so a parser on
+// a view made before exact serving began still tells a call its test made once
+// more than it recorded from one it never recorded.
+func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
+	if er, ok := s.MockMemDb.(integrations.ExactConsumedReader); ok {
+		return er.ConsumedTestMocks()
+	}
+	return nil
+}
+
+var (
+	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
+	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
+)
+
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetFilteredMocks())
 }
