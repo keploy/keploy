@@ -53,3 +53,30 @@ func TestARunsIDIsAnsweredByTheRecordingOfTheIDItStandsFor(t *testing.T) {
 		t.Fatalf("the recording itself is left as recorded: %s", stub.Spec.HTTPResp.Body)
 	}
 }
+
+// A write teaches the run's values: the id in its path and the times in its
+// body. A later read of what it wrote is answered by the recording of that
+// read, with the run's values in the answer.
+func TestAWriteTeachesTheRunsIDsAndTimes(t *testing.T) {
+	t.Cleanup(ids.Default.Reset)
+	h := newHTTP()
+	base := time.Unix(1_700_000_000, 0)
+	put := httpMock("put", "PUT", "http://bao/v1/secret/data/keys/"+recordedKey)
+	put.Spec.HTTPReq.Body = `{"data":{"createdAt":1792054012,"expiresAt":1792057612}}`
+	read := keyMock("read", recordedKey, base.Add(time.Second))
+	read.Spec.HTTPResp.Body = `{"data":{"id":"` + recordedKey + `","createdAt":1792054012,"expiresAt":1792057612}}`
+
+	learnIDs(put, "PUT", "/v1/secret/data/keys/"+liveKey, []byte(`{"data":{"createdAt":1792100000,"expiresAt":1792103600}}`))
+	learnIDs(read, "GET", "/v1/secret/data/keys/"+otherKey, nil)
+	if got := ids.Default.Pairs(); len(got) != 3 || got[recordedKey] != liveKey || got["1792054012"] != "1792100000" || got["1792057612"] != "1792103600" {
+		t.Fatalf("a write pairs its id and times, a read pairs nothing: %v", got)
+	}
+	db := &mockMemDb{mocks: []*models.Mock{keyMock("other", otherKey, base), read}, updateUnFilteredReturn: true}
+	ok, stub, _, err := h.match(context.Background(), restoreIDs(putGet("/v1/secret/data/keys/"+liveKey)), db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok || stub.Name != "read" {
+		t.Fatalf("the read is answered by its own recording: ok=%v stub=%v err=%v", ok, stub, err)
+	}
+	if body := swapIDs(stub).Spec.HTTPResp.Body; body != `{"data":{"id":"`+liveKey+`","createdAt":1792100000,"expiresAt":1792103600}}` {
+		t.Fatalf("the answer carries the run's values: %s", body)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -422,6 +423,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
 			if opts.SwapIDs && !provenswitch.On() {
+				learnIDs(stub, request.Method, request.URL.Path, reqBody)
 				stub = swapIDs(stub)
 			}
 			respBytes, err := h.buildMockResponseBytes(stub)
@@ -493,6 +495,21 @@ func restoreIDs(in *req) *req {
 	u := *in.url
 	u.Path, u.RawPath, u.RawQuery = ids.Default.Restore(u.Path), ids.Default.Restore(u.RawPath), ids.Default.Restore(u.RawQuery)
 	return &req{method: in.method, url: &u, header: in.header, body: []byte(ids.Default.Restore(string(in.body))), raw: []byte(ids.Default.Restore(string(in.raw)))}
+}
+
+func learnIDs(stub *models.Mock, method, path string, body []byte) {
+	if stub == nil || stub.Spec.HTTPReq == nil {
+		return
+	}
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return
+	}
+	if u, err := url.Parse(stub.Spec.HTTPReq.URL); err == nil {
+		ids.PairPath(u.Path, path, ids.Default.Add)
+	}
+	ids.PairJSON([]byte(stub.Spec.HTTPReq.Body), body, ids.Default.Add)
 }
 
 func swapIDs(stub *models.Mock) *models.Mock {
