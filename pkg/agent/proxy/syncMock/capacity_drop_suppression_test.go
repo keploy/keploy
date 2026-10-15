@@ -10,17 +10,16 @@ import (
 )
 
 // fullOutChanManager returns a manager whose outChan is a tiny-capacity,
-// never-drained channel already filled to capacity, so the very next
-// sendToOutChanOwned exhausts the send budget and takes the capacity-drop
-// branch. Each forced drop costs a real sendBudget (200ms) of wall-clock, so
-// tests that need MANY distinct drops should drive recordDroppedTC directly
-// instead of routing through the send path.
+// never-drained channel already filled to capacity, so the very next send
+// queues and its drainer gives it up as dropped: its stall is measured on a
+// clock on which each look is past the bound (stalledOutClock).
 func fullOutChanManager(t *testing.T) *SyncMockManager {
 	t.Helper()
 	ch := make(chan *models.Mock, 1)
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 	// Fill the single slot so every subsequent send hits the drop branch.
 	ch <- &models.Mock{}
@@ -41,7 +40,7 @@ func TestCapacityDropRecordsOwningTCPrecisely(t *testing.T) {
 	mgr := fullOutChanManager(t)
 
 	// A single owned send that overflows past the budget.
-	mgr.sendToOutChanOwned(newMock(), "test-7")
+	sendOwnedAndWait(t, mgr, newMock(), "test-7")
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected DropCount()==1 after a forced capacity drop, got %d", got)
@@ -69,7 +68,7 @@ func TestCapacityDropOwnerEmptyRecordsNothing(t *testing.T) {
 
 	mgr := fullOutChanManager(t)
 
-	mgr.sendToOutChanOwned(newMock(), "")
+	sendOwnedAndWait(t, mgr, newMock(), "")
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected DropCount()==1, got %d", got)
@@ -92,7 +91,7 @@ func TestCapacityDropOnClosedChannelRecordsOwner(t *testing.T) {
 	mgr.SetOutputChannel(ch)
 	mgr.CloseOutChan() // outChanClosed = true
 
-	mgr.sendToOutChanOwned(newMock(), "test-closed")
+	sendOwnedAndWait(t, mgr, newMock(), "test-closed")
 
 	if !mgr.WasMockDroppedForTC("test-closed") {
 		t.Fatalf("a send to a closed outChan must record the owning TC for suppression")
@@ -112,9 +111,9 @@ func TestCapacityDropOnClosedChannelRecordsOwner(t *testing.T) {
 // TestCapacityDropCountBoundedFIFO inserts more than maxDroppedTCNames
 // distinct owners via forced drops and asserts the set is count-bounded FIFO:
 // exactly maxDroppedTCNames retained, the oldest evicted, the newest kept.
-// Drives recordDroppedTC directly to avoid paying maxDroppedTCNames*sendBudget
-// of wall-clock — the eviction logic under test lives entirely in
-// recordDroppedTC and the forced-drop path is already covered above.
+// Drives recordDroppedTC directly to avoid a drained send per drop — the
+// eviction logic under test lives entirely in recordDroppedTC and the
+// forced-drop path is already covered above.
 func TestCapacityDropCountBoundedFIFO(t *testing.T) {
 	t.Parallel()
 
@@ -178,13 +177,12 @@ func TestCapacityDropConcurrentNoRaceNoDeadlock(t *testing.T) {
 	t.Parallel()
 
 	// A never-drained, capacity-1 channel: after it is primed full, every
-	// send falls to the budget branch and drops. Use a short-lived manager
-	// with the real sendBudget — keep N small so total wall-clock is bounded
-	// (the sends run concurrently, so ~sendBudget total, not N*sendBudget).
+	// send queues and is dropped once its drainer gives up (stalledOutClock).
 	ch := make(chan *models.Mock, 1)
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 	ch <- &models.Mock{} // prime full
 
@@ -197,7 +195,7 @@ func TestCapacityDropConcurrentNoRaceNoDeadlock(t *testing.T) {
 		writerWG.Add(1)
 		go func(id int) {
 			defer writerWG.Done()
-			mgr.sendToOutChanOwned(newMock(), fmt.Sprintf("owner-%d", id))
+			sendOwnedAndWait(t, mgr, newMock(), fmt.Sprintf("owner-%d", id))
 		}(i)
 	}
 
@@ -217,8 +215,8 @@ func TestCapacityDropConcurrentNoRaceNoDeadlock(t *testing.T) {
 		}(i)
 	}
 
-	// Join writers first (each takes one bounded-block drop, all concurrent
-	// so ~sendBudget total), then stop and join the readers.
+	// Join writers first (each waits for its mock's drop), then stop and
+	// join the readers.
 	writerWG.Wait()
 	close(stop)
 	readerWG.Wait()
@@ -236,7 +234,7 @@ func TestCapacityDropConcurrentNoRaceNoDeadlock(t *testing.T) {
 // ---------------------------------------------------------------------------
 // End-to-end owner-threading through the three send loops.
 //
-// The tests above drive sendToOutChanOwned / recordDroppedTC directly. The
+// The tests above drive send / recordDroppedTC directly. The
 // tests below close the remaining gap: that ResolveRange, FlushOwnedWindows,
 // and DeleteMocksStrictlyBefore each thread the CORRECT owner into that send
 // path — a per-test mock's real test name on its owned branch, and "" on the
@@ -272,6 +270,7 @@ func TestResolveRangeInWindowDropAttributesOwner(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.ResolveRange(start, end, "test-42", true, false)
+	waitOutQueue(t, mgr)
 
 	// The mock was genuinely sent and dropped on the budget branch...
 	if got := mgr.DropCount(); got != 1 {
@@ -315,6 +314,7 @@ func TestResolveRangeSessionCarveOutRecordsNothing(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.ResolveRange(start, end, "test-42", true, false)
+	waitOutQueue(t, mgr)
 
 	// It WAS sent and dropped (proves the carve-out reached the send path)...
 	if got := mgr.DropCount(); got != 1 {
@@ -348,6 +348,7 @@ func TestFlushOwnedWindowsDropAttributesOwner(t *testing.T) {
 	// buffer: it appends {winStart,winEnd,"test-7"} to recentWindows and sends
 	// nothing (no budget paid here).
 	mgr.ResolveRange(winStart, winEnd, "test-7", true, false)
+	waitOutQueue(t, mgr)
 
 	// A late per-test mock (not session, not startup) whose ReqTimestampMock
 	// falls inside test-7's now-resolved window — only the ownerWindow branch
@@ -360,6 +361,7 @@ func TestFlushOwnedWindowsDropAttributesOwner(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.FlushOwnedWindows()
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected the late owner-window mock to be flushed and capacity-dropped (DropCount()==1), got %d", got)
@@ -392,6 +394,7 @@ func TestFlushOwnedWindowsStartupCarveOutRecordsNothing(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.FlushOwnedWindows()
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected the startup mock to be flushed and capacity-dropped (DropCount()==1), got %d", got)
@@ -418,6 +421,7 @@ func TestDeleteMocksStrictlyBeforeDropAttributesOwner(t *testing.T) {
 	winEnd := now.Add(-1 * time.Second)
 	// Register test-3's resolved window (empty buffer → no send).
 	mgr.ResolveRange(winStart, winEnd, "test-3", true, false)
+	waitOutQueue(t, mgr)
 
 	// Late kept mock: before the cleanup horizon (now) AND inside test-3's
 	// window, not session, not startup — only the ownerWindow rescue can claim
@@ -430,6 +434,7 @@ func TestDeleteMocksStrictlyBeforeDropAttributesOwner(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.DeleteMocksStrictlyBefore(now)
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected the rescued owner-window mock to be flushed and capacity-dropped (DropCount()==1), got %d", got)
@@ -465,6 +470,7 @@ func TestDeleteMocksStrictlyBeforeSessionCarveOutRecordsNothing(t *testing.T) {
 	mgr.mu.Unlock()
 
 	mgr.DeleteMocksStrictlyBefore(now)
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected the connection mock to be flushed and capacity-dropped (DropCount()==1), got %d", got)

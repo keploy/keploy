@@ -750,14 +750,12 @@ func TestResolveRangeRetainsSessionMocksWhenOutChanUnbound(t *testing.T) {
 	}
 }
 
-// TestSendToOutChanNoDropWhenDrainedWithinBudget exercises the
-// fast-then-bounded-block path: once the fast-path slot is taken,
-// a consumer that drains within sendBudget must let the blocked
-// sender complete without bumping dropCount. This is the "normal
-// scheduling jitter" case the bounded block was introduced for —
-// the pre-fix silent-drop shipped a recording-loss flake in
-// exactly this scenario, so the test lives to prevent regression.
-func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
+// TestSendToOutChanNoDropWhenDrainedLater: a consumer behind by a full
+// channel that takes again later loses nothing: the send is queued, and
+// delivered once it does, without bumping dropCount. Before, the send waited
+// 200 ms and dropped; the silent drop before that shipped a recording-loss
+// flake in exactly this scenario.
+func TestSendToOutChanNoDropWhenDrainedLater(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 1)
@@ -766,75 +764,55 @@ func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
 	}
 	mgr.SetOutputChannel(ch)
 
-	// Prime the buffer slot so the next send goes down the
-	// bounded-block branch rather than the fast path.
+	// Prime the buffer slot so the next send is queued rather than sent
+	// at once.
 	ch <- &models.Mock{}
-
-	// Drain one slot well inside sendBudget so the blocked send
-	// succeeds. 50ms is comfortably under the 200ms budget while
-	// still giving the goroutine time to park on the send.
-	done := make(chan struct{})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		<-ch // drop the primer
-		close(done)
-	}()
 
 	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
 	mgr.sendToOutChan(mock)
-	<-done
+	time.Sleep(300 * time.Millisecond) // past the old 200 ms budget
+	<-ch                               // the primer: the consumer takes again
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 0 {
-		t.Fatalf("expected zero drops when consumer drains within budget, got %d", got)
+		t.Fatalf("expected zero drops when the consumer drains later, got %d", got)
 	}
-
-	// Real mock should have landed on the channel.
 	select {
 	case got := <-ch:
 		if got != mock {
-			t.Fatalf("expected bounded-block send to deliver mock; got different pointer")
+			t.Fatalf("expected the queued send to deliver mock; got different pointer")
 		}
 	default:
-		t.Fatalf("bounded-block send should have delivered the mock after the primer was drained")
+		t.Fatalf("the queued send should have delivered the mock after the primer was drained")
 	}
 }
 
-// TestSendToOutChanDropsAfterBudget is the inverse: a consumer that
-// never drains must cause exactly one drop per send after the
-// budget, and dropCount must increment accordingly. Also asserts
-// the first drop emits an Error log (the sampled, immediately-
-// visible signal the pre-fix code lacked).
-func TestSendToOutChanDropsAfterBudget(t *testing.T) {
+// TestSendToOutChanDropsOnAStalledConsumer is the inverse: a consumer that
+// takes nothing for the stall bound loses the queued mock, dropCount counts
+// it, and the first drop emits an Error log (the sampled, immediately-visible
+// signal the pre-fix code lacked).
+func TestSendToOutChanDropsOnAStalledConsumer(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 1)
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 
-	// Capture log output so we can verify the first-drop Error
-	// actually fires — the whole point of promoting Warn->Error.
 	core, logs := observer.New(zap.ErrorLevel)
 	mgr.SetLogger(zap.New(core))
 
-	// Fill the buffered slot; subsequent sends must exhaust the
-	// budget and drop.
+	// Fill the buffered slot; the next send is queued, and its drainer
+	// gives it up.
 	ch <- &models.Mock{}
 
-	// Use a tight send budget override via measuring elapsed time —
-	// we can't stub sendBudget directly without adding a knob, so
-	// just accept the 200ms wall-clock cost on a single send and
-	// validate the semantics. 200ms * 1 send is fine for unit tests.
-	start := time.Now()
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	elapsed := time.Since(start)
+	waitOutQueue(t, mgr)
 
-	if elapsed < sendBudget {
-		t.Fatalf("bounded-block send returned in %v, expected >= sendBudget (%v)", elapsed, sendBudget)
-	}
 	if got := mgr.DropCount(); got != 1 {
-		t.Fatalf("expected dropCount=1 after budget exhaustion, got %d", got)
+		t.Fatalf("expected dropCount=1 after the consumer stalled, got %d", got)
 	}
 	if logs.Len() != 1 {
 		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
@@ -860,15 +838,17 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 
 	core, logs := observer.New(zap.ErrorLevel)
 	mgr.SetLogger(zap.New(core))
 
-	// Fill the slot so the next send hits the drop branch.
+	// Fill the slot so the next send is queued and given up.
 	ch <- &models.Mock{}
 
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected dropCount=1, got %d", got)
@@ -890,13 +870,14 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	}
 
 	// Now drive dropCount up to the next sampler milestone (1024)
-	// without paying the per-drop wall-clock cost, then walk
+	// without a drained send per drop, then walk
 	// sendToOutChan once more to fire the n==1024 branch. The
 	// emitted message must be the TERSE default — without "LOSSY"
 	// — so the sampled telemetry doesn't drown a stuck consumer's
 	// goroutine in the long actionable string.
 	mgr.dropCount.Store(sendDropSampleRate - 1) // next Add brings n to 1024
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	waitOutQueue(t, mgr)
 	if logs.Len() != 2 {
 		t.Fatalf("expected a second Error log at n==%d, got total=%d",
 			sendDropSampleRate, logs.Len())
@@ -915,8 +896,8 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 // sendDropSampleRate entries. Without the sampling, a stuck
 // consumer would flood the log and further starve the producer
 // — the specific anti-pattern the windows-redirector work
-// surfaced. Uses direct atomic writes to avoid 200ms * N real
-// timeouts in the test.
+// surfaced. Uses direct atomic writes to avoid a drained send per
+// drop in the test.
 func TestSendToOutChanDropSampling(t *testing.T) {
 	t.Parallel()
 
