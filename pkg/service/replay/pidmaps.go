@@ -309,7 +309,8 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	}
 	// What keploy cannot capture at all: only what is new since the set's
 	// last read (its tests already carry the rest), counted from the run's
-	// base when no test read.
+	// base when no test read. A standing unix_unseen is always new (no mark
+	// takes it away): such a set is not judged.
 	judged, _ := now.Since(from).Split()
 	notFrom := r.lossRunBase
 	if lastRead {

@@ -261,6 +261,8 @@ func (u *unixConn) close() {
 // watch reads the reports until the reader is closed, and counts each one the
 // allow-list and the owner do not excuse.
 func (u *unixConn) watch(logger *zap.Logger, member func(tgid uint32) bool) {
+	// However it ends (a panic too): a drain waiting on it ends with it.
+	defer u.drain.stop(errors.New("keploy's AF_UNIX report ended"))
 	warned := false
 	for {
 		rec, err := u.rd.Read()
@@ -279,6 +281,12 @@ func (u *unixConn) watch(logger *zap.Logger, member func(tgid uint32) bool) {
 			return
 		}
 		var e unixConnectEvent
+		if len(rec.RawSample) != binary.Size(e) {
+			// A report of another size: keploy's agent and its BPF
+			// objects disagree. A call keploy cannot judge: counted.
+			u.losses.Add(models.CaptureLossUnixSocket, "a report keploy could not read")
+			continue
+		}
 		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
 			// A call keploy cannot judge: counted, never dropped.
 			u.losses.Add(models.CaptureLossUnixSocket, "a report keploy could not read")
