@@ -246,7 +246,7 @@ type FailureInfo struct {
 	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
 	// see): the test has no verdict (NotJudged), and its set is not judged.
 	// Never a failure.
-	CannotCapture CaptureLosses `json:"not_judged,omitempty" yaml:"not_judged,omitempty"`
+	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
 }
 
 // NotJudged is why the test has no verdict, whatever its status says: what
