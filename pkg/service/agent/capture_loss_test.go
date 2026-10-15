@@ -184,8 +184,8 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrCaptureLossesUnsupported)
 }
 
-// A TLS handshake a client aborted against keploy's CA fails the replayed
-// test running then, through the proxy's count.
+// A TLS client's handshake that failed against keploy's CA fails the
+// replayed test running then, through the proxy's count.
 func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	lp := lossProxy{wireProxy: p}
@@ -200,5 +200,60 @@ func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "TLS handshake(s) with keploy's proxy failed")
+	require.Contains(t, e.Reason, "1 TLS handshake(s) with keploy's proxy failed")
+}
+
+// A TLS client's rejection of keploy's certificate is the test's it happened
+// in, not a taint of every later test: the client's other calls are captured,
+// or rejected, on their own. One between two tests is the next test's, as a
+// miss between tests is. It failed the open test and every later one.
+func TestATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	lp := lossProxy{wireProxy: p}
+	a.Proxy = lp
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	rejected := func(n uint64) {
+		lp.losses = models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: "to 10.0.0.1:443"}}
+		a.Proxy = lp
+	}
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestDuring"))
+	require.Nil(t, serr)
+	rejected(1)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestDuring", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action, "the test the rejection happened in fails")
+	require.Empty(t, endPassed(t, a, "TestAfter").Action, "a later test is not charged with it")
+
+	rejected(2) // between two tests
+	require.Equal(t, models.ScopeActionFail, endPassed(t, a, "TestNext").Action, "a rejection between tests is the next test's")
+	require.Empty(t, endPassed(t, a, "TestLast").Action)
+
+	w := windowOf(t, a, "o::TestNext")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}, w.Evidence.CaptureIncomplete, "one rejection, the one it was charged")
+	require.Nil(t, windowOf(t, a, "o::TestAfter").Evidence)
+}
+
+// A failed handshake after one test process's last test and before the next
+// one claims the run is the run's (its own verdict counts every loss while
+// the command ran), as the calls it misses then are: not the next process's
+// first test's.
+func TestATLSRejectionBeforeATestProcessClaimsIsNotItsFirstTests(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	lp := lossProxy{wireProxy: p}
+	a.Proxy = lp
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	ctx := context.Background()
+	first := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "a"}, first.Process.Pid)
+	require.Nil(t, serr)
+	require.Empty(t, endPassed(t, a, "TestFirst").Action)
+	kill(t, first)
+
+	lp.losses = models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}
+	a.Proxy = lp
+	claimSelf(t, a)
+	require.Empty(t, endPassed(t, a, "TestSecond").Action, "the next process's first test is not charged a loss before its claim")
+	require.Nil(t, windowOf(t, a, "o::TestSecond").Evidence)
 }

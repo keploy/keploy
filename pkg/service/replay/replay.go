@@ -6953,8 +6953,9 @@ type testMisses struct {
 	err   error
 	asked bool
 	// lost and lostErr are, under the proven switch, what the agent could not
-	// capture since the test set began (testCaptureLosses), and why that
-	// could not be told.
+	// capture that the test is charged (testCaptureLosses: a taint since the
+	// test set began, a failed TLS handshake since the previous test), and
+	// why that could not be told.
 	lost    models.CaptureLosses
 	lostErr error
 	// real are the test's REAL rows, under the proven switch with a

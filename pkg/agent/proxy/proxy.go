@@ -3219,13 +3219,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				speculativeDial.abandon()
 				speculativeDial = nil
 			}
-			// The call behind this handshake is neither recorded nor
-			// mocked: a capture loss, charged to the test running now
-			// and every later one under the proven switch. One that a
-			// stopping agent cut short is no loss of a test's.
-			if ctx.Err() == nil {
-				p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
-			}
+			p.chargeClientHandshake(ctx, err, dstAddr)
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}

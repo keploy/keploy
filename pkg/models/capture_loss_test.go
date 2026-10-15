@@ -1,6 +1,7 @@
 package models
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,27 @@ func TestCaptureLossesSinceIsWhatGrew(t *testing.T) {
 	}
 	if got := CaptureLosses(nil).Since(base); len(got) != 0 {
 		t.Fatalf("no counts: %+v", got)
+	}
+}
+
+// A test is charged the agent-life kinds' growth since the run began (they
+// taint every later test) and a test's own kinds' growth since the previous
+// test ended (only the test they happened in).
+func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
+	run := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}
+	prev := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
+	now := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
+	want := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}
+	if got := now.Charged(run, prev); !reflect.DeepEqual(got, want) {
+		t.Fatalf("no rejection since the previous test: Charged = %+v, want %+v (the PID map's taint only)", got, want)
+	}
+	now = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 5, What: "to b:443"}}
+	want = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}, {Kind: CaptureLossTLSAbort, Count: 2, What: "to b:443"}}
+	if got := now.Charged(run, prev); !reflect.DeepEqual(got, want) {
+		t.Fatalf("two rejections since the previous test: Charged = %+v, want %+v", got, want)
+	}
+	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
+		t.Fatal("only a TLS client's rejection is a test's own")
 	}
 }
 

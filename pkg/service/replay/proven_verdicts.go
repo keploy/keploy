@@ -255,9 +255,10 @@ func failOnMisses(o testOutcome) testOutcome {
 
 // failTestsWithCaptureLoss fails, under the proven switch, every test that
 // would otherwise pass or be demoted while keploy's agent could not capture
-// every call (FailureInfo.CaptureIncomplete: since its test set began, so the
-// test running at the loss and every later one), adds CAPTURE_INCOMPLETE, and
-// names them.
+// every call (FailureInfo.CaptureIncomplete: what testCaptureLosses charged
+// it -- a taint since its test set began, so the test running at the loss and
+// every later one; a failed TLS handshake only the test it happened in), adds
+// CAPTURE_INCOMPLETE, and names them.
 func failTestsWithCaptureLoss(results []models.TestResult) []string {
 	if !provenswitch.On() {
 		return nil

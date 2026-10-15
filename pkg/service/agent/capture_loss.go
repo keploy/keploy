@@ -12,8 +12,8 @@ import (
 // CaptureLosses counts every kind of capture loss the agent can see, each
 // only ever growing for its life (models.CaptureLosses): the processes the
 // kernel refused a place in the PID maps (the hooks), and the calls the proxy
-// intercepted and could not record or mock (a client-side TLS handshake that
-// failed against keploy's CA, a TLS upgrade it could not make). Each later
+// intercepted and could not record or mock (a TLS client that rejected
+// keploy's certificate, a TLS upgrade it could not make). Each later
 // source (design v14 §3.2) adds its kind here. With neither source able to
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
@@ -76,28 +76,37 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 	return captureLossMark{at: at, known: true}
 }
 
-// captureLossesSince is what was lost since the run began, at a test's end:
-// it taints the test open when it happened and every test after it (design
-// v14 §3.2), so every test that ends after a loss carries it. A mark or a read
-// that failed is an error: a test keploy cannot tell was fully captured is
-// not judged as if it were. Hooks that cannot count at all (other platforms'
-// hooks, which release 1 does not prove) leave every test as it was, as the
-// PID-map check does for a session (models.ErrPIDMapRefusalsUnsupported).
-func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark) (models.CaptureLosses, error) {
+// captureLossesSince is what a test is charged as it ends (models.Charged):
+// what was lost since the run began, which taints the test open when it
+// happened and every test after it (design v14 §3.2), so every test that ends
+// after such a loss carries it; and what of a test's own kind (PerTest) was
+// lost since the previous test ended (test; the run's mark for the first),
+// which is that test's only. It returns the counts read now, the next test's
+// mark (a read that failed leaves the next test to count its own kinds from
+// the test before, so it is charged this one's too). A mark or a read that
+// failed is an error: a test keploy cannot tell
+// was fully captured is not judged as if it were. Hooks that cannot count at
+// all (other platforms' hooks, which release 1 does not prove) leave every
+// test as it was, as the PID-map check does for a session
+// (models.ErrPIDMapRefusalsUnsupported).
+func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, test models.CaptureLosses) (lost, now models.CaptureLosses, err error) {
 	if errors.Is(mark.err, models.ErrCaptureLossesUnsupported) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !mark.known {
 		if mark.err == nil {
-			return nil, errors.New("keploy did not read its capture-loss counts when the run began")
+			return nil, nil, errors.New("keploy did not read its capture-loss counts when the run began")
 		}
-		return nil, fmt.Errorf("at the start of the run: %w", mark.err)
+		return nil, nil, fmt.Errorf("at the start of the run: %w", mark.err)
 	}
-	now, err := a.CaptureLosses(ctx)
+	now, err = a.CaptureLosses(ctx)
 	if err != nil {
 		// Hooks that counted at the run's start and no longer can: the count
 		// was lost, which is not "never counted".
-		return nil, err
+		return nil, nil, err
 	}
-	return now.Since(mark.at), nil
+	if test == nil {
+		test = mark.at
+	}
+	return now.Charged(mark.at, test), now, nil
 }

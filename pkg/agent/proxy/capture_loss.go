@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"context"
+
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // CaptureLosses counts, by kind, the calls the proxy intercepted and could not
 // record or mock since it started: a client-side TLS handshake that failed
-// against keploy's CA, a TLS upgrade it could not make. Each only ever grows.
+// other than by the client giving it up (chargeClientHandshake), a TLS upgrade
+// it could not make. Each only ever grows.
 func (p *Proxy) CaptureLosses() models.CaptureLosses {
 	return p.losses.Snapshot()
 }
@@ -53,4 +57,19 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 			p.losses.Add(kind, reason+" on a connection to "+dst())
 		}
 	}
+}
+
+// chargeClientHandshake counts a client-side TLS handshake with the proxy
+// that failed (err) as a capture loss when it lost a call: the client
+// rejected the certificate keploy answered with (it does not trust keploy's
+// CA), keploy refused its hello, or keploy could not make its certificate.
+// Its call is then neither recorded nor mocked: the test's it happened in
+// under the proven switch. A client that gave the handshake up -- a cancel, a
+// timeout, its own stop (pTls.IsClientGiveUp) -- made no call to lose, and one
+// a stopping agent cut short is no loss of a test's.
+func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr string) {
+	if err == nil || ctx.Err() != nil || pTls.IsClientGiveUp(err) {
+		return
+	}
+	p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
 }

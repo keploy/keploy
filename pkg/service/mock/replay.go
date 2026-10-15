@@ -539,8 +539,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Error(msg, append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", captureIncomplete))...)
 	}
 	// Under the proven switch, every other loss of capture during the run
-	// fails it the same way: each test after it already failed with it, and
-	// this covers a loss after the last test too.
+	// fails it the same way: the test running at it already failed with it
+	// (and each later one, but for a failed TLS handshake), and this covers
+	// a loss outside every test too.
 	lost, lostErr := m.captureLossesDuring(ctx, lossesBase)
 	if parent.Err() != nil {
 		// The user's Ctrl+C came while keploy read the agent's counts (what

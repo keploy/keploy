@@ -247,14 +247,18 @@ func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.Ca
 }
 
 // testCaptureLosses is, under the proven switch, what the agent could not
-// capture since the test set's mark, read as one of its tests ends: processes
-// the kernel refused a place in the agent's PID maps, client-side TLS
-// handshakes that failed against keploy's CA, TLS upgrades keploy could not
-// make. A loss taints the test running when it happened and every later test
-// of the set (design v14 §3.2); the counts only grow, so every later read
-// carries it. An agent that cannot count leaves every test as it was, as the
-// set's own check does; one that counts but could not be read now, or at the
-// mark, is an error: the test's capture cannot be told.
+// capture that a test is charged, read as the test ends: processes the kernel
+// refused a place in the agent's PID maps and TLS upgrades keploy could not
+// make since the test set's mark -- such a loss taints the test running when
+// it happened and every later test of the set (design v14 §3.2), and the
+// counts only grow, so every later read carries it -- and client-side TLS
+// handshakes that failed since the previous test's read (the set's mark for
+// its first test): a handshake's loss is the one call it lost, the test's it
+// happened in (models.CaptureLossKind.PerTest). A read that failed leaves the
+// next test to count from the read before, so it is charged the failed
+// test's handshakes too. An agent that cannot count leaves every test as it
+// was, as the set's own check does; one that counts but could not be read
+// now, or at the mark, is an error: the test's capture cannot be told.
 func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	reader, ok := r.instrumentation.(CaptureLossReader)
 	if !ok || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
@@ -270,8 +274,12 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 	if err != nil {
 		return nil, err
 	}
+	from := r.lossMark.at
+	if r.lossLastRead {
+		from = r.lossLast
+	}
 	r.lossLast, r.lossLastRead = now, true
-	return now.Since(r.lossMark.at), nil
+	return now.Charged(r.lossMark.at, from), nil
 }
 
 // endCaptureLosses reads, at a test set's end under the proven switch, what

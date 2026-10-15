@@ -22,9 +22,13 @@ const (
 	// was not excluded, and its children's calls may have been captured as
 	// the application's.
 	CaptureLossPIDMapExcluded CaptureLossKind = "pid_map_refused_excluded"
-	// CaptureLossTLSAbort: a client aborted the TLS handshake keploy's proxy
-	// answered with a certificate from keploy's CA (it does not trust that
-	// CA, or the handshake failed): its call was neither recorded nor mocked.
+	// CaptureLossTLSAbort: a client-side TLS handshake with keploy's proxy
+	// failed other than by the client giving it up: the client rejected the
+	// certificate keploy answered with (it does not trust keploy's CA), or
+	// keploy refused its hello or could not make its certificate. Its call
+	// was neither recorded nor mocked. A client that hung up (a cancel, a
+	// timeout, its own stop) made no call to lose and is not counted. Charged
+	// to the test it happened in only (PerTest).
 	CaptureLossTLSAbort CaptureLossKind = "tls_handshake_failed"
 	// CaptureLossSTARTTLS: a parser asked to upgrade a connection to TLS
 	// (STARTTLS, Postgres SSLRequest) and keploy could not make the upgrade,
@@ -85,6 +89,38 @@ type CaptureLosses []CaptureLoss
 // ErrCaptureLossesUnsupported reports that an agent cannot count its capture
 // losses (hooks without the counters). It means "unknown", never "none".
 var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it captured every call")
+
+// PerTest says a loss of kind k, in the agent's counts, is the test's it
+// happened in, not a taint of every later test (design v14 §3.2's taint,
+// which the agent-life kinds carry): a client whose TLS handshake failed lost
+// that one call, and its later calls are captured, or lost, on their own. One
+// between two tests is the next test's, as a miss between tests is.
+// (CaptureLossRealUncaptured is a test's own too, but never in the agent's
+// counts: the agent charges it to its test itself.)
+func (k CaptureLossKind) PerTest() bool {
+	return k == CaptureLossTLSAbort
+}
+
+// Charged is what a test is charged from l, the counts as it ends: each kind
+// that taints every later test, as it grew since run (the counts as the run
+// began), and each kind that is the test's own (PerTest), as it grew since
+// test (the counts as the previous test ended, or as the run began). Sorted
+// by kind.
+func (l CaptureLosses) Charged(run, test CaptureLosses) CaptureLosses {
+	var out CaptureLosses
+	for _, c := range l.Since(run) {
+		if !c.Kind.PerTest() {
+			out = append(out, c)
+		}
+	}
+	for _, c := range l.Since(test) {
+		if c.Kind.PerTest() {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
 
 // Since is what grew from base on: each kind whose count is higher than in
 // base, with the growth as its count. A count lower than base's (an agent
@@ -151,7 +187,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossPIDMapExcluded:
 		return fmt.Sprintf("the kernel refused %d insert(s) into keploy's PID map excluded_pids, so a process that predates the run was not excluded, and its children's calls may have been captured as the application's", c.Count)
 	case CaptureLossTLSAbort:
-		return fmt.Sprintf("%d TLS handshake(s) with keploy's proxy failed on the client's side (a client that does not trust keploy's CA aborts it), so those calls were neither recorded nor mocked", c.Count)
+		return fmt.Sprintf("%d TLS handshake(s) with keploy's proxy failed other than by the client hanging up (a client that does not trust keploy's CA rejects keploy's certificate), so those calls were neither recorded nor mocked", c.Count)
 	case CaptureLossSTARTTLS:
 		return fmt.Sprintf("keploy could not make %d STARTTLS upgrade(s), so what followed on those connections was not parsed", c.Count)
 	case CaptureLossParserStall:

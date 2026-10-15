@@ -681,7 +681,7 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 	t.Setenv(provenswitch.Env, "1")
 	h := newPartialRunHarness(t, 3, 0) // every test passes
 	h.replayer.config.Test.Mocking = true
-	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 2, What: "to 10.0.0.9:443"}}
+	tls := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 2, What: "to 10.0.0.9:5432"}}
 	// The mark, then one read as each test ends, then the set end's re-mark.
 	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, tls}}
 	h.replayer.instrumentation = instr
@@ -716,6 +716,45 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 	// The next test set counts from the end of this one.
 	if instr.reads != 5 || len(h.replayer.lossMark.at) != 1 {
 		t.Fatalf("%d reads, mark %+v; want the mark, three tests and the end's re-mark, the mark at the loss", instr.reads, h.replayer.lossMark)
+	}
+}
+
+// Under the proven switch a client-side TLS handshake that failed lost that
+// one call: the test it happened in is FAILED with CAPTURE_INCOMPLETE, and the
+// tests after it, whose calls were captured, are judged on their own. Every
+// failed handshake used to taint every later test of the set: a false red.
+func TestUnderTheSwitchATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 3, 0) // every test passes
+	h.replayer.config.Test.Mocking = true
+	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.9:443"}}
+	// The mark, then one read as each test ends (the last repeating for
+	// test-3 and the set end's re-mark): rejected while test-2 ran.
+	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, tls}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("test set status %q, want FAILED: test-2 lost a call", status)
+	}
+	byID := map[string]models.TestResult{}
+	for _, r := range h.report.report.Tests {
+		byID[r.TestCaseID] = r
+	}
+	for _, id := range []string{"test-1", "test-3"} {
+		if r := byID[id]; r.Status != models.TestStatusPassed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+			t.Fatalf("%s: %s %+v, want PASSED with no capture evidence: the handshake failed while test-2 ran", id, r.Status, r.FailureInfo.CaptureIncomplete)
+		}
+	}
+	r := byID["test-2"]
+	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+		t.Fatalf("test-2: %s %+v, want FAILED with %+v", r.Status, r.FailureInfo.CaptureIncomplete, tls)
+	}
+	if cv := h.report.report.CaptureVerification; cv != nil {
+		t.Fatalf("capture_verification %+v: the set's tail lost nothing; test-2's handshake is test-2's", cv)
+	}
+	if instr.reads != 5 {
+		t.Fatalf("%d reads; want the mark, three tests and the end's re-mark", instr.reads)
 	}
 }
 
@@ -764,7 +803,7 @@ func TestUnderTheSwitchAPerTestCaptureReadThatFailsLeavesTheSetUnjudged(t *testi
 // as its first test set begins, not leaving every test unjudged.
 func TestUnderTheSwitchTheTestSetCountsLossesFromItsMark(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	before := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 4, What: "to 10.0.0.1:443"}}
+	before := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 4, What: "to 10.0.0.1:5432"}}
 
 	h := newPartialRunHarness(t, 3, 0)
 	h.replayer.config.Test.Mocking = true
@@ -777,7 +816,7 @@ func TestUnderTheSwitchTheTestSetCountsLossesFromItsMark(t *testing.T) {
 	// No mark taken before the set (keploy test without -c).
 	h = newPartialRunHarness(t, 3, 0)
 	h.replayer.config.Test.Mocking = true
-	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before, before, append(models.CaptureLosses(nil), models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 5, What: "to 10.0.0.1:443"})}}
+	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{before, before, append(models.CaptureLosses(nil), models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 5, What: "to 10.0.0.1:5432"})}}
 	h.replayer.instrumentation = instr
 	if status := h.run(t); status != models.TestSetStatusFailed {
 		t.Fatalf("no -c: status %q, want FAILED (test-2 and test-3 tainted), not unjudged", status)
