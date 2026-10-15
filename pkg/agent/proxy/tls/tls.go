@@ -95,21 +95,25 @@ type TLSLayerHolder interface {
 	HoldTLSLayer(*tls.Conn)
 }
 
-// holdTLSLayer hands tlsConn to the first connection under conn that holds
-// one (TLSLayerHolder), through the wrappers between (their NetConn), if
-// there is one.
-func holdTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
+// PassTLSLayer hands tlsConn to the first connection under conn that holds
+// one (TLSLayerHolder), through the wrappers between (their NetConn, or
+// Unwrap), if there is one. A wrapper that exposes neither passes it on
+// itself by holding it (the relay's).
+func PassTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
 	c := conn
 	for i := 0; c != nil && i < 16; i++ { // a wrapper chain, never a cycle
 		if h, ok := c.(TLSLayerHolder); ok {
 			h.HoldTLSLayer(tlsConn)
 			return
 		}
-		u, ok := c.(interface{ NetConn() net.Conn })
-		if !ok {
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
 			return
 		}
-		c = u.NetConn()
 	}
 }
 
@@ -160,7 +164,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 
 	// The connection the proxy closes with care is handed the layer: its
 	// close reads through it what its socket still holds (TLSLayerHolder).
-	holdTLSLayer(conn, tlsConn)
+	PassTLSLayer(conn, tlsConn)
 
 	// 4. (Optional) Check what kind of connection happened
 	// You can log this to verify if the client actually used mTLS or just standard TLS
