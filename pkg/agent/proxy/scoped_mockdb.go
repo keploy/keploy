@@ -143,6 +143,21 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 	return out, nil
 }
 
+// MarkMockAsUsed forwards a match that keeps the mock, and records a stateful
+// dependency's per-test recording the worker's scope kept for its repeats,
+// to be consumed when the scope ends (Proxy.noteRetained).
+func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
+	if !s.MockMemDb.MarkMockAsUsed(mock) {
+		return false
+	}
+	// Only the open test's own: a recording every test may be served stays
+	// for the next.
+	if s.src != nil && !s.live && retainsForRepeats(&mock) && s.OwnedByOpenTest(&mock) {
+		s.src.noteRetained(s.current().scope, s.MockMemDb, mock)
+	}
+	return true
+}
+
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetFilteredMocks())
 }
@@ -398,6 +413,8 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	if p.workerScope == nil {
 		p.workerScope = make(map[uint32]workerScopeEntry)
 	}
+	// The scope this one replaces ends here.
+	ended := p.takeRetainedLocked(p.workerScope[pid].scope)
 	// Each registration is a new scope (the worker's next test, or a re-run of
 	// the same one), named by its place in the scope sequence, so its
 	// stateful cursors start over. Replace (never mutate) the entry so a set
@@ -405,6 +422,141 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	at := p.stampWorkerLocked(pid)
 	p.workerScope[pid] = workerScopeEntry{allow: set, scope: fmt.Sprintf("w%d.%d", pid, at)}
 	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
+}
+
+// retainedUse is a per-test recording of a stateful dependency a worker's
+// scope was served and kept for the scope's repeats of the request (a cursor
+// mock, models.ConsumeCursorSaturate), and the store that holds it.
+type retainedUse struct {
+	db   integrations.MockMemDb
+	name string
+}
+
+// retainsForRepeats reports whether a match keeps m for its test's repeats
+// rather than consuming it: a stated per-test HTTP recording of a stateful
+// dependency (the HTTP integration's updateMock marks it used instead).
+func retainsForRepeats(m *models.Mock) bool {
+	return m.TestModeInfo.Lifetime == models.LifetimePerTest &&
+		m.TestModeInfo.Consume == models.ConsumeCursorSaturate && m.StatesLifetime()
+}
+
+// noteRetained records that scope was served and kept mock (retainedUse).
+func (p *Proxy) noteRetained(scope string, db integrations.MockMemDb, mock models.Mock) {
+	if scope == "" {
+		return
+	}
+	p.workerScopeMu.Lock()
+	defer p.workerScopeMu.Unlock()
+	if p.retained == nil {
+		p.retained = make(map[string][]retainedUse)
+	}
+	p.retained[scope] = append(p.retained[scope], retainedUse{db: db, name: mock.Name})
+}
+
+// takeRetainedLocked removes and returns what scope kept for its repeats.
+// workerScopeMu must be held.
+func (p *Proxy) takeRetainedLocked(scope string) []retainedUse {
+	if scope == "" {
+		return nil
+	}
+	uses := p.retained[scope]
+	delete(p.retained, scope)
+	return uses
+}
+
+// consumeRetained spends what an ended scope kept for its repeats
+// (MockManager.Spend): the test is over, so no later test, and no call
+// between tests, is served its recordings, as when its matches consumed them;
+// a later run of the same test is.
+func consumeRetained(uses []retainedUse) {
+	for _, u := range uses {
+		if sp, ok := u.db.(interface{ Spend(...string) }); ok {
+			sp.Spend(u.name)
+		}
+	}
+}
+
+// KeepForRepeats and KeptForRepeats key a worker's kept recordings by its
+// scope, as its cursors are, so a later run of the same test starts afresh.
+func (s *scopedMockDb) KeepForRepeats(name string) {
+	if k, ok := s.MockMemDb.(integrations.RepeatKeeper); ok {
+		k.KeepForRepeats(s.keptKey(name))
+	}
+}
+
+func (s *scopedMockDb) KeptForRepeats() func(name string) bool {
+	k, ok := s.MockMemDb.(integrations.RepeatKeeper)
+	if !ok {
+		return nil
+	}
+	kept := k.KeptForRepeats()
+	if kept == nil {
+		return nil
+	}
+	prefix := keptPrefix(s.scope())
+	return func(name string) bool { return kept(prefix + name) }
+}
+
+func (s *scopedMockDb) keptKey(name string) string {
+	return keptPrefix(s.scope()) + name
+}
+
+// scope is the scope this view serves a call in now: the test open to it, or
+// its worker's.
+func (s *scopedMockDb) scope() string {
+	switch {
+	case s.live:
+		return starts.Default.Scope(s.pid)
+	case s.src != nil:
+		return s.current().scope
+	}
+	return ""
+}
+
+func keptPrefix(scope string) string {
+	if scope == "" {
+		return ""
+	}
+	return scope + "\x00"
+}
+
+// OwnedByOpenTest reports whether m is the recording of the test open to this
+// worker (integrations.TestOwner): its test's mapping names it. A mock mapped
+// to no test, which every worker sees, is no test's own; so is every mock
+// while no test is open to the worker. A view with no mapping to tell by asks
+// the store it wraps.
+func (s *scopedMockDb) OwnedByOpenTest(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if s.live {
+		if owned, known := starts.Default.Owns(s.pid, m.Name); known {
+			return owned
+		}
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
+	v := s.current()
+	if v.allow == nil || v.universe == nil {
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
+	_, mine := v.allow[m.Name]
+	return mine
+}
+
+// Spent hides what an ended test kept for its repeats (MockManager.Spent)
+// from this worker, unless it is the worker's current test's own: a later run
+// of the same test is served its recordings again.
+func (s *scopedMockDb) Spent(m *models.Mock) bool {
+	sr, ok := s.MockMemDb.(integrations.SpentReader)
+	if !ok || !sr.Spent(m) {
+		return false
+	}
+	if s.live || s.src == nil {
+		return true
+	}
+	_, mine := s.current().allow[m.Name]
+	return !mine
 }
 
 // workerScopeEntry is a registered worker's current test: the mock names it
@@ -429,11 +581,14 @@ func (p *Proxy) stampWorkerLocked(pid uint32) uint64 {
 // test has no mapping). Idempotent.
 func (p *Proxy) ClearWorkerScope(pid uint32) {
 	p.workerScopeMu.Lock()
-	if _, ok := p.workerScope[pid]; ok {
+	var ended []retainedUse
+	if e, ok := p.workerScope[pid]; ok {
+		ended = p.takeRetainedLocked(e.scope)
 		delete(p.workerScope, pid)
 		p.stampWorkerLocked(pid)
 	}
 	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
 }
 
 // ClearAllWorkerScopes wipes every worker scope and the mapped universe. Called
@@ -442,6 +597,7 @@ func (p *Proxy) ClearWorkerScope(pid uint32) {
 func (p *Proxy) ClearAllWorkerScopes() {
 	p.workerScopeMu.Lock()
 	p.workerScope = nil
+	p.retained = nil
 	p.mappedUniverse = nil
 	p.scopeSeq++
 	p.universeAt = p.scopeSeq
@@ -588,3 +744,9 @@ var (
 	_ integrations.MockCursor = (*MockManager)(nil)
 	_ integrations.MockCursor = (*scopedMockDb)(nil)
 )
+
+// StatesLifetimes answers for the recording the view is cut from: whether it
+// states its kind mocks' lifetimes is the set's, not the worker's.
+func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
+	return integrations.StatesLifetimes(s.MockMemDb, kind)
+}

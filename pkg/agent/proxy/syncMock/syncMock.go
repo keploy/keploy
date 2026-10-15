@@ -1478,7 +1478,10 @@ const (
 // windows it does it by (ownerOrSharedLocked). BacklogBefore asks it too: what
 // a flush will take is still to be handed on. Caller holds m.mu.
 func (m *SyncMockManager) flushTakeLocked(mock *models.Mock) (take flushTake, w resolvedWindow, shared resolvedWindow, behind bool) {
-	if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+	// A mock reusable only by its recorder's statement (a MySQL SET, BEGIN or
+	// COMMIT; models.Mock.ReusableByStatementOnly) is attributed as a per-test
+	// mock is: owned by its window, pruned with a duplicate's.
+	if lt := mock.TestModeInfo.Lifetime; (lt == models.LifetimeSession || lt == models.LifetimeConnection) && !mock.ReusableByStatementOnly() {
 		return flushReusable, w, shared, false
 	}
 	w, ok, shared, behind := m.ownerOrSharedLocked(mock.Spec.ReqTimestampMock)
@@ -3387,8 +3390,14 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// trying to "match" them against [start,end] would either
 		// drop them silently (out-of-window cutoff) or attribute
 		// them to whichever test happens to ResolveRange first.
+		//
+		// A mock reusable only by its recorder's statement (a MySQL SET,
+		// BEGIN or COMMIT; models.Mock.ReusableByStatementOnly) is matched
+		// as a per-test mock is: owned by its window and mapped to its test,
+		// and pruned with a duplicate's window, as before lifetimes were
+		// stated. The statement decides how a replay serves it.
 		lt := mock.TestModeInfo.Lifetime
-		if lt == models.LifetimeSession || lt == models.LifetimeConnection {
+		if (lt == models.LifetimeSession || lt == models.LifetimeConnection) && !mock.ReusableByStatementOnly() {
 			if !outChanBound {
 				m.buffer[keepIdx] = mock
 				keepIdx++
@@ -3848,8 +3857,9 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		// Session/connection mocks outlive any single test window and must
 		// survive a per-test cleanup. Flush when we can persist them now,
 		// otherwise retain for a later drain. Owned by no specific test →
-		// owner "".
-		if lt := mock.TestModeInfo.Lifetime; lt == models.LifetimeSession || lt == models.LifetimeConnection {
+		// owner "". One reusable only by its recorder's statement is the
+		// duplicate's debris like its per-test mocks (ReusableByStatementOnly).
+		if lt := mock.TestModeInfo.Lifetime; (lt == models.LifetimeSession || lt == models.LifetimeConnection) && !mock.ReusableByStatementOnly() {
 			if outChanBound {
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock})
 				continue

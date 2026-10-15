@@ -376,6 +376,13 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 		t.Errorf("V2 mock must be stamped LifetimePerTest+LifetimeDerived at build time, got %+v",
 			v2Mock.TestModeInfo)
 	}
+	// Both state the exchange per-test on disk too (models.MetadataLifetimeKey),
+	// so a replay serves it to the test it was recorded in only.
+	for name, m := range map[string]*models.Mock{"v2": v2Mock, "legacy": legacyMock} {
+		if got := m.Spec.Metadata[models.MetadataLifetimeKey]; got != models.MetadataLifetimePerTest {
+			t.Errorf("%s mock states lifetime %q, want %q", name, got, models.MetadataLifetimePerTest)
+		}
+	}
 }
 
 // runLegacyParseFinalHTTP invokes the legacy parseFinalHTTP on the given

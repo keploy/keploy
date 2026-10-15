@@ -182,6 +182,44 @@ func TestReplayBindsEachStartToItsOwnBootAndHidesTheOthers(t *testing.T) {
 	}
 }
 
+// A call owns the recordings its open test's mapping names, from whichever
+// start: not a boot's, not another test's, and none with no test open.
+func TestOwnsIsTheOpenTestsMapping(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	if _, known := r.Owns(101, "pen-old"); known {
+		t.Fatal("a registry with no table knows no view")
+	}
+	r.SetTable("/r", map[string]models.SetTable{
+		"e2e/orders": {
+			Boots: map[string][]string{"shop#1": {"boot-inr"}},
+			Tests: map[string][]models.Owned{
+				"orders.TestReload": {{Name: "pen-old", Start: "shop#1"}, {Name: "pen-new", Start: "shop#1@orders.TestReload"}},
+				"orders.TestCreate": {{Name: "book", Start: "shop#1"}},
+			},
+		},
+	})
+	f.spawn(100, 1, at(0), "orders.test")
+	r.Begin(100, "e2e/orders", "/r/e2e/orders", true, at(10))
+	f.spawn(101, 100, at(20), "shop")
+	if owned, known := r.Owns(101, "pen-old"); owned || !known {
+		t.Fatalf("no test open: owned %v known %v; want not owned, known", owned, known)
+	}
+	r.Begin(100, "orders.TestReload", "/r/e2e/orders", false, at(100))
+	for name, want := range map[string]bool{"pen-old": true, "pen-new": true, "boot-inr": false, "book": false, "unmapped": false} {
+		if owned, known := r.Owns(101, name); owned != want || !known {
+			t.Errorf("Owns(%q) = %v, %v; want %v, true", name, owned, known, want)
+		}
+	}
+	if _, known := r.Owns(999, "pen-old"); known {
+		t.Fatal("a pid of no worker has no view")
+	}
+	r.End(100, "orders.TestReload", false, at(150))
+	if owned, _ := r.Owns(101, "pen-old"); owned {
+		t.Fatal("an ended test owns nothing")
+	}
+}
+
 func TestAnUnrecordedStartFallsBackToTheSuiteStartOfTheSameProgram(t *testing.T) {
 	f := newFake()
 	r := New(f, 0)

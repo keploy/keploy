@@ -3259,7 +3259,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// pool even when the cached Lifetime field is the zero value
 		// (LifetimePerTest). metadata.scope is deliberately NOT
 		// consulted here.
-		if p.Spec.Metadata != nil &&
+		if p.Spec.Metadata != nil && !p.StatesLifetime() &&
 			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
 			if p.Spec.Metadata["type"] == "config" {
 				p.TestModeInfo.Lifetime = models.LifetimeSession
@@ -3327,7 +3327,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		if strict {
+		// A per-test mock whose recorder stated its lifetime is the data of
+		// the test it was recorded in, and is served to no other test whatever
+		// the window mode: lax promotion exists for recordings whose recorders
+		// could not tell data from shared traffic, which this one did. Nor does
+		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
+		// to another test: an HTTP call every test may make is declared in
+		// keploy.yaml (models.SessionCallRule).
+		if strict || p.StatesLifetime() {
 			// Per-test, out-of-window. Genuine stale cross-test bleed
 			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
 			// dropped — the strictMockWindow guarantee. The startup-init band
@@ -3344,8 +3351,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 				// runs without --debug. Tagged with "diag/" so it is
 				// obviously diagnostic. Will be demoted/removed once the
 				// strict-window regression on listmonk + pgtype-tour is
-				// root-caused.
-				logger.Info("diag/strict-mode drop: per-test mock outside window",
+				// root-caused. A stated mock dropped outside strict mode is
+				// at Debug: every test's staging leaves out every other
+				// test's mocks, which is the design, not a regression.
+				log := logger.Info
+				if !strict {
+					log = logger.Debug
+				}
+				log("diag/strict-mode drop: per-test mock outside window",
 					zap.String("mock", p.Name),
 					zap.String("kind", string(p.Kind)),
 					zap.String("connID", p.ConnectionID),
@@ -3538,8 +3551,10 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 
 		// Out-of-window per-test: strict drops, lax promotes to unfiltered.
-		// The startup-init band was already claimed above, in both modes.
-		if strict {
+		// The startup-init band was already claimed above, in both modes. A
+		// per-test mock whose recorder stated its lifetime is dropped in both,
+		// as filterByTimeStampTierAware drops it.
+		if strict || p.StatesLifetime() {
 			// Per-mock diagnostic: emit hash + window deltas at Debug
 			// for the three-tier strict-drop path so a CI log can
 			// identify which postgres / mongo / etc. mock the per-test
@@ -3652,6 +3667,13 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	}
 	if m.TestModeInfo.LifetimeDerived {
 		return m.TestModeInfo.Lifetime
+	}
+	// A recorder's statement decides over the type tag, as DeriveLifetime
+	// decides it.
+	if m.StatesLifetime() {
+		c := *m
+		c.DeriveLifetime()
+		return c.TestModeInfo.Lifetime
 	}
 	if m.Spec.Metadata != nil {
 		switch m.Spec.Metadata["type"] {
