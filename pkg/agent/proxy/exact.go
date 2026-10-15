@@ -198,6 +198,8 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // it at each dispatch: exact serving can begin after a connection opened.
 func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
+var _ integrations.ExactServingReader = (*MockManager)(nil)
+
 // FindStagedNotOwned is, under exact serving with a test open, the name of
 // the first mock of kind staged in the manager's trees (per-test, session,
 // startup, in that order) that the open test does not own and match accepts,
