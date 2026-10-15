@@ -259,6 +259,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 	}
 
+	// The app's own host entries, and host.docker.internal at host-gateway:
+	// the app joins this container's network namespace and reads its
+	// /etc/hosts (extra_hosts.go).
+	appHostsStr, err := agentHostFlags(opts.AppExtraHosts, opts.HostGateway)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
+
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
 	agentMemoryLimitFlag := ""
 	if opts.MemoryLimit > 0 {
@@ -326,7 +335,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	switch osName {
 	case "linux":
 
-		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
@@ -405,7 +414,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 			// return alias, nil
 
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
 				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -471,7 +480,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -552,7 +561,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			// return alias, nil
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
 				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -617,7 +626,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +

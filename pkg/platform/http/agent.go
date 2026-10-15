@@ -2543,6 +2543,16 @@ func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	}
 }
 
+// agentReadyBudget is how long one bring-up of the agent may stall: the
+// daemon's answer to its version (Setup), and then the agent's readiness
+// (waitForAgent). KEPLOY_AGENT_READY_TIMEOUT, or a retry's own, overrides it.
+func agentReadyBudget(opts models.SetupOptions) time.Duration {
+	if opts.AgentReadyTimeout > 0 {
+		return opts.AgentReadyTimeout
+	}
+	return pkg.AgentReadyTimeout()
+}
+
 // waitForAgent blocks until the agent started by startAgent answers its health
 // check (nil, or a refusal wrapping provenswitch.ErrAgentSwitch when that
 // answer reports a proven switch that is not this keploy's), its process ends
@@ -2553,10 +2563,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// well over a minute just to start (observed: a local-image `docker run`
 	// taking 126s), so a 60s wait gave up prematurely and tore down a
 	// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-	readyTimeout := pkg.AgentReadyTimeout()
-	if opts.AgentReadyTimeout > 0 {
-		readyTimeout = opts.AgentReadyTimeout
-	}
+	readyTimeout := agentReadyBudget(opts)
 	agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
@@ -2819,8 +2826,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
+		// The agent container maps host.docker.internal to the Docker host
+		// (host-gateway) where the daemon resolves it (extra_hosts.go). The
+		// question has the bring-up's own budget, as waitForAgent's wait does:
+		// a daemon that does not answer it in that time would not start the
+		// agent either, and running out fails this bring-up as a stalled one
+		// (retried), rather than hanging setup with nothing said, or answering
+		// no.
+		readyBudget := agentReadyBudget(opts)
+		versionCtx, cancelVersion := context.WithTimeout(ctx, readyBudget)
+		opts.HostGateway, err = kdocker.HostGatewaySupported(versionCtx, a.dockerClient)
+		cancelVersion()
+		if err != nil {
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			return fmt.Errorf("%w: the Docker daemon did not answer its version within %s", pkg.ErrAgentNotReady, readyBudget)
+		}
 
-		var appPorts, appNetworks []string
+		var appPorts, appNetworks, appHosts []string
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -2828,7 +2852,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -2865,7 +2889,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			cmd, appPorts, appNetworks = agentUtils.ExtractDockerFlags(cmd)
+			cmd, appHosts = agentUtils.ExtractAddHosts(cmd)
 		}
+		opts.AppExtraHosts = appHosts
 
 		opts.AppPorts = appPorts
 		if len(appNetworks) > 0 {
@@ -4207,9 +4233,10 @@ const fromContainerStopBudget = 45 * time.Second
 // published ports until it exits, and the bind only frees once it has.
 const fromContainerRestoreBudget = 90 * time.Second
 
-// appNetworkingFromContainer reads the published ports and user networks off an
-// already-running container, in the shapes GenerateDockerCommand expects:
-// AppPorts as whole `-p …` flags, AppNetworks as bare names.
+// appNetworkingFromContainer reads the published ports, user networks and host
+// entries off an already-running container, in the shapes GenerateDockerCommand
+// expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
+// AppExtraHosts as NAME:ADDRESS.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -4220,10 +4247,15 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports []string, networks []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// Its host entries, which its replacement cannot carry under the agent's
+	// network mode: the agent container carries them (AppExtraHosts).
+	if inspect.HostConfig != nil {
+		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -4273,7 +4305,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, nil
+	return ports, networks, hosts, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts
