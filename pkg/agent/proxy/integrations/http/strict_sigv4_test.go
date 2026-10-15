@@ -3,13 +3,16 @@ package http
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap/zaptest"
 )
 
 // sigV4 is an AWS SigV4 Authorization header.
@@ -238,5 +241,78 @@ func TestStrictSigV4ThePayloadHashLeavesTheSwitchedList(t *testing.T) {
 		if _, ok := flakyHeaderNoise()[h]; !ok {
 			t.Fatalf("without the switch %s left the static list", h)
 		}
+	}
+}
+
+// A learned Authorization does not excuse a SigV4 credential's scope or its
+// signed headers: a learner that reads the header whole (L, at record's full
+// round) sees the signature drift on every SigV4 call and learns
+// header.authorization, and the parts are read before that noise. Only the
+// signature and the signing day may then differ; with the noise checked
+// first, another account, region or service was served.
+func TestStrictSigV4ALearnedAuthorizationKeepsTheScope(t *testing.T) {
+	body := "hello"
+	rec := recorded("put", "/bucket/key", awsCall(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(1)), "20261015T101010Z", hashOf(body)), body)
+	rec.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {}}
+	if got, diag := strictMatch(t, sent("/bucket/key", awsCall(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), "20261015T101533Z", hashOf(body)), body), nil, nil, nil, rec); got == nil {
+		t.Fatalf("a call signed again was not served: differs %v", differs(diag))
+	}
+	for _, tc := range []struct {
+		auth string
+		want string
+	}{
+		{sigV4("OTHER", "20261015", "us-east-1", "s3", signed, sig(2)), "header.authorization.access_key_id"},
+		{sigV4("AKID", "20261015", "eu-west-1", "s3", signed, sig(2)), "header.authorization.region"},
+		{sigV4("AKID", "20261015", "us-east-1", "sqs", signed, sig(2)), "header.authorization.service"},
+		{strings.Replace(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), "aws4_request", "aws5_request", 1), "header.authorization.terminator"},
+		{sigV4("AKID", "20261015", "us-east-1", "s3", "host;x-amz-date", sig(2)), "header.authorization.signed_headers"},
+		{sigV4("AKID", "20261016", "us-east-1", "s3", signed, sig(2)), "header.authorization.date"},
+		// A live value that is no SigV4 is compared whole: the noise was
+		// learned for the recording's signature.
+		{"Bearer token", "header.authorization"},
+		{strings.Replace(sigV4("OTHER", "20261015", "eu-west-1", "s3", signed, sig(2)), sigV4Algorithm, "AWS4-ECDSA-P256-SHA256", 1), "header.authorization"},
+	} {
+		got, diag := strictMatch(t, sent("/bucket/key", awsCall(tc.auth, "20261015T101533Z", hashOf(body)), body), nil, nil, nil, rec)
+		if got != nil {
+			t.Fatalf("%s (%s): a learned Authorization excused it", tc.want, tc.auth)
+		}
+		if d := differs(diag); len(d) != 1 || d[0] != tc.want {
+			t.Fatalf("%s: differs %v", tc.want, d)
+		}
+	}
+	// What is no SigV4 is excused by the learned noise, as before.
+	bearer := recorded("m", "/bucket/key", map[string]string{"Authorization": "Bearer token-1"}, "")
+	bearer.Spec.ReqBodyNoise = map[string][]string{"header.authorization": {}}
+	if got, diag := strictMatch(t, sent("/bucket/key", map[string]string{"Authorization": "Bearer token-2"}, ""), nil, nil, nil, bearer); got == nil {
+		t.Fatalf("a learned Bearer token was not excused: differs %v", differs(diag))
+	}
+}
+
+// decodeHTTP keeps the body as the client sent it before it undoes its
+// Content-Encoding, and the payload hash is checked against that: a SigV4
+// call whose body the client gzipped is served under the switch.
+func TestDecodeHTTPChecksThePayloadHashAgainstTheBodyAsSent(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	body := `{"id":"a-1"}`
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	_, _ = w.Write([]byte(body))
+	_ = w.Close()
+	recH := awsCall(sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(1)), "20261015T101010Z", hashOf(gz.String()))
+	recH["Content-Encoding"], recH["Content-Type"] = "gzip", "application/json"
+	rec := recorded("put", "/bucket/key", recH, body)
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	head := fmt.Sprintf("POST /bucket/key HTTP/1.1\r\nHost: api.example\r\nAuthorization: %s\r\nX-Amz-Date: 20261015T101533Z\r\nX-Amz-Content-Sha256: %s\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n",
+		sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), hashOf(gz.String()), gz.Len())
+	app, proxy := tcpPair(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	go func() {
+		_ = h.decodeHTTP(ctx, append([]byte(head), gz.Bytes()...), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	// The bound only turns a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("a gzipped SigV4 call hashed as sent was answered %q", got)
 	}
 }
