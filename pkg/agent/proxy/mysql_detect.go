@@ -47,7 +47,9 @@
 //	port the recording never saw is MySQL only by the identity of what
 //	the connection reaches: the container the recording reached MySQL
 //	in, or the host it reached it on with the port moved, never this
-//	machine (recordedEndpointMoved); anything else only by mysqlPorts.
+//	machine or the Docker host at the container's gateway or at an
+//	address of its own the keploy CLI gave the agent
+//	(recordedEndpointMoved); anything else only by mysqlPorts.
 //	Nothing is judged by how long a client stays silent.
 //
 // Together: auto-detect at record, auto-recall at replay. `mysqlPorts`
@@ -276,44 +278,56 @@ func (r *mysqlPortRegistry) LearnHinted(dstAddr string) bool {
 //   - anything else, where it does not: its host must be one the recording
 //     reached MySQL on, container or not; the address is all there is.
 //
-// A host never matches when it is this machine — a loopback or unspecified
-// address (founder decision 29): every local service shares it, so a moved
-// port there says nothing about which service it is, and greeting would race
-// a local client-first client to its first bytes. A MySQL moved to another
-// port of this machine is listed in mysqlPorts. why names the match, for the
-// warning.
-func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key string, isContainer, keyed, named bool) (why string, ok bool) {
+// A host never matches when shared says every service on its machine is
+// reached at it (Proxy.sharedHost): this machine, or the Docker host at the
+// container's gateway or at an address of its own the keploy CLI gave the
+// agent. A moved port there says nothing about which service it
+// is, and greeting would race a client-first client there to its first bytes.
+// A MySQL moved to another port of it is listed in mysqlPorts. shared is asked
+// only of a host the recording holds, and outside the registry's lock: it
+// reads the network namespace. why names the match, for the warning.
+func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key string, isContainer, keyed, named bool, shared func(netip.Addr) bool) (why string, ok bool) {
+	why, byHost, ok := r.recordedEndpoint(host, key, isContainer, keyed, named)
+	if ok && byHost && shared(host) {
+		return "", false
+	}
+	return why, ok
+}
+
+// recordedEndpoint is recordedEndpointMoved's match before a host is asked
+// whether it is shared: byHost says the match is by host, not container key.
+func (r *mysqlPortRegistry) recordedEndpoint(host netip.Addr, key string, isContainer, keyed, named bool) (why string, byHost, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if isContainer {
 		if _, ok := r.mockKeys[key]; ok && key != "" {
-			return "the container the recording reached MySQL in (" + key + ")", true
+			return "the container the recording reached MySQL in (" + key + ")", false, true
 		}
 		// A recording made without container names knows its MySQL only by
 		// its address: a container on that host with the port moved is it,
 		// as far as the recording can tell, as with the switch off.
 		if named {
-			return "", false
+			return "", false, false
 		}
 		return r.hostMatchLocked(host, r.plainHosts)
 	}
 	if !keyed {
-		if why, ok := r.hostMatchLocked(host, r.containerHosts); ok {
-			return why, true
+		if why, byHost, ok := r.hostMatchLocked(host, r.containerHosts); ok {
+			return why, byHost, true
 		}
 	}
 	return r.hostMatchLocked(host, r.plainHosts)
 }
 
-// hostMatchLocked reports whether host, not this machine, is one of hosts.
-func (r *mysqlPortRegistry) hostMatchLocked(host netip.Addr, hosts map[netip.Addr]struct{}) (why string, ok bool) {
-	if !host.IsValid() || thisMachine(host) {
-		return "", false
+// hostMatchLocked reports whether host is one of hosts.
+func (r *mysqlPortRegistry) hostMatchLocked(host netip.Addr, hosts map[netip.Addr]struct{}) (why string, byHost, ok bool) {
+	if !host.IsValid() {
+		return "", false, false
 	}
 	if _, ok := hosts[host.Unmap()]; !ok {
-		return "", false
+		return "", false, false
 	}
-	return "the host the recording reached MySQL on (" + host.Unmap().String() + "), on another port", true
+	return "the host the recording reached MySQL on (" + host.Unmap().String() + "), on another port", true, true
 }
 
 // hasMockKeys reports whether any recorded MySQL mock carries a container
@@ -322,13 +336,6 @@ func (r *mysqlPortRegistry) hasMockKeys() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.mockKeys) > 0
-}
-
-// thisMachine reports whether a is a loopback or unspecified address: one
-// every local service is reached at.
-func thisMachine(a netip.Addr) bool {
-	a = a.Unmap()
-	return a.IsLoopback() || a.IsUnspecified()
 }
 
 // MarkSessionStale says that the recording in force is about to be replaced, so
@@ -824,8 +831,10 @@ func (p *Proxy) probeMysqlReplay(
 // greeted: it may simply not have spoken yet, and no clock can tell the two
 // apart. So the connection is MySQL only by the identity of what it reaches:
 // the container the recording reached MySQL in, or the host it reached it on
-// with the port moved — never this machine, whose loopback address every local
-// service shares (recordedEndpointMoved). Then keploy, the server, greets at
+// with the port moved — never this machine or the Docker host (at the
+// container's gateway, or at an address of its own the keploy CLI gave the
+// agent), which every service on them shares (Proxy.sharedHost,
+// recordedEndpointMoved). Then keploy, the server, greets at
 // once — unless the client has already spoken, which a MySQL client never
 // does. Anything else is MySQL only if mysqlPorts lists its port (the fast
 // path in probeMysql), and is handed on: if its client closes having said
@@ -858,7 +867,8 @@ func (p *Proxy) replayUnrecordedPort(
 		isContainer, keyed = containerkey.PlacedFromContext(ctx)
 	}
 	named := containerkey.RecordingNamesContainers(ctx)
-	if why, ok := p.mysqlPorts.recordedEndpointMoved(host, key, isContainer, keyed, named); ok {
+	shared := func(a netip.Addr) bool { _, ok := p.sharedHost(a); return ok }
+	if why, ok := p.mysqlPorts.recordedEndpointMoved(host, key, isContainer, keyed, named, shared); ok {
 		if nothing, known := util.ArrivedNothing(srcConn); known && !nothing {
 			return &mysqlProbe{SrcConn: srcConn, Reason: "client-spoke-first"}, nil
 		}
@@ -894,7 +904,7 @@ func (p *Proxy) replayUnrecordedPort(
 		return &mysqlProbe{SrcConn: replayConn(srcConn, read, logger), Reason: "client-spoke-first"}, nil
 	case err != nil && !isTimeout(err):
 		// It waited to be greeted and gave up: a call no mock answered.
-		p.sendMockNotFoundError(unlistedEndpointMiss(dstAddr, host, port, recorded))
+		p.sendMockNotFoundError(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port)))
 		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "its client closed it without sending anything")
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	case cancelled:
@@ -913,18 +923,19 @@ func (p *Proxy) hintUnlistedEndpoint(logger *zap.Logger, dstAddr string, host ne
 	if !p.mysqlPorts.LearnHinted(dstAddr) {
 		return
 	}
-	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host (not this machine) the recording reached MySQL at, so it served this one nothing",
+	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host the recording reached MySQL at (not this machine, nor the Docker host at the container's gateway or at an address of its own the keploy CLI gave the agent), so it served this one nothing",
 		zap.String("dstAddr", dstAddr),
 		zap.Uint32s("recordedPorts", recorded),
-		zap.String("next_step", unlistedNextStep(dstAddr, host, port)))
+		zap.String("next_step", p.unlistedNextStep(dstAddr, host, port)))
 }
 
 // unlistedNextStep is the next step for a MySQL endpoint keploy cannot tie to
-// the recording: list its port.
-func unlistedNextStep(dstAddr string, host netip.Addr, port uint32) string {
+// the recording: list its port. On a shared host (sharedHost) it says that a
+// moved port there is never taken for the recorded MySQL.
+func (p *Proxy) unlistedNextStep(dstAddr string, host netip.Addr, port uint32) string {
 	where := ""
-	if host.IsValid() && thisMachine(host) {
-		where = " A MySQL moved to another port of this machine (localhost) is never taken for the recorded one: only a listed port is."
+	if name, ok := p.sharedHost(host); ok {
+		where = " A MySQL moved to another port of " + name + " is never taken for the recorded one: only a listed port is."
 	}
 	return fmt.Sprintf("if %s is MySQL, add %d to mysqlPorts in keploy.yml, keeping the ports already listed there (a mysqlPorts list replaces the built-in 3306 and 4000): keploy then serves the recorded MySQL mocks on it.%s", dstAddr, port, where)
 }
@@ -932,14 +943,15 @@ func unlistedNextStep(dstAddr string, host netip.Addr, port uint32) string {
 // unlistedEndpointMiss is the miss of a connection to a port the recording
 // never saw whose client closed it without sending anything, in a replay whose
 // recording holds MySQL: it waited for its server to speak first, as a MySQL
-// client does, and nothing answered it. Its next step names the port to list.
-func unlistedEndpointMiss(dstAddr string, host netip.Addr, port uint32, recorded []uint32) error {
+// client does, and nothing answered it. next is its next step
+// (unlistedNextStep), which names the port to list.
+func unlistedEndpointMiss(dstAddr string, recorded []uint32, next string) error {
 	why := fmt.Sprintf("the client closed its connection to a port the recording never saw without sending anything: it waited for its server to speak first, as a MySQL client does, and keploy answered nothing (the recording holds MySQL on ports %v)", recorded)
 	report := mismatch.NewReport(mismatch.ProtocolMySQL, "connection phase: server greeting").
 		WithDestination(dstAddr).
 		WithPhase(models.MatchPhaseNoRequest, 0).
 		WithDiff(why).
-		WithNextSteps(unlistedNextStep(dstAddr, host, port)).
+		WithNextSteps(next).
 		Build()
 	return models.NewMockMismatchError(fmt.Errorf("mysql connection phase, server greeting: %s: %w", why, models.ErrNoMockMatched), report)
 }

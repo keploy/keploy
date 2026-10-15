@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -165,6 +166,12 @@ type Proxy struct {
 	// handshake during record, and derived from the loaded mocks'
 	// destAddr metadata during replay. See mysql_detect.go.
 	mysqlPorts *mysqlPortRegistry
+	// readNetns, when set, stands in for sharedHost's read of the network
+	// namespace the application shares with the agent (tests).
+	readNetns func() (own, gateways []netip.Addr)
+	// dockerHostAddr, when set, stands in for containerkey.HostAddr in
+	// sharedHost (tests).
+	dockerHostAddr func(netip.Addr) bool
 
 	// activeTestErrors accumulates mock-not-found errors during active test
 	// execution. The continuous drain goroutine routes errors here when non-nil.

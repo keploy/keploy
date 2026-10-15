@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -38,6 +39,9 @@ func testProxy(t *testing.T) *Proxy {
 	return &Proxy{
 		logger:     zap.NewNop(),
 		mysqlPorts: newMysqlPortRegistry(),
+		// No address of the test's machine, nor its gateway, decides a verdict.
+		readNetns:      func() (own, gateways []netip.Addr) { return nil, nil },
+		dockerHostAddr: func(netip.Addr) bool { return false },
 		// Built the way proxy.New does, so tests can drive SetMocksWithWindow —
 		// the call a stock agent actually makes to publish a test set's mocks.
 		dnsCache: newDNSCache(),

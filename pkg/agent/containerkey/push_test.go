@@ -197,6 +197,32 @@ func TestApplySnapshotOnlyOnAPushedAgent(t *testing.T) {
 	}
 }
 
+// The Docker host's addresses a docker-mode agent knows are the ones its CLI
+// gave it last; an agent that reads Docker itself, or was given none, knows
+// none.
+func TestHostAddrIsTheHostsAddressesTheCLIGave(t *testing.T) {
+	saved := Default
+	t.Cleanup(func() { Default = saved })
+	bridge := netip.MustParseAddr("172.17.0.1")
+	Default = NewKeyer(newDockerIndex())
+	if HostAddr(bridge) {
+		t.Fatal("an agent that reads Docker knows the host's addresses from a list")
+	}
+	UsePushed()
+	if HostAddr(bridge) {
+		t.Fatal("an agent given no list knows the host's addresses")
+	}
+	if err := ApplySnapshot(Snapshot{Seq: 1, Local: []string{"172.17.0.1", "192.168.1.10"}, Containers: []SnapshotContainer{}}); err != nil {
+		t.Fatal(err)
+	}
+	if !HostAddr(netip.MustParseAddr("::ffff:172.17.0.1")) || !HostAddr(netip.MustParseAddr("192.168.1.10")) {
+		t.Fatal("an address of the host the CLI gave is not the host's")
+	}
+	if HostAddr(netip.MustParseAddr("10.1.2.3")) {
+		t.Fatal("another machine's address is the host's")
+	}
+}
+
 // posts records what a pusher gave, and tells sent of each post.
 type posts struct {
 	mu   sync.Mutex

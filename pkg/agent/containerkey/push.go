@@ -311,6 +311,23 @@ func TakesPushed() bool {
 	return ok
 }
 
+// HostAddr reports whether a is an address of the Docker host by the list
+// this docker-mode agent's keploy CLI gave it last (Snapshot.Local: the host's
+// own addresses, the Docker bridges' gateways among them). An agent given no
+// list, one whose CLI cannot read the daemon as this host's (its list carries
+// Err and no addresses), or one that reads Docker itself, knows none.
+func HostAddr(a netip.Addr) bool {
+	Default.mu.Lock()
+	p, ok := Default.res.(*pushedIndex)
+	Default.mu.Unlock()
+	if !ok {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.st != nil && p.st.local[a.Unmap()]
+}
+
 // ErrNotPushed is ApplySnapshot's error for an agent that reads Docker
 // itself.
 var ErrNotPushed = errors.New("this agent reads Docker itself and takes no container list")
