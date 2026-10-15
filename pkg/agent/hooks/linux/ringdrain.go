@@ -21,9 +21,9 @@ var errReportClosed = errors.New("keploy closed the report's reader")
 // has its room in the ring from then, so it has been handled. No clock: the
 // reports' own order.
 type reportDrain struct {
-	// serial: one drain at a time, so a flush the reader answers once is
-	// one drain's.
-	serial sync.Mutex
+	// sem: one drain at a time, so a flush the reader answers once is one
+	// drain's; a drain queued behind another ends with its ctx.
+	sem chan struct{}
 
 	mu sync.Mutex
 	// gen counts the flushes the watch got through.
@@ -34,10 +34,15 @@ type reportDrain struct {
 	stopped error
 	// waiting counts the drains waiting on the watch.
 	waiting int
+	// abandoned: a drain's flush whose ctx ended before the watch got
+	// through it. Its answer is still to come, and is no later drain's: the
+	// next drain waits it out before it flushes (abandonedAt is gen then).
+	abandoned   bool
+	abandonedAt uint64
 }
 
 func newReportDrain() *reportDrain {
-	return &reportDrain{changed: make(chan struct{})}
+	return &reportDrain{sem: make(chan struct{}, 1), changed: make(chan struct{})}
 }
 
 // flushed is the watch's: its reader returned a flush, after every report
@@ -51,7 +56,7 @@ func (d *reportDrain) flushed() {
 }
 
 // stop is the watch's, as it ends: why is errReportClosed when keploy closed
-// its reader.
+// its reader. The first reason stays.
 func (d *reportDrain) stop(why error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -77,17 +82,51 @@ func (d *reportDrain) failure() error {
 // It ends early with ctx, or when the watch has ended: what it would have
 // counted cannot be told.
 func (d *reportDrain) wait(ctx context.Context, flush func() error) error {
-	d.serial.Lock()
-	defer d.serial.Unlock()
+	select {
+	case d.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-d.sem }()
+	d.mu.Lock()
+	abandoned, at := d.abandoned, d.abandonedAt
+	d.mu.Unlock()
+	if abandoned {
+		// An earlier drain's flush, still to be answered: its answer must
+		// not be taken for this drain's.
+		if err := d.await(ctx, at); err != nil {
+			return err
+		}
+		d.mu.Lock()
+		d.abandoned = false
+		d.mu.Unlock()
+	}
 	d.mu.Lock()
 	start, stopped := d.gen, d.stopped
 	d.mu.Unlock()
 	if stopped != nil {
 		return fmt.Errorf("the report has ended: %w", stopped)
 	}
+	if err := ctx.Err(); err != nil {
+		return err // no flush that nobody waits for
+	}
 	if err := flush(); err != nil {
 		return fmt.Errorf("flush the report's ring: %w", err)
 	}
+	if err := d.await(ctx, start); err != nil {
+		if ctx.Err() != nil {
+			d.mu.Lock()
+			d.abandoned, d.abandonedAt = true, start
+			d.mu.Unlock()
+		}
+		return err
+	}
+	return nil
+}
+
+// await waits until the watch got through a flush after gen start, the
+// watch ended, or ctx ended.
+func (d *reportDrain) await(ctx context.Context, start uint64) error {
 	d.mu.Lock()
 	d.waiting++
 	defer func() {

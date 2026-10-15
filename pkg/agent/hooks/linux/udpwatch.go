@@ -168,6 +168,8 @@ func (w *udpWatch) close() {
 
 // watch counts each reported reply until the reader is closed.
 func (w *udpWatch) watch(logger *zap.Logger) {
+	// However it ends (a panic too): a drain waiting on it ends with it.
+	defer w.drain.stop(errors.New("the UDP watch ended"))
 	warned := false
 	for {
 		rec, err := w.rd.Read()
@@ -256,6 +258,9 @@ func (w *udpWatch) closeEpoch() {
 		w.losses.Add(models.CaptureLossUDPReply, what)
 	}
 	w.open = nil
+	if w.err != nil {
+		return // failed (its maps may be closed): what it counts is unknown
+	}
 	w.epoch++
 	if w.epoch == 0 {
 		w.epoch = 1 // 0 is the kernel's "never set"
@@ -268,6 +273,9 @@ func (w *udpWatch) closeEpoch() {
 // counts is what the watch charged, with what the kernel had no room for.
 func (w *udpWatch) counts() models.CaptureLosses {
 	out := w.losses.Snapshot()
+	if w.failure() != nil {
+		return out // its maps may be closed; CaptureLossesErr says it is unknown
+	}
 	var missed uint64
 	for _, m := range []*ebpf.Map{w.maps.UdpMemberSocksFailures, w.maps.UdpReplyEventsLost} {
 		var n uint64

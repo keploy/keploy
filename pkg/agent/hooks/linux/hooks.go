@@ -684,8 +684,8 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// never 0.
 	h.udpMu.Lock()
 	if h.udp != nil {
-		h.udp.close()
 		h.udp.fail(errors.New("the UDP watch was closed with the hooks"))
+		h.udp.close()
 	}
 	h.udpMu.Unlock()
 
