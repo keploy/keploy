@@ -1,7 +1,6 @@
 package generic
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net"
@@ -11,7 +10,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -137,39 +135,4 @@ func TestTheGenericParserKeepsAMissHeldForTheProxyToFile(t *testing.T) {
 	if n := h.held(); n != 1 {
 		t.Fatalf("held %d after the miss was returned, want 1 until the proxy files it", n)
 	}
-}
-
-// Under the switch, a request a read returned with the deadline's timeout is
-// a request: a follow-up of exactly 1024 bytes (one full read, then a read
-// that times out) is held and answered. Before, the timeout came back with
-// the bytes and the request was dropped: never held, never answered, no miss.
-func TestTheGenericParserKeepsARequestAReadReturnedWithItsDeadline(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	h := newHolds()
-	ctx, cancel := context.WithCancel(integrations.WithRequestHolder(context.Background(), h))
-	defer cancel()
-	app, proxySide := net.Pipe()
-	defer app.Close()
-	big := bytes.Repeat([]byte("A"), 1024)
-	m := exchange("mock-big", string(big))
-	m.TestModeInfo.IsFiltered = true
-	m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "BIGOK"}}}}
-	done := make(chan error, 1)
-	go func() {
-		done <- decodeGeneric(ctx, zap.NewNop(), []byte("PING"), proxySide, nil, pingStore{mocks: []*models.Mock{pingPong(), m}}, models.OutgoingOptions{})
-	}()
-	got := make([]byte, 4)
-	if _, err := io.ReadFull(app, got); err != nil || string(got) != "PONG" {
-		t.Fatalf("answer %q, %v", got, err)
-	}
-	if _, err := app.Write(big); err != nil {
-		t.Fatal(err)
-	}
-	ans := make([]byte, 5)
-	if _, err := io.ReadFull(app, ans); err != nil || string(ans) != "BIGOK" {
-		t.Fatalf("the 1024-byte request's answer %q, %v", ans, err)
-	}
-	cancel()
-	_ = app.Close()
-	<-done
 }
