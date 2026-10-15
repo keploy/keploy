@@ -30,7 +30,8 @@ import (
 // the runner drives the requests, Keploy answers the outgoing calls from the
 // set. On a miss it applies the configured policy (fail / passthrough /
 // record). It propagates the runner's exit code, and with --strict also exits
-// non-zero when any recorded mock was missed. It returns an error for a
+// non-zero when a call missed its recorded mock (one that counts against a
+// test, models.UnmatchedCall.CountsAgainstTest). It returns an error for a
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
@@ -493,9 +494,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		actual:   actual.list(),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
-	missed, missesKnown := counts.missed, counts.missed >= 0
+	missesKnown := counts.missed >= 0
 
-	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
+	// 11. Exit code: mirror the runner; with --strict also fail on a miss
+	//     that counts against a test.
 	// The learn step's findings not kept means keploy did not complete the
 	// round, whatever the test command did: that is the exit, and the
 	// receipt's.
@@ -599,11 +601,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
-	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
+	// Only a miss that counts against a test (models.UnmatchedCall.
+	// CountsAgainstTest): not a DNS lookup's, which the proxy answers itself,
+	// nor one on a connection whose client sent nothing, which made no call (a
+	// MySQL client waiting at a port keploy could not tie to the recording, or
+	// a dependency's TCP health check). Each is still told, with its next
+	// step, above.
+	if m.config.Mock.Strict && counts.missedData > 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
 		m.logger.Error("replay failed under --strict: recorded dependency calls were missed",
-			zap.Int("missed", missed),
+			zap.Int("missed", counts.missedData),
 			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
 	}
 

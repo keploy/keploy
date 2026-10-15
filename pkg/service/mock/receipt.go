@@ -283,8 +283,12 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 		return false, "bypass rules send calls to " + strings.Join(bypass, ", ") + " to the real service"
 	case counts.missed < 0:
 		return false, "the agent never reported which calls were missed"
-	case counts.missed > 0:
-		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missed)
+	case counts.missedData > 0:
+		// Only a miss that counts against a test (models.UnmatchedCall.
+		// CountsAgainstTest), as --strict reads it: a DNS lookup's miss is
+		// the proxy's own answer, and a connection whose client sent
+		// nothing made no call, so neither reached a real service.
+		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missedData)
 	case counts.consumed < 0:
 		return false, "the agent never reported which recorded calls it served"
 	case counts.consumed == 0:

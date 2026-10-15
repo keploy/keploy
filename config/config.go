@@ -354,8 +354,11 @@ type MockCmd struct {
 	// persist), or "record" (dial the real dependency AND append the new call
 	// to the set — VCR-style new_episodes for incremental refresh).
 	OnMiss string `json:"onMiss" yaml:"onMiss" mapstructure:"onMiss"`
-	// Strict makes replay exit non-zero if any recorded mock was missed, so a
-	// drifted dependency contract fails the build even when the runner passed.
+	// Strict makes replay exit non-zero if a call missed its recorded mock, so
+	// a drifted dependency contract fails the build even when the runner
+	// passed. A miss that counts against no test by itself does not: a DNS
+	// lookup's, or one on a connection whose client sent nothing
+	// (models.UnmatchedCall.CountsAgainstTest).
 	Strict bool `json:"strict" yaml:"strict" mapstructure:"strict"`
 	// Local forces the file-backed store even when a cloud registry is
 	// configured (enterprise). Registry-first by default; --local opts out.
