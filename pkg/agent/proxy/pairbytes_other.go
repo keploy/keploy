@@ -21,7 +21,9 @@ func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.
-func (p *Proxy) pairClosing(conn net.Conn) { _, _, _ = p.paired.closing(conn) }
+func (p *Proxy) pairClosing(_ context.Context, conn net.Conn, _ *trackedConn) {
+	_, _, _ = p.paired.closing(conn)
+}
 
 func readUnread(*net.TCPConn) (int, error) {
 	return 0, fmt.Errorf("%w: the proxy's sockets are read on Linux only", models.ErrProxyConnsUnsupported)
