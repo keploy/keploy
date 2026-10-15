@@ -1514,8 +1514,11 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				}
 				connFailures++
 			}
-			deps.Add(mock)
 			r.route(mock, true)
+			// After routing, which derives the mock's lifetime unless the
+			// mapping prune drops it first: its links are then read without
+			// deriving it again on a copy.
+			deps.Add(mock)
 		}
 		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
@@ -1591,8 +1594,8 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			if mock.Kind == models.ConnectionFailure {
 				connFailures++
 			}
-			deps.Add(mock)
 			r.route(mock, false)
+			deps.Add(mock) // after routing, as the gob reader
 		}
 	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)

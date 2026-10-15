@@ -105,8 +105,8 @@ func servedAt(set map[string]*models.Mock, lane string, completed int) string {
 // An async epoch kept because a replay serves it keeps what it requires, as
 // any kept mock does.
 func TestUpdateMocks_AKeptAsyncEpochKeepsWhatItRequires(t *testing.T) {
-	models.RegisterMockDeps(models.HTTP, depsByMetadata)
-	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, nil) })
+	prev := models.RegisterMockDeps(models.HTTP, depsByMetadata)
+	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, prev) })
 	epoch := asyncTestMock(1, "cfg", 2, 1, "v1")
 	epoch.Spec.Metadata = map[string]string{"requires": "k"}
 	fixture := []*models.Mock{
