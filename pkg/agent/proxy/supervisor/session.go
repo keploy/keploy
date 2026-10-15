@@ -608,8 +608,8 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //     before calling mgr.AddMock. If ctx was already cancelled,
 //     EmitMock returns ctx.Err() without touching the manager. If ctx
 //     cancels AFTER the AddMock call starts, AddMock runs to completion
-//     (buffers the mock, or blocks in its own bounded sendToOutChan
-//     up to sendBudget) and EmitMock returns nil. AddMock may also
+//     (buffers the mock, or hands it to the manager's out queue, which
+//     never blocks it) and EmitMock returns nil. AddMock may also
 //     drop the mock under backpressure/memory-pause without signalling
 //     the caller — the drop is recorded on the manager's drop counter
 //     instead. This is a deliberate asymmetry: the syncMock manager
@@ -639,8 +639,8 @@ func (s *Session) EmitMock(m *models.Mock) error {
 //
 //   - SyncMock path: skip the s.Ctx pre-check and call mgr.AddMock
 //     unconditionally. AddMock owns its own lifecycle (memory-pause,
-//     drop accounting, sendBudget) and remains the right place to
-//     enforce shutdown-time backpressure.
+//     drop accounting, its out queue's bounds) and remains the right
+//     place to enforce shutdown-time backpressure.
 //
 //   - Direct-channel path: replace the select-against-ctx with a
 //     non-blocking best-effort send. If the channel is full at
@@ -720,12 +720,11 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s.RouteMocksViaSyncMock {
 		mgr := s.manager()
 		// Best-effort ctx probe. mgr.AddMock doesn't observe
-		// s.Ctx — it takes its own mutex and may sit
-		// in sendToOutChan up to the manager's internal
-		// sendBudget without signalling cancellation back to
-		// us. A pre-check at least catches the "already
-		// cancelled" case so we don't spend mgr.AddMock's
-		// bounded wait on work the parser already abandoned.
+		// s.Ctx — it takes its own mutex and hands the mock
+		// on without signalling cancellation back to us. A
+		// pre-check at least catches the "already cancelled"
+		// case so we don't spend mgr.AddMock's work on a mock
+		// the parser already abandoned.
 		// Post-call cancellation during mgr.AddMock's send is
 		// documented as a semantic difference from the
 		// direct-channel branch (see the EmitMock doc comment
