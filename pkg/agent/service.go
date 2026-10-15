@@ -193,12 +193,7 @@ type ProxyConnCounter interface {
 // v14 §5.2): bytes an accepted connection holds unread, and, in a replay, a
 // request read and not yet answered. It waits by events, never by a clock.
 type InFlightReader interface {
-	// InFlightPending is how many accepted connections hold such work;
-	// answers counts unanswered requests too (a replay, whose answers are
-	// the proxy's own work), not in a record, where a request waits for its
-	// real server.
-	InFlightPending(answers bool) int
-	// InFlightChanged is closed at the next change of what InFlightPending
+	// InFlightChanged is closed at the next change of what InFlightState
 	// reads: take it before reading.
 	InFlightChanged() <-chan struct{}
 	// InFlightPendingProgress is, for each connection that holds such work
@@ -206,11 +201,18 @@ type InFlightReader interface {
 	// a wait whose pending connections' counts do not move is stuck,
 	// whatever moves elsewhere.
 	InFlightPendingProgress(answers bool) map[uint64]uint64
-	// InFlightUnknown names the protocols of the accepted connections, in a
-	// replay (answers), whose parser reads ahead of its answers and does not
-	// say which requests it holds (integrations.RequestHolding): whether they
-	// hold one cannot be told, so a test's end is not verified.
-	InFlightUnknown(answers bool) []string
+	// InFlightState reads each accepted connection once, as one view:
+	// pending is how many hold such work (answers counts unanswered
+	// requests too: a replay, whose answers are the proxy's own work; not a
+	// record, where a request waits for its real server); unknown names the
+	// protocols of those, in a replay, whose parser reads ahead of its
+	// answers and does not say which requests it holds
+	// (integrations.RequestHolding), or says that for now it cannot tell
+	// (integrations.MarkUnknown): whether they hold one cannot be told, so
+	// a test's end is not verified. There is no separate count of either:
+	// read apart, a connection whose parser ends a state it could not tell
+	// between the two reads is seen neither busy nor unknown.
+	InFlightState(answers bool) (pending int, unknown []string)
 }
 
 // PairedBytesWaiter is the optional extension of a proxy that holds the

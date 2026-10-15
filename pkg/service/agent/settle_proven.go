@@ -33,9 +33,10 @@ import (
 // request held or released, a connection closing. No clock decides. A test
 // whose calls keploy cannot count (models.ErrProxyConnsUnsupported, or hooks
 // not loaded) is not settled: "unknown" is never "none in flight". Nor is one
-// with a connection whose parser reads ahead and does not say what it holds
-// (holdsUnknown), or one during which the kernel dropped packets at the
-// proxy's listener (dropped): its end leaves it not verified. The run's read
+// with a connection whose parser reads ahead and does not say what it holds,
+// or says that for now it cannot tell (holdsUnknown), or one during which
+// the kernel dropped packets at the proxy's listener (dropped): its end
+// leaves it not verified. The run's read
 // of its misses settles the same way, so a call after the last test's end is
 // read, never filed after it.
 //
@@ -87,7 +88,8 @@ var errNoProgress = errors.New("keploy's agent made no progress settling the tes
 
 // errHoldsUnknown: a connection is served by a parser that reads ahead of
 // its answers and does not say which requests it holds
-// (integrations.RequestHolding), so whether it still holds one of the test's
+// (integrations.RequestHolding), or that says for now it cannot tell
+// (integrations.MarkUnknown), so whether it still holds one of the test's
 // calls cannot be told. A test's end that finds one is not verified; a begin
 // goes on (the test's end, or the run's last read, says it).
 var errHoldsUnknown = errors.New("a connection's held requests are unknown")
@@ -96,7 +98,7 @@ var errHoldsUnknown = errors.New("a connection's held requests are unknown")
 type holdsUnknown []string
 
 func (h holdsUnknown) Error() string {
-	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds"
+	return "keploy cannot tell whether " + strings.Join(h, ", ") + " on a connection still holds a request: its parser reads ahead of its answers and does not say which requests it holds, or says that for now it cannot tell"
 }
 
 func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
@@ -153,14 +155,19 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	working.Store(true)
 	for {
 		changed := ir.InFlightChanged()
-		if ir.InFlightPending(answers) == 0 {
+		// One view of the connections (InFlightState): read apart, a parser
+		// that ended a state it could not tell between the two reads would be
+		// seen neither busy nor unknown.
+		pending, unknown := ir.InFlightState(answers)
+		if pending == 0 {
 			c, err := a.ProxyConns(ctx)
 			if err != nil {
 				return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 			}
 			// Settled, but for a connection whose parser reads ahead and does
-			// not say which requests it holds: it may hold one.
-			if unknown := ir.InFlightUnknown(answers); len(unknown) > 0 {
+			// not say which requests it holds, or says that for now it cannot
+			// tell: it may hold one.
+			if len(unknown) > 0 {
 				return c.ListenDrops, holdsUnknown(unknown)
 			}
 			return c.ListenDrops, nil
