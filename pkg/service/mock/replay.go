@@ -1742,7 +1742,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	counts := replayCounts{consumed: len(consumed), missed: len(misses)}
 	for _, miss := range misses {
-		if !strings.EqualFold(miss.Protocol, "DNS") {
+		if miss.CountsAgainstTest() {
 			counts.missedData++
 		}
 	}

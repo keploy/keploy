@@ -1252,11 +1252,14 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// response by design (the app keeps working), so on a fully passing
 		// run they are routine, not actionable — without this filter every
 		// healthy run with app-startup DNS chatter would print the table.
+		// So are connections that sent nothing (models.MatchPhaseNoRequest):
+		// no call was made, and the warning names their port once per
+		// endpoint; a health check would otherwise add a row per connection.
 		mismatchRows := r.mockMismatchFailures.GetFailures()
 		if testRunResult {
 			actionable := make([]TestFailure, 0, len(mismatchRows))
 			for _, f := range mismatchRows {
-				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.Protocol == "DNS" {
+				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && !f.MismatchReport.CountsAgainstTest() {
 					continue
 				}
 				actionable = append(actionable, f)

@@ -79,9 +79,11 @@ func testMocksUnknown(armed bool, owned int, fetchErr error) bool {
 
 // failTestsWithMisses fails, under the proven switch, every test that would
 // otherwise pass or be demoted while one of its calls got no recorded answer,
-// and names them. DNS is left out: resolution order is not deterministic, and
-// a DNS miss is protocol-phase. Run over a set's results before the
-// BeforeTestResult hook, so the hook sees the verdicts it is to act on.
+// and names them. DNS lookups and connections that sent nothing are left out
+// (dataPlaneMisses): resolution order is not deterministic and a DNS miss is
+// protocol-phase, and a connection that sent nothing made no call. Run over a
+// set's results before the BeforeTestResult hook, so the hook sees the
+// verdicts it is to act on.
 func failTestsWithMisses(results []models.TestResult) []string {
 	if !provenswitch.On() {
 		return nil
@@ -102,15 +104,9 @@ func failTestsWithMisses(results []models.TestResult) []string {
 }
 
 // dataPlaneMisses counts the calls that got no recorded answer, DNS lookups
-// left out.
+// and connections that sent nothing (models.MatchPhaseNoRequest) left out.
 func dataPlaneMisses(calls []models.UnmatchedCall) int {
-	n := 0
-	for _, c := range calls {
-		if !strings.EqualFold(c.Protocol, "DNS") {
-			n++
-		}
-	}
-	return n
+	return len(dataPlaneCalls(calls))
 }
 
 // verdictCounts counts a set's per-test verdicts, one per test: the results the
@@ -337,11 +333,13 @@ type hookSnapshot struct {
 	evidence map[string]testEvidence
 }
 
-// dataPlaneCalls are the calls of calls that are not DNS lookups.
+// dataPlaneCalls are the calls of calls that are not DNS lookups, nor
+// connections whose client sent nothing (models.MatchPhaseNoRequest): no call
+// was made there, and a dependency's TCP health check ends the same way.
 func dataPlaneCalls(calls []models.UnmatchedCall) []models.UnmatchedCall {
 	var out []models.UnmatchedCall
 	for _, c := range calls {
-		if !strings.EqualFold(c.Protocol, "DNS") {
+		if c.CountsAgainstTest() {
 			out = append(out, c)
 		}
 	}

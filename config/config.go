@@ -41,11 +41,13 @@ type Config struct {
 	RetryPassing   bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath     string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules    []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	// MysqlPorts pins extra destination ports to the MySQL parser,
-	// skipping auto-detection for them. Rarely needed now that ports are
-	// detected automatically (see DisableMysqlAutoDetect); keep it for
-	// deployments that want the ~250ms first-connection probe skipped,
-	// or that disable detection entirely. Built-in defaults: 3306, 4000.
+	// MysqlPorts pins destination ports to the MySQL parser, skipping
+	// auto-detection for them; a non-empty list replaces the built-in
+	// defaults (3306, 4000). Needed in replay for a MySQL endpoint that
+	// moved since the recording and is neither the recorded container nor
+	// the recorded host (see DisableMysqlEndpointDrift; another port of
+	// this machine, localhost, always needs listing), and when detection is
+	// disabled (DisableMysqlAutoDetect).
 	MysqlPorts []uint32 `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection.
 	// With detection on (the default), keploy identifies MySQL on any
@@ -56,16 +58,18 @@ type Config struct {
 	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only
-	// the inference is turned off.
+	// the moved-endpoint judgement is turned off.
 	//
-	// Leave it on (the default) unless a dependency is being misread. The
-	// inference fires when a replayed app opens a connection to an unknown
-	// port and says nothing, which is the MySQL signature — but a client that
-	// stays silent for the whole confirmation window and only then speaks
-	// looks the same, and it will be answered with a handshake it did not ask
-	// for. Pinning the real mapping with MysqlPorts is the better fix when you
-	// know it; this is the escape hatch when you do not, and unlike
-	// DisableMysqlAutoDetect it keeps record-time detection working.
+	// Leave it on (the default) unless a dependency is being misread. Replay
+	// serves MySQL on a port the recording never saw only when the
+	// connection reaches the container the recording reached MySQL in, or
+	// the host it reached it on (never this machine) with the port moved,
+	// and its client has not spoken; any other moved endpoint, another
+	// localhost port among them, needs its port in MysqlPorts. A non-MySQL
+	// service on the recorded host (a client-first one that had not spoken
+	// yet) can still be answered with a handshake it did not ask for: this
+	// is the escape hatch for that, and unlike DisableMysqlAutoDetect it
+	// keeps record-time detection working.
 	DisableMysqlEndpointDrift bool     `json:"disableMysqlEndpointDrift" yaml:"disableMysqlEndpointDrift" mapstructure:"disableMysqlEndpointDrift"`
 	EnableTesting             bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions     bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`

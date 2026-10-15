@@ -1003,3 +1003,44 @@ func TestParseAddrPortReadsEveryFormTheProxyWrites(t *testing.T) {
 		}
 	}
 }
+
+// KeyFromContext says what a connection's destination is without counting a
+// use of it: a container asked about is not one of two configured the same
+// in the scope.
+func TestKeyFromContextCountsNoUse(t *testing.T) {
+	k := NewKeyer(newFake())
+	_ = name(t, k, "a", "127.0.0.1:40002")
+	_ = name(t, k, "twin", "127.0.0.1:40005")
+	k.BeginTest()
+	defer k.EndTest()
+	if key, isContainer, keyed := KeyFromContext(WithConn(context.Background(), k, "twin")); !keyed || !isContainer || key != keyDefault {
+		t.Fatalf("KeyFromContext = %q, %v, %v; want %q, true, true", key, isContainer, keyed, keyDefault)
+	}
+	if key, st := use(k, "a"); st != Keyed || key != keyDefault {
+		t.Fatalf("a use after the twin was only asked about = %q, %v; want Keyed", key, st)
+	}
+}
+
+// Whether the test set the agent was given was recorded naming containers is
+// read from its whole tally: a stamp of any mock counts, a container whose
+// key could not be read among them; the next set's tally replaces it.
+func TestRecordingNamesContainersFollowsTheTestSet(t *testing.T) {
+	k := NewKeyer(newFake())
+	ctx := WithConn(context.Background(), k, "c")
+	if RecordingNamesContainers(ctx) {
+		t.Fatal("named before any test set was given")
+	}
+	var named RecordedTally
+	named.Add(&models.Mock{Spec: models.MockSpec{Metadata: map[string]string{InstanceKey: "i1"}}})
+	k.SetRecorded(&named)
+	if !RecordingNamesContainers(ctx) {
+		t.Fatal("a set with a container stamp (its key unread) is not named")
+	}
+	k.SetRecorded(&RecordedTally{})
+	if RecordingNamesContainers(ctx) {
+		t.Fatal("the previous set's stamp outlived its replacement")
+	}
+	if RecordingNamesContainers(context.Background()) {
+		t.Fatal("named with no keyer in ctx")
+	}
+}

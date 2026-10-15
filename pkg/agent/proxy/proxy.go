@@ -4551,9 +4551,11 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
 }
 
-// logDroppedMisses says which misses are dropped: at Warn, except DNS misses
-// alone (an offline runner's upstream DNS, at the app's startup), which the
-// end-of-run summary leaves out of a green run too, at Debug.
+// logDroppedMisses says which misses are dropped: at Warn, except misses that
+// count against no test alone (models.MockMismatchReport.CountsAgainstTest:
+// an offline runner's upstream DNS at the app's startup, or a connection that
+// sent nothing, whose port a warning already names once per endpoint), which
+// the end-of-run summary leaves out of a green run too, at Debug.
 func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 	if len(errs) == 0 {
 		return
@@ -4561,7 +4563,7 @@ func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 	level := zap.DebugLevel
 	for _, err := range errs {
 		var pe models.ParserError
-		if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.Protocol != "DNS" {
+		if !errors.As(err, &pe) || pe.MismatchReport == nil || pe.MismatchReport.CountsAgainstTest() {
 			level = zap.WarnLevel
 			break
 		}

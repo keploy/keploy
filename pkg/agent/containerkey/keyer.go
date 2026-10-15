@@ -114,6 +114,9 @@ type Keyer struct {
 	// groups (a key in one scope) whose mocks came from two or more
 	// containers: SetRecorded.
 	recorded map[recordedGroup]bool
+	// recordedNamed: that test set was recorded naming containers
+	// (RecordedTally.named).
+	recordedNamed bool
 	// warned: this session already said Docker cannot be read.
 	warned bool
 	// session bounds what waits for a container's configuration outside a
@@ -687,6 +690,35 @@ func StateFromContext(ctx context.Context) (string, State) {
 		return "", NotContainer
 	}
 	return ref.k.use(ctx, ref.id)
+}
+
+// KeyFromContext is the container key of the connection ctx carries, as
+// StateFromContext reads it, waiting at most as long as ctx for the index's
+// read of the container's configuration, but without counting a use of it in
+// the scope open now: it says what the destination is, as the MySQL detection
+// probe asks before any parser serves the connection. keyed is false when ctx
+// carries no connection of a keyer (the proven switch is off); isContainer is
+// false for a connection that is no container's; key is "" for a container
+// whose configuration could not be read.
+func KeyFromContext(ctx context.Context) (key string, isContainer, keyed bool) {
+	ref, ok := ctx.Value(ctxKey{}).(connRef)
+	if !ok || ref.k == nil {
+		return "", false, false
+	}
+	_, key, isContainer = ref.k.key(ctx, ref.id)
+	return key, isContainer, true
+}
+
+// PlacedFromContext is KeyFromContext without the key: whether the connection
+// ctx carries reaches a container (Placed), which never waits on a
+// container's configuration.
+func PlacedFromContext(ctx context.Context) (isContainer, keyed bool) {
+	ref, ok := ctx.Value(ctxKey{}).(connRef)
+	if !ok || ref.k == nil {
+		return false, false
+	}
+	_, isContainer = ref.k.Placed(ctx, ref.id)
+	return isContainer, true
 }
 
 // FromContext is the container key of the connection a parser serves, if its

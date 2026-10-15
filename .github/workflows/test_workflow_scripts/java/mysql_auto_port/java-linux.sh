@@ -29,10 +29,12 @@
 # a port nothing has ever seen, while the mocks still say ${MYSQL_PORT}. Port
 # recall is an equality test, and the environment does not always agree with
 # the recording — a rebuilt compose file, a pooler on one side only, a
-# per-environment port. When it disagrees, keploy still detects the connection
-# as server-speaks-first and used to discard that verdict for want of a port
-# match, leaving the app to block on a greeting that, in replay, only keploy
-# could ever send. Phase 2 requires the same tests to pass anyway.
+# per-environment port. The moved endpoint is another port of this machine
+# (localhost), which keploy never takes for the recorded MySQL on its own
+# (founder decision 29: every local service shares the host, so nothing about
+# the port says which one it is). The app lists it in mysqlPorts, and Phase 2
+# requires the same tests to pass with keploy serving the recorded MySQL there
+# because the port is listed.
 #
 # Compat matrix: this behaviour needs BOTH binaries to support it. A
 # record binary without detection hangs the handshake and records
@@ -85,17 +87,6 @@ mysql_auto_detect_supported() {
     && grep -q "disableMysqlAutoDetect" "$probe_dir/keploy.yml" 2>/dev/null && rc=0
   rm -rf "$probe_dir"
   return "$rc"
-}
-
-# mysql_port_drift_supported: true when this binary can serve MySQL mocks on a
-# port the recording never saw. There is no config key for that behaviour, so
-# probe the binary for the warning it emits on that path — deliberately the
-# same string the assertion below greps for, so the probe cannot quietly drift
-# away from what is being asserted.
-mysql_port_drift_supported() {
-  local bin="$1"
-  [[ -f "$bin" ]] || return 1
-  grep -aq "serving MySQL mocks on a port the recording never saw" "$bin"
 }
 
 # Move the sample off 3306 without touching the samples repo: rewrite
@@ -427,38 +418,19 @@ check_reports "recorded endpoint" "$REPLAY_RC"
 # ---------------------------------------------------------------------------
 #
 # Everything above replays against the same endpoint that was recorded, so the
-# port can be recalled from the mocks' destAddr metadata. That recall is an
-# equality test, and it carries an assumption stated in the PR that introduced
-# it: "container IPs change between record and replay, ports don't."
+# port is recalled from the mocks' destAddr metadata. That recall is an
+# equality test, and a reconstructed environment — a rebuilt compose file, a
+# pooler present on one side only, a per-environment port — hands the
+# application a different endpoint than the recording saw.
 #
-# They do. A reconstructed environment — `keploy cloud replay` rebuilding a
-# compose file from a stored manifest, a pooler present in one environment and
-# not the other, a per-environment port — hands the application a different
-# endpoint than the recording saw. Detection still fires there: the client
-# opens the connection and says nothing, which is the MySQL signature and the
-# only server-speaks-first protocol keploy records. It was the port equality
-# check that discarded that evidence, and declining is not a neutral outcome —
-# in replay keploy IS the server, so nothing else will ever send the greeting.
-# The application blocks until its own timeout, every test touching the
-# dependency reports status_code 0, and the entire recorded mock set goes
-# unused while the recording itself is perfectly good. That is silent: no error
-# is printed, the tests simply fail as if the application were broken.
-#
-# So: point the application at a port nothing has ever seen, with MySQL still
-# shut down and the mocks still recorded on :${MYSQL_PORT}, and require the
-# same tests to pass anyway.
-if ! mysql_port_drift_supported "${REPLAY_BIN:-keploy}"; then
-  if [[ "${REQUIRE_MYSQL_AUTO_DETECT:-}" == "true" ]]; then
-    echo "::error::the replay binary is built from this commit yet does not report"
-    echo "::error::endpoint-drift inference. Either the feature regressed or the"
-    echo "::error::probe string changed. Not skipping — this cell must assert."
-    exit 1
-  fi
-  echo "Skipping the endpoint-drift phase: the replay binary predates it."
-  echo "MySQL auto-port-detection e2e passed: recorded and replayed on :${MYSQL_PORT} with no port configuration."
-  exit 0
-fi
-
+# Here the endpoint moves to another port of this machine. keploy does not take
+# another localhost port for the recorded MySQL on its own: every local service
+# shares the host, so a silent client there could be any of them, and greeting
+# it would race a client-first client to its first bytes (founder decision 29).
+# The application lists the port in mysqlPorts, and keploy then serves the
+# recorded MySQL mocks on it. Point the app at :${DRIFT_PORT}, with MySQL still
+# shut down and the mocks still recorded on :${MYSQL_PORT}, list the port, and
+# require the same tests to pass.
 section "Point the app at :${DRIFT_PORT} (mocks still say :${MYSQL_PORT})"
 # The jar carries application.properties on its classpath, so editing the
 # source tree after the build changes nothing — the app would keep dialling
@@ -480,60 +452,58 @@ echo "Recorded mocks still carry :${MYSQL_PORT}:"
 grep -o "destAddr: .*" "$MOCKS_FILE" | sort -u
 endsec
 
-# The drift port must be as unknown to keploy as the recorded one, or the
-# inference path is never reached and this phase asserts nothing.
-assert_no_mysql_ports_config "$DRIFT_PORT"
+section "List :${DRIFT_PORT} in mysqlPorts"
+# Only this setting, the way keploy.yml holds just what differs from the
+# defaults. A mysqlPorts list replaces the built-in 3306 and 4000, which this
+# app does not use.
+cat > keploy.yml <<KEPLOY_CFG
+mysqlPorts: [${DRIFT_PORT}]
+KEPLOY_CFG
+cat keploy.yml
+endsec
 
 PRE_DRIFT_RUN_DIR=$(latest_run_dir)
 
 section "Replay after endpoint drift"
+# --debug: the probe's verdict on each connection is a debug line.
 set +e
 "$REPLAY_BIN" test -c "java -jar $JAR_NAME" \
-  --delay 20 --api-timeout 60 \
+  --delay 20 --api-timeout 60 --debug \
   2>&1 | tee test_logs_drift.txt
 DRIFT_RC=$?
 set -e
 echo "Replay exit code: $DRIFT_RC"
 endsec
 
-section "Assert the mocks were served on the drifted port"
-# Passing tests alone would not prove the inference ran — a change that simply
-# made the port allowlist permissive would pass too. Require the warning that
-# says keploy knowingly served MySQL on a port the recording never saw. It is
-# logged at WARN, so unlike the port numbers (DEBUG) it is always present.
-# The port travels as a structured field, so match it too: a warning fired on
-# some other port would otherwise satisfy this assertion.
-if ! grep "serving MySQL mocks on a port the recording never saw" test_logs_drift.txt | grep -q "${DRIFT_PORT}"; then
-  # Two very different failures both land here, and the test outcome tells them
-  # apart. If the override never took effect the app is still talking to
-  # :${MYSQL_PORT}, which IS in the recorded set, so every test passes. If the
-  # override took effect and the inference is gone, the app blocks waiting for
-  # a greeting only keploy could send, its connection pool fails to initialise,
-  # and nothing passes.
+section "Assert the mocks were served on the listed port"
+# Passing tests alone would not prove the app moved: if the override never took
+# effect it still talks to :${MYSQL_PORT}, which IS in the recorded set, and
+# every test passes. Require keploy's verdict that a connection to
+# :${DRIFT_PORT} is MySQL because the port is listed.
+if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | grep -q '"reason": "configured-port"'; then
   if reports_all_passed "$PRE_DRIFT_RUN_DIR"; then
-    echo "::error::the drift warning is absent but every test passed, which means the"
+    echo "::error::every test passed but keploy judged no connection to :${DRIFT_PORT}, which means the"
     echo "::error::application was still talking to :${MYSQL_PORT} — the file:./application.properties"
     echo "::error::override did not take effect and this phase exercised nothing."
     echo "::error::Check that Spring Boot still ranks file:./ above classpath:/ and that"
     echo "::error::the datasource keys below still match the sample:"
     cat application.properties
   else
-    echo "::error::keploy did not serve the recorded MySQL mocks on :${DRIFT_PORT}."
-    echo "::error::The application blocked waiting for a server greeting that, in replay,"
-    echo "::error::only keploy could send — the endpoint-drift inference has regressed."
+    echo "::error::keploy did not take :${DRIFT_PORT} as MySQL although keploy.yml lists it in mysqlPorts."
     if [[ "$(latest_run_dir)" == "$PRE_DRIFT_RUN_DIR" ]]; then
       echo "::error::(the drift replay produced no report at all: the app never finished starting)"
     fi
     grep -n "Communications link failure\|Failed to initialize pool" test_logs_drift.txt | head -n 5 || true
   fi
+  grep "mysql probe result" test_logs_drift.txt | head -n 5 || true
   tail -n 120 test_logs_drift.txt
   exit 1
 fi
-grep "serving MySQL mocks on a port the recording never saw" test_logs_drift.txt | head -n 3
+grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | head -n 3
 endsec
 
 check_reports "drifted endpoint :${DRIFT_PORT}" "$DRIFT_RC" "$PRE_DRIFT_RUN_DIR"
 
 echo "MySQL auto-port-detection e2e passed: recorded and replayed on :${MYSQL_PORT} with"
-echo "no port configuration, and replayed again with the app moved to :${DRIFT_PORT}."
+echo "no port configuration, and replayed again with the app moved to :${DRIFT_PORT}, listed in mysqlPorts."
 exit 0
