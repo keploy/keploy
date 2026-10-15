@@ -327,7 +327,19 @@ func parseShortPortSpec(spec string) (host, port string, ok bool) {
 // with a 404 WITHOUT invoking an application handler — the probe therefore never
 // consumes a mock or triggers an app side effect. Any HTTP response to it (the
 // 404 included) still proves the proxy→app path is serving.
+//
+// It is requested with keployReadinessProbeMethod, not GET: a path alone does
+// not keep a catch-all route out. Echo (v4.9.0) hands GET
+// /keploy/__readiness_probe__ to a `/:param` route, whose handler then queries
+// the app's database before any test has opened a window, a call no recorded
+// mock can answer.
 const keployReadinessProbePath = "/keploy/__readiness_probe__"
+
+// keployReadinessProbeMethod is the method the reserved probe path is requested
+// with. Routers answer an OPTIONS for routes registered with other methods
+// themselves (Echo 204, gin and net/http 404 or 405; Express, Flask and Spring
+// list the allowed methods), so no application handler runs.
+const keployReadinessProbeMethod = http.MethodOptions
 
 // resetProbeRequestTimeout bounds a single readiness probe round-trip.
 const resetProbeRequestTimeout = 800 * time.Millisecond
@@ -476,6 +488,11 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	// An operator's health path is their endpoint, requested as they would.
+	method := http.MethodGet
+	if path == keployReadinessProbePath {
+		method = keployReadinessProbeMethod
+	}
 	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), path)
 	client := &http.Client{
 		Timeout: resetProbeRequestTimeout,
@@ -492,7 +509,7 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 	defer client.CloseIdleConnections()
 
 	probe := func() bool {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		req, err := http.NewRequestWithContext(ctx, method, target, nil)
 		if err != nil {
 			return false
 		}

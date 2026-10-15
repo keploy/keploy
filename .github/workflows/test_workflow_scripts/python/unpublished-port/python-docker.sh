@@ -274,9 +274,11 @@ fi
 # The app holds 8095 back 25s and logs each request it serves there. The
 # readiness gate's HTTP probe of host port 18095 has to be the first: a gate
 # that skipped the probe passes on docker's own listener accepting, and the
-# first thing the app sees is a test, or, as before this, nothing at all.
+# first thing the app sees is a test, or, as before this, nothing at all. The
+# probe is an OPTIONS, so a router answers it without running a GET handler;
+# this app has no do_OPTIONS, so http.server answers it 501.
 first95=$(grep -m1 -F '[app:8095] "' remap_test_logs.txt)
-if ! printf '%s\n' "$first95" | grep -qF '"GET /keploy/__readiness_probe__ '; then
+if ! printf '%s\n' "$first95" | grep -qF '"OPTIONS /keploy/__readiness_probe__ '; then
     echo "::error::the first request the app served on 8095 was not the readiness gate's HTTP probe: ${first95:-it served none}"
     fail=1
 fi
