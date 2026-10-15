@@ -100,9 +100,16 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Build the universal mismatch report so generic misses show
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
-				report := buildGenericMismatchReport(ctx, genericRequests, mockDb)
-				// Under exact serving: one exchange more than the test recorded?
-				if n := extraCall(genericRequests, mockDb); n > 0 {
+				// Under exact serving: one exchange more than the test
+				// recorded? Any other miss is compared with the test's
+				// answered exchanges too: they are in no read now.
+				n := extraCall(genericRequests, mockDb)
+				var answered []*models.Mock
+				if n == 0 {
+					answered = answeredExchanges(mockDb)
+				}
+				report := buildGenericMismatchReport(ctx, genericRequests, mockDb, answered)
+				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch

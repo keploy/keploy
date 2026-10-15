@@ -333,9 +333,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
-				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
 				// Under exact serving: one call more than the test recorded?
-				if n := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation); n > 0 && report != nil {
+				// Any other miss is diagnosed against the test's answered
+				// recordings too (answeredDiag): they are in no read now.
+				n := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				if n == 0 {
+					diag = h.answeredDiag(ctx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
+				}
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				}
 				if report != nil {
