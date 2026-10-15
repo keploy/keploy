@@ -305,12 +305,10 @@ func TestDecodeHTTPChecksThePayloadHashAgainstTheBodyAsSent(t *testing.T) {
 	head := fmt.Sprintf("POST /bucket/key HTTP/1.1\r\nHost: api.example\r\nAuthorization: %s\r\nX-Amz-Date: 20261015T101533Z\r\nX-Amz-Content-Sha256: %s\r\nContent-Encoding: gzip\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n",
 		sigV4("AKID", "20261015", "us-east-1", "s3", signed, sig(2)), hashOf(gz.String()), gz.Len())
 	app, proxy := tcpPair(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	go func() {
-		_ = h.decodeHTTP(ctx, append([]byte(head), gz.Bytes()...), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
-	}()
+	runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, append([]byte(head), gz.Bytes()...), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	})
 	// The bound only turns a hang into a failure.
 	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") {
 		t.Fatalf("a gzipped SigV4 call hashed as sent was answered %q", got)
