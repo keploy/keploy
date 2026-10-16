@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -50,6 +51,9 @@ const (
 	holdPast
 	stallShort
 	sendNothing
+	// wrongStart: sendNothing, with the HTTP side's status 500 against
+	// its recorded 200.
+	wrongStart
 )
 
 func newHeldOpenApps(t *testing.T) *heldOpenApps {
@@ -60,6 +64,10 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 			a.record(r)
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			mode := apps.mode.Load()
+			if mode == wrongStart {
+				w.WriteHeader(http.StatusInternalServerError)
+				mode = sendNothing
+			}
 			for i, line := range heldOpenLines {
 				if mode == stallShort && i > 0 || mode == sendNothing {
 					break
@@ -108,7 +116,7 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 			switch mode {
 			case stallShort:
 				sends = 1
-			case sendNothing:
+			case sendNothing, wrongStart:
 				sends = 0
 			}
 			for i := 0; i < sends; i++ {
@@ -231,7 +239,7 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 			t.Fatalf("%d stream(s) sent every keepalive they had and were still read", n)
 		}
 		for name, says := range map[string]string{
-			"test-1": "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /stream",
+			"test-1": "the app sent its answer's headers and nothing of its body but keepalives, for GET /stream",
 			"test-2": "only keepalives, for /orders.Orders/Get",
 		} {
 			r := h.result(t, name)
@@ -250,11 +258,31 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 		}
 		// The console says the stream is not judged and why, not that its
 		// read failed.
-		if n := logs.FilterMessage("not judged: the app sent its answer's headers and nothing of its body, then only keepalives, for GET /stream").Len(); n != 1 {
+		if n := logs.FilterMessage("not judged: the app sent its answer's headers and nothing of its body but keepalives, for GET /stream").Len(); n != 1 {
 			t.Fatalf("the console said %d times that test-1 is not judged, want once", n)
 		}
 		if n := logs.FilterMessage("failed to read streaming response").Len(); n != 0 {
 			t.Fatalf("the console called test-1's stream a failed read %d time(s)", n)
+		}
+	})
+
+	// The same with the stream's start differing (a 500 against the
+	// recorded 200): what came is judged, a FAILED with no mark, never "not
+	// judged"; the gRPC side, nothing of its answer, still fails closed.
+	t.Run("with a start that differs and nothing more", func(t *testing.T) {
+		apps.mode.Store(wrongStart)
+		t.Cleanup(func() { apps.mode.Store(asRecorded) })
+		h := newTmplHarness(t, &tmplConf{}, cases, nil)
+		h.run(t)
+		r := h.result(t, "test-1")
+		if r.Status != models.TestStatusFailed || r.FailureInfo.AnswerStalled != "" || len(r.VerdictUnknown()) != 0 || r.Result.StatusCode.Normal {
+			t.Fatalf("test-1: %s, %+v, status %+v; want a judged FAILED on the 500", r.Status, r.FailureInfo, r.Result.StatusCode)
+		}
+		if r := h.result(t, "test-2"); r.Status != models.TestStatusFailed || r.FailureInfo.AnswerStalled == "" {
+			t.Fatalf("test-2: %s, %+v; want FAILED, not judged", r.Status, r.FailureInfo)
+		}
+		if reason := h.report.report.FailureReason; !strings.Contains(reason, "never answered 1 test(s) (test-2)") {
+			t.Fatalf("failure reason %q; want test-2 alone not judged", reason)
 		}
 	})
 }
@@ -334,5 +362,61 @@ func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
 	}
 	if said := run.said(zapcore.ErrorLevel, "failed to simulate request"); len(said) != 0 {
 		t.Fatalf("the console called the stalled answer an ordinary failure: %v", said)
+	}
+}
+
+// Under the switch an answer that began (its status and headers came) and
+// then stalled with its body part-way is judged on its start first: a start
+// that differs from the recording (a 500 against a recorded 200) is a judged
+// failure, its set FAILED, never "not judged"; only a start that matches
+// fails closed, FAILED with the not-judged mark, its set not judged.
+func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	saved := pkg.AnswerStallGrace
+	pkg.AnswerStallGrace = 300 * time.Millisecond
+	t.Cleanup(func() { pkg.AnswerStallGrace = saved })
+
+	var status atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(bpBody)))
+		if r.URL.Path != "/test-2" {
+			_, _ = w.Write([]byte(bpBody))
+			return
+		}
+		w.WriteHeader(int(status.Load()))
+		_, _ = w.Write([]byte(bpBody[:5]))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, c := range []struct {
+		name    string
+		status  int32
+		judged  bool
+		set     models.TestSetStatus
+		stalled string
+	}{
+		{"a start that differs", 500, true, models.TestSetStatusFailed, ""},
+		{"a start that matches", 200, false, models.TestSetStatusInternalErr, "the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /test-2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			status.Store(c.status)
+			run := newBasePathRun(t, srv.URL, "test-1", "test-2")
+			if _, err := run.start(t); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			r := run.resultOf(t, "test-2")
+			if r.Status != models.TestStatusFailed || r.FailureInfo.AnswerStalled != c.stalled || (len(r.VerdictUnknown()) == 0) != c.judged {
+				t.Fatalf("test-2: %s, AnswerStalled %q, VerdictUnknown %v; want FAILED, %q, judged %v", r.Status, r.FailureInfo.AnswerStalled, r.VerdictUnknown(), c.stalled, c.judged)
+			}
+			if c.judged && r.Result.StatusCode.Normal {
+				t.Fatalf("test-2's status compared normal: %+v; want the 500 judged against the recorded 200", r.Result.StatusCode)
+			}
+			if rep := run.report.report; rep == nil || rep.Status != string(c.set) {
+				t.Fatalf("report %+v; want the set %s", rep, c.set)
+			}
+		})
 	}
 }

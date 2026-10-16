@@ -2813,6 +2813,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					heldOpen, loopErr = loopErr.Error(), nil
 				}
 			}
+			// An answer that began (its status and headers, gRPC metadata)
+			// and then nothing of its body (pkg.AnswerBegan): what came is
+			// judged first. A difference in it is a judged failure, compared
+			// below with the recording's body in place of the one that never
+			// came; only a start that matches fails closed, not judged.
+			if loopErr != nil && pkg.AnswerBegan(loopErr) && resp != nil {
+				if judged, ok := r.answerStartDiffers(tmplRun, &sent, resp, testSetID); ok {
+					resp, loopErr = judged, nil
+				}
+			}
 
 			// The test case has its answer, or none: it ends here. Under exact
 			// serving the agent serves the pool from now, so what is read next
@@ -3948,6 +3958,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// its recording or short of it: compared as far as
 						// it came, and the test has no verdict (row W1).
 						streamHeldOpen, streamErr = streamErr.Error(), nil
+					}
+					if pkg.AnswerBegan(streamErr) {
+						// Its status and headers came, and nothing of the
+						// stream: judged on them first. A difference in them
+						// is a judged failure, compared below with the
+						// recording's body; only a start that matches fails
+						// closed, not judged.
+						start := &models.HTTPResp{StatusCode: streamResp.StatusCode, StatusMessage: streamResp.StatusMessage, Header: streamResp.Header}
+						if _, differs := r.answerStartDiffers(tmplRun, &sent, start, testSetID); differs {
+							streamErr, streamMatched, capturedBody, streamMismatchInfo = nil, true, "", nil
+						}
 					}
 
 					if streamErr != nil {

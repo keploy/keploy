@@ -207,6 +207,7 @@ func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 		{keptOpenWithNothing("/pkg.Svc/Method", false, 0), "the app never answered, and sent only keepalives, for /pkg.Svc/Method"},
 		{keptOpenWithNothing("", true, 0), "the app sent its answer's headers and nothing of its body, then only keepalives"},
 		{keptOpenWithNothing("GET /e", true, 9), "the app's answer stopped part-way, after 9 bytes of its body, then only keepalives, for GET /e"},
+		{keptOpenWithKeepalivesOnly(), "the app sent its answer's headers and nothing of its body but keepalives"},
 		{&AnswerStallError{Target: "POST /chunked", Waited: time.Minute, Untaken: true, Sent: 7}, "the app stopped taking the test's request and never answered (it took at most 7 bytes of it); waited 1m0s of keploy's runnable time for POST /chunked"},
 	} {
 		if got := c.e.Error(); got != c.want {
@@ -398,8 +399,8 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			says        string
 		}{
 			{"/sse-none", "text/event-stream", frames("data", "a"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /sse-none"},
-			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /sse-keepalive-none"},
-			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /ndjson-keepalive-none"},
+			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body but keepalives, for GET /sse-keepalive-none"},
+			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body but keepalives, for GET /ndjson-keepalive-none"},
 			{"/binary-none", "application/octet-stream", frames("raw", "abcdef"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /binary-none"},
 		} {
 			ok, err := readStream(t, stream(c.path, c.ctype, c.chunks))
@@ -463,11 +464,32 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			t.Fatalf("%v, %+v, %v; want the finished stream judged, and passed", ok, info, err)
 		}
 	})
+	// A stream read to its end ends its watch, closed or not.
+	t.Run("a stream read to its end, never closed", func(t *testing.T) {
+		tc := stream("/ndjson-done", "application/x-ndjson", frames("raw", `{"id":1}`, `{"id":2}`))
+		resp, err := SimulateHTTPStreaming(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadAll(resp.Reader); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-resp.Reader.(*answerReader).w.done:
+		default:
+			t.Fatal("the watch of a stream read to its end goes on")
+		}
+		_ = resp.Reader.Close()
+	})
 	t.Run("an answer that stops part-way", func(t *testing.T) {
 		tc := &models.TestCase{Name: "partial", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/partial"}}
-		_, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
-		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial"; !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want {
+		resp, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial"; !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want || !AnswerBegan(err) {
 			t.Fatalf("%v; want %q", err, want)
+		}
+		// Its start goes with the error, for the replay to judge it.
+		if resp == nil || resp.StatusCode != 200 || resp.Header["Content-Length"] != "100" {
+			t.Fatalf("returned %+v; want the status and headers that came", resp)
 		}
 	})
 	t.Run("R5 an answer that never comes", func(t *testing.T) {
@@ -601,7 +623,7 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 		}
 		cfg := stallConfig()
 		cfg.StallGrace = 3 * time.Second
-		_, err := SimulateGRPC(context.Background(), grpcTestCase(addr, reqs), "s", zap.NewNop(), cfg)
+		_, err := simulateGRPCBounded(t, grpcTestCase(addr, reqs), cfg)
 		if !errors.Is(err, ErrAnswerStalled) || !strings.Contains(fmtErr(err), "stopped taking the test's request") || !strings.Contains(fmtErr(err), "were never taken") {
 			t.Fatalf("%v; want the request the app stopped taking", err)
 		}
@@ -637,15 +659,19 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 			<-hold
 			return nil
 		}).Addr().String()
-		for _, c := range []struct{ addr, says string }{
-			{addr, "the app never answered; waited 300ms of keploy's runnable time for /pkg.Svc/Method"},
-			{addrHeaders, "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for /pkg.Svc/Method"},
+		for _, c := range []struct {
+			addr, says string
+			began      bool
+		}{
+			{addr, "the app never answered; waited 300ms of keploy's runnable time for /pkg.Svc/Method", false},
+			{addrHeaders, "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for /pkg.Svc/Method", true},
 		} {
 			tc := recordedAs(grpcTestCase(c.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"))
-			resp, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), stallConfig())
-			if resp != nil || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
+			resp, err := simulateGRPCBounded(t, tc, stallConfig())
+			if !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says || AnswerBegan(err) != c.began {
 				t.Fatalf("%v, %v; want it failing closed: %q", resp, err, c.says)
 			}
+			requireHeadersOnly(t, resp, c.began)
 		}
 	})
 
@@ -664,18 +690,55 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 		for _, c := range []struct {
 			addr, says string
 			cfg        SimulationConfig
+			began      bool
 		}{
-			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}},
-			{headers, "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}},
-			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{Unbounded: true}},
+			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}, false},
+			{headers, "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}, true},
+			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{Unbounded: true}, false},
 		} {
 			tc := recordedAs(grpcTestCase(c.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"))
-			resp, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), c.cfg)
-			if resp != nil || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
+			resp, err := simulateGRPCBounded(t, tc, c.cfg)
+			if !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says || AnswerBegan(err) != c.began {
 				t.Fatalf("%+v: %v, %v; want it failing closed: %q", c.cfg, resp, err, c.says)
 			}
+			requireHeadersOnly(t, resp, c.began)
 		}
 	})
+}
+
+// simulateGRPCBounded is SimulateGRPC, failing the test, not hanging it, when
+// the call does not end within a minute: a stall rule that never fires.
+func simulateGRPCBounded(t *testing.T, tc *models.TestCase, cfg SimulationConfig) (*models.GrpcResp, error) {
+	t.Helper()
+	type result struct {
+		resp *models.GrpcResp
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), cfg)
+		done <- result{resp, err}
+	}()
+	select {
+	case r := <-done:
+		return r.resp, r.err
+	case <-time.After(time.Minute):
+		t.Fatal("HANG: the call did not end on its stall rule")
+		return nil, nil
+	}
+}
+
+// requireHeadersOnly checks what a stalled gRPC call returned: with its answer
+// begun, the headers that came and no message, for the replay to judge them
+// (AnswerBegan); with none, nothing.
+func requireHeadersOnly(t *testing.T, resp *models.GrpcResp, began bool) {
+	t.Helper()
+	switch {
+	case !began && resp != nil:
+		t.Fatalf("an answer that never began returned %+v", resp)
+	case began && (resp == nil || resp.Headers.PseudoHeaders[":status"] != "200" || len(resp.AllMessages()) > 1 || len(resp.AllMessages()) == 1 && resp.AllMessages()[0].DecodedData != ""):
+		t.Fatalf("an answer that began returned %+v; want its headers and no message", resp)
+	}
 }
 
 func fmtErr(err error) string {
