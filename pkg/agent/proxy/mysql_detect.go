@@ -88,6 +88,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -596,15 +597,21 @@ func (p *Proxy) probeMysql(
 // probeMysqlRecord answers, for a record, whether the destination speaks
 // MySQL by what the connection itself does first. A MySQL client sends
 // nothing until its server greets it, and mysqld greets the moment it
-// accepts; every other protocol keploy records is opened by its client.
-// So the upstream is reached at once, both ends are read from the start,
-// and whichever speaks first decides:
+// accepts; every other protocol keploy records is opened by its client,
+// though some servers send something at accept too (an HTTP/2 server's
+// SETTINGS). So the upstream is reached at once, both ends are read from
+// the start, and whichever speaks first decides:
 //
 //   - the client: not MySQL. Its bytes go on to generic dispatch the moment
 //     they arrive, so its first request reaches its parser, and is stamped,
 //     when the application sent it.
 //   - the upstream: MySQL if its greeting is a HandshakeV10, read until
 //     MySQL.MatchType's answer on it can no longer change (greetingDecided).
+//     Under the switch, a refusal at accept (refusalAtAccept): relayed,
+//     the port learning nothing. A server-first protocol's greeting
+//     (serverFirstGreeting), whose client waits to be greeted
+//     (reasonServerFirst): relayed from its greeting. Any other: not MySQL,
+//     dispatched on the client's bytes.
 //   - the upstream closing without a word: not MySQL (mysqld never does).
 //
 // No clock decides anything: until one end speaks or closes, or the run
@@ -739,6 +746,21 @@ func (p *Proxy) probeMysqlRecord(
 			return notMysql("client-spoke-first", src), nil
 		}
 		return with(notMysql("client-spoke-first", src), greeting), nil
+
+	case len(greeting) > 0 && provenswitch.On() && refusalAtAccept(greeting):
+		// The destination refused the connection at accept: relayed, so
+		// the client gets the refusal, and the port learns nothing (it
+		// speaks its own protocol once the destination accepts).
+		return with(&mysqlProbe{SrcConn: src, Reason: reasonRefusedAtAccept}, greeting), nil
+
+	case len(greeting) > 0 && serverFirstGreeting(greeting):
+		// A server-first protocol keploy has no parser for: its client
+		// waits to be greeted, so it is relayed from the greeting
+		// (relayServerFirst). The destination is marked before the port
+		// is learned, so a later connection to it, the probe skipped, is
+		// relayed too.
+		p.serverFirstDests.first(dstAddr)
+		return with(notMysql(reasonServerFirst, src), greeting), nil
 
 	case len(greeting) > 0:
 		return with(notMysql("greeting-not-mysql", src), greeting), nil

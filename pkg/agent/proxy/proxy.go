@@ -162,6 +162,15 @@ type Proxy struct {
 	// failedDests rate-limits the log line for a dependency that refused a
 	// held connection.
 	failedDests failedDests
+	// serverFirstSaid is the destinations keploy said, in this recording
+	// session, it cannot record: a server-first protocol it relays
+	// (relayServerFirst).
+	serverFirstSaid saidOnce
+	// serverFirstDests is the destinations found to speak a server-first
+	// protocol: a later connection to one, its port learned not to be MySQL
+	// and the probe skipped, is relayed too (relayServerFirst). It lives as
+	// long as the port cache it goes with (mysqlPorts), not one session.
+	serverFirstDests saidOnce
 	// hold is the handshake hold's lifecycle (handshake_hold.go).
 	hold holdState
 
@@ -2840,8 +2849,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	// From here the connection is recorded, or answered from mocks: under
 	// the proven switch a local destination is listed mocked (design v14
-	// §3.1).
-	if proven {
+	// §3.1). In a replay, now; in a record, once the probe has said what
+	// the connection is (below).
+	if proven && rule.Mode == models.MODE_TEST {
 		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
 	}
 	if p.synchronous {
@@ -2874,6 +2884,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			defer predialed.CloseIfUnused()
 		}
 	}
+	// A record's local destination is listed mocked, except a server-first
+	// one keploy relays (relayServerFirst): it is reached for real, and
+	// nothing of it is recorded.
+	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept && !(probe.Reason == "known-not-mysql" && p.serverFirstDests.has(dstAddr))) {
+		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+	}
 	if err != nil {
 		switch {
 		case refusedLocally(err):
@@ -2889,6 +2905,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("isMySQL", probe.IsMySQL),
 		zap.String("reason", probe.Reason),
 		zap.Uint32("destPort", destInfo.Port))
+
+	if rule.Mode != models.MODE_TEST && (probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept ||
+		probe.Reason == "known-not-mysql" && p.serverFirstDests.has(dstAddr)) {
+		// The destination spoke first with a server-first protocol's
+		// greeting, now or on an earlier connection (its port learned, the
+		// probe skipped), whose client waits to be greeted; or, under the
+		// switch, refused the connection at accept. Relayed from the
+		// greeting, not dispatched on the client's first bytes (P250).
+		return p.relayServerFirst(parserCtx, srcConn, dstAddr, predialed, probe.Reason == reasonRefusedAtAccept, p.logger.With(zap.String("Destination Address", dstAddr)))
+	}
 
 	if probe.IsMySQL {
 		if rule.Mode != models.MODE_TEST {
@@ -4113,6 +4139,7 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	recorded.reset()
+	p.serverFirstSaid.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
 	// boundary: opts arrives over the agent API from a client that may predate

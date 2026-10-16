@@ -161,6 +161,38 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	}
 }
 
+// Data the application sends over a server-first protocol keploy passes
+// through (P250) is said for the test case it was sent in, never a failure;
+// some sent after the last test case is said too, charged to none, as such,
+// and not as an abandoned TLS handshake.
+func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	sf := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossServerFirst, Count: n, What: "to 10.0.0.9:25"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, sf(2), sf(2), sf(3)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	if fmt.Sprint(w.uncapturable) != "[test-2]" {
+		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
+	}
+	if n := len(logs.FilterMessageSnippet("abandoned its handshake with keploy's proxy").All()); n != 0 {
+		t.Fatalf("%d late lines call it an abandoned TLS handshake", n)
+	}
+	late := logs.FilterMessageSnippet("server-first protocol keploy passes through, after the last test case was recorded").All()
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "sent data on them 1 time(s)") || !strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "mock.real") {
+		t.Fatalf("%d lines for the late one, want one WARN naming 1 send and mock.real: %+v", len(late), late)
+	}
+}
+
 func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {

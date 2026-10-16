@@ -213,13 +213,23 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("reason", w.notJudged.NotJudgedText()),
 			zap.String("next_step", w.notJudged.NotJudgedRemedy()+", then re-record these test cases"))
 	}
-	// A handshake abandoned after the last test case was checked: charged to
-	// no test case, and said, never a failure.
-	var abandonedLate models.CaptureLosses
+	// A handshake abandoned after the last test case was checked, or data
+	// sent over a server-first protocol keploy relays: charged to no test
+	// case, and said, never a failure.
+	var abandonedLate, relayedLate models.CaptureLosses
 	for _, c := range w.finalNotJudged.Since(w.chargedNotJudged) {
-		if c.Kind.PerTest() {
+		switch {
+		case c.Kind == models.CaptureLossServerFirst:
+			relayedLate = append(relayedLate, c)
+		case c.Kind.PerTest():
 			abandonedLate = append(abandonedLate, c)
 		}
+	}
+	if len(relayedLate) > 0 {
+		w.logger.Warn("the application sent data over a server-first protocol keploy passes through, after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", relayedLate.NotJudgedText()),
+			zap.String("next_step", relayedLate.NotJudgedRemedy()+", then re-record"))
 	}
 	if len(abandonedLate) > 0 {
 		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: whether a call was lost cannot be told, and no test case holds it ("+provenswitch.Env+"=1)",
