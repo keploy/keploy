@@ -66,7 +66,7 @@ type rekey struct {
 // nothing: an entry that named it goes stale, and the test runs.
 func (ts *TestYaml) beginRekey(set, test, path string) *rekey {
 	r := currentRekeyer()
-	if r == nil || !provenswitch.On() {
+	if r == nil || !provenswitch.On() || rewriting(ts.TcsPath, set) {
 		return nil
 	}
 	info, err := os.Lstat(path)
@@ -130,4 +130,110 @@ func (ts *TestYaml) beginRekeys(files []yaml.File) []*rekey {
 		}
 	}
 	return out
+}
+
+// SetRewrite is a command's rewrite of a set's recordings in several writes,
+// some of them outside testdb: keploy sanitize, which redacts every test case
+// file where it lies, and keploy normalize of a sanitized set, which
+// desanitizes the set, normalizes it and sanitizes it again. Each recording is
+// named before the first write and re-keyed once, when the command is done:
+// a write in between re-keys nothing, as the recordings it leaves (a
+// desanitized one) are no entry's.
+type SetRewrite struct {
+	r         Rekeyer
+	logger    *zap.Logger
+	keployDir string
+	set       string
+	key       string
+	tests     []string
+	paths     map[string]string
+	old       map[string]string
+}
+
+var (
+	rewritesMu sync.Mutex
+	rewrites   = map[string]bool{}
+)
+
+// rewriteKey names keployDir's set however its path is spelled.
+func rewriteKey(keployDir, set string) string {
+	dir, err := filepath.Abs(keployDir)
+	if err != nil {
+		dir = filepath.Clean(keployDir)
+	}
+	return dir + "\x00" + set
+}
+
+// rewriting reports whether a SetRewrite of set is under way: a write to it
+// then re-keys nothing of its own.
+func rewriting(keployDir, set string) bool {
+	rewritesMu.Lock()
+	defer rewritesMu.Unlock()
+	return rewrites[rewriteKey(keployDir, set)]
+}
+
+// BeginSetRewrite names every recording of set, under keployDir, before a
+// command rewrites them (SetRewrite). It is nil, and its Done does nothing,
+// without the switch or a Rekeyer, and inside another rewrite of the set,
+// which re-keys for it.
+func BeginSetRewrite(logger *zap.Logger, keployDir, set string) *SetRewrite {
+	r := currentRekeyer()
+	if r == nil || !provenswitch.On() || validateNameComponent("testSetID", set) != nil {
+		return nil
+	}
+	key := rewriteKey(keployDir, set)
+	rewritesMu.Lock()
+	if rewrites[key] {
+		rewritesMu.Unlock()
+		return nil
+	}
+	rewrites[key] = true
+	rewritesMu.Unlock()
+
+	w := &SetRewrite{r: r, logger: logger, keployDir: keployDir, set: set, key: key, paths: map[string]string{}, old: map[string]string{}}
+	dir := filepath.Join(keployDir, set, "tests")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return w
+	}
+	for _, e := range entries {
+		ext := filepath.Ext(e.Name())
+		if ext != ".yaml" && ext != ".yml" && ext != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			continue
+		}
+		test := strings.TrimSuffix(e.Name(), ext)
+		old, err := r.Hash(keployDir, path)
+		if err != nil {
+			logger.Warn("keploy could not name a recording it is about to rewrite, so an entry of verdicts.yaml that names it is not moved onto the new one: that entry is now stale, and the test runs",
+				zap.String("testSet", set), zap.String("testCase", test), zap.Error(err),
+				zap.String("next_step", "quarantine the test again if it is still to be skipped"))
+			continue
+		}
+		w.tests = append(w.tests, test)
+		w.paths[test], w.old[test] = path, old
+	}
+	return w
+}
+
+// Done re-keys each recording the command rewrote, as it now lies: one it
+// left as it was, or removed, re-keys nothing.
+func (w *SetRewrite) Done() {
+	if w == nil {
+		return
+	}
+	rewritesMu.Lock()
+	delete(rewrites, w.key)
+	rewritesMu.Unlock()
+	for _, test := range w.tests {
+		k := &rekey{r: w.r, keployDir: w.keployDir, set: w.set, test: test, path: w.paths[test], old: w.old[test]}
+		if _, err := os.Lstat(k.path); err != nil {
+			continue
+		}
+		k.done(w.logger)
+	}
 }
