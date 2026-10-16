@@ -370,16 +370,22 @@ func TestLaunched_IsRecordedPerAgentAndRenewedForEachOne(t *testing.T) {
 	require.True(t, ok)
 	require.NotEqual(t, first, second)
 
+	// The stop of an earlier agent does not forget a later launch there.
+	ForgetLaunch(uri, first)
+	got, ok := Launched(uri)
+	require.True(t, ok, "forgetting an earlier launch forgot the agent launched after it")
+	require.Equal(t, second, got)
+
 	// Once forgotten, the address is no agent of this process's, until it
 	// launches one there again.
-	ForgetLaunch(uri)
+	ForgetLaunch(uri, second)
 	_, ok = Launched(uri)
 	require.False(t, ok, "a forgotten launch is still reported")
 	RecordLaunch(uri)
 	third, ok := Launched(uri)
 	require.True(t, ok)
 	require.NotEqual(t, second, third)
-	ForgetLaunch(uri)
+	ForgetLaunch(uri, third)
 }
 
 // freshTokenDir starts a test with no private token directory and removes the

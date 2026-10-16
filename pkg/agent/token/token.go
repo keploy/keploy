@@ -306,16 +306,20 @@ func RecordLaunch(agentURI string) {
 }
 
 // ForgetLaunch drops the record that this process launched an agent at
-// agentURI: that agent is gone, and an agent at the address from then on is
-// not this process's unless it launches one there again (RecordLaunch). A test
-// that records the launch of an agent at a loopback address must forget it:
-// the address is the port the system gave it, and a later test's agent may
-// get the same port.
-func ForgetLaunch(agentURI string) {
+// agentURI, when that record is still launch (Launched's number): that agent
+// is gone, and an agent at the address from then on is not this process's
+// unless it launches one there again (RecordLaunch). A later launch at the
+// address, which a compose test run makes for each test-set, is not dropped
+// by the stop of the one before it. A test that records the launch of an
+// agent at a loopback address must forget it: the address is the port the
+// system gave it, and a later test's agent may get the same port.
+func ForgetLaunch(agentURI string, launch uint64) {
 	launchMu.Lock()
 	defer launchMu.Unlock()
 
-	delete(launches, agentURI)
+	if launches[agentURI] == launch {
+		delete(launches, agentURI)
+	}
 }
 
 // Launched reports whether this process launched the agent at agentURI, and
