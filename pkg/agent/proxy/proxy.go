@@ -3138,6 +3138,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
+	// clientTLS is the TLS layer keploy serves the client over, once its
+	// handshake is done: whether the client sent anything after it is read
+	// from it (pTls.SilentSinceHandshake).
+	var clientTLS net.Conn
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 
 	// Speculative upstream TLS dial — kicked off in parallel with the
@@ -3281,6 +3285,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		srcConn = tlsSrcConn
+		clientTLS = tlsSrcConn
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3322,6 +3327,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
+		if clientTLS != nil {
+			p.chargeSilentClient(ctx, err, clientTLS, dstAddr)
+		}
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
 	}

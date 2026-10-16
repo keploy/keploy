@@ -32,11 +32,14 @@ const (
 	CaptureLossTLSAbort CaptureLossKind = "tls_handshake_failed"
 	// CaptureLossTLSAbandoned: a client hung up on its TLS handshake with
 	// keploy's proxy once keploy had sent it its certificate, without a
-	// word (no alert). A client that does not trust keploy's CA may reject
-	// the certificate so -- Node.js does -- and one that gave up (a cancel,
-	// a timeout) looks the same, so whether a call was lost cannot be told:
-	// the test it happened in is NOT JUDGED (NotJudged), never failed and
-	// never passed. Charged to that test only (PerTest).
+	// word (no alert), or as soon as the handshake was done, having sent
+	// nothing since (no data, no close_notify). A client that does not trust
+	// keploy's CA may reject the certificate so -- Node.js under TLS 1.3
+	// during the handshake; curl, libcurl and Node.js under TLS 1.2 just
+	// after it -- and one that gave up (a cancel, a timeout) looks the same,
+	// so whether a call was lost cannot be told: the test it happened in is
+	// NOT JUDGED (NotJudged), never failed and never passed. Charged to that
+	// test only (PerTest).
 	CaptureLossTLSAbandoned CaptureLossKind = "tls_handshake_abandoned"
 	// CaptureLossSTARTTLS: a parser asked to upgrade a connection to TLS
 	// (STARTTLS, Postgres SSLRequest) and keploy could not make the upgrade,
@@ -381,7 +384,7 @@ func captureLossText(c CaptureLoss) string {
 	case CaptureLossRealUncaptured:
 		return fmt.Sprintf("keploy could neither capture nor relay as real %d connection(s) to a mock.real destination's address", c.Count)
 	case CaptureLossTLSAbandoned:
-		return fmt.Sprintf("a client hung up on %d TLS handshake(s) with keploy's proxy once keploy had sent its certificate, without a word: a client that does not trust keploy's CA rejects it so (Node.js does) and one that gave up (a cancel, a timeout) looks the same, so whether a call was lost cannot be told; if the client does not trust keploy's CA, make it trust it (for Node.js, set NODE_EXTRA_CA_CERTS to keploy's CA certificate)", c.Count)
+		return fmt.Sprintf("a client hung up on %d TLS handshake(s) with keploy's proxy once keploy had sent its certificate, without a word, during the handshake or as soon as it was done: a client that does not trust keploy's CA rejects it so (Node.js, curl and libcurl do) and one that gave up (a cancel, a timeout) looks the same, so whether a call was lost cannot be told; if the client does not trust keploy's CA, make it trust it (for Node.js, set NODE_EXTRA_CA_CERTS to keploy's CA certificate; for curl, --cacert)", c.Count)
 	case CaptureLossUDPReply:
 		return fmt.Sprintf("the application's UDP was answered live %d time(s) (a socket counted once per read it was answered before), which keploy neither records nor mocks (UDP other than DNS); add a port-only bypassRules entry for it if it is meant to be live, or reach it over TCP", c.Count)
 	case CaptureLossUnixSocket:
