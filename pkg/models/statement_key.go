@@ -3,7 +3,9 @@ package models
 // StatementKey names the statement a mock records, for the kinds whose clients
 // can prepare a statement before they run it: a PostgreSQL client may prepare
 // its statements at app start and run most of them only inside tests. It is ""
-// for a mock that records none, and for every other kind (a kind whose clients
+// for a mock that records none, for a mock whose statement the server answered
+// with an error (a refused Parse, a failed execution: nothing the catalog can
+// describe the statement by), and for every other kind (a kind whose clients
 // prepare ahead adds its key here).
 //
 // The agent's on-disk store keeps, for each key, the first per-test mock
@@ -19,6 +21,12 @@ func StatementKey(m *Mock) string {
 	case PostgresV3:
 		s := m.Spec.PostgresV3
 		if s == nil || s.Type != PostgresV3TypeQuery || s.Query == nil {
+			return ""
+		}
+		if r := s.Query.Response; r != nil && r.Error != nil {
+			// The catalog keeps a statement's first recording: one the
+			// server refused would leave the statement there with no
+			// shape, though a later recording of it has one.
 			return ""
 		}
 		if s.Query.SQLAstHash != "" {

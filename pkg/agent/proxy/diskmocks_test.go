@@ -434,18 +434,22 @@ func pgStatementMock(name, sqlHash string, sec int64) *models.Mock {
 }
 
 // The store keeps, for each statement its mocks record, the first one
-// recorded, whatever order they were added in; a mock of no statement is in
-// no catalog.
+// recorded, whatever order they were added in; a mock of no statement, or one
+// the server answered with an error (no shape to describe the statement by),
+// is in no catalog.
 func TestLoadStatements_KeepsTheFirstRecordingOfEachStatement(t *testing.T) {
 	s, err := NewDiskMocks(zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	refused := pgStatementMock("b-refused", "sha256:b", 5)
+	refused.Spec.PostgresV3.Query.Response = &models.PostgresV3Response{Error: &models.PostgresV3Error{Severity: "ERROR", Code: "42P01"}}
 	for _, m := range []*models.Mock{
 		pgStatementMock("a-late", "sha256:a", 30),
 		pgStatementMock("a-first", "sha256:a", 10),
 		pgStatementMock("b", "sha256:b", 20),
+		refused,
 		perTestMockAt("http", 15),
 	} {
 		if err := s.Add(m); err != nil {
