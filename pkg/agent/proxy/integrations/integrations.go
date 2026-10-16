@@ -315,6 +315,53 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// StagedFinder is an optional MockMemDb extension under exact serving (the
+// proven switch): the name of a staged mock of kind, which the open test does
+// not own, for which match reports true, whatever the open view shows; "" for
+// none, or with no test open. For a miss's diagnosis only: the mock is never
+// handed out, nor served.
+type StagedFinder interface {
+	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
+// StagedReader is an optional MockMemDb capability: every mock staged in the
+// store (its per-test, session and start-up tiers), whatever the open view
+// shows and whether or not it was served. For the learn step's earlier places
+// only (design v14 §7.2 step 6: a value the recording held before a call is
+// one the call's value may have flowed from, served or not): such a mock is
+// never handed out, nor served.
+type StagedReader interface {
+	StagedMocks() []*models.Mock
+}
+
+// TestWindows is an optional MockMemDb capability: where the request time of
+// a recorded mock falls among the replay's test windows. The learn step tells
+// the open test's own mocks, the pool's and other tests' apart by it where
+// the store's tiers cannot (a reusable HTTP mock of any test is in the
+// session tier).
+type TestWindows interface {
+	// InTestWindow reports whether t is inside the window of the test the
+	// replay runs now.
+	InTestWindow(t time.Time) bool
+	// InRecordedTestWindow reports whether t is inside the window of some
+	// recorded test of the set; known is false when the replay sent none.
+	InRecordedTestWindow(t time.Time) (inside, known bool)
+	// SameRecordedTestWindow reports whether a and b are inside one recorded
+	// test's window; known is false when the replay sent none.
+	SameRecordedTestWindow(a, b time.Time) (same, known bool)
+}
+
+// TestOwnership is an optional MockMemDb capability: whether a mock is one of
+// the open test's own, which its mapping lists, rather than the pool's. A view
+// that scopes the pool to a test (`keploy mock replay`'s) knows; known is
+// false when no test is open in it, and a store that is no such view does
+// not implement it: there a test's own mocks are its per-test tier. The learn
+// step pairs the open test's own mocks, and the pool's only in a full record
+// (design v14 §7.2 step 10).
+type TestOwnership interface {
+	OwnedByTest(m *models.Mock) (owned, known bool)
+}
+
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
 // snapshot narrowed to the mocks recorded inside one test window, without
 // walking the rest of it.

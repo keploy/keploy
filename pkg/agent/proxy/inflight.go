@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -25,16 +26,18 @@ import (
 //
 // inflight keeps every accepted connection and tells, by events and counts
 // only, when none holds either: a connection is settled when its handler is
-// blocked reading it, its parser holds no request it read
-// (integrations.HoldRequest: a parser that reads ahead is blocked reading
-// while it still holds one), and its socket holds no unread byte. Each change
-// of a connection's state (a read begins or returns, a request is held or
-// released, a mark that it cannot tell is set or released, the connection
-// closes) wakes whoever waits on Changed, so a wait never polls a clock.
-// Progress, for the agent's watchdog, counts only the changes that move work:
-// a read that returns bytes or ends the connection, a hold, a release, a mark
-// or its release, an accept, a close. A read that waited out its deadline
-// with nothing (a parser polling an idle connection) is no progress.
+// blocked reading it, or waits out an answer the dependency held idle
+// (integrations.MarkIdle: a long poll that has caught up with the
+// recording), its parser holds no request it read (integrations.HoldRequest:
+// a parser that reads ahead is blocked reading while it still holds one), and
+// its socket holds no unread byte. Each change of a connection's state (a read
+// begins or returns, a request is held or released, a mark that it cannot
+// tell, or that it waits idle, is set or released, the connection closes)
+// wakes whoever waits on Changed, so a wait never polls a clock. Progress, for
+// the agent's watchdog, counts only the changes that move work: a read that
+// returns bytes or ends the connection, a hold, a release, a mark or its
+// release, an accept, a close. A read that waited out its deadline with
+// nothing (a parser polling an idle connection) is no progress.
 type inflight struct {
 	mu    sync.Mutex
 	conns map[*trackedConn]struct{}
@@ -56,10 +59,11 @@ type trackedConn struct {
 	// progress counts what moved its own work: bytes read, a request held
 	// or released, its close.
 	progress atomic.Uint64
-	// mu orders each change of reading, held and unknownFor against State's
-	// read of the three (view): a parser hands a request from one to another
-	// (busy, then held, then reading on; busy, then marked, then reading on;
-	// marked, then busy), so no order of separate reads sees every hand-off.
+	// mu orders each change of reading, held, unknownFor and idle against
+	// the reads of the four (view): a parser hands a request from one to
+	// another (busy, then held, then reading on; busy, then marked, then
+	// reading on; marked, then busy; busy, then idle, then busy), so no order
+	// of separate reads sees every hand-off.
 	mu sync.Mutex
 	// reading counts the reads in progress: one is the handler waiting for
 	// the application's next bytes.
@@ -77,6 +81,15 @@ type trackedConn struct {
 	// (pairbytes.go).
 	beforeClose func()
 	closeOnce   sync.Once
+	// closing: its Close has begun. A read from then on is the close's own
+	// (pairClosing reads through the TLS layer what the socket holds) or one
+	// the close is ending, never its handler waiting for the application:
+	// until its handler is done (forget), and its miss filed, it holds work.
+	closing atomic.Bool
+	// tlsLayer is the TLS layer the proxy serves the connection over, once
+	// its handshake is done (HoldTLSLayer); nil for a plain one. Its close
+	// reads through it what the socket still holds (pairClosing).
+	tlsLayer atomic.Pointer[tls.Conn]
 	// unknown names the protocol of a parser serving it that reads ahead
 	// and does not mark what it holds (integrations.HoldsUnknown): whether
 	// it holds a request cannot be told.
@@ -86,6 +99,10 @@ type trackedConn struct {
 	// the latest.
 	unknownFor  atomic.Int32
 	unknownWhat atomic.Pointer[string]
+	// idle counts the marks its parser holds that it waits out an answer the
+	// dependency held idle (MarkIdle): while one stands, a handler that is
+	// not reading is no work of keploy's.
+	idle atomic.Int32
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
@@ -163,11 +180,29 @@ func (t *inflight) Pending(answers bool) int {
 		if tc.forgotten.Load() {
 			continue
 		}
-		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0)) {
+		if tc.pending(answers) {
 			n++
 		}
 	}
 	return n
+}
+
+// pending reports whether c still holds work (Pending): its socket first, as
+// State reads it, then its counts at one instant (view).
+func (c *trackedConn) pending(answers bool) bool {
+	unread := c.unread()
+	reading, held, _, idle := c.view()
+	return busy(unread, answers, reading, held, idle, c.closing.Load())
+}
+
+// busy is the rule Pending, State and PendingProgress read a connection by:
+// it holds work when its socket holds unread bytes, or, in a replay
+// (answers), when its parser holds a request it read, its close has begun
+// (closing: until its handler is done its miss may still be filed), or its
+// handler is neither blocked reading nor waiting out an idle answer
+// (MarkIdle). An idle mark never covers a close.
+func busy(unread int, answers bool, reading, held, idle int32, closing bool) bool {
+	return unread > 0 || (answers && (held > 0 || closing || (reading == 0 && idle == 0)))
 }
 
 // State is Pending and Unknown read as one view: how many accepted
@@ -197,8 +232,8 @@ func (t *inflight) State(answers bool) (pending int, unknown []string) {
 		// parser the proxy noted, which it notes before that parser's
 		// first read (servedBy).
 		unread := tc.unread()
-		reading, held, marks := tc.view()
-		if unread > 0 || (answers && (reading == 0 || held > 0)) {
+		reading, held, marks, idle := tc.view()
+		if busy(unread, answers, reading, held, idle, tc.closing.Load()) {
 			pending++
 		}
 		if answers {
@@ -237,7 +272,7 @@ func (t *inflight) PendingProgress(answers bool) map[uint64]uint64 {
 		if tc.forgotten.Load() {
 			continue
 		}
-		if tc.unread() > 0 || (answers && (tc.reading.Load() == 0 || tc.held.Load() > 0)) {
+		if tc.pending(answers) {
 			out[tc.id] = tc.progress.Load()
 		}
 	}
@@ -312,12 +347,12 @@ func (c *trackedConn) count(n *atomic.Int32, delta int32) {
 	c.mu.Unlock()
 }
 
-// view is c's reads in progress, held requests and marks, read at one
-// instant.
-func (c *trackedConn) view() (reading, held, marks int32) {
+// view is c's reads in progress, held requests, unknown marks and idle marks,
+// read at one instant.
+func (c *trackedConn) view() (reading, held, marks, idle int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.reading.Load(), c.held.Load(), c.unknownFor.Load()
+	return c.reading.Load(), c.held.Load(), c.unknownFor.Load(), c.idle.Load()
 }
 
 // moved is a change that moved c's own work: progress for c, and for all.
@@ -357,6 +392,22 @@ func (c *trackedConn) MarkUnknown(protocol string) (release func()) {
 	}
 }
 
+// MarkIdle marks that, until release, c's parser waits out an answer the
+// dependency held idle (integrations.IdleMarker): its handler, not reading,
+// is no work of keploy's, and a test's end does not wait for it. release
+// unmarks it, once.
+func (c *trackedConn) MarkIdle() (release func()) {
+	c.count(&c.idle, 1)
+	c.moved()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.count(&c.idle, -1)
+			c.moved()
+		})
+	}
+}
+
 // SyscallConn is the socket under c (syscall.Conn), for what reads the
 // kernel's state of it (util.ReceivedNothing): c reads and writes through
 // its own methods only.
@@ -372,6 +423,7 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 // (SQS's) has not filed the miss yet: until the proxy files it, the
 // connection holds the test's work, as a handler not blocked reading does.
 func (c *trackedConn) Close() error {
+	c.closing.Store(true)
 	if c.beforeClose != nil {
 		c.closeOnce.Do(c.beforeClose)
 	}
@@ -379,6 +431,10 @@ func (c *trackedConn) Close() error {
 	c.moved()
 	return err
 }
+
+// HoldTLSLayer keeps the TLS layer the proxy serves c over
+// (pTls.TLSLayerHolder), for its close.
+func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
 // CloseWrite forwards a half-close to the conn underneath.
 func (c *trackedConn) CloseWrite() error {
@@ -418,5 +474,6 @@ var (
 	_ agent.InFlightReader       = (*Proxy)(nil)
 	_ integrations.RequestHolder = (*trackedConn)(nil)
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
+	_ integrations.IdleMarker    = (*trackedConn)(nil)
 	_ syscall.Conn               = (*trackedConn)(nil)
 )

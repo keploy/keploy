@@ -238,6 +238,11 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 		return
 	}
 	r.lossMark = captureLossMark{at: at, known: true}
+	if !r.lossRunBaseSet {
+		// The run's first mark, before its application starts: what keploy
+		// cannot capture at all is counted from here for the whole run.
+		r.lossRunBase, r.lossRunBaseSet = at, true
+	}
 }
 
 // readCaptureLosses reads the agent's counts with no deadline of its own (the
@@ -247,14 +252,20 @@ func readCaptureLosses(ctx context.Context, reader CaptureLossReader) (models.Ca
 }
 
 // testCaptureLosses is, under the proven switch, what the agent could not
-// capture since the test set's mark, read as one of its tests ends: processes
-// the kernel refused a place in the agent's PID maps, client-side TLS
-// handshakes that failed against keploy's CA, TLS upgrades keploy could not
-// make. A loss taints the test running when it happened and every later test
-// of the set (design v14 §3.2); the counts only grow, so every later read
-// carries it. An agent that cannot count leaves every test as it was, as the
-// set's own check does; one that counts but could not be read now, or at the
-// mark, is an error: the test's capture cannot be told.
+// capture that a test is charged, read as the test ends: processes the kernel
+// refused a place in the agent's PID maps and TLS upgrades keploy could not
+// make since the test set's mark -- such a loss taints the test running when
+// it happened and every later test of the set (design v14 §3.2), and the
+// counts only grow, so every later read carries it -- and client-side TLS
+// handshakes that failed since the previous test's read (the set's mark for
+// its first test): a handshake's loss is the one call it lost, the test's it
+// happened in (models.CaptureLossKind.PerTest). What keploy cannot capture
+// at all (decision 20) is counted from the run's base, however far back it
+// was made (models.CaptureLosses.SinceWithin). A read that failed leaves the
+// next test to count from the read before, so it is charged the failed
+// test's handshakes too. An agent that cannot count leaves every test as it
+// was, as the set's own check does; one that counts but could not be read
+// now, or at the mark, is an error: the test's capture cannot be told.
 func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	reader, ok := r.instrumentation.(CaptureLossReader)
 	if !ok || errors.Is(r.lossMark.err, models.ErrCaptureLossesUnsupported) {
@@ -270,8 +281,30 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 	if err != nil {
 		return nil, err
 	}
+	from := r.lossMark.at
+	if r.lossLastRead {
+		from = r.lossLast
+	}
 	r.lossLast, r.lossLastRead = now, true
-	return now.Since(r.lossMark.at), nil
+	return now.Charged(r.lossMark.at, r.lossRunBase, from), nil
+}
+
+// captureTaintsTheSet reports whether, under the proven switch, the agent's
+// counts as the set's last test ended carry a loss that taints every later
+// test of the set (a kind that is not a test's own, PerTest), judged or not.
+// The counts only grow and each test is charged them from the set's mark
+// (testCaptureLosses), so every test a --retry-passing-test cycle ran again
+// would be charged that loss, the tests that ran clean before it included.
+func (r *Replayer) captureTaintsTheSet() bool {
+	if !provenswitch.On() || !r.lossMark.known || !r.lossLastRead {
+		return false
+	}
+	for _, c := range r.lossLast.SinceWithin(r.lossMark.at, r.lossRunBase) {
+		if !c.Kind.PerTest() {
+			return true
+		}
+	}
+	return false
 }
 
 // endCaptureLosses reads, at a test set's end under the proven switch, what
@@ -302,10 +335,20 @@ func (r *Replayer) endCaptureLosses(ctx context.Context) (models.CaptureLosses, 
 	if lastRead {
 		from = last
 	}
-	// Not the PID-map refusals: the set's PID-map check (pidMapCaptureIncomplete)
-	// reports those, once.
+	// What keploy cannot capture at all over a connection that outlives
+	// tests: only what is new since the set's last read (its tests already
+	// carry the rest), counted from the run's base when no test read. A
+	// standing unix_unseen is always new (no mark takes it away): such a set
+	// is not judged. Every other kind, an abandoned TLS handshake too, from
+	// the set's last read or its mark (SinceWithin).
+	notFrom := r.lossRunBase
+	if lastRead {
+		notFrom = last
+	}
+	// Not the PID-map refusals: the set's PID-map check
+	// (pidMapCaptureIncomplete) reports those, once.
 	var out models.CaptureLosses
-	for _, l := range now.Since(from) {
+	for _, l := range now.SinceWithin(from, notFrom) {
 		if l.Kind != models.CaptureLossPIDMap && l.Kind != models.CaptureLossPIDMapExcluded {
 			out = append(out, l)
 		}

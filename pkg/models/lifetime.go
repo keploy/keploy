@@ -125,6 +125,9 @@ func (c ConsumeMode) String() string {
 //     its Metadata["type"] tag.
 //
 // Precedence (applied top-to-bottom; first match wins):
+//  0. A window-bound kind (a connection failure) → LifetimePerTest; a mock
+//     whose recorder stated its lifetime (MetadataLifetimeKey) → as stated,
+//     and none of the rules below applies to it.
 //  1. Kind == MySQL AND first request is a connection-alive command
 //     with an input-independent response (COM_PING, COM_STATISTICS,
 //     COM_DEBUG, COM_RESET_CONNECTION) → LifetimeSession. Applied
@@ -154,6 +157,11 @@ func (c ConsumeMode) String() string {
 // recorders began tagging explicitly. The counter is the operator-
 // visible signal (surfaced at replay completion); per-call logging is
 // deliberately avoided because DeriveLifetime runs on every mock load.
+//
+// Last, a call declared shared (SetSessionCalls, keploy.yaml sessionCalls)
+// that its recorder stated per-test is session: every test may be served it.
+// A mock recorded before lifetimes were stated keeps the lifetime the rules
+// above give it, declared or not.
 func (m *Mock) DeriveLifetime() {
 	// Idempotent short-circuit. LifetimeDerived is distinct from the
 	// Lifetime field itself because LifetimePerTest IS the zero value
@@ -174,6 +182,14 @@ func (m *Mock) DeriveLifetime() {
 // operators read as how many such mocks a replay loaded: false for a look at
 // a mock that is not loaded to be served (StatefulSequenceKey).
 func (m *Mock) derive(count bool) {
+	m.deriveLifetime(count)
+	if m.TestModeInfo.Lifetime == LifetimePerTest && m.StatesLifetime() && declaredSessionCall(m) {
+		m.TestModeInfo.Lifetime = LifetimeSession
+	}
+}
+
+// deriveLifetime is derive without the declared session calls.
+func (m *Mock) deriveLifetime(count bool) {
 	defer func() { m.TestModeInfo.LifetimeDerived = true }()
 
 	// A window-bound kind (a connection failure) is per-test whatever its tag,
@@ -182,6 +198,27 @@ func (m *Mock) derive(count bool) {
 	// First, so no later rule can promote it.
 	if WindowBound(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimePerTest
+		return
+	}
+
+	// A recorder that states each mock's lifetime itself (MetadataLifetimeKey)
+	// is authoritative: none of the rules below, written for recordings that
+	// predate it, applies. In particular the kind fallbacks (rules 4 and 5),
+	// which make every HTTP, HTTP/2, MySQL and Generic data mock reusable
+	// across tests, do not: a data mock it states per-test is served to its
+	// own test only.
+	//
+	// A stated per-test HTTP mock is still the data of a stateful dependency
+	// whose repeated identical requests advance through their recorded
+	// responses (a counter, a created-then-read row): it keeps the
+	// cursor+saturate consumption, within the pool of the test it was
+	// recorded in. The lifetime decides which test may be served a
+	// recording; the cursor decides how its repeats are served.
+	if lt, ok := statedLifetime(m); ok {
+		m.TestModeInfo.Lifetime = lt
+		if lt == LifetimePerTest && m.Kind == HTTP {
+			m.TestModeInfo.Consume = ConsumeCursorSaturate
+		}
 		return
 	}
 
@@ -462,6 +499,84 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 		return false
 	}
 	return IsMySQLSessionReusableCommandType(hdr.Type)
+}
+
+// MetadataLifetimeKey is the Spec.Metadata key in which a recorder states the
+// lifetime of each mock it records, with one of the MetadataLifetime* values.
+// A mock that carries it was recorded by a recorder that classifies every mock
+// it records, and DeriveLifetime takes its value as given (statedLifetime);
+// a mock without it predates that recorder, and keeps the classification it
+// always had. The key is additive: Spec.Metadata["type"] keeps the value
+// older replayers read.
+const MetadataLifetimeKey = "lifetime"
+
+// The values of MetadataLifetimeKey.
+const (
+	// MetadataLifetimePerTest: data of the test it was recorded in.
+	MetadataLifetimePerTest = "perTest"
+	// MetadataLifetimeSession: reusable in every test (handshakes, auth,
+	// connection-independent shared traffic).
+	MetadataLifetimeSession = "session"
+	// MetadataLifetimeConnection: reusable on the connection it was recorded
+	// on (Spec.Metadata["connID"]), as a prepared statement is.
+	MetadataLifetimeConnection = "connection"
+)
+
+// StatesLifetime reports whether m's recorder stated its lifetime
+// (MetadataLifetimeKey) with a value DeriveLifetime takes as given.
+func (m *Mock) StatesLifetime() bool {
+	_, ok := statedLifetime(m)
+	return ok
+}
+
+// ReusableByStatementOnly reports whether m is session or connection lifetime
+// only because its recorder stated so (MetadataLifetimeKey), where its type
+// tag and its command would make it per-test: a MySQL SET, BEGIN or COMMIT,
+// or a prepared statement's CLOSE or RESET, tagged "mocks". A recording
+// attributes such a mock as it did before lifetimes were stated (owned by the
+// test whose window holds it, mapped to that test, pruned with a duplicate
+// request's); the statement decides how a replay serves it.
+func (m *Mock) ReusableByStatementOnly() bool {
+	lt, ok := statedLifetime(m)
+	if !ok || lt == LifetimePerTest {
+		return false
+	}
+	switch m.Spec.Metadata["type"] {
+	case "config", "connection":
+		return false
+	}
+	return !(m.Kind == MySQL && mysqlIsSessionReusableCommand(m))
+}
+
+// statedLifetime is the lifetime m's recorder stated (MetadataLifetimeKey),
+// and whether it stated a known one. A connection lifetime with no connID to
+// scope it to is served as session, as a "connection" type tag is.
+//
+// Only the kinds whose recorders state it this way are read: HTTP, HTTP/2 and
+// MySQL. The Postgres v3 recorder writes the same key for its own replayer,
+// which reads it to build its tiers, and DeriveLifetime derives a Postgres
+// mock from its type tag, as it always did.
+func statedLifetime(m *Mock) (Lifetime, bool) {
+	if m.Spec.Metadata == nil {
+		return LifetimePerTest, false
+	}
+	switch m.Kind {
+	case HTTP, HTTP2, MySQL:
+	default:
+		return LifetimePerTest, false
+	}
+	switch m.Spec.Metadata[MetadataLifetimeKey] {
+	case MetadataLifetimePerTest:
+		return LifetimePerTest, true
+	case MetadataLifetimeSession:
+		return LifetimeSession, true
+	case MetadataLifetimeConnection:
+		if m.Spec.Metadata["connID"] != "" {
+			return LifetimeConnection, true
+		}
+		return LifetimeSession, true
+	}
+	return LifetimePerTest, false
 }
 
 // IsMySQLSessionReusableCommandType reports whether a MySQL command

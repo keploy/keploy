@@ -40,13 +40,62 @@ func (m *mockService) captureLossBaseline(ctx context.Context) lossBase {
 	return lossBase{at: at, checked: true, err: err}
 }
 
+// UnchargedLossReader is an optional Instrumentation extension: what the
+// agent could not capture since the run began that no test was charged with
+// (a loss after the last test ended).
+type UnchargedLossReader interface {
+	GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
+}
+
+// runLosses is, for a record that is judged, what the agent could not
+// capture that no test was charged with: no recording holds what it carried,
+// so judging fails the run on it (design v14 §7.5). Read once the run's last
+// test has ended, before the agent may stop. What keploy cannot capture at
+// all is left out (NotJudged's). An agent that cannot say which losses no
+// test was charged with leaves every loss of the run as the run's (lost, and
+// the PID-map refusals refused): judging then fails the run rather than pass
+// on a guess. When the run's own count could not be read either (lostErr),
+// what was lost after the last test is unknown: that is the error, and
+// judging fails the run on it as on a loss.
+func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.CaptureLosses, lostErr error, refused models.PIDMapRefusals) (models.CaptureLosses, error) {
+	if !base.checked {
+		return nil, nil
+	}
+	var unchargedErr error
+	if reader, ok := m.instrumentation.(UnchargedLossReader); ok {
+		un, err := reader.GetUnchargedCaptureLosses(ctx)
+		if err == nil {
+			judged, _ := un.Split()
+			return judged, nil
+		}
+		unchargedErr = err
+		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", zap.Error(err))
+	}
+	all := append(models.CaptureLosses(nil), lost...)
+	if refused.Target > 0 {
+		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete()})
+	}
+	if refused.Excluded > 0 {
+		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete()})
+	}
+	switch {
+	case lostErr != nil && unchargedErr != nil:
+		return all, fmt.Errorf("%w; nor which of them no test was charged with: %v", lostErr, unchargedErr)
+	case lostErr != nil:
+		return all, lostErr
+	}
+	return all, nil
+}
+
 // captureLossesDuring is what the agent could not capture while the test
 // command ran, every kind but the PID-map refusals (the PID-map check reports
-// those): a TLS handshake a client aborted against keploy's CA, a STARTTLS
-// upgrade keploy could not make, a parser stall or dropped bytes. Under the proven
-// switch every test after such a loss already failed with it; this is the
-// run's own verdict, which also covers a loss after the last test. An error
-// is a count that could not be read, at the start or now.
+// those): a client-side TLS handshake with keploy's proxy that failed other
+// than by the client hanging up, a STARTTLS upgrade keploy could not make, a
+// parser stall or dropped bytes. Under the proven switch the test running at
+// such a loss already failed with it, and every later one too but for a
+// failed handshake, which is only its own test's; this is the run's own
+// verdict, which also covers a loss outside every test. An error is a count
+// that could not be read, at the start or now.
 func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil

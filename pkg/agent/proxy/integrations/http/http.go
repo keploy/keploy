@@ -313,9 +313,14 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 	}
 
+	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
+	// type tag older replayers read: an exchange is the data of the test it
+	// was made in, a recordOne representative is served to every test.
 	ptLifetime := models.LifetimePerTest
+	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
 	if ptRecordOne {
 		ptLifetime = models.LifetimeSession
+		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
 	newMock := &models.Mock{
 		Version: models.GetVersion(),

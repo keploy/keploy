@@ -1634,7 +1634,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 					"timestamp falls outside the outer test window will be dropped rather than promoted "+
 					"across tests. If your replays start reporting missing mocks after an upgrade, this "+
 					"is likely why. To opt out: set KEPLOY_STRICT_MOCK_WINDOW=0 in the environment, OR "+
-					"test.strictMockWindow: false in keploy.yaml.",
+					"test.strictMockWindow: false in keploy.yaml. A recording whose recorder stated each "+
+					"mock's lifetime (spec.metadata.lifetime) serves each test its own calls in every mode: "+
+					"declare an HTTP call every test may make in keploy.yaml (sessionCalls), or record the "+
+					"test set again.",
 				zap.Bool("viaPerCallFlag", params.StrictMockWindow),
 				zap.Bool("viaEnvOverride", !params.StrictMockWindow && strictEnabled),
 				zap.String("escape_hatch_env", "KEPLOY_STRICT_MOCK_WINDOW=0"),

@@ -242,6 +242,9 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		if isTLS {
 			clientConn, _, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
 			if err != nil {
+				// The handshake's own error, as before: the callers
+				// above tell a client's EOF apart by identity.
+				err = pTls.HandshakeCause(err)
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
 			}

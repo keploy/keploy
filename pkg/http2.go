@@ -696,12 +696,19 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	//
 	// APITimeout is the same knob the HTTP replay path uses. Zero means the
 	// caller did not set one, so fall back rather than leaving it unbounded.
-	timeout := time.Duration(cfg.APITimeout) * time.Second
-	if timeout <= 0 {
-		timeout = defaultGrpcCallTimeout
+	//
+	// Unbounded (the proven switch, and no apiTimeout of the user's) sets no
+	// clock: the drain ends on the app's end of the stream (rule 15, row
+	// W1). A stream the app holds open then waits for the run's own bound.
+	if !cfg.Unbounded {
+		timeout := time.Duration(cfg.APITimeout) * time.Second
+		if timeout <= 0 {
+			timeout = defaultGrpcCallTimeout
+		}
+		var cancelCall context.CancelFunc
+		ctx, cancelCall = context.WithTimeout(ctx, timeout)
+		defer cancelCall()
 	}
-	ctx, cancelCall := context.WithTimeout(ctx, timeout)
-	defer cancelCall()
 
 	// Create context with metadata
 	callCtx := metadata.NewOutgoingContext(ctx, md)

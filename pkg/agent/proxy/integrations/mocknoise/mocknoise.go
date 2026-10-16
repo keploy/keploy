@@ -39,6 +39,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Adapter is the per-protocol contract for plugging into the shared mock-noise
@@ -155,7 +156,14 @@ func (e *Engine) Detect(m *models.Mock, liveBody []byte, userNoise map[string][]
 		return nil, false
 	}
 	recorded, ok := e.adapter.RecordedBody(m)
-	if !ok {
+	return e.DetectRecorded(m, recorded, ok, liveBody, userNoise)
+}
+
+// DetectRecorded is Detect with m's recorded body given (ok false: it has
+// none), for a parser that compares a recording as the live request reads it
+// (StrictRejectRecorded): what it learns is what strict then compares.
+func (e *Engine) DetectRecorded(m *models.Mock, recorded []byte, ok bool, liveBody []byte, userNoise map[string][]string) (drift map[string][]string, comparable bool) {
+	if !e.DetectionEnabled() || !ok {
 		return nil, false
 	}
 	// Learn pass (JSON bodies): narrow learning to VALUE drift only
@@ -215,6 +223,17 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 	if e == nil {
 		return true, nil
 	}
+	recorded, ok := e.adapter.RecordedBody(m)
+	return e.StrictRejectRecorded(m, recorded, ok, liveBody, userNoise)
+}
+
+// StrictRejectRecorded is StrictReject with m's recorded body given (ok false:
+// it has none), for a parser that compares a recording as the live request
+// reads it.
+func (e *Engine) StrictRejectRecorded(m *models.Mock, recorded []byte, ok bool, liveBody []byte, userNoise map[string][]string) (allowed bool, drift map[string][]string) {
+	if e == nil {
+		return true, nil
+	}
 	stored := e.adapter.StoredNoise(m)
 	// Under strict enforcement every candidate is value-compared against its
 	// recorded body, even one with no learned req_body_noise — so a changed value
@@ -225,7 +244,6 @@ func (e *Engine) StrictReject(m *models.Mock, liveBody []byte, userNoise map[str
 	if !e.strict && len(stored) == 0 {
 		return true, nil
 	}
-	recorded, ok := e.adapter.RecordedBody(m)
 	if !ok {
 		return true, nil
 	}
@@ -346,11 +364,25 @@ func StripBodyPrefix(in map[string][]string) map[string][]string {
 	if len(in) == 0 {
 		return nil
 	}
+	proven := provenswitch.On()
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
+		// Under the proven switch the learn step also learns noise in a
+		// request's other parts (header.<name>, url.query.<name>,
+		// url.path.<i>; package matcher/learn), in the same store. None
+		// of them is a body path.
+		if proven && learnedOutsideBody(k) {
+			continue
+		}
 		out[strings.TrimPrefix(k, "body.")] = v
 	}
 	return out
+}
+
+// learnedOutsideBody reports whether a stored noise path names a part of the
+// request other than its body, as the learn step writes them.
+func learnedOutsideBody(path string) bool {
+	return strings.HasPrefix(path, "header.") || strings.HasPrefix(path, "url.")
 }
 
 // AddBodyPrefix returns a copy of in with "body." prepended to each key that

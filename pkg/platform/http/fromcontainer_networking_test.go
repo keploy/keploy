@@ -75,7 +75,7 @@ func TestAppNetworkingFromContainerPortSpecs(t *testing.T) {
 					HostConfig: &container.HostConfig{PortBindings: tc.bindings, PublishAllPorts: tc.publish},
 				},
 			})
-			ports, _, err := a.appNetworkingFromContainer(context.Background(), "app")
+			ports, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 			if err != nil {
 				t.Fatalf("appNetworkingFromContainer: %v", err)
 			}
@@ -96,7 +96,7 @@ func TestAppNetworkingPortSpecsAreParseable(t *testing.T) {
 			}},
 		},
 	})
-	ports, _, err := a.appNetworkingFromContainer(context.Background(), "app")
+	ports, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 	if err != nil {
 		t.Fatalf("appNetworkingFromContainer: %v", err)
 	}
@@ -118,12 +118,27 @@ func TestAppNetworkingFromContainerSkipsPredefinedNetworks(t *testing.T) {
 			"bridge": {}, "host": {}, "none": {}, "backend": {}, "frontend": {},
 		}},
 	})
-	_, networks, err := a.appNetworkingFromContainer(context.Background(), "app")
+	_, networks, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 	if err != nil {
 		t.Fatalf("appNetworkingFromContainer: %v", err)
 	}
 	// Sorted so a re-run produces the same agent command.
 	if !reflect.DeepEqual(networks, []string{"backend", "frontend"}) {
 		t.Errorf("networks = %v, want the user networks only, sorted", networks)
+	}
+}
+
+// A --from-container app's host entries are read off it: its replacement
+// cannot carry them under the agent's network mode, so the agent does.
+func TestAppNetworkingFromContainerHostEntries(t *testing.T) {
+	a := agentFor(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{
+		HostConfig: &container.HostConfig{ExtraHosts: []string{"db.test:10.1.2.3", "host.docker.internal:host-gateway"}},
+	}})
+	_, _, hosts, err := a.appNetworkingFromContainer(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("appNetworkingFromContainer: %v", err)
+	}
+	if want := []string{"db.test:10.1.2.3", "host.docker.internal:host-gateway"}; !reflect.DeepEqual(hosts, want) {
+		t.Fatalf("hosts %q, want %q", hosts, want)
 	}
 }

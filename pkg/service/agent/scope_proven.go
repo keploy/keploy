@@ -59,6 +59,11 @@ type provenWire struct {
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
 	charged []models.UnmatchedCall
+	// lossesCharged is what the tests' ends charged of what the agent could
+	// not capture since the run began (chargeCaptureLosses), kind by kind:
+	// what the run lost beyond it was charged to no test
+	// (UnchargedCaptureLosses).
+	lossesCharged models.CaptureLosses
 	// claim is the live claim; zero when none.
 	claim claimant
 	// claims is every claim of the session, in order: from each one's time
@@ -97,8 +102,11 @@ type provenWire struct {
 	// mocked-local rows, NoteLive and NoteMocked).
 	topology topologyRows
 	// losses is the run's capture-loss counts at its start, which each
-	// test's end counts from (capture_loss.go).
-	losses captureLossMark
+	// test's end counts from (capture_loss.go); testLosses the counts as the
+	// previous test ended, which a test's own kinds (models.PerTest) count
+	// from (nil before the first test's end: the run's mark).
+	losses     captureLossMark
+	testLosses models.CaptureLosses
 }
 
 // claimant is the process that claimed the run: a pid, and its start time,
@@ -282,6 +290,18 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
 		}
 	}
+	if prev != me {
+		// A failed TLS handshake before this claim is the run's -- charged
+		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
+		// which counts every loss while the command ran -- as its misses
+		// are: not this process's first test's. A read that fails leaves
+		// that test to count from the previous test's end.
+		if now, err := a.CaptureLosses(ctx); err == nil {
+			a.provenMu.Lock()
+			a.proven.testLosses = now
+			a.provenMu.Unlock()
+		}
+	}
 	a.provenMu.Lock()
 	a.proven.claim = me
 	newClaim := prev != me || a.proven.key != key
@@ -298,6 +318,16 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		containerkey.Default.BeginInstance()
 	}
 	if a.replaying() {
+		// A new claim of the key (a test process run again: a retried
+		// package, --rerun-fails) is a new scope: its calls outside every
+		// test start afresh, as a test begun again does (decision 31's
+		// ruling on re-runs). A first claim has consumed nothing yet.
+		if newClaim {
+			if err := a.restartKey(key); err != nil {
+				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+					"keploy could not start the calls of "+key+" made outside its tests afresh: "+err.Error(), "check the agent's log")
+			}
+		}
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
@@ -544,7 +574,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// left open, it would be blamed on the next begin
 		// (one_test_at_a_time).
 		if open == id {
-			if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
+			if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, at, serr.Message); err != nil {
 				a.logger.Warn("could not judge a test whose end keploy refused", zap.String("test", id), zap.Error(err))
 			}
 		}
@@ -565,7 +595,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		// once), and the run names the cause. An end with no test open
 		// refuses only that call.
 		if open != "" {
-			if _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
+			if _, _, err := a.closeOpen(ctx, open, models.ScopeOutcomeFailed, at, msg); err != nil {
 				a.logger.Warn("could not judge a test another test's end left open", zap.String("test", open), zap.Error(err))
 			}
 			a.NoteRefusal(serr.Refusal())
@@ -576,7 +606,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if outcome == "" {
 		outcome = models.ScopeOutcomeFailed
 	}
-	ev, err := a.closeOpen(ctx, id, outcome, at, "")
+	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its
 		// verdict is keploy's not-judged); a failure to end it is the run's
@@ -585,8 +615,10 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
 	// Record instances never answer fail (design v14 §5.3): a record's
-	// evidence (capture losses) is for judging, on the window.
-	if a.replaying() && ev != nil && (!ev.Empty() || ev.Reason != "") {
+	// evidence (capture losses) is for judging, on the window. Nor does a
+	// replayed test that is only not judged (decision 20): its window says
+	// so, and its outcome stands.
+	if a.replaying() && outcome == models.ScopeOutcomeFailed && ev != nil && (!ev.Empty() || ev.Reason != "") {
 		return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionFail, Reason: ev.Reason}, nil
 	}
 	return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
@@ -594,7 +626,7 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 
 // closeOpen ends the open test id (endTest) and clears it, whatever happens
 // on the way. With the wire held.
-func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	defer func() {
 		a.provenMu.Lock()
 		closed := a.proven.open == id
@@ -614,7 +646,7 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 // failOpen ends, as failed, a test whose harness can no longer end it. With
 // the wire held.
 func (a *Agent) failOpen(ctx context.Context, id string, why string) {
-	if _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
+	if _, _, err := a.closeOpen(ctx, id, models.ScopeOutcomeFailed, time.Now(), why); err != nil {
 		a.logger.Warn("could not judge a test whose process went away", zap.String("test", id), zap.Error(err))
 	}
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
@@ -624,7 +656,7 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 // read that failed is an error, and the test is recorded failed with it: a
 // test keploy could not judge never passes. A test that skipped itself is
 // not failed for the recorded calls it then never made.
-func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, error) {
+func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
 	// The test's calls are settled before it is judged (settle_proven.go):
@@ -724,14 +756,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if readErr == nil {
 			readErr = err
 		}
+		outcome = models.ScopeOutcomeFailed
 	}
-	return ev, readErr
+	return ev, outcome, readErr
 }
 
 // chargeCaptureLosses adds to a test's evidence what the agent could not
-// capture since the run began (design v14 §3.2): a loss taints the test open
-// when it happened and every later one. In a replay the test then fails, with
-// the losses in its reason; a record keeps the evidence on the window for
+// capture that the test is charged (design v14 §3.2): a loss since the run
+// began taints the test open when it happened and every later one, but for a
+// test's own kinds (models.PerTest: a failed TLS handshake), which are the
+// test's they happened in. In a replay the test then fails, with the losses
+// in its reason; a record keeps the evidence on the window for
 // judging and answers as before (record instances never fail a test). A read
 // of the losses that failed is a test keploy cannot judge: failed in a
 // replay, and said on the window in a record.
@@ -742,11 +777,40 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 // the losses'.
 func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.ScopeEvidence, outcome string, fromEvidence bool, beganAt time.Time) (*models.ScopeEvidence, string) {
 	a.provenMu.Lock()
-	mark := a.proven.losses
+	mark, test := a.proven.losses, a.proven.testLosses
 	a.provenMu.Unlock()
-	lost, err := a.captureLossesSince(ctx, mark)
+	lost, now, err := a.captureLossesSince(ctx, mark, test)
+	if err == nil && now != nil {
+		// The next test's own losses count from here.
+		a.provenMu.Lock()
+		a.proven.testLosses = now
+		a.provenMu.Unlock()
+	}
 	if err == nil && len(lost) == 0 {
 		return ev, outcome
+	}
+	if err == nil {
+		// What the tests have been charged, kind by kind: a taint is
+		// charged whole to every test from it on, so the most any test's
+		// end saw since the run began (tests of parallel instances end
+		// concurrently, and their reads land in either order); a test's
+		// own kind (PerTest) only to the test it happened in, so the sum
+		// of what each test was charged -- what a test process's claim
+		// kept from its first test is charged to none.
+		var taint, own models.CaptureLosses
+		for _, c := range sinceRun(now, mark) {
+			if !c.Kind.PerTest() {
+				taint = append(taint, c)
+			}
+		}
+		for _, c := range lost {
+			if c.Kind.PerTest() {
+				own = append(own, c)
+			}
+		}
+		a.provenMu.Lock()
+		a.proven.lossesCharged = a.proven.lossesCharged.Max(taint).Plus(own)
+		a.provenMu.Unlock()
 	}
 	if ev == nil {
 		ev = &models.ScopeEvidence{}
@@ -760,7 +824,20 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		}
 		return ev, outcome
 	}
-	ev.CaptureIncomplete = lost
+	// A call keploy cannot capture at all (decision 20: over a Unix socket)
+	// leaves the test without a verdict, never failed: it is on the window,
+	// and in the reason, but the outcome stands.
+	judged, notJudged := lost.Split()
+	ev.CannotCapture = notJudged
+	if len(judged) == 0 {
+		if ev.Reason == "" {
+			ev.Reason = "keploy: " + notJudged.NotJudgedText() + "."
+		} else {
+			ev.Reason = strings.TrimSpace(ev.Reason + " Also " + notJudged.NotJudgedText() + ".")
+		}
+		return ev, outcome
+	}
+	ev.CaptureIncomplete = judged
 	switch {
 	case fromEvidence:
 		// keploy's text for the evidence, written again with the losses
@@ -772,7 +849,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		}
 		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
 	default:
-		ev.Reason = strings.TrimSpace("keploy: " + lost.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		ev.Reason = strings.TrimSpace("keploy: " + judged.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
 	if a.replaying() {
 		outcome = models.ScopeOutcomeFailed
@@ -802,8 +879,10 @@ func (a *Agent) failClosedWindow(id, why string) {
 }
 
 // testEvidence is what fails the open test id at its end: its data-plane
-// misses (DNS is protocol-phase), and the test mocks it did not consume while
-// it was open (exact serving tells which). A failed read is an error.
+// misses (models.UnmatchedCall.CountsAgainstTest: DNS is protocol-phase, and
+// a connection that sent nothing made no call), and the test mocks it did not
+// consume while it was open (exact serving tells which). A failed read is an
+// error. Every miss is still charged to the run, so its next step is said.
 func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
@@ -813,7 +892,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses)
 	for _, m := range misses {
-		if strings.EqualFold(m.Protocol, "DNS") {
+		if !m.CountsAgainstTest() {
 			continue
 		}
 		ev.Misses = append(ev.Misses, sanitizedMiss(m))
@@ -1029,7 +1108,8 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, and the call's shape
+// the matcher's next step, when it happened, why it missed (the learn step's
+// reason, in record's full round), and the call's shape
 // (models.MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?". No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
@@ -1041,7 +1121,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
-		Kind: m.Kind, Recorded: m.Recorded}
+		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.

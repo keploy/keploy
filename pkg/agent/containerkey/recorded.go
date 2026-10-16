@@ -1,11 +1,19 @@
 package containerkey
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"context"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // RecordedTally counts, over a test set's mocks, the containers each
 // recorded group (one key in one recorded scope) came from.
 type RecordedTally struct {
 	groups map[recordedGroup]map[string]bool
+	// named: a mock of the set carries a container stamp
+	// (RecordedContainer), whether or not its key could be read: the set
+	// was recorded naming containers.
+	named bool
 }
 
 // Add counts m: a mock of a container, stamped with its key, instance and
@@ -16,6 +24,9 @@ func (t *RecordedTally) Add(m *models.Mock) {
 	}
 	md := m.Spec.Metadata
 	key, inst, scope := md[MetadataKey], md[InstanceKey], md[ScopeKey]
+	if inst != "" {
+		t.named = true
+	}
 	if key == "" || inst == "" {
 		return
 	}
@@ -43,6 +54,21 @@ func (k *Keyer) SetRecorded(t *RecordedTally) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.recorded = amb
+	k.recordedNamed = t.named
+}
+
+// RecordingNamesContainers reports whether the test set the agent was given
+// (SetRecorded) was recorded naming containers — a mock of it, of any
+// destination, carries a container stamp — as the keyer of the connection
+// ctx carries knows it. False with no keyer in ctx, or before any set.
+func RecordingNamesContainers(ctx context.Context) bool {
+	ref, ok := ctx.Value(ctxKey{}).(connRef)
+	if !ok || ref.k == nil {
+		return false
+	}
+	ref.k.mu.Lock()
+	defer ref.k.mu.Unlock()
+	return ref.k.recordedNamed
 }
 
 // RecordedAmbiguous reports whether m is a mock of a container key that, in

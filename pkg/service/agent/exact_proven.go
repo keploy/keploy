@@ -98,6 +98,20 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// restartKey starts key's calls outside every test afresh on the proxy
+// (coreAgent.ExactKeyRestarter), when the proxy can: one that cannot keeps
+// what they consumed.
+func (a *Agent) restartKey(key string) error {
+	r, ok := a.Proxy.(coreAgent.ExactKeyRestarter)
+	if !ok {
+		return nil
+	}
+	a.provenMu.Lock()
+	names := append([]string(nil), a.proven.pool[key]...)
+	a.provenMu.Unlock()
+	return r.RestartExactKey(key, names)
+}
+
 // serveTestExactly opens test id under exact serving: its test mocks, the
 // data-plane mocks of its mapping, in recorded order. A mapping that names a
 // mock the loaded recording does not have refuses: what the test owns cannot

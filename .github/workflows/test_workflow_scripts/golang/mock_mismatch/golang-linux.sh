@@ -12,13 +12,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 # `keploy report --format json` and --assert-dependencies) over BOTH of its
 # branches, using one recording:
 #
-#   phase 1-2 (steps 0-8)   the tier as an ordinary recording leaves it: every
-#                           dependency is session-tier, nothing is eligible, and
-#                           the honest verdict is NOT CHECKED;
-#   phase 3   (steps 9-11)  the same recording replayed with the per-test tier
-#                           in force, where the assertion RUNS: checked bit,
-#                           MISSING row, and the knob's OBSOLETE -> FAILED /
-#                           exit 0 -> non-zero delta.
+#   phase 1   (the default  the mutated recording replayed as an ordinary
+#   replay)                 user replays it: every test FAILS and the run
+#                           exits non-zero, whoever recorded it. The calls got
+#                           no recorded answer, so no test is demoted to
+#                           OBSOLETE, though a recording that states lifetimes
+#                           makes its calls per-test and so eligible;
+#   phase 2   (steps 0-8)   every dependency session-tier: as an older
+#                           recording's lax promotion leaves them, or, for a
+#                           recording that states lifetimes, as keploy.yaml's
+#                           sessionCalls declares the sample's pokeapi.co calls.
+#                           Nothing is eligible, and the honest verdict is NOT
+#                           CHECKED;
+#   phase 3   (steps 9-11)  the per-test tier in force, on a copy of the
+#                           recording whose tests' answers no longer match and
+#                           whose mappings each list a twin of the test's
+#                           call, which no call consumes, so that nothing
+#                           misses: the assertion RUNS (checked bit, MISSING
+#                           row), and the knob's OBSOLETE -> FAILED / exit 0 ->
+#                           non-zero delta.
 #
 # Neither phase is sufficient alone — a writer stuck at "checked" passes phase 3
 # and a writer stuck at "not checked" passes phase 1-2. Read the long comment
@@ -62,11 +74,23 @@ config_file="./keploy.yml"
 # `sed` silently patched nothing: the noise rule vanished and every
 # replay diffed on the fields it was meant to mask. Write what this
 # test needs instead of editing what the generator happened to print.
-cat > "$config_file" <<'KEPLOY_CFG'
+# write_config [declared]: declared adds the sessionCalls rule that makes the
+# sample's pokeapi.co calls session-tier (phase 2, on a recording that states
+# lifetimes; see the comment above step 0).
+write_config() {
+    cat > "$config_file" <<'KEPLOY_CFG'
 test:
     globalNoise:
         global: {"body": {"updated_at":[]}}
 KEPLOY_CFG
+    if [ "${1:-}" = declared ]; then
+        cat >> "$config_file" <<'KEPLOY_CFG'
+sessionCalls:
+    - host: "pokeapi.co"
+KEPLOY_CFG
+    fi
+}
+write_config
 
 send_request() {
     sleep 6
@@ -154,23 +178,16 @@ fi
 # Replay. The mutated mocks no longer match → keploy must report the unmatched
 # outgoing call.
 #
-# THIS RUN IS EXPECTED TO BE RED, for RESPONSE reasons. With no mock serving
-# /api/v2/ the app's outgoing call fails, so its responses drift from what was
-# recorded and the tests come back FAILED. Measured on this sample with this
-# tree's binary: every test FAILED and default_rc = 1.
+# THIS RUN IS RED, and is asserted red below. With no mock serving /api/v2/ the
+# app's outgoing call fails, so its responses drift from what was recorded and
+# every test comes back FAILED, with a non-zero exit, whoever recorded it.
 #
-# NOTE, because an earlier version of this comment claimed the opposite and it
-# is the first thing a reader hits: the OBSOLETE demotion does NOT happen in
-# this phase. Every dependency the mapping records here is session-tier, so
-# filteredExpectedNames is empty, isMockSubset returns true, mockSetMismatch is
-# false, and demoteToObsolete never fires. OBSOLETE appears only in phase 3,
-# where the tier flip makes the expectation list non-empty — see the comment
-# above step 9.
-#
-# default_rc is therefore NOT asserted on its own (step 6 says so too). It is
-# captured only as the BASELINE for step 7b, whose question is 'does turning
-# --assert-dependencies on change anything on a test set where it can assert
-# nothing?'.
+# On a recording made before lifetimes were stated every dependency is
+# session-tier, so the mock set never diverges and the demotion to OBSOLETE
+# never fires. On one that states them each test's call is per-test and its
+# mapped mock goes unconsumed, so its mock set diverges; it is still FAILED,
+# because a call of it got no recorded answer, which vetoes the demotion (a
+# demoted test would leave this red run green).
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
 default_rc=${PIPESTATUS[0]}
 
@@ -220,6 +237,32 @@ if [ "$mismatch_reported" != true ]; then
     exit 1
 fi
 
+# The default run is red: a non-zero exit, and every test FAILED, none
+# OBSOLETE or PASSED.
+statuses=$(yq -N '.tests[].status' "${reports[@]}" 2>/dev/null | sort | uniq -c | tr '\n' ' ')
+if [ "$default_rc" -eq 0 ] || [ -z "$statuses" ] || [ -n "$(yq -N '.tests[] | select(.status != "FAILED") | .test_case_id' "${reports[@]}")" ]; then
+    echo "::error::the default replay of the mutated recording must FAIL every test and exit non-zero, whoever recorded it: its calls got no recorded answer. It exited $default_rc with statuses: $statuses"
+    exit 1
+fi
+echo "✓ the default replay failed every test and exited $default_rc"
+
+# Phase 2 asserts the NOT CHECKED branch, which needs every dependency
+# session-tier. A recording made before lifetimes were stated is, as
+# recorded: the default run above is that run. A recording that states them
+# is replayed again with keploy.yaml declaring the sample's pokeapi.co calls
+# shared (sessionCalls), which makes them session-tier.
+if grep -q 'lifetime: perTest' ./keploy/test-set-*/mocks.yaml; then
+    rm -rf ./keploy/reports
+    write_config declared
+    "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_declared.txt
+    default_rc=${PIPESTATUS[0]}
+    if grep "WARNING: DATA RACE" test_logs_declared.txt; then
+        echo "::error::Race condition detected in the declared replay"
+        exit 1
+    fi
+    echo "phase 2 runs on the replay with the pokeapi.co calls declared shared (exit $default_rc)"
+fi
+
 # ---------------------------------------------------------------------------
 # Dependency assertions on the sync path (keploy-consumer-design-v2.md §7
 # slice 4): the DepResult writer, the `keploy report --format json` verdict
@@ -237,19 +280,23 @@ fi
 #     test, so "this test's window did not consume it" is not evidence of
 #     anything and asserting it would turn healthy tests RED at random.
 #
-# models.Mock.DeriveLifetime classifies an untagged (or non-canonically tagged)
-# HTTP / HTTP2 / Postgres / MySQL / Generic mock as SESSION tier. The HTTP
-# recorder tags its mocks "HTTP_CLIENT", which is non-canonical, so every mock
-# this sample records is session tier. Verified on a real recording of this very
-# sample:
+# This build's HTTP recorder states each mock's lifetime: per-test, the call
+# of the test that made it (Spec.Metadata["lifetime"]). A call every test may
+# be served is declared in keploy.yaml (sessionCalls), and DeriveLifetime
+# classifies the mocks it covers as SESSION tier; such a recording is replayed
+# for this phase with the sample's pokeapi.co calls declared (above). A
+# recording made by an older recorder states nothing, and DeriveLifetime
+# classifies its mocks (tagged "HTTP_CLIENT", non-canonical) as session tier by
+# its lax promotion (rule 5). Either way every mock this sample records is
+# session tier here:
 #
 #   name=mock-2 kind=Http lifetime="session" metaType="HTTP_CLIENT" reusable=true
 #   name=mock-3 kind=Http lifetime="session" metaType="HTTP_CLIENT" reusable=true
 #
-# So for the tier as recorded, the honest per-test dependency verdict is NOT
-# CHECKED: mappings.yaml exists and lists those mocks, the assertion is armed,
-# and every entry is filtered out before it can be asserted. In THIS phase there
-# is no missing-row path to exercise and --assert-dependencies cannot fail
+# So for that tier, the honest per-test dependency verdict is NOT CHECKED:
+# mappings.yaml exists and lists those mocks, the assertion is armed, and every
+# entry is filtered out before it can be asserted. In THIS phase there is no
+# missing-row path to exercise and --assert-dependencies cannot fail
 # anything.
 #
 # An earlier version of this suite asserted the opposite (a MISSING dep row, a
@@ -350,7 +397,7 @@ echo "✓ keploy report --format junit emitted a clean XML document"
 #    dependencies_consumed: 0, effects: []`) and exactly the false green the
 #    whole projection exists to close.
 if ! jq -es 'length > 0 and all(.dependencies_checked == false)' ndjson_out.txt > /dev/null; then
-    echo "::error::a verdict reported dependencies_checked=true, but every mock this sample records is session-tier and therefore ineligible for the per-test assertion. Either the tier classification changed (check the recorder's metadata type tag) or the writer is claiming an assertion it did not run."
+    echo "::error::a verdict reported dependencies_checked=true, but every mock this sample records is session-tier in this phase (a recording made before lifetimes were stated, or one replayed with its pokeapi.co calls declared in sessionCalls) and therefore ineligible for the per-test assertion. Either the tier classification changed (check the sessionCalls rule, and the recorder's metadata type and lifetime) or the writer is claiming an assertion it did not run."
     jq -s 'map({test_case_id, status, dependencies_checked, dependencies_consumed, effects: (.effects // [] | length)})' ndjson_out.txt
     exit 1
 fi
@@ -542,10 +589,21 @@ echo "✓ the verdict contract is identical with the knob on"
 # the flag. Between them the two phases bracket the writer: neither a
 # permanently-true nor a permanently-false `dependencies_checked` can pass.
 #
-# HOW THE TIER CHANGES, AND WHY THIS IS NOT A FAKE. Nothing is re-recorded and
-# no file is edited: the mocks, the mappings and the mutation are the same bytes
-# phases 1-2 just ran against. The only difference is KEPLOY_STRICT_MOCK_WINDOW=1
-# in the environment, which is a documented, product-supported knob.
+# HOW THE TIER CHANGES, AND WHY THIS IS NOT A FAKE. Nothing is re-recorded.
+# keploy.yml declares no sessionCalls, and KEPLOY_STRICT_MOCK_WINDOW=1 is in
+# the environment; both are documented, product-supported settings. A
+# recording whose recorder stated lifetimes is per-test without the
+# declaration; an older one, once the lax promotion goes too:
+#
+# WHY A COPY OF THE RECORDING, NOT THE MUTATED ONE. The mutated recording's
+# calls get no recorded answer, and a miss vetoes the demotion to OBSOLETE on
+# its own (phase 1): there would be no demotion for the knob to veto. This
+# phase replays a copy of the recording as recorded (pristine-run) in which
+# each test's recorded answer no longer matches (its status code is changed)
+# and each test's mapping lists a twin of its recorded call. The call is
+# answered, by the recording or its twin, so nothing misses; the other is
+# never consumed, so the mock set diverges, and the failed answer is demoted
+# to OBSOLETE unless a veto flag says otherwise.
 #
 # models.Mock.DeriveLifetime applies its precedence list top-to-bottom. The HTTP
 # recorder tags its mocks `type: HTTP_CLIENT`, which is neither "config" nor
@@ -565,12 +623,12 @@ echo "✓ the verdict contract is identical with the knob on"
 # shape every recording takes when a recorder starts tagging per-test tier
 # properly, so these assertions are the ones that will outlive the compat rule.
 #
-# WHY THE MISSING ROW IS DETERMINISTIC, not a timing race: the mocks were
-# mutated at the top of this script to an /api/v0-mismatch/ path the app never
-# requests, so the live call cannot match them however the windows fall. And the
-# EXPECTATION is read from mappings.yaml, not from the window-filtered set, so
-# even a mock dropped by strict windowing is still expected and still reported
-# unconsumed. "Not consumed" here is forced by construction.
+# WHY THE MISSING ROW IS DETERMINISTIC, not a timing race: each test makes one
+# call and its mapping lists two identical recordings of it, so exactly one is
+# never consumed however the windows fall. And the EXPECTATION is read from
+# mappings.yaml, not from the window-filtered set, so even a mock dropped by
+# strict windowing is still expected and still reported unconsumed. "Not
+# consumed" here is forced by construction.
 # ---------------------------------------------------------------------------
 
 # 9. THE CHECKED BRANCH, DEFAULT MODE. Same recording, per-test tier in force:
@@ -578,8 +636,29 @@ echo "✓ the verdict contract is identical with the knob on"
 #    so. `dependencies_checked` must be true, and — this is the invariant step 4
 #    asserts from the other direction — consuming none of an eligible set means
 #    every one of them is MISSING, so `effects` cannot be empty.
-rm -rf ./keploy/reports
-KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false 2>&1 | tee strict_logs.txt
+write_config
+rm -rf ./knob-run
+mkdir ./knob-run
+cp -a ./pristine-run/keploy ./knob-run/keploy
+# One file at a time: yq -i edits the first of several files only.
+for tc_file in ./knob-run/keploy/test-set-*/tests/*.yaml; do
+    yq -i '.spec.resp.status_code = 299' "$tc_file"
+done
+if grep -L 'status_code: 299' ./knob-run/keploy/test-set-*/tests/*.yaml | grep -q .; then
+    echo "::error::phase 3's copy of the recording kept a test's recorded status code; its answer would not fail"
+    exit 1
+fi
+for set_dir in ./knob-run/keploy/test-set-*; do
+    [ -f "$set_dir/mappings.yaml" ] || continue
+    twins=$(yq ea 'select(.kind == "Http") | .name += "-twin"' "$set_dir/mocks.yaml")
+    [ -n "$twins" ] && printf -- '---\n%s\n' "$twins" >> "$set_dir/mocks.yaml"
+    yq -i '.tests[].mock_entries |= (. + (map(select(.kind == "Http")) | map(.name = .name + "-twin")))' "$set_dir/mappings.yaml"
+done
+if ! grep -q -- '-twin' ./knob-run/keploy/test-set-*/mappings.yaml; then
+    echo "::error::no test's mapping lists a twin of its call; phase 3's copy of the recording was not built"
+    exit 1
+fi
+KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./knob-run --delay 7 --generateGithubActions=false 2>&1 | tee strict_logs.txt
 strict_rc=${PIPESTATUS[0]}
 
 if grep "WARNING: DATA RACE" strict_logs.txt; then
@@ -587,7 +666,7 @@ if grep "WARNING: DATA RACE" strict_logs.txt; then
     exit 1
 fi
 
-"$REPLAY_BIN" report --format json > ndjson_strict.txt 2> ndjson_strict_err.txt
+"$REPLAY_BIN" report --path ./knob-run --format json > ndjson_strict.txt 2> ndjson_strict_err.txt
 if [ ! -s ndjson_strict.txt ]; then
     echo "::error::keploy report --format json produced no NDJSON after the per-test-tier run"
     cat ndjson_strict_err.txt
@@ -611,7 +690,7 @@ fi
 missing_mapping=false
 for tcid in $(jq -r '.test_case_id' ndjson_strict.txt); do
     found=false
-    for mp in ./keploy/test-set-*/mappings.yaml; do
+    for mp in ./knob-run/keploy/test-set-*/mappings.yaml; do
         [ -e "$mp" ] || continue
         # Each mapping entry is `- id: <test>` followed by its mock_entry list;
         # awk keeps the two bound to the same entry (independent greps could
@@ -640,7 +719,7 @@ for tcid in $(jq -r '.test_case_id' ndjson_strict.txt); do
     fi
 done
 if [ "$missing_mapping" = true ]; then
-    for mp in ./keploy/test-set-*/mappings.yaml; do echo "--- $mp ---"; cat "$mp"; done
+    for mp in ./knob-run/keploy/test-set-*/mappings.yaml; do echo "--- $mp ---"; cat "$mp"; done
     exit 1
 fi
 echo "✓ every recorded test maps at least one dependency, so 'all(...)' below is a real quantifier"
@@ -660,7 +739,7 @@ fi
 #     matched=false, which is what a consumer's
 #     `checked && any(matched == false)` rule keys off.
 if ! jq -es 'length > 0 and all((.effects // []) | map(select(.matched == false)) | length > 0)' ndjson_strict.txt > /dev/null; then
-    echo "::error::the dependency assertion ran over the mutated mocks and reported no unexercised dependency. The mocks were rewritten to an /api/v0-mismatch/ path the app never requests, so every mapped per-test dependency MUST come back unconsumed."
+    echo "::error::the dependency assertion ran and reported no unexercised dependency. Each test's mapping lists two identical recordings of its one call, so one of them MUST come back unconsumed."
     jq -s 'map({test_case_id, dependencies_checked, dependencies_consumed, effects})' ndjson_strict.txt
     exit 1
 fi
@@ -670,7 +749,7 @@ echo "✓ with per-test-tier dependencies the assertion RAN and reported the van
 #     MISSING row as a row. `expected: consumed / actual: not consumed` is the
 #     literal shape the writer emits for a dependency that vanished.
 shopt -s nullglob
-strict_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+strict_reports=( ./knob-run/keploy/reports/test-run-*/test-set-*-report.yaml )
 shopt -u nullglob
 if [ ${#strict_reports[@]} -eq 0 ]; then
     echo "::error::the per-test-tier run wrote no test-set report"
@@ -727,8 +806,8 @@ echo "✓ the persisted report carries deps_checked: true and the MISSING depend
 #         pass for the wrong reason the day a pokeapi drift flips the baseline
 #         red too — and this suite mutates mocks on purpose, so that is a live
 #         possibility rather than a hypothetical.
-rm -rf ./keploy/reports
-KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --assert-dependencies --generateGithubActions=false 2>&1 | tee strict_assert_logs.txt
+rm -rf ./knob-run/keploy/reports
+KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./knob-run --delay 7 --assert-dependencies --generateGithubActions=false 2>&1 | tee strict_assert_logs.txt
 strict_assert_rc=${PIPESTATUS[0]}
 
 # 11pre. THE NEGATIVE CONTROL FOR STEP 7a, on the only run where it can fire.
@@ -753,14 +832,14 @@ fi
 echo "✓ the inert warning stays silent when the assertion can actually run"
 
 shopt -s nullglob
-strict_assert_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+strict_assert_reports=( ./knob-run/keploy/reports/test-run-*/test-set-*-report.yaml )
 shopt -u nullglob
 if [ ${#strict_assert_reports[@]} -eq 0 ]; then
     echo "::error::the per-test-tier --assert-dependencies run wrote no report"
     exit 1
 fi
 
-"$REPLAY_BIN" report --format json > ndjson_strict_assert.txt 2> ndjson_strict_assert_err.txt
+"$REPLAY_BIN" report --path ./knob-run --format json > ndjson_strict_assert.txt 2> ndjson_strict_assert_err.txt
 if [ ! -s ndjson_strict_assert.txt ]; then
     echo "::error::keploy report --format json produced no NDJSON after the per-test-tier --assert-dependencies run"
     cat ndjson_strict_assert_err.txt

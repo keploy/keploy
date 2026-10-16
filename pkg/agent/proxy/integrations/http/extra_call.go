@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -51,6 +52,58 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 		}
 	}
 	return max(n, 1)
+}
+
+// answeredDiag widens the diagnosis of a miss, under exact serving (the
+// proven switch), to the open test's answered mocks. Each test mock answers
+// once and is then in no read, so a call a test makes after the recording
+// it most resembles answered finds that recording nowhere: the miss would
+// name no closest recording ("no_mocks"), or a farther one, although the
+// test recorded one to say what differs from. The answered mocks compete
+// with the live pool's closest recording by the same rule (closerThan), the
+// live pool's first on a tie, and the diagnosis takes the closer. As in the
+// live pool, a mock that declares variable places is not compared strictly
+// (the variable pass's evidence reports those). They are only compared,
+// never served: the match already failed. diag is returned as
+// it is when exact serving is off, when the test has no answered mock, and
+// for a miss whose recording fit but whose variables did not hold (that is
+// what it reports). The caller leaves an extra call's diagnosis as the
+// match found it.
+func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations.MockMemDb, diag *matchDiag, headerNoise, bodyNoise map[string][]string, urlNoise []string) *matchDiag {
+	if !provenswitch.On() || (diag != nil && diag.variable != nil) {
+		return diag
+	}
+	er, ok := mockDb.(integrations.ExactConsumedReader)
+	if !ok {
+		return diag
+	}
+	_, answered := splitVariableMocks(FilterHTTPMocks(er.ConsumedTestMocks()))
+	if len(answered) == 0 {
+		return diag
+	}
+	live := liveDestination(ctx, input)
+	_, near, err := strictCompare(ctx, input, live, answered, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+	if err != nil {
+		return diag
+	}
+	var out matchDiag
+	if diag != nil {
+		out = *diag
+	}
+	if !near.closerThan(nearest{mock: out.closest, diffs: out.differs, route: out.closest != nil && out.phase == models.MatchPhaseStrict}) {
+		return diag
+	}
+	out.phase = models.MatchPhaseSchema
+	out.schemaMatched = nil
+	if near.route {
+		out.phase = models.MatchPhaseStrict
+		out.schemaMatched = []*models.Mock{near.mock}
+	}
+	out.pool = append(append(make([]*models.Mock, 0, len(out.pool)+len(answered)), out.pool...), answered...)
+	out.candidates = len(out.pool)
+	out.live = &live
+	out.closest, out.differs = near.mock, near.diffs
+	return &out
 }
 
 // answeredOnly is a read-only view of a test's answered mocks, for extraCall:

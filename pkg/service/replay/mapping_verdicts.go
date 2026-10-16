@@ -204,6 +204,17 @@ func leftRecordedMockUnconsumed(expected []models.MockEntry, consumed []models.M
 	return false
 }
 
+// markWrittenByKeployTest names keploy test as the source of doc's test
+// entries (models.MappingSourceKeployTest), when it has any: entries a replay
+// consumed, not what each test recorded, which under the proven switch do not
+// say what a test owns (provenMappings). A write of the startup section alone
+// keeps the file's source.
+func markWrittenByKeployTest(doc *models.Mapping) {
+	if doc != nil && len(doc.TestCases) > 0 {
+		doc.Source = models.MappingSourceKeployTest
+	}
+}
+
 // passingEntriesOf is the mapping document a run may write: doc with the entries
 // of the passing tests only, and the startup section as it is. kept names the
 // tests whose consumption entry was left out, in doc order, so that

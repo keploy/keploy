@@ -189,6 +189,54 @@ func TestRunTestSet_AnUnreadableBindingLeavesTheSetNotJudged(t *testing.T) {
 	}
 }
 
+// Under --retry-passing-test a test case's row is its last cycle's, and so
+// is whether what it captured was checked: a create whose first cycle's
+// check could not read the agent's variables, and whose next cycle's could,
+// has its verdict, and its set is judged (P019). The unchecked list kept
+// every cycle's, and left the set not judged. A cycle runs again, the
+// passing test cases only, when one failed: the read-back answers another
+// id.
+func TestRunTestSet_AnUncheckedCaptureALaterCycleCheckedLeavesTheSetJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tmpl := map[string]interface{}{"id": "u_rec_0001"}
+	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+		mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			writeJSON(w, http.StatusCreated, `{"id":"u_live_0002"}`)
+		})
+		mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			writeJSON(w, http.StatusOK, `{"id":"another"}`)
+		})
+	})
+	cases := []*models.TestCase{
+		tmplCase(1, app.addr, "POST", "/users", map[string]string{"Content-Type": "application/json"}, `{"name":"a"}`,
+			recorded(201, nil, `{"id":"{{capture string .id}}"}`, tmpl)),
+		tmplCase(2, app.addr, "GET", "/users/{{string .id}}", nil, "",
+			recorded(200, nil, `{"id":"{{string .id}}"}`, tmpl)),
+	}
+	h := newTmplHarness(t, &tmplConf{stored: models.TestSet{Template: tmpl}}, cases, nil)
+	h.r.config.RetryPassing = true
+	reads := 0
+	h.r.instrumentation = &varInstr{prInstr: h.r.instrumentation.(*prInstr), bound: func() ([]models.VariableBinding, error) {
+		reads++
+		if reads == 1 {
+			return nil, errors.New("agent gone")
+		}
+		return nil, nil
+	}}
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("set %s (%s); want FAILED, judged: the create's last cycle checked what it captured, and the read-back failed", status, h.report.report.FailureReason)
+	}
+	if reads < 2 {
+		t.Fatalf("%d reads of the agent's variables; the create was not run again", reads)
+	}
+	if r := h.result(t, "test-1"); r.FailureInfo.VariablesUnchecked != "" {
+		t.Fatalf("the create's row says %q; its last cycle checked what it captured", r.FailureInfo.VariablesUnchecked)
+	}
+}
+
 // Without an agent (a base path) nothing is read and nothing fails.
 func TestRunTestSet_WithoutAnAgentNoVariableIsRead(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")

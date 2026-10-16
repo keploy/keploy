@@ -36,6 +36,11 @@ type pairedConn struct {
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
 	atClose atomic.Pointer[proxySide]
+	// noSession: the proxy serves it with no session (serveWithoutSession):
+	// it closes it unanswered, or passes it through, and records and mocks
+	// nothing on it by design, so nothing the application wrote to it is a
+	// capture loss, and no bytes wait holds it.
+	noSession atomic.Bool
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
@@ -55,16 +60,22 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 }
 
 // closing notes, once the proxy begins closing conn, what its side had
-// received: the wait's answer for it from then on.
-func (s *pairedConns) closing(conn net.Conn) {
+// received: the wait's answer for it from then on. It returns conn's paired
+// connection (nil for one it does not keep, or whose close was noted) and how
+// many bytes its socket holds unread, read after its side: the close tosses
+// them with a reset (tcp_close), bytes the application wrote that its side
+// counts received and the proxy never read.
+func (s *pairedConns) closing(conn net.Conn) (*pairedConn, int, error) {
 	s.mu.Lock()
 	pc := s.byConn[conn]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
-		return
+		return nil, 0, nil
 	}
 	ps := readProxySide(pc.conn)
 	pc.atClose.Store(&ps)
+	unread, err := readUnread(pc.conn)
+	return pc, unread, err
 }
 
 // pairedConns are the paired connections the proxy holds, under the proven
@@ -148,7 +159,7 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 	defer s.mu.Unlock()
 	var out []*pairedConn
 	for _, pc := range s.byConn {
-		if pc.appSeq <= n {
+		if pc.appSeq <= n && !pc.noSession.Load() {
 			out = append(out, pc)
 		}
 	}
@@ -156,6 +167,17 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 		return nil, s.err
 	}
 	return out, nil
+}
+
+// servedWithoutSession notes that the proxy serves conn with no session
+// (pairedConn.noSession). A connection it does not keep is ignored.
+func (s *pairedConns) servedWithoutSession(conn net.Conn) {
+	s.mu.Lock()
+	pc := s.byConn[conn]
+	s.mu.Unlock()
+	if pc != nil {
+		pc.noSession.Store(true)
+	}
 }
 
 // changes is closed at the next removal or failure: take it before looking.

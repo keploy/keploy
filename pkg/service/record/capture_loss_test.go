@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -67,6 +68,99 @@ func TestARecordingThatLostACaptureNamesTheTestCasesFromTheLossOn(t *testing.T) 
 	}
 }
 
+// A TLS client's rejection of keploy's certificate is the test case's it
+// happened in, not a taint of every later one: only the test cases recorded
+// while one happened are named. It named every test case from the first on.
+func TestARecordingNamesOnlyTheTestCasesATLSRejectionHappenedIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, then each test case's check.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, tls(1), tls(1), tls(2)}}
+	w, failed, _ := record3(t, instr)
+	if !failed || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("failed %v, %s; want test-1 and test-3 tainted, not test-2, and the recording failed", failed, w)
+	}
+}
+
+// The recording's ERROR gives every loss as its reason, not only the last
+// tainted test case's own: test-1's failed handshake is still why the
+// recording is incomplete when test-3 is named for a PID-map refusal.
+func TestARecordingsReasonNamesEveryLossNotOnlyTheLast(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}
+	both := models.CaptureLosses{pid(1)[0], tls}
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, {tls}, {tls}, both}}
+	w, failed, logs := record3(t, instr)
+	if !failed || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("failed %v, %s; want test-1 and test-3 tainted and the recording failed", failed, w)
+	}
+	errs := logs.FilterMessageSnippet("the recording is incomplete").All()
+	if len(errs) != 1 {
+		t.Fatalf("%d 'recording is incomplete' ERRORs, want 1", len(errs))
+	}
+	if r := fmt.Sprint(errs[0].ContextMap()["reason"]); r != both.Text() {
+		t.Fatalf("the ERROR's reason %q, want every loss: %q", r, both.Text())
+	}
+}
+
+// The final read charges no test case with what each test case's check
+// already saw: two test cases' own failed handshakes are both charged, so
+// nothing is left over for "after the last test case".
+func TestARecordingsFinalReadCountsEachTestCasesOwnHandshakes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tls := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, tls(1), tls(1), tls(2), tls(2)}}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if !w.finish("test-set-0") || w.String() != "tainted=[test-1,test-3] unverified=[]" {
+		t.Fatalf("%s; want test-1 and test-3 tainted and the recording failed", w)
+	}
+	if n := len(logs.FilterMessageSnippet("after the last test case").All()); n != 0 {
+		t.Fatalf("%d 'after the last test case' ERRORs, want none: every handshake was charged to a test case", n)
+	}
+}
+
+// A TLS handshake a client abandoned without a word is said for the test
+// case it happened in, never a failure, and a later test case is not named
+// for it; one after the last test case is said too, charged to none.
+func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ab := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: n, What: "to 10.0.0.1:443"}}
+	}
+	// The base, each test case's check, then the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, ab(1), ab(1), ab(2)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	if fmt.Sprint(w.uncapturable) != "[test-2]" {
+		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
+	}
+	during := logs.FilterMessageSnippet("abandoned its handshake: such calls are not in the mocks").All()
+	if len(during) != 1 || !strings.Contains(fmt.Sprint(during[0].ContextMap()["next_step"]), "trust keploy's CA") {
+		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
+	}
+	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") {
+		t.Fatalf("%d lines for the late one, want one WARN naming 1 handshake: %+v", len(late), late)
+	}
+}
+
 func TestARecordingWhoseCountCannotBeReadIsNotVerified(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
@@ -113,5 +207,25 @@ func TestTheCaptureWatchIsOffWithoutTheSwitchOrACount(t *testing.T) {
 	type plain struct{ Instrumentation }
 	if _, failed, _ := record3(t, plain{}); failed {
 		t.Fatal("an instrumentation without the count failed the recording")
+	}
+}
+
+// Decision 20: test cases recorded while or after the application called what
+// keploy cannot capture at all (a Unix socket) are named at WARN; the
+// recording does not fail for it.
+func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	db := models.CaptureLosses{{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), &countingInstr{answers: []models.CaptureLosses{nil, nil, db}})
+	for _, n := range []string{"test-1", "test-2", "test-3"} {
+		w.afterTestCase(context.Background(), n)
+	}
+	if w.finish("test-set-0") {
+		t.Fatal("the recording failed for a call keploy cannot capture")
+	}
+	warns := logs.FilterMessageSnippet("keploy cannot capture").All()
+	if len(warns) != 1 || fmt.Sprint(warns[0].ContextMap()["testCases"]) != "[test-2 test-3]" {
+		t.Fatalf("WARN lines %+v, want one naming test-2 and test-3", warns)
 	}
 }

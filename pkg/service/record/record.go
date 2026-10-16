@@ -352,32 +352,35 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			// nowhere to go (see the MAPPINGS forwarder's note).
 			return
 		case item, ok := <-stream:
-			if !ok && ending && (ender.StreamEnded(o.stream) || ends.failed.Load()) {
+			marker := !ok && canEnd && ender.StreamEnded(o.stream)
+			if marker || (!ok && ending && ends.failed.Load()) {
 				// Read to the agent's marker (or closed here, the agent not
 				// taking the request to end it): every frame it had for this
 				// drain is through.
-				if ender.StreamEnded(o.stream) {
+				if marker {
 					r.logger.Debug(streamEndedLog, zap.String("frames", o.kind))
 				}
 				return
 			}
 			if !ok {
-				// The stream's end and the stop can both be ready when this
-				// select runs, and it takes either: whether the stop had come
-				// is the context's to say, or the recording's (its stop
-				// begins before this drain does), not the order select took
-				// them in. An end the stop had come before is the agent going
-				// away while the drain still needed it.
-				if ctx.Err() != nil || r.stopping.Load() {
+				// The agent ended the stream, not this drain (which closes
+				// it only to read the rest in its own loop above, or as it
+				// gives up), and without its marker: it did not say it had
+				// sent all it had. Judged by that, whenever it came: before
+				// the stop, at it, or during its drain. Whether the stop had
+				// begun is no measure of it: an agent killed or crashed
+				// mid-recording, or one docker compose or kubelet stops on a
+				// signal that reached it first, ends its streams before the
+				// recording knows it is stopping, and an end taken for one
+				// before the stop was said to be no loss at all.
+				select {
+				case <-utils.StopNow():
 					// A second interrupt that reached the agent too ends its
 					// stream as it gives the drain up: that is the user's
 					// stop, and said as one, whichever this select saw first.
-					select {
-					case <-utils.StopNow():
-						giveUp()
-					default:
-						r.agentEndedDrain(o.kind, &looks)
-					}
+					giveUp()
+				default:
+					r.agentEndedDrain(o.kind, &looks)
 				}
 				return
 			}
@@ -603,9 +606,17 @@ type Recorder struct {
 	// progress for the stop's outer drains (drainProgress).
 	backlogHolds atomic.Uint64
 	// captureLost is set when a frame drain stopped waiting for what the
-	// agent still held from before the stop: the recording is incomplete,
-	// and ends as failed.
+	// agent still held from before the stop, or the mock store could not
+	// write mocks the recording captured (mocksNotWritten): the recording is
+	// incomplete, and ends as failed.
 	captureLost atomic.Bool
+	// mocksLossSaid is set once mocksNotWritten has said the mock store
+	// could not write mocks the recording captured.
+	mocksLossSaid atomic.Bool
+	// mockWriteStopped is set when the user's second interrupt stopped the
+	// mock store's writing (closeMockStore): the cleanup does not wait for
+	// it again.
+	mockWriteStopped atomic.Bool
 	// realUncaptured is set, under the proven switch with a mock.real list,
 	// when keploy could neither capture nor relay as real a connection of
 	// the recording, or could not read whether it did (reportRealRun): the
@@ -617,10 +628,6 @@ type Recorder struct {
 	// cover, are not counted. Whether one came since the look that said the
 	// agent held something decides if a loss is certain (agentEndedDrain).
 	heldFrames atomic.Uint64
-	// stopping is set once the recording's stop has begun (Start's teardown).
-	// The frame drains start later, once the app is stopped (natively); a
-	// stream the agent ends in between is one it ended after the stop.
-	stopping atomic.Bool
 	// mappingsStreamed counts the test-mock mappings the agent handed over
 	// this recording. A recording made without --sync that the agent mapped
 	// itself (enterprise's static dedup resolves its windows in the agent)
@@ -663,10 +670,11 @@ type backlogLooks struct {
 	endable bool
 }
 
-// agentEndedDrain reports a frame stream the agent ended on its own after the
-// stop, before its drain was done with it: the agent went away (it was
-// killed, or crashed) before it said it held nothing more from before the
-// stop, and what it still held is lost. The recording fails (captureLost),
+// agentEndedDrain reports a frame stream the agent ended on its own, without
+// its end marker, while this recording still read it (before the stop, or
+// before its drain was done with it): the agent went away (it was killed, or
+// crashed) before it said it held nothing more, and what it still held is
+// lost. The recording fails (captureLost),
 // said at ERROR, when the agent itself gave a sign it held something (at the
 // latest look it was not already gone for, it said so, or did not answer:
 // Held), or when this client started the agent (startedAgent): such an agent
@@ -678,14 +686,14 @@ type backlogLooks struct {
 // not tell its backlog from this CLI's own lag in taking what it had sent.
 func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
 	if !looks.Held() && !startedAgent(r.instrumentation) {
-		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more from before the stop: what it still held, if anything, is lost",
+		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more: what it still held, if anything, is lost",
 			zap.String("frames", kind),
-			zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured"))
+			zap.String("next_step", "the agent was stopped before the recording had saved what it captured (docker compose stops it with the project, also when the app exits on its own; kubelet with its pod): stop the recording, not the app or the agent, and re-record if this recording's last test cases matter"))
 		return
 	}
 	r.captureLost.Store(true)
 	said, answered := looks.Said()
-	msg := "the keploy agent ended its stream before it confirmed it had handed over all it captured before the stop: some of that may be lost"
+	msg := "the keploy agent ended its stream before it confirmed it had handed over all it captured: some of that may be lost"
 	if answered && said == models.BacklogPending && r.heldFrames.Load() == looks.heldFrames {
 		msg = "the keploy agent ended its stream while it still held what it captured before the stop: that is lost"
 	}
@@ -694,7 +702,95 @@ func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
 		fields = append(fields, zap.Stringer("agent_said", said))
 	}
 	r.logger.Error(msg, append(fields,
-		zap.String("next_step", "the agent was stopped or crashed before the recording's stop had saved what it held; the recording ends as failed. Do not stop the agent separately from the recording; re-record"))...)
+		zap.String("next_step", "the agent was stopped or crashed before the recording had saved what it held; the recording ends as failed. Do not stop the agent separately from the recording; re-record"))...)
+}
+
+// mockStoreWriter is a mock store that writes in the background and is
+// closed to write the rest (MockYaml in the gob format): CloseUnless stops
+// waiting once stop is closed, and MocksLeft is how many it has yet to write.
+type mockStoreWriter interface {
+	CloseUnless(stop <-chan struct{}) error
+	MocksLeft() uint64
+}
+
+// closeMockStore closes the mock store, which writes what it still holds. A
+// store that writes in the background is waited for for as long as it
+// writes, which a slow disk makes long: every `every` it says how
+// many mocks it has left, and, once it has said so, that a second interrupt
+// stops it now (the rest is then not written, a capture loss), as the stop's
+// other drains do (reportDrainProgress).
+func (r *Recorder) closeMockStore(store any, every time.Duration) error {
+	w, ok := store.(mockStoreWriter)
+	if !ok {
+		if closer, ok := store.(io.Closer); ok {
+			return closer.Close()
+		}
+		return nil
+	}
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- w.CloseUnless(stop) }()
+	notice := utils.NewStopNowNotice(every)
+	defer notice.Withdraw()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	said, offering := false, false
+	last := w.MocksLeft()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-notice.Interrupt():
+			r.mockWriteStopped.Store(true)
+			close(stop)
+			return <-done
+		case <-t.C:
+		}
+		left := w.MocksLeft()
+		wasOffering := offering
+		offering = notice.Next()
+		if left != last || !said || offering != wasOffering {
+			msg := "Still writing the recording's mocks to the mock file"
+			if offering {
+				msg += "; press Ctrl+C again to stop now: the rest is then not written, and this recording fails as incomplete"
+			}
+			r.logger.Info(msg, zap.Uint64("mocksLeft", left))
+			said, last = true, left
+		}
+	}
+}
+
+// mockStoreCleanup is Start's cleanup of the mock store: it closes it, which
+// writes what it still holds, unless the user stopped that writing at a
+// second interrupt (closeMockStore): it is not waited for again. A store that
+// writes in the background is closed as the stop closes it (closeMockStore):
+// on a record drain that did not join, all it holds is written here, and the
+// user is told what is left and can end it.
+func (r *Recorder) mockStoreCleanup(closer io.Closer) func() error {
+	return func() error {
+		if r.mockWriteStopped.Load() {
+			return nil
+		}
+		if _, ok := closer.(mockStoreWriter); ok {
+			return r.closeMockStore(closer, drainProgressEvery)
+		}
+		return closer.Close()
+	}
+}
+
+// mocksNotWritten says the mock store could not write mocks the recording
+// captured (models.ErrMocksNotWritten, or any error closing it): the
+// recording is incomplete, and ends as failed, as for any capture loss.
+// It is said once a recording: the deferred cleanup closes the store again.
+func (r *Recorder) mocksNotWritten(err error) {
+	r.captureLost.Store(true)
+	if !r.mocksLossSaid.CompareAndSwap(false, true) {
+		r.logger.Debug("the mock store still could not write every mock", zap.Error(err))
+		return
+	}
+	r.logger.Error("the recording is incomplete: mocks it captured were not written to the mock file",
+		zap.Error(err),
+		zap.String("next_step", "check the disk the recording writes to (space, speed, permissions); re-record this test set"))
 }
 
 // startedAgent reports whether the agent client started the agent it talks to
@@ -1261,10 +1357,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		utils.SetExitCodeOnce(recordExitCode(err))
 		return err
 	}
-	// A recorder can be started again: this recording has not begun to stop,
-	// nor lost anything yet.
-	r.stopping.Store(false)
+	// A recorder can be started again: this recording has not lost anything
+	// yet.
 	r.captureLost.Store(false)
+	r.mocksLossSaid.Store(false)
+	r.mockWriteStopped.Store(false)
 	r.heldFrames.Store(0)
 	r.mappingsStreamed.Store(0)
 
@@ -1278,7 +1375,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// other subsystems the caller has registered (telemetry flush,
 	// mapping-DB sync, etc.).
 	if closer, ok := r.mockDB.(io.Closer); ok {
-		r.RegisterCleanup(closer.Close)
+		r.RegisterCleanup(r.mockStoreCleanup(closer))
 	}
 
 	// Drain all registered cleanups in LIFO order on return. Errors
@@ -1291,6 +1388,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		r.cleanupMu.Unlock()
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			if err := cleanups[i](); err != nil {
+				if errors.Is(err, models.ErrMocksNotWritten) {
+					// The summary is said: the run fails all the same.
+					r.mocksNotWritten(err)
+					utils.SetExitCodeOnce(utils.ExitKeployError)
+					continue
+				}
 				// A cleanup error usually means a mock-file flush or
 				// telemetry-drain returned non-nil — the session data
 				// is still on disk (the writer buffers drain before
@@ -1496,10 +1599,6 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
-		// From here a frame stream the agent ends is one it ended after the
-		// stop, though its drain starts only once the app is stopped
-		// (forwardUntilDrained).
-		r.stopping.Store(true)
 		r.logger.Info("Stopping Keploy recording...")
 
 		// Notify the agent that we are shutting down gracefully
@@ -1542,9 +1641,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
 			drainFrames()
 			// Read while the agent, which the app's stack carries, still
-			// runs: what it could not capture (mock.real).
+			// runs: what it could not capture (mock.real), and what it
+			// lost after the last test case.
 			if recordingStarted {
 				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
 			}
 		}
 		runAppCtxCancel()
@@ -1557,6 +1658,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// reached it too, and the app has stopped making calls.
 			if recordingStarted {
 				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
 		}
@@ -1576,6 +1678,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			recordDrainedCleanly = false
 		}
 
+		// Every mock is now handed to the mock store: a store that writes
+		// in the background (the gob writer) writes the rest here, before
+		// the end-of-recording hook reads the mock file and before the
+		// summary says whether the recording is complete. One it could not
+		// write is a capture loss. On a drain that did not join, a writer
+		// may still hand it mocks, and the deferred cleanup closes it.
+		// agentLost is what the drains lost, before any loss of the store's
+		// own (the summary's reason names both).
+		agentLost := r.captureLost.Load()
+		storeWrote := true // false once the mock store said it could not write every mock
+		if recordDrainedCleanly {
+			if err := r.closeMockStore(r.mockDB, drainProgressEvery); err != nil {
+				r.mocksNotWritten(err)
+				storeWrote = false
+			}
+		}
+
 		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
@@ -1589,11 +1708,15 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// into a valid-but-short file. Skipping the pass on the timeout path costs
 		// one recording's post-record work; running it risks a truncated mock set.
 		if recordingStarted && newTestSetID != "" {
-			if recordDrainedCleanly {
-				r.afterRecordingComplete(ctx, newTestSetID)
-			} else {
+			switch {
+			case !recordDrainedCleanly:
 				r.logger.Warn("skipping the end-of-recording hook: the record drain timed out, so a mock or test-case write may still be in flight; the post-record pass is skipped to avoid racing an unfinished write. The recording itself is saved.",
 					zap.String("testSetID", newTestSetID))
+			case !storeWrote:
+				r.logger.Warn("skipping the end-of-recording hook: the mock store could not write every mock, so the mock file is unfinished",
+					zap.String("testSetID", newTestSetID))
+			default:
+				r.afterRecordingComplete(ctx, newTestSetID)
 			}
 		}
 
@@ -1798,7 +1921,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if incomplete {
 			r.logger.Error("the recording may be incomplete: Keploy could not confirm it saved all the keploy agent captured before the stop",
 				zap.String("testSetID", newTestSetID),
-				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, or a second interrupt stopped the saving); re-record this test set"))
+				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
 		// Under the proven switch: test cases recorded while the agent could
@@ -1819,6 +1942,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				status = "aborted"
 			case incomplete:
 				status, reason = "incomplete", "the agent's captures from before the stop were not all handed over"
+				if !storeWrote {
+					reason = "mocks the recording captured were not written to the mock file"
+					if agentLost {
+						reason = "the agent's captures from before the stop were not all handed over, and mocks the recording captured were not written to the mock file"
+					}
+				}
 			}
 			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, reason)
 		}
@@ -2989,7 +3118,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// Call the new AgentClient method
 		ch, err := r.instrumentation.GetMappings(mapCtx, incomingOpts)
 		if err != nil {
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
+			// An agent with no mapping stream (models.ErrNoMappingStream,
+			// said by its client): the recording goes on without mappings.
+			if ctx.Err() != nil || utils.IsShutdownError(err) || errors.Is(err, models.ErrNoMappingStream) {
 				return nil
 			}
 			return fmt.Errorf("failed to get mappings: %w", err)
@@ -3097,12 +3228,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					return nil
 				}
 				if !ok {
-					// Not ended here (mapCtx): the agent ended it. After the
-					// stop that is the agent going away before this drain was
-					// through, and the mappings it still held are lost.
-					if mapCtx.Err() == nil && (ctx.Err() != nil || r.stopping.Load()) {
-						r.logger.Warn("the keploy agent ended its mapping stream before the stop had saved its mappings: those it still held, if any, are lost",
-							zap.String("next_step", "stop the recording, not the agent: the recording stops the agent once it has saved what the agent captured. A test left without its mapping replays with no mocks"))
+					// Not ended here (mapCtx): the agent ended it, without
+					// its marker, before this recording was done with it
+					// (whenever that came: see forwardUntilDrained), and the
+					// mappings it still held are lost.
+					if mapCtx.Err() == nil {
+						r.logger.Warn("the keploy agent ended its mapping stream before the recording had saved its mappings: those it still held, if any, are lost",
+							zap.String("next_step", "the agent was stopped before the recording had saved its mappings (docker compose stops it with the project, also when the app exits on its own; kubelet with its pod): stop the recording, not the app or the agent. A test left without its mapping replays with no mocks"))
 					}
 					return nil
 				}

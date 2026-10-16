@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -23,6 +24,19 @@ import (
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
+//
+// A data-plane recording a parser consumes through a delete door while no
+// test is open (a call before the first test or between tests) is consumed
+// for the staging, not for the view (founder decision 31): no begin or end
+// brings it back, and the next staging (stagingEpoch) does. The manager
+// gives no last answer to repeat: which recordings are one call's sequence
+// is the parser's to know (its matching), so a parser that has one
+// saturates itself (HTTP's stateful cursor; SQS answers a drained
+// ReceiveMessage with its empty answer), and an exhausted call of any other
+// misses. A protocol-phase recording (a handshake, ZooKeeper's connect, an
+// SQS config call) stays reusable as before: one consumed through a delete
+// door is gone until the view changes. In a test, a consume through a
+// delete door is gone for the rest of the test, as before.
 //
 // The staged trees keep every mock of the set. Each read a parser makes is
 // narrowed to what the view shows, and the open test's mocks are read from
@@ -65,11 +79,14 @@ type exactView struct {
 	consumed []bool
 	order    []int
 	// spent are the staged mocks this view shows that a parser consumed
-	// through a delete door (a per-test-lifetime pool mock, a protocol-phase
-	// mock a parser evicts): gone until the view changes at the next begin
-	// or end, as when each begin and end staged the set again. The staged
-	// trees keep them.
+	// through a delete door in its test, or a protocol-phase mock one
+	// evicted outside every test: gone until the view changes. The staged
+	// trees keep them. A data-plane recording consumed outside every test is
+	// the staging's (outside), not the view's.
 	spent map[string]bool
+	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
+	outside *outsideAnswers
+	epoch   *atomic.Uint64
 }
 
 // exactState is a manager's exact serving: off until the agent turns it on
@@ -85,6 +102,115 @@ type exactState struct {
 	last atomic.Pointer[exactView]
 	// gen numbers the test views.
 	gen atomic.Uint64
+	// outside is what the calls made outside every test consumed in the
+	// current staging (outsideAnswers).
+	outside outsideAnswers
+}
+
+// outsideAnswers is the staged data-plane recordings a parser consumed
+// through a delete door while no test was open, in one staging
+// (stagingEpoch): hidden from every read of exact serving until the next
+// staging.
+type outsideAnswers struct {
+	// mu serializes building cur; reads and spends need no lock. It is taken
+	// under swapMu, never the other way round.
+	mu  sync.Mutex
+	cur atomic.Pointer[outsideState]
+}
+
+// outsideState is outsideAnswers for one staging.
+type outsideState struct {
+	epoch uint64
+	// staged is, by name, every staged recording of the staging, read under
+	// the staging lock: a consume is checked against it.
+	staged map[string]*models.Mock
+	// spent holds the names consumed: the first consume of one wins.
+	spent sync.Map
+}
+
+// hidden reports whether name was consumed outside every test in the staging
+// epoch is.
+func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	_, spent := st.spent.Load(name)
+	return spent
+}
+
+// prepareOutside builds the outside answers of the current staging, once: the
+// staged recordings by name, read with the staging lock held, so no staging
+// is ever half read. It runs before any view's lock is taken.
+func (m *MockManager) prepareOutside() {
+	m.swapMu.RLock()
+	defer m.swapMu.RUnlock()
+	o := &m.exact.outside
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	epoch := m.stagingEpoch.Load()
+	if st := o.cur.Load(); st != nil && st.epoch == epoch {
+		return
+	}
+	st := &outsideState{epoch: epoch, staged: map[string]*models.Mock{}}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	for _, tree := range trees {
+		for _, mk := range m.treeValues(tree, "") {
+			if _, dup := st.staged[mk.Name]; !dup {
+				st.staged[mk.Name] = mk
+			}
+		}
+	}
+	o.cur.Store(st)
+}
+
+// RestartExactKey starts key's calls outside every test afresh: a test
+// process that claims key again in the session (a retried package,
+// --rerun-fails) is a new scope, as a test begun again is. The recordings of
+// names, key's pool slice, that calls outside every test consumed in the
+// staging answer again, and key's stateful cursors (exactCursorKey) start
+// over. No other key's are touched: pool slices name disjoint recordings.
+func (m *MockManager) RestartExactKey(key string, names []string) {
+	if st := m.exact.outside.cur.Load(); st != nil {
+		for _, n := range names {
+			st.spent.Delete(n)
+		}
+	}
+	prefix := key + "\x00"
+	m.cursorMu.Lock()
+	for k := range m.cursors {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.cursors, k)
+		}
+	}
+	m.cursorMu.Unlock()
+	// Parsers that keep an index of what they read read again.
+	m.bumpRevisionAll()
+}
+
+// consumeOutside settles a delete-door consume of a data-plane recording mk
+// while no test is open (decision 31), once prepareOutside has run. The
+// first consume of a recording in the staging is served and spends it. A
+// recording another call consumed since it was read is refused, and so is
+// one that is not the staging's own (read before the staging landed, under
+// a name the staging stages too or none it stages) and any consume while a
+// staging lands: the parser reads again. It takes no tree lock.
+func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
+	st := m.exact.outside.cur.Load()
+	if st == nil || st.epoch != m.stagingEpoch.Load() {
+		return exactRefused
+	}
+	staged := st.staged[mk.Name]
+	if staged == nil || staged.Kind != mk.Kind || !staged.Spec.ReqTimestampMock.Equal(mk.Spec.ReqTimestampMock) ||
+		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
+		return exactRefused
+	}
+	if _, taken := st.spent.LoadOrStore(mk.Name, true); taken {
+		return exactRefused
+	}
+	return exactServed
 }
 
 // exactView returns the view exact serving shows, nil when it is off.
@@ -96,6 +222,62 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // parser that keeps an index across reads (Postgres v3's tier engines) reads
 // it at each dispatch: exact serving can begin after a connection opened.
 func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
+
+var _ integrations.ExactServingReader = (*MockManager)(nil)
+
+// FindStagedNotOwned is, under exact serving with a test open, the name of
+// the first mock of kind staged in the manager's trees (per-test, session,
+// startup, in that order) that the open test does not own and match accepts,
+// whatever the open view shows (integrations.StagedFinder); "" for none. For a
+// miss's diagnosis only: the mock is never handed out, nor served.
+func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	v := m.exactView()
+	if v == nil || v.test == "" || match == nil {
+		return ""
+	}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	found := ""
+	for _, t := range trees {
+		if t == nil || found != "" {
+			continue
+		}
+		t.rangeValues(func(val interface{}) bool {
+			mk, ok := val.(*models.Mock)
+			if !ok || mk == nil || mk.Kind != kind {
+				return true
+			}
+			if _, own := v.index[mk.Name]; own {
+				return true
+			}
+			if match(mk) {
+				found = mk.Name
+				return false
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// StagedMocks is every mock staged in the manager's trees (per-test, session,
+// startup, in that order), whatever the open view shows: exact serving spends
+// a served mock without taking it out of its tree, so a recording served or
+// not is here (integrations.StagedReader). For the learn step's earlier
+// places only: the mocks are never handed out, nor served.
+func (m *MockManager) StagedMocks() []*models.Mock {
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	var out []*models.Mock
+	for _, t := range trees {
+		out = append(out, m.treeValues(t, "")...)
+	}
+	return out
+}
+
+var _ integrations.StagedReader = (*MockManager)(nil)
 
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer
@@ -147,6 +329,7 @@ func (m *MockManager) ServeExactPool(key string, names []string) {
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal.
 func (m *MockManager) installExact(v *exactView) {
+	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
 		prev.mu.Lock()
@@ -293,7 +476,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 	v.mu.Lock()
 	spent := v.spent[mk.Name]
 	v.mu.Unlock()
-	if spent {
+	if spent || v.spentOutside(mk.Name) {
 		return false
 	}
 	if mk.IsProtocolPhase() {
@@ -306,20 +489,34 @@ func (v *exactView) shows(mk *models.Mock) bool {
 	return ok
 }
 
+// spentOutside reports whether name, a data-plane recording, was consumed
+// outside every test in the current staging (outsideAnswers).
+func (v *exactView) spentOutside(name string) bool {
+	return v.outside != nil && v.outside.hidden(name, v.epoch.Load())
+}
+
 // keep narrows staged mocks to those the view shows, in their order.
 // unspent is in less the mocks a parser consumed through a delete door in
-// this view; in itself when there are none.
+// this view, or outside every test in the staging; in itself when there are
+// none.
 func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if len(v.spent) == 0 || len(in) == 0 {
+	if len(in) == 0 {
 		return in
 	}
-	out := make([]*models.Mock, 0, len(in))
-	for _, mk := range in {
-		if mk != nil && !v.spent[mk.Name] {
+	var out []*models.Mock
+	for i, mk := range in {
+		gone := mk != nil && (v.spent[mk.Name] || v.spentOutside(mk.Name))
+		if gone && out == nil {
+			out = append(make([]*models.Mock, 0, len(in)), in[:i]...)
+		}
+		if !gone && out != nil {
 			out = append(out, mk)
 		}
+	}
+	if out == nil {
+		return in
 	}
 	return out
 }
@@ -380,8 +577,9 @@ const (
 
 // exactConsume settles a parser's consume of mk under exact serving. evicts
 // is a delete door (DeleteFilteredMock, DeleteUnFilteredMock,
-// DeleteStartupMock): a staged mock the view shows is then spent until the
-// view changes, and the staged trees keep it.
+// DeleteStartupMock): a staged mock the view shows is then spent, and the
+// staged trees keep it. A data-plane recording consumed with no test open is
+// spent for the staging (consumeOutside); any other, until the view changes.
 func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	v := m.exactView()
 	if v == nil || mk == nil {
@@ -414,6 +612,21 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	if !evicts {
 		return exactPass
 	}
+	if v.test == "" && !mk.IsProtocolPhase() {
+		m.prepareOutside()
+		// The view's closed check and the spend are one step: no begin or
+		// end lands between them.
+		v.mu.Lock()
+		verdict := exactRefused
+		if !v.closed {
+			verdict = m.consumeOutside(mk)
+		}
+		v.mu.Unlock()
+		if verdict == exactServed {
+			m.noteExactSpent(mk)
+		}
+		return verdict
+	}
 	v.mu.Lock()
 	if v.closed || v.spent[mk.Name] {
 		v.mu.Unlock()
@@ -439,9 +652,20 @@ func (m *MockManager) exactConsumeValue(mock models.Mock, evicts bool) exactVerd
 	return m.exactConsume(&mk, evicts)
 }
 
+// dataPlaneTyped is MockState.DataPlane for mk: a test mock whose type tag
+// says protocol-phase (a Generic exchange its recorder stated per-test).
+func dataPlaneTyped(mk *models.Mock) bool {
+	switch mk.Spec.Metadata["type"] {
+	case "config", "connection":
+		return !mk.IsProtocolPhase()
+	}
+	return false
+}
+
 // noteExactSpent records that a staged mock answered through a delete door,
-// and tells the parsers that keep an index that it is gone until the view
-// changes.
+// and tells the parsers that keep an index that it is gone: until the view
+// changes, or for a data-plane recording consumed outside every test, until
+// the next staging.
 func (m *MockManager) noteExactSpent(mk *models.Mock) {
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:             mk.Name,
@@ -450,10 +674,13 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		IsFiltered:       mk.TestModeInfo.IsFiltered,
 		SortOrder:        mk.TestModeInfo.SortOrder,
 		Type:             mk.Spec.Metadata["type"],
+		DataPlane:        dataPlaneTyped(mk),
 		Lifetime:         mk.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+		Variables:        variablesOf(mk.Spec),
+		Binds:            bindsOf(mk.Spec),
 	}); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
@@ -464,7 +691,9 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 // noteExactServed records that test mock owned answered (consumed, served
 // once) and tells the parsers that keep an index that it is gone. served is
 // the copy the parser reported, which carries the request-body noise it
-// detected, if any.
+// detected, if any, and under the proven switch what record's full round
+// learned onto it (its variables and the binds it carries onto earlier
+// calls), as the other doors' states do.
 func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:             owned.Name,
@@ -473,10 +702,13 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		IsFiltered:       true,
 		SortOrder:        owned.TestModeInfo.SortOrder,
 		Type:             owned.Spec.Metadata["type"],
+		DataPlane:        dataPlaneTyped(owned),
 		Lifetime:         owned.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(owned.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(owned.Spec.ResTimestampMock),
 		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
+		Variables:        variablesOf(served.Spec),
+		Binds:            bindsOf(served.Spec),
 	}); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}

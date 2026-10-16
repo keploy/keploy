@@ -142,6 +142,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Every kind of capture loss, for the per-test taint under the
 		// proven switch. See pkg/agent/routes/capturelosses.go.
 		r.Get("/capturelosses", a.HandleCaptureLosses)
+		// What of it no test was charged with (a loss after the last test).
+		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct
@@ -412,7 +414,8 @@ func (f *flushOnWrite) Write(p []byte) (int, error) {
 var testCaseHoldTick = syncmgr.TestCaseHoldTick
 
 // testCaseHoldMax is how long HandleIncoming holds a test case for its verdict
-// at most (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
+// while what holds it makes no progress, in the time the process could run
+// (syncMock.TestCaseHoldMax). A variable so a test can reach the bound.
 var testCaseHoldMax = syncmgr.TestCaseHoldMax
 
 // streamWriteFailed logs a failed write to a recording's test-case stream: at
@@ -751,7 +754,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// behind: these were checked against what was known then.
 			a.logger.Warn("agent: some test cases were saved before the agent had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 				zap.Int("test_cases", tcsUnsettled),
-				zap.Duration("held_up_to", testCaseHoldMax))
+				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
 		logRecordingComplete("agent: recording complete",
 			// How the stream ended: "capture" (it closed its channel),

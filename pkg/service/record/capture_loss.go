@@ -22,18 +22,23 @@ type CaptureLossReader interface {
 // captureWatch is, under the proven switch, keploy record's account of what
 // the agent could not capture (design v14 §3.2, rule 12): processes the
 // kernel refused a place in the agent's PID maps, client-side TLS handshakes
-// that failed against keploy's CA, TLS upgrades keploy could not make,
-// counted from the moment the agent began capturing. A loss taints the test case being recorded when
-// it happened and every later one, so each test case is checked as it is
-// saved: the first whose check sees a loss and every one after it are named
-// at the end, and the recording fails. A test case whose check could not be
-// read is named as unverified, and fails the recording too. With the switch
-// off, or an agent that cannot count, it does nothing.
+// with keploy's proxy that failed other than by the client hanging up, TLS
+// upgrades keploy could not make, counted from the moment the agent began
+// capturing. A loss taints the test case being recorded when it happened and
+// every later one -- but for a test case's own kinds (models.PerTest), which
+// are the test case's they happened in -- so each test case is checked as it
+// is saved: every one whose check sees a loss is named at the end, and the
+// recording fails. A test case whose check could not be read is named as
+// unverified, and fails the recording too. With the switch off, or an agent
+// that cannot count, it does nothing.
 type captureWatch struct {
 	logger *zap.Logger
 	reader CaptureLossReader
 	off    bool
 	base   models.CaptureLosses
+	// last is the count as the previous test case was checked, which a test
+	// case's own kinds (models.PerTest) count from; nil before the first.
+	last models.CaptureLosses
 	// baseErr is why the count could not be read when capture began; every
 	// test case is then unverified.
 	baseErr error
@@ -43,6 +48,26 @@ type captureWatch struct {
 	unverified []string
 	lost       models.CaptureLosses
 	readErr    error
+	// uncapturable are the test cases recorded while or after the
+	// application called what keploy cannot capture at all (decision 20),
+	// and notJudged what that was: said, never a failure.
+	uncapturable []string
+	notJudged    models.CaptureLosses
+	// charged is the most the test cases' checks saw lost (judged kinds),
+	// kind by kind; final is what the final read (afterTestCases) saw lost,
+	// whose excess over charged no test case is charged with (a test case
+	// the drain saves after the final read is checked, and charged, after
+	// it); finalErr is why that read failed.
+	charged  models.CaptureLosses
+	final    models.CaptureLosses
+	finalErr error
+	// chargedNotJudged and finalNotJudged are charged's and final's
+	// counterparts for what leaves a test case without a verdict: an
+	// abandoned TLS handshake beyond the most the checks saw was after the
+	// last test case, said (a Unix socket's is every test case's from the
+	// first on already).
+	chargedNotJudged models.CaptureLosses
+	finalNotJudged   models.CaptureLosses
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -83,7 +108,10 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	return w
 }
 
-// afterTestCase checks the count as test case name is saved.
+// afterTestCase checks the count as test case name is saved: an agent-life
+// loss since the recording began taints it, and a failed TLS handshake since
+// the previous check (models.PerTest) is its own. A check that failed leaves
+// the next one to count from the check before.
 func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 	if w == nil || w.off {
 		return
@@ -104,10 +132,57 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		}
 		return
 	}
-	if lost := now.Since(w.base); len(lost) > 0 {
-		w.tainted = append(w.tainted, name)
-		w.lost = lost
+	test := w.last
+	if test == nil {
+		test = w.base
 	}
+	w.last = now
+	judged, notJudged := now.Charged(w.base, w.base, test).Split()
+	// Every loss so far: the reason names them all, not only this test
+	// case's own (an earlier one's failed handshake is still a reason the
+	// recording is incomplete), and each was charged to a test case by now.
+	allJudged, allNotJudged := now.Since(w.base).Split()
+	w.charged = w.charged.Max(allJudged)
+	w.chargedNotJudged = w.chargedNotJudged.Max(allNotJudged)
+	if len(judged) > 0 {
+		w.tainted = append(w.tainted, name)
+		w.lost = allJudged
+	}
+	if len(notJudged) > 0 {
+		w.uncapturable = append(w.uncapturable, name)
+		w.notJudged = allNotJudged
+	}
+}
+
+// afterTestCases is the final read, once the app is stopped and before the
+// agent may stop: what was lost after the last test case was checked is
+// charged to no test case, so no test case's mocks miss it, and the
+// recording fails on it (design v14 §7.5: evidence charged to no test).
+// Without it a loss after the last test case went unsaid.
+func (w *captureWatch) afterTestCases(ctx context.Context) {
+	if w == nil || w.off || w.baseErr != nil {
+		return
+	}
+	// No deadline of its own (rule 15), as the base read: the agent's
+	// answer ends it, or the second interrupt, which gives the stop's waits
+	// up (the read is then "not verified", and the recording fails).
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRead()
+	go func() {
+		select {
+		case <-utils.StopNow():
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
+	now, err := w.reader.GetCaptureLosses(readCtx)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err != nil {
+		w.finalErr = err
+		return
+	}
+	w.final, w.finalNotJudged = now.Since(w.base).Split()
 }
 
 // finish says, at ERROR, which test cases were recorded while the agent could
@@ -127,6 +202,44 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.Strings("testCases", w.tainted),
 			zap.String("reason", w.lost.Text()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
+	}
+	if len(w.uncapturable) > 0 {
+		// Not a failure: keploy never had these calls to lose, or cannot
+		// tell it lost one (an abandoned TLS handshake). The test cases are
+		// kept; a replay of them makes those calls for real.
+		w.logger.Warn("these test cases were recorded while or after the application called what keploy cannot capture, or while a TLS client abandoned its handshake: such calls are not in the mocks ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Strings("testCases", w.uncapturable),
+			zap.String("reason", w.notJudged.NotJudgedText()),
+			zap.String("next_step", w.notJudged.NotJudgedRemedy()+", then re-record these test cases"))
+	}
+	// A handshake abandoned after the last test case was checked: charged to
+	// no test case, and said, never a failure.
+	var abandonedLate models.CaptureLosses
+	for _, c := range w.finalNotJudged.Since(w.chargedNotJudged) {
+		if c.Kind.PerTest() {
+			abandonedLate = append(abandonedLate, c)
+		}
+	}
+	if len(abandonedLate) > 0 {
+		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: whether a call was lost cannot be told, and no test case holds it ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", abandonedLate.NotJudgedText()),
+			zap.String("next_step", abandonedLate.NotJudgedRemedy()+", then re-record"))
+	}
+	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
+		failed = true
+		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call after the last test case was recorded, and no test case holds what those calls carried ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("reason", afterLast.Text()),
+			zap.String("next_step", "fix what the reason names, then re-record"))
+	}
+	if w.finalErr != nil {
+		failed = true
+		w.logger.Error("the recording is not verified: keploy could not read whether its agent captured every call after the last test case was recorded ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.Error(w.finalErr),
+			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
 	}
 	if len(w.unverified) > 0 {
 		failed = true

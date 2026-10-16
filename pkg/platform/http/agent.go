@@ -49,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -478,9 +479,34 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 const mockHandoffBuffer = 1024
 
 // mockHandoffGrace bounds how long the decoder waits for the consumer to take a
-// mock before giving up on it. Only reachable if the consumer has stopped
-// draining entirely; a busy one drains in milliseconds.
+// mock before giving up on it, in the time this process could run
+// (utils/stall), not wall time: a CLI starved of CPU has a consumer that could
+// not run either. Only reachable if the consumer has stopped draining
+// entirely; a busy one drains in milliseconds.
 const mockHandoffGrace = 30 * time.Second
+
+// handOff offers m to ch, and reports whether it was taken before ch's reader
+// took nothing for grace of the time the process could run (on clk; nil: the
+// process's own).
+func handOff[T any](ch chan<- T, m T, clk stall.Clock, grace time.Duration) bool {
+	select {
+	case ch <- m:
+		return true
+	default:
+	}
+	meter := stall.NewMeter(clk, grace)
+	defer meter.Stop()
+	for {
+		select {
+		case ch <- m:
+			return true
+		case <-meter.Wait():
+			if meter.Expired() {
+				return false
+			}
+		}
+	}
+}
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
@@ -619,10 +645,7 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		// is logged as an error, because the alternative - a mock set
 		// indistinguishable from one where the call never happened - is
 		// what made this class of bug take an investigation to find.
-		select {
-		case mockChan <- &mock:
-			// Send the decoded mock to the channel
-		case <-time.After(mockHandoffGrace):
+		if !handOff(mockChan, &mock, nil, mockHandoffGrace) {
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
@@ -656,11 +679,15 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	// An agent predating test-mock mapping (keploy #3715, Feb 2026) has no
 	// /mappings route and answers 404. That is version skew, not a failure, and
 	// it must NOT be reported as one: this call sits inside the record errgroup
-	// (pkg/service/record/record.go), so an error here aborts the entire
+	// (pkg/service/record/record.go), so any other error here aborts the entire
 	// RECORDING. Before this status check existed the decoder goroutine simply
 	// logged "failed to decode mapping from stream" and returned nil, and
 	// recording completed without mappings — that degraded-but-working
-	// behaviour is what a missing endpoint should still produce.
+	// behaviour is what a missing endpoint should still produce. It is said
+	// here, and returned as models.ErrNoMappingStream, which the recorder takes
+	// for a recording without mappings. Not as a channel closed at once: the
+	// recorder reads a mapping stream that closes without the agent's marker
+	// as the agent going away with mappings unsaved.
 	//
 	// Same tolerance BeginTestErrorCapture, GetScopeWindows, GetScopeTable and
 	// DrainCapturedMocks already apply, and for the same reason StoreMocks
@@ -676,9 +703,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings",
 			zap.String("consequence", "replay falls back to timestamp-based mock filtering for this recording"),
 			zap.String("remedy", "upgrade the agent image to one built from keploy #3715 or later"))
-		noMappings := make(chan models.TestMockMapping)
-		close(noMappings)
-		return noMappings, nil
+		return nil, models.ErrNoMappingStream
 	}
 	if err := agentStreamStatus("get mappings", res); err != nil {
 		stream.close()
@@ -1638,6 +1663,39 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 	return losses, nil
 }
 
+// GetUnchargedCaptureLosses asks the agent what it could not capture since
+// the run began that no test was charged with: what was lost after the last
+// test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
+// is ErrCaptureLossesUnsupported.
+func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent for the capture losses no test was charged with: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/uncharged")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get the capture losses no test was charged with", res, rawBody)
+	}
+	var losses models.CaptureLosses
+	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses no test was charged with: %w", err)
+	}
+	return losses, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {
@@ -1660,6 +1718,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
+		// The daemons the app left are part of its run, and end with it
+		// (adopt_linux.go): none is judged in the next test set, and the app
+		// started again can bind their ports.
+		stopAdopted(a.logger)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
 		}
@@ -2487,6 +2549,16 @@ func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	}
 }
 
+// agentReadyBudget is how long one bring-up of the agent may stall: the
+// daemon's answer to its version (Setup), and then the agent's readiness
+// (waitForAgent). KEPLOY_AGENT_READY_TIMEOUT, or a retry's own, overrides it.
+func agentReadyBudget(opts models.SetupOptions) time.Duration {
+	if opts.AgentReadyTimeout > 0 {
+		return opts.AgentReadyTimeout
+	}
+	return pkg.AgentReadyTimeout()
+}
+
 // waitForAgent blocks until the agent started by startAgent answers its health
 // check (nil, or a refusal wrapping provenswitch.ErrAgentSwitch when that
 // answer reports a proven switch that is not this keploy's), its process ends
@@ -2497,10 +2569,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// well over a minute just to start (observed: a local-image `docker run`
 	// taking 126s), so a 60s wait gave up prematurely and tore down a
 	// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-	readyTimeout := pkg.AgentReadyTimeout()
-	if opts.AgentReadyTimeout > 0 {
-		readyTimeout = opts.AgentReadyTimeout
-	}
+	readyTimeout := agentReadyBudget(opts)
 	agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
@@ -2763,8 +2832,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
+		// The agent container maps host.docker.internal to the Docker host
+		// (host-gateway) where the daemon resolves it (extra_hosts.go). The
+		// question has the bring-up's own budget, as waitForAgent's wait does:
+		// a daemon that does not answer it in that time would not start the
+		// agent either, and running out fails this bring-up as a stalled one
+		// (retried), rather than hanging setup with nothing said, or answering
+		// no.
+		readyBudget := agentReadyBudget(opts)
+		versionCtx, cancelVersion := context.WithTimeout(ctx, readyBudget)
+		opts.HostGateway, err = kdocker.HostGatewaySupported(versionCtx, a.dockerClient)
+		cancelVersion()
+		if err != nil {
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			return fmt.Errorf("%w: the Docker daemon did not answer its version within %s", pkg.ErrAgentNotReady, readyBudget)
+		}
 
-		var appPorts, appNetworks []string
+		var appPorts, appNetworks, appHosts []string
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -2772,7 +2858,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -2809,7 +2895,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			cmd, appPorts, appNetworks = agentUtils.ExtractDockerFlags(cmd)
+			cmd, appHosts = agentUtils.ExtractAddHosts(cmd)
 		}
+		opts.AppExtraHosts = appHosts
 
 		opts.AppPorts = appPorts
 		if len(appNetworks) > 0 {
@@ -2827,6 +2915,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
 		opts.ClientNSPID = uint32(os.Getpid())
+		if !isDockerCmd && provenswitch.On() {
+			// The run's members are this process's descendants: keep a daemon
+			// the app starts among them (adopt_linux.go, P146).
+			adoptDaemons(a.logger)
+		}
 		var agentExited <-chan error
 		agentExited, err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
@@ -4146,9 +4239,10 @@ const fromContainerStopBudget = 45 * time.Second
 // published ports until it exits, and the bind only frees once it has.
 const fromContainerRestoreBudget = 90 * time.Second
 
-// appNetworkingFromContainer reads the published ports and user networks off an
-// already-running container, in the shapes GenerateDockerCommand expects:
-// AppPorts as whole `-p …` flags, AppNetworks as bare names.
+// appNetworkingFromContainer reads the published ports, user networks and host
+// entries off an already-running container, in the shapes GenerateDockerCommand
+// expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
+// AppExtraHosts as NAME:ADDRESS.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -4159,10 +4253,15 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports []string, networks []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// Its host entries, which its replacement cannot carry under the agent's
+	// network mode: the agent container carries them (AppExtraHosts).
+	if inspect.HostConfig != nil {
+		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -4212,7 +4311,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, nil
+	return ports, networks, hosts, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts

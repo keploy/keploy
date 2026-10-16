@@ -44,6 +44,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 
 	finalMappings := make(map[string][]models.MockEntry)
 	var existingStartup []models.MockEntry
+	var existingSource string
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -72,6 +73,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 			finalMappings[t.ID] = t.Mocks
 		}
 		existingStartup = existingConfig.Startup
+		existingSource = existingConfig.Source
 	}
 
 	for _, t := range mapping.TestCases {
@@ -108,6 +110,12 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Startup = mapping.Startup
 	case len(existingStartup) > 0:
 		newMapping.Startup = existingStartup
+	}
+	// Who wrote the test entries: a writer that names itself, else the
+	// file's (models.Mapping.Source).
+	newMapping.Source = existingSource
+	if mapping.Source != "" {
+		newMapping.Source = mapping.Source
 	}
 
 	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
@@ -483,6 +491,16 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 		return nil, "", false, err
 	}
 	return mapping, filepath.Join(mappingPath, fileName+"."+detected.FileExtension()), true, nil
+}
+
+// GetSource returns which keploy command wrote testSetID's mappings.yaml
+// (models.Mapping.Source): "" for keploy record, and for no file.
+func (db *MappingDb) GetSource(ctx context.Context, testSetID string) (string, error) {
+	m, _, _, err := db.decodeMapping(ctx, testSetID)
+	if err != nil || m == nil {
+		return "", err
+	}
+	return m.Source, nil
 }
 
 func (db *MappingDb) GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error) {

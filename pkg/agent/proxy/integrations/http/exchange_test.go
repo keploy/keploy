@@ -82,13 +82,38 @@ const noMockAnswer = "HTTP/1.1 502 Bad Gateway"
 // decodeHTTP returns ErrMockNotMatched.
 func startDecode(t *testing.T, first string, proxy net.Conn) <-chan error {
 	t.Helper()
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	return runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+	})
+}
+
+// runDecode runs decode, a decodeHTTP serving the proxy's end of a connection,
+// and returns what it returns. The test's cleanup closes that end and waits
+// for decodeHTTP to return before the test ends, whether the test read its
+// result or failed first. Waiting for decodeHTTP is waiting for its reader:
+// with its context live, decodeHTTP returns only once the goroutine that reads
+// the connection has sent its result, after the last line it logs (but on a
+// panic, which it logs after it has closed that result's channel). Cancelling
+// the context instead returns decodeHTTP at once and leaves that goroutine
+// blocked on the connection; when the connection then closed, it logged its
+// failed read through the test's logger after the test had ended, racing
+// testing's cleanup (go test -race).
+func runDecode(t *testing.T, proxy net.Conn, decode func(ctx context.Context) error) <-chan error {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	done := make(chan error, 1)
+	returned := make(chan struct{})
 	go func() {
-		done <- h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+		defer close(returned)
+		done <- decode(ctx)
 	}()
+	// Registered after cancel, so it runs before it.
+	t.Cleanup(func() {
+		_ = proxy.Close()
+		<-returned
+	})
 	return done
 }
 
@@ -324,9 +349,23 @@ func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net
 	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	d := make(chan error, 1)
+	returned := make(chan struct{})
 	go func() {
+		defer close(returned)
 		d <- h.encodeHTTP(gctx, []byte(first), proxyClient, proxyDest, out, models.OutgoingOptions{}, nil)
 	}()
+	// As in runDecode, and registered after cancel so it runs before it: the
+	// proxy's ends are closed and encodeHTTP waited for with its context
+	// live, whether the test read its result or failed first. encodeHTTP
+	// returns on the result its forwarding goroutine sends before that
+	// goroutine drains its recorder, which logs through the test's logger, so
+	// the errgroup that goroutine runs in is waited for as well.
+	t.Cleanup(func() {
+		_ = proxyClient.Close()
+		_ = proxyDest.Close()
+		<-returned
+		_ = g.Wait()
+	})
 	return app, d, out
 }
 

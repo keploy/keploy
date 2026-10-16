@@ -84,12 +84,17 @@ func TestRegisterMockDepsDeclaresAKindsLinks(t *testing.T) {
 	if got := DepsOf(m); len(got.Provides)+len(got.Requires) != 0 {
 		t.Fatalf("an undeclared kind has deps: %+v", got)
 	}
-	RegisterMockDeps(kind, func(*Mock) MockDeps { return MockDeps{Provides: []string{"acme lease"}} })
+	if prev := RegisterMockDeps(kind, func(*Mock) MockDeps { return MockDeps{Provides: []string{"acme lease"}} }); prev != nil {
+		t.Fatal("registering an undeclared kind replaced a declaration")
+	}
 	t.Cleanup(func() { RegisterMockDeps(kind, nil) })
 	if got := DepsOf(m); !reflect.DeepEqual(got.Provides, []string{"acme lease"}) {
 		t.Errorf("DepsOf a registered kind = %+v", got)
 	}
-	RegisterMockDeps(kind, nil)
+	// The replaced declaration comes back, for a caller that puts it back.
+	if prev := RegisterMockDeps(kind, nil); prev == nil || !reflect.DeepEqual(prev(m).Provides, []string{"acme lease"}) {
+		t.Errorf("removing a declaration did not return it")
+	}
 	if got := DepsOf(m); len(got.Provides) != 0 {
 		t.Errorf("a removed declaration still applies: %+v", got)
 	}

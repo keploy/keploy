@@ -17,6 +17,9 @@ type caseCapture struct {
 	done  chan struct{}
 	mu    sync.Mutex
 	cases []capturedMock
+	// handled counts the cases taken off the stream and dealt with (stored,
+	// or failed to be): the capture's progress, which wait bounds.
+	handled atomic.Uint64
 }
 
 func (m *mockService) requests() bool {
@@ -54,12 +57,14 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
+				c.handled.Add(1)
 				continue
 			}
 			if err := m.hooks.AfterTestCaseInsert(persistCtx, &rec.TestCaseContext{TestCase: tc, TestSetID: name}); err != nil {
 				m.logger.Debug("AfterTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			c.add(tc)
+			c.handled.Add(1)
 		}
 	}()
 	return c
@@ -89,15 +94,14 @@ func caseEnd(tc *models.TestCase) time.Time {
 	return tc.GrpcResp.Timestamp
 }
 
-// wait blocks until the incoming stream has been drained, or grace has passed.
-func (c *caseCapture) wait(grace time.Duration) {
+// wait blocks until the incoming stream has been drained, or it has stored
+// nothing for bound of the time this process could run (utils/stall), as the
+// mock drain before it does.
+func (c *caseCapture) wait(bound time.Duration) {
 	if c == nil {
 		return
 	}
-	select {
-	case <-c.done:
-	case <-time.After(grace):
-	}
+	utils.WaitWhileProgressing(c.done, bound, c.handled.Load)
 }
 
 // list is every stored case with the time its request arrived.

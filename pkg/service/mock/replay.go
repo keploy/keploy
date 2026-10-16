@@ -30,7 +30,8 @@ import (
 // the runner drives the requests, Keploy answers the outgoing calls from the
 // set. On a miss it applies the configured policy (fail / passthrough /
 // record). It propagates the runner's exit code, and with --strict also exits
-// non-zero when any recorded mock was missed. It returns an error for a
+// non-zero when a call missed its recorded mock (one that counts against a
+// test, models.UnmatchedCall.CountsAgainstTest). It returns an error for a
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
@@ -265,6 +266,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		Learn:                     m.learning(),
+		LearnPool:                 m.learningPool(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -483,6 +486,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return nil
 	}
 	detail := replayDetail{
+		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
@@ -490,9 +494,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		actual:   actual.list(),
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
-	missed, missesKnown := counts.missed, counts.missed >= 0
+	missesKnown := counts.missed >= 0
 
-	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
+	// 11. Exit code: mirror the runner; with --strict also fail on a miss
+	//     that counts against a test.
+	// The learn step's findings not kept means keploy did not complete the
+	// round, whatever the test command did: that is the exit, and the
+	// receipt's.
+	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
+		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
+	}
 	m.propagateExit(appErr, "replay")
 	// WHOSE failure this is, from what the runner reported -- not from the
 	// global exit code. keploy's own internal failure (a panic in the app
@@ -539,9 +551,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Error(msg, append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", captureIncomplete))...)
 	}
 	// Under the proven switch, every other loss of capture during the run
-	// fails it the same way: each test after it already failed with it, and
-	// this covers a loss after the last test too.
-	lost, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	// fails it the same way: the test running at it already failed with it
+	// (and each later one, but for a failed TLS handshake), and this covers
+	// a loss outside every test too.
+	lostAll, lostErr := m.captureLossesDuring(ctx, lossesBase)
 	if parent.Err() != nil {
 		// The user's Ctrl+C came while keploy read the agent's counts (what
 		// it served and missed, its PID maps, its capture losses): a read it
@@ -551,6 +564,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// comes after this one. Not judged: 128+N (the deferred rule above).
 		return nil
 	}
+	// A call keploy cannot capture at all (decision 20) does not fail the
+	// run: it leaves it unverified, below.
+	lost, lostNotJudged := lostAll.Split()
 	if t := lost.Text(); t != "" {
 		if captureIncomplete == "" {
 			captureIncomplete = t
@@ -585,11 +601,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
-	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
+	// Only a miss that counts against a test (models.UnmatchedCall.
+	// CountsAgainstTest): not a DNS lookup's, which the proxy answers itself,
+	// nor one on a connection whose client sent nothing, which made no call (a
+	// MySQL client waiting at a port keploy could not tie to the recording, or
+	// a dependency's TCP health check). Each is still told, with its next
+	// step, above.
+	if m.config.Mock.Strict && counts.missedData > 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
 		m.logger.Error("replay failed under --strict: recorded dependency calls were missed",
-			zap.Int("missed", missed),
+			zap.Int("missed", counts.missedData),
 			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
 	}
 
@@ -654,6 +676,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			m.logger.Warn("this replay is not verified: keploy could not read whether the agent "+unread+", so a call may have reached the real dependency unmocked",
 				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
 		}
+	}
+	// The test command called what keploy cannot capture at all (decision
+	// 20: a Unix socket; only counted under the proven switch, where the
+	// tests it served are not judged): no loss of what keploy saw, so not a
+	// failure, but nothing proves the run isolated either.
+	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = t
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, or a TLS client abandoned its handshake ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 	}
 
 	// 12. What the run proved -- decided once, so the log line below and the
@@ -734,15 +766,18 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
 		Refusals:       m.refusals,
+		CannotCapture:  lostNotJudged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-		Set:         name,
-		At:          started.UTC().Truncate(time.Second),
-		MocksDigest: digest,
-		Tests:       counts.tests,
-		Live:        m.live,
-		Mocked:      m.mocked,
-		Real:        realRun,
+		Set:           name,
+		At:            started.UTC().Truncate(time.Second),
+		MocksDigest:   digest,
+		Tests:         counts.tests,
+		Live:          m.live,
+		Mocked:        m.mocked,
+		Real:          realRun,
+		CannotCapture: lostNotJudged,
+		Learned:       counts.learnedPool,
 	})
 	return keployFailure
 }
@@ -1598,6 +1633,11 @@ type replayCounts struct {
 	missed     int
 	missedData int
 	tests      []TestReceipt
+	// learnedPool is what the learn step wrote onto mocks no test consumed.
+	learnedPool []string
+	// learnErr is why what the learn step learned could not be written: the
+	// round did not complete.
+	learnErr error
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -1705,16 +1745,26 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 
 	for _, miss := range misses {
-		m.logger.Warn("no recorded mock matched an outgoing call",
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", miss.ActualSummary),
-			zap.String("destination", miss.Destination),
-			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
+		logMiss(m.logger, miss)
 	}
 
 	// What each test used and missed, and its verdict: for the receipt, and
 	// for the reporter below.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	// What the learn step learned goes onto the recording, before the record
+	// that runs this round commits it. A round whose learning cannot be read
+	// or kept did not complete: its record would judge recordings that lack
+	// what this round served.
+	var learned map[string][]string
+	var learnedPool []string
+	var learnErr error
+	if m.learning() {
+		if consumedErr != nil {
+			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
+		} else {
+			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
+		}
+	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free
@@ -1742,7 +1792,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	counts := replayCounts{consumed: len(consumed), missed: len(misses)}
 	for _, miss := range misses {
-		if !strings.EqualFold(miss.Protocol, "DNS") {
+		if miss.CountsAgainstTest() {
 			counts.missedData++
 		}
 	}
@@ -1753,7 +1803,34 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.missed, counts.missedData = -1, -1
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	for i := range counts.tests {
+		counts.tests[i].Learned = learned[counts.tests[i].Name]
+	}
+	counts.learnedPool = learnedPool
+	counts.learnErr = learnErr
 	return counts
+}
+
+// logMiss warns of a call no recorded mock answered, with the next step its
+// matcher gave it (a MySQL endpoint that moved names the port to list, a value
+// drift the fields), and, where it gave none, to record the call. A
+// connection whose client sent nothing made no call: it is said as such, and
+// as what it was if its client waited for its server to speak first (a TCP
+// health check closes the same way).
+func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
+	next := miss.NextSteps
+	if next == "" {
+		next = "record this call with --on-miss record, or re-record the set"
+	}
+	msg := "no recorded mock matched an outgoing call"
+	if miss.MatchPhase == models.MatchPhaseNoRequest {
+		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
+	}
+	logger.Warn(msg,
+		zap.String("protocol", miss.Protocol),
+		zap.String("call", miss.ActualSummary),
+		zap.String("destination", miss.Destination),
+		zap.String("next_step", next))
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
@@ -1766,7 +1843,10 @@ func provenCount(n int) *int {
 }
 
 // mergeCaptureLosses is a and b, one entry per kind: the one with the larger
-// count (the counts are since the run began, so the later attempt's).
+// count (the counts are since the run began, so the later attempt's), but for
+// a test's own kind (models.CaptureLossKind.PerTest: a TLS handshake that
+// failed or was abandoned), which each attempt was charged its own of, so
+// the two added.
 func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 	out := append(models.CaptureLosses(nil), a...)
 	for _, l := range b {
@@ -1774,7 +1854,13 @@ func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 		for i := range out {
 			if out[i].Kind == l.Kind {
 				found = true
-				if l.Count > out[i].Count {
+				switch {
+				case l.Kind.PerTest():
+					out[i].Count += l.Count
+					if l.What != "" {
+						out[i].What = l.What
+					}
+				case l.Count > out[i].Count:
 					out[i] = l
 				}
 			}
@@ -1814,8 +1900,13 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 			ev.Unread, ev.Reason = true, w.Evidence.Reason
 		}
 		// Counts since the run began: each attempt carries the run's, so
-		// keep one per kind, the latest (largest).
+		// keep one per kind, the latest (largest); a test's own kinds,
+		// each attempt's, added.
 		ev.CaptureIncomplete = mergeCaptureLosses(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete)
+		// What keploy cannot capture at all leaves the test not judged,
+		// never failed: a line that dropped it would read as keploy's
+		// failure with no call to name.
+		ev.CannotCapture = mergeCaptureLosses(ev.CannotCapture, w.Evidence.CannotCapture)
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {

@@ -82,7 +82,27 @@ const (
 	// value than the one the variable was bound to this run, used it before
 	// the call that binds it, or the mock declares a place keploy cannot follow.
 	MatchPhaseVariable = "variable_mismatch"
+	// MatchPhaseNoRequest: the client sent nothing. It waited for its server
+	// to speak first, nothing answered it, and it closed the connection: no
+	// call was made, so the miss is reported for its next step and fails no
+	// test by itself (a dependency's TCP health check closes the same way).
+	MatchPhaseNoRequest = "no_request"
 )
+
+// CountsAgainstTest reports whether a miss is evidence against the test it was
+// made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
+// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way).
+// Every verdict, count and evidence line that judges misses reads this.
+func (c UnmatchedCall) CountsAgainstTest() bool {
+	return !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+}
+
+// CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
+// is made from, for the places that hold the report and not the call.
+func (r *MockMismatchReport) CountsAgainstTest() bool {
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase}.CountsAgainstTest()
+}
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
 // They answer a question the match cascade cannot: did any of the mocks this
@@ -234,6 +254,14 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// NotOwned says, under the proven switch, the call is ClosestMock, a
+	// recording the open test does not own (byte for byte, or at the per-test
+	// similarity): likely one another test recorded, which the replay names
+	// (UnmatchedCall.RecordedIn).
+	NotOwned bool
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

@@ -50,7 +50,7 @@ const receiptTempPrefix = ".last-replay-"
 const (
 	FailedBySetup           = "setup"            // keploy could not start the run; the tests never ran
 	FailedByRunner          = "runner"           // the test command itself failed
-	FailedByStrict          = "strict"           // --strict: a call was missed, or the miss list was unreadable
+	FailedByStrict          = "strict"           // --strict: a counted miss, or the miss list or PID-map count was unreadable
 	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
 	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
 	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing
@@ -84,10 +84,11 @@ type Receipt struct {
 	Loaded   int `yaml:"loaded" json:"loaded"`
 	Consumed int `yaml:"consumed" json:"consumed"`
 	Missed   int `yaml:"missed" json:"missed"`
-	// MissedData counts, under the proven switch only, the misses other than
-	// DNS lookups, which are protocol-phase (the proxy answers an unrecorded
-	// name itself): what the proven model's verdict fails on. -1 when the
-	// misses were not read; absent with the switch off.
+	// MissedData counts, under the proven switch only, the misses that count
+	// against a test (models.UnmatchedCall.CountsAgainstTest: not DNS lookups,
+	// which are protocol-phase, nor connections that sent nothing): what the
+	// proven model's verdict fails on. -1 when the misses were not read;
+	// absent with the switch off.
 	MissedData *int `yaml:"missedData,omitempty" json:"missedData,omitempty"`
 	// Bypass lists the destinations configured to skip keploy (bypassRules,
 	// --pass-through-ports): calls to them reach the real service.
@@ -122,6 +123,13 @@ type Receipt struct {
 	// than one test binary at once): keploy's verdict fails the run naming
 	// each. Absent with the switch off.
 	Refusals []models.RunRefusal `yaml:"refusals,omitempty" json:"refusals,omitempty"`
+	// CannotCapture is what the test command did that keploy cannot capture at
+	// all (decision 20: a call over a Unix socket, or Unix sockets keploy
+	// cannot see; CaptureLossKind.NotJudged), counted over the whole run
+	// from its base, one entry per kind with its latest What. Non-empty
+	// means the run has no verdict, whatever its tests' lines say: a call
+	// after the last test's read is on no line. Empty with the switch off.
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -197,6 +205,28 @@ type TestsReceipt struct {
 	// those it first reached outside a test, and the capture_incomplete
 	// evidence charged to no test. nil without the switch.
 	Real *models.RealRun `yaml:"real,omitempty" json:"real,omitempty"`
+	// CannotCapture is, under the proven switch, what the run did that keploy
+	// cannot capture at all (Receipt.CannotCapture): in a replay's file the
+	// receipt's, in a record's what the recording lacks, so it is not taken
+	// as fully captured.
+	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// CaptureLosses is, in a record's file under the proven switch, what the
+	// agent could not capture that no test was charged with (design v14
+	// §3.2: a loss charges the test open when it happened and every later
+	// one, so this is a loss after the last test): no recording holds what
+	// it carried, so judging fails the run on it (§7.5, evidence charged to
+	// no test). What keploy cannot capture at all is CannotCapture's, not this.
+	CaptureLosses models.CaptureLosses `yaml:"captureLosses,omitempty" json:"captureLosses,omitempty"`
+	// CaptureLossesUnread is, in a record's file under the proven switch, why
+	// keploy could not read what its agent could not capture after the last
+	// test: judging fails the run on it, as on CaptureLosses (a read that
+	// failed is never "none").
+	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto
+	// mocks no test consumed (the set's start-up and pool), each field as
+	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
+	// §7.2 step 10).
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // empty reports whether the run reported no test and keploy refused
@@ -220,7 +250,8 @@ type TestReceipt struct {
 	Missed   int    `yaml:"missed" json:"missed"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
-	// connections keploy could not capture.
+	// connections keploy could not capture; or what left it not judged
+	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).
@@ -229,6 +260,10 @@ type TestReceipt struct {
 	// test's recording lists: the run must reach each (design v14 §8.2 rule
 	// 4), and the test ran on the real clock (§3.4, F3).
 	RealListed []string `yaml:"realListed,omitempty" json:"realListed,omitempty"`
+	// Learned is what the learn step of a record's full round wrote onto the
+	// test's recording, each field as "<mock> <path> (<kind>)" (design v14
+	// §7.2 step 10). Only that round has any.
+	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
 }
 
 // isolation decides whether a finished run proved isolation: the runner
@@ -248,8 +283,12 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 		return false, "bypass rules send calls to " + strings.Join(bypass, ", ") + " to the real service"
 	case counts.missed < 0:
 		return false, "the agent never reported which calls were missed"
-	case counts.missed > 0:
-		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missed)
+	case counts.missedData > 0:
+		// Only a miss that counts against a test (models.UnmatchedCall.
+		// CountsAgainstTest), as --strict reads it: a DNS lookup's miss is
+		// the proxy's own answer, and a connection whose client sent
+		// nothing made no call, so neither reached a real service.
+		return false, fmt.Sprintf("%d call(s) matched nothing in the recording", counts.missedData)
 	case counts.consumed < 0:
 		return false, "the agent never reported which recorded calls it served"
 	case counts.consumed == 0:

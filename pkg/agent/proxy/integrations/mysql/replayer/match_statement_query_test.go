@@ -103,6 +103,7 @@ func matchLiveOrder(t *testing.T, db *fakeMockDb, params ...string) (*mysql.Resp
 	req := liveExecute(params...)
 	dctx := newDecodeCtx()
 	dctx.StmtIDToQuery[33] = ordersInsert
+	dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 2}
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
 	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil)
 	if err != nil {

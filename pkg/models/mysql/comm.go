@@ -19,6 +19,15 @@ type QueryPacket struct {
 	NewParamsBindFlag byte        `yaml:"new_params_bind_flag" json:"new_params_bind_flag"`
 	Parameters        []Parameter `yaml:"parameters" json:"parameters"`
 	Query             string      `yaml:"query" json:"query"`
+	// LegacyQuery and LegacyParameters are, for a packet carrying query
+	// attributes read at replay, what a keploy older than the one that
+	// reads the attributes' names recorded from the same bytes: each
+	// attribute's name taken for its value, and its value glued to the head
+	// of the query. A recording such a keploy made is matched against them.
+	// Empty when that keploy could not read the packet (it recorded
+	// nothing), and never recorded.
+	LegacyQuery      string      `yaml:"-" json:"-"`
+	LegacyParameters []Parameter `yaml:"-" json:"-"`
 }
 
 // LocalInFileRequestPacket is used to send local file request to server, currently not supported
@@ -133,6 +142,15 @@ type StmtExecutePacket struct {
 	NullBitmap        []byte      `yaml:"null_bitmap" json:"null_bitmap"`
 	NewParamsBindFlag byte        `yaml:"new_params_bind_flag" json:"new_params_bind_flag"`
 	Parameters        []Parameter `yaml:"parameters" json:"parameters"`
+	// LegacyParameters are, for a packet sent without its parameter types
+	// (NewParamsBindFlag 0) and read at replay, the parameters a keploy
+	// older than the one that reads such a packet with its statement's
+	// types recorded from it: every value read as a length-encoded string,
+	// typed FieldTypeString. A small integer read so came out as bytes of
+	// garbage, and a recording of it is matched against these. Nil when that
+	// keploy could not read the packet at all (it recorded nothing), and
+	// never recorded.
+	LegacyParameters []Parameter `yaml:"-" json:"-"`
 }
 
 type Parameter struct {

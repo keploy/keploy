@@ -66,6 +66,22 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// CaptureLossDrainer is the optional extension implemented by hooks whose
+// counts of capture losses are fed by reports the kernel makes: before a read
+// of them, DrainCaptureLosses waits until every report made before it has
+// been counted, so a call the application made before the read is in it.
+type CaptureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
+// CaptureLossErrReporter is the optional extension implemented by hooks whose
+// count of a capture loss could not start (under the proven switch): while
+// CaptureLossesErr is not nil, what it would count is unknown, never 0, and
+// the agent reads no capture losses.
+type CaptureLossErrReporter interface {
+	CaptureLossesErr() error
+}
+
 // ListenerCounter is what the hooks give the proxy so that the kernel counts,
 // and numbers, the connections completed to the proxy's listener.
 type ListenerCounter interface {
@@ -444,6 +460,15 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactKeyRestarter is an optional ExactServer capability: it starts a claim
+// key's calls outside every test afresh, for a test process that claims the
+// key again (a re-run is a new scope): the recordings of names, the key's
+// pool slice, consumed outside every test answer again, and the key's
+// stateful cursors start over.
+type ExactKeyRestarter interface {
+	RestartExactKey(key string, names []string) error
 }
 
 // ScopeStager is an optional Proxy capability: it stages the pool of a test

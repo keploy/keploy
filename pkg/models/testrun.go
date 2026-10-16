@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,16 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// UnclaimedCalls are the calls the set's application made after its last
+	// test that no mock answered (proven switch): a pool miss no later test
+	// takes. They fail the set; JUnit fails a case of its own with them.
+	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
+	// so its results carry the proven model's evidence: a report renders it
+	// from this, not from the switch of the process rendering it. Set on
+	// every report a set run under the switch writes; absent for a set run
+	// without it.
+	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -234,6 +245,50 @@ type FailureInfo struct {
 	// could not be read, at the test's end or at its set's mark): the test
 	// has no verdict, and its set is not judged.
 	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
+	// all that the application did while this test or one before it ran
+	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
+	// see): the test has no verdict (NotJudged), and its set is not judged.
+	// Never a failure.
+	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
+}
+
+// NotJudged is why the test has no verdict, whatever its status says: what
+// keploy could not read or check of it (UnmatchedCallsUnread,
+// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
+// capture at all (CannotCapture, decision 20), one reason each.
+// Empty for a judged test. Each is set only under the proven switch, so a
+// result written without it is never unjudged.
+func (fi FailureInfo) NotJudged() []string {
+	var why []string
+	if fi.UnmatchedCallsUnread {
+		why = append(why, "keploy could not read every call it made that no recorded mock answered")
+	}
+	if fi.TestMocksUnread {
+		why = append(why, "keploy could not read which of its recorded calls it made")
+	}
+	if fi.VariablesUnchecked != "" {
+		why = append(why, "keploy could not check what it captured against its dependency calls: "+fi.VariablesUnchecked)
+	}
+	if fi.CaptureUnread {
+		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	if len(fi.CannotCapture) > 0 {
+		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
+	}
+	return why
+}
+
+// VerdictUnknown is why the test has no verdict although its row reads as
+// one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
+// (what could not be read can only add to why it failed) and for one keploy
+// skipped (IGNORED, which says it has no verdict). JUnit and the NDJSON mark
+// a test by this one predicate.
+func (r TestResult) VerdictUnknown() []string {
+	if r.Status == TestStatusFailed || r.Status == TestStatusIgnored {
+		return nil
+	}
+	return r.FailureInfo.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -320,7 +375,37 @@ type UnmatchedCall struct {
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
+	// a recording the test does not own.
+	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// RecordedIn names, under the proven switch, the other test of the set
+	// that owns the recording a NotOwned call is (ClosestMock): the call is
+	// likely one that test recorded, such as a later exchange of a connection
+	// it opened, whose handshake was recorded there.
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Reason is why the call missed, in judging's words (design v14 §5.3,
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
+	// record's full round, where the learn step runs, gives one; empty
+	// everywhere else.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
+
+// The reasons a miss of record's full round carries (UnmatchedCall.Reason),
+// as the learn step decides them (package matcher/learn).
+const (
+	// MissRequestChanged: a recorded call had the request's method,
+	// destination and shape, but the request differs from it in a way the
+	// learn step does not learn (a field added or removed, a type changed, a
+	// value several recorded calls explain equally, a value that flows from an
+	// earlier call when nothing can follow it).
+	MissRequestChanged = "request_changed"
+	// MissUnstableOrder: the closest recorded call holds an array the request
+	// sent with the recorded elements in another order (the order rule).
+	MissUnstableOrder = "unstable_order"
+	// MissUnmockedCall: no recorded call has the request's method,
+	// destination and shape.
+	MissUnmockedCall = "unmocked_call"
+)
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what
@@ -414,6 +499,18 @@ const (
 	TestSetStatusIgnored      TestSetStatus = "IGNORED"
 	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
+
+// SetEnd is how keploy test ended one run of a test set (each attempt, when
+// maxFlakyChecks or --must-pass runs it again): the status the run ended it
+// with, and why, as the set's final report's FailureReason says, or the error
+// that ended the set before such a report was written. A set can end neither PASSED nor FAILED
+// with only passing results (the app halted after some tests passed, or
+// keploy could not judge the set), and FAILED with none failing (a capture
+// loss after its last test): its results alone do not say how it ended.
+type SetEnd struct {
+	Status TestSetStatus `json:"status" yaml:"status"`
+	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+}
 
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	switch s {

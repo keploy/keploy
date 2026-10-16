@@ -210,7 +210,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		if mock != nil {
 			// EmitMock takes the incomplete-mock flag itself. Clearing it
 			// again here would wipe a mark set while EmitMock delivered
-			// (AddMock can block for its send budget): that mark is the
+			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
 			// nothing reporting it.
 			if emitErr := sess.EmitMock(mock); emitErr != nil {
@@ -719,9 +719,14 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
+	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
+	// type tag older replayers read: an exchange is the data of the test it
+	// was made in, a recordOne representative is served to every test.
 	ptLifetime := models.LifetimePerTest
+	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
 	if ptRecordOne {
 		ptLifetime = models.LifetimeSession
+		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
 	mock := &models.Mock{
 		Version: models.GetVersion(),

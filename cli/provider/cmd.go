@@ -510,7 +510,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false: a non-JSON body is compared only when it differs in kind from the recorded one - JSON against non-JSON, or empty against non-empty - or under KEPLOY_PROVEN=1, which compares every body)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
@@ -1160,6 +1160,20 @@ func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The calls keploy.yaml declares shared apply to every mock this process
+	// derives the lifetime of (loading a recording to replay it), and travel
+	// with the derived lifetime to the agent.
+	models.SetSessionCalls(c.cfg.SessionCalls)
+	for i, rule := range c.cfg.SessionCalls {
+		if problem := rule.Problem(); problem != "" {
+			c.logger.Warn("a sessionCalls rule in keploy.yaml matches no call",
+				zap.Int("rule", i),
+				zap.String("host", rule.Host),
+				zap.String("problem", problem),
+				zap.String("next_step", "name the call's host as its request does, for example host: auth.example.com or host: auth.example.com:8443, and narrow it with method and pathPrefix"))
+		}
+	}
+
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
 	// an early-return that would skip every subsequent validation step
@@ -1455,6 +1469,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		// The selection is -t's alone: keploy.yml's test.selectedTests does
+		// not reach keploy sanitize, which refuses every name -t gives that
+		// is not recorded (Tools.refuseUnrecorded).
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
@@ -1779,6 +1796,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if len(testSets) != 0 {
 				config.SetSelectedTests(c.cfg, testSets)
 			}
+			// Whether the selection is this command line's own: with the
+			// proven switch off, a name it gives that is not recorded fails
+			// the run, and one keploy.yml inherited is left out with a
+			// warning (Replayer.selectTestSets). -t "" names nothing.
+			c.cfg.Test.SelectedFromCommandLine = cmd.Flags().Changed("testsets") && len(config.TestSetNames(testSets)) > 0
+			// Whether the bound on the app's answer is the user's own
+			// (config.Test.APITimeoutSet): the flag, or keploy.yml.
+			c.cfg.Test.APITimeoutSet = cmd.Flags().Changed("api-timeout") || viper.InConfig("test.apiTimeout")
 
 			// get disable-mapping flag value
 			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
@@ -2036,6 +2061,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
+		// -t "test-set-1, test-set-2", the help text's own example, keeps the
+		// space after the comma: each name is trimmed, as keploy test's are.
+		c.cfg.Templatize.TestSets = config.TestSetNames(c.cfg.Templatize.TestSets)
+		c.cfg.Templatize.TestSetsFromCommandLine = cmd.Flags().Changed("testsets") && len(c.cfg.Templatize.TestSets) > 0
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -2497,7 +2526,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
-		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
 		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")

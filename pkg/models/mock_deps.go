@@ -55,15 +55,18 @@ var mockDeps = struct {
 // lives outside this module registers from its own package, so the links of
 // its kind are known only in a binary that links that package: one that
 // removes mocks without it (a CLI built without the parser) judges each of
-// its mocks alone.
-func RegisterMockDeps(kind Kind, fn MockDepsFunc) {
+// its mocks alone. It returns the declaration it replaced (nil: none), for a
+// caller that puts it back.
+func RegisterMockDeps(kind Kind, fn MockDepsFunc) (previous MockDepsFunc) {
 	mockDeps.Lock()
 	defer mockDeps.Unlock()
+	previous = mockDeps.byKind[kind]
 	if fn == nil {
 		delete(mockDeps.byKind, kind)
-		return
+		return previous
 	}
 	mockDeps.byKind[kind] = fn
+	return previous
 }
 
 // DepsOf reads m's links to the other mocks of its test set; none when its
