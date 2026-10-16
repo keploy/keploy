@@ -218,3 +218,29 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 		t.Fatalf("NotJudgedText = %q", text)
 	}
 }
+
+// A server-first connection keploy passed through (P250) leaves the test it
+// carried bytes in not judged, that test only, and says what it was and how
+// to reach it by design.
+func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossServerFirst
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v; want a test's own loss that leaves it not judged", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	before := CaptureLosses{{Kind: k, Count: 2, What: "to 10.0.0.9:25"}}
+	now := CaptureLosses{{Kind: k, Count: 5, What: "to 10.0.0.9:25"}}
+	charged := now.Charged(nil, nil, before)
+	if len(charged) != 1 || charged[0].Count != 3 {
+		t.Fatalf("charged %+v; want what passed in this test only", charged)
+	}
+	_, notJudged := charged.Split()
+	text := notJudged.NotJudgedText()
+	for _, want := range []string{"server-first protocol", "passed through for real", "sent data on them 3 time(s)", "to 10.0.0.9:25"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("%q does not say %q", text, want)
+		}
+	}
+	if !strings.Contains(notJudged.NotJudgedRemedy(), "mock.real") {
+		t.Fatalf("remedy %q", notJudged.NotJudgedRemedy())
+	}
+}

@@ -104,14 +104,25 @@ const (
 	// answered live, neither recorded nor mocked. Only under the proven
 	// switch.
 	CaptureLossUDPReply CaptureLossKind = "udp_reply"
+	// CaptureLossServerFirst (P250): a connection in record whose
+	// destination spoke first with a greeting keploy has no parser for (a
+	// server-first protocol: SMTP, FTP, POP3, IMAP, NATS) was relayed both
+	// ways, every byte, neither recorded nor mocked: each test the
+	// application sent data on it in made a call keploy cannot capture, and
+	// is NOT JUDGED (NotJudged), never failed. Counted once for each piece
+	// of the application's data sent on it, the test's it was sent in
+	// (PerTest); what the destination sends on its own charges nothing.
+	// Only under the proven switch.
+	CaptureLossServerFirst CaptureLossKind = "server_first"
 )
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
 // without a verdict (decision 20), rather than failing them: a call keploy
-// cannot capture at all, or a TLS handshake abandoned without a word, which
-// keploy cannot tell lost a call, as opposed to one it saw and lost.
+// cannot capture at all (a Unix socket, a server-first protocol it relays),
+// or a TLS handshake abandoned without a word, which keploy cannot tell lost
+// a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -187,15 +198,18 @@ const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certifica
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
 // dependency over TCP; make a TLS client that abandoned its handshake trust
-// keploy's CA. Empty for none.
+// keploy's CA; list a server-first destination in mock.real. Empty for
+// none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, tls bool
+	var unix, tls, serverFirst bool
 	for _, c := range l {
 		switch c.Kind {
 		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
 			unix = true
 		case CaptureLossTLSAbandoned:
 			tls = true
+		case CaptureLossServerFirst:
+			serverFirst = true
 		}
 	}
 	var do []string
@@ -204,6 +218,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if tls {
 		do = append(do, "make the TLS client trust keploy's CA ("+trustKeployCA+")")
+	}
+	if serverFirst {
+		do = append(do, "list the server-first destination in keploy.yml mock.real, to reach it for real by design")
 	}
 	return strings.Join(do, ", and ")
 }
@@ -235,12 +252,13 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // happened in, not a taint of every later test (design v14 §3.2's taint,
 // which the agent-life kinds carry): a client whose TLS handshake failed, or
 // was abandoned, lost that one call or may have, and its later calls are
-// captured, or lost, on their own. One between two tests is the next test's,
-// as a miss between tests is.
+// captured, or lost, on their own; data the application sent over a
+// server-first protocol keploy relays is that test's call. One between two
+// tests is the next test's, as a miss between tests is.
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -399,6 +417,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("the application called a Unix socket keploy cannot capture (%d time(s)) while this test or one before it ran", c.Count)
 	case CaptureLossUnixUnseen:
 		return "keploy cannot see the application's calls over Unix sockets here, so whether this test or one before it made one cannot be told"
+	case CaptureLossServerFirst:
+		return fmt.Sprintf("the application's calls over a server-first protocol keploy has no parser for (its server greets first: SMTP, FTP, POP3) were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
