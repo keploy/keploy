@@ -556,6 +556,147 @@ func TestKeyerStampsAnUnreadContainerWithoutAKey(t *testing.T) {
 	}
 }
 
+// A connection named under the ID of an earlier, closed one (an ID its
+// capture reuses) is named by its own destination only: one the index does
+// not place takes nothing of the earlier one's container, and one it does
+// replaces it, without the earlier one's place among the closed, which would
+// let it go first.
+func TestKeyerNamesAReusedConnectionIDAfresh(t *testing.T) {
+	k := NewKeyer(newFake())
+	_ = name(t, k, "tls-7", "127.0.0.1:40004") // redis
+	k.Forget("tls-7")
+	if got := stamped(k, "tls-7"); got != keyRedis {
+		t.Fatalf("a closed connection's late mock was stamped %q, want redis's", got)
+	}
+	_ = name(t, k, "tls-7", "93.184.216.34:443") // no container
+	if got := stamped(k, "tls-7"); got != "" {
+		t.Fatalf("a connection to no container, under a reused ID, was stamped %q", got)
+	}
+	if key, st := use(k, "tls-7"); st != NotContainer || key != "" {
+		t.Fatalf("its use = %q, %v", key, st)
+	}
+	k.Forget("tls-7")
+	if len(k.closed) != 0 || len(k.conns) != 0 {
+		t.Fatalf("held %d connections, %d closed, want none", len(k.conns), len(k.closed))
+	}
+	_ = name(t, k, "tls-7", "127.0.0.1:40004")
+	k.Forget("tls-7")
+	_ = name(t, k, "tls-7", "") // a destination its caller does not know
+	if got := stamped(k, "tls-7"); got != "" {
+		t.Fatalf("a connection of no known destination, under a reused ID, was stamped %q", got)
+	}
+	_ = name(t, k, "tls-7", "127.0.0.1:40004")
+	k.Forget("tls-7")
+	_ = name(t, k, "tls-7", "127.0.0.1:40002") // pgA
+	if got := stamped(k, "tls-7"); got != keyDefault {
+		t.Fatalf("a reused ID now to postgres was stamped %q", got)
+	}
+	if len(k.closed) != 0 {
+		t.Fatalf("the earlier connection is still among the closed: %v", k.closed)
+	}
+}
+
+// A reused ID whose earlier connection the index had not placed, and which
+// was never closed (a capture that names a stream again under its ID before
+// the earlier one's close), takes nothing of that connection's look-up
+// again: the index placing a container at the earlier destination since
+// names nothing for the connection now under the ID.
+func TestKeyerNamesAReusedConnectionIDAfreshWhileTheEarlierIsUnplaced(t *testing.T) {
+	f := newFake()
+	k := NewKeyer(f)
+	_ = name(t, k, "tls-8", "127.0.0.1:40080") // no container there yet
+	f.mu.Lock()
+	f.at["127.0.0.1:40080"] = redis // placed since
+	f.mu.Unlock()
+	_ = name(t, k, "tls-8", "93.184.216.34:443") // no container
+	if got := stamped(k, "tls-8"); got != "" {
+		t.Fatalf("a connection to no container, under a reused ID, was stamped %q", got)
+	}
+}
+
+// A look-up again in flight when its ID is named again names the uses that
+// waited on it, and only them: a capture that routes one connection afresh
+// under its own ID (a JSSE stream recorded again from its next request) does
+// not lose the container its first use is placing, and one that hands the ID
+// to another connection keeps that connection's container for the ID.
+func TestKeyerALookUpInFlightNamesItsOwnUsesWhenItsIDIsNamedAgain(t *testing.T) {
+	for _, c := range []struct {
+		name, again, wantID string
+	}{
+		{"the same connection", "127.0.0.1:40090", keyDefault},
+		{"another connection", "127.0.0.1:40004", keyRedis},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			read := make(chan struct{})
+			f.reads = map[string]chan struct{}{"r": read}
+			f.awaitedCh = make(chan struct{}, 4)
+			k := NewKeyer(f)
+			_ = name(t, k, "tls-9", "127.0.0.1:40090") // its container is being placed
+			type res struct {
+				key string
+				st  State
+			}
+			first := make(chan res, 1)
+			go func() {
+				key, st := use(k, "tls-9")
+				first <- res{key, st}
+			}()
+			<-f.awaitedCh // the first use waits on the look-up again
+			f.mu.Lock()
+			f.at["127.0.0.1:40090"] = pgA // placed now
+			f.mu.Unlock()
+			_ = name(t, k, "tls-9", c.again)
+			close(read)
+			if a := <-first; a.st != Keyed || a.key != keyDefault {
+				t.Fatalf("the use in flight = %q, %v, want the container its look-up placed", a.key, a.st)
+			}
+			if got := stamped(k, "tls-9"); got != c.wantID {
+				t.Fatalf("after the look-up, the ID is stamped %q, want %q", got, c.wantID)
+			}
+		})
+	}
+}
+
+// An ID named twice before either is forgotten (a connection routed afresh
+// under its own ID, each route naming and forgetting it) is closed at its last
+// Forget only: the first route's close neither puts the one still open among
+// the closed, where enough later closes take its container while it is open,
+// nor drops its look-up again.
+func TestKeyerClosesAnIDNamedTwiceAtItsLastForget(t *testing.T) {
+	t.Run("placed", func(t *testing.T) {
+		k := NewKeyer(newFake())
+		_ = name(t, k, "tls-5", "127.0.0.1:40004")
+		_ = name(t, k, "tls-5", "127.0.0.1:40004") // routed afresh
+		k.Forget("tls-5")                          // the first route's close
+		for i := 0; i < keptClosed+1; i++ {
+			id := strconv.Itoa(i)
+			_ = name(t, k, id, "127.0.0.1:40002")
+			k.Forget(id)
+		}
+		if key, st := use(k, "tls-5"); st != Keyed || key != keyRedis {
+			t.Fatalf("the route still open = %q, %v, want redis's", key, st)
+		}
+		k.Forget("tls-5")
+		if got := stamped(k, "tls-5"); got != keyRedis {
+			t.Fatalf("its late mock was stamped %q, want redis's", got)
+		}
+	})
+	t.Run("unplaced", func(t *testing.T) {
+		f := newFake()
+		k := NewKeyer(f)
+		_ = name(t, k, "tls-6", "127.0.0.1:40096") // no container there yet
+		_ = name(t, k, "tls-6", "127.0.0.1:40096") // routed afresh
+		k.Forget("tls-6")
+		f.mu.Lock()
+		f.at["127.0.0.1:40096"] = pgA // placed since
+		f.mu.Unlock()
+		if key, st := use(k, "tls-6"); st != Keyed || key != keyDefault {
+			t.Fatalf("the route still open = %q, %v, want the container its look-up again places", key, st)
+		}
+	})
+}
+
 // Only the closed connections a late mock may still need are kept.
 func TestKeyerKeepsABoundedNumberOfClosedConnections(t *testing.T) {
 	k := NewKeyer(newFake())

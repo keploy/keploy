@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -121,6 +122,15 @@ type Keyer struct {
 	// placing at its accept are placed, so a container Docker started a
 	// moment before is still named.
 	unplaced map[string]*pendingConn
+	// opened counts each ID's Names not yet forgotten. A capture can name
+	// one ID twice before either is forgotten: a connection it routes afresh
+	// under its own ID (a JSSE stream recorded again from its next request),
+	// or an ID reused while the earlier connection's parser still drains.
+	// Only the ID's last Forget closes it, so the first's close neither drops
+	// the look-up again of the one still open nor puts it among the closed,
+	// where keptClosed later closes would take its container while it is
+	// open.
+	opened map[string]int
 	// recorded is, for the test set the agent was given, the recorded
 	// groups (a key in one scope) whose mocks came from two or more
 	// containers: SetRecorded.
@@ -149,6 +159,13 @@ type pendingConn struct {
 	// lookedUp closes when its one look-up again is over; nil until its
 	// first use begins one.
 	lookedUp chan struct{}
+	// renamed: its ID was named again while it waited (dropLocked), for
+	// another connection or for this one routed afresh. Its look-up then
+	// names the uses that waited on it (got, placed), not the ID, whose
+	// container is what the later Name gave.
+	renamed bool
+	got     Container
+	placed  bool
 }
 
 // keptClosed bounds how many closed connections a keyer keeps for mocks
@@ -177,7 +194,7 @@ type recordedGroup struct{ key, scope string }
 // NewKeyer is a keyer that asks res, which is never nil, which destinations
 // are containers.
 func NewKeyer(res resolver) *Keyer {
-	k := &Keyer{res: res, conns: map[string]Container{}, unplaced: map[string]*pendingConn{}}
+	k := &Keyer{res: res, conns: map[string]Container{}, unplaced: map[string]*pendingConn{}, opened: map[string]int{}}
 	k.run = k.beginLocked(false, time.Now())
 	return k
 }
@@ -271,6 +288,7 @@ func (k *Keyer) Reset() {
 	k.scopes, k.spans, k.test = 0, nil, nil
 	k.run = k.beginLocked(false, time.Now())
 	k.conns, k.closed, k.unplaced, k.warned = map[string]Container{}, nil, map[string]*pendingConn{}, false
+	k.opened = map[string]int{}
 	k.endSessionLocked()
 }
 
@@ -334,7 +352,25 @@ func (k *Keyer) Scope() uint64 {
 // address, so one on a random port misses in replay instead of matching
 // another container. A host with no Docker daemon socket has no containers
 // to name: the agent says so once, at Info, and at Debug after.
+//
+// Name begins connection connID. What the keyer still holds under that ID is
+// an earlier connection's that carried it, kept closed for its late mocks: a
+// capture that names a connection by something reused (a decrypted TLS
+// stream by its SSL*, freed and allocated again) hands the keyer one ID for
+// both. It is not this connection's, so it goes first: else a connection the
+// index does not place would take, at its first use, the container the
+// earlier one reached. A dst Name cannot read (empty: a caller that does not
+// know the connection's destination) names no container. A capture may also
+// name an open connection again under its own ID (a JSSE stream it records
+// afresh from its next request): it is named by dst again, and a look-up
+// again its first use was waiting on still names that use (place).
 func (k *Keyer) Name(logger *zap.Logger, connID, dst string) (Container, string, bool) {
+	if connID != "" {
+		k.mu.Lock()
+		k.dropLocked(connID)
+		k.opened[connID]++
+		k.mu.Unlock()
+	}
 	ap, err := ParseAddrPort(dst)
 	if err != nil {
 		return Container{}, "", false
@@ -504,6 +540,9 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 		}
 		k.mu.Lock()
 		defer k.mu.Unlock()
+		if p.renamed {
+			return p.got, p.placed
+		}
 		c, ok := k.conns[connID]
 		return c, ok
 	}
@@ -518,6 +557,12 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 	defer k.mu.Unlock()
 	defer close(p.lookedUp)
 	if k.unplaced[connID] != p {
+		if p.renamed && err == nil && ok {
+			// Named again meanwhile: what it found is this connection's,
+			// for its uses; the ID's is the later Name's.
+			p.got, p.placed = got, true
+			return got, true
+		}
 		return Container{}, false // closed, or the session reset, meanwhile
 	}
 	delete(k.unplaced, connID)
@@ -536,11 +581,31 @@ func (k *Keyer) endpoint() string {
 	return res.Endpoint()
 }
 
-// Forget marks a connection closed. Its container is kept for a mock stamped
-// late, until keptClosed connections closed after it.
+// dropLocked forgets connection connID altogether: its container, its place
+// among the closed connections and its look-up again. k.mu is held.
+func (k *Keyer) dropLocked(connID string) {
+	if p := k.unplaced[connID]; p != nil {
+		p.renamed = true
+		delete(k.unplaced, connID)
+	}
+	if _, held := k.conns[connID]; !held {
+		return
+	}
+	delete(k.conns, connID)
+	k.closed = slices.DeleteFunc(k.closed, func(id string) bool { return id == connID })
+}
+
+// Forget marks a connection closed, at the last Forget of its ID's Names
+// (opened). Its container is kept for a mock stamped late, until keptClosed
+// connections closed after it.
 func (k *Keyer) Forget(connID string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if n := k.opened[connID]; n > 1 {
+		k.opened[connID] = n - 1
+		return // named again since, and that one is open
+	}
+	delete(k.opened, connID)
 	delete(k.unplaced, connID)
 	if _, ok := k.conns[connID]; !ok {
 		return
