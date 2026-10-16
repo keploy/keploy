@@ -4131,6 +4131,13 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	p.isGracefulShutdown.Store(false)
 	// Reset DNS mock deduplication tracker for fresh recording
 	p.ResetRecordedDNSMocks()
+	// The process's mock manager starts the recording before its first
+	// request, whatever an earlier recording of this process left. An
+	// already-running application's request that reaches the ingress after
+	// the recording's incoming stream attached but before this Record is
+	// forgotten here: its calls from then on are recorded as startup calls
+	// (sent on at once, not windowed), and the next request signals again.
+	syncMock.Get().StartRecordSession()
 	// Lift the per-session opportunistic-TLS toggle onto the proxy
 	// for handleConnection to read. Independent of GlobalPassthrough.
 	p.OpportunisticTLSIntercept = opts.OpportunisticTLSIntercept

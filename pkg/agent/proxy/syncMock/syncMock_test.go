@@ -2386,3 +2386,24 @@ func TestALateGenericTestMockIsOwnedByItsResolvedWindow(t *testing.T) {
 		t.Fatal("the late exchange was not flushed")
 	}
 }
+
+// A record session starts before its first request, with its startup window
+// ahead of it, whatever the session before it on the same manager left.
+func TestARecordSessionStartsBeforeItsFirstRequest(t *testing.T) {
+	m := New(zap.NewNop())
+	m.SetFirstRequestSignaled()
+	m.mu.Lock()
+	m.resolvedTestCount = models.StartupMockTestCaseWindow + 3
+	m.mu.Unlock()
+
+	m.StartRecordSession()
+	if m.GetFirstReqSeen() {
+		t.Fatal("the new session starts with the earlier one's first request seen")
+	}
+	m.mu.Lock()
+	n := m.resolvedTestCount
+	m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("the new session starts %d test cases into its startup window, want 0", n)
+	}
+}
