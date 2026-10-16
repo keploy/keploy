@@ -281,6 +281,18 @@ func failTestsWithCaptureLoss(results []models.TestResult) []string {
 	return failed
 }
 
+// failsOnCaptureLoss reports whether, under the proven switch, this read
+// charges its test a capture loss that fails it whatever its answer says:
+// what attachReadMockErrors writes to FailureInfo.CaptureIncomplete, which
+// failTestsWithCaptureLoss fails once the set's results are in.
+func (m testMisses) failsOnCaptureLoss() bool {
+	if !provenswitch.On() {
+		return false
+	}
+	judged, _ := m.lost.Split()
+	return (m.lostErr == nil && len(judged) > 0) || (m.realErr == nil && len(m.realLost) > 0)
+}
+
 // anyTestLostCapture reports whether, under the proven switch, the agent lost
 // a call while one of these tests ran (FailureInfo.CaptureIncomplete): the
 // mocks recorded for a lost call were consumed by nobody, so the set's

@@ -3036,6 +3036,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// of it got no recorded answer or a recorded call of it was not
 			// made: a comparison that matches prints no pass line for it.
 			failedOnItsOwn := earlyMissed > 0 || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
+			// A matching answer does not pass a test the verdict fails anyway:
+			// one the switch fails on its own or on a capture loss (once the
+			// set's results are in), or one --assert-dependencies (or a strict
+			// mock noise) fails for its diverged mock set with the switch off.
+			// Its comparison prints no pass line; it is compared as before.
+			noPassLine := failedOnItsOwn || read.failsOnCaptureLoss() || resolveTestOutcome(true, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure()).Status != models.TestStatusPassed
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -3076,7 +3082,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					delete(variablesWhy, testCase.Name)
 				}
 				opts := resolved.opts
-				if failedOnItsOwn || len(varFailures) > 0 {
+				if noPassLine || len(varFailures) > 0 {
 					// The test case has failed on its own: no pass line.
 					opts = append(opts, httpMatcher.WithoutPassLine())
 				}
@@ -3152,7 +3158,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// is read first, so a test case it fails never prints the
 				// comparison's pass line.
 				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
-				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || failedOnItsOwn)
+				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || noPassLine)
 				if len(templateFailures) > 0 {
 					testPass = false
 					markTemplateFailures(testResult)
@@ -4065,7 +4071,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
 			var streamOpts []httpMatcher.MatchOption
-			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 {
+			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 || streamRead.failsOnCaptureLoss() {
 				streamOpts = append(streamOpts, httpMatcher.WithoutPassLine())
 			}
 			testPass, testResult := r.compareHTTPResp(expectedStream, httpResp, testSetID, emitFailureLogs, streamOpts...)
@@ -5838,6 +5844,9 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
 		if pass {
+			// The quiet pre-match prints nothing, its pass line included:
+			// print it here, as Match does when it emits its logs.
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
 		}
@@ -5847,6 +5856,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		// and calling the helper here as well as below would log the skip twice
 		// for the same test case.
 		if !r.additiveAutoPassOff() && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
 		}
