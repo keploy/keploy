@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -208,5 +209,103 @@ func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
 	}
 	if len(p.catalogs) != 2 || len(p.catalogs[1]) != 0 {
 		t.Fatalf("the next set's store left the catalog %v; want it replaced with none", p.catalogs)
+	}
+}
+
+// A set's staging call also stages, beside the startup band, the per-test
+// mocks a parser declares it needs staged whatever their recorded time
+// (models.StagingWithStartup): here the pushes of a broker kind, one
+// recorded before the first test, one at its start, one inside it and one in
+// the gap after it. It reads only those of its window, never the rest of the
+// recording nor a push past the window's end, and a test's own call is
+// unchanged. The mock manager files them as startup traffic, and the first
+// test refiles that tier to what was recorded before it.
+func TestStagingAlsoStagesTheMocksAParserDeclares(t *testing.T) {
+	isPush := func(m *models.Mock) bool { return m.Spec.Metadata["commandType"] == "MESSAGE" }
+	defer models.RegisterStagingNeed(agentPulsar, models.StagingNeed{Use: models.StagingWithStartup, Match: isPush})()
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	p := &mgrProxy{mm: mm}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		agentBroker("push-boot", agentPulsar, "MESSAGE", stageT0.Add(-time.Second)),
+		agentBroker("push-at-cut", agentPulsar, "MESSAGE", stageT0),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		agentBroker("push-in-a", agentPulsar, "MESSAGE", stageT0.Add(1500*time.Millisecond)),
+		agentBroker("send-in-a", agentPulsar, "SEND", stageT0.Add(1600*time.Millisecond)),
+		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)),
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
+		agentBroker("push-past-window", agentPulsar, "MESSAGE", stageT0.Add(3*time.Hour)))
+	core, logs := observer.New(zap.DebugLevel)
+	a.logger = zap.New(core)
+	startupNames := func() []string {
+		t.Helper()
+		startup, err := mm.GetStartupMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, m := range startup {
+			names = append(names, m.Name)
+		}
+		return sortedNames(names)
+	}
+
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
+		t.Fatalf("the staging call read %v mocks from disk; want the 2 startup mocks and the 3 later pushes of its window", got)
+	}
+	staged := logs.FilterMessage("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs").All()
+	if len(staged) != 1 || staged[0].ContextMap()["startupMocks"] != int64(2) || staged[0].ContextMap()["declaredMocks"] != int64(3) {
+		t.Fatalf("staging logged %v; want 2 startup mocks and 3 declared ones", staged)
+	}
+	if got, want := startupNames(), []string{"boot-config", "push-at-cut", "push-boot", "push-gap", "push-in-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the staging call filed %v as startup traffic; want %v", got, want)
+	}
+
+	// The first test's call is unchanged: its window and the startup band.
+	// The first test refiles the startup tier to what was recorded before it.
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:        stageT0,
+		BeforeTime:       stageT0.Add(2 * time.Second),
+		StrictMockWindow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5, 6}) {
+		t.Fatalf("the test's call read %v mocks from disk; want its 4 and the 2 startup mocks", got)
+	}
+	if got, want := startupNames(), []string{"boot-config", "push-boot"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after the first test the startup tier is %v; want what was recorded before it, %v", got, want)
+	}
+}
+
+// With no kind declaring a need, the staging call reads the startup band
+// only, as before.
+func TestStagingWithNoDeclaredNeedReadsOnlyTheStartupBand(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &recordingProxy{}
+	a := diskAgent(t, p,
+		agentBroker("push-boot", agentPulsar, "MESSAGE", stageT0.Add(-time.Second)),
+		agentBroker("push-gap", agentPulsar, "MESSAGE", stageT0.Add(30*time.Second)))
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedNames(p.windowed[0][0]); !reflect.DeepEqual(got, []string{"push-boot"}) {
+		t.Fatalf("staged %v; want only the startup band", got)
 	}
 }

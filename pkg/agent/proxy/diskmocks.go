@@ -32,6 +32,12 @@ type DiskMocks struct {
 	// Empty while no kind is registered.
 	carry []diskEntry
 
+	// staged indexes the entries a models.StagingWithStartup need declares
+	// (models.IsStagedAtStaging at Add), sorted with entries, so the set's
+	// staging call reads only them beside the startup band (LoadStaged).
+	// Empty while no kind declares one.
+	staged []diskEntry
+
 	// statements is the statement catalog: for each statement a mock on disk
 	// records (its kind and models.StatementKey), the entry of the first one
 	// recorded (LoadStatements). One entry per statement, resident.
@@ -162,6 +168,9 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if models.IsCarryOver(m) {
 		d.carry = append(d.carry, e)
 	}
+	if models.IsStagedAtStaging(m) {
+		d.staged = append(d.staged, e)
+	}
 	if k := models.StatementKey(m); k != "" {
 		key := string(m.Kind) + "\x00" + k
 		if first, ok := d.statements[key]; !ok || e.reqTsNano < first.reqTsNano {
@@ -195,6 +204,7 @@ func (d *DiskMocks) Finalize() {
 	}
 	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].reqTsNano < d.entries[j].reqTsNano })
 	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
+	sort.Slice(d.staged, func(i, j int) bool { return d.staged[i].reqTsNano < d.staged[j].reqTsNano })
 	d.finalize = true
 }
 
@@ -298,6 +308,32 @@ func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
 	sel := make([]diskEntry, 0)
 	for ; i < len(d.carry) && d.carry[i].reqTsNano <= hi; i++ {
 		sel = append(sel, d.carry[i])
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadStaged returns, in recorded order, the mocks a
+// models.StagingWithStartup need declares with request timestamp in
+// [from, to] (inclusive): what the set's staging call stages beside the
+// startup band (LoadBefore), from the band's cutoff to the end of the
+// staging's window. It reads only those entries.
+func (d *DiskMocks) LoadStaged(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sort.Search(len(d.staged), func(k int) bool { return d.staged[k].reqTsNano >= lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.staged) && d.staged[i].reqTsNano <= hi; i++ {
+		sel = append(sel, d.staged[i])
 	}
 	d.mu.Unlock()
 	return d.decodeAll(sel)

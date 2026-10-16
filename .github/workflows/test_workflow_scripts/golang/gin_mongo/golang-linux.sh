@@ -300,14 +300,18 @@ if [ "$replay_is_build" = true ]; then
     windowed_sets=0
     while IFS= read -r line; do
         startup="$(printf '%s\n' "$line" | grep -o '"startupMocks": [0-9]*' | grep -o '[0-9]*$' || true)"
+        declared="$(printf '%s\n' "$line" | grep -o '"declaredMocks": [0-9]*' | grep -o '[0-9]*$' || true)"
         on_disk="$(printf '%s\n' "$line" | grep -o '"onDisk": [0-9]*' | grep -o '[0-9]*$' || true)"
-        echo "staging read ${startup:-?} of ${on_disk:-?} on-disk mocks"
+        # The mocks a parser declares it needs staged (declaredMocks) are
+        # read too; a build from before they were logged counts none.
+        staged=$(( ${startup:-0} + ${declared:-0} ))
+        echo "staging read ${startup:-?} startup and ${declared:-0} declared of ${on_disk:-?} on-disk mocks"
         if [ -z "$startup" ] || [ -z "$on_disk" ]; then
             echo "::error::Cannot read startupMocks/onDisk from: $line"
             exit 1
         fi
         if [ "$on_disk" -gt 0 ]; then
-            if [ "$startup" -ge "$on_disk" ]; then
+            if [ "$staged" -ge "$on_disk" ]; then
                 echo "::error::A set's staging read all ${on_disk} on-disk mocks; it must read only those recorded before its first test"
                 exit 1
             fi

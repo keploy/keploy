@@ -468,3 +468,46 @@ func TestLoadStatements_KeepsTheFirstRecordingOfEachStatement(t *testing.T) {
 		t.Fatalf("catalog %v; want the first recording of each statement, in recorded order: %v", names, want)
 	}
 }
+
+// LoadStaged returns, in recorded order, the stored mocks a
+// models.StagingWithStartup need declares with request time in [from, to],
+// both ends included, and none other. Mocks stored before the need was
+// declared are not indexed: the store indexes a mock as it is added.
+func TestLoadStaged_ReadsOnlyTheDeclaredMocksOfItsRangeInRecordedOrder(t *testing.T) {
+	s, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	declared := func(name string, at int64) *models.Mock {
+		m := perTestMockAt(name, at)
+		m.Spec.Metadata = map[string]string{"push": "true"}
+		return m
+	}
+	if err := s.Add(declared("before-need", 15)); err != nil {
+		t.Fatal(err)
+	}
+	defer models.RegisterStagingNeed(models.HTTP, models.StagingNeed{
+		Use:   models.StagingWithStartup,
+		Match: func(m *models.Mock) bool { return m.Spec.Metadata["push"] == "true" },
+	})()
+	for _, m := range []*models.Mock{
+		declared("late", 300), perTestMockAt("plain", 20), declared("at-from", 10),
+		declared("before-from", 9), declared("at-to", 400), declared("after-to", 401),
+	} {
+		if err := s.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.LoadStaged(time.Unix(10, 0), time.Unix(400, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range got {
+		out = append(out, m.Name)
+	}
+	if want := []string{"at-from", "late", "at-to"}; !reflect.DeepEqual(out, want) {
+		t.Fatalf("LoadStaged read %v; want the declared mocks of [10s, 400s] in recorded order: %v", out, want)
+	}
+}
