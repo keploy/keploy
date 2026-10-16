@@ -77,6 +77,12 @@ func (s *h2Stream) trailers(code codes.Code) error {
 	return s.headers(true, "grpc-status", strconv.Itoa(int(code)))
 }
 
+// trailersOnly is an answer of trailers alone: one HEADERS frame that ends the
+// stream.
+func (s *h2Stream) trailersOnly(code codes.Code) error {
+	return s.headers(true, ":status", "200", "content-type", "application/grpc", "grpc-status", strconv.Itoa(int(code)))
+}
+
 // keepalive sends a PING and waits for its acknowledgement; false once the
 // client reset the stream or the connection is gone.
 func (s *h2Stream) keepalive() bool {
@@ -217,6 +223,12 @@ func recordedAs(tc *models.TestCase, msgs ...[]byte) *models.TestCase {
 	return tc
 }
 
+// withStatus is tc with code as its recorded answer's status.
+func withStatus(tc *models.TestCase, code codes.Code) *models.TestCase {
+	tc.GrpcResp.Trailers.OrdinaryHeaders = map[string]string{"grpc-status": strconv.Itoa(int(code))}
+	return tc
+}
+
 func grpcStatusOf(resp *models.GrpcResp) string {
 	if resp == nil {
 		return ""
@@ -241,6 +253,10 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 		{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one")}},
 		{"an answer of trailers alone recorded, then keepalives", nil, [][]byte{nil}},
 	} {
+		recordedCode := codes.OK
+		if tc.sent == nil {
+			recordedCode = codes.NotFound
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			app := startH2App(t, func(s *h2Stream) {
 				if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil {
@@ -253,8 +269,8 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 				}
 				s.holdOpen(200)
 			})
-			resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), app.exhausted)
-			if !errors.Is(err, ErrStreamHeldOpen) {
+			resp, err := heldOpenCall(t, withStatus(recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), recordedCode), app.exhausted)
+			if !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled) {
 				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen", err)
 			}
 			if got := len(resp.AllMessages()); got != max(len(tc.sent), 1) {
@@ -262,6 +278,101 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 			}
 			if n := app.keepalives.Load(); n < 2 {
 				t.Fatalf("the call ended after the app's keepalive %d; the first after the request may be a flow-control ping, so not before the second", n)
+			}
+		})
+	}
+}
+
+// A stream that stalls short of its recording ends on the app's keepalives
+// too (row W1, round 2): two in a row with no message between them, and the
+// app neither ended the stream nor sent the rest of its answer. It has no
+// verdict (ErrStreamStalled, an ErrStreamHeldOpen): what came is returned,
+// then the recording's rest, so only what came is compared.
+func TestAGRPCStreamThatStallsShortOfItsRecordingEndsOnItsKeepalives(t *testing.T) {
+	app := startH2App(t, func(s *h2Stream) {
+		if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil || s.message(pbMsg("one")) != nil {
+			return
+		}
+		s.holdOpen(200)
+	})
+	resp, err := heldOpenCall(t, recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"), pbMsg("two")), app.exhausted)
+	if !errors.Is(err, ErrStreamStalled) || !errors.Is(err, ErrStreamHeldOpen) {
+		t.Fatalf("SimulateGRPC: %v; want ErrStreamStalled, an ErrStreamHeldOpen", err)
+	}
+	got := resp.AllMessages()
+	if len(got) != 2 || int(got[0].MessageLength) != len(pbMsg("one")) || int(got[1].MessageLength) != len(pbMsg("two")) {
+		t.Fatalf("returned %+v, want the message that came, then the recording's rest", got)
+	}
+	if n := app.keepalives.Load(); n < 3 {
+		t.Fatalf("the call ended after the app's keepalive %d; the first after the request may be a flow-control ping, so not before the third", n)
+	}
+}
+
+// An answer that is slow to come is the app's, judged, while its app sends
+// fewer than two keepalives after the first: an answer of trailers alone,
+// recorded with its error status, and an empty message (google.protobuf.Empty),
+// recorded as one empty message with status 0, which a recording of trailers
+// alone is not. A third keepalive with nothing is a stall: not judged, the
+// count keploy waits by.
+func TestASlowAnswerIsJudgedUntilTheAppStallsOnItsKeepalives(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		keepalives int
+		answer     func(s *h2Stream) error
+		recorded   *models.TestCase
+		stalled    bool
+		// headersFirst: the app sends its response headers before its
+		// keepalives.
+		headersFirst bool
+	}{
+		{"trailers alone", 2, func(s *h2Stream) error { return s.trailersOnly(codes.NotFound) },
+			withStatus(recordedAs(&models.TestCase{}, nil), codes.NotFound), false, false},
+		{"an empty message", 2, func(s *h2Stream) error {
+			if err := s.headers(false, ":status", "200", "content-type", "application/grpc"); err != nil {
+				return err
+			}
+			if err := s.message(nil); err != nil {
+				return err
+			}
+			return s.trailers(codes.OK)
+		}, withStatus(recordedAs(&models.TestCase{}, nil), codes.OK), false, false},
+		{"an empty message after its headers", 2, func(s *h2Stream) error {
+			if err := s.message(nil); err != nil {
+				return err
+			}
+			return s.trailers(codes.OK)
+		}, withStatus(recordedAs(&models.TestCase{}, nil), codes.OK), false, true},
+		{"trailers alone after three keepalives", 3, func(s *h2Stream) error { return s.trailersOnly(codes.NotFound) },
+			withStatus(recordedAs(&models.TestCase{}, nil), codes.NotFound), true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := startH2App(t, func(s *h2Stream) {
+				if tc.headersFirst {
+					if s.headers(false, ":status", "200", "content-type", "application/grpc") != nil {
+						return
+					}
+				}
+				for i := 0; i < tc.keepalives; i++ {
+					if !s.keepalive() {
+						return
+					}
+				}
+				_ = tc.answer(s)
+			})
+			call := grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}})
+			call.GrpcResp = tc.recorded.GrpcResp
+			resp, err := heldOpenCall(t, call, app.exhausted)
+			if tc.stalled {
+				if !errors.Is(err, ErrStreamStalled) {
+					t.Fatalf("SimulateGRPC: %v; want ErrStreamStalled", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SimulateGRPC: %v; want the app's answer, judged", err)
+			}
+			if got, want := grpcStatusOf(resp), call.GrpcResp.Trailers.OrdinaryHeaders["grpc-status"]; got != want {
+				t.Fatalf("grpc-status %q, want the app's %s", got, want)
 			}
 		})
 	}
@@ -356,17 +467,23 @@ func (c *pingCountingConn) Write(b []byte) (int, error) {
 // one after a second without activity, its least), answering every call with
 // handle. Its flow-control pings are on, as by default.
 func startKeepaliveServer(t *testing.T, limit int32, handle grpc.StreamHandler) *keepaliveCounter {
+	return startGRPCServer(t, limit, time.Second, handle)
+}
+
+// startGRPCServer is startKeepaliveServer with keepalives every keepaliveTime
+// of inactivity; grpc-go's default (two hours) when it is zero.
+func startGRPCServer(t *testing.T, limit int32, keepaliveTime time.Duration, handle grpc.StreamHandler) *keepaliveCounter {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	counter := &keepaliveCounter{Listener: ln, limit: limit, exhausted: make(chan struct{})}
-	g := grpc.NewServer(
-		grpc.ForceServerCodec(rawSrvCodec{}),
-		grpc.UnknownServiceHandler(handle),
-		grpc.KeepaliveParams(keepalive.ServerParameters{Time: time.Second, Timeout: time.Minute}),
-	)
+	opts := []grpc.ServerOption{grpc.ForceServerCodec(rawSrvCodec{}), grpc.UnknownServiceHandler(handle)}
+	if keepaliveTime > 0 {
+		opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{Time: keepaliveTime, Timeout: time.Minute}))
+	}
+	g := grpc.NewServer(opts...)
 	go func() { _ = g.Serve(counter) }()
 	t.Cleanup(g.Stop)
 	return counter
@@ -414,13 +531,16 @@ func TestARealGRPCServersKeepalivesEndAStreamHeldOpen(t *testing.T) {
 		}, recordedAs(&models.TestCase{}, pbMsg("one")), "0"},
 		{"trailers alone, recorded as one empty message", func(grpc.ServerStream) error {
 			return status.Error(codes.NotFound, "no such thing")
-		}, recordedAs(&models.TestCase{}, nil), "5"},
+		}, withStatus(recordedAs(&models.TestCase{}, nil), codes.NotFound), "5"},
 		{"trailers alone, recorded as none", func(grpc.ServerStream) error {
 			return status.Error(codes.NotFound, "no such thing")
 		}, &models.TestCase{GrpcResp: models.GrpcResp{NoMessages: true}}, "5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := startKeepaliveServer(t, 6, func(_ interface{}, stream grpc.ServerStream) error {
+			// The app's flow-control pings, and no keepalive: a judged
+			// answer does not race the app's keepalive clock on a loaded
+			// machine.
+			srv := startGRPCServer(t, 6, 0, func(_ interface{}, stream grpc.ServerStream) error {
 				drain(stream)
 				return tc.answer(stream)
 			})
@@ -505,22 +625,28 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 		// cutByKeepalive: the drain had every message when the keepalive
 		// came.
 		cutByKeepalive bool
+		// stalled: held short of the recording.
+		stalled bool
 	}{
-		{"a message, then two pings", 1, []step{w(request), w(requestEnd), r(settings, false), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false},
-		{"a ping before the message counts as the first", 1, []step{w(request), w(requestEnd), r(settings, false), r(ping, false), r(headers, false), r(data(one), false), r(ping, true)}, 1, false},
-		{"a ping before the request's end does not count", 1, []step{w(request), r(settings, false), r(ping, false), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false},
-		{"a request that ends with its headers", 1, []step{w(headersEnd), r(settings, false), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false},
-		{"acknowledgements are no pings", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ack, false), r(ack, false), r(ack, false)}, 1, false},
-		{"pings before every recorded message came", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, false), r(data(two), false), r(ping, true)}, 2, false},
-		{"a message not yet whole", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(both[:len(both)-1]), false), r(ping, false), r(ping, false), r(data(both[len(both)-1:]), false), r(ping, true)}, 2, false},
-		{"padded frames, a message across them", 2, []step{w(request), w(requestEnd), r(headers, false), r(padded(both[:9]), false), r(padded(both[9:]), false), r(ping, false), r(ping, true)}, 2, false},
-		{"empty messages", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(append(grpcMessage(nil), grpcMessage(nil)...)), false), r(ping, false), r(ping, true)}, 2, false},
-		{"none recorded", 0, []step{w(request), w(requestEnd), r(headers, false), r(ping, false), r(ping, true)}, 0, true},
-		{"the app ended the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(trailers, false), r(ping, false), r(ping, false)}, 1, false},
-		{"the app reset the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(reset, false), r(ping, false), r(ping, false)}, 1, false},
-		{"a message beyond the recording", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(both), false), r(ping, false), r(ping, true)}, 2, false},
-		{"what the app sends after the keepalive", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, true), r(data(two), true), r(ping, true)}, 1, false},
-		{"the drain had every message first", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), d(1), r(ping, false), r(ping, true)}, 1, true},
+		{"a message, then two pings", 1, []step{w(request), w(requestEnd), r(settings, false), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false, false},
+		{"a ping before the message counts as the first", 1, []step{w(request), w(requestEnd), r(settings, false), r(ping, false), r(headers, false), r(data(one), false), r(ping, true)}, 1, false, false},
+		{"a ping before the request's end does not count", 1, []step{w(request), r(settings, false), r(ping, false), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false, false},
+		{"a request that ends with its headers", 1, []step{w(headersEnd), r(settings, false), r(headers, false), r(data(one), false), r(ping, false), r(ping, true)}, 1, false, false},
+		{"acknowledgements are no pings", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ack, false), r(ack, false), r(ack, false)}, 1, false, false},
+		{"pings before every recorded message came", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, false), r(data(two), false), r(ping, true)}, 2, false, false},
+		{"a message not yet whole", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(both[:len(both)-1]), false), r(ping, false), r(ping, false), r(data(both[len(both)-1:]), false), r(ping, true)}, 2, false, false},
+		{"padded frames, a message across them", 2, []step{w(request), w(requestEnd), r(headers, false), r(padded(both[:9]), false), r(padded(both[9:]), false), r(ping, false), r(ping, true)}, 2, false, false},
+		{"empty messages", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(append(grpcMessage(nil), grpcMessage(nil)...)), false), r(ping, false), r(ping, true)}, 2, false, false},
+		{"none recorded", 0, []step{w(request), w(requestEnd), r(headers, false), r(ping, false), r(ping, true)}, 0, true, false},
+		{"the app ended the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(trailers, false), r(ping, false), r(ping, false)}, 1, false, false},
+		{"the app reset the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(reset, false), r(ping, false), r(ping, false)}, 1, false, false},
+		{"a message beyond the recording", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(both), false), r(ping, false), r(ping, true)}, 2, false, false},
+		{"stalled short of the recording", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, false), r(ping, true)}, 1, false, true},
+		{"a message between two keepalives is no stall", 3, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, false), r(data(two), false), r(ping, false), r(ping, true)}, 2, false, true},
+		{"none recorded and no headers yet", 0, []step{w(request), w(requestEnd), r(ping, false), r(ping, false), r(ping, true)}, 0, true, true},
+		{"none recorded, then the end", 0, []step{w(request), w(requestEnd), r(ping, false), r(ping, false), r(trailers, false), r(ping, false), r(ping, false)}, 0, false, false},
+		{"what the app sends after the keepalive", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(ping, false), r(ping, true), r(data(two), true), r(ping, true)}, 1, false, false},
+		{"the drain had every message first", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), d(1), r(ping, false), r(ping, true)}, 1, true, false},
 	} {
 		for _, split := range []bool{false, true} {
 			name := tc.name
@@ -553,16 +679,19 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 							pw.scanRead(c)
 						}
 					}
-					if got, _ := pw.heldOpen(); got != st.held {
+					if got, _, _ := pw.heldOpen(); got != st.held {
 						t.Fatalf("step %d: held open %v, want %v", i, got, st.held)
 					}
 				}
-				held, at := pw.heldOpen()
+				held, at, stalled := pw.heldOpen()
 				if !held {
 					return
 				}
 				if at != tc.heldAt {
 					t.Fatalf("held open after %d messages, want %d: the ones that came before the keepalive", at, tc.heldAt)
+				}
+				if stalled != tc.stalled {
+					t.Fatalf("stalled %v, want %v", stalled, tc.stalled)
 				}
 				if tc.cutByKeepalive {
 					// The drain had them all: the keepalive cuts the
