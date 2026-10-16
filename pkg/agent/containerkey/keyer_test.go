@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/go-connections/nat"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1311,4 +1313,136 @@ func TestKeyerFirstUseEndsWithItsContextWhileTheListIsOut(t *testing.T) {
 	if _, st := StateFromContext(WithConn(ctx, k, "c1")); st != NotContainer {
 		t.Fatalf("the use = %v", st)
 	}
+}
+
+// A use of a connection whose container's read stalled (the daemon did not
+// answer it for the stall window, in time keploy could run) neither waits
+// nor names it: it is withheld, the mock is stamped with no key, and each
+// use is told (OnUnread), naming the container, so its test is not judged.
+func TestKeyerTellsOfEachUseWhoseContainersReadStalled(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	r.mu.Lock()
+	r.stallClock = &stall.ManualClock{Step: stall.OnTime} // keploy runs all the while
+	r.mu.Unlock()
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	k := NewKeyer(r)
+	var mu sync.Mutex
+	var told []string
+	k.OnUnread(func(what string) {
+		mu.Lock()
+		defer mu.Unlock()
+		told = append(told, what)
+	})
+	_ = name(t, k, "c1", "172.17.0.7:5432")
+	if key, st := use(k, "c1"); st != Withheld || key != "" {
+		t.Fatalf("a use of the stalled container = %q, %v; want Withheld", key, st)
+	}
+	if got := stamped(k, "c1"); got != "" {
+		t.Fatalf("a mock of it was stamped %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 2 {
+		t.Fatalf("told %d uses, want 2: %q", len(told), told)
+	}
+	for _, w := range told {
+		if !strings.HasPrefix(w, "container ") || !strings.Contains(w, "postgres:16") {
+			t.Fatalf("told %q, want the container named", w)
+		}
+	}
+}
+
+// A probe that decides by a connection's key (the MySQL detection probe)
+// reads its key and then its legacy key (KeyFromContext, then
+// LegacyKeyFromContext): one use, told once, whose container's read stalled.
+func TestAProbeOfAContainerWhoseReadStalledIsToldOnce(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	r.mu.Lock()
+	r.stallClock = &stall.ManualClock{Step: stall.OnTime} // keploy runs all the while
+	r.mu.Unlock()
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	k := NewKeyer(r)
+	var told []string
+	k.OnUnread(func(what string) { told = append(told, what) })
+	_ = name(t, k, "c1", "172.17.0.7:5432")
+	ctx := WithConn(context.Background(), k, "c1")
+	if key, isContainer, keyed := KeyFromContext(ctx); key != "" || !isContainer || !keyed {
+		t.Fatalf("KeyFromContext = %q, %v, %v; want no key, of a container", key, isContainer, keyed)
+	}
+	if legacy := LegacyKeyFromContext(ctx); legacy != "" {
+		t.Fatalf("LegacyKeyFromContext = %q", legacy)
+	}
+	if len(told) != 1 {
+		t.Fatalf("told %d times for one probe, want 1: %q", len(told), told)
+	}
+}
+
+// A mock stamped after the scope its request was sent in ended, its
+// container's read stalled, is marked (UnreadKey) and told with that
+// scope's id, not the scope open at the stamp: a record charges its own
+// test with it. A mock of a container whose key is in is neither.
+func TestKeyerMarksAnUnreadMockForTheScopeItsRequestWasSentIn(t *testing.T) {
+	f := newFake()
+	k := NewKeyer(stalling{f})
+	var told []string
+	var scopes []uint64
+	k.OnUnreadMock(func(scope uint64, what string) {
+		scopes = append(scopes, scope)
+		told = append(told, what)
+	})
+	k.BeginTest()
+	first := k.Scope()
+	sent := time.Now()
+	_ = name(t, k, "c1", "127.0.0.1:40050") // the stalled container
+	_ = name(t, k, "c2", "127.0.0.1:40002") // pgA, its key in
+	k.EndTest()
+	k.BeginTest() // the next test is open as the stall resolves
+	m := &models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: sent}}
+	k.Stamp(m)
+	if m.Spec.Metadata[UnreadKey] != "container held (postgres:16)" || m.Spec.Metadata[MetadataKey] != "" {
+		t.Fatalf("stamped %v, want it marked unread, with no key", m.Spec.Metadata)
+	}
+	keyed := &models.Mock{ConnectionID: "c2", Spec: models.MockSpec{ReqTimestampMock: sent}}
+	k.Stamp(keyed)
+	if keyed.Spec.Metadata[UnreadKey] != "" {
+		t.Fatalf("a mock whose key is in was marked: %v", keyed.Spec.Metadata)
+	}
+	if len(scopes) != 1 || scopes[0] != first || told[0] != "container held (postgres:16)" {
+		t.Fatalf("told %v %q, want the first test's scope %d once", scopes, told, first)
+	}
+}
+
+// stalling is the fake index with the container at 127.0.0.1:40050 one
+// whose read stalled.
+type stalling struct{ *fakeIndex }
+
+func (s stalling) Lookup(dst netip.AddrPort) (Container, bool, error) {
+	if dst.String() == "127.0.0.1:40050" {
+		return Container{ID: "held", Image: "postgres:16", Port: 5432}, true, nil
+	}
+	return s.fakeIndex.Lookup(dst)
+}
+
+func (s stalling) FingerprintsOrStall(ctx context.Context, id string) (string, string, bool, string) {
+	if id == "held" {
+		return "", "", false, "held (postgres:16)"
+	}
+	fp, ok := s.fakeIndex.Fingerprint(ctx, id)
+	return fp, "", ok, ""
 }

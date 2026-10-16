@@ -261,3 +261,33 @@ func TestARefusalAtAcceptIsALossOfItsOwnKind(t *testing.T) {
 		t.Fatalf("remedy %q", remedy)
 	}
 }
+
+// A use of a container whose configuration's read the Docker daemon did not
+// answer is the test's own loss, and leaves it not judged: the text names
+// the container and says the daemon did not answer, and the remedy is to
+// make its inspect answer.
+func TestAContainerReadTheDaemonDidNotAnswerLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossContainerUnread
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() {
+		t.Fatal("an unread container is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "container pg (postgres:16)"}}
+	}
+	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := at(1).NotJudgedText()
+	for _, want := range []string{"not judged: ", "did not answer keploy's read of a container's configuration (1 time(s)", "(container pg (postgres:16))"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "docker inspect") || strings.Contains(r, "trust keploy's CA") {
+		t.Fatalf("remedy %q: make the container's inspect answer, and nothing of TLS", r)
+	}
+}
