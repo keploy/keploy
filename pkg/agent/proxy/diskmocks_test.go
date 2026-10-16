@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -410,5 +411,56 @@ func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 		if want := m.Name == "big" || m.Name == "mongo"; elided != want {
 			t.Fatalf("mock %s: response kept apart = %v, want %v", m.Name, elided, want)
 		}
+	}
+}
+
+// pgStatementMock is a per-test PostgreSQL query mock of the statement
+// sqlHash, recorded at second sec.
+func pgStatementMock(name, sqlHash string, sec int64) *models.Mock {
+	at := time.Unix(sec, 0).UTC()
+	return &models.Mock{
+		Name: name,
+		Kind: models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type:  models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{SQLAstHash: sqlHash},
+			},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
+	}
+}
+
+// The store keeps, for each statement its mocks record, the first one
+// recorded, whatever order they were added in; a mock of no statement is in
+// no catalog.
+func TestLoadStatements_KeepsTheFirstRecordingOfEachStatement(t *testing.T) {
+	s, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, m := range []*models.Mock{
+		pgStatementMock("a-late", "sha256:a", 30),
+		pgStatementMock("a-first", "sha256:a", 10),
+		pgStatementMock("b", "sha256:b", 20),
+		perTestMockAt("http", 15),
+	} {
+		if err := s.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.LoadStatements()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range got {
+		names = append(names, m.Name)
+	}
+	if want := []string{"a-first", "b"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("catalog %v; want the first recording of each statement, in recorded order: %v", names, want)
 	}
 }

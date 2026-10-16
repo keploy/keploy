@@ -112,3 +112,101 @@ func TestStagingWithoutARecordedTestTimeReadsItsWindow(t *testing.T) {
 		t.Fatalf("the staging call staged %v; want all 5", p.windowed[0][0])
 	}
 }
+
+// pgQueryMock is a per-test PostgreSQL query mock of the statement sqlHash,
+// recorded at at.
+func pgQueryMock(name, sqlHash string, at time.Time) *models.Mock {
+	return &models.Mock{
+		Version: "api.keploy.io/v1beta1",
+		Name:    name,
+		Kind:    models.PostgresV3,
+		Spec: models.MockSpec{
+			PostgresV3: &models.PostgresV3Spec{
+				Type:  models.PostgresV3TypeQuery,
+				Query: &models.PostgresV3QuerySpec{SQLAstHash: sqlHash, InvocationID: name},
+			},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true},
+	}
+}
+
+// catalogProxy is a recordingProxy that takes the statement catalog.
+type catalogProxy struct {
+	*recordingProxy
+	catalogs [][]string
+}
+
+func (p *catalogProxy) SeedStatementCatalog(mocks []*models.Mock) {
+	p.catalogs = append(p.catalogs, namesOf(mocks))
+}
+
+// Storing a set hands the proxy its statement catalog, once: the first
+// recording of each statement on disk, those recorded inside tests included,
+// which the staging's startup band does not reach. An app that prepares at
+// start a statement it runs only inside a test is described from it. The
+// staging, a test's own call and a scope staging (its begin and end, each a
+// call from BaseTime) leave it as stored, and the next set's store replaces it,
+// with none when that store keeps nothing on disk.
+func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &catalogProxy{recordingProxy: &recordingProxy{}}
+	a := strictAgent(true)
+	a.Proxy = p
+	filtered := []*models.Mock{
+		pgQueryMock("boot-select", "sha256:boot", stageT0.Add(-5*time.Second)),
+		pgQueryMock("lists-in-a", "sha256:lists", stageT0.Add(time.Second)),
+		pgQueryMock("lists-in-b", "sha256:lists", stageT0.Add(time.Minute)),
+		pgQueryMock("insert-in-b", "sha256:insert", stageT0.Add(time.Minute+time.Second)),
+		stageMock("http-in-a", "/q", stageT0.Add(2*time.Second)),
+	}
+	header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, filtered, nil))
+	if err := a.StoreMocksStream(context.Background(), header, dec); err != nil {
+		t.Fatal(err)
+	}
+	if loadStorage(t, a).diskMocks == nil {
+		t.Fatal("the set's per-test mocks are not on disk")
+	}
+	if len(p.catalogs) != 1 {
+		t.Fatalf("storing the set seeded the catalog %d times, want once", len(p.catalogs))
+	}
+	if got, want := p.catalogs[0], []string{"boot-select", "lists-in-a", "insert-in-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the catalog is %v; want the first recording of each statement, in recorded order: %v", got, want)
+	}
+
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-select"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the staging call staged %v; want only the startup mocks %v (the catalog serves nothing)", got, want)
+	}
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime: stageT0, BeforeTime: stageT0.Add(2 * time.Second), StrictMockWindow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.stageScope(context.Background(), []string{"lists-in-a"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.stageScope(context.Background(), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.catalogs) != 1 {
+		t.Fatalf("a call after the store seeded the catalog again (%d seeds, want 1)", len(p.catalogs))
+	}
+
+	// The next set keeps nothing on disk: its store replaces the catalog with
+	// none, so no prepare is described from the previous set's recordings.
+	if err := a.StoreMocks(context.Background(), []*models.Mock{pgQueryMock("next-set", "sha256:next", stageT0)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.catalogs) != 2 || len(p.catalogs[1]) != 0 {
+		t.Fatalf("the next set's store left the catalog %v; want it replaced with none", p.catalogs)
+	}
+}

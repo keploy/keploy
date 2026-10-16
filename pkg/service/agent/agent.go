@@ -50,6 +50,10 @@ type ClientMockStorage struct {
 	// is a test mock (data-plane): one is a recorded call its test is judged
 	// for (refusedOf).
 	refused map[string]bool
+	// statements is the set's statement catalog, read from diskMocks once
+	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
+	// the store is published (seedStatementCatalog); nil with no on-disk store.
+	statements []*models.Mock
 }
 
 type Agent struct {
@@ -1058,6 +1062,7 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 		}
 	}
 	a.clientMocks.Store(uint64(0), storage)
+	a.seedStatementCatalog(storage)
 
 	// Track the loaded count for /agent/mock/stats.
 	a.scopeMu.Lock()
@@ -1181,6 +1186,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	}
 	if disk != nil {
 		disk.Finalize()
+		statements, err := disk.LoadStatements()
+		if err != nil {
+			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
+		}
+		storage.statements = statements
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int("spilledResponses", disk.SpilledResponses()),
@@ -1365,6 +1375,29 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		zap.Int("loadedFromDisk", len(loaded)),
 		zap.Int("residentIneligible", len(resident)))
 	return dedupByName(resident, loaded), nil
+}
+
+// seedStatementCatalog hands the proxy the stored set's statement catalog
+// (storage.statements): the first recorded mock of each statement its on-disk
+// store holds. An app may prepare at start the statements it runs only inside
+// tests, and the set's staging reads only the mocks recorded before the first
+// test (stagingStartupCutoff): the parser answers those prepares from the
+// catalog, describe-only, never serving it. It is seeded once per store, when
+// the store is published, so no test's call and no scope staging reads it
+// again, and a store with no on-disk store (whose per-test mocks are all
+// resident, so the staging reaches them) replaces the previous set's catalog
+// with none. A proxy that cannot take it is not seeded.
+func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
+	seeder, ok := a.Proxy.(coreAgent.StatementCatalogSeeder)
+	if !ok {
+		return
+	}
+	seeder.SeedStatementCatalog(storage.statements)
+	if storage.diskMocks != nil {
+		a.logger.Info("seeded the set's statement catalog from the on-disk store: the first recording of each statement, to describe a statement the app prepares before the test that runs it, never served",
+			zap.Int("statements", len(storage.statements)),
+			zap.Int("onDisk", storage.diskMocks.Len()))
+	}
 }
 
 // stagingStartupCutoff returns where a set's staging call stops reading the

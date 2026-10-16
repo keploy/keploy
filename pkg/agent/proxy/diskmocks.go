@@ -31,6 +31,11 @@ type DiskMocks struct {
 	// at Add), sorted with entries, so the lookahead load reads only them.
 	// Empty while no kind is registered.
 	carry []diskEntry
+
+	// statements is the statement catalog: for each statement a mock on disk
+	// records (its kind and models.StatementKey), the entry of the first one
+	// recorded (LoadStatements). One entry per statement, resident.
+	statements map[string]diskEntry
 }
 
 // diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
@@ -156,6 +161,15 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	d.entries = append(d.entries, e)
 	if models.IsCarryOver(m) {
 		d.carry = append(d.carry, e)
+	}
+	if k := models.StatementKey(m); k != "" {
+		key := string(m.Kind) + "\x00" + k
+		if first, ok := d.statements[key]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.statements == nil {
+				d.statements = make(map[string]diskEntry)
+			}
+			d.statements[key] = e
+		}
 	}
 	d.finalize = false
 	return nil
@@ -306,6 +320,32 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano >= cut })
 	sel := append([]diskEntry(nil), d.entries[:i]...)
 	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadStatements returns the statement catalog: for each statement the mocks
+// on disk record (models.StatementKey), the first one recorded, in recorded
+// order. A client may prepare a statement at app start that its recordings hold
+// only inside tests, which the startup band (LoadBefore) does not reach: the
+// agent reads these once, when the set is stored, and seeds them on the proxy
+// describe-only, so a parser can answer the prepare and never serves them.
+func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.statements))
+	for _, e := range d.statements {
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	sort.Slice(sel, func(i, j int) bool {
+		if sel[i].reqTsNano != sel[j].reqTsNano {
+			return sel[i].reqTsNano < sel[j].reqTsNano
+		}
+		return sel[i].off < sel[j].off
+	})
 	return d.decodeAll(sel)
 }
 

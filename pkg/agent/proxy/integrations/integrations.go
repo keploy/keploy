@@ -293,6 +293,22 @@ type MockCursor interface {
 	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
+// StatementCatalog is an optional MockMemDb capability: the stored set's
+// statement catalog, the first recorded mock of each statement
+// (models.StatementKey) among the per-test mocks the agent keeps on disk, by
+// kind, in recorded order. The agent seeds it once, when the set's mocks are
+// stored. A client may prepare at app start a statement it runs only inside
+// tests, whose mocks the startup staging does not load: a parser answers that
+// prepare (a PostgreSQL Describe's row shape) from the catalog when no mock it
+// may serve holds the statement. The catalog is describe-only: a parser never
+// serves one of its mocks as a call's answer, nor consumes it, and never
+// changes one (the mocks are shared). The agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it: a wrapper that drops it leaves
+// a prepare at app start without the statement's shape.
+type StatementCatalog interface {
+	StatementCatalog(kind models.Kind) []*models.Mock
+}
+
 // VariableStore is an optional MockMemDb capability: the table of the test
 // variables the replay has bound (package variables), which a matcher reads
 // to follow a mock's declared variable places under the proven switch. The

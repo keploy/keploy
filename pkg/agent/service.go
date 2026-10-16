@@ -392,6 +392,17 @@ type StartupCutoffSeeder interface {
 	SeedStartupCutoff(start time.Time)
 }
 
+// StatementCatalogSeeder is the optional extension implemented by proxies whose
+// mock manager can hold the stored set's statement catalog (the first recorded
+// mock of each statement the agent keeps on disk), describe-only, for the
+// parsers' integrations.StatementCatalog capability. Optional in the same style
+// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and a
+// statement prepared at app start that its recordings hold only inside tests
+// is then described from what the parser may serve, as before.
+type StatementCatalogSeeder interface {
+	SeedStatementCatalog(mocks []*models.Mock)
+}
+
 // RecordedWindowsSeeder is the optional extension implemented by proxies whose
 // mock manager can be told the recorded window of every test of the set being
 // staged (models.MockFilterParams.RecordedWindows). Optional in the same style
