@@ -8,3 +8,6 @@ import "go.uber.org/zap"
 // Linux only: on macOS the shim a daemon inherits keeps it a member, and
 // Windows has no reparenting.
 func adoptDaemons(*zap.Logger) {}
+
+// stopAdopted ends what adoptDaemons adopted: nothing here.
+func stopAdopted(*zap.Logger) {}
