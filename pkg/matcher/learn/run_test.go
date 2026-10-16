@@ -122,7 +122,13 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 		t.Fatalf("the next test sees the previous test's late exchange: %+v", earlier)
 	}
 	tr.End()
+	if !tr.Begun() {
+		t.Fatal("a test has begun in this set, and the tracker says none has")
+	}
 	tr.NewSet()
+	if tr.Begun() {
+		t.Fatal("a new set begins with no test begun, and the tracker says one has")
+	}
 	tr.Served(7, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
 		t.Fatalf("an exchange of a test that never ran is kept: %+v", earlier)
