@@ -4,6 +4,7 @@ package linux
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -55,5 +56,61 @@ func TestAUDPWatchFailureIsUnknownNeverZero(t *testing.T) {
 	h.udp.fail(errors.New("a UDP reply report of 40 bytes"))
 	if err := h.CaptureLossesErr(); err == nil || !strings.Contains(err.Error(), "40 bytes") {
 		t.Fatalf("CaptureLossesErr = %v, want the watch's failure", err)
+	}
+}
+
+// A report names what the kernel knows: the destination when it has one, a
+// bound socket when it has none, and a datagram whose source it could not
+// read.
+func TestAUDPReportNamesWhatTheKernelKnows(t *testing.T) {
+	w := &udpWatch{epoch: 2}
+	to := udpDest{IPVersion: 4, IP4: 0x7f000001, Port: 9000}
+	for _, c := range []struct {
+		e    udpReplyEvent
+		want string
+	}{
+		{udpReplyEvent{SrcPort: 9000, Dst: to, Epoch: 1}, "UDP to 127.0.0.1:9000 answered from port 9000"},
+		{udpReplyEvent{SrcPort: 9000, Epoch: 1}, "UDP on a socket the application bound answered from port 9000"},
+		{udpReplyEvent{Dst: to, Epoch: 1, Flags: udpSrcUnread}, "UDP to 127.0.0.1:9000 got a datagram from a source keploy could not read"},
+		{udpReplyEvent{Epoch: 1, Flags: udpSrcUnread}, "UDP on a socket the application bound got a datagram from a source keploy could not read"},
+	} {
+		if got := w.handle(c.e); got != c.want {
+			t.Errorf("handle(%+v) = %q, want %q", c.e, got, c.want)
+		}
+	}
+	if l := w.losses.Snapshot(); len(l) != 1 || l[0].Count != 4 {
+		t.Fatalf("losses %+v, want 4 udp_reply", l)
+	}
+}
+
+// With the proven switch off the UDP watch's maps, which the kernel allocates
+// whole at load, are loaded at their smallest: the watch costs nothing.
+// Under the switch they keep the sizes keploy/ebpf gave them.
+func TestTheUDPWatchsMapsCostNothingWithoutTheSwitch(t *testing.T) {
+	sizes := func(on string) map[string]uint32 {
+		t.Helper()
+		t.Setenv(provenswitch.Env, on)
+		spec, err := hookSpec()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]uint32{}
+		for _, name := range unswitchedMaps {
+			m, ok := spec.Maps[name]
+			if !ok {
+				t.Fatalf("the object has no %s", name)
+			}
+			out[name] = m.MaxEntries
+		}
+		return out
+	}
+	off, on := sizes("0"), sizes("1")
+	for _, name := range unswitchedMaps {
+		if off[name] >= on[name] {
+			t.Errorf("%s: %d entries with the switch off, %d with it on: want it at its smallest when off", name, off[name], on[name])
+		}
+	}
+	if off["udp_peer_first"] != 1 || off["udp_member_addrs"] != 1 || off["udp_reply_events"] != uint32(os.Getpagesize()) {
+		t.Fatalf("with the switch off: %v, want one entry each and one page of ring", off)
 	}
 }
