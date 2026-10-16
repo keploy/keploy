@@ -953,11 +953,12 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	v := dc.of(recorded, now)
-	// The test's own call that sent the value is the place, before one of
-	// the run's that sent it too: only a test's own calls carry its
-	// variables.
-	var first Place
-	found := false
+	// The place is where the value was sent, not where it was answered (a
+	// variable is bound where the application sent it): the test's own call
+	// that sent it first, else the run's, else another's; an answer that
+	// gave it only when no call sent it.
+	var best Place
+	rank := 4
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -966,20 +967,32 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			if ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v); ok {
-				p := Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}
-				if e.Own {
-					return p, true
+			ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v)
+			if !ok {
+				continue
+			}
+			r := 3
+			if s.Side == Request {
+				switch {
+				case e.Own:
+					r = 0
+				case e.Run:
+					r = 1
+				default:
+					r = 2
 				}
-				if !found {
-					first, found = p, true
-				}
+			}
+			if r < rank {
+				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, r
+			}
+			if rank == 0 {
+				return best, true
 			}
 		}
 	}
-	if found {
-		return first, true
+	if rank < 4 {
+		return best, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),
