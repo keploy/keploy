@@ -3,7 +3,6 @@ package agent
 import (
 	"testing"
 	"time"
-
 )
 
 func TestEffectiveFirstWindowStart(t *testing.T) {

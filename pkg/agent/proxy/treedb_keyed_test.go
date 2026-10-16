@@ -153,7 +153,9 @@ func TestRangeSessionMocksWithKeyIsGetSessionMocksFilteredByKey(t *testing.T) {
 			stage func()
 		}{
 			{"the set's begin", func() { mm.BeginTestSet(time.Time{}, nil, perTest, session) }},
-			{"first window", func() { mm.SetMocksWithWindow(perTest, session, base.Add(50*time.Millisecond), base.Add(60*time.Millisecond)) }},
+			{"first window", func() {
+				mm.SetMocksWithWindow(perTest, session, base.Add(50*time.Millisecond), base.Add(60*time.Millisecond))
+			}},
 		} {
 			staging.stage()
 			all, _ := mm.GetSessionMocks()
