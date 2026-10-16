@@ -7,8 +7,10 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -18,6 +20,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1996,5 +1999,260 @@ func TestSettleNeverGivesADestroyedContainerALiveOnesAddress(t *testing.T) {
 	r.Settle(t.Context())
 	if c, ok := lookup(t, r, "172.17.0.98:5432"); !ok || c.ID != "next" {
 		t.Fatalf("the live container's address after Settle = %+v, %v; want next", c, ok)
+	}
+}
+
+// waitStallLook waits for a read's stall watch to arm its next look on clk.
+func waitStallLook(t *testing.T, clk *stall.ManualClock) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the read's stall watch never armed its next look")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A read of a container's configuration the daemon holds stalls once keploy
+// could run for the stall window with no answer, never in wall time alone (a
+// starved agent's read is not stalled): what waits for the container's
+// fingerprint stops waiting then, told the container, and a later wait does
+// not wait at all. The read's end, when it comes, clears the stall.
+func TestAReadTheDaemonHoldsStallsInTimeKeployCouldRun(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered // its inspect is held
+	got := make(chan string, 1)
+	go func() {
+		_, _, ok, stalled := r.FingerprintsOrStall(t.Context(), "tc")
+		if ok {
+			stalled = "a fingerprint"
+		}
+		got <- stalled
+	}()
+	for range 5 { // wall time passes, keploy given no CPU
+		waitStallLook(t, clk)
+		clk.Pass()
+	}
+	waitStallLook(t, clk)
+	select {
+	case s := <-got:
+		t.Fatalf("a read keploy had no CPU to wait on stalled: %q", s)
+	default:
+	}
+	clk.Advance(readStallGrace)
+	if s := <-got; !strings.Contains(s, "postgres:16") {
+		t.Fatalf("the wait ended with %q, want the stalled container named", s)
+	}
+	if _, _, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); ok || s == "" {
+		t.Fatalf("a wait after the stall = %v, %q; want none, at once", ok, s)
+	}
+	close(held)
+	if id := <-applied; id != "tc" {
+		t.Fatalf("read %s", id)
+	}
+	if fp, legacy, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); !ok || fp != fpEmpty || legacy != lfpEmpty || s != "" {
+		t.Fatalf("after the read = %q, %q, %v, %q", fp, legacy, ok, s)
+	}
+}
+
+// waitStallLooks waits until n of the reads' stall watches on clk have armed
+// their next look.
+func waitStallLooks(t *testing.T, clk *stall.ManualClock, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of the reads' stall watches never armed their next look (%d did)", n, clk.Pending())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// stalledNow says whether the current watch marks container id's read stalled.
+func stalledNow(r *dockerIndex, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cur != nil && r.cur.stalled[id]
+}
+
+// A read that waits for a read slot while the reads in the slots end is not
+// stalled: the daemon answers, and the queue moves. Its stall counts from the
+// queue's last move (a read giving its slot back, or its taking one), as a
+// parser's hang counts from its last progress: a read stalls once its own
+// inspect, or every read in front of it, has been held for the window, never
+// for the length of a queue that moves.
+func TestAReadWaitingForASlotIsNotStalledWhileTheQueueMoves(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	r.readSlots = make(chan struct{}, 1) // one slot: b and c wait for a's
+	heldA, heldB, heldC := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer close(heldB)
+	defer close(heldC)
+	f.mu.Lock()
+	f.block["a"], f.block["b"], f.block["c"] = heldA, heldB, heldC
+	f.mu.Unlock()
+	f.set("a", running("nginx", "sha256:n", []string{"172.17.0.8"}, nat.PortMap{}))
+	f.set("b", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.set("c", running("redis", "sha256:r", []string{"172.17.0.9"}, nat.PortMap{}))
+	f.msgs <- start("a")
+	if id := <-f.entered; id != "a" {
+		t.Fatalf("read %s first", id)
+	}
+	f.msgs <- start("b")
+	f.msgs <- start("c")
+	waitStallLooks(t, clk, 3) // b's and c's watches run while they wait for a's slot
+	clk.Advance(readStallGrace - time.Second)
+	waitStallLooks(t, clk, 3)
+	close(heldA) // the daemon answers a: one of b and c takes the slot, and its inspect is held
+	x := <-f.entered
+	y := map[string]string{"b": "c", "c": "b"}[x]
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for clk.Pending() != 2 {                // a's watch ended with its read
+		if time.Now().After(deadline) {
+			t.Fatalf("a's stall watch did not end with its read (%d looks pending)", clk.Pending())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Each has waited past the window in all: x's own inspect 2 s of it, and
+	// y in a queue that moved 2 s ago.
+	clk.Advance(2 * time.Second)
+	for clk.Pending() < 2 && !stalledNow(r, x) && !stalledNow(r, y) {
+		if time.Now().After(deadline) {
+			t.Fatal("the stall watches neither looked again nor marked a read")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if stalledNow(r, x) || stalledNow(r, y) {
+		t.Fatalf("stalled: %s %v, %s %v; the queue they waited in moved: the daemon answered a", x, stalledNow(r, x), y, stalledNow(r, y))
+	}
+	clk.Advance(readStallGrace) // x's inspect held for the window, and y behind it
+	for !stalledNow(r, x) || !stalledNow(r, y) {
+		if time.Now().After(deadline) {
+			t.Fatalf("held for the window: %s stalled %v, %s, behind it, stalled %v", x, stalledNow(r, x), y, stalledNow(r, y))
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A stall watch whose look expired as its read ended marks nothing, though a
+// read of the container is in flight again: that read is another, not
+// stalled until its own watch says so.
+func TestALookThatExpiredAsItsReadEndedMarksNoOtherRead(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered // a read of tc in flight, its own watch on the process's clock
+	ended := make(chan struct{})
+	close(ended) // the watch of a read before it, which ended
+	r.markStalled(current(r), "tc", ended)
+	if stalledNow(r, "tc") {
+		t.Fatal("a look of a read that ended marked the read in flight now stalled")
+	}
+	r.markStalled(current(r), "tc", make(chan struct{})) // this read's own watch
+	if !stalledNow(r, "tc") {
+		t.Fatal("the read's own watch did not mark it stalled")
+	}
+}
+
+// A read that stalled and then ends, with its container to be read once more
+// (an event came meanwhile), clears its stall: the next read is waited for
+// until its own watch says it stalled.
+func TestAStalledReadReadOnceMoreIsWaitedForAgain(t *testing.T) {
+	f := newFakeDocker()
+	r, applied := watching(t, f)
+	clk := &stall.ManualClock{}
+	r.mu.Lock()
+	r.stallClock = clk
+	r.mu.Unlock()
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	waitStallLook(t, clk)
+	clk.Advance(readStallGrace)
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for !stalledNow(r, "tc") {
+		if time.Now().After(deadline) {
+			t.Fatal("never stalled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	connect(f, "tc") // tc is to be read once more when this read ends
+	fence(f)
+	second := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = second // the next read is held too
+	f.mu.Unlock()
+	close(held)
+	if id := <-applied; id != "tc" {
+		t.Fatalf("read %s", id)
+	}
+	<-f.entered // the next read of tc is in flight
+	defer close(second)
+	if stalledNow(r, "tc") {
+		t.Fatal("the next read of tc is stalled before its own watch said so")
+	}
+	got := make(chan bool, 1)
+	go func() {
+		_, _, ok, s := r.FingerprintsOrStall(t.Context(), "tc")
+		got <- ok || s != ""
+	}()
+	waitStallLook(t, clk)
+	select {
+	case <-got:
+		t.Fatal("a wait for the next read did not wait")
+	default:
+	}
+	clk.Advance(readStallGrace)
+	if !<-got {
+		t.Fatal("the next read's stall did not end the wait")
+	}
+}
+
+// A fingerprint that is in wins over a stall still marked: the read put it
+// in, and its end, which clears the mark, comes a moment after.
+func TestAFingerprintInWinsOverAStallStillMarked(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f)
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	r.markStalled(current(r), "tc", make(chan struct{}))
+	r.mu.Lock()
+	// the read's put, before its end
+	r.cur.images["tc"], r.cur.fingerprints["tc"], r.cur.legacy["tc"] = "postgres:16", fpEmpty, lfpEmpty
+	r.mu.Unlock()
+	if fp, legacy, ok, s := r.FingerprintsOrStall(t.Context(), "tc"); !ok || fp != fpEmpty || legacy != lfpEmpty || s != "" {
+		t.Fatalf("= %q, %q, %v, %q; want the fingerprint, not the stall", fp, legacy, ok, s)
 	}
 }

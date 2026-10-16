@@ -121,7 +121,27 @@ const (
 	// is (NotJudged, PerTest), with its own text. Only under the proven
 	// switch.
 	CaptureLossRefusedAtAccept CaptureLossKind = "refused_at_accept"
+	// CaptureLossContainerUnread (P116-a): the Docker daemon did not answer
+	// keploy's read of the configuration of a container a call reached, for
+	// keploy's stall window in time keploy could run (Docker holds an
+	// inspect while another operation holds the container, and may hold it
+	// for good). The container's identity, its key, is unknown to the call,
+	// so whether it was matched, or recorded, under the right one cannot be
+	// told: the test it is charged to is NOT JUDGED (NotJudged). A test's own
+	// kind (PerTest), counted when the use gives up waiting: in a replay the
+	// count charges a call matched to its own test (a replayed test's end
+	// settles its calls first). A record charges by the mock instead
+	// (ContainerUnreadMetadata), whenever its stamp came, and leaves the
+	// count out (Without). Only under the proven switch.
+	CaptureLossContainerUnread CaptureLossKind = "container_unread"
 )
+
+// ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
+// with when the Docker daemon did not answer keploy's read of its
+// container's configuration (CaptureLossContainerUnread), naming the
+// container: a record charges the mock's own test with it, whenever the
+// read stalled, rather than by the count (Without).
+const ContainerUnreadMetadata = "containerUnread"
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
 // without a verdict (decision 20), rather than failing them: a call keploy
@@ -129,7 +149,7 @@ const (
 // or a TLS handshake abandoned without a word, which keploy cannot tell lost
 // a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -208,7 +228,7 @@ const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certifica
 // keploy's CA; list a server-first destination in mock.real. Empty for
 // none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, tls, serverFirst, refused bool
+	var unix, tls, serverFirst, refused, docker bool
 	for _, c := range l {
 		switch c.Kind {
 		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
@@ -219,6 +239,8 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 			serverFirst = true
 		case CaptureLossRefusedAtAccept:
 			refused = true
+		case CaptureLossContainerUnread:
+			docker = true
 		}
 	}
 	var do []string
@@ -233,6 +255,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if refused {
 		do = append(do, "find why the destination refused the application's connections (its connection limit, or its protected mode)")
+	}
+	if docker {
+		do = append(do, "make `docker inspect` of the container named answer (another operation on it, such as a stop's grace period or a hung exec, holds it)")
 	}
 	return strings.Join(do, ", and ")
 }
@@ -270,7 +295,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -291,6 +316,19 @@ func (l CaptureLosses) Charged(base, runBase, test CaptureLosses) CaptureLosses 
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
+}
+
+// Without is l without kind k's count: a record charges a container read
+// the daemon did not answer by the mock it marked
+// (ContainerUnreadMetadata), not by when it was counted.
+func (l CaptureLosses) Without(k CaptureLossKind) CaptureLosses {
+	var out CaptureLosses
+	for _, c := range l {
+		if c.Kind != k {
+			out = append(out, c)
+		}
+	}
 	return out
 }
 
@@ -433,6 +471,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("the application's calls over a server-first protocol keploy has no parser for (its server greets first: SMTP, FTP, POP3) were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
 	case CaptureLossRefusedAtAccept:
 		return fmt.Sprintf("a destination refused the application's connections at accept, and its calls on them were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
+	case CaptureLossContainerUnread:
+		return fmt.Sprintf("the Docker daemon did not answer keploy's read of a container's configuration (%d time(s) a call to it was matched or recorded), so keploy cannot tell which container those calls reached, nor whether they were matched or recorded as that container's", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
