@@ -1080,8 +1080,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		if cfg.answer.didStall() {
-			// The answer stopped part-way: nothing whole to compare.
-			return nil, cfg.answer.err()
+			// The answer stopped part-way: nothing whole to compare. Its
+			// status and headers came, and go with the error, for the
+			// replay to judge them first (AnswerBegan).
+			return &models.HTTPResp{
+				StatusCode:    httpResp.StatusCode,
+				StatusMessage: http.StatusText(httpResp.StatusCode),
+				Header:        ToYamlHTTPHeader(httpResp.Header),
+			}, cfg.answer.err()
 		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
@@ -1596,7 +1602,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 					if nextExpected == 0 {
 						// A recording of no frame, and the app sent
 						// none: nothing of the answer to compare.
-						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithNothing("", true, 0)
+						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
 					}
 					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
 				}
@@ -1684,14 +1690,14 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			// compare: it fails closed, not judged (ErrAnswerStalled).
 			if readToEnd && nextExpected >= len(expectedQueue) {
 				if nextExpected == 0 {
-					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithNothing("", true, 0)
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
 				}
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
 			}
 			keepalives++
 			if readToEnd && keepalives >= 2 {
 				if nextExpected == 0 {
-					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithNothing("", true, 0)
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
 				}
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamStalled
 			}

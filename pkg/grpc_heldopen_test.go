@@ -280,9 +280,10 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 			resp, err := heldOpenCall(t, withStatus(recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), recordedCode), app.exhausted)
 			switch {
 			case tc.nothing:
-				if want := "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method"; resp != nil || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != want {
+				if want := "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method"; !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != want || !AnswerBegan(err) {
 					t.Fatalf("SimulateGRPC: %v, %v; want it failing closed: %q", resp, err, want)
 				}
+				requireHeadersOnly(t, resp, true)
 			case !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled):
 				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, not stalled", err)
 			case len(resp.AllMessages()) != len(tc.sent):

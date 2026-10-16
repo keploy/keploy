@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -137,16 +138,68 @@ func markAnswerStalled(result *models.TestResult, err error) {
 }
 
 // sayNoAnswer is the console's line for a test with no answer: for one the
-// stall rule ended, that it is not judged and what was waited for, not an
-// ordinary failure; else what as says, with the error.
+// stall rule or the app's keepalives ended, that it is not judged and what
+// was waited for, not an ordinary failure; else what as says, with the
+// error.
 func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 	if errors.Is(err, pkg.ErrAnswerStalled) {
 		logger.Error("not judged: "+err.Error(),
 			zap.String("testcase", test),
-			zap.String("next_step", "find why the app does not answer, or does not read the request; if it takes longer than that by design, give the test a bound of your own with --api-timeout"))
+			zap.String("next_step", stalledAnswerRemedy(err)))
 		return
 	}
 	utils.LogError(logger, err, as)
+}
+
+// stalledAnswerRemedy is what to do about a test whose answer never came:
+// for one the app's keepalives ended (pkg.AnswerStallError.Keepalives), a
+// bound of the user's changes nothing, so it is never suggested.
+func stalledAnswerRemedy(err error) string {
+	var st *pkg.AnswerStallError
+	if errors.As(err, &st) && st.Keepalives {
+		return keepalivesRemedy
+	}
+	return stalledAnswersRemedy
+}
+
+// keepalivesRemedy is what to do about a stream the app sent only
+// keepalives on: no bound changes it.
+const keepalivesRemedy = "find why the app sends only keepalives and nothing of its answer (a stream it waits to fill, an event that never comes at replay), or record the test again; --api-timeout does not change this"
+
+// answerStartDiffers judges the start of an answer that began and then sent
+// nothing of its body (pkg.AnswerBegan): its status and headers (gRPC: its
+// metadata) against the recording's, with the recording's body and trailers
+// in place of those that never came. When they differ it reports true and
+// the answer to compare for the judged failure (the start, and the
+// recording's rest); when they match, false: the test fails closed, not
+// judged. It prints nothing: the comparison of the judged answer does.
+func (r *Replayer) answerStartDiffers(run *templates.Run, sent *models.TestCase, resp any, testSetID string) (any, bool) {
+	expected := noAnswerView(run, sent)
+	switch got := resp.(type) {
+	case *models.HTTPResp:
+		if got == nil {
+			return nil, false
+		}
+		start := *got
+		start.Body = expected.HTTPResp.Body
+		probe := start
+		if same, _ := r.compareHTTPResp(expected, &probe, testSetID, false); same {
+			return nil, false
+		}
+		return &start, true
+	case *models.GrpcResp:
+		if got == nil {
+			return nil, false
+		}
+		start := sent.GrpcResp
+		start.Headers = got.Headers
+		probe := start
+		if same, _ := r.compareGRPCResp(expected, &probe, testSetID, false, true); same {
+			return nil, false
+		}
+		return &start, true
+	}
+	return nil, false
 }
 
 // testsWithStalledAnswers names, under the proven switch, the tests of a set
@@ -169,11 +222,12 @@ func testsWithStalledAnswers(results []models.TestResult) []string {
 // stalledAnswersReason is the test-set report's reason for a set left
 // unjudged by tests whose answer never came.
 func stalledAnswersReason(tests []string) string {
-	return fmt.Sprintf("not judged: the app never answered %d test(s) (%s), sent nothing of the answer past its headers, or never took the whole request, before keploy's stall bound of runnable time passed or its keepalives showed it stalled; %s, then run the test-set again",
+	return fmt.Sprintf("not judged: the app never answered %d test(s) (%s), sent nothing of the answer past its headers, or never took the whole request, before keploy's stall bound of runnable time passed or its keepalives showed it stalled; %s (a stream it sent only keepalives on: --api-timeout does not change that), then run the test-set again",
 		len(tests), strings.Join(tests, ", "), stalledAnswersRemedy)
 }
 
-// stalledAnswersRemedy is what to do about a test whose answer never came.
+// stalledAnswersRemedy is what to do about a test whose answer never came,
+// by keploy's stall bound.
 const stalledAnswersRemedy = "find why the app does not answer, or does not read the request; if it takes longer than that by design, give the tests a bound of your own with --api-timeout"
 
 // testsKeployCannotCapture names, under the proven switch, the tests of a set
