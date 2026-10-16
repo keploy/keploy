@@ -150,3 +150,24 @@ func TestReadBack(t *testing.T) {
 		}
 	}
 }
+
+// ReplaceToken replaces a value only where it stands as a token.
+func TestReplaceToken(t *testing.T) {
+	for _, c := range []struct {
+		s, v, with, want string
+		found            bool
+	}{
+		{"USER:42", "42", "7", "USER:7", true},
+		{"order-42x", "42", "7", "order-42x", false},
+		{"42/42x/42", "42", "7", "7/42x/7", true},
+		{"abcdef", "abcdef", "LIVE01", "LIVE01", true},
+		{"Xabcdef9", "abcdef", "LIVE01", "Xabcdef9", false},
+		{"", "42", "7", "", false},
+		{"42", "", "7", "42", false},
+	} {
+		got, found := ReplaceToken(c.s, c.v, c.with)
+		if got != c.want || found != c.found {
+			t.Fatalf("ReplaceToken(%q, %q, %q) = %q, %v; want %q, %v", c.s, c.v, c.with, got, found, c.want, c.found)
+		}
+	}
+}

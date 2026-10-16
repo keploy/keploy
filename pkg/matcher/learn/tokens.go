@@ -37,3 +37,36 @@ func ContainsToken(s, v string) bool {
 	}
 	return false
 }
+
+// ReplaceToken is s with each occurrence of v as a token (ContainsToken)
+// replaced by with, and whether there was one: "USER:42" with 42 as 7 is
+// "USER:7", "order-42x" is unchanged.
+func ReplaceToken(s, v, with string) (string, bool) {
+	if v == "" {
+		return s, false
+	}
+	var b strings.Builder
+	found := false
+	i := 0
+	for i <= len(s)-len(v) {
+		j := strings.Index(s[i:], v)
+		if j < 0 {
+			break
+		}
+		at := i + j
+		if !tokenAt(s, v, at) {
+			b.WriteString(s[i : at+1])
+			i = at + 1
+			continue
+		}
+		b.WriteString(s[i:at])
+		b.WriteString(with)
+		found = true
+		i = at + len(v)
+	}
+	if !found {
+		return s, false
+	}
+	b.WriteString(s[i:])
+	return b.String(), true
+}
