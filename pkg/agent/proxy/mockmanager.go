@@ -57,6 +57,13 @@ import (
 // the atomic variants above.
 
 type MockManager struct {
+	// statements is the stored set's statement catalog, by kind
+	// (SeedStatementCatalog): describe-only, in no tree, never served or
+	// consumed. Replaced whole when a set's mocks are stored; read under
+	// statementsMu.
+	statementsMu sync.RWMutex
+	statements   map[models.Kind][]*models.Mock
+
 	// servedObserver, when set, is told of every mock a parser is served
 	// (consumed or reused), before the claim takes it out of the pool and
 	// outside the manager's own locks: under the proven switch, the learn
@@ -2035,6 +2042,35 @@ func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
 	m.cursorMu.Unlock()
+}
+
+// SeedStatementCatalog replaces the stored set's statement catalog: the first
+// recorded mock of each statement its on-disk store holds
+// (DiskMocks.LoadStatements), none for a set with no on-disk store. They go in
+// no tree: a parser reads them only to
+// answer a prepare (StatementCatalog), and no match or consume ever reaches
+// them, so a statement recorded inside a test is described at app start
+// without its answer being served there.
+func (m *MockManager) SeedStatementCatalog(mocks []*models.Mock) {
+	byKind := make(map[models.Kind][]*models.Mock)
+	for _, mk := range mocks {
+		if mk != nil {
+			byKind[mk.Kind] = append(byKind[mk.Kind], mk)
+		}
+	}
+	m.statementsMu.Lock()
+	m.statements = byKind
+	m.statementsMu.Unlock()
+}
+
+// StatementCatalog returns the stored set's statement catalog's mocks of kind, in
+// recorded order. Satisfies the parsers' optional
+// integrations.StatementCatalog capability. The mocks are shared: a caller
+// reads them and never changes them.
+func (m *MockManager) StatementCatalog(kind models.Kind) []*models.Mock {
+	m.statementsMu.RLock()
+	defer m.statementsMu.RUnlock()
+	return m.statements[kind]
 }
 
 // Variables returns the table of the test variables this replay has bound.

@@ -538,6 +538,15 @@ func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
 	return false, false
 }
 
+// StatementCatalog forwards the staged set's statement catalog: describe-only,
+// the same for every view (it serves no test's answer).
+func (s *scopedMockDb) StatementCatalog(kind models.Kind) []*models.Mock {
+	if c, ok := s.MockMemDb.(integrations.StatementCatalog); ok {
+		return c.StatementCatalog(kind)
+	}
+	return nil
+}
+
 // Variables forwards the replay's variable table. Under the proven switch one
 // test is open at a time in an agent, so every view shares the one table.
 func (s *scopedMockDb) Variables() *variables.Table {

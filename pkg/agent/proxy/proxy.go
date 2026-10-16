@@ -4447,6 +4447,15 @@ func (p *Proxy) SeedStartupCutoff(start time.Time) {
 	}
 }
 
+// SeedStatementCatalog hands the underlying MockManager the stored set's
+// statement catalog (MockManager.SeedStatementCatalog). Satisfies the agent's
+// optional StatementCatalogSeeder extension interface.
+func (p *Proxy) SeedStatementCatalog(mocks []*models.Mock) {
+	if m := p.getMockManager(); m != nil {
+		m.SeedStatementCatalog(mocks)
+	}
+}
+
 // SeedRecordedWindows hands the underlying MockManager the recorded window of
 // every test of the set being staged. Satisfies the agent's optional
 // RecordedWindowsSeeder extension interface.
