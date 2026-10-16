@@ -55,6 +55,10 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
+    # The CLI's lines ("Keploy:") only, unlike the other fuzzer lanes, which
+    # also fail on the agent's ("Keploy(agent):"): this lane's replay leaves
+    # about a third of its queries unmatched while its tests pass
+    # (keploy/integrations#326). The agent's lines join this gate with that fix.
     # Find critical Keploy errors, but exclude specific non-critical ones.
     if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
