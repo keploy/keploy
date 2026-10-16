@@ -327,7 +327,9 @@ func (p *Proxy) recordViaSupervisor(
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
 	// FakeConns so the parser's reads unblock on abort.
 	relayDone := make(chan error, 1)
-	relayCtx, relayCancel := context.WithCancel(ctx)
+	// A client-side TLS upgrade the relay makes is charged as every
+	// client-side handshake is (clientTLS), to this connection's destination.
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn)))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 
