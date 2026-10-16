@@ -198,42 +198,84 @@ func TestRunTestSet_ACallAfterTheLastTestFailsASetWhoseTestsWereAllQuarantined(t
 	}
 }
 
-// haltsAtSetEnd is the stand-in agent and application, whose application
-// exits as the set's end reads the calls made after its last test: the read
-// is cut short by the set's stop (its ctx is cancelled), as a real agent
-// client's is.
-type haltsAtSetEnd struct {
+// haltsAfterLastTest is the stand-in agent and application, whose
+// application exits on its own once the last test's calls are read, before
+// the set's end stops it: the read is answered, and the app watcher has the
+// set's status by the time it returns.
+type haltsAfterLastTest struct {
 	*prInstr
 	reads atomic.Int32
 	at    int32
 }
 
-func (f *haltsAtSetEnd) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+func (f *haltsAfterLastTest) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
 	if f.reads.Add(1) != f.at {
 		return f.prInstr.GetMockErrors(ctx)
 	}
 	close(f.appStopped)
 	<-ctx.Done() // the app watcher's stop: the set's status is recorded first
-	return nil, ctx.Err()
+	return nil, nil
 }
 
-// An application that exits after the set's last test, as the set's end reads
-// its calls, ends the set APP_HALTED, as it did before that read: a read the
-// stop cut short is not a read that could not vouch (INTERNAL_ERR, not
-// judged), which would also keep the run going past an app that exited.
-func TestRunTestSet_AnAppThatExitsAsTheSetEndReadsIsHalted(t *testing.T) {
+// An application that exits on its own after the set's last test ends the
+// set APP_HALTED: the set's end, which under the switch stops the app and
+// then reads what it did after its last test, reads nothing of an app that
+// stopped itself, and does not take it for a set whose calls could not be
+// read (INTERNAL_ERR, not judged), which would also keep the run going past
+// an app that exited.
+func TestRunTestSet_AnAppThatExitsAfterTheLastTestIsHalted(t *testing.T) {
 	provenOn(t, true)
 	h := newPartialRunHarness(t, 2, 0)
-	instr := &haltsAtSetEnd{prInstr: h.instr, at: 3} // a read per test, then the set's
+	instr := &haltsAfterLastTest{prInstr: h.instr, at: 2} // the last test's read
 	h.replayer.instrumentation = instr
 	status := h.run(t)
-	if instr.reads.Load() != 3 {
-		t.Fatalf("fixture: %d reads of the agent's misses, want 3", instr.reads.Load())
+	if instr.reads.Load() != 2 {
+		t.Fatalf("%d reads of the agent's misses, want 2: one per test, and none at the end of a set whose app exited", instr.reads.Load())
 	}
 	if status != models.TestSetStatusAppHalted {
 		t.Fatalf("status %s, want APP_HALTED: the app exited after the last test", status)
 	}
 	if h.replayer.notJudged("test-set-0") {
 		t.Fatal("a set whose app exited is marked not judged, and the run would go on past it")
+	}
+}
+
+// stopsAtSetEnd is the stand-in agent and application, whose user stops the
+// run (Ctrl+C) as the set's end reads the calls made after its last test:
+// the read is cut short by the stop (its ctx is cancelled), as a real agent
+// client's is.
+type stopsAtSetEnd struct {
+	*prInstr
+	reads atomic.Int32
+	at    int32
+	stop  func()
+}
+
+func (f *stopsAtSetEnd) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	if f.reads.Add(1) != f.at {
+		return f.prInstr.GetMockErrors(ctx)
+	}
+	f.stop()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A read of the set's end that the user's stop cuts short is the stop's: the
+// set is USER_ABORT, not a set whose calls could not be read (not judged).
+func TestRunTestSet_AStopThatCutsTheSetEndReadShortIsTheStops(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	instr := &stopsAtSetEnd{prInstr: h.instr, at: 3} // a read per test, then the set's
+	instr.stop = func() { h.cancel() }
+	h.replayer.instrumentation = instr
+	status := h.run(t)
+	if instr.reads.Load() != 3 {
+		t.Fatalf("fixture: %d reads of the agent's misses, want 3", instr.reads.Load())
+	}
+	if status != models.TestSetStatusUserAbort {
+		t.Fatalf("status %s, want USER_ABORT: the user stopped the run as the set's end read", status)
+	}
+	if h.replayer.notJudged("test-set-0") {
+		t.Fatal("a set the user stopped is marked not judged")
 	}
 }
