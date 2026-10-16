@@ -135,6 +135,17 @@ func (t *Tracker) Open() bool {
 	return t.open
 }
 
+// Begun reports whether a test has begun in this set (Begin, until NewSet):
+// what is served before is the start-up's. A nil tracker answers true.
+func (t *Tracker) Begun() bool {
+	if t == nil {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.began
+}
+
 // Test is the running test's number, what the learn step served in it so
 // far, leaf by leaf, every mock any parser served in it so far
 // (ServedMock), and the mocks served before it began: those served since the
