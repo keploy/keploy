@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -800,4 +801,118 @@ func TestOtherLoopbackReadsADualStackDestination(t *testing.T) {
 		require.True(t, ok, dst)
 		require.Equal(t, "[::1]:5432", other, dst)
 	}
+}
+
+// P251, a pin: a connection to a mock.real name's address that keploy's DNS
+// answered for several names (so it did not name it exactly once) waits for
+// its client's first bytes to name it. A server-first destination's client
+// sends none: it waits to be greeted. In a replay keploy has dialled nothing,
+// so no greeting comes; in a record with the handshake hold the destination
+// was dialled at the handshake, and its greeting waits unread in that
+// connection. Either way the application gets nothing, and the wait has no
+// clock and does not hang the run. The test it was open in ends with the
+// connection charged as capture_incomplete (class e), naming the candidates
+// and that no name came before the test ended; the run's end closes it,
+// nothing of it relayed, recorded or mocked, and the run is not charged
+// again. The application's own call, waiting on its greeting, is the
+// replay's to end (its bound, or the answer stall rule, train/fix/proven-
+// stream-hangs).
+func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTestsEnd(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		name := "replay: nothing dialled"
+		if held {
+			name = "record: dialled at the handshake"
+		}
+		t.Run(name, func(t *testing.T) {
+			var accepted atomic.Int32
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				for {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					accepted.Add(1)
+					_, _ = c.Write([]byte("220 mail.test ESMTP\r\n"))
+					_, _ = io.Copy(io.Discard, c)
+					_ = c.Close()
+				}
+			}()
+			dst := ln.Addr().String()
+			_, portText, _ := net.SplitHostPort(dst)
+			p := realProxy(t, []string{"mail.test:" + portText}, nil)
+			// keploy's DNS answered both names with the address: it names
+			// neither exactly once.
+			book := p.real.Load().book
+			for _, n := range []string{"mail.test", "other.test"} {
+				book.Answered(n, []netip.Addr{netip.MustParseAddr("127.0.0.1")})
+			}
+			var pre *util.Predialed
+			if held {
+				up, err := util.DialUpstream(context.Background(), nil, "tcp", dst)
+				require.NoError(t, err)
+				pre = util.NewPredialed(dst, up)
+				t.Cleanup(pre.CloseIfUnused)
+			}
+			p.realTracker.BeginTest()
+
+			app, acceptedConn := realConnPair(t)
+			reading := &readSignal{Conn: acceptedConn, started: make(chan struct{})}
+			ctx, endRun := context.WithCancel(context.Background())
+			done := make(chan served, 1)
+			go func() {
+				h, c, err := p.serveReal(ctx, reading, dst, "", 1, pre)
+				done <- served{h, c, err}
+			}()
+			// serveReal reads the client for its name once the connection
+			// is pending in the tracker.
+			awaitEvent(t, reading.started, "serveReal reading the client for its name")
+
+			// The test ends with the client silent: the connection is
+			// charged to it, still waiting.
+			_, incomplete := p.realTracker.EndTest()
+			select {
+			case s := <-done:
+				t.Fatalf("serveReal ended (%+v) with the client silent and the run going", s)
+			default:
+			}
+			require.Len(t, incomplete, 1)
+			require.Equal(t, models.CaptureIncompleteRealName, incomplete[0].Class)
+			require.Equal(t, dst, incomplete[0].Destination)
+			require.Contains(t, incomplete[0].Why, "mail.test")
+			require.Contains(t, incomplete[0].Why, "its client had sent no name when the test ended")
+
+			endRun()
+			s := awaitEvent(t, done, "serveReal ending with the run")
+			require.True(t, s.handled, "the connection was never handed on, recorded or mocked")
+			// Everything keploy wrote the application arrives before its
+			// close: it wrote nothing.
+			require.NoError(t, app.SetReadDeadline(time.Now().Add(10*time.Second)))
+			got, err := io.ReadAll(app)
+			require.NoError(t, err)
+			require.Empty(t, got, "the application was sent bytes")
+			want := int32(0)
+			if held {
+				want = 1 // the handshake's own dial, never relayed
+			}
+			require.Equal(t, want, accepted.Load())
+			run := p.RealRun()
+			require.Empty(t, run.Incomplete, "its test was charged; the run is not charged again")
+			require.Empty(t, run.Reached)
+		})
+	}
+}
+
+// readSignal is a connection that says when it is first read.
+type readSignal struct {
+	net.Conn
+	once    sync.Once
+	started chan struct{}
+}
+
+func (c *readSignal) Read(p []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.Conn.Read(p)
 }
