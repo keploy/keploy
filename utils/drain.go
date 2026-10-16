@@ -234,6 +234,11 @@ func agentGone(err error) bool {
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
 }
 
+// AgentGone reports whether asking the agent failed because it could not be
+// reached at all (refused, reset, the connection closed mid-answer), by the
+// error, not its text: the agent going away, as Look reads it.
+func AgentGone(err error) bool { return agentGone(err) }
+
 // LastGone reports whether the agent could not be reached at all at the last
 // look (see Look).
 func (l *BacklogLooks) LastGone() bool { return l.gone }

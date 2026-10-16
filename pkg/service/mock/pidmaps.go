@@ -5,69 +5,27 @@ import (
 	"errors"
 	"fmt"
 
-	"time"
-
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-// readPIDMapRefusals reads the agent's count. With the proven switch off it is
-// bounded by agentEpilogueTimeout, like every other end-of-run agent read; with
-// it on, it has no deadline of any length (design rule 15): the agent's
-// answer, the connection's close or ctx ends it, or the user. ctx may be one
-// an interrupt does not cancel (a record's persistCtx, so a stopped recording
-// is still checked). The user ends it as a recording's drain is ended
-// (utils.StopNowNotice): every mockDrainNotice the read says it is waiting,
-// and once the run has been interrupted, that another interrupt stops it now;
-// from then the next one does (utils.StopNow), and the count is unread. An
-// interrupt before that offer is not the user's answer to it: a stop sent to
-// both sudo and keploy reaches keploy twice.
+// readPIDMapRefusals reads the agent's count, as an epilogue read
+// (epilogueRead): with the proven switch off it is bounded by
+// agentEpilogueTimeout, like every other end-of-run agent read; with it on,
+// it has no deadline of any length (design rule 15): the agent's answer, the
+// connection's close or ctx ends it, or the user, and the count is then
+// unread.
 func readPIDMapRefusals(ctx context.Context, logger *zap.Logger, reader PIDMapReader) (models.PIDMapRefusals, error) {
-	if !provenswitch.On() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
-		defer cancel()
-		return reader.GetPIDMapRefusals(ctx)
-	}
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	type read struct {
-		refusals models.PIDMapRefusals
-		err      error
-	}
-	done := make(chan read, 1)
-	go func() {
-		refusals, err := reader.GetPIDMapRefusals(ctx)
-		done <- read{refusals, err}
-	}()
-	notice := utils.NewStopNowNotice(mockDrainNotice)
-	defer notice.Withdraw()
-	notices := time.NewTicker(mockDrainNotice)
-	defer notices.Stop()
-	for {
-		select {
-		case r := <-done:
-			if r.err != nil && context.Cause(ctx) != nil && context.Cause(ctx) != ctx.Err() {
-				r.err = fmt.Errorf("%w (%v)", r.err, context.Cause(ctx))
-			}
-			return r.refusals, r.err
-		case <-utils.StopNow():
-			cancel(errors.New("the read was given up at the user's interrupt"))
-			r := <-done
-			if r.err == nil { // it answered as it was given up
-				return r.refusals, nil
-			}
-			return r.refusals, fmt.Errorf("%w (%v)", r.err, context.Cause(ctx))
-		case <-notices.C:
-			msg := "waiting for keploy's agent to say whether it tracked every process of the test command"
-			if notice.Next() {
-				msg += "; press Ctrl+C again to stop now, and the run is not verified"
-			}
-			logger.Info(msg)
-		}
-	}
+	var refusals models.PIDMapRefusals
+	err := epilogueRead(ctx, logger,
+		"waiting for keploy's agent to say whether it tracked every process of the test command",
+		"press Ctrl+C again to stop now, and the run is not verified",
+		func(ctx context.Context) error {
+			var err error
+			refusals, err = reader.GetPIDMapRefusals(ctx)
+			return err
+		})
+	return refusals, err
 }
 
 // PIDMapReader is an optional Instrumentation extension: the inserts into the
