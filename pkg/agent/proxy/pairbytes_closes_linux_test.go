@@ -462,3 +462,101 @@ func TestAConnectionServedWithoutASessionIsNoCaptureLoss(t *testing.T) {
 		})
 	}
 }
+
+// A wait takes its connections (upTo) before their handlers have all said
+// which the proxy serves with no session: one the handler marks after the wait
+// took it holds the wait no more than one marked before, since nothing on it
+// is captured. The handler closes it unanswered with the application's bytes
+// unread, and the close resets the application's socket, so the wait may read
+// that socket open, read it gone after the close, or read it after the mark.
+// None of these is unknown, a loss, or a wait. The wait reads the mark after
+// the connection's side (pairReached): the handler marks it before closing it,
+// so a side read closed carries a mark that is seen. The hooks lane's
+// TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt lost this race
+// about 1 run in 15: its wait read the socket gone, after the proxy's close,
+// and ended unknown.
+func TestAConnectionServedWithoutASessionAfterTheWaitTookItHoldsNothing(t *testing.T) {
+	for _, read := range []string{"before the mark", "gone after the close", "after the mark"} {
+		t.Run("the application's socket read "+read, func(t *testing.T) {
+			p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+			if _, err := app.Write([]byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			for received(t, proxySide) < 1 {
+				runtime.Gosched()
+			}
+			pcs, err := p.paired.upTo(1) // the wait takes it: not yet marked
+			if err != nil || len(pcs) != 1 {
+				t.Fatalf("upTo = %v, %v; want the connection", pcs, err)
+			}
+			pc := pcs[0]
+			ds, err := openDiag()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ds.close()
+			var targets []*pairTarget
+			if read == "before the mark" {
+				target, err := p.pairTarget(ds, pc)
+				if err != nil || target == nil || target.gone {
+					t.Fatalf("pairTarget = %+v, %v; want the open connection's", target, err)
+				}
+				targets = append(targets, target)
+			}
+			p.paired.servedWithoutSession(proxySide)
+			_ = reader.Close() // unanswered: the byte unread, the close resets
+			switch read {
+			case "gone after the close":
+				// pairTarget's read raced the mark: it found the socket gone.
+				for {
+					if _, _, err := appWritten(ds, pc.app, pc.proxy); errors.Is(err, errNoSocket) {
+						break
+					}
+					runtime.Gosched()
+				}
+				targets = append(targets, &pairTarget{pc: pc, gone: true})
+			case "after the mark":
+				if target, err := p.pairTarget(ds, pc); err != nil || target != nil {
+					t.Fatalf("pairTarget = %+v, %v; want nothing to wait for", target, err)
+				}
+			}
+			if err := p.waitPairTargets(context.Background(), targets); err != nil {
+				t.Fatalf("the wait: %v; want nothing held by a connection served without a session", err)
+			}
+			if l := p.losses.Snapshot(); len(l) != 0 {
+				t.Fatalf("capture losses %+v, want none for a connection served without a session", l)
+			}
+		})
+	}
+}
+
+// A connection the proxy passes through with no session stays open, and no
+// read or close of its wakes a wait that took it before the mark: the mark
+// itself does, and releases it.
+func TestTheMarkOfAConnectionServedWithoutASessionReleasesAWaitOnIt(t *testing.T) {
+	p, app, _, _ := heldPair(t, "tcp4", "127.0.0.1:0")
+	// More than the proxy's side can receive before the proxy reads, which
+	// it never does here: the wait cannot be reached by bytes.
+	queue(t, app)
+	targets, err := p.pairTargets(1)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("pairTargets = %v, %v; want the connection", targets, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	p.paired.mu.Lock()
+	var conn net.Conn
+	for c := range p.paired.byConn {
+		conn = c
+	}
+	p.paired.mu.Unlock()
+	p.paired.servedWithoutSession(conn)
+	// No deadline but the test binary's -timeout: without the wake the
+	// wait never ends.
+	if err := <-done; err != nil {
+		t.Fatalf("the wait: %v; want released by the mark", err)
+	}
+	if l := p.losses.Snapshot(); len(l) != 0 {
+		t.Fatalf("capture losses %+v, want none", l)
+	}
+}

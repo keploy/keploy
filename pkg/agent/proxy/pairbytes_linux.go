@@ -153,6 +153,12 @@ func (p *Proxy) waitPairTargets(ctx context.Context, pending []*pairTarget) erro
 // pairTarget reads, from the application's socket, how much it had written
 // to pc: nil when there is nothing to wait for.
 func (p *Proxy) pairTarget(ds *diagSock, pc *pairedConn) (*pairTarget, error) {
+	if pc.noSession.Load() {
+		// Marked since upTo took it: nothing on it is captured. One marked
+		// after this look is released by pairReached, which reads the mark
+		// after the connection's side.
+		return nil, nil
+	}
 	want, d, err := appWritten(ds, pc.app, pc.proxy)
 	if err == nil {
 		p.paired.visible.Store(true)
@@ -206,6 +212,18 @@ func appWritten(ds *diagSock, app, proxy netip.AddrPort) (uint64, diagTCP, error
 func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	pc := t.pc
 	ps, closed := pc.side()
+	if pc.noSession.Load() {
+		// The proxy serves it with no session (serveWithoutSession), marked
+		// after the wait took it: a wait takes its connections before their
+		// handlers have all classified them. Nothing on it is captured, so
+		// no wait holds it, as none would have had the mark come first; its
+		// close, which resets the application's socket when the bytes on it
+		// were never read, is no loss and no unknown. Read after its side:
+		// the handler marks it before it closes it, so a side read closed
+		// (pc.done, or atClose stored by closing) is one whose mark, if
+		// any, is seen here.
+		return true, nil
+	}
 	if ps.err != nil {
 		return false, fmt.Errorf("%w: read the proxy's socket from %s: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err)
 	}
