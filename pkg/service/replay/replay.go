@@ -1788,11 +1788,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return lastAppErr
 	}
 	// stopAppBeforeSetEnd, under the proven switch, stops the application
-	// keploy started for this set, as the set's teardown does (gracefully: an
-	// interrupt, then the wait the app's runner gives it), and waits for it
-	// to exit (P101-b). nil when keploy started none here: a reused stack
+	// keploy started for this set as the set's teardown does (an interrupt,
+	// the runner's grace, then a kill) and waits for it to exit (P101-b). It
+	// returns why the runner had to kill it (pkg/client/app setend_stop.go),
+	// "" when it did not. nil when keploy started none here: a reused stack
 	// (serveTest), a base path, docker compose.
-	var stopAppBeforeSetEnd func()
+	var stopAppBeforeSetEnd func() string
+	// appStopKilled is that why, as the app's run returned it; read once the
+	// run has returned.
+	var appStopKilled string
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -2232,17 +2236,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// it reads what the app did after its last test (P101-b). A
 				// stop of it is the app's run ending (ErrCtxCanceled), never a
 				// halt or an abort of the set.
+				//
+				// The stop's cause (models.ErrAppStoppedForSetEnd) has the app's
+				// runner say, in the run's StopKilled, whether its stop had to
+				// kill the app.
 				appCtx := runTestSetCtx
 				var appExited chan struct{}
 				if provenswitch.On() {
-					var stopApp context.CancelFunc
-					appCtx, stopApp = context.WithCancel(runTestSetCtx)
+					var stopApp context.CancelCauseFunc
+					appCtx, stopApp = context.WithCancelCause(runTestSetCtx)
 					appExited = make(chan struct{})
-					stopAppBeforeSetEnd = func() {
-						stopApp()
+					stopAppBeforeSetEnd = func() string {
+						stopApp(models.ErrAppStoppedForSetEnd)
 						select {
 						case <-appExited:
+							return appStopKilled
 						case <-runTestSetCtx.Done():
+							return ""
 						}
 					}
 				}
@@ -2254,6 +2264,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(appCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
+					appStopKilled = appErr.StopKilled
 					if appErr != (models.AppError{}) {
 						setLastAppErr(appErr)
 					}
@@ -4595,6 +4606,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// appLogsBeforeStop is what the app logged last, read before the set's
 	// end stopped it (stopAppBeforeSetEnd), for a report that carries logs.
 	appLogsBeforeStop := ""
+	// consumedAtStopUnread is why what the app consumed as the set's end
+	// stopped it could not be read.
+	var consumedAtStopUnread error
+	// stopKilled is why the set's end had to kill the app it stopped: its
+	// shutdown is then not known, and the set is not judged.
+	stopKilled := ""
 	// realRun is what the set's run saw of mock.real beyond its test cases;
 	// realListed the destinations the recordings of the test cases that ran
 	// list; realWhy why they fail the set (proven switch).
@@ -4642,7 +4659,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			logCtx, cancelLogs := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
 			appLogsBeforeStop = r.instrumentation.GetRecentAppLogs(logCtx)
 			cancelLogs()
-			stopAppBeforeSetEnd()
+			stopKilled = stopAppBeforeSetEnd()
+			// What the app consumed as it stopped (a shutdown call a pool
+			// mock answered) is drained now, into the set's: what the learn
+			// step learned on it is then kept with the set's (persistLearned),
+			// and the next set's first read does not take it, by its name,
+			// for one of its own.
+			//
+			// Not on the set's context: the app watcher cancels it once an
+			// app that exited on its own is recorded, and what that app
+			// consumed is the set's all the same. On the run's, which the
+			// user's stop cancels, and bounded (setEndDrainBudget): the
+			// agent's client has no deadline of its own, and a read that does
+			// not end leaves the set not judged, never a run that does not
+			// end.
+			drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
+			consumed, err := r.hookImpl.GetConsumedMocks(drainCtx)
+			cancelDrain()
+			if err != nil {
+				consumedAtStopUnread = err
+			} else {
+				for _, m := range consumed {
+					totalConsumedMocks[m.Name] = m
+					allConsumedAcrossCycles[m.Name] = m
+				}
+			}
 		}
 		// stoppedByUser records, once the run's user has stopped it (Ctrl+C,
 		// SIGTERM), that the set is USER_ABORT, and reports it. The app
@@ -4740,6 +4781,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Strings("tests", consumedUnread))
 			testSetStatus = models.TestSetStatusInternalErr
 			// Not judged, not broken: the round goes on (abortAfterTestSet).
+			r.markNotJudged(testSetID)
+		}
+		// The set's end had to kill the app it stopped (it had not exited
+		// when the stop's grace ran out): what the app would have done as
+		// it stopped is not known, so neither is the set's verdict.
+		if stopKilled != "" && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			notJudged = alsoNotJudged(notJudged, "not judged: "+stopKilled+", and what it would have done as it stopped is not known")
+			r.logger.Error("test-set is not judged: keploy had to kill the application it stopped at the set's end; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID), zap.String("reason", stopKilled),
+				zap.String("next_step", "make the application exit promptly on SIGINT (a shutdown that waits on something slow or that never comes, a handler that ignores it), then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		}
+		// What the app consumed as the set's end stopped it could not be
+		// read: what was learned on it cannot be vouched for. A set that
+		// stopped otherwise (the app halted, the user aborted) keeps that
+		// status, as the read of its calls after the last test does.
+		if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); consumedAtStopUnread != nil && !stopped && !stoppedByUser() &&
+			(testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			notJudged = alsoNotJudged(notJudged, "not judged: keploy could not read from its agent what the application consumed as the set's end stopped it: "+consumedAtStopUnread.Error())
+			r.logger.Error("test-set is not judged: keploy could not read what its application consumed as it was stopped at the set's end; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID), zap.Error(consumedAtStopUnread),
+				zap.String("next_step", "check the agent's log for why the read failed, then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		}
 		if len(variablesUnjudged) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
