@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -962,7 +963,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			}
 			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
 				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run}, true
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, true
 			}
 		}
 	}
@@ -1223,22 +1224,24 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
 }
 
-// minReadBack is the length below which a value is not read back: a short
-// value equal by chance to one the run made is not that value.
+// minReadBack is the length, in characters, below which a value is not read
+// back: a short value equal by chance to one the run made is not that value.
 const minReadBack = 6
 
 // ReadBack is where a value of a recorded answer was written earlier with
 // another value in this run: the request place, held whole, of the earliest
 // exchange served before whose recorded value is r's and whose live value
-// differs from it: where the value was first stored, so every read of it,
-// and every later write that carries it on, follows one variable. A call that answers with what an earlier call wrote (a
-// time, a code the application made and stored) is then answered with what
-// this run wrote there: r's place is an answer place of the variable bound
-// at that earlier place. Only a place the adapter marked Written is read
-// (it knows which of a request's places store a value, and which only
-// compare with one).
+// differs from it. That is where the value was first stored, so every read of
+// it, and every later write that carries it on, follows one variable. A call
+// that answers with what an earlier call wrote (a time, a code the
+// application made and stored) is then answered with what this run wrote
+// there: r's place is an answer place of the variable bound at that earlier
+// place. Only a place the adapter marked Written is read (it knows which of a
+// request's places store a value, and which only compare with one). The
+// request place's type is not compared with r's: an id stored as a number is
+// read back as text.
 func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
-	if r.Unnamed || r.Type != String || len(r.Value) < minReadBack {
+	if r.Unnamed || r.Type != String || utf8.RuneCountInString(r.Value) < minReadBack {
 		return Place{}, false
 	}
 	served := append([]Earlier(nil), earlier...)
@@ -1256,25 +1259,35 @@ func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
 }
 
 // Named is e with each request place that holds one of vars (as its bind or
-// a use) naming that variable (Seen.Name). An echo is not named: it is its
-// call's alone, and a later call that reads its value back binds it there
-// as a variable of the test (ReadBack).
+// a use) naming that variable (Seen.Name), the first by name when two hold
+// one place. An echo is not named: it is its call's alone, and a later call
+// that reads its value back binds it there as a variable of the test
+// (ReadBack). e's own Seen is left as it was: the result holds a copy.
 func Named(e Earlier, vars models.MockVariables) Earlier {
 	if len(vars) == 0 {
 		return e
 	}
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	at := map[string]string{}
-	for name, v := range vars {
+	for _, name := range names {
+		v := vars[name]
 		if v.Echo {
 			continue
 		}
-		if v.Bind != "" {
+		if v.Bind != "" && at[v.Bind] == "" {
 			at[v.Bind] = name
 		}
 		for _, u := range v.Use {
-			at[u] = name
+			if at[u] == "" {
+				at[u] = name
+			}
 		}
 	}
+	e.Seen = append([]Seen(nil), e.Seen...)
 	for i, s := range e.Seen {
 		if s.Side == Request && s.Place != "" {
 			e.Seen[i].Name = at[s.Place]
