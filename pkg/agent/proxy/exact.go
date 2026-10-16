@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -163,6 +164,30 @@ func (m *MockManager) prepareOutside() {
 		}
 	}
 	o.cur.Store(st)
+}
+
+// RestartExactKey starts key's calls outside every test afresh: a test
+// process that claims key again in the session (a retried package,
+// --rerun-fails) is a new scope, as a test begun again is. The recordings of
+// names, key's pool slice, that calls outside every test consumed in the
+// staging answer again, and key's stateful cursors (exactCursorKey) start
+// over. No other key's are touched: pool slices name disjoint recordings.
+func (m *MockManager) RestartExactKey(key string, names []string) {
+	if st := m.exact.outside.cur.Load(); st != nil {
+		for _, n := range names {
+			st.spent.Delete(n)
+		}
+	}
+	prefix := key + "\x00"
+	m.cursorMu.Lock()
+	for k := range m.cursors {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.cursors, k)
+		}
+	}
+	m.cursorMu.Unlock()
+	// Parsers that keep an index of what they read read again.
+	m.bumpRevisionAll()
 }
 
 // consumeOutside settles a delete-door consume of a data-plane recording mk

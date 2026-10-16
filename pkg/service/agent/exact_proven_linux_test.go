@@ -59,6 +59,10 @@ func (p *servingProxy) ServeExactPool(key string, names []string) error {
 	p.mm.ServeExactPool(key, names)
 	return nil
 }
+func (p *servingProxy) RestartExactKey(key string, names []string) error {
+	p.mm.RestartExactKey(key, names)
+	return nil
+}
 func (p *servingProxy) ExactTestOutcome() (string, []string, []string, bool) {
 	return p.mm.ExactTestOutcome()
 }
@@ -146,6 +150,14 @@ func pingMock(name, path, body string, at time.Time) *models.Mock {
 // by this test process with key "o".
 func exactAgent(t *testing.T, mocks []*models.Mock, table, pool map[string][]string) (*Agent, *servingProxy) {
 	t.Helper()
+	a, p := unclaimedExactAgent(t, mocks, table, pool)
+	claimSelf(t, a)
+	return a, p
+}
+
+// unclaimedExactAgent is exactAgent before any test process claimed it.
+func unclaimedExactAgent(t *testing.T, mocks []*models.Mock, table, pool map[string][]string) (*Agent, *servingProxy) {
+	t.Helper()
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := newServingProxy()
 	a.Proxy = p
@@ -153,7 +165,6 @@ func exactAgent(t *testing.T, mocks []*models.Mock, table, pool map[string][]str
 	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
 	require.NoError(t, a.SetScopeTable(ctx, table))
 	require.NoError(t, a.SetScopePool(ctx, pool))
-	claimSelf(t, a)
 	return a, p
 }
 
@@ -419,6 +430,41 @@ func TestANewStagingAnswersOutsideTestCallsAfresh(t *testing.T) {
 	require.Equal(t, sqsEmpty, p.poll(t, "/receive"), "spent for the staging")
 	require.NoError(t, a.UpdateMockParams(context.Background(), models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}))
 	require.Equal(t, "2 messages", p.poll(t, "/receive"), "a new staging starts the sequence afresh")
+}
+
+// A test process that claims its key again in the session (a retried
+// package, --rerun-fails) is a new scope: its calls outside every test start
+// afresh, the recordings its earlier run consumed answer again, and its
+// HTTP sequences start over (decision 31, as ruled for re-runs). It found
+// its startup recordings spent, and its startup calls missed. A claim the
+// same process makes again starts nothing afresh.
+func TestAKeyClaimedAgainStartsItsOutsideCallsAfresh(t *testing.T) {
+	a, p := unclaimedExactAgent(t,
+		[]*models.Mock{
+			pingMock("mock-4", "/receive", "2 messages", t0),
+			pingMock("mock-16", "/receive", "empty", t0.Add(time.Second)),
+			pingMock("mock-1", "/n", "one", t0.Add(2*time.Second)),
+			pingMock("mock-2", "/n", "two", t0.Add(3*time.Second)),
+		},
+		map[string][]string{}, map[string][]string{"o": {"mock-4", "mock-16", "mock-1", "mock-2"}})
+	ctx := context.Background()
+	first := child(t)
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, first.Process.Pid)
+	require.Nil(t, serr)
+	call := func(path string) string {
+		code, body := p.call(t, path)
+		return fmt.Sprintf("%d %s", code, strings.TrimSpace(body))
+	}
+	require.Equal(t, []string{"2 messages", "empty", sqsEmpty}, []string{p.poll(t, "/receive"), p.poll(t, "/receive"), p.poll(t, "/receive")}, "the first run")
+	require.Equal(t, []string{"200 one", "200 two"}, []string{call("/n"), call("/n")}, "the first run's HTTP sequence")
+	kill(t, first)
+
+	claimSelf(t, a) // the package run again: the same key, a new process
+	require.Equal(t, []string{"2 messages", "empty"}, []string{p.poll(t, "/receive"), p.poll(t, "/receive")}, "the run again answers its startup calls afresh")
+	require.Equal(t, "200 one", call("/n"), "the run again starts its HTTP sequence over")
+
+	claimSelf(t, a) // the same process claims again: not a new scope
+	require.Equal(t, sqsEmpty, p.poll(t, "/receive"), "a claim the same process repeats starts nothing afresh")
 }
 
 // HTTP's own parser saturates a call outside every test itself: its stateful

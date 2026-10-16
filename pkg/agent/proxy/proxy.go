@@ -4431,6 +4431,16 @@ func (p *Proxy) ServeExactPool(key string, names []string) error {
 	return nil
 }
 
+// RestartExactKey implements agent.ExactKeyRestarter (exact.go).
+func (p *Proxy) RestartExactKey(key string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.RestartExactKey(key, names)
+	return nil
+}
+
 // ExactTestOutcome implements agent.ExactServer (exact.go).
 func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	m := p.getMockManager()
