@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -1079,4 +1080,94 @@ func TestScopeNamesEachScopeOnce(t *testing.T) {
 	fresh("a session's reset")
 	k.BeginTest()
 	fresh("the next session's test")
+}
+
+// A container Docker started before a connection to it was accepted is
+// named at the connection's first use, though the index has not taken its
+// start event by then (the event stream lags the daemon: a busy host): the
+// first use waits for a list of the daemon asked after the accept, never for
+// the event. The same container's key holds when its event comes after.
+func TestKeyerNamesAContainerWhoseStartTheIndexHasNotTaken(t *testing.T) {
+	f := newFakeDocker()
+	r, applied, placed := watchingPlaced(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	// Docker started it, and it answers on its published port; its start
+	// event has not reached the index.
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{"5432/tcp": published("0.0.0.0", "49400")}))
+	if c, _, ok := k.Name(zap.NewNop(), "c1", "127.0.0.1:49400"); ok {
+		t.Fatalf("the index placed %+v before it took the start", c)
+	}
+	want := "container:postgres:5432@" + fpEmpty
+	if key, st := use(k, "c1"); st != Keyed || key != want {
+		t.Fatalf("the first use = %q, %v; want %q, Keyed: the container Docker started before the accept", key, st, want)
+	}
+	f.msgs <- start("tc") // the event comes at last
+	if id := <-placed; id != "tc" {
+		t.Fatalf("placed %s", id)
+	}
+	for range 2 { // Settle's read of its configuration, and the event's
+		if id := <-applied; id != "tc" {
+			t.Fatalf("read %s", id)
+		}
+	}
+	if c, key, ok := k.Name(zap.NewNop(), "c2", "127.0.0.1:49400"); !ok || key != want || c.ID != "tc" {
+		t.Fatalf("after the event Name = %+v, %q, %v", c, key, ok)
+	}
+}
+
+// Only a first use that finds nothing placed lists the daemon: a connection
+// the index placed at its accept, or by its first use (the start event came
+// between), lists nothing; one to where no container is (a service on the
+// host) costs its first use one list, and is no container's.
+func TestKeyerListsTheDaemonOnlyForAFirstUseThatFindsNothing(t *testing.T) {
+	f := testcontainers()
+	r, applied, placed := watchingPlaced(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	before := listsOf(f)
+	_ = name(t, k, "pg", "127.0.0.1:49153") // placed at the accept
+	if _, st := use(k, "pg"); st != Keyed {
+		t.Fatalf("the placed connection's use = %v", st)
+	}
+	f.set("late", running("redis:7", "sha256:r", []string{"172.17.0.8"}, nat.PortMap{}))
+	_ = name(t, k, "late", "172.17.0.8:6379")
+	f.msgs <- start("late") // placed between the accept and the first use
+	if id := <-placed; id != "late" {
+		t.Fatalf("placed %s", id)
+	}
+	<-applied
+	if _, st := use(k, "late"); st != Keyed {
+		t.Fatalf("the late connection's use = %v", st)
+	}
+	if n := listsOf(f) - before; n != 0 {
+		t.Fatalf("%d lists for connections the index placed", n)
+	}
+	_ = name(t, k, "native", "127.0.0.1:5999")
+	for range 2 {
+		if _, st := use(k, "native"); st != NotContainer {
+			t.Fatalf("a host service's use = %v", st)
+		}
+	}
+	if n := listsOf(f) - before; n != 1 {
+		t.Fatalf("%d lists for a connection no container is at, want its first use's one", n)
+	}
+}
+
+// A first use whose context ends while the list of the daemon it waits for
+// is out returns, no container's: the list holds no call longer than the
+// call's own context.
+func TestKeyerFirstUseEndsWithItsContextWhileTheListIsOut(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.mu.Lock()
+	f.listGate = gate // the list never comes
+	f.mu.Unlock()
+	_ = name(t, k, "c1", "127.0.0.1:5999")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, st := StateFromContext(WithConn(ctx, k, "c1")); st != NotContainer {
+		t.Fatalf("the use = %v", st)
+	}
 }
