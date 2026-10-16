@@ -34,8 +34,8 @@ type fingerprintsResolver interface {
 // called, placing the running containers it did not hold, or ctx ends, so a
 // container Docker started before a connection's first use is placed though
 // its start event has not reached the index. It never waits for a
-// container's configuration. One that cannot (a docker-mode agent's list,
-// which only its CLI gives) places what its lists say.
+// container's configuration. A docker-mode agent's index settles by asking
+// its CLI to list the daemon (pushedIndex.Settle).
 type settler interface {
 	Settle(ctx context.Context)
 }

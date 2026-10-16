@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
@@ -63,7 +65,11 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 		// The pusher gives its lists to the agent at uri, the one it was
 		// made for, whatever this client is set up for later.
 		post := func(ctx context.Context, s containerkey.Snapshot) error { return a.postContainers(ctx, uri, s) }
-		v, _ = containerPushers.LoadOrStore(uri, containerkey.NewPusher(post, a.conf.KeployContainer))
+		pusher := containerkey.NewPusher(post, a.conf.KeployContainer)
+		pusher.AnswerSettles(func(ctx context.Context, boot string, after uint64) (containerkey.SettleAsk, error) {
+			return a.askSettle(ctx, uri, boot, after)
+		})
+		v, _ = containerPushers.LoadOrStore(uri, pusher)
 	}
 	p, ok := v.(*containerkey.Pusher)
 	if !ok {
@@ -121,4 +127,35 @@ func (a *AgentClient) postContainers(ctx context.Context, uri string, s containe
 		return fmt.Errorf("the agent took no container list: %s: %s", res.Status, bytes.TrimSpace(msg))
 	}
 	return nil
+}
+
+// askSettle asks the agent at uri for its next settle, held open until it
+// has one the pusher was not told of (containerkey.AwaitSettleAsk). An agent
+// that predates settles has no such route: containerkey.ErrNoSettles.
+func (a *AgentClient) askSettle(ctx context.Context, uri, boot string, after uint64) (containerkey.SettleAsk, error) {
+	q := url.Values{"after": {strconv.FormatUint(after, 10)}, "boot": {boot}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri+"/containers/settle?"+q.Encode(), nil)
+	if err != nil {
+		return containerkey.SettleAsk{}, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return containerkey.SettleAsk{}, err
+	}
+	defer func() { _ = res.Body.Close() }()
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict:
+		// No such route (an agent that predates settles), or an agent that
+		// reads Docker itself.
+		return containerkey.SettleAsk{}, containerkey.ErrNoSettles
+	default:
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return containerkey.SettleAsk{}, fmt.Errorf("the agent answered %s: %s", res.Status, bytes.TrimSpace(msg))
+	}
+	var ask containerkey.SettleAsk
+	if err := json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&ask); err != nil {
+		return containerkey.SettleAsk{}, fmt.Errorf("invalid settle ask: %w", err)
+	}
+	return ask, nil
 }

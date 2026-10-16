@@ -134,6 +134,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		if provenswitch.On() {
 			r.Get("/containers", a.HandleTakesContainers)
 			r.Post("/containers", a.HandleContainers)
+			r.Get("/containers/settle", a.HandleSettleContainers)
 		}
 		// The run's mock.real, and what the run saw of it beyond its tests
 		// (real.go). Any method: with the switch off each answers the 404

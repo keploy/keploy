@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -82,10 +83,64 @@ func TestContainerRoutesOnlyUnderTheSwitch(t *testing.T) {
 		t.Setenv("KEPLOY_PROVEN", tc.proven)
 		r := chi.NewRouter()
 		DefaultRoutes{}.New(r, nil, zap.NewNop())
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/agent/containers", nil))
-		if rec.Code != tc.want {
-			t.Fatalf("KEPLOY_PROVEN=%q: GET /agent/containers answered %d, want %d", tc.proven, rec.Code, tc.want)
+		// The CLI's ask for settles too: the agent's Docker is its own here,
+		// so with the switch on it refuses at once.
+		for _, path := range []string{"/agent/containers", "/agent/containers/settle?after=0"} {
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != tc.want {
+				t.Fatalf("KEPLOY_PROVEN=%q: GET %s answered %d, want %d", tc.proven, path, rec.Code, tc.want)
+			}
 		}
 	}
+}
+
+// The CLI's ask for settles is held open until the docker-mode agent asks
+// one, and is answered with its count and run; an agent that reads Docker
+// itself refuses it, and a count that is not one is refused.
+func TestHandleSettleContainers(t *testing.T) {
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	a := &Agent{logger: zap.NewNop()}
+	ask := func(ctx context.Context, query string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleSettleContainers(rec, httptest.NewRequest(http.MethodGet, "/agent/containers/settle"+query, nil).WithContext(ctx))
+		return rec
+	}
+	containerkey.Default = containerkey.NewKeyer(oneContainer{})
+	if rec := ask(t.Context(), "?after=0"); rec.Code != http.StatusConflict {
+		t.Fatalf("an agent that reads Docker answered %d, want 409", rec.Code)
+	}
+	containerkey.UsePushed()
+	if rec := ask(t.Context(), "?after=x"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a count that is not one answered %d, want 400", rec.Code)
+	}
+	if err := containerkey.ApplySnapshot(containerkey.Snapshot{Source: "cli", Seq: 1, Settles: true, Containers: []containerkey.SnapshotContainer{}}); err != nil {
+		t.Fatal(err)
+	}
+	gone, cancel := context.WithCancel(t.Context())
+	cancel()
+	if rec := ask(gone, "?after=0"); rec.Body.Len() != 0 {
+		t.Fatalf("an ask whose CLI went away was answered %q", rec.Body.String())
+	}
+	got := make(chan *httptest.ResponseRecorder, 1)
+	go func() { got <- ask(t.Context(), "?after=0&boot=") }()
+	containerkey.Default.Name(zap.NewNop(), "c1", "172.18.0.9:5432")
+	settled := make(chan struct{})
+	go func() {
+		// A first use that finds nothing placed asks its CLI for a list.
+		ctx, stop := context.WithCancel(t.Context())
+		defer stop()
+		_, _ = containerkey.StateFromContext(containerkey.WithConn(ctx, containerkey.Default, "c1"))
+		close(settled)
+	}()
+	rec := <-got
+	var answer containerkey.SettleAsk
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); rec.Code != http.StatusOK || err != nil || answer.Asked != 1 || answer.Boot == "" {
+		t.Fatalf("the ask was answered %d %q (%v), want the agent's first settle", rec.Code, rec.Body.String(), err)
+	}
+	if err := containerkey.ApplySnapshot(containerkey.Snapshot{Source: "cli", Seq: 2, Settles: true, Settled: 1, SettledBoot: answer.Boot, Containers: []containerkey.SnapshotContainer{}}); err != nil {
+		t.Fatal(err)
+	}
+	<-settled
 }
