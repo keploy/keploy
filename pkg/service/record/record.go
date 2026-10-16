@@ -358,7 +358,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				// taking the request to end it): every frame it had for this
 				// drain is through.
 				if marker {
-					r.logger.Debug(streamEndedLog, zap.String("frames", o.kind))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", o.kind))
 				}
 				return
 			}
@@ -3224,7 +3224,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok && ender != nil && ender.StreamEnded(models.MappingStream) {
 					// The agent ended it at its marker, every mapping it owed
 					// from before the stop on it.
-					r.logger.Debug(streamEndedLog, zap.String("frames", "mappings"))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", "mappings"))
 					return nil
 				}
 				if !ok {
