@@ -51,14 +51,18 @@ type Tracker struct {
 	// mock and place), and taken the names given.
 	names map[string]string
 	taken map[string]bool
-	// run are the exchanges the learn step served while no test was open
-	// that carried a value the run made (one that drifted from its
-	// recording): an earlier place of every later test of the set (Run).
-	// runNames are the variables bound at them, by mock and place, and
-	// runTaken their names, which no test's variable takes.
+	// run are the exchanges the learn step served before the first test
+	// began (the start-up's) that carried a value the run made (one that
+	// drifted from its recording): an earlier place of every test of the set
+	// (Run). runNames are the variables bound at them, by mock and place, and
+	// runTaken their names, which no test's variable takes. setTaken are the
+	// names every test of the set has taken so far, which no run's variable
+	// takes: a run's variable is named when a test first uses it, after
+	// earlier tests named their own.
 	run      []Earlier
 	runNames map[string]string
 	runTaken map[string]bool
+	setTaken map[string]bool
 }
 
 // NewTracker makes a tracker with no test open.
@@ -78,7 +82,7 @@ func (t *Tracker) NewSet() {
 	t.mu.Lock()
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.outside, t.outsideKept = nil, nil
-	t.run, t.runNames, t.runTaken = nil, nil, nil
+	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.open = false
 	t.mu.Unlock()
 }
@@ -253,20 +257,20 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 	t.mu.Unlock()
 }
 
-// Served adds a mock F served to test number n's history; nothing when that
-// test has ended since. Served while no test is open, it is the run's when it
-// carried a value the run made (Earlier.Run).
+// Served adds a mock F served to test number n's history, until the next test
+// begins: a request of that test answered after it ended, or between it and
+// the next, lands there too, and the next Begin forgets it. Served before the
+// first test began (the start-up's), it is the run's when it carried a value
+// the run made (Earlier.Run): an earlier place of every test of the set.
 func (t *Tracker) Served(n uint64, e Earlier) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	switch {
-	case !t.open:
-		if drifted(e) {
-			e.Run = true
-			t.run = append(t.run, e)
-		}
+	case !t.open && t.epoch == 0 && drifted(e):
+		e.Run = true
+		t.run = append(t.run, e)
 	case t.epoch == n:
 		t.served = append(t.served, e)
 	}
@@ -274,10 +278,10 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 }
 
 // drifted reports whether an exchange's request carried a value other than
-// its recording's at some place.
+// its recording's at some place a variable can hold.
 func drifted(e Earlier) bool {
 	for _, s := range e.Seen {
-		if s.Side == Request && s.Live != s.Leaf.Value {
+		if s.Side == Request && s.Place != "" && s.Live != "" && s.Live != s.Leaf.Value {
 			return true
 		}
 	}
@@ -312,13 +316,17 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	if t.names == nil {
 		t.names, t.taken = map[string]string{}, map[string]bool{}
 	}
+	if t.setTaken == nil {
+		t.setTaken = map[string]bool{}
+	}
 	name = t.free(place, reserved, t.taken)
-	t.names[key], t.taken[name] = name, true
+	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
 	return name, true
 }
 
 // RunName names the variable bound at place of mock, an exchange of the run
-// (Earlier.Run): one name for the whole set, which no test's variable takes.
+// (Earlier.Run): one name for the whole set, which no test's variable takes,
+// and none a test of the set took before it.
 func (t *Tracker) RunName(mock, place string, reserved map[string]bool) string {
 	if t == nil {
 		name, _ := t.Name(0, mock, place, reserved)
@@ -333,7 +341,7 @@ func (t *Tracker) RunName(mock, place string, reserved map[string]bool) string {
 	if t.runNames == nil {
 		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
 	}
-	name := t.free(place, reserved, t.taken)
+	name := t.free(place, reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name
 }
