@@ -682,3 +682,36 @@ func DrainsAfterStop(ctx context.Context) bool {
 	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
 	return v
 }
+
+// DrainsOnAgentStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it once the agent says a stop signal reached
+// it (StopNoticePath), and closes it then: something else stops this agent
+// (docker compose, with the app's project, also when the app exits on its
+// own), and the client is not told otherwise before the agent goes. A stop
+// signal the agent gets while such a stream has carried a frame, or the
+// agent holds one for it, waits for the stream to close, as for a
+// DrainsAfterStopHeader stream: the client, told, drains what the agent
+// captured before the stop. An agent with nothing to hand over does not wait.
+// `keploy record` sends it under docker compose, and watches StopNoticePath.
+const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
+
+// StopNoticePath is the agent route (GET) a recording's client of an agent
+// something else stops waits on (DrainsOnAgentStopHeader): it answers 204 once
+// a stop signal has reached the agent and the agent waits for the client to
+// drain its streams. 404 from an agent that predates it.
+const StopNoticePath = "/record/stopping"
+
+type agentStopNoticeKey struct{}
+
+// WithAgentStopNotice marks the agent frame streams opened on ctx as ones
+// their client drains when the agent says a stop reached it
+// (DrainsOnAgentStopHeader): the client watches StopNoticePath meanwhile.
+func WithAgentStopNotice(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentStopNoticeKey{}, true)
+}
+
+// AgentStopNotice reports whether ctx was marked with WithAgentStopNotice.
+func AgentStopNotice(ctx context.Context) bool {
+	v, _ := ctx.Value(agentStopNoticeKey{}).(bool)
+	return v
+}

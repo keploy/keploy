@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"
@@ -1208,5 +1210,89 @@ func TestAwaitPreviousAgentEndsOnContextOrInterrupt(t *testing.T) {
 	utils.ResetInterruptedAgain()
 	if err := a.awaitPreviousAgent(context.Background()); err == nil {
 		t.Fatal("awaitPreviousAgent waited past its bound for an agent that never exits")
+	}
+}
+
+// An agent docker compose stops, whose recording gave a drain up on a stall
+// (its stream may stay open, and the agent waits for it), is sent the
+// escalation signal once, which ends that wait, and is then waited for as any
+// other: its teardown judged, never SIGTERM nor SIGKILL from keploy.
+func TestEndComposeAgentReleasesAnAgentAStalledDrainHolds(t *testing.T) {
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 5 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	// The fake engine's container ends at the escalation signal, as the
+	// agent, released, then goes.
+	log, _ := fakeEngine(t)
+	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{KeployContainer: stopTestContainer}}
+	returned := make(chan struct{})
+	go func() { a.EndComposeAgent(true); close(returned) }()
+	within(t, "EndComposeAgent", func() { <-returned })
+	calls := engineLines(t, log)
+	sig, wait := slices.Index(calls, "kill --signal SIGUSR2 "+stopTestContainer), slices.Index(calls, "wait "+stopTestContainer)
+	if sig < 0 || wait < sig || count(calls, "kill --signal SIGUSR2 "+stopTestContainer) != 1 {
+		t.Fatalf("calls %q: want the escalation signal once, then the wait", calls)
+	}
+	if n := count(calls, "kill --signal SIGTERM "+stopTestContainer) + count(calls, "kill "+stopTestContainer); n != 0 {
+		t.Fatalf("calls %q: keploy sent SIGTERM or SIGKILL", calls)
+	}
+}
+
+// The agent docker compose stops with the app's project, once a recording has
+// drained it, is waited for while its teardown makes progress, not for
+// compose's grace (24h under keploy record): one that ignores its stop -- its
+// teardown takes no step -- is wedged, and is killed with the escalation
+// signal, keploy saying so at WARN. One that exits is only waited for. keploy
+// sends neither a stop signal of its own: compose's is the agent's stop.
+func TestEndComposeAgentKillsOnlyAWedgedAgent(t *testing.T) {
+	defer func(d time.Duration) { dockerStopPoll = d }(dockerStopPoll)
+	dockerStopPoll = 5 * time.Millisecond
+	defer func(n uint64) { stallChecks = n }(stallChecks)
+	stallChecks = 3
+	for _, tc := range []struct {
+		name   string
+		report func(beat uint64) utils.TeardownProgress
+		wedged bool
+	}{
+		{"an agent that exits", func(b uint64) utils.TeardownProgress { return p(b+1, b, false) }, false},
+		{"an agent that ignores its stop", func(b uint64) utils.TeardownProgress { return p(1, b, false) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			log, release := fakeEngine(t)
+			core, logs := observer.New(zap.WarnLevel)
+			a := &AgentClient{logger: zap.New(core), conf: &config.Config{KeployContainer: stopTestContainer}}
+			returned := make(chan struct{})
+			go func() { a.EndComposeAgent(false); close(returned) }()
+			awaitEngineWait(t, log, returned)
+			for beat := uint64(0); ; beat++ {
+				if !returnsWithin(returned, 0) && !tc.wedged && beat == 4*stallChecks {
+					// Its teardown went on across many times stallChecks
+					// checks; now it exits.
+					if err := os.WriteFile(release, nil, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					break
+				}
+				awaitEngineRead(t, log, reportInContainer(t, log, tc.report(beat)), returned)
+				if returnsWithin(returned, 0) {
+					break
+				}
+			}
+			within(t, "EndComposeAgent", func() { <-returned })
+			calls := engineLines(t, log)
+			if killed := count(calls, "kill --signal SIGUSR2 "+stopTestContainer) == 1; killed != tc.wedged {
+				t.Fatalf("killed=%v, want %v; calls %q", killed, tc.wedged, calls)
+			}
+			if n := count(calls, "kill --signal SIGTERM "+stopTestContainer) + count(calls, "kill "+stopTestContainer); n != 0 {
+				t.Fatalf("calls %q: keploy signalled an agent compose had stopped", calls)
+			}
+			said := logs.FilterMessageSnippet("Stopping the keploy agent by force").Len() == 1
+			if said != tc.wedged {
+				t.Fatalf("said it killed a wedged agent: %v, want %v (%v)", said, tc.wedged, logs.All())
+			}
+		})
 	}
 }
