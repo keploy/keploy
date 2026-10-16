@@ -496,6 +496,20 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// waits for them (syncMock BacklogBefore).
 	defer syncmgr.Get().WatchTestCaseQueue(func() int { return len(tc) })()
 
+	// A recording whose stop was noted (syncMock.NoteStop) has ended once
+	// the next one's stream attaches, and once this one's stream ends: the
+	// requests its stop found in flight are no requests of the next
+	// (EndStoppedRecording). Here, before this session's tally opens, so it
+	// tells no loss of theirs.
+	syncmgr.Get().EndStoppedRecording()
+	defer syncmgr.Get().EndStoppedRecording()
+	// A request the stop of a recording that has ended found in flight is no
+	// request of this session's: a test case of one resolved as that
+	// recording ended, or captured as its window was given up, which that
+	// recording's stream no longer took, is left out here, as the recording it
+	// began in left it out. This session is the first since that end, which
+	// is where those arrive.
+	leftovers := syncmgr.Get().TakeLeftovers()
 	// Kept requests the mock manager leaves out this session because their
 	// window was given up while they were in flight (syncMock.Window.Keep),
 	// less those a later request is recorded in the place of
@@ -536,6 +550,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// Whether t is streamed, left out or lost to a broken stream, this
 		// is the last that sees it.
 		defer discardUpload(a.logger, t)
+		if _, left := leftovers[t.HTTPReq.Timestamp.UnixNano()]; left && !t.HTTPReq.Timestamp.IsZero() {
+			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
+				zap.Time("request_time", t.HTTPReq.Timestamp))
+			return true
+		}
 		// Skip this test case if memory pressure overlapped its HTTP window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the

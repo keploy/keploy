@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -62,4 +63,39 @@ func TestARecordingAfterAnotherStartsBeforeItsFirstRequest(t *testing.T) {
 		t.Fatalf("the mock recorded is for %q, want the startup call's", url)
 	}
 	awaitEvent(t, done, "handleConnection returning")
+}
+
+// A request of the application's in flight across a recording's stop (an
+// attached app goes on as a recording stops) is no request of the recording
+// the agent makes next. The stop's graceful shutdown notes it, and the proxy's
+// Record gives it up as the next recording starts, if nothing ended the last
+// one before. Still open, it held every leftover of the next recording's
+// requests, and kept in it, it was recorded there with them.
+func TestARequestInFlightAcrossAStopIsGivenUpAsTheNextRecordingStarts(t *testing.T) {
+	mgr := syncMock.Get()
+	mgr.StartRecordSession() // what an earlier test's recording left
+	t.Cleanup(func() {
+		// A new recording's holds session, then none: the stop's ask below
+		// is not left stopping the next test's holds.
+		mgr.SetOutputChannel(make(chan *models.Mock))
+		mgr.SetOutputChannel(nil)
+	})
+	inFlight := mgr.OpenWindow(time.Now().Add(-time.Second), nil)
+	t.Cleanup(inFlight.Close)
+
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, keepAliveHTTPUpstream(t))}, cfg)
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetGracefulShutdown(context.Background()); err != nil { // the recording's stop
+		t.Fatal(err)
+	}
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+	if inFlight.Keep() {
+		t.Fatal("the next recording kept a request in flight across the last recording's stop")
+	}
 }
