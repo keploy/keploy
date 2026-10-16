@@ -265,15 +265,20 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 		// would write as a sequence of ints that reads back as ints (no
 		// replay can send them as the bytes recorded). Such an element is
 		// written as !!binary, as a []byte cell is, and read back as bytes
-		// (yamlBinaryRestored).
+		// (yamlBinaryRestored); a uuid ([16]uint8, as pgx scans a uuid[]
+		// element), macaddr (net.HardwareAddr) or bit string (pgtype.Bits)
+		// element likewise, in the shape a cell of its type is written.
 		return yamlBinaryElems(v), nil
 	}
 	return c.Value, nil
 }
 
 // yamlBinaryElems is v, an array, record or document cell's value, with
-// each []byte in it at any depth replaced by its !!binary node, and
-// everything else as it is: a container that holds no []byte is itself.
+// each []byte in it at any depth replaced by its !!binary node, and each
+// [16]uint8, net.HardwareAddr and pgtype.Bits by its mapping (as a cell of
+// its type is written: marshalUUIDBytesYAML, marshalHardwareAddrYAML,
+// marshalPgBitsYAML), and everything else as it is: a container that
+// holds none of them is itself.
 func yamlBinaryElems(v any) any {
 	if !holdsBytes(v) {
 		return v
@@ -281,6 +286,12 @@ func yamlBinaryElems(v any) any {
 	switch x := v.(type) {
 	case []byte:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString(x)}
+	case [16]uint8:
+		return marshalUUIDBytesYAML(x)
+	case net.HardwareAddr:
+		return marshalHardwareAddrYAML(x)
+	case pgtype.Bits:
+		return marshalPgBitsYAML(x)
 	case []any:
 		out := make([]any, len(x))
 		for i, e := range x {
@@ -297,11 +308,11 @@ func yamlBinaryElems(v any) any {
 	return v
 }
 
-// holdsBytes reports whether v is a []byte or an array or document holding
-// one at any depth.
+// holdsBytes reports whether v is a []byte, [16]uint8, net.HardwareAddr or
+// pgtype.Bits, or an array or document holding one at any depth.
 func holdsBytes(v any) bool {
 	switch x := v.(type) {
-	case []byte:
+	case []byte, [16]uint8, net.HardwareAddr, pgtype.Bits:
 		return true
 	case []any:
 		for _, e := range x {
@@ -860,8 +871,9 @@ func StringNeedsDoubleQuoted(s string) bool {
 //	!!binary     → []byte
 //	!!timestamp  → time.Time
 //	other        → interface{} default; in a sequence or a string-keyed
-//	               mapping, each !!binary element or value → []byte
-//	               (yamlBinaryRestored)
+//	               mapping, each !!binary element or value → []byte, and
+//	               each !!binary-holding uuid, macaddr or bit string
+//	               mapping → its type (yamlBinaryRestored)
 func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 	if node == nil {
 		c.Value = nil
@@ -1016,9 +1028,11 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 // yamlBinaryRestored returns v, the generic decode of node (an array,
 // record or document cell), with each element or value written as !!binary
 // in it (yamlBinaryElems) the bytes it encodes, where yaml.v3's generic
-// decode makes text of them. Everything else is as the generic decode made
-// it. An older mock's []byte element, written as a sequence of ints, is
-// those ints as before.
+// decode makes text of them, and each {uuid}, {macaddr} or {bytes, len,
+// valid} mapping holding its bytes as !!binary the [16]uint8,
+// net.HardwareAddr or pgtype.Bits it encodes. Everything else is as the
+// generic decode made it. An older mock's element, written as a sequence
+// of ints (or a mapping of them), is what it was stored as, as before.
 func yamlBinaryRestored(node *yaml.Node, v any) any {
 	for depth := 0; node.Kind == yaml.AliasNode && node.Alias != nil && depth < 16; depth++ {
 		node = node.Alias
@@ -1042,6 +1056,23 @@ func yamlBinaryRestored(node *yaml.Node, v any) any {
 			}
 		}
 	case yaml.MappingNode:
+		// A uuid, macaddr or bit string element, as yamlBinaryElems
+		// writes it: each holds its bytes as !!binary, which a JSON
+		// document never does, so the shape is no document's.
+		switch {
+		case len(node.Content) == 2 && isUUIDBytesMapping(node):
+			if u, err := decodeUUIDBytesMapping(node); err == nil {
+				return u
+			}
+		case binaryFieldMapping(node, "macaddr"):
+			if a, err := decodeHardwareAddrMapping(node); err == nil {
+				return a
+			}
+		case binaryFieldMapping(node, "bytes", "len", "valid"):
+			if b, err := decodePgBitsMapping(node); err == nil {
+				return b
+			}
+		}
 		if m, ok := v.(map[string]any); ok {
 			for i := 0; i+1 < len(node.Content); i += 2 {
 				k := node.Content[i]
@@ -1824,6 +1855,26 @@ func decodeHardwareAddrMapping(node *yaml.Node) (net.HardwareAddr, error) {
 		return nil, fmt.Errorf("pg/macaddr: base64 decode: %w", err)
 	}
 	return net.HardwareAddr(b), nil
+}
+
+// binaryFieldMapping reports whether node is a mapping of exactly keys
+// whose first key's value is a !!binary scalar: the shape a macaddr
+// ({macaddr}) or bit string ({bytes, len, valid}) cell is written in.
+func binaryFieldMapping(node *yaml.Node, keys ...string) bool {
+	if node.Kind != yaml.MappingNode || len(node.Content) != 2*len(keys) {
+		return false
+	}
+	fields, err := pgMappingFields(node)
+	if err != nil || len(fields) != len(keys) {
+		return false
+	}
+	for _, k := range keys {
+		if _, ok := fields[k]; !ok {
+			return false
+		}
+	}
+	b := fields[keys[0]]
+	return b != nil && b.Kind == yaml.ScalarNode && b.Tag == "!!binary"
 }
 
 // isUUIDBytesMapping reports whether an untagged YAML mapping carries

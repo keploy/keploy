@@ -263,6 +263,16 @@ func cellValueToJSON(v any) any {
 			"format": int64(x.Format),
 			"bytes":  base64.StdEncoding.EncodeToString(x.Bytes),
 		}
+	case [16]uint8:
+		// A uuid as pgx scans a uuid[] element, nests the binary
+		// discriminator as macaddr does; reflection would write its 16
+		// bytes as numbers that read back as a []any no codec encodes.
+		return map[string]any{
+			"uuid": map[string]any{
+				jsonPgTypeKey: jsonPgTypeBinary,
+				"data":        base64.StdEncoding.EncodeToString(x[:]),
+			},
+		}
 	case float64:
 		return floatToJSON(x)
 	case float32:
@@ -283,15 +293,16 @@ func cellValueToJSON(v any) any {
 }
 
 // jsonBinaryElems is v, an array, record or document cell's value, with
-// each []byte in it at any depth replaced by its $pgtype: binary wrapper
-// (cellValueToJSON), and everything else as it is: a container that holds
-// no []byte is itself.
+// each []byte in it at any depth replaced by its $pgtype: binary wrapper,
+// and each [16]uint8, net.HardwareAddr and pgtype.Bits by the object a
+// cell of its type is written as (cellValueToJSON), and everything else as
+// it is: a container that holds none of them is itself.
 func jsonBinaryElems(v any) any {
 	if !holdsBytes(v) {
 		return v
 	}
 	switch x := v.(type) {
-	case []byte:
+	case []byte, [16]uint8, net.HardwareAddr, pgtype.Bits:
 		return cellValueToJSON(x)
 	case []any:
 		out := make([]any, len(x))
@@ -424,6 +435,8 @@ func recoverPgMappingFromJSON(m map[string]any) (any, error) {
 		return decodeJSONPrefix(m["prefix"])
 	case len(keys) == 1 && keys[0] == "macaddr":
 		return decodeJSONHWAddr(m["macaddr"])
+	case len(keys) == 1 && keys[0] == "uuid" && isJSONUUIDBytes(m["uuid"]):
+		return decodeJSONUUIDBytes(m["uuid"])
 	case keysEq(keys, []string{"exp", "infinitymodifier", "int", "nan", "valid"}):
 		return numericFromJSON(m)
 	case keysEq(keys, []string{"days", "microseconds", "months", "valid"}):
@@ -1376,4 +1389,33 @@ func asString(v any) (string, error) {
 		return s, nil
 	}
 	return "", fmt.Errorf("expected string, got %T", v)
+}
+
+// isJSONUUIDBytes reports whether v, a {"uuid": v} object's value, is the
+// $pgtype: binary wrapper of 16 bytes that cellValueToJSON writes for a
+// [16]uint8: a JSON document's {"uuid": "<text>"} is no such wrapper, and
+// stays the document's.
+func isJSONUUIDBytes(v any) bool {
+	w, ok := v.(map[string]any)
+	if !ok || w[jsonPgTypeKey] != jsonPgTypeBinary || len(w) != 2 {
+		return false
+	}
+	data, ok := w["data"].(string)
+	if !ok {
+		return false
+	}
+	b, err := base64.StdEncoding.DecodeString(data)
+	return err == nil && len(b) == 16
+}
+
+// decodeJSONUUIDBytes is the [16]uint8 a {"uuid": wrapper} object holds
+// (isJSONUUIDBytes).
+func decodeJSONUUIDBytes(v any) (any, error) {
+	b, err := base64.StdEncoding.DecodeString(v.(map[string]any)["data"].(string))
+	if err != nil || len(b) != 16 {
+		return nil, fmt.Errorf("PostgresV3Cell: pg/uuid: want 16 bytes")
+	}
+	var u [16]uint8
+	copy(u[:], b)
+	return u, nil
 }

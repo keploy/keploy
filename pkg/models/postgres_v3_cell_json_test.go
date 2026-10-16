@@ -339,3 +339,27 @@ func TestPostgresV3Cell_AnOlderMocksBase64ElementStillLoads(t *testing.T) {
 		t.Fatalf("it loaded as %#v, want %#v", back, want)
 	}
 }
+
+// A uuid[], macaddr[] and bit[] cell's elements, and a uuid cell as a
+// [16]uint8, round-trip through JSON as the values pgx scanned, not as
+// arrays of numbers (or base64 text) no codec encodes back for the client;
+// a document's "uuid" text stays the document's.
+func TestPostgresV3Cell_JSONKeepsAUUIDArraysElements(t *testing.T) {
+	in := append(pgUUIDArrayCells(), NewValueCell([16]uint8{0x01, 0x02}))
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
