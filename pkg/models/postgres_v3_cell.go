@@ -258,8 +258,65 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 		// `{uuid: !!binary <base64>}` so the decode side recovers
 		// the fixed-array shape symmetrically with the gob path.
 		return marshalUUIDBytesYAML(v), nil
+	case []any, map[string]any:
+		// An array cell (bytea[], a multi-dim array), a record, or a
+		// json/jsonb document: yaml.v3's reflective encoder writes it as
+		// before, but for a []byte element or value at any depth, which it
+		// would write as a sequence of ints that reads back as ints (no
+		// replay can send them as the bytes recorded). Such an element is
+		// written as !!binary, as a []byte cell is, and read back as bytes
+		// (yamlBinaryRestored).
+		return yamlBinaryElems(v), nil
 	}
 	return c.Value, nil
+}
+
+// yamlBinaryElems is v, an array, record or document cell's value, with
+// each []byte in it at any depth replaced by its !!binary node, and
+// everything else as it is: a container that holds no []byte is itself.
+func yamlBinaryElems(v any) any {
+	if !holdsBytes(v) {
+		return v
+	}
+	switch x := v.(type) {
+	case []byte:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString(x)}
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = yamlBinaryElems(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = yamlBinaryElems(e)
+		}
+		return out
+	}
+	return v
+}
+
+// holdsBytes reports whether v is a []byte or an array or document holding
+// one at any depth.
+func holdsBytes(v any) bool {
+	switch x := v.(type) {
+	case []byte:
+		return true
+	case []any:
+		for _, e := range x {
+			if holdsBytes(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, e := range x {
+			if holdsBytes(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // YAML local tags for the pgtype-typed cell shapes. The current
@@ -802,7 +859,9 @@ func StringNeedsDoubleQuoted(s string) bool {
 //	!!str        → string
 //	!!binary     → []byte
 //	!!timestamp  → time.Time
-//	other        → interface{} default (maps/seqs reserved for future array support)
+//	other        → interface{} default; in a sequence or a string-keyed
+//	               mapping, each !!binary element or value → []byte
+//	               (yamlBinaryRestored)
 func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 	if node == nil {
 		c.Value = nil
@@ -950,8 +1009,52 @@ func (c *PostgresV3Cell) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&v); err != nil {
 		return fmt.Errorf("PostgresV3Cell: decode node (kind=%d, tag=%q): %w", node.Kind, node.Tag, err)
 	}
-	c.Value = v
+	c.Value = yamlBinaryRestored(node, v)
 	return nil
+}
+
+// yamlBinaryRestored returns v, the generic decode of node (an array,
+// record or document cell), with each element or value written as !!binary
+// in it (yamlBinaryElems) the bytes it encodes, where yaml.v3's generic
+// decode makes text of them. Everything else is as the generic decode made
+// it. An older mock's []byte element, written as a sequence of ints, is
+// those ints as before.
+func yamlBinaryRestored(node *yaml.Node, v any) any {
+	for depth := 0; node.Kind == yaml.AliasNode && node.Alias != nil && depth < 16; depth++ {
+		node = node.Alias
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Tag != "!!binary" {
+			return v
+		}
+		raw := node.Value
+		if strings.ContainsAny(raw, " \t\r\n") {
+			raw = stripBase64Whitespace(raw)
+		}
+		if b, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			return b
+		}
+	case yaml.SequenceNode:
+		if s, ok := v.([]any); ok && len(s) == len(node.Content) {
+			for i := range s {
+				s[i] = yamlBinaryRestored(node.Content[i], s[i])
+			}
+		}
+	case yaml.MappingNode:
+		if m, ok := v.(map[string]any); ok {
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				k := node.Content[i]
+				if k.Kind != yaml.ScalarNode || k.Tag == "!!merge" {
+					continue
+				}
+				if e, ok := m[k.Value]; ok {
+					m[k.Value] = yamlBinaryRestored(node.Content[i+1], e)
+				}
+			}
+		}
+	}
+	return v
 }
 
 // decodePgTaggedNode handles the `!pg/<name>` tag dispatch. Returns
