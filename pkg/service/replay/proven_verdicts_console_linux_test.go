@@ -17,9 +17,18 @@ import (
 // The console says nothing that contradicts a verdict of the proven switch: a
 // test it fails on a miss or on an unconsumed test mock prints no "Testrun
 // passed" line, though its answer matched, wherever the comparison prints one
-// (an HTTP test under --schema-match, a gRPC test, a streamed test). The rows
-// where nothing stands against the test are the controls: the line is printed,
-// and captured, where it is due.
+// (an HTTP test, compared loudly once it has failed on its own; a gRPC test; a
+// streamed test). The rows where nothing stands against the test are the
+// controls: the line is printed, and captured, where it is due.
+//
+// The HTTP rows set --schema-match, whose comparison prints the line. Under
+// the switch the setting is ignored (every body is compared value by value),
+// so there they are plain HTTP tests, and a plain HTTP test that nothing
+// stands against prints no line, the switch on or off: the value comparison
+// matches quietly first (compareHTTPRespForReplay). That cell is not this
+// test's to pin either way (a line for a test that passed contradicts
+// nothing); the switch-off row is the HTTP control, where --schema-match is
+// honoured and the schema comparison prints the line.
 func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 	const body = `{"orders":[{"id":"ord_LIT","status":"paid"}]}`
 	miss := func() ([]models.UnmatchedCall, error) {
@@ -29,7 +38,7 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 		for _, c := range []struct {
 			name                 string
 			on, miss, unconsumed bool
-			passLine             bool
+			passed               bool
 		}{
 			{"nothing against it", true, false, false, true},
 			{"a miss, the switch off", false, true, false, true},
@@ -37,6 +46,9 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 			{"an unconsumed test mock", true, false, true, false},
 		} {
 			t.Run(path+"/"+c.name, func(t *testing.T) {
+				// plainHTTP: an HTTP row under the switch, compared as plain
+				// HTTP since --schema-match is ignored there.
+				plainHTTP := path == "HTTP --schema-match" && c.on
 				setSwitch(t, c.on)
 				app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 					mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
@@ -55,8 +67,11 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 				switch path {
 				case "HTTP --schema-match":
 					// The plain comparison prints no pass line in the main
-					// loop (compareHTTPRespForReplay matches quietly first);
-					// the schema comparison does.
+					// loop for a test nothing stands against
+					// (compareHTTPRespForReplay matches quietly first); the
+					// schema comparison, honoured with the switch off, does.
+					// A test failed on its own is compared loudly
+					// (compareHTTPResp), which would print it.
 					tc = tmplCase(1, app.addr, "GET", "/orders", nil, "", recorded(200, nil, body, nil))
 					tune = func(cfg *config.Config) { cfg.Test.SchemaMatch = true }
 				case "gRPC":
@@ -84,11 +99,14 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 					h.r.hookImpl = &consumingHooks{TestHooks: h.r.hookImpl}
 				}
 				console := captureConsole(t, func() { h.run(t) })
-				if printed := strings.Contains(console, "Testrun passed for testcase"); printed != c.passLine {
-					t.Errorf("the console printed the pass line: %v, want %v\n%s", printed, c.passLine, console)
+				switch printed := strings.Contains(console, "Testrun passed for testcase"); {
+				case !c.passed && printed:
+					t.Errorf("the console printed the pass line for a test the switch failed\n%s", console)
+				case c.passed && !plainHTTP && !printed:
+					t.Errorf("the console printed no pass line where the comparison prints it\n%s", console)
 				}
 				want := models.TestStatusPassed
-				if !c.passLine {
+				if !c.passed {
 					want = models.TestStatusFailed
 				}
 				assertStatus(t, h, "test-1", want, "the switch's verdict")
