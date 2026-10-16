@@ -171,17 +171,21 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 }
 
 // servedWithoutSession notes that the proxy serves conn with no session
-// (pairedConn.noSession). A connection it does not keep is ignored.
+// (pairedConn.noSession), and wakes the waits: one that took conn before the
+// mark is released by it (pairReached), with no read or close of conn's to
+// wake it when the proxy passes conn through. A connection it does not keep is
+// ignored.
 func (s *pairedConns) servedWithoutSession(conn net.Conn) {
 	s.mu.Lock()
-	pc := s.byConn[conn]
-	s.mu.Unlock()
-	if pc != nil {
+	defer s.mu.Unlock()
+	if pc := s.byConn[conn]; pc != nil {
 		pc.noSession.Store(true)
+		s.wakeLocked()
 	}
 }
 
-// changes is closed at the next removal or failure: take it before looking.
+// changes is closed at the next removal, failure or connection served with no
+// session: take it before looking.
 func (s *pairedConns) changes() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
