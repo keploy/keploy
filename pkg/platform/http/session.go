@@ -397,7 +397,17 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	}
 	// A docker-mode agent that restarted holds no container list.
 	a.pushContainers(ctx)
-	return a.session().reapply(ctx, a.logger)
+	if err := a.session().reapply(ctx, a.logger); err != nil {
+		return err
+	}
+	// The agent compose started again holds the whole setup again, and the
+	// app has not run against the one it replaced: compose's retry runs only
+	// while the app's container was never started (shouldRetryComposeUp),
+	// and the app starts behind this agent's readiness, put back last. So
+	// what a watch of the agent's process keeps to (a test set's evidence)
+	// is all on this one.
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	return nil
 }
 
 // awaitAgentAnswers waits, up to the agent's readiness budget, for its health

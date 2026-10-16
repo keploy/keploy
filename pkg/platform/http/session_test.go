@@ -305,6 +305,9 @@ type restartingAgent struct {
 	slowBy             time.Duration
 	// order is every call that met the agent up, as "METHOD path".
 	order []string
+	// instance, when set, names the agent process in every answer, as an
+	// agent with the proven switch on does (models.AgentInstanceHeader).
+	instance string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -326,6 +329,9 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
+		}
+		if r.instance != "" {
+			w.Header().Set(models.AgentInstanceHeader, r.instance)
 		}
 		r.mu.Unlock()
 		switch req.URL.Path {

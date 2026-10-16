@@ -57,6 +57,10 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 		c := *t
 		c.base = ownConnections(t.base)
 		return &c
+	case *instanceTransport:
+		c := *t
+		c.base = ownConnections(t.base)
+		return &c
 	case *http.Transport:
 		c := t.Clone()
 		c.DisableKeepAlives = true
@@ -78,9 +82,13 @@ func agentHTTPClient(token string) http.Client {
 // calls unauthenticated.
 func agentHTTPClientWithTimeout(token string, timeout time.Duration) http.Client {
 	c := http.Client{Timeout: timeout}
+	var base http.RoundTripper
 	if token != "" {
-		c.Transport = &bearerTransport{token: token}
+		base = &bearerTransport{token: token}
 	}
+	// Every answer is noted for which agent process gave it
+	// (agent_instance.go), with or without a token.
+	c.Transport = &instanceTransport{base: base}
 	return c
 }
 

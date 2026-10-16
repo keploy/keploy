@@ -477,6 +477,41 @@ const (
 // it.
 const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
 
+// AgentInstanceHeader is the response header in which an agent names the
+// process that answers: an id the agent draws once, as its process starts.
+// What a test set is judged on (the calls no mock answered, what its tests
+// consumed, what keploy could not capture) is held in that process's memory,
+// and an agent started again in its place (kubelet restarting a crashed
+// sidecar, docker restarting a container) answers at the same address with
+// none of it. Two answers that name different processes say that happened
+// between them. Only an agent with the proven switch on sends it.
+const AgentInstanceHeader = "X-Keploy-Agent-Instance"
+
+// AgentReplacement is an agent process answering where another answered
+// before it: First, the process that answered first since a watch began
+// (AgentInstanceWatch), and Next, the first other one that answered after it.
+type AgentReplacement struct {
+	First string
+	Next  string
+}
+
+// AgentInstanceWatch watches which agent process answers a client's agent
+// address (AgentInstanceHeader): from when it begins, the first process to
+// answer is the one the watch keeps to, and any other that answers after it
+// replaced it.
+type AgentInstanceWatch interface {
+	// Replacement reports the first process that answered after the one the
+	// watch keeps to, and whether one did.
+	Replacement() (AgentReplacement, bool)
+	// Accept says the process that answers now was set up again in full
+	// before the application ran against it (the docker compose bring-up's
+	// retry): nothing the watch keeps to was on the process it replaced, and
+	// the watch keeps to this one from now on.
+	Accept()
+	// Stop ends the watch.
+	Stop()
+}
+
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
 }
