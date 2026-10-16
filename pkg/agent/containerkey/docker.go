@@ -43,7 +43,9 @@ var errNoDaemon = errors.New("there is no Docker daemon socket")
 // once from the container list, then keeps it by Docker's event stream: a
 // container that starts or joins a network is read, one that dies is dropped
 // at once. Nothing is refreshed on a timer, and a lookup only reads it:
-// naming a connection never waits on Docker.
+// naming a connection never waits on Docker. A connection's first use that
+// finds its destination unplaced has the index list the daemon (Settle), so
+// a container whose start event has not come yet is placed all the same.
 type dockerIndex struct {
 	mu   sync.Mutex
 	host string // the endpoint SetDockerHost gave; "" for the environment's
@@ -63,6 +65,10 @@ type dockerIndex struct {
 	// placeDone, when set, is told each container whose placing loop ended
 	// (tests wait on it).
 	placeDone func(id string)
+	// settleWaits, when set, is told each time a Settle waits for a list,
+	// and each time a list waits for the placings of containers an event
+	// spoke for while it was out (tests wait on it).
+	settleWaits func()
 	// imageShared, if set, is told each read of a container that takes an
 	// image's defaults from another container's read of them in flight
 	// (imageConfig): tests see the image read once.
@@ -88,6 +94,12 @@ type dockerIndex struct {
 	// readSlots bounds the reads of the daemon in flight at once: the first
 	// list starts one per container it lists.
 	readSlots chan struct{}
+	// settleAsked counts the lists of the daemon Settle asked for, and
+	// settled the ones that are in (one runs at a time, so they are in in
+	// the order asked); settling closes when the one in flight is in, nil
+	// while none is.
+	settleAsked, settled uint64
+	settling             chan struct{}
 }
 
 // maxReads is how many containers the index reads from the daemon at once.
@@ -120,8 +132,10 @@ type watchState struct {
 	// done closes when the watch has ended: its client closed, and its
 	// event stream's reader returned.
 	done chan struct{}
-	// ctx bounds the watch.
+	// ctx bounds the watch, and api is its client (nil for a watch that
+	// failed as it began): Settle lists the daemon with it.
 	ctx context.Context
+	api dockerAPI
 	// stop ends the watch: its event stream, its reads and its client.
 	stop context.CancelFunc
 	// err is why the daemon cannot be read. It holds until the next Watch (a
@@ -133,11 +147,16 @@ type watchState struct {
 	// and one stuck read holds up no other container. reading marks a
 	// container with a read in flight (one at a time: an event meanwhile
 	// marks it dirty, and it is read once more); destroyed, one destroyed
-	// while read, whose seq goes when the read ends.
+	// while read, or while a list may still show it (the first list, or
+	// Settle's: settleOut), whose seq goes when the read and the list end.
 	seq       map[string]int
 	reading   map[string]bool
 	dirty     map[string]bool
 	destroyed map[string]bool
+	// settleOut marks Settle's list out (settleList), from the moment it
+	// took the event counts it is applied as of: a destroy meanwhile keeps
+	// its container's count, so the list's put loses to it, as to a die.
+	settleOut bool
 	// placing marks a container an event started or moved that the index
 	// has not placed since: where it is, not its configuration, is what a
 	// connection accepted meanwhile waits for (Pending). It is placed by its
@@ -245,6 +264,7 @@ func (r *dockerIndex) Watch(ctx context.Context, logger *zap.Logger) {
 		if !live(r.cur) {
 			r.cur, r.endpoint = st, endpoint
 			if api != nil {
+				st.api = api
 				go r.watch(st.ctx, st, api)
 			}
 		} else if api != nil {
@@ -381,12 +401,7 @@ func (r *dockerIndex) watch(ctx context.Context, st *watchState, api dockerAPI) 
 	}
 	r.mu.Lock()
 	st.listed = true
-	for id := range st.destroyed {
-		if !st.reading[id] {
-			delete(st.destroyed, id)
-			delete(st.seq, id)
-		}
-	}
+	st.forgetDestroyedLocked()
 	st.once.Do(func() { close(st.synced) })
 	r.mu.Unlock()
 	<-ctx.Done()
@@ -463,9 +478,11 @@ func (r *dockerIndex) event(ctx context.Context, st *watchState, api dockerAPI, 
 func (r *dockerIndex) forget(st *watchState, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Until the first list is in, the list may still have the container:
-	// its count stays, so the list's add loses to the destroy.
-	if st.reading[id] || !st.listed {
+	// Until the first list is in, or while Settle's list is out, the list
+	// may still have the container: its count stays, so the list's put loses
+	// to the destroy: a count gone is 0, which Settle's list takes for a
+	// container no event spoke for.
+	if st.reading[id] || !st.listed || st.settleOut {
 		st.destroyed[id] = true
 		return
 	}
@@ -571,7 +588,7 @@ func (r *dockerIndex) readLoop(ctx context.Context, api dockerAPI, st *watchStat
 		if !again {
 			delete(st.reading, id)
 			delete(st.dirty, id)
-			if st.destroyed[id] && st.listed {
+			if st.destroyed[id] && st.listed && !st.settleOut {
 				delete(st.destroyed, id)
 				delete(st.seq, id)
 			}
@@ -1192,6 +1209,128 @@ func (r *dockerIndex) AwaitReadsOf(ctx context.Context, ids []string) {
 			return
 		case <-st.ctx.Done():
 			return
+		}
+	}
+}
+
+// Settle waits until a list of the daemon asked after Settle was called is
+// in, and every running container it shows that the index did not hold is
+// placed, or ctx (or the watch) ends: a container Docker started before a
+// connection's first use is then placed, though its start event has not
+// reached the index (the stream lags the daemon on a busy host). A container
+// an event spoke for while the list was out is left to that event, and its
+// placing is waited for. Like a placing (placeFromList), it never waits for a
+// container's configuration: what it places is read beside, as the first
+// list's containers are. Lists are asked one at a time: the uses that come
+// while one is out share the next. A list that fails places nothing, and the
+// Settle that waited for it returns.
+func (r *dockerIndex) Settle(ctx context.Context) {
+	r.mu.Lock()
+	st, after := r.cur, r.settleAsked
+	r.mu.Unlock()
+	for {
+		r.mu.Lock()
+		if r.cur != st || st == nil || st.err != nil || st.api == nil || !st.listed || r.settled > after {
+			r.mu.Unlock()
+			return
+		}
+		wait := r.settling
+		if wait == nil {
+			r.settleAsked++
+			wait = make(chan struct{})
+			r.settling = wait
+			go r.settleList(st, r.settleAsked, wait)
+		}
+		waits := r.settleWaits
+		r.mu.Unlock()
+		if waits != nil {
+			waits()
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return
+		case <-st.ctx.Done():
+			return
+		}
+	}
+}
+
+// settleList is Settle's list number n: it places, from the daemon's list,
+// each running container the index does not hold and no event spoke for
+// since the list was asked (as of the event counts then, so a die that
+// overtakes the list wins), starting its configuration's read, and waits for
+// the placings of those an event spoke for meanwhile; then it closes done.
+// A container listed by image ID (its repository is in its configuration
+// only) is not placed, and no read of it is started, as the first list's add
+// starts one: its start event's read places it.
+func (r *dockerIndex) settleList(st *watchState, n uint64, done chan struct{}) {
+	defer func() {
+		r.mu.Lock()
+		r.settled, r.settling = n, nil
+		st.settleOut = false
+		st.forgetDestroyedLocked()
+		r.mu.Unlock()
+		close(done)
+	}()
+	r.mu.Lock()
+	asked := maps.Clone(st.seq)
+	st.settleOut = true
+	r.mu.Unlock()
+	list, err := st.api.ContainerList(st.ctx, container.ListOptions{})
+	if err != nil {
+		r.say(st, "could not list the daemon's containers for a connection's first use", zap.Error(err))
+		return
+	}
+	var spoken []string
+	for _, c := range list {
+		if isImageID(c.Image, c.ImageID) {
+			continue
+		}
+		seq := asked[c.ID]
+		r.mu.Lock()
+		held := st.images[c.ID] != ""
+		read := !held && st.seq[c.ID] == seq && !st.reading[c.ID]
+		if read {
+			// Marked before its entry is in, as the first list's are
+			// (add): nothing that finds it takes its missing fingerprint
+			// for an unreadable one.
+			st.reading[c.ID] = true
+		}
+		r.mu.Unlock()
+		if held {
+			continue
+		}
+		e := summaryEntry(c)
+		e.placed, e.fromList = true, true
+		if !r.put(st, e, seq) {
+			// An event spoke for it since the list was asked: its own
+			// placing has it, or its die.
+			spoken = append(spoken, c.ID)
+		}
+		if read {
+			go r.readLoop(st.ctx, st.api, st, c.ID)
+		}
+	}
+	if len(spoken) > 0 {
+		r.mu.Lock()
+		waits := r.settleWaits
+		r.mu.Unlock()
+		if waits != nil {
+			waits()
+		}
+		r.AwaitReadsOf(st.ctx, spoken)
+	}
+}
+
+// forgetDestroyedLocked drops the event counts of the containers destroyed
+// while a list was out, once no read of them is in flight either: no list
+// out can show them now. The index's lock is held.
+func (st *watchState) forgetDestroyedLocked() {
+	for id := range st.destroyed {
+		if !st.reading[id] {
+			delete(st.destroyed, id)
+			delete(st.seq, id)
 		}
 	}
 }

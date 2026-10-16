@@ -329,10 +329,11 @@ func (p *Proxy) realAtHandshake(dest *agent.NetworkAddress) (string, bool) {
 // containerRepoOfConn is the image repository of the container accepted
 // connection connID reaches, for a list with container: entries: the one the
 // keyer placed it at, waiting, if the index did not place it at its accept,
-// for the containers the index was placing then (containerkey.Keyer.Placed,
-// never a configuration's read), so a container Docker started a moment
-// before is a mock.real destination, not a dependency recorded under its
-// key. Else what the index says of addr now (containerRepoAt).
+// for the containers the index was placing then and, placing none there, for
+// a list of the daemon asked then (containerkey.Keyer.Placed, never a
+// configuration's read), so a container Docker started a moment before is a
+// mock.real destination, not a dependency recorded under its key. Else what
+// the index says of addr now (containerRepoAt).
 func (p *Proxy) containerRepoOfConn(ctx context.Context, st *realState, addr string, connID int64) string {
 	if !st.list.HasContainers() {
 		return ""
