@@ -1287,6 +1287,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.logger.Info("Color encoding is disabled")
 	}
 
+	// Under the proven switch a deleted setting's flag is unknown, and its
+	// keploy.yml key is ignored, with one notice (U18, deleted.go). Not for
+	// the agent: its CLI forwards no deleted flag.
+	if cmd.Name() != "agent" {
+		if err := c.checkDeletedSettings(cmd); err != nil {
+			utils.LogError(c.logger, err, "refusing a deleted flag")
+			return err
+		}
+	}
+
 	// Validate --storage-format flag (applies to all commands via persistent flag)
 	c.cfg.StorageFormat = strings.ToLower(strings.TrimSpace(c.cfg.StorageFormat))
 	if c.cfg.StorageFormat == "" {
