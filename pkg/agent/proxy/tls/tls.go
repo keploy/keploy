@@ -171,6 +171,25 @@ func HandshakeCause(err error) error {
 	return err
 }
 
+// clientHandshakeReportKey carries WithClientHandshakeReport's report.
+type clientHandshakeReportKey struct{}
+
+// WithClientHandshakeReport is ctx carrying report, which HandleTLSConnection
+// calls with its error when a client-side handshake made under ctx fails: an
+// integration that makes its own client handshake (MySQL's, on its client's
+// SSLRequest) is charged so as the proxy charges its own handshakes, without
+// the error having to come back up through the integration.
+func WithClientHandshakeReport(ctx context.Context, report func(error)) context.Context {
+	return context.WithValue(ctx, clientHandshakeReportKey{}, report)
+}
+
+// reportClientHandshake hands err to ctx's report, if it carries one.
+func reportClientHandshake(ctx context.Context, err error) {
+	if report, ok := ctx.Value(clientHandshakeReportKey{}).(func(error)); ok && report != nil {
+		report(err)
+	}
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
@@ -180,6 +199,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	if ca == nil {
 		err := fmt.Errorf("no MITM CA available for this run")
 		utils.LogError(logger, err, "Failed to obtain the signing CA")
+		reportClientHandshake(ctx, err)
 		return nil, false, err
 	}
 	caPrivKey := ca.signer
@@ -220,7 +240,9 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	err := tlsConn.Handshake()
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
-		return nil, false, &HandshakeError{Err: err, CertificateSent: certSent.Load()}
+		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}
+		reportClientHandshake(ctx, herr)
+		return nil, false, herr
 	}
 
 	// The connection the proxy closes with care is handed the layer: its

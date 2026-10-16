@@ -880,3 +880,73 @@ func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
 		})
 	}
 }
+
+// A MySQL client that asks for TLS (an SSLRequest) makes a client-side TLS
+// handshake with keploy's proxy, which the MySQL replayer makes itself: it is
+// charged as any client-side handshake with the proxy -- a rejection of
+// keploy's certificate is a loss, an abandon once the certificate is out
+// leaves the test not judged, a client that hangs up before keploy answered
+// lost nothing. The replayer's handshake was charged nothing: a test whose
+// database connection keploy's certificate failed had no capture loss.
+func TestAMySQLClientsTLSHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
+	sslRequest := func(app net.Conn) error {
+		if _, err := readOneMySQLPacket(app); err != nil {
+			return fmt.Errorf("reading the greeting: %w", err)
+		}
+		caps := mysqlTestHR41("app", mysqlmodels.Native).CapabilityFlags | mysqlmodels.CLIENT_SSL
+		payload := make([]byte, 32)
+		payload[0], payload[1], payload[2], payload[3] = byte(caps), byte(caps>>8), byte(caps>>16), byte(caps>>24)
+		payload[6], payload[8] = 0x01, 0x21 // max packet 1<<16, utf8
+		_, err := app.Write(append([]byte{byte(len(payload)), 0, 0, 1}, payload...))
+		return err
+	}
+	for _, tc := range []struct {
+		name              string
+		client            func(t *testing.T, app net.Conn)
+		failed, abandoned uint64
+	}{
+		{"a client that hangs up before keploy answered", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example")[:20])
+		}, 0, 0},
+		{"a client that closes once keploy's certificate is in, without an alert", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example"))
+			_, _ = app.Read(make([]byte, 1<<14))
+		}, 0, 1},
+		{"a Go client that rejects keploy's certificate", func(t *testing.T, app net.Conn) {
+			_ = tls.Client(app, &tls.Config{ServerName: "db.example"}).Handshake()
+		}, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			now := time.Now()
+			mm.SetMocksWithWindow(nil, []*models.Mock{mysqlTestNative("mock-0", now, false)}, now.Add(-time.Hour), now.Add(time.Hour))
+			app, src := acceptedConn(t)
+			connCtx := context.WithValue(context.WithValue(context.Background(), models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = p.mockMySQLOutgoing(connCtx, src, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+				_ = src.Close()
+			}()
+			if err := sslRequest(app); err != nil {
+				t.Fatal(err)
+			}
+			tc.client(t, app)
+			_ = app.Close()
+			<-done
+			got := map[models.CaptureLossKind]uint64{}
+			for _, l := range p.losses.Snapshot() {
+				got[l.Kind] = l.Count
+				if l.What != "to 10.0.0.5:3306" {
+					t.Fatalf("%s: a loss names %q, want the destination", l.Kind, l.What)
+				}
+			}
+			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || len(got) > 2 {
+				t.Fatalf("%s: charged %v, want %d tls_handshake_failed and %d tls_handshake_abandoned", tc.name, got, tc.failed, tc.abandoned)
+			}
+		})
+	}
+}

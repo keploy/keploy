@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -89,13 +90,20 @@ func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr st
 	return pTls.HandshakeCause(err)
 }
 
-// handleClientTLS is pTls.HandleTLSConnection returning the handshake's own
-// error (pTls.HandshakeCause), for a parser's TLS upgrader (the record path's
-// util.ConnTLSUpgrader): the parsers above it tell a client's EOF apart by
-// identity, as before.
-func handleClientTLS(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-	c, isMTLS, err := pTls.HandleTLSConnection(ctx, logger, conn, backdate)
-	return c, isMTLS, pTls.HandshakeCause(err)
+// clientTLSHandler is pTls.HandleTLSConnection for a parser's TLS upgrader
+// on the record path (util.ConnTLSUpgrader: MySQL's SSLRequest, Postgres's)
+// on a connection to dstAddr: a handshake that failed is charged as the
+// proxy's own client handshakes are (chargeClientHandshake), and its own
+// error (pTls.HandshakeCause) is returned, which the parsers above it tell a
+// client's EOF apart by identity with.
+func (p *Proxy) clientTLSHandler(dstAddr string) util.ClientTLSHandlerFunc {
+	return func(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
+		c, isMTLS, err := pTls.HandleTLSConnection(ctx, logger, conn, backdate)
+		if err != nil {
+			err = p.chargeClientHandshake(ctx, err, dstAddr)
+		}
+		return c, isMTLS, err
+	}
 }
 
 // relayClientHandshake is the relay's OnClientHandshakeFailed for a

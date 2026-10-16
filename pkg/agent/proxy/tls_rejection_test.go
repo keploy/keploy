@@ -146,19 +146,26 @@ func TestAHandshakeAStoppingAgentCutShortIsNoLoss(t *testing.T) {
 	}
 }
 
-// A parser's TLS upgrader (the record path's) gets the handshake's own error,
-// as before keploy told abandoned handshakes apart: a client's EOF is io.EOF
-// itself, which the parsers above it compare by identity.
-func TestARecordUpgradersHandshakeErrorIsTheHandshakesOwn(t *testing.T) {
+// A parser's TLS upgrader on the record path (MySQL's SSLRequest, Postgres's)
+// makes a client-side handshake with keploy's proxy: charged as the proxy's
+// own are -- here an abandon once keploy's certificate is out -- and its own
+// error is what the parser gets, a client's EOF io.EOF itself, which the
+// parsers above compare by identity. The upgrader's handshake was charged
+// nothing.
+func TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn(t *testing.T) {
 	app, src := acceptedConn(t)
 	go func() {
 		_, _ = app.Write(rawHello(t, "db.example"))
 		_, _ = app.Read(make([]byte, 1<<14))
 		_ = app.Close()
 	}()
-	_, _, err := handleClientTLS(context.Background(), zap.NewNop(), src, time.Time{})
+	p := &Proxy{logger: zap.NewNop()}
+	_, _, err := p.clientTLSHandler("10.0.0.5:3306")(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != io.EOF {
-		t.Fatalf("handleClientTLS returned %v (%T), want io.EOF itself", err, err)
+		t.Fatalf("the upgrader's handshake returned %v (%T), want io.EOF itself", err, err)
+	}
+	if got := p.losses.Snapshot(); len(got) != 1 || got[0].Kind != models.CaptureLossTLSAbandoned || got[0].What != "to 10.0.0.5:3306" {
+		t.Fatalf("charged %+v, want one tls_handshake_abandoned to 10.0.0.5:3306", got)
 	}
 }
 

@@ -174,6 +174,44 @@ func TestRelayConfig_AClientUpgradesHandshakeIsChargedAsAnyClientHandshake(t *te
 	}
 }
 
+// Every parser TLS upgrader the record path builds (MySQL's, Postgres's)
+// charges its client's handshake as the proxy's own are (clientTLSHandler),
+// to the connection's destination: given pTls.HandleTLSConnection bare, a
+// rejection of keploy's certificate there was charged nothing. The behaviour
+// is TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn.
+func TestEveryRecordUpgraderChargesItsClientsHandshake(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy.go: %v", err)
+	}
+	var handlers []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewConnTLSUpgrader" && len(call.Args) == 4 {
+			var buf bytes.Buffer
+			if err := printer.Fprint(&buf, fset, call.Args[3]); err != nil {
+				t.Fatal(err)
+			}
+			handlers = append(handlers, buf.String())
+		}
+		return true
+	})
+	if len(handlers) != 2 {
+		t.Fatalf("%d NewConnTLSUpgrader calls in proxy.go, want the two record paths' (MySQL's probe branch, the parsers'): %v", len(handlers), handlers)
+	}
+	for _, h := range handlers {
+		if h != "p.clientTLSHandler(dstAddr)" {
+			t.Fatalf("a record upgrader terminates its client's TLS with %q, want p.clientTLSHandler(dstAddr)", h)
+		}
+	}
+}
+
 // The half-close grace is an operator knob whose whole point is being
 // reachable without a rebuild, so the one line binding it into the relay
 // is worth pinning: delete it and the field silently reverts to the

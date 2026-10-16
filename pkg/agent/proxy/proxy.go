@@ -1378,7 +1378,12 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 		return errors.New("mysql parser not registered")
 	}
 
-	err := mysqlMocker.MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	// The replayer makes the client's TLS handshake itself, on its
+	// SSLRequest: charged as the proxy's own client handshakes are.
+	reportCtx := pTls.WithClientHandshakeReport(parserCtx, func(err error) {
+		_ = p.chargeClientHandshake(parserCtx, err, dstAddr)
+	})
+	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 		p.sendMockNotFoundError(err)
@@ -2880,7 +2885,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, handleClientTLS)
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3637,7 +3642,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, handleClientTLS)
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
