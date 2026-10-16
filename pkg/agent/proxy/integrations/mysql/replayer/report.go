@@ -141,7 +141,13 @@ func formatExecParams(params []mysql.Parameter) string {
 	}
 	vals := make([]string, 0, len(params))
 	for _, p := range params {
-		vals = append(vals, truncate(fmt.Sprintf("%v", p.Value), 48))
+		v := p.Value
+		if p.Name != "" && v != nil {
+			// A query attribute: its name, not its value's shape, may be
+			// what makes it a secret (executeForLog).
+			v = maskedAttributeValue
+		}
+		vals = append(vals, truncate(fmt.Sprintf("%v", v), 48))
 	}
 	return "params=[" + strings.Join(vals, ", ") + "]"
 }
