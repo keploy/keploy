@@ -100,6 +100,10 @@ type Keyer struct {
 	run, test *scope
 	// scopes counts the scopes this session began, for their tokens.
 	scopes int
+	// tests counts the test scopes this keyer ever began, never reset (a
+	// session's Reset restarts scopes); openTest is the open test's number,
+	// 0 while none is open (OpenTest).
+	tests, openTest uint64
 	// spans are the session's scopes, in the order they began, with when
 	// they began and ended: Stamp files a recorded mock under the scope its
 	// request was sent in, which may have ended by the time it is stamped.
@@ -262,7 +266,7 @@ func (k *Keyer) Bind(ctx context.Context) {
 func (k *Keyer) Reset() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.scopes, k.spans, k.test = 0, nil, nil
+	k.scopes, k.spans, k.test, k.openTest = 0, nil, nil, 0
 	k.run = k.beginLocked(false, time.Now())
 	k.conns, k.closed, k.unplaced, k.warned = map[string]Container{}, nil, map[string]*pendingConn{}, false
 	k.endSessionLocked()
@@ -276,7 +280,7 @@ func (k *Keyer) BeginInstance() {
 	now := time.Now()
 	k.endLocked(k.test, now)
 	k.endLocked(k.run, now)
-	k.run, k.test = k.beginLocked(false, now), nil
+	k.run, k.test, k.openTest = k.beginLocked(false, now), nil, 0
 }
 
 // BeginTest opens a test's scope; a scope already open is replaced, since a
@@ -287,6 +291,8 @@ func (k *Keyer) BeginTest() {
 	now := time.Now()
 	k.endLocked(k.test, now)
 	k.test = k.beginLocked(true, now)
+	k.tests++
+	k.openTest = k.tests
 }
 
 // EndTest closes the open test's scope: connections from here on are the
@@ -299,9 +305,18 @@ func (k *Keyer) EndTest() {
 	defer k.mu.Unlock()
 	now := time.Now()
 	k.endLocked(k.test, now)
-	k.test = nil
+	k.test, k.openTest = nil, 0
 	k.endLocked(k.run, now)
 	k.run = k.beginLocked(false, now)
+}
+
+// OpenTest is the open test's scope, a number no other test scope of this
+// keyer's has had, or 0 while no test is open: what a connection's events
+// compare to tell whether they happened within one test.
+func (k *Keyer) OpenTest() uint64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.openTest
 }
 
 // Name names the connection connID, accepted for the address the proxy dials

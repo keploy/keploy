@@ -1044,3 +1044,41 @@ func TestRecordingNamesContainersFollowsTheTestSet(t *testing.T) {
 		t.Fatal("named with no keyer in ctx")
 	}
 }
+
+// OpenTest names the open test's scope by a number no other test scope of
+// the keyer's has had, a session's Reset included, and is 0 while no test is
+// open: before the first, between two, after one ends, after a claim.
+func TestOpenTestNamesEachTestScopeOnce(t *testing.T) {
+	k := NewKeyer(newFake())
+	if k.OpenTest() != 0 {
+		t.Fatal("a test is open before any began")
+	}
+	seen := map[uint64]bool{}
+	next := func() uint64 {
+		t.Helper()
+		k.BeginTest()
+		n := k.OpenTest()
+		if n == 0 || seen[n] {
+			t.Fatalf("test scope %d: zero, or one an earlier test had", n)
+		}
+		seen[n] = true
+		return n
+	}
+	next()
+	next() // a test begun over an open one replaces it
+	k.EndTest()
+	if k.OpenTest() != 0 {
+		t.Fatal("a test is open after it ended")
+	}
+	next()
+	k.BeginInstance()
+	if k.OpenTest() != 0 {
+		t.Fatal("a test is open after a claim")
+	}
+	next()
+	k.Reset()
+	if k.OpenTest() != 0 {
+		t.Fatal("a test is open after a session's reset")
+	}
+	next() // not a number the last session's tests had
+}
