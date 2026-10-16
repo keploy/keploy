@@ -656,6 +656,17 @@ func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 	return s.emitMockCore(m, true)
 }
 
+// MockHeld tells the session its parser holds a mock it made instead of
+// emitting it now, to emit it once it knows what the mock is: the parser has
+// consumed the input, so the session's pending work is cleared
+// (OnPendingCleared), as an emitted mock clears it. Work left pending through
+// the next idle spell is taken for a hung parser. Nil-safe.
+func (s *Session) MockHeld() {
+	if s != nil && s.OnPendingCleared != nil {
+		s.OnPendingCleared()
+	}
+}
+
 func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s == nil || m == nil {
 		return nil
