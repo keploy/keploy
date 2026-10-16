@@ -47,8 +47,22 @@ trap cleanup EXIT
 echo "=== pruning any prior state ==="
 "${DC[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 
+# The base images are pulled first, through the retry for a registry's rate
+# limit or a transport fault, so the build finds them local and fetches only
+# Go modules (also retried, on a transport fault). Docker Hub's official
+# images: see Dockerfile.setup for why not ECR Public.
+# shellcheck source=../../../.github/workflows/test_workflow_scripts/docker-build-retry.sh
+source "${SCRIPT_DIR}/../../../.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+export GOLANG_IMAGE="${GOLANG_IMAGE:-golang:1.27-bookworm}"
+export DEBIAN_IMAGE="${DEBIAN_IMAGE:-debian:trixie-slim}"
+echo "=== pulling the base images ==="
+docker_pull_retry "${GOLANG_IMAGE}"
+docker_pull_retry "${DEBIAN_IMAGE}"
+echo "=== building the harness image ==="
+docker_build_retry "${DC[@]}" build
+
 echo "=== bringing up ca-writer + tls-probe ==="
-"${DC[@]}" up -d --build
+"${DC[@]}" up -d
 # Wait for the writer to finish. depends_on: service_completed_successfully on
 # the probe gates on newer compose, but older docker-compose versions (which
 # this script explicitly supports via the DC fallback above) ignore that
