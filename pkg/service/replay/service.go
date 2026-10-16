@@ -46,6 +46,21 @@ type Instrumentation interface {
 	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
+// AppContainerExitReader is an optional Instrumentation extension for an app
+// run in docker: it says whether the app's container still runs.
+//
+// Under docker compose keploy's agent is a service in the app's project, and
+// compose stops it the moment the app exits, so an agent that stops answering
+// during the bring-up can be one that went with the app rather than one that
+// was replaced. ensureAgentHoldsStoredMocks asks this before it says the
+// agent was replaced.
+type AppContainerExitReader interface {
+	// AppContainerExit returns the app's container no longer running --
+	// exited, dead, or restarting after an exit -- as an error naming it and
+	// how it ended, and nil while it runs or when it cannot tell.
+	AppContainerExit(ctx context.Context) error
+}
+
 type Service interface {
 	Start(ctx context.Context) error
 	Instrument(ctx context.Context) (*InstrumentState, error)

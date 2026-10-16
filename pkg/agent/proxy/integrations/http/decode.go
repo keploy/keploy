@@ -524,6 +524,9 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // async.go) because it is the shared serializer for BOTH the ordinary
 // matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
+// A response with no body by rule (to a HEAD, a 1xx, 204 or 304) keeps the
+// Content-Length it was recorded with: a HEAD's is the size of the body a GET
+// gets, which the client takes for that size (an S3 client's Stat).
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	name := ""
 	if stub != nil {
@@ -537,8 +540,10 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
 	protoMajor, protoMinor := 1, 1
+	method := ""
 	if stub.Spec.HTTPReq != nil {
 		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
+		method = string(stub.Spec.HTTPReq.Method)
 	}
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
 		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
@@ -554,9 +559,10 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	} else {
 		respBody = body
 	}
+	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
 	var headers string
 	for key, values := range header {
-		if key == "Content-Length" {
+		if key == "Content-Length" && !noBody {
 			values = []string{strconv.Itoa(len(respBody))}
 		}
 		for _, value := range values {
