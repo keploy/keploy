@@ -7,13 +7,15 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -42,10 +44,19 @@ import (
 // pgrep, would wait for ever). It must reap only those: the CLI's own children
 // are waited for by os/exec, and a child reaped under it makes its Wait fail.
 // Go holds a pidfd for every child it starts, from the clone that starts it
-// until its Wait has reaped it (os.StartProcess, where pidfds work), so a
-// zombie child of the CLI that no pidfd of the CLI's names is one it adopted;
-// that is checked once, on a child of its own, before the CLI becomes a
-// subreaper, and without it nothing changes and a warning says what is lost.
+// until its Wait has reaped it (os.StartProcess, where pidfds work); it lets
+// go of one sooner only when no Wait can come any more (Process.Release, or a
+// Process collected without one). So a zombie child of the CLI that no pidfd
+// of the CLI's names is one it adopted, or one nothing will wait for. That Go
+// uses pidfds here is checked once, before the CLI becomes a subreaper, and
+// without them nothing changes and a warning says what is lost.
+//
+// What the CLI adopts is part of the application's tree, and ends with it
+// (stopAdopted): when keploy stops the application for a test set, or the
+// application ends, the daemons it left are stopped too, as the agent is
+// (decision 12): asked to stop, and killed only once they make no progress.
+// So a daemon one test set started is never judged in the next, and the
+// application started again can bind its ports again.
 //
 // The alternative weighed, membership by cgroup, needs a cgroup of keploy's
 // own for the app (cgroup v2, a writable and delegated hierarchy, which
@@ -54,7 +65,12 @@ import (
 // replaces the parent walk outright. Until then the subreaper keeps the walk
 // true across a reparent with a change to the CLI alone.
 
-var adoptOnce sync.Once
+var (
+	adoptOnce sync.Once
+	// adopting is set once this process is a child subreaper that reaps
+	// what it adopts.
+	adopting atomic.Bool
+)
 
 // adoptDaemons makes this process, the CLI whose tree is the run's
 // membership, the child subreaper of its descendants and reaps the ones it
@@ -73,7 +89,7 @@ func adoptDaemons(logger *zap.Logger) {
 // each child it starts, makes this process a child subreaper, and reaps every
 // adopted child as it exits (SIGCHLD) until stop is called.
 func startAdopting(logger *zap.Logger) (stop func(), err error) {
-	if err := childrenHavePidfds(); err != nil {
+	if err := goUsesPidfds(); err != nil {
 		return nil, err
 	}
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
@@ -82,17 +98,20 @@ func startAdopting(logger *zap.Logger) (stop func(), err error) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGCHLD)
 	done := make(chan struct{})
+	adopting.Store(true)
 	go func() {
-		defer utils.Recover(logger)
-		for {
-			// Every adopted child that is a zombie now, and every one a scan
-			// missed while the list changed under it: a pass that reaped one
-			// is followed by another.
-			for {
-				if len(reapAdopted(logger)) == 0 {
-					break
-				}
+		defer func() {
+			// A subreaper that no longer reaps leaves every daemon it adopts a
+			// zombie once it exits: the CLI stops being one, and later
+			// orphans go to init, as before.
+			if r := recover(); r != nil {
+				adopting.Store(false)
+				_ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+				utils.HandleRecovery(logger, r, "keploy stopped reaping the daemons it adopts; daemons the application starts from now on leave the run's tree")
 			}
+		}()
+		for {
+			reapAll(logger)
 			select {
 			case <-sig:
 			case <-done:
@@ -109,20 +128,34 @@ func startAdopting(logger *zap.Logger) (stop func(), err error) {
 	}, nil
 }
 
-// childrenHavePidfds reports, by starting a child, whether Go holds a pidfd
-// for it until it is waited for: what tells this process's own children from
-// the ones it adopts.
-func childrenHavePidfds() error {
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start a child to tell its own children from adopted ones: %w", err)
+// reapAll reaps every adopted child that is a zombie now: a pass that reaped
+// one is followed by another, and the last by one more, for a zombie a scan
+// missed while the list of children changed under it.
+func reapAll(logger *zap.Logger) {
+	for {
+		if len(reapAdopted(logger)) == 0 {
+			break
+		}
 	}
-	held := heldPidfds(nil)
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("wait for the child that tells its own children from adopted ones: %w", err)
+	reapAdopted(logger)
+}
+
+// goUsesPidfds reports whether Go holds pidfds for processes here, what
+// tells this process's own children from the ones it adopts: os.FindProcess
+// opens one (as os.StartProcess does for each child) only where Go found
+// pidfds work, CLONE_PIDFD among them.
+func goUsesPidfds() error {
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("find this process: %w", err)
 	}
-	if !held[cmd.Process.Pid] {
-		return errors.New("Go holds no pidfd for the children it starts here (pidfds need Linux 5.4 or later, and no seccomp filter refusing them), so keploy cannot tell its own children from adopted ones")
+	defer func() { _ = self.Release() }()
+	held, err := heldPidfds()
+	if err != nil {
+		return err
+	}
+	if !held[os.Getpid()] {
+		return errors.New("Go holds no pidfds here (they need Linux 5.4 or later, and no seccomp filter refusing them), so keploy cannot tell its own children from adopted ones")
 	}
 	return nil
 }
@@ -139,7 +172,7 @@ func reapAdopted(logger *zap.Logger) []int {
 		if st, ok := utils.ReadProcStat(pid); !ok || st.State != 'Z' {
 			continue
 		}
-		fd, err := unix.PidfdOpen(pid, 0)
+		fd, err := openPidfd(pid)
 		if err != nil {
 			continue // reaped already
 		}
@@ -148,23 +181,44 @@ func reapAdopted(logger *zap.Logger) []int {
 	if len(zombies) == 0 {
 		return nil
 	}
-	ours := make(map[int]bool, len(zombies))
-	for _, z := range zombies {
-		ours[z.fd] = true
+	defer func() {
+		for _, z := range zombies {
+			closePidfd(z.fd)
+		}
+	}()
+	held, err := heldPidfds()
+	if err != nil {
+		// Which zombies are this process's own cannot be told: none is
+		// reaped, or os/exec's Wait for one would fail. The next SIGCHLD
+		// tries again.
+		failedClosed(logger, err)
+		return nil
 	}
-	held := heldPidfds(ours)
 	var reaped []int
 	for _, z := range zombies {
-		if !held[z.pid] {
-			var info unix.Siginfo
-			if err := unix.Waitid(unix.P_PIDFD, z.fd, &info, unix.WEXITED|unix.WNOHANG, nil); err == nil {
-				reaped = append(reaped, z.pid)
-				logger.Debug("reaped a daemon the run started that keploy had adopted", zap.Int("pid", z.pid))
-			}
+		if held[z.pid] {
+			continue
 		}
-		_ = unix.Close(z.fd)
+		// A child that cannot be reaped yet (its main thread exited while
+		// another runs on, or another tracer holds it) is no reap: the wait
+		// returns without a child, and nothing is looked at again before its
+		// SIGCHLD. Counted as one, the pass that found it was followed by
+		// another for as long as it lasted, a core spinning.
+		if signo, err := waitAdopted(z.fd); err == nil && signo == int32(unix.SIGCHLD) {
+			reaped = append(reaped, z.pid)
+			logger.Debug("reaped a daemon the run started that keploy had adopted", zap.Int("pid", z.pid))
+		}
 	}
 	return reaped
+}
+
+// waitAdopted reaps the child pidfd names if it can be reaped now, and
+// returns the signal its wait reports: SIGCHLD for one reaped, 0 for one that
+// cannot be yet (WNOHANG). A variable for the tests of a child that cannot.
+var waitAdopted = func(pidfd int) (int32, error) {
+	var info unix.Siginfo
+	err := unix.Waitid(unix.P_PIDFD, pidfd, &info, unix.WEXITED|unix.WNOHANG, nil)
+	return info.Signo, err
 }
 
 // childPids is this process's children: each thread's children list
@@ -207,23 +261,65 @@ func childPids() []int {
 	return pids
 }
 
-// heldPidfds is the set of pids this process holds a pidfd for, but the fds
-// in skip: a pidfd's fdinfo names its process ("Pid:"), and no other kind of
-// fd has that line.
-func heldPidfds(skip map[int]bool) map[int]bool {
+// fdinfoDir is where heldPidfds reads this process's fds (a variable for
+// the tests of a read that fails).
+var fdinfoDir = "/proc/self/fdinfo"
+
+// ownFds is the pidfds the adopter itself holds (a reap's zombies, a stop's
+// daemons): no sign that a child is one os/exec waits for. An adopted
+// zombie a stop held a pidfd on was taken for keploy's own, and not reaped
+// until a later child's exit. Changed, and read by heldPidfds, under its
+// lock: an fd leaves it before it is closed, so its number, given again to
+// a pidfd of os/exec's, is never skipped.
+var ownFds = struct {
+	sync.Mutex
+	m map[int]bool
+}{m: map[int]bool{}}
+
+// openPidfd opens a pidfd on pid for the adopter (ownFds).
+func openPidfd(pid int) (int, error) {
+	ownFds.Lock()
+	defer ownFds.Unlock()
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err == nil {
+		ownFds.m[fd] = true
+	}
+	return fd, err
+}
+
+// closePidfd closes a pidfd openPidfd opened.
+func closePidfd(fd int) {
+	ownFds.Lock()
+	defer ownFds.Unlock()
+	delete(ownFds.m, fd)
+	_ = unix.Close(fd)
+}
+
+// heldPidfds is the set of pids this process holds a pidfd for, but the
+// adopter's own (ownFds): a pidfd's fdinfo names its process ("Pid:"), and no
+// other kind of fd has that line. A read that fails is an error, never a
+// smaller set (a zombie of this process's own taken for adopted would be
+// reaped from under its Wait); an fd closed meanwhile is no pidfd held.
+func heldPidfds() (map[int]bool, error) {
+	ownFds.Lock()
+	defer ownFds.Unlock()
+	skip := ownFds.m
 	held := map[int]bool{}
-	fds, err := os.ReadDir("/proc/self/fdinfo")
+	fds, err := os.ReadDir(fdinfoDir)
 	if err != nil {
-		return held
+		return nil, fmt.Errorf("list this process's fds: %w", err)
 	}
 	for _, f := range fds {
 		fd, err := strconv.Atoi(f.Name())
 		if err != nil || skip[fd] {
 			continue
 		}
-		b, err := os.ReadFile("/proc/self/fdinfo/" + f.Name())
-		if err != nil {
+		b, err := os.ReadFile(fdinfoDir + "/" + f.Name())
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read fd %d's fdinfo: %w", fd, err)
 		}
 		sc := bufio.NewScanner(bytes.NewReader(b))
 		for sc.Scan() {
@@ -235,5 +331,394 @@ func heldPidfds(skip map[int]bool) map[int]bool {
 			}
 		}
 	}
-	return held
+	return held, nil
+}
+
+// A stop reads the daemons' progress every stopCheck, and escalates once
+// stopStallChecks reads in a row find none: the count the CLI stops its agent
+// by (utils.TeardownStallChecks), never a fixed grace. A press of Ctrl+C a
+// whole stopOffer after the stop's signal kills them at once. Variables for
+// the tests.
+var (
+	stopCheck       = time.Second
+	stopStallChecks = uint64(utils.TeardownStallChecks)
+	stopOffer       = 5 * time.Second
+)
+
+// leftToKernel is what an earlier stop killed and found still there, held by
+// the kernel without progress, by pid and start time: no later stop waits for
+// it again.
+var leftToKernel sync.Map
+
+// member is a process a stop ends: a daemon keploy adopted, or one it runs,
+// as it was when the stop began, named by a pidfd opened on it, so that a pid
+// reused while the stop waits is never signalled in its place.
+type member struct {
+	pid   int
+	fd    int
+	start uint64
+	pgrp  int
+	// leads: a daemon keploy adopted that leads its process group, which is
+	// signalled with it, as the application's own groups are.
+	leads bool
+}
+
+// stopAdopted ends what this process adopted from the application's tree,
+// once the application has ended or keploy has stopped it for its test set.
+// The daemons and what they run, as they are now, are asked to stop
+// (SIGTERM, each daemon's group with it), killed only once they make no
+// progress on their way out across stopStallChecks reads -- a process or
+// thread of theirs ending, a file or socket closed, storage read or written;
+// being scheduled is not, a daemon that ignores the request runs on -- and
+// waited for until gone, so a daemon one test set started is never judged in
+// the next and the application started again can bind its ports. While it
+// waits, a drain does not give up on the run (utils.BeginDaemonStop): the
+// next test set starts once it is over. What the kernel holds after the kill
+// without progress is left to it, and said. The application served across
+// test sets (serveTest) is one run: what it leaves ends with it. What a
+// member starts after the stop began is not the stop's: orphaned, it is
+// adopted, a member of the next run, and ended with it. A no-op unless
+// adoptDaemons made this process a subreaper.
+func stopAdopted(logger *zap.Logger) {
+	if !adopting.Load() {
+		return
+	}
+	daemons := adoptedRunning(logger)
+	if len(daemons) == 0 {
+		return
+	}
+	end := utils.BeginDaemonStop()
+	defer end()
+	ms := members(daemons)
+	defer func() {
+		for _, m := range ms {
+			closePidfd(m.fd)
+		}
+	}()
+	stopMembers(logger, ms)
+}
+
+// adoptedRunning is this process's children that it adopted (no pidfd of its
+// own names them) and that run, but keploy itself (an agent whose sudo is
+// gone), what an earlier stop left to the kernel, and what this user may not
+// see, which it says.
+func adoptedRunning(logger *zap.Logger) []int {
+	children := childPids()
+	held, err := heldPidfds()
+	if err != nil {
+		failedClosed(logger, err)
+		return nil // which are its own cannot be told: stop none
+	}
+	self, selfErr := os.Stat("/proc/self/exe")
+	me := os.Getpid()
+	var pids []int
+	for _, pid := range children {
+		st, ok := utils.ReadProcStat(pid)
+		if !ok || st.PPID != me || st.State == 'Z' || held[pid] {
+			continue
+		}
+		if _, gone := leftToKernel.Load([2]uint64{uint64(pid), st.StartTime}); gone {
+			continue
+		}
+		exe, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
+		if err != nil {
+			logger.Info("keploy cannot see what a daemon the application left running is (it is not dumpable, or another user's), and leaves it running",
+				zap.Int("pid", pid), zap.Error(err))
+			continue
+		}
+		if selfErr == nil && os.SameFile(exe, self) {
+			continue // keploy's own
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// members is each daemon of pids and every process it runs, now, each named
+// by a pidfd; a process that is gone, or whose pid names another process by
+// the time its pidfd is opened, is left out.
+func members(pids []int) []member {
+	var ms []member
+	seen := map[int]bool{}
+	var add func(pid, parent int, top bool)
+	add = func(pid, parent int, top bool) {
+		if seen[pid] {
+			return
+		}
+		seen[pid] = true
+		before, ok := utils.ReadProcStat(pid)
+		if !ok || before.State == 'Z' || before.PPID != parent {
+			return
+		}
+		fd, err := openPidfd(pid)
+		if err != nil {
+			return
+		}
+		if after, ok := utils.ReadProcStat(pid); !ok || after.StartTime != before.StartTime || after.PPID != parent {
+			closePidfd(fd)
+			return
+		}
+		ms = append(ms, member{pid: pid, fd: fd, start: before.StartTime, pgrp: before.PGRP, leads: top && before.PGRP == pid})
+		for _, child := range processChildren(pid) {
+			add(child, pid, false)
+		}
+	}
+	self := os.Getpid()
+	for _, pid := range pids {
+		add(pid, self, true)
+	}
+	return ms
+}
+
+// stopMembers asks ms to stop, kills them once they make no progress on
+// their way out (or at once, at the press of Ctrl+C the stop offers), and
+// waits until each has exited, or is held by the kernel without progress.
+func stopMembers(logger *zap.Logger, ms []member) {
+	pids := make([]int, 0, len(ms))
+	for _, m := range ms {
+		pids = append(pids, m.pid)
+	}
+	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it", zap.Ints("pids", pids))
+	signalAll(ms, syscall.SIGTERM, false)
+	signalAll(ms, syscall.SIGCONT, false) // a stopped one handles it now
+	notice := utils.NewStopNowNotice(stopOffer)
+	defer notice.Withdraw()
+	t := time.NewTicker(stopCheck)
+	defer t.Stop()
+	var mark exitRatchet
+	mark.advance(markExit(ms))
+	var quiet uint64
+	killed, offering := false, false
+	kill := func(why string) {
+		logger.Warn(why, zap.Ints("pids", running(ms)))
+		signalAll(ms, syscall.SIGKILL, true)
+		killed, quiet = true, 0
+		// What is left the kill ends, or the kernel holds: no press
+		// does more, and a closed channel read again would spin.
+		notice.Withdraw()
+	}
+	for {
+		left := running(ms)
+		if len(left) == 0 {
+			return
+		}
+		select {
+		case <-t.C:
+		case <-notice.Interrupt():
+			if !killed {
+				kill("killing the daemons the application left running at once, at the press of Ctrl+C")
+			}
+			continue
+		}
+		if !killed && !offering && notice.Next() {
+			offering = true
+			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
+				zap.Ints("pids", left))
+		}
+		if mark.advance(markExit(ms)) {
+			quiet = 0
+			continue
+		}
+		if quiet++; quiet < stopStallChecks {
+			continue
+		}
+		if killed {
+			logger.Warn("a daemon the application left running was killed and is still there, held by the kernel without progress; keploy goes on without it",
+				zap.Ints("pids", left), zap.String("next_step", "check what it waits for in the kernel (cat /proc/<pid>/stack); it ends once that wait does"))
+			for _, m := range ms {
+				if !m.exited() {
+					leftToKernel.Store([2]uint64{uint64(m.pid), m.start}, true)
+				}
+			}
+			return
+		}
+		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
+	}
+}
+
+// signalAll sends sig to each process group a daemon of ms leads, while the
+// daemon is the process its pidfd names, as keploy stops the application's
+// own groups (the whole group, where pg_ctl stop and docker stop signal the
+// leader alone: postgres's backends end on their own then, not at its
+// postmaster's word, which a run's end does not need), and through its pidfd
+// to each member outside those groups; with every, to each member as well.
+// The daemon is the process its pidfd names while that pidfd shows it alive:
+// its pid, and so its group's id, cannot have been given to another.
+func signalAll(ms []member, sig syscall.Signal, every bool) {
+	groups := map[int]bool{}
+	for _, m := range ms {
+		if m.leads && unix.PidfdSendSignal(m.fd, 0, nil, 0) == nil {
+			groups[m.pgrp] = true
+			_ = syscall.Kill(-m.pid, sig)
+		}
+	}
+	for _, m := range ms {
+		if every || !groups[m.pgrp] {
+			_ = unix.PidfdSendSignal(m.fd, sig, nil, 0)
+		}
+	}
+}
+
+// exited reports whether m has exited: its pidfd is readable then.
+func (m member) exited() bool {
+	fds := []unix.PollFd{{Fd: int32(m.fd), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, 0)
+	return err == nil && n > 0 && fds[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0
+}
+
+// running is the pids of ms that have not exited.
+func running(ms []member) []int {
+	var pids []int
+	for _, m := range ms {
+		if !m.exited() {
+			pids = append(pids, m.pid)
+		}
+	}
+	return pids
+}
+
+// exitMark is how far a stop's members are on their way out: how many still
+// run, with how many threads and open files, how much storage they have read
+// and written, and whether one waits on storage (an uninterruptible sleep,
+// D) as it is read.
+type exitMark struct {
+	running, threads, fds int
+	io                    uint64
+	onStorage             bool
+}
+
+func markExit(ms []member) exitMark {
+	var m exitMark
+	for _, mb := range ms {
+		if mb.exited() {
+			continue
+		}
+		m.running++
+		dir := "/proc/" + strconv.Itoa(mb.pid)
+		if st, ok := utils.ReadProcStat(mb.pid); ok && st.State == 'D' {
+			m.onStorage = true
+		}
+		if tasks, err := os.ReadDir(dir + "/task"); err == nil {
+			m.threads += len(tasks)
+		}
+		if fds, err := os.ReadDir(dir + "/fd"); err == nil {
+			m.fds += len(fds)
+		}
+		m.io += storageIO(dir + "/io")
+	}
+	return m
+}
+
+// exitRatchet is the furthest a stop's members have come on their way out:
+// the fewest of them running, threads and open files seen, and the most
+// storage I/O. A reading is progress only where it passes that mark, so a
+// count that rises and falls back (a socket opened and closed, a thread
+// started and ended: a retry loop, a DNS lookup, a pool) is none; and
+// storage I/O counts only while a member waits on it: a daemon that logs as
+// it waits on its own makes none.
+type exitRatchet struct {
+	best exitMark
+	set  bool
+}
+
+// advance takes reading m and reports whether it passed the mark.
+func (r *exitRatchet) advance(m exitMark) bool {
+	if !r.set {
+		r.best, r.set = m, true
+		return false
+	}
+	moved := false
+	if m.running < r.best.running {
+		r.best.running, moved = m.running, true
+	}
+	if m.threads < r.best.threads {
+		r.best.threads, moved = m.threads, true
+	}
+	if m.fds < r.best.fds {
+		r.best.fds, moved = m.fds, true
+	}
+	if m.io > r.best.io {
+		if m.onStorage {
+			moved = true
+		}
+		r.best.io = m.io
+	}
+	return moved
+}
+
+// storageIO is the bytes a process has read from and written to storage
+// (read_bytes and write_bytes of /proc/<pid>/io), 0 where it cannot be read.
+func storageIO(path string) uint64 {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var n uint64
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, key := range []string{"read_bytes:", "write_bytes:"} {
+			if v, ok := strings.CutPrefix(line, key); ok {
+				if x, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64); err == nil {
+					n += x
+				}
+			}
+		}
+	}
+	return n
+}
+
+// processChildren is the processes pid runs: its threads' children lists, or,
+// where the kernel keeps none, every process whose parent it is.
+func processChildren(pid int) []int {
+	dir := "/proc/" + strconv.Itoa(pid) + "/task"
+	tasks, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	listed := false
+	for _, t := range tasks {
+		b, err := os.ReadFile(dir + "/" + t.Name() + "/children")
+		if err != nil {
+			continue
+		}
+		listed = true
+		for _, f := range strings.Fields(string(b)) {
+			if c, err := strconv.Atoi(f); err == nil {
+				pids = append(pids, c)
+			}
+		}
+	}
+	if listed {
+		return pids
+	}
+	procs, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	for _, p := range procs {
+		c, err := strconv.Atoi(p.Name())
+		if err != nil {
+			continue
+		}
+		if st, ok := utils.ReadProcStat(c); ok && st.PPID == pid {
+			pids = append(pids, c)
+		}
+	}
+	return pids
+}
+
+var failedClosedOnce sync.Once
+
+// failedClosed says, once at Warn and then at Debug, that keploy could not
+// tell its own children from the ones it adopted, and so neither reaped nor
+// stopped any.
+func failedClosed(logger *zap.Logger, err error) {
+	said := false
+	failedClosedOnce.Do(func() {
+		said = true
+		logger.Warn("keploy could not read which children it waits for itself, so it neither reaps nor stops the daemons it adopted while that lasts", zap.Error(err))
+	})
+	if !said {
+		logger.Debug("keploy could not read which children it waits for itself", zap.Error(err))
+	}
 }

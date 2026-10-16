@@ -10,14 +10,22 @@
 //	daemonapp daemonize URL DONE  start "get" in a new session, and exit
 //	daemonapp get URL [DONE PID]  GET URL; with DONE, once PID is no longer its
 //	                              parent, and then write DONE
+//	daemonapp daemonize-serve ADDR LOG READY
+//	                              start "serve" in a new session, and exit
+//	daemonapp serve ADDR LOG READY
+//	                              serve ADDR as a daemon does: write READY
+//	                              once it listens, answer GET /hi with "hi",
+//	                              appending each path to LOG
 package main
 
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +45,10 @@ func main() {
 		daemonize(os.Args[2], os.Args[3])
 	case "get":
 		get(os.Args[2:])
+	case "daemonize-serve":
+		detach(append([]string{"serve"}, os.Args[2:]...)...)
+	case "serve":
+		serve(os.Args[2], os.Args[3], os.Args[4])
 	default:
 		os.Exit(2)
 	}
@@ -59,6 +71,28 @@ func app(addr, up string) {
 	self, err := os.Executable()
 	if err != nil {
 		panic(err)
+	}
+	// DAEMON_SRV: the app starts a server daemon as it starts, as an app
+	// whose start runs pg_ctl start does, and waits until it listens; one
+	// that cannot (a daemon of an earlier run still holds the port) fails
+	// the app's start.
+	srv := os.Getenv("DAEMON_SRV")
+	if srv != "" {
+		ready := fmt.Sprintf("%s/daemon-srv-ready-%d", os.TempDir(), os.Getpid())
+		if err := exec.Command(self, "daemonize-serve", srv, os.DevNull, ready).Run(); err != nil {
+			panic(err)
+		}
+		for {
+			if b, err := os.ReadFile(ready); err == nil && len(b) > 0 {
+				_ = os.Remove(ready)
+				if strings.HasPrefix(string(b), "listen") {
+					fmt.Fprintln(os.Stderr, "the server daemon could not start: "+string(b))
+					os.Exit(1)
+				}
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 	http.HandleFunc("/go", func(w http.ResponseWriter, r *http.Request) {
 		var out []string
@@ -85,6 +119,9 @@ func app(addr, up string) {
 		_ = os.Remove(done)
 		fmt.Fprintf(os.Stderr, "daemon said: %s\n", b)
 		out = append(out, "daemon: done")
+		if srv != "" {
+			out = append(out, "server: "+call("http://"+srv+"/hi"))
+		}
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, strings.Join(out, "\n"))
 	})
@@ -121,8 +158,49 @@ func get(args []string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	res := call(url)
-	_ = os.WriteFile(done+".tmp", []byte(fmt.Sprintf("ppid %d: %s", os.Getppid(), res)), 0o644)
+	ppid := os.Getppid()
+	exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", ppid))
+	_ = os.WriteFile(done+".tmp", []byte(fmt.Sprintf("ppid %d (exe %s): %s", ppid, exe, res)), 0o644)
 	_ = os.Rename(done+".tmp", done)
+}
+
+// detach starts this binary with args in a session of its own and exits
+// without waiting for it, as pg_ctl start does.
+func detach(args ...string) {
+	self, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	cmd := exec.Command(self, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		panic(err)
+	}
+	os.Exit(0)
+}
+
+func serve(addr, log, ready string) {
+	if os.Getenv("DEAF") == "1" {
+		signal.Ignore(syscall.SIGTERM) // a daemon that does not stop when asked
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		// Said where the command that started it waits: a daemon of an
+		// earlier run still holding the port is what the lane checks for.
+		_ = os.WriteFile(ready, []byte("listen failed: "+err.Error()), 0o644)
+		os.Exit(1)
+	}
+	f, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(ready, []byte(fmt.Sprint(os.Getpid())), 0o644); err != nil {
+		panic(err)
+	}
+	panic(http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(f, r.URL.Path)
+		fmt.Fprint(w, "hi")
+	})))
 }
 
 func call(url string) string {
