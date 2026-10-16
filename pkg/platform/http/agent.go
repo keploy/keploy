@@ -2883,6 +2883,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
 		opts.ClientNSPID = uint32(os.Getpid())
+		if !isDockerCmd && provenswitch.On() {
+			// The run's members are this process's descendants: keep a daemon
+			// the app starts among them (adopt_linux.go, P146).
+			adoptDaemons(a.logger)
+		}
 		var agentExited <-chan error
 		agentExited, err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
