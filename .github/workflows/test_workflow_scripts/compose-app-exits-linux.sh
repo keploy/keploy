@@ -33,9 +33,14 @@ ID=$$
 # The app's port on this host.
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
 
-# Tear down only this run's project, by name. Never a blanket prune.
+# The project leg 3 names with -p: a name that starts with "up", which keploy's
+# command rewrite once took for the `up` subcommand.
+PROJECT="upload$ID"
+
+# Tear down only this run's projects, by name. Never a blanket prune.
 cleanup() {
   [ -f docker-compose.yml ] && sudo docker compose down --remove-orphans >/dev/null 2>&1
+  [ -f docker-compose.yml ] && sudo docker compose -p "$PROJECT" down --remove-orphans >/dev/null 2>&1
   return 0
 }
 finish() {
@@ -140,17 +145,23 @@ with open(log, "rb") as f:
 PY
 }
 
-# record NAME PROVEN: keploy records the compose project while the lane makes
-# the app's N calls; the app then exits, and keploy must exit on its own, 0.
-# The log is NAME.log.
+# record NAME PROVEN [FLAGS]: keploy records the compose project while the
+# lane makes the app's N calls; the app then exits, and keploy must exit on
+# its own, 0. The log is NAME.log. With FLAGS (compose's global -p NAME), the
+# app container must run in that project.
 record() {
-  local name=$1 proven=$2 log="$1.log" pid rc i before=$FAIL
+  local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL
   sudo rm -rf keploy
   : > "$log"
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose up" --container-name "cae-app-$ID" \
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
+    if [ -n "$flags" ] && [ -z "$(sudo docker ps -q --filter "name=^/?cae-app-$ID\$" --filter "label=com.docker.compose.project=$PROJECT")" ]; then
+      echo "FAIL: $name: the app container is not in project $PROJECT, which the command names (-p)"
+      sudo docker ps -a --format '{{.Names}} project={{.Label "com.docker.compose.project"}}'
+      FAIL=1
+    fi
     for i in $(seq 1 "$N"); do
       curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/s$i" || { echo "FAIL: $name: GET /price/s$i through the app failed"; FAIL=1; }
     done
@@ -220,6 +231,12 @@ echo "== 2. a compose app that exits on its own, under the proven switch =="
 record exits-on 1
 saved_all exits-on
 ended_at_markers exits-on
+cleanup
+
+echo "== 3. a compose command naming its project (-p), the switch off =="
+record exits-project "" "-p $PROJECT"
+saved_all exits-project
+ended_at_markers exits-project
 cleanup
 
 # A race build reports a data race and carries on: fail on one in any leg.

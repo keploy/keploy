@@ -196,3 +196,44 @@ func TestWithAgentTokenKeepsTheMockTokenThroughSudo(t *testing.T) {
 		t.Errorf("nothing to keep, yet rewritten to %q", got)
 	}
 }
+
+// keploy splices its compose file in before the `up` subcommand, and its
+// abort flags after it: the subcommand is the word "up" that is not a global
+// flag's value, so a project (-p) or profile whose name starts with, or is,
+// "up" keeps its value, and the command still runs `up`.
+func TestComposeCommandRewriteFindsTheUpSubcommand(t *testing.T) {
+	const tmp = "docker-compose-tmp.yaml"
+	for cmd, want := range map[string]string{
+		"docker compose up":                    "docker compose -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app",
+		"docker compose -p upload up":          "docker compose -p upload -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app",
+		"docker compose -p up up --build":      "docker compose -p up -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app --build",
+		"docker compose --profile upstream up": "docker compose --profile upstream -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app",
+		"docker-compose -p updates up -d":      "docker-compose -p updates -f ./docker-compose-tmp.yaml up --abort-on-container-exit --exit-code-from app -d",
+		// A wrapper's quoted script: keploy's file is spliced inside it, where
+		// compose runs. The abort flags are not: keploy reads them back off
+		// the command's words, where they would end in the quote.
+		`bash -c "docker compose up"`:       `bash -c "docker compose -f ./docker-compose-tmp.yaml up"`,
+		`sh -c 'docker compose -p shop up'`: `sh -c 'docker compose -p shop -f ./docker-compose-tmp.yaml up'`,
+		// A quoted file's name is one word, however many "up"s it holds.
+		`docker compose -f "my up dir/c.yaml" up`: `docker compose -f "my up dir/c.yaml" up --abort-on-container-exit --exit-code-from app`,
+	} {
+		if got := modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app"); got != want {
+			t.Errorf("%q:\n got  %q\n want %q", cmd, got, want)
+		}
+		if strings.HasPrefix(cmd, "docker") {
+			name, _ := composeProjectScope(modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app"))
+			if wantName, _ := composeProjectScope(cmd); name != wantName {
+				t.Errorf("%q: the rewritten command's project is %q, want %q", cmd, name, wantName)
+			}
+		}
+	}
+	if got := ensureComposeExitOnAppFailure("docker compose -p up up", "app", false); got != "docker compose -p up up --abort-on-container-exit --exit-code-from app" {
+		t.Errorf("-p up up: %q; the abort flags go after the subcommand, not the project", got)
+	}
+	if at, ok := composeUpOffset(`docker compose -f "my up.yaml" up`, false); !ok || at != len(`docker compose -f "my up.yaml" `) {
+		t.Errorf("a quoted file name is one word: up at %d (%v)", at, ok)
+	}
+	if _, ok := composeUpOffset(`bash -c "docker compose up"`, false); ok {
+		t.Error("a wrapper's quoted script has no `up` of the command's own")
+	}
+}
