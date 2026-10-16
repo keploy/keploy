@@ -44,7 +44,9 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
-    if awk '/ERROR/ && !/Unsupported DNS query type/ { exit 0 } END { exit 1 }' "$logfile"; then
+    # A flag, not `exit 0` in the rule: END runs after that exit, and its own
+    # exit 1 won, so this check never failed a log.
+    if awk '/ERROR/ && !/Unsupported DNS query type/ { found = 1 } END { exit !found }' "$logfile"; then
         echo "Error found in $logfile"
         cat "$logfile"
         exit 1
