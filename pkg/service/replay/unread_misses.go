@@ -92,6 +92,35 @@ func unreadCaptureReason(tests []string) string {
 		len(tests), strings.Join(tests, ", "))
 }
 
+// testsWithStreamsHeldOpen names, under the proven switch, the tests of a set
+// whose app kept its stream open on keepalives, past the recording or short
+// of it (FailureInfo.StreamHeldOpen, row W1), and that did not fail on what
+// came: they have no verdict, and the set is not judged. One whose frames
+// that came differed from the recording keeps its failure.
+func testsWithStreamsHeldOpen(results []models.TestResult) []string {
+	if !provenswitch.On() {
+		return nil
+	}
+	var out []string
+	for _, r := range results {
+		if r.FailureInfo.StreamHeldOpen != "" && len(r.VerdictUnknown()) > 0 {
+			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// streamsHeldOpenReason is the test-set report's reason for a set left
+// unjudged by tests whose app kept its stream open on keepalives, past the
+// recording or short of it (pkg.ErrStreamStalled).
+func streamsHeldOpenReason(tests []string) string {
+	return fmt.Sprintf("not judged: the app kept its stream open on keepalives in %d test(s) (%s), past the end of its recording, or with the rest of its recorded answer not coming, and did not end it; %s, then run the test-set again",
+		len(tests), strings.Join(tests, ", "), streamsHeldOpenRemedy)
+}
+
+// streamsHeldOpenRemedy is what to do about a stream the app held open.
+const streamsHeldOpenRemedy = "check why the app keeps the stream open after its recorded answer, or why the rest of its answer does not come, or record the test again"
+
 // testsKeployCannotCapture names, under the proven switch, the tests of a set
 // during or after which the application called what keploy cannot capture at
 // all (FailureInfo.CannotCapture, decision 20: a Unix socket), or during which

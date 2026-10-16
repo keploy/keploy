@@ -46,7 +46,9 @@ type pairTarget struct {
 // received every byte the application had written to it when the wait began,
 // so that a call written to a connection opened long before (a pooled one) is
 // in the proxy's hands before a test's end reads what the test did. Writes
-// made after it began cannot hold it back. A connection the proxy closed
+// made after it began cannot hold it back. A connection the proxy serves with
+// no session (pairedConn.noSession) is not waited on: nothing on it is
+// captured. A connection the proxy closed
 // short of what was written (anything that arrives at it now is answered
 // with a reset) is a capture loss (models.CaptureLossAppBytesLost), and does
 // not hold it back; so is one it closed with bytes unread, whenever a wait

@@ -95,6 +95,12 @@ func publish(broker, msg string, written chan<- struct{}) {
 	var once sync.Once
 	wrote := func() { once.Do(func() { close(written) }) }
 	defer wrote()
+	// NOPUBLISH: the app no longer makes the call (a replay of a recording
+	// that has it must fail).
+	if os.Getenv("NOPUBLISH") != "" {
+		log.Printf("%s: not published (NOPUBLISH)", msg)
+		return
+	}
 	switch os.Getenv("PROTO") {
 	case "tcpkeep":
 		log.Printf("%s: broker said %s on the kept connection", msg, line(msg, wrote))

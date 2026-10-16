@@ -2,7 +2,8 @@
 # runners' shared Docker daemon: reap-keploy-containers.ps1,
 # cleanup-windows.ps1, take-docker-job-lock.ps1, remove-job-containers.ps1 (with
 # register-job-compose-project.ps1), ensure-docker.ps1 and
-# recover-runner-state.ps1. Plain PowerShell, no
+# recover-runner-state.ps1; and the download-image action's Windows checks of
+# the image tarball. Plain PowerShell, no
 # Pester, so it runs unchanged under Windows PowerShell 5.1 (what the
 # self-hosted runners use) and PowerShell 7 on Linux (what the ubuntu CI job
 # uses):
@@ -2414,6 +2415,137 @@ jobs:
     )
     $bp = @(Get-BudgetProblems (Join-Path $repoRoot '.github/workflows'))
     Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @($bp)
+
+    # ---- download-image: the Windows checks of the image tarball ------------
+
+    # A step's run: text from the download-image action, as the runner runs a
+    # `shell: powershell` step: `$ErrorActionPreference = 'stop'` before it,
+    # `exit $LASTEXITCODE` after it, in a PowerShell of its own (this one's
+    # executable: Windows PowerShell 5.1 in precheck-windows, pwsh in the
+    # ubuntu job). Under 5.1 a native command's redirected stderr is error
+    # records, which 'stop' makes terminating; pwsh 7.2 and later no longer do
+    # that, so only precheck-windows would see a check that let tar's stderr
+    # end the step. Both see one that ends with tar's exit code.
+    $action = Join-Path $repoRoot '.github/actions/download-image/action.yml'
+    function Get-ActionRun([string]$step) {
+        $lines = @(Get-Content -LiteralPath $action)
+        $at = [array]::IndexOf([string[]]$lines, "    - name: $step")
+        if ($at -lt 0) { throw "no step '$step' in $action" }
+        for ($i = $at + 1; $i -lt $lines.Count -and $lines[$i] -notmatch '^\s*run: \|\s*$'; $i++) {
+            if ($lines[$i] -match '^    - ') { throw "step '$step' in $action has no run: | block" }
+        }
+        $indent = $lines[$i].Length - $lines[$i].TrimStart().Length
+        $body = New-Object System.Collections.ArrayList
+        for ($i++; $i -lt $lines.Count; $i++) {
+            $l = $lines[$i]
+            if ($l.Trim() -and ($l.Length - $l.TrimStart().Length) -le $indent) { break }
+            [void]$body.Add($(if ($l.Length -gt $indent + 2) { $l.Substring($indent + 2) } else { '' }))
+        }
+        $body -join "`n"
+    }
+    function Invoke-ActionRun([string]$step, [string]$temp) {
+        $text = (Get-ActionRun $step).Replace('${{ runner.temp }}', $temp).Replace('${{ inputs.artifact_name }}', 'docker-image-test')
+        $dir = New-Dir 'step'
+        $file = Join-Path $dir 'step.ps1'
+        $out = Join-Path $dir 'output'
+        Set-Content -LiteralPath $file -Encoding ASCII -Value ("`$ErrorActionPreference = 'stop'`n" + $text + "`nif ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit `$LASTEXITCODE }")
+        # Made as the runner makes it (empty, no byte-order mark), and read
+        # back as it reads it: the whole file, each line split at its first
+        # `=`, nothing trimmed. A value written as " false" reads " false",
+        # and `== 'false'` skips the second download just the same.
+        [IO.File]::Create($out).Dispose()
+        $exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $savedOutput = $env:GITHUB_OUTPUT
+        $env:GITHUB_OUTPUT = $out
+        try {
+            # Its stderr is read here as records too: 'Continue', or the
+            # first line it writes would end this run instead. The step
+            # consumes tar's stderr itself, so a line on the step's own
+            # stderr is a PowerShell error: kept apart, as STDERR lines.
+            $log = & {
+                $ErrorActionPreference = 'Continue'
+                & $exe -NoProfile -NonInteractive -Command ". '$file'" 2>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { "STDERR: $_" } else { "$_" }
+                }
+            }
+            $code = $LASTEXITCODE
+        } finally { $env:GITHUB_OUTPUT = $savedOutput }
+        [pscustomobject]@{
+            Output   = (@($log) -join "`n")
+            Code     = $code
+            Complete = (@([IO.File]::ReadAllText($out) -split '\r?\n' | Where-Object { $_ }) -join ',')
+        }
+    }
+    # An image tarball, whole or cut short in a member's data, as a short
+    # artifact download leaves it.
+    function New-ImageTemp([ValidateSet('complete', 'truncated', 'missing')][string]$kind) {
+        $temp = New-Dir 'runner-temp'
+        $img = Join-Path $temp 'keploy-image'
+        New-Item -ItemType Directory -Path $img | Out-Null
+        if ($kind -eq 'missing') { return $temp }
+        $src = New-Dir 'image-src'
+        $rng = New-Object System.Random 7
+        foreach ($f in @(@('layer-a', 200000), @('layer-b', 300000))) {
+            $bytes = New-Object byte[] $f[1]
+            $rng.NextBytes($bytes)
+            [IO.File]::WriteAllBytes((Join-Path $src $f[0]), $bytes)
+        }
+        $tar = Join-Path $img 'image.tar'
+        & {
+            $ErrorActionPreference = 'Continue'
+            tar -cf $tar -C $src . 2>&1 | ForEach-Object { Write-Host "tar: $_" }
+        }
+        if ($LASTEXITCODE -ne 0) { throw "tar -cf $tar exited $LASTEXITCODE" }
+        if ($kind -eq 'truncated') {
+            $fs = [IO.File]::Open($tar, [IO.FileMode]::Open)
+            try { $fs.SetLength($fs.Length - 100000) } finally { $fs.Dispose() }
+        }
+        $temp
+    }
+    function NoNativeError($result) {
+        $err = @($result.Output -split "`n" | Where-Object { $_ -like 'STDERR: *' })
+        if ($err.Count) { "the step wrote to its own stderr, a PowerShell error: $($err -join ' | ')" }
+    }
+    $first = 'Check the image tarball is complete (Windows)'
+    $second = 'Check the image tarball is complete (second attempt, Windows)'
+
+    $temp = New-ImageTemp complete
+    $r = Invoke-ActionRun $first $temp
+    Report "the image check passes a complete tarball and keeps it" $r @(
+        (Code $r 0), (NoNativeError $r),
+        $(if ($r.Complete -ne 'complete=true') { "wrote [$($r.Complete)] to GITHUB_OUTPUT, want complete=true" }),
+        $(if (-not (Test-Path -LiteralPath (Join-Path $temp 'keploy-image/image.tar'))) { 'removed the tarball' }),
+        $(if ($r.Output -match '::warning::') { 'warned about a complete tarball' })
+    )
+    # Run 38739210530: the truncated tarball's tar.exe stderr ended the step
+    # as a NativeCommandError, before the second download could run.
+    $temp = New-ImageTemp truncated
+    $r = Invoke-ActionRun $first $temp
+    Report "the image check takes a truncated tarball (run 38739210530) to the second download: no PowerShell error, exit 0, complete=false" $r @(
+        (Code $r 0), (NoNativeError $r),
+        $(if ($r.Complete -ne 'complete=false') { "wrote [$($r.Complete)] to GITHUB_OUTPUT, want complete=false" }),
+        (Says $r '::warning::the downloaded image tarball is incomplete or unreadable \(tar -tf exit [1-9]\d*: [^)]*\S' "the warning with tar's exit code and its reason"),
+        $(if (Test-Path -LiteralPath (Join-Path $temp 'keploy-image')) { 'left the truncated download for the second one to land on' })
+    )
+    $temp = New-ImageTemp missing
+    $r = Invoke-ActionRun $first $temp
+    Report "the image check takes a download with no image.tar to the second download" $r @(
+        (Code $r 0), (NoNativeError $r),
+        $(if ($r.Complete -ne 'complete=false') { "wrote [$($r.Complete)] to GITHUB_OUTPUT, want complete=false" }),
+        (Says $r '::warning::the downloaded image tarball is incomplete or unreadable \(no image\.tar\)' 'the warning that there is no image.tar')
+    )
+    $temp = New-ImageTemp truncated
+    $r = Invoke-ActionRun $second $temp
+    Report "the second image check fails a second truncated tarball with its own error" $r @(
+        (Code $r 1), (NoNativeError $r),
+        (Says $r '::error::the image artifact docker-image-test downloaded incomplete twice \(tar -tf exit [1-9]' "the error naming the artifact and tar's exit code")
+    )
+    $temp = New-ImageTemp complete
+    $r = Invoke-ActionRun $second $temp
+    Report "the second image check passes a complete tarball" $r @(
+        (Code $r 0), (NoNativeError $r),
+        (Says $r 'The second download is complete\.' 'that the second download is complete')
+    )
 } finally {
     $env:KEPLOY_WINDOWS_SCRIPT_TESTS = $savedTestsFlag
     $env:XDG_CACHE_HOME = $savedCacheHome

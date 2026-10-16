@@ -3,8 +3,12 @@ package routes
 import (
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // recording_clients.go counts the frame streams (test cases, mocks, mappings)
@@ -19,34 +23,23 @@ import (
 // at once closed the streams the client was still draining, and what its
 // parsers still held from before the stop was lost with it.
 
-var recordingClients struct {
+// streamClients counts open frame streams of one kind of recording client.
+type streamClients struct {
 	mu sync.Mutex
 	n  int
 	// gone is closed when n falls to zero, and replaced when it rises from it.
 	gone chan struct{}
 }
 
-func init() {
-	recordingClients.gone = make(chan struct{})
-	close(recordingClients.gone)
+func newStreamClients() *streamClients {
+	c := &streamClients{gone: make(chan struct{})}
+	close(c.gone)
+	return c
 }
 
-// holdForDrain notes the frame stream r opened, when its client drains it
-// after the stop, closes it before it stops the agent, and is the only thing
-// that stops the agent (models.DrainsAfterStopHeader), and returns the func
-// that notes it closed. Any other stream (an agent docker compose or kubelet
-// stops) is not held for: the agent stops on a signal as it always has.
-func holdForDrain(r *http.Request) (detach func()) {
-	if r.Header.Get(models.DrainsAfterStopHeader) != "true" {
-		return func() {}
-	}
-	return attachRecordingClient()
-}
-
-// attachRecordingClient notes a frame stream a recording's client holds open,
-// and returns the func that notes it closed.
-func attachRecordingClient() (detach func()) {
-	c := &recordingClients
+// attach notes a frame stream opened, and returns the func that notes it
+// closed.
+func (c *streamClients) attach() (detach func()) {
 	c.mu.Lock()
 	if c.n == 0 {
 		c.gone = make(chan struct{})
@@ -65,12 +58,72 @@ func attachRecordingClient() (detach func()) {
 	}
 }
 
-// RecordingClients is how many frame streams recordings' clients hold open.
-func RecordingClients() int {
-	c := &recordingClients
+// count is how many of its streams are open.
+func (c *streamClients) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.n
+}
+
+// wait blocks while one of its streams is open.
+func (c *streamClients) wait() {
+	c.mu.Lock()
+	gone := c.gone
+	c.mu.Unlock()
+	<-gone
+}
+
+// recordingClients are the streams whose client drains them after its stop
+// and stops the agent itself (models.DrainsAfterStopHeader); noticeClients,
+// those whose client drains them once the agent says a stop reached it,
+// something else stopping the agent (models.DrainsOnAgentStopHeader: docker
+// compose, with the app's project). noticeCarried is set once a notice
+// client's stream has carried a frame.
+var (
+	recordingClients = newStreamClients()
+	noticeClients    = newStreamClients()
+	noticeCarried    atomic.Bool
+)
+
+// holdForDrain notes the frame stream r opened, when its client drains it
+// after the stop, closes it before it stops the agent, and is the only thing
+// that stops the agent (models.DrainsAfterStopHeader), or drains it once this
+// agent says a stop reached it (models.DrainsOnAgentStopHeader), and returns
+// the func that notes it closed. Any other stream (an agent kubelet stops, a
+// client that does not drain) is not held for: the agent stops on a signal as
+// it always has.
+func holdForDrain(r *http.Request) (detach func()) {
+	switch {
+	case r.Header.Get(models.DrainsAfterStopHeader) == "true":
+		return recordingClients.attach()
+	case r.Header.Get(models.DrainsOnAgentStopHeader) == "true":
+		return noticeClients.attach()
+	}
+	return func() {}
+}
+
+// attachRecordingClient notes a frame stream a recording's client holds open,
+// draining it after its stop, and returns the func that notes it closed.
+func attachRecordingClient() (detach func()) {
+	return recordingClients.attach()
+}
+
+// carriedFrame notes that the frame stream r opened has taken a frame to carry
+// to its client: a client that drains it once told of a stop then has
+// something of this agent's to save (NoticeClientsHold). Noted as the stream
+// takes the frame, before it writes it: the frame is no longer the agent's
+// backlog then (BacklogBefore), and a stop that came while the stream wrote
+// it found neither, and did not wait for the stream it was cut off on.
+func carriedFrame(r *http.Request) {
+	if r.Header.Get(models.DrainsOnAgentStopHeader) == "true" {
+		noticeCarried.Store(true)
+	}
+}
+
+// RecordingClients is how many frame streams recordings' clients hold open
+// that they drain after their stop (models.DrainsAfterStopHeader).
+func RecordingClients() int {
+	return recordingClients.count()
 }
 
 // WaitForRecordingClients blocks while a recording's client holds a frame
@@ -80,11 +133,98 @@ func RecordingClients() int {
 // and an agent stopped another way (its API's stop, its escalation signal)
 // stops without it.
 func WaitForRecordingClients() {
-	c := &recordingClients
-	c.mu.Lock()
-	gone := c.gone
-	c.mu.Unlock()
-	<-gone
+	recordingClients.wait()
+}
+
+// NoticeClientsHold reports whether a stop signal must wait for the clients
+// that drain this agent's streams once told of the stop
+// (models.DrainsOnAgentStopHeader): one holds a stream open, and this agent
+// has something for it to save: its streams have carried a frame, or pending
+// says the agent still holds one. An agent with nothing to hand over goes at
+// once: under docker compose that is one whose app never ran, which keploy's
+// retry of the project's `up` starts again (a recording's streams carry on on
+// the agent compose starts), and which would only wait out compose's grace.
+func NoticeClientsHold(pending func() bool) bool {
+	if noticeClients.count() == 0 {
+		return false
+	}
+	return noticeCarried.Load() || pending()
+}
+
+// HoldStop is what a stop signal this agent gets waits on (utils.SetSignalHold):
+// the recording's clients that hold its frame streams open. One that drains
+// them after its own stop (RecordingClients) is waited for until it closes
+// them. One that drains them once told of the stop (NoticeClientsHold, asked
+// of this agent's capture as the stop comes: whether it may still hand over
+// something captured before it) is told (AnnounceStop) and waited for, but
+// only when the agent has something for it to save: an agent with nothing
+// goes at once, unannounced. Under docker compose that is one whose app never
+// ran, which keploy's retry of the project's `up` starts again: an announced
+// stop would have the recording drain, and end, before the app it records
+// had started.
+func HoldStop(logger *zap.Logger) func() {
+	return holdStop(logger, func() bool { return syncmgr.Get().BacklogBefore(time.Now()).Pending })
+}
+
+// holdStop is HoldStop with what the agent's capture still holds asked of
+// pending.
+func holdStop(logger *zap.Logger, pending func() bool) func() {
+	return func() {
+		started, noticed := RecordingClients() > 0, NoticeClientsHold(pending)
+		if !started && !noticed {
+			return
+		}
+		if noticed {
+			AnnounceStop()
+		}
+		logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished")
+		WaitForRecordingClients()
+		if noticed {
+			WaitForNoticeClients()
+		}
+	}
+}
+
+// WaitForNoticeClients blocks while a client that drains this agent's streams
+// once told of the stop holds one open (models.DrainsOnAgentStopHeader). It
+// closes them once its drain is through, or as its connections drop.
+func WaitForNoticeClients() {
+	noticeClients.wait()
+}
+
+// stopNoticeState is closed (announced) once a stop signal reached this agent
+// and it waits for its notice clients (AnnounceStop).
+type stopNoticeState struct {
+	once      sync.Once
+	announced chan struct{}
+}
+
+func newStopNotice() *stopNoticeState {
+	return &stopNoticeState{announced: make(chan struct{})}
+}
+
+// stopNotice is this agent's: a stop reaches it at most once.
+var stopNotice = newStopNotice()
+
+// AnnounceStop tells the clients that drain this agent's streams once told
+// of a stop (HandleStopNotice) that one has reached it, and that it waits for
+// them to drain its streams.
+func AnnounceStop() {
+	s := stopNotice
+	s.once.Do(func() { close(s.announced) })
+}
+
+// HandleStopNotice answers a recording's client (GET models.StopNoticePath)
+// once a stop signal has reached this agent and it waits for the client to
+// drain its streams (AnnounceStop): 204, at once if it has already. Until
+// then the request stays open; it ends unanswered if the client goes, or the
+// agent stops without waiting for it.
+func (a *Agent) HandleStopNotice(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-stopNotice.announced:
+		w.WriteHeader(http.StatusNoContent)
+	case <-r.Context().Done():
+	}
 }
 
 // recordingStreamsEnd is what each recording's frame streams wait on to end

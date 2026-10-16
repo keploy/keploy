@@ -132,9 +132,13 @@ func (m *mockService) setName() string {
 	return name
 }
 
-// agentEpilogueTimeout bounds every agent read made AFTER the wrapped runner
-// has exited: the consumed/missed outcome, the per-test scope windows, and the
-// captured-on-miss drain.
+// agentEpilogueTimeout bounds, with the proven switch off, every agent read
+// made AFTER the wrapped runner has exited: the consumed/missed outcome, the
+// PID-map count and the captured-on-miss drain (epilogueRead), and the
+// per-test scope windows (readWindows). Under the switch those reads are what
+// keploy's verdict rests on, and none has a deadline (design rule 15): the
+// agent's answer, the connection's close or the run's context ends each, and
+// the user ends the epilogueRead ones at a second interrupt.
 //
 // Natively the agent is keploy's own sibling and is alive right through
 // teardown, so those reads always answer. Under compose the runner exiting is
@@ -147,8 +151,9 @@ func (m *mockService) setName() string {
 // never answers would hang the run: forever on the record side, whose reads sit
 // on a context.WithoutCancel that not even Ctrl+C reaches.
 //
-// These are all best-effort epilogue reads — losing one costs a summary line or
-// a mappings file, never a recorded mock — so a short bound is the right trade.
+// With the switch off these are all best-effort epilogue reads — losing one
+// costs a summary line or a mappings file, never a recorded mock — so a short
+// bound is the right trade.
 const agentEpilogueTimeout = 10 * time.Second
 
 // composeReleaseTimeout bounds the /agent/ready POST that releases the app.

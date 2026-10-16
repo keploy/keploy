@@ -96,6 +96,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/stop", a.Stop)
 		r.Get("/record/pending", a.HandlePending)
 		r.Post(models.StreamEndPath, a.HandleEndStreams)
+		r.Get(models.StopNoticePath, a.HandleStopNotice)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Get("/mockerrors", a.GetMockErrors)
@@ -580,6 +581,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 
 		tcsSentSoFar++
+		// From here the test case is this stream's to deliver, no longer the
+		// agent's backlog (NoticeClientsHold).
+		carriedFrame(r)
 		// Stream each test case as JSON
 		// 1. Write metadata (JSON)
 		header := textproto.MIMEHeader{}
@@ -1055,6 +1059,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	// put streams m. It reports false once the stream is no longer viable.
 	put := func(m *models.Mock) bool {
 		starts.Default.Stamp(m)
+		// From here the mock is this stream's to deliver, no longer the
+		// agent's backlog (NoticeClientsHold).
+		carriedFrame(r)
 		if err := enc.Encode(m); err != nil {
 			// enc.Encode(m) folds two distinct failure modes into
 			// one error: (a) per-mock serialization errors (an

@@ -205,9 +205,17 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 // The stream carries its recording's token too (models.StreamEndTokenHeader),
 // whoever started the agent: the recording's stop asks the agent to end the
 // streams of that token (EndRecordingStreams).
+//
+// A stream whose client watches for the agent's own word of a stop
+// (models.WithAgentStopNotice, WatchAgentStop) says so instead, when this
+// client did not start the agent: the agent holds a stop signal for it while
+// it has something for it to save, and tells it (models.DrainsOnAgentStopHeader).
 func (a *AgentClient) markDrainsAfterStop(ctx context.Context, req *http.Request) {
-	if models.DrainsAfterStop(ctx) && a.startedAgent.Load() {
+	switch {
+	case models.DrainsAfterStop(ctx) && a.startedAgent.Load():
 		req.Header.Set(models.DrainsAfterStopHeader, "true")
+	case models.AgentStopNotice(ctx) && !a.startedAgent.Load():
+		req.Header.Set(models.DrainsOnAgentStopHeader, "true")
 	}
 	if tok := models.StreamEndToken(ctx); tok != "" {
 		req.Header.Set(models.StreamEndTokenHeader, tok)
@@ -3354,6 +3362,21 @@ var dockerStopPoll = time.Second
 func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
+	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
+		logger.Debug("Could not signal the agent container. It may have already stopped.",
+			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		return
+	}
+	return awaitAgentContainer(logger, cli, name, unanswered)
+}
+
+// awaitAgentContainer waits for an agent's container that has been told to
+// stop to exit, while the agent's teardown makes progress, which it reports
+// in its container (readContainerProgress), and kills it only once it has
+// stopped making any, or has detached everything and not exited, or at the
+// user's Ctrl+C, as stopAgentContainer says. It returns once the container
+// has exited, or once it killed it at once (killedAtOnce).
+func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool) (killedAtOnce bool) {
 	// kill(false) sends the agent the escalation signal, on which it dies
 	// once no teardown work in progress is making progress
 	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
@@ -3368,11 +3391,6 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
 		return err
-	}
-	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
-		logger.Debug("Could not signal the agent container. It may have already stopped.",
-			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
-		return
 	}
 	// The wait returns when the container has stopped; at once, with an
 	// error, when it is already gone (--rm removed it).
@@ -3406,6 +3424,37 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 	<-gone
 	<-resent
 	return killedAtOnce
+}
+
+// EndComposeAgent sees the agent docker compose runs to its end, once a
+// recording has drained it: compose stopped it with the app's project, and it
+// waited for the drain (WatchAgentStop), and goes once the recording's streams
+// close. Its container is waited for while its teardown makes progress
+// (awaitAgentContainer), not for compose's grace: one that stops making
+// progress, or has detached everything and not exited, is wedged, and is
+// killed, keploy saying so at WARN (stopWatch). Compose then finishes stopping
+// the project. Nothing is sent to an agent that is already going: compose's
+// stop signal is its stop. But the agent waits, before it goes, for the
+// recording's streams to close (its stop's hold), and release says that a
+// drain was given up on a stall, whose stream may stay open: the agent is then
+// sent the escalation signal, which ends that wait (utils.DieOnEscalation),
+// so that its teardown begins, and is judged as any other. Otherwise it would
+// report no teardown, which is waited for until it exits.
+func (a *AgentClient) EndComposeAgent(release bool) {
+	name := a.conf.KeployContainer
+	if name == "" {
+		return
+	}
+	logger := a.logger.With(zap.String("container", name))
+	cli := newEngineCLI(logger)
+	if release {
+		logger.Warn("a drain of the keploy agent's streams was given up on a stall; telling the agent to stop waiting for it")
+		if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGUSR2", name); err != nil {
+			logger.Debug("Could not signal the agent container. It may have already stopped.",
+				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		}
+	}
+	awaitAgentContainer(logger, cli, name, false)
 }
 
 // sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits
@@ -3659,6 +3708,70 @@ func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) err
 		return fmt.Errorf("the agent answered %s", resp.Status)
 	}
 	return nil
+}
+
+// agentStopNoticeRetry is how long WatchAgentStop waits before it asks again
+// after a request that failed: an agent compose starts again, or one that
+// answers again. It paces the asking; nothing is judged by it.
+var agentStopNoticeRetry = time.Second
+
+// WatchAgentStop returns what closes once the agent says a stop signal has
+// reached it and it waits for this client to drain its streams
+// (models.StopNoticePath): the frame streams opened on a ctx marked
+// models.WithAgentStopNotice ask the agent for that. It never closes for an
+// agent that predates the route (404), or once ctx is done. A request that
+// fails (the agent restarting, going away) is made again, of the agent at
+// this client's address, until ctx is done.
+func (a *AgentClient) WatchAgentStop(ctx context.Context) <-chan struct{} {
+	stopping := make(chan struct{})
+	if a.conf.Agent.AgentURI == "" {
+		return stopping
+	}
+	go func() {
+		for {
+			answered, err := a.awaitStopNotice(ctx)
+			switch {
+			case answered:
+				close(stopping)
+				return
+			case err == nil || ctx.Err() != nil:
+				// No route (an agent from before it), or the watch is over.
+				return
+			}
+			a.logger.Debug("could not wait on the keploy agent's word of a stop; asking again", zap.Error(err))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(agentStopNoticeRetry):
+			}
+		}
+	}()
+	return stopping
+}
+
+// awaitStopNotice makes one request of models.StopNoticePath: answered when
+// the agent said a stop reached it; neither answered nor an error from an
+// agent without the route.
+func (a *AgentClient) awaitStopNotice(ctx context.Context) (answered bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+models.StopNoticePath, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	}
+	return false, fmt.Errorf("the agent answered %s", resp.Status)
 }
 
 // StreamEnded reports whether the agent ended the latest stream of kind with

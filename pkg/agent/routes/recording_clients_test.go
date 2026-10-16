@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -223,5 +224,223 @@ func TestHandleGracefulShutdownSaysWhetherADrainingClientHoldsAStream(t *testing
 		if rec.Code != http.StatusOK || drains != attached {
 			t.Fatalf("attached=%v: status %d, told a draining client holds a stream: %v", attached, rec.Code, drains)
 		}
+	}
+}
+
+// freshStopNotice gives the test an agent no stop has reached, with no notice
+// client's stream having carried a frame, and puts the agent's own back after.
+func freshStopNotice(t *testing.T) {
+	t.Helper()
+	saved, carried := stopNotice, noticeCarried.Load()
+	stopNotice = newStopNotice()
+	noticeCarried.Store(false)
+	t.Cleanup(func() {
+		stopNotice = saved
+		noticeCarried.Store(carried)
+	})
+}
+
+// A stream whose client drains it once the agent says a stop reached it
+// (docker compose stops the agent) is counted apart from one whose client
+// stops the agent itself: RecordingClients, which tells the ingress the app
+// was stopped on purpose, is not changed by it.
+func TestHoldForDrainCountsANoticeClientApart(t *testing.T) {
+	before, noticed := RecordingClients(), noticeClients.count()
+	r := httptest.NewRequest(http.MethodPost, "/agent/incoming", nil)
+	r.Header.Set(models.DrainsOnAgentStopHeader, "true")
+	detach := holdForDrain(r)
+	if n, m := RecordingClients(), noticeClients.count(); n != before || m != noticed+1 {
+		t.Fatalf("recording clients %d (want %d), notice clients %d (want %d)", n, before, m, noticed+1)
+	}
+	detach()
+	if m := noticeClients.count(); m != noticed {
+		t.Fatalf("%d notice clients once the stream closed, want %d", m, noticed)
+	}
+}
+
+// A stop waits for a notice client only while this agent has something for it
+// to save: a frame its stream carried, or one the agent still holds. One with
+// nothing goes at once: under docker compose that is an agent whose app never
+// ran, which keploy's retry of the project's `up` starts again.
+func TestNoticeClientsHoldOnlyForSomethingToSave(t *testing.T) {
+	freshStopNotice(t)
+	none := func() bool { return false }
+	held := func() bool { return true }
+	if NoticeClientsHold(held) {
+		t.Fatal("a stop waits with no notice client to wait for")
+	}
+	r := httptest.NewRequest(http.MethodPost, "/agent/incoming", nil)
+	r.Header.Set(models.DrainsOnAgentStopHeader, "true")
+	detach := holdForDrain(r)
+	defer detach()
+	if NoticeClientsHold(none) {
+		t.Fatal("a stop waits for a client the agent has nothing for")
+	}
+	if !NoticeClientsHold(held) {
+		t.Fatal("a stop does not wait for a client the agent still holds a frame for")
+	}
+	other := httptest.NewRequest(http.MethodPost, "/agent/incoming", nil)
+	carriedFrame(other) // a stream with no notice header carries a frame
+	if NoticeClientsHold(none) {
+		t.Fatal("a frame on a stream whose client is not told of a stop counts")
+	}
+	carriedFrame(r)
+	if !NoticeClientsHold(none) {
+		t.Fatal("a stop does not wait for a client whose stream carried a frame")
+	}
+}
+
+// A stop signal waits for a notice client only while this agent has something
+// for it to save, and then tells it (AnnounceStop) and waits until its stream
+// closes. With nothing to save it goes at once, unannounced: under docker
+// compose that is an agent whose app never ran, which keploy's retry of the
+// project's `up` starts again, and an announced stop would have the recording
+// drain, and end, before the app it records started.
+func TestHoldStopWaitsForANoticeClientOnlyWithSomethingToSave(t *testing.T) {
+	freshStopNotice(t)
+	announced := func() bool {
+		select {
+		case <-stopNotice.announced:
+			return true
+		default:
+			return false
+		}
+	}
+	nothing := func() bool { return false }
+	r := httptest.NewRequest(http.MethodPost, "/agent/incoming", nil)
+	r.Header.Set(models.DrainsOnAgentStopHeader, "true")
+	detach := holdForDrain(r)
+	defer detach()
+
+	held := make(chan struct{})
+	go func() { holdStop(zap.NewNop(), nothing)(); close(held) }()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("a stop with nothing to save waited for a notice client")
+	}
+	if announced() {
+		t.Fatal("a stop with nothing to save told the notice client of it")
+	}
+
+	carriedFrame(r)
+	held = make(chan struct{})
+	go func() { holdStop(zap.NewNop(), nothing)(); close(held) }()
+	select {
+	case <-stopNotice.announced:
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("a stop with something to save did not tell the notice client of it")
+	}
+	select {
+	case <-held:
+		t.Fatal("the stop went with the notice client's stream still open")
+	default:
+	}
+	detach()
+	select {
+	case <-held:
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("the stop did not go once the notice client's stream closed")
+	}
+}
+
+// Each frame stream notes, for a notice client, that it carried a frame.
+func TestStreamHandlersNoteAFrameTheyCarried(t *testing.T) {
+	for _, s := range []struct {
+		name string
+		send func(streamsSvc)
+	}{
+		{"incoming", func(svc streamsSvc) { svc.tc <- &models.TestCase{Name: "test-1", Kind: models.HTTP} }},
+		{"outgoing", func(svc streamsSvc) { svc.mocks <- &models.Mock{Name: "mock-1", Kind: models.HTTP} }},
+	} {
+		t.Run(s.name, func(t *testing.T) {
+			freshStopNotice(t)
+			svc := streamsSvc{tc: make(chan *models.TestCase), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
+			a := &Agent{logger: zap.NewNop(), svc: svc}
+			handler := map[string]http.HandlerFunc{"incoming": a.HandleIncoming, "outgoing": a.HandleOutgoing}[s.name]
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+			body := map[string]any{"incoming": models.IncomingReq{}, "outgoing": models.OutgoingReq{}}[s.name]
+			b, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(b))
+			req.Header.Set(models.DrainsOnAgentStopHeader, "true")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if noticeCarried.Load() {
+				t.Fatal("a stream that carried nothing yet is noted as having carried a frame")
+			}
+			s.send(svc)
+			deadline := time.Now().Add(30 * time.Second) // only turns a hang into a failure
+			for !noticeCarried.Load() {
+				if time.Now().After(deadline) {
+					t.Fatal("a frame the stream carried is not noted")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			close(svc.tc)
+			close(svc.mocks)
+		})
+	}
+}
+
+// A notice client's wait on the agent's word of a stop ends, 204, once a stop
+// has reached the agent and it waits for the client (AnnounceStop), and at
+// once for one that asks after. A client that goes first ends its wait
+// unanswered.
+func TestHandleStopNoticeAnswersOnceTheStopIsAnnounced(t *testing.T) {
+	freshStopNotice(t)
+	a := &Agent{logger: zap.NewNop()}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleStopNotice))
+	defer srv.Close()
+
+	gone, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(gone, http.MethodGet, srv.URL, nil)
+	errc := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			err = errors.New("answered " + resp.Status)
+		}
+		errc <- err
+	}()
+	cancel()
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a client that went before any stop: %v, want its own cancel", err)
+	}
+
+	answered := make(chan int, 1)
+	go func() {
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			answered <- 0
+			return
+		}
+		resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	select {
+	case code := <-answered:
+		t.Fatalf("answered %d before any stop", code)
+	case <-time.After(100 * time.Millisecond): // a wait still open, not a bound on the answer
+	}
+	AnnounceStop()
+	AnnounceStop() // once is all a stop takes
+	if code := <-answered; code != http.StatusNoContent {
+		t.Fatalf("the wait ended %d, want 204", code)
+	}
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("a wait made after the stop answered %d, want 204 at once", resp.StatusCode)
 	}
 }

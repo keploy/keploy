@@ -722,7 +722,7 @@ func TestASharedHostIsAskedOutsideTheRegistrysLock(t *testing.T) {
 	p := testProxy(t)
 	recordedMySQL(p, "10.1.2.3:3306", "")
 	asked := 0
-	why, ok := p.mysqlPorts.recordedEndpointMoved(netip.MustParseAddr("10.1.2.3"), "", false, false, false, func(netip.Addr) bool {
+	why, ok := p.mysqlPorts.recordedEndpointMoved(netip.MustParseAddr("10.1.2.3"), "", "", false, false, false, func(netip.Addr) bool {
 		asked++
 		if !p.mysqlPorts.mu.TryLock() {
 			t.Error("the shared host was asked with the registry's lock held")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -233,11 +234,23 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 		},
 	}
 
-	// Wrap the TCP conn with TLS
-	tlsConn := tls.Server(conn, config)
+	// Wrap the TCP conn with TLS. Under the proven switch, over a conn that
+	// hands crypto/tls a record at a time until the client's first byte
+	// after the handshake, so that whether it sent any is known
+	// (SilentSinceHandshake); without it, as before.
+	var records *recordConn
+	under := conn
+	if provenswitch.On() {
+		records = newRecordConn(conn)
+		under = records
+	}
+	tlsConn := tls.Server(under, config)
 
 	// Perform the handshake
 	err := tlsConn.Handshake()
+	if err == nil && records != nil {
+		records.handshakeDone()
+	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
 		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}

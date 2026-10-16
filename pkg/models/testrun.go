@@ -251,6 +251,14 @@ type FailureInfo struct {
 	// see): the test has no verdict (NotJudged), and its set is not judged.
 	// Never a failure.
 	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
+	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
+	// not read to its end: the app kept it open on keepalives, past its
+	// recording (every recorded frame, or message, came, then a keepalive
+	// beyond the recorded ones), or short of it (two keepalives in a row
+	// and nothing of the rest between them) (row W1). The test has no
+	// verdict, and its set is not judged. Never a pass, and a failure only
+	// on what came.
+	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
 }
 
 // NotJudged is why the test has no verdict, whatever its status says: what
@@ -275,6 +283,9 @@ func (fi FailureInfo) NotJudged() []string {
 	}
 	if len(fi.CannotCapture) > 0 {
 		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
+	}
+	if fi.StreamHeldOpen != "" {
+		why = append(why, fi.StreamHeldOpen)
 	}
 	return why
 }

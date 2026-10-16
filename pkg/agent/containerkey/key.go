@@ -81,6 +81,10 @@ type Container struct {
 	// Fingerprint names the container's own configuration (Fingerprint); ""
 	// until the index has read it.
 	Fingerprint string
+	// Legacy is its fingerprint of the legacy form (legacyFingerprint), which
+	// a replay of a recording made before secrets were left out compares
+	// with; never written.
+	Legacy string
 }
 
 // Key is a parsed container key.
@@ -108,6 +112,16 @@ func KeyOf(c Container) (Key, bool) {
 		return Key{}, false
 	}
 	return Key{Repo: Repository(c.Image), Port: c.Port, Fingerprint: c.Fingerprint}, true
+}
+
+// legacyKeyOf is c's key of the legacy form, as a recording made before
+// secrets were left out names it (legacyFingerprint); ok is false while its
+// configuration is unread.
+func legacyKeyOf(c Container) (Key, bool) {
+	if c.Legacy == "" {
+		return Key{}, false
+	}
+	return Key{Repo: Repository(c.Image), Port: c.Port, Fingerprint: c.Legacy}, true
 }
 
 // String is the key as recordings and matchers carry it.

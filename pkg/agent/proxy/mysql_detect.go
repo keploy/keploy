@@ -287,8 +287,8 @@ func (r *mysqlPortRegistry) LearnHinted(dstAddr string) bool {
 // A MySQL moved to another port of it is listed in mysqlPorts. shared is asked
 // only of a host the recording holds, and outside the registry's lock: it
 // reads the network namespace. why names the match, for the warning.
-func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key string, isContainer, keyed, named bool, shared func(netip.Addr) bool) (why string, ok bool) {
-	why, byHost, ok := r.recordedEndpoint(host, key, isContainer, keyed, named)
+func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key, legacy string, isContainer, keyed, named bool, shared func(netip.Addr) bool) (why string, ok bool) {
+	why, byHost, ok := r.recordedEndpoint(host, key, legacy, isContainer, keyed, named)
 	if ok && byHost && shared(host) {
 		return "", false
 	}
@@ -297,11 +297,17 @@ func (r *mysqlPortRegistry) recordedEndpointMoved(host netip.Addr, key string, i
 
 // recordedEndpoint is recordedEndpointMoved's match before a host is asked
 // whether it is shared: byHost says the match is by host, not container key.
-func (r *mysqlPortRegistry) recordedEndpoint(host netip.Addr, key string, isContainer, keyed, named bool) (why string, byHost, ok bool) {
+func (r *mysqlPortRegistry) recordedEndpoint(host netip.Addr, key, legacy string, isContainer, keyed, named bool) (why string, byHost, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if isContainer {
 		if _, ok := r.mockKeys[key]; ok && key != "" {
+			return "the container the recording reached MySQL in (" + key + ")", false, true
+		}
+		// A recording made before secrets were left out of fingerprints
+		// names it by its legacy key (containerkey.SameKey); it is said by
+		// its current one.
+		if _, ok := r.mockKeys[legacy]; ok && key != "" && containerkey.SameKey(legacy, key, legacy) {
 			return "the container the recording reached MySQL in (" + key + ")", false, true
 		}
 		// A recording made without container names knows its MySQL only by
@@ -860,17 +866,18 @@ func (p *Proxy) replayUnrecordedPort(
 	// it; otherwise whether the destination is a container at all decides,
 	// and placing a connection never waits on a container's configuration.
 	var (
-		key                string
+		key, legacy        string
 		isContainer, keyed bool
 	)
 	if p.mysqlPorts.hasMockKeys() {
 		key, isContainer, keyed = containerkey.KeyFromContext(ctx)
+		legacy = containerkey.LegacyKeyFromContext(ctx)
 	} else {
 		isContainer, keyed = containerkey.PlacedFromContext(ctx)
 	}
 	named := containerkey.RecordingNamesContainers(ctx)
 	shared := func(a netip.Addr) bool { _, ok := p.sharedHost(a); return ok }
-	if why, ok := p.mysqlPorts.recordedEndpointMoved(host, key, isContainer, keyed, named, shared); ok {
+	if why, ok := p.mysqlPorts.recordedEndpointMoved(host, key, legacy, isContainer, keyed, named, shared); ok {
 		if nothing, known := util.ArrivedNothing(srcConn); known && !nothing {
 			return &mysqlProbe{SrcConn: srcConn, Reason: "client-spoke-first"}, nil
 		}

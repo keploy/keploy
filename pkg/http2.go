@@ -17,6 +17,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -657,8 +658,16 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}()
 
-	// Create gRPC client connection using the TCP connection
-	dialer := func(context.Context, string) (net.Conn, error) { return conn, nil }
+	// Create gRPC client connection using the TCP connection. Under the
+	// proven switch the app's frames are watched (pingWatch): a stream it
+	// keeps open past its recording ends on its keepalives (row W1).
+	var dialed net.Conn = conn
+	var pings *pingWatch
+	if provenswitch.On() {
+		pings = newPingWatch(conn)
+		dialed = pings
+	}
+	dialer := func(context.Context, string) (net.Conn, error) { return dialed, nil }
 
 	clientConn, err := grpc.DialContext(
 		ctx,
@@ -699,7 +708,8 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	//
 	// Unbounded (the proven switch, and no apiTimeout of the user's) sets no
 	// clock: the drain ends on the app's end of the stream (rule 15, row
-	// W1). A stream the app holds open then waits for the run's own bound.
+	// W1), or, on a stream the app holds open past its recording, on its
+	// keepalives (pingWatch): the test then has no verdict.
 	if !cfg.Unbounded {
 		timeout := time.Duration(cfg.APITimeout) * time.Second
 		if timeout <= 0 {
@@ -712,6 +722,14 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Create context with metadata
 	callCtx := metadata.NewOutgoingContext(ctx, md)
+	// A stream the app keeps open past its recording is cut through its
+	// own context (pingWatch).
+	if pings != nil {
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+		callCtx = metadata.NewOutgoingContext(streamCtx, md)
+		pings.arm(recordedMessagesComplete(tc.GrpcResp), cancelStream)
+	}
 
 	// Create a new stream
 	stream, err := clientConn.NewStream(callCtx, &grpc.StreamDesc{
@@ -793,6 +811,28 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))
+		if pings != nil && pings.gotMessage(len(respMsgs)) {
+			break
+		}
+	}
+	// Every recorded message came, then a keepalive beyond them before any
+	// end: the app kept the stream open past its recording (pingWatch, on
+	// the wire's order). The messages that came before the keepalive are
+	// returned, with ErrStreamHeldOpen: the test has no verdict, and what the
+	// app sent after it is not its answer. A message beyond the recording
+	// among them still fails the comparison, as before.
+	//
+	// A stream that stalled short of its recording (two keepalives, and no
+	// message between them) is returned with ErrStreamStalled: the messages
+	// that came, then the recording's for the rest, which the app never
+	// sent, so that only what came is compared.
+	heldOpen, heldAt, stalled := pings.heldOpen()
+	heldOpen = heldOpen && len(respMsgs) >= heldAt
+	if heldOpen {
+		respMsgs, drainErr = respMsgs[:heldAt], nil
+		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
+			respMsgs = append(respMsgs, recorded[heldAt:]...)
+		}
 	}
 	if len(respMsgs) == 0 {
 		// A response carrying only trailers is legitimate (an error status, or
@@ -810,8 +850,13 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(nil))
 	}
 
-	// Now that the stream is finished, the trailers are real.
-	trailers := stream.Trailer()
+	// Now that the stream is finished, the trailers are real. One the app
+	// held open has none: the drain may have left it before its cut was
+	// done.
+	var trailers metadata.MD
+	if !heldOpen {
+		trailers = stream.Trailer()
+	}
 
 	// Construct the response
 	grpcResp := &models.GrpcResp{
@@ -886,7 +931,29 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	logger.Info("successfully completed gRPC simulation",
 		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
+	if heldOpen && stalled {
+		return grpcResp, ErrStreamStalled
+	}
+	if heldOpen {
+		return grpcResp, ErrStreamHeldOpen
+	}
 	return grpcResp, nil
+}
+
+// recordedMessagesComplete is how many response messages complete resp, the
+// recorded answer: a keepalive after them, under the proven switch, is one
+// beyond the recording (pingWatch). One empty message is how a recording keeps
+// an answer of trailers alone (SimulateGRPC), and also an empty message
+// (google.protobuf.Empty): the recorded status tells them apart, an error
+// being an answer of trailers alone, which none completes.
+func recordedMessagesComplete(resp models.GrpcResp) int {
+	msgs := resp.AllMessages()
+	if len(msgs) == 1 && msgs[0].MessageLength == 0 && msgs[0].DecodedData == "" {
+		if code := strings.TrimSpace(resp.Trailers.OrdinaryHeaders["grpc-status"]); code != "" && code != "0" {
+			return 0
+		}
+	}
+	return len(msgs)
 }
 
 // defaultGrpcCallTimeout bounds a replayed gRPC call when the caller supplies

@@ -277,3 +277,63 @@ func TestResolveProvenReadsTheUsersRules(t *testing.T) {
 		t.Fatalf("the fingerprinted built-in did not answer: %+v %v", rule, ok)
 	}
 }
+
+// Every fingerprinted built-in path row, one by one (design v14 §4): its
+// path alone is an app's route and an ordinary dependency; on its protocol's
+// default port, or with its protocol's header (and that header's value, when
+// the fingerprint names one), it is the protocol's, and answered.
+func TestEveryFingerprintedTelemetryRowNeedsItsFingerprint(t *testing.T) {
+	rows := map[string]PassThroughRule{}
+	for _, r := range BuiltinTelemetryDefaults() {
+		rows[r.ID] = r
+	}
+	for id, fp := range telemetryFingerprints {
+		row, ok := rows[id]
+		if !ok {
+			t.Fatalf("fingerprint %s names no built-in row", id)
+		}
+		t.Run(id, func(t *testing.T) {
+			port := uint32(18080)
+			if fp.port == port {
+				t.Fatalf("the test's own port is %s's", id)
+			}
+			if r, ok := ResolveProven(nil, nil, "app", port, row.Method, row.Path, nil); ok && r.ID == id {
+				t.Fatalf("%s answered a call on its path alone", id)
+			}
+			if fp.port == 0 && fp.header == "" {
+				t.Fatalf("%s has no fingerprint", id)
+			}
+			if fp.port != 0 {
+				if r, ok := ResolveProven(nil, nil, "collector", fp.port, row.Method, row.Path, nil); !ok || r.ID != id {
+					t.Fatalf("%s did not answer on its port %d: %+v %v", id, fp.port, r, ok)
+				}
+			}
+			if fp.header == "" {
+				return
+			}
+			value := fp.value
+			if value == "" {
+				value = "1"
+			}
+			header := map[string][]string{fp.header: {value}}
+			if r, ok := ResolveProven(nil, nil, "collector", port, row.Method, row.Path, header); !ok || r.ID != id {
+				t.Fatalf("%s did not answer with its header %s: %+v %v", id, fp.header, r, ok)
+			}
+			if fp.value != "" {
+				other := map[string][]string{fp.header: {"application/json"}}
+				if r, ok := ResolveProven(nil, nil, "app", port, row.Method, row.Path, other); ok && r.ID == id {
+					t.Fatalf("%s answered with its header but another value", id)
+				}
+			}
+		})
+	}
+	// Every built-in row a path alone would match is fingerprinted: a row
+	// with a host, or the OTLP/gRPC service prefix, is one already.
+	for _, r := range BuiltinTelemetryDefaults() {
+		if r.Host == "" && !r.PathPrefix && r.Port == 0 {
+			if _, ok := telemetryFingerprints[r.ID]; !ok {
+				t.Errorf("built-in path row %s has no fingerprint", r.ID)
+			}
+		}
+	}
+}

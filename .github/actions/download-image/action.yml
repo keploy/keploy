@@ -50,26 +50,48 @@ runs:
     # Same check on Windows, in PowerShell: a composite `shell: bash` step
     # needs Git Bash, which not every self-hosted Windows runner in the fleet
     # has (see the Load image (Windows) step's note on pwsh).
+    #
+    # The runner puts `$ErrorActionPreference = 'stop'` before a powershell
+    # step's text and `exit $LASTEXITCODE` after it. So:
+    #   - tar runs with 'Continue' in a scope of its own. In Windows PowerShell
+    #     5.1, each line a native command writes to a redirected stderr is an
+    #     error record, and under 'stop' the first one ends the step. In run
+    #     38739210530 a truncated tarball's "tar.exe: Truncated input file
+    #     (needed 29843456 bytes, only 29806563 available)" did that: the step
+    #     failed as a NativeCommandError, and the download below never ran.
+    #     tar's exit code alone says whether the archive is complete, and its
+    #     stderr goes into the warning.
+    #   - the incomplete path ends with `exit 0`: otherwise the runner's own
+    #     `exit $LASTEXITCODE` exits with tar's code, and the failed step skips
+    #     the second download just the same.
+    # reap-keploy-containers.tests.ps1 runs both Windows checks, wrapped as the
+    # runner wraps them, on a complete, a truncated and a missing tarball.
     - name: Check the image tarball is complete (Windows)
       id: checkwin
       if: runner.os == 'Windows'
       shell: powershell
       run: |
-        # Statements, not an expression: `(cmd; $LASTEXITCODE -eq 0)` inside an
-        # `if (...)` is a PowerShell parse error, not a test.
-        $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
+        $dir = Join-Path "${{ runner.temp }}" 'keploy-image'
+        $tar = Join-Path $dir 'image.tar'
+        $why = 'no image.tar'
         $complete = $false
-        if (Test-Path $tar) {
-          tar -tf $tar *> $null
+        if (Test-Path -LiteralPath $tar) {
+          $why = & {
+            $ErrorActionPreference = 'Continue'
+            tar -tf $tar 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }
+          }
           $complete = ($LASTEXITCODE -eq 0)
+          $why = "tar -tf exit ${LASTEXITCODE}: $(@($why) -join '; ')"
         }
         if ($complete) {
           "complete=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           exit 0
         }
-        Write-Host "::warning::the downloaded image tarball is incomplete or unreadable; downloading it again"
-        Remove-Item -Recurse -Force (Join-Path "${{ runner.temp }}" "keploy-image") -ErrorAction SilentlyContinue
+        Write-Host "::warning::the downloaded image tarball is incomplete or unreadable ($why); downloading it again"
+        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "$($_.Length) $($_.Name)" }
+        Remove-Item -Recurse -Force -LiteralPath $dir -ErrorAction SilentlyContinue
         "complete=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        exit 0
 
     - name: Download image artifact (second attempt)
       if: steps.check.outputs.complete == 'false' || steps.checkwin.outputs.complete == 'false'
@@ -91,22 +113,30 @@ runs:
         ls -la "${{ runner.temp }}/keploy-image" 2>/dev/null || true
         exit 1
 
+    # As the first Windows check: tar in a scope of its own, judged by its exit
+    # code, so a second short download fails here with this step's own error.
     - name: Check the image tarball is complete (second attempt, Windows)
       if: steps.checkwin.outputs.complete == 'false'
       shell: powershell
       run: |
-        $tar = Join-Path "${{ runner.temp }}" "keploy-image\image.tar"
+        $dir = Join-Path "${{ runner.temp }}" 'keploy-image'
+        $tar = Join-Path $dir 'image.tar'
+        $why = 'no image.tar'
         $complete = $false
-        if (Test-Path $tar) {
-          tar -tf $tar *> $null
+        if (Test-Path -LiteralPath $tar) {
+          $why = & {
+            $ErrorActionPreference = 'Continue'
+            tar -tf $tar 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }
+          }
           $complete = ($LASTEXITCODE -eq 0)
+          $why = "tar -tf exit ${LASTEXITCODE}: $(@($why) -join '; ')"
         }
         if ($complete) {
           Write-Host "The second download is complete."
           exit 0
         }
-        Write-Host "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice"
-        Get-ChildItem (Join-Path "${{ runner.temp }}" "keploy-image") -Force -ErrorAction SilentlyContinue
+        Write-Host "::error::the image artifact ${{ inputs.artifact_name }} downloaded incomplete twice ($why)"
+        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "$($_.Length) $($_.Name)" }
         exit 1
 
     # The image is loaded into the LOCAL docker daemon below. On Docker Desktop

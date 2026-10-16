@@ -3138,6 +3138,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
+	// clientTLS is the TLS layer keploy serves the client over, once its
+	// handshake is done: whether the client sent anything after it is read
+	// from it (pTls.SilentSinceHandshake).
+	var clientTLS net.Conn
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 
 	// Speculative upstream TLS dial — kicked off in parallel with the
@@ -3281,6 +3285,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		srcConn = tlsSrcConn
+		clientTLS = tlsSrcConn
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3322,6 +3327,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
+		if clientTLS != nil {
+			p.chargeSilentClient(ctx, err, clientTLS, dstAddr)
+		}
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
 	}
@@ -4137,10 +4145,13 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 	// connection that arrives while the rules install is accepted at once,
 	// as before.)
 	p.ensureHandshakeHold(rule)
-	p.setSession(rule)
-	p.ensureHandshakeHold(rule) // the listener may have opened in between
-	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
-
+	// What a connection under the session needs is set up before the
+	// session takes effect: the packet capture, so a connection's start is
+	// in it, and a mock manager, so the recording has one to hand its
+	// mocks to (the first session's had none: a connection under it was
+	// dropped). The manager is put in place just before the session, so
+	// a replay session before it serves from its own until then.
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger)
 	if opts.CapturePackets {
 		// Agent picks its own scratch dir on its OWN filesystem; the
 		// recorder cannot pass a path here because the two processes
@@ -4159,10 +4170,24 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 		// from a prior test-set is torn down.
 		p.stopPacketCapture()
 	}
-
-	// The session is set up: what was passed through while there was none
-	// is reset, so it reconnects and is recorded.
-	p.endNoSessionPassthroughs(rule)
+	// What was passed through while there was no session is reset, and
+	// no more is passed through, before the first session takes effect: a
+	// passthrough still open under it would carry the application's calls
+	// unrecorded while it records. The application reconnects, and its
+	// reconnection is recorded (one that comes before the session is
+	// refused, and reconnects again). Under a session already in effect a
+	// reconnection would be the old session's, so a later session resets
+	// what it does not pass through once it is in effect, as before.
+	first := p.getSession() == nil
+	if first {
+		p.endNoSessionPassthroughs(rule)
+	}
+	p.setMockManager(mm)
+	p.setSession(rule)
+	if !first {
+		p.endNoSessionPassthroughs(rule)
+	}
+	p.ensureHandshakeHold(rule) // the listener may have opened in between
 	return nil
 }
 
