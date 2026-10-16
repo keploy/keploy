@@ -85,6 +85,13 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 	}
 
 	r.Route(agentRoutePrefix, func(r chi.Router) {
+		// Under the proven switch every answer names this agent process, so a
+		// client can tell an agent started again in its place, which holds
+		// none of what this one saw, from this one (models.AgentInstanceHeader).
+		// With the switch off the answers are as they were.
+		if provenswitch.On() {
+			r.Use(answersAs(processInstance))
+		}
 		r.Get("/health", a.Health)
 		r.Get("/ca", a.CACert)
 		r.Post("/incoming", a.HandleIncoming)

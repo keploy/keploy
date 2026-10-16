@@ -366,6 +366,64 @@ for restart in 1 2; do
 done
 
 docker logs "$AGENT" 2>&1 | grep -i "recording start boottime" || true
+
+# The agent process that answers names itself in every answer under the proven
+# switch (X-Keploy-Agent-Instance), so that keploy can tell an agent started
+# again in its place: what a test set is judged on (the calls no mock
+# answered, what its tests consumed, what keploy could not capture) is held in
+# that process's memory, and a restarted agent answers at the same address
+# holding none of it. Here a restarted container is a new process, as a
+# sidecar kubelet restarts is: it must name another instance, and one process
+# the same one in every answer. With the switch off no answer names one.
+#
+# answered_as prints the instance the agent's answer to its health check
+# names, "" when it names none.
+answered_as() {
+  curl -fsS --max-time "$HANG_GUARD" -D - -o /dev/null "http://127.0.0.1:$AGENT_PORT/agent/health" |
+    tr -d '\r' | awk 'tolower($1) == "x-keploy-agent-instance:" { print $2 }'
+}
+instances() {
+  local first again restarted
+  if [ -n "$(answered_as)" ]; then
+    fail "with the proven switch off the agent's answers name its process"
+    return 1
+  fi
+  docker rm -f "$AGENT" >/dev/null
+  # The agent's switch is its --proven flag (keploy passes it to the agents
+  # it starts), never its environment.
+  docker run -d --name "$AGENT" --privileged \
+    --pid="container:$POD" --network="container:$POD" --ipc="container:$POD" \
+    -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+    "$IMAGE" --port "$AGENT_PORT" --proxy-port 16789 --dns-port 26789 --mode record --proven >/dev/null
+  if ! healthy; then
+    fail "with the proven switch on the agent did not answer its health check"
+    return 1
+  fi
+  if ! curl -fsS --max-time "$HANG_GUARD" -D - -o /dev/null "http://127.0.0.1:$AGENT_PORT/agent/health" |
+    tr -d '\r' | grep -ix 'x-keploy-proven: on' >/dev/null; then
+    fail "the agent started with --proven does not say its proven switch is on"
+    return 1
+  fi
+  first=$(answered_as)
+  again=$(answered_as)
+  if [ -z "$first" ] || [ "$first" != "$again" ]; then
+    fail "with the proven switch on one agent process must name the same instance in every answer; it named '$first', then '$again'"
+    return 1
+  fi
+  docker restart -t 10 "$AGENT" >/dev/null
+  if ! healthy; then
+    fail "with the proven switch on the restarted agent did not answer its health check"
+    return 1
+  fi
+  restarted=$(answered_as)
+  if [ -z "$restarted" ] || [ "$restarted" = "$first" ]; then
+    fail "the agent started again must name another instance than the one before ('$first'); it named '$restarted'"
+    return 1
+  fi
+  echo "agent instances: the agent named $first, and started again $restarted; with the switch off, none"
+}
+[ "$FAIL" -ne 0 ] || instances || true
+
 if [ "$FAIL" -ne 0 ]; then
   echo "--- application ---"
   docker logs "$APP" 2>&1 | tail -n 60
