@@ -46,9 +46,60 @@ func h2FrameLen(hdr []byte) int {
 	return h2FrameHeaderLen + (int(hdr[0])<<16 | int(hdr[1])<<8 | int(hdr[2]))
 }
 
-// isSettingsAck reports whether the frame header hdr is a SETTINGS ACK.
+// isSettingsAck reports whether the frame header hdr is a SETTINGS ACK: a
+// SETTINGS frame with the ACK flag and no payload (one with a payload is a
+// protocol error of the client's, passed on as it came).
 func isSettingsAck(hdr []byte) bool {
-	return hdr[3] == h2FrameSettings && hdr[4]&h2FlagAck != 0
+	return hdr[3] == h2FrameSettings && hdr[4]&h2FlagAck != 0 && h2FrameLen(hdr) == h2FrameHeaderLen
+}
+
+// isHTTP2PrefacePrefix reports whether buf is the start of the HTTP/2 client
+// preface, short of all of it.
+func isHTTP2PrefacePrefix(buf []byte) bool {
+	return len(buf) > 0 && len(buf) < len(http2.ClientPreface) && http2.ClientPreface[:len(buf)] == string(buf)
+}
+
+// readHTTP2Preface reads an HTTP/2 client connection whose first read holds
+// only part of the client preface (buf) until it holds all of it, or its
+// bytes leave the preface: a client writes the whole preface at once, and
+// keploy reads on to it rather than deciding on how much came in the first
+// read. It returns what was read. A client that closes first returns what
+// came, without an error; one whose ctx ends returns ctx's error (the read
+// is cut short by a deadline already past, never by a budget).
+func readHTTP2Preface(ctx context.Context, conn net.Conn, buf []byte) ([]byte, error) {
+	defer cutOnDone(ctx, conn)()
+	chunk := make([]byte, len(http2.ClientPreface))
+	for isHTTP2PrefacePrefix(buf) {
+		n, err := conn.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if err != nil {
+			if ctx.Err() != nil {
+				return buf, ctx.Err()
+			}
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
+	return buf, nil
+}
+
+// cutOnDone cuts conn's reads short when ctx ends, with a read deadline
+// already past, and returns what undoes it: once ctx has ended, the
+// deadline it set is cleared so it does not outlive the read.
+func cutOnDone(ctx context.Context, conn net.Conn) func() {
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetReadDeadline(time.Unix(1, 0))
+		close(fired)
+	})
+	return func() {
+		if !stop() {
+			<-fired
+			_ = conn.SetReadDeadline(time.Time{})
+		}
+	}
 }
 
 // splitH2Frames splits buf, which starts with the client preface, into the
@@ -71,8 +122,9 @@ func splitH2Frames(buf []byte) (whole, part []byte) {
 // has arrived. initialBuf is what was read of it so far: the client preface,
 // and no HEADERS frame. It returns the bytes the protocol matchers and the
 // parser read first, every frame up to and including that HEADERS frame and
-// whatever followed it in the last read, and the connection to read the rest
-// from. Neither holds the client's acknowledgement of keploy's SETTINGS, nor a
+// whatever followed it in the last read (but for a frame whose header has
+// not all come, which the filter reads first), and the connection to read
+// the rest from. Neither holds the client's acknowledgement of keploy's SETTINGS, nor a
 // PING keploy answered. A connection the client closes before its HEADERS
 // returns what was read, without an error: the matchers decide on it as they
 // would have. One ctx ends while it waits returns ctx's error: the read is
@@ -81,13 +133,7 @@ func readHTTP2UntilHeaders(ctx context.Context, conn net.Conn, initialBuf []byte
 	if _, err := conn.Write(h2ServerPreface); err != nil {
 		return initialBuf, conn, err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Unix(1, 0)) })
-	defer func() {
-		if !stop() {
-			// ctx ended: the read deadline it set must not outlive this read.
-			_ = conn.SetReadDeadline(time.Time{})
-		}
-	}()
+	defer cutOnDone(ctx, conn)()
 	whole, part := splitH2Frames(initialBuf)
 	out := append([]byte(nil), whole...)
 	ackDropped, sawHeaders := false, false
@@ -123,11 +169,16 @@ func readHTTP2UntilHeaders(ctx context.Context, conn net.Conn, initialBuf []byte
 			return append(out, part...), conn, rerr
 		}
 	}
-	buf := append(out, part...)
 	if ackDropped {
-		return buf, conn, nil
+		return append(out, part...), conn, nil
 	}
-	return buf, newAckFilter(conn, part), nil
+	if len(part) < h2FrameHeaderLen {
+		// A frame whose header has not all come yet may be the
+		// acknowledgement still to be taken out: the filter reads it
+		// first.
+		return out, newAckFilter(conn, part, false), nil
+	}
+	return append(out, part...), newAckFilter(conn, part, true), nil
 }
 
 // ackFilter is a client connection that keploy answered with its own SETTINGS
@@ -152,19 +203,24 @@ type ackFilter struct {
 	scratch []byte
 }
 
-// newAckFilter filters conn, whose stream continues the incomplete frame part
-// already passed on.
-func newAckFilter(conn net.Conn, part []byte) *ackFilter {
+// newAckFilter filters conn, whose stream continues the incomplete frame
+// part: passed on already (emitted), or still to pass on, as the start of a
+// header the filter decides on (fewer bytes than a header).
+func newAckFilter(conn net.Conn, part []byte, emitted bool) *ackFilter {
 	f := &ackFilter{Conn: conn, scratch: make([]byte, 16<<10)}
 	switch {
 	case len(part) >= h2FrameHeaderLen:
 		f.need = h2FrameLen(part) - len(part)
 	case len(part) > 0:
 		f.hn = copy(f.hdr[:], part)
-		f.emitted = true
+		f.emitted = emitted
 	}
 	return f
 }
+
+// NetConn is the connection the filter reads, for the helpers that unwrap
+// a connection to its socket.
+func (f *ackFilter) NetConn() net.Conn { return f.Conn }
 
 func (f *ackFilter) Read(p []byte) (int, error) {
 	for len(f.out) == 0 {
