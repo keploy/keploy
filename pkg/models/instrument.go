@@ -260,6 +260,11 @@ type OutgoingOptions struct {
 	// judgement that covers a moved endpoint (by its container or host) is
 	// turned off. See Config.DisableMysqlEndpointDrift.
 	DisableMysqlEndpointDrift bool
+	// DisablePgTimeSliceCohort turns off the PostgreSQL v3 replayer's
+	// time-slice fallback: a query that matches no recording on its
+	// parameter types and values is then a miss, not served the query's
+	// recordings in record order. See Config.DisablePgTimeSliceCohort.
+	DisablePgTimeSliceCohort bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and

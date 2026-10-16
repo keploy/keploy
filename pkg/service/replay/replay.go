@@ -2059,6 +2059,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		}
@@ -2192,6 +2193,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})

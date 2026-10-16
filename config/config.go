@@ -65,6 +65,19 @@ type Config struct {
 	// to restore the strict port-list behaviour — then MySQL on a port
 	// outside MysqlPorts will hang its handshake.
 	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
+	// DisablePgTimeSliceCohort turns off, for this project, the PostgreSQL
+	// v3 replayer's time-slice fallback, as KEPLOY_PG_V3_TIMESLICE_COHORT=0
+	// does for a process (either one turns it off). When a query matches no
+	// recording on its parameter types and values (the driver sends other
+	// parameter types than when recording, or a value changes every run),
+	// the fallback serves the query's recordings in record order, checking
+	// only how many parameters it has and their formats: with values that
+	// are genuinely non-deterministic that is the answer wanted, but when
+	// the query was recorded with other values (another user's row) it is
+	// another call's answer. Turned off, such a query is a miss. Under
+	// KEPLOY_PROVEN=1 the fallback serves only the recording of the live
+	// values.
+	DisablePgTimeSliceCohort bool `json:"disablePgTimeSliceCohort" yaml:"disablePgTimeSliceCohort" mapstructure:"disablePgTimeSliceCohort"`
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only
 	// the moved-endpoint judgement is turned off.
