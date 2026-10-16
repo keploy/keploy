@@ -238,6 +238,14 @@ func alsoNotJudged(prev, reason string) string {
 // mocks was not consumed (KEPLOY_PROVEN=1).
 const vetoUnconsumedTestMock = "a recorded call of this test was not made during it (" + provenswitch.Env + "=1)"
 
+// failOnCaptureLoss is the verdict of a test keploy's agent lost a call of, or
+// of a test before it (testMisses.failsOnCaptureLoss), under the proven
+// switch: the verdict of a miss (failOnMisses), FAILED and its set with it,
+// whatever the response did.
+func failOnCaptureLoss(o testOutcome) testOutcome {
+	return failOnMisses(o)
+}
+
 // failOnMisses is the verdict of a test one of whose calls got no recorded
 // answer, under the proven switch: FAILED, and its set with it, whatever the
 // response did. A test already FAILED keeps the log line that says why.
@@ -281,6 +289,19 @@ func failTestsWithCaptureLoss(results []models.TestResult) []string {
 	return failed
 }
 
+// failsOnCaptureLoss reports whether, under the proven switch, this read
+// charges its test a capture loss that fails it whatever its answer says:
+// what attachReadMockErrors writes to FailureInfo.CaptureIncomplete. The
+// replay loop fails the test on it (failOnCaptureLoss), as
+// failTestsWithCaptureLoss does once the set's results are in.
+func (m testMisses) failsOnCaptureLoss() bool {
+	if !provenswitch.On() {
+		return false
+	}
+	judged, _ := m.lost.Split()
+	return (m.lostErr == nil && len(judged) > 0) || (m.realErr == nil && len(m.realLost) > 0)
+}
+
 // anyTestLostCapture reports whether, under the proven switch, the agent lost
 // a call while one of these tests ran (FailureInfo.CaptureIncomplete): the
 // mocks recorded for a lost call were consumed by nobody, so the set's
@@ -311,6 +332,12 @@ func missCategory(r *models.TestResult) {
 // FAILED rather than demoted to OBSOLETE when a call it made got no recorded
 // answer (KEPLOY_PROVEN=1).
 const vetoUnmatchedCall = "a call this test made got no recorded answer (" + provenswitch.Env + "=1)"
+
+// vetoCaptureLoss is the reason a streaming test whose mock set diverged is
+// FAILED, whatever its answer, when keploy's agent lost a call while it or a
+// test before it ran (KEPLOY_PROVEN=1): not the mismatch, which does not fail
+// a streaming test whose answer matched.
+const vetoCaptureLoss = "keploy's agent could not capture every call while this test or a test before it ran (" + provenswitch.Env + "=1)"
 
 // vetoUnmatchedCallSwitchOff is the reason a test whose mock set diverged is
 // FAILED rather than demoted to OBSOLETE, with the proven switch off, when a

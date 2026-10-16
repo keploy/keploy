@@ -61,6 +61,28 @@ func WithoutPassLine() MatchOption {
 	return func(o *matchOptions) { o.noPassLine = true }
 }
 
+// PrintPassLine prints the "Testrun passed" line for tc, as Match prints it
+// for a comparison that passes when it emits its logs, unless opts say the
+// caller failed the test case on its own (WithoutPassLine). For a caller
+// that compared quietly first (emitFailureLogs false) and found it passing.
+func PrintPassLine(tc *models.TestCase, logger *zap.Logger, opts ...MatchOption) {
+	var mo matchOptions
+	for _, o := range opts {
+		o(&mo)
+	}
+	if mo.noPassLine {
+		return
+	}
+	newLogger := ppNew234()
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetPassingColorScheme())
+	var log2 = ""
+	log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+	if _, err := newLogger.Printf(log2); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
+}
+
 // WithRecordedBody says the expected body was resolved from a test case's
 // placeholders for this run (pkg/templates), and what the body was when it was
 // recorded: each placeholder at its config.yaml value. When this run's values
@@ -599,16 +621,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
 	// so we skip the success message as well
-	if !skipSuccessMsg && emitFailureLogs && !mo.noPassLine {
-		newLogger := ppNew234()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetPassingColorScheme())
-		var log2 = ""
-		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		_, err := newLogger.Printf(log2)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-		}
+	if !skipSuccessMsg && emitFailureLogs {
+		PrintPassLine(tc, logger, opts...)
 	}
 
 	if AssertionsReplaceComparison(tc) {

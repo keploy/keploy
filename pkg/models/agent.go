@@ -319,6 +319,13 @@ type Owned struct {
 // conflates the two reads an unreportable agent as a replaced one.
 var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
 
+// ErrNoMappingStream is what GetMappings returns for an agent that predates
+// test-mock mappings (keploy #3715): it has no /mappings route, so there is no
+// mapping stream at all, and a recording goes on without one. It is not a
+// failure, and not a stream the agent ended: a recorder that takes it for
+// either says a loss that never happened.
+var ErrNoMappingStream = errors.New("this keploy agent has no mapping stream")
+
 // ErrScopeGateUnsupported is returned for an agent that cannot gate which
 // tests run (one that predates POST /agent/replay/gate).
 var ErrScopeGateUnsupported = errors.New("agent cannot gate which tests run")

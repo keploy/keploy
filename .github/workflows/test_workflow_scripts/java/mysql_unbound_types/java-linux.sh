@@ -28,6 +28,26 @@
 # must read the live packet as that keploy did for such a recording: the
 # replay, plain and strict, must pass.
 #
+# COM_STMT_EXECUTEs with a query attribute (GET /pattr: a server-prepared
+# statement executed with a traceparent that differs on every call, as
+# Connector/J 8.1+ sends OpenTelemetry's): they must replay, plain and strict.
+# keploy compared an EXECUTE's attributes as its statement's parameters, so
+# no EXECUTE of a traced statement matched its recording: the strict replay
+# refused every one, and a plain one was answered by recorded order.
+#
+# COM_QUERYs with query attributes, from Connector/J 8.4 (GET /attr: a
+# traceparent that differs on every call, as OpenTelemetry's does; /attrs: a
+# second attribute; /trace: one fixed traceparent; /attrread: a statement
+# reading its attribute with mysql_query_attribute_string()). A released
+# keploy read no attribute's name: it took the name for the value and glued
+# the value to the head of the query, so a query with a per-call traceparent
+# never replayed, and one with two attributes was left out of the recording.
+# This build must record each query as it was sent, with its attributes
+# named, and the replay, plain and strict, must pass: an attribute is not
+# compared unless the statement reads it. And a released keploy's recording
+# of /trace (its queries' text holding the fixed traceparent) must still
+# replay: this build reads the live packet as that keploy did for it.
+#
 # Readiness is event-driven: MySQL answering a query, the app's /healthz, and
 # a last /healthz whose test case is written after every earlier request's.
 # Ports: 8096 (app), 3306 (MySQL). Env: RECORD_BIN, REPLAY_BIN; MYSQL_IMAGE
@@ -41,6 +61,8 @@ RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0}"
 LEGACY_VERSION="${LEGACY_VERSION:-v3.6.126}"
+# The app's GET /trace sends it with every query (app/src/main/java/Loop.java).
+FIXED_TRACEPARENT=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FAIL=0
 fail() {
@@ -77,7 +99,60 @@ trap cleanup EXIT
 execute_rows() {
     yq -N 'select(.kind == "MySQL" and .spec.requests[0].header.packet_type == "COM_STMT_EXECUTE") |
         [.spec.requests[0].message.new_params_bind_flag, ([.spec.requests[0].message.parameters[]?.type] | join(",")),
-         ([.spec.requests[0].message.parameters[]?.value] | join("|"))] | @tsv' keploy/test-set-0/mocks.yaml
+         ([.spec.requests[0].message.parameters[]?.value] | join("|"))] | @tsv' keploy/test-set-0/mocks.yaml |
+        sed '/^$/d'
+}
+
+# check_executes <expect>: the EXECUTEs are recorded as this build records
+# them (current) or as a released keploy did (legacy).
+check_executes() {
+    local unbound bad
+    unbound=$(execute_rows | awk -F'\t' '$1 == 0' | wc -l)
+    [ "$unbound" -gt 0 ] || fail "$CELL: no EXECUTE was sent without its types, so nothing here tested that"
+    if [ "$1" = legacy ]; then
+        # What the released keploy wrote for an EXECUTE sent without types:
+        # every value read as a string (a small integer's bytes of garbage),
+        # with the type FieldTypeString (254).
+        bad=$(execute_rows | awk -F'\t' '$1 == 0 && $2 != "254,254"')
+    else
+        # Every EXECUTE, sent with or without its types: an INT and a
+        # string, or two strings; or (GET /pattr) an INT and its traceparent.
+        bad=$(execute_rows | awk -F'\t' '$2 == "3,253" && $3 ~ /^[0-9]+\|(item|again|small)-[0-9]+$/ { next }
+            $2 == "253,253" && $3 ~ /^s[0-9]+\|item-[0-9]+$/ { next }
+            $2 == "3,254" && $3 ~ /^[0-9]+\|00-[0-9a-f]+-[0-9a-f]+-01$/ { next } { print }')
+    fi
+    [ -z "$bad" ] || fail "$CELL: EXECUTEs recorded with the wrong types or values: $(echo "$bad" | head -3 | tr '\n' ' ')"
+    echo "$CELL: $unbound EXECUTEs sent without types"
+}
+
+# attr_rows: query, attribute names and values of each recorded COM_QUERY
+# that carries query attributes (yq prints an empty line for each other
+# document).
+attr_rows() {
+    local tab=$'\t'
+    yq -N 'select(.kind == "MySQL" and .spec.requests[0].header.packet_type == "COM_QUERY" and (.spec.requests[0].message.parameters | length) > 0) |
+        [.spec.requests[0].message.query, ([.spec.requests[0].message.parameters[] | .name // ""] | join(",")),
+         ([.spec.requests[0].message.parameters[] | .value // ""] | join("|"))] | join("'"$tab"'")' keploy/test-set-0/mocks.yaml |
+        sed '/^$/d'
+}
+
+# check_attrs <expect> <count>: count queries with attributes are recorded,
+# as this build records them (current) or as a released keploy did (legacy:
+# GET /trace's, the name taken for the value and the value glued to the head
+# of the query).
+check_attrs() {
+    local n bad
+    n=$(attr_rows | wc -l)
+    [ "$n" -eq "$2" ] || fail "$CELL: recorded $n queries with attributes, want $2: $(attr_rows | head -3 | tr '\n' ' ')"
+    if [ "$1" = legacy ]; then
+        bad=$(attr_rows | awk -F'\t' -v tp="7$FIXED_TRACEPARENT" 'index($1, tp) == 1 && substr($1, length(tp) + 1) ~ /^SELECT [0-9]+ AS v$/ && $2 == "" && $3 == "traceparent" { next } { print }')
+    else
+        # Each value as sent: a traceparent, and /attrs' span s<i> after it.
+        bad=$(attr_rows | awk -F'\t' '$1 ~ /^SELECT [0-9]+ AS v$/ && $2 == "traceparent" && $3 ~ /^00-[0-9a-f]+-[0-9a-f]+-01$/ { next }
+            $1 ~ /^SELECT [0-9]+ AS v$/ && $2 == "traceparent,span" && $3 ~ /^00-[0-9a-f]+-[0-9a-f]+-01\|s[0-9]+$/ { next }
+            $1 == "SELECT mysql_query_attribute_string('"'"'span'"'"') AS v" && $2 == "span" && $3 ~ /^s[0-9]+$/ { next } { print }')
+    fi
+    [ -z "$bad" ] || fail "$CELL: queries with attributes recorded wrong: $(echo "$bad" | head -3 | tr '\n' ' ')"
 }
 
 # tests_of <regex>: how many recorded test cases request a URL matching it
@@ -115,7 +190,7 @@ replay() {
 # expect says (current: this build's; legacy: a released keploy's), and
 # replay it, plain and strict.
 run() {
-    local pom="$2" bin="$3" expect="$4" code
+    local pom="$2" bin="$3" expect="$4" code path out
     CELL="$1"
     shift 4
     echo "== $CELL =="
@@ -130,6 +205,14 @@ run() {
         [ "$(docker inspect -f '{{.State.Running}}' "$MYSQL_CID" 2>/dev/null)" = true ] || { fail "$CELL: MySQL exited"; return; }
         sleep 0.5
     done
+    # mysql_query_attribute_string() (GET /attrread).
+    out=$(docker exec "$MYSQL_CID" mysql -h127.0.0.1 -uroot -ppassword \
+        -e 'INSTALL COMPONENT "file://component_query_attributes"' 2>&1) || {
+        fail "$CELL: could not install MySQL's query attributes component: $(echo "$out" | grep -v 'Using a password' | head -3)"
+        docker rm -f "$MYSQL_CID" >/dev/null 2>&1
+        MYSQL_CID=""
+        return
+    }
 
     sudo -E env PATH="$PATH" "$bin" record -c "java -cp $CP Loop" --generateGithubActions=false --disable-tele \
         >record.log 2>&1 </dev/null &
@@ -155,27 +238,21 @@ run() {
     docker rm -f "$MYSQL_CID" >/dev/null 2>&1
     MYSQL_CID=""
 
-    local tests unbound bad
-    tests=$(tests_of '/(loop|again|strings|small)/[0-9]+$')
+    local tests executes=0 attrs=0
+    for path in "$@"; do
+        case "$path" in
+        /attr/* | /attrs/* | /trace/* | /attrread/*) attrs=$((attrs + ${path##*/})) ;;
+        *) executes=1 ;;
+        esac
+    done
+    tests=$(tests_of '/(loop|again|strings|small|attr|attrs|trace|attrread|pattr)/[0-9]+$')
     [ "$tests" -eq "$#" ] || fail "$CELL: recorded $tests test cases of the $# requests: the rest were left out"
     if grep -q 'a captured exchange was not recorded as a mock' record.log; then
         fail "$CELL: keploy record left MySQL exchanges out: $(grep -m1 'a captured exchange was not recorded as a mock' record.log | cut -c1-300)"
     fi
-    unbound=$(execute_rows | awk -F'\t' '$1 == 0' | wc -l)
-    [ "$unbound" -gt 0 ] || fail "$CELL: no EXECUTE was sent without its types, so nothing here tested that"
-    if [ "$expect" = legacy ]; then
-        # What the released keploy wrote for an EXECUTE sent without types:
-        # every value read as a string (a small integer's bytes of garbage),
-        # with the type FieldTypeString (254).
-        bad=$(execute_rows | awk -F'\t' '$1 == 0 && $2 != "254,254"')
-    else
-        # Every EXECUTE, sent with or without its types: an INT and a
-        # string, or two strings.
-        bad=$(execute_rows | awk -F'\t' '$2 == "3,253" && $3 ~ /^[0-9]+\|(item|again|small)-[0-9]+$/ { next }
-            $2 == "253,253" && $3 ~ /^s[0-9]+\|item-[0-9]+$/ { next } { print }')
-    fi
-    [ -z "$bad" ] || fail "$CELL: EXECUTEs recorded with the wrong types or values: $(echo "$bad" | head -3 | tr '\n' ' ')"
-    echo "$CELL: $tests test cases, $(execute_rows | wc -l) EXECUTEs recorded, $unbound of them sent without types"
+    [ "$attrs" -eq 0 ] || check_attrs "$expect" "$attrs"
+    [ "$executes" -eq 0 ] || check_executes "$expect"
+    echo "$CELL: $tests test cases, $(execute_rows | wc -l) EXECUTEs recorded, $(attr_rows | wc -l) queries with attributes"
 
     replay plain
     replay strict --mock-noise-strict
@@ -183,9 +260,10 @@ run() {
     cd "$WORK" || exit 1
 }
 
-run cj8.4 pom.xml "$RECORD_BIN" current /loop/3 /again/3 /again/4
+run cj8.4 pom.xml "$RECORD_BIN" current /loop/3 /again/3 /again/4 /attr/3 /attrs/2 /trace/2 /attrread/2 /pattr/3
 run cj5.1 pom51.xml "$RECORD_BIN" current /loop/1 /loop/3 /loop/5 /again/3 /strings/3 /small/3
 run cj5.1-legacy-recording pom51.xml "$LEGACY_RECORD_BIN" legacy /strings/3 /strings/2 /small/3
+run cj8.4-legacy-recording pom.xml "$LEGACY_RECORD_BIN" legacy /trace/3
 
 if [ "$FAIL" -ne 0 ]; then
     echo "$FAIL check(s) failed"

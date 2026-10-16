@@ -25,15 +25,19 @@ import (
 
 // The proven switch's watch on the application's non-DNS UDP (keploy/ebpf
 // k_udp.h, design v14 §3.2 (c)). keploy leaves such UDP where the
-// application sends it, so a datagram that gets a reply was answered live,
-// neither recorded nor mocked: counted as a udp_reply capture loss. The
-// kernel reports a socket's reply once per epoch, which the watch moves on at
-// each read of its count (snapshot), so a socket answered again after a read
-// is counted again. A datagram to UDP port 443 (QUIC) is refused in the
-// kernel, so the client falls back to TCP; a connect() to it never is
-// (glibc's address sort probes addresses with one). Only under
-// KEPLOY_PROVEN: the agent then sets FlagProvenUDP and attaches the ingress,
-// egress and release programs, which today's users never run.
+// application sends it, so a datagram that answers it was answered live,
+// neither recorded nor mocked: counted as a udp_reply capture loss. An answer
+// is what a socket that sent first receives, or what a socket that received
+// first (a server) receives from a peer it asked first; never a request a
+// server answers, a datagram from another member's socket (the application
+// talking to itself) or DNS's (keploy serves DNS). A datagram whose source
+// cannot be read counts. The kernel reports a socket's answer once per epoch,
+// which the watch moves on at each read of its count (snapshot), so a socket
+// answered again after a read is counted again. A datagram to UDP port 443
+// (QUIC) is refused in the kernel, so the client falls back to TCP; a
+// connect() to it never is (glibc's address sort probes addresses with one).
+// Only under KEPLOY_PROVEN: the agent then sets FlagProvenUDP and attaches the
+// bind, ingress, egress and release programs, which today's users never run.
 
 // udpDest mirrors struct dest_info_t.
 type udpDest struct {
@@ -54,8 +58,12 @@ type udpReplyEvent struct {
 	SrcPort uint32
 	Dst     udpDest
 	Epoch   uint32 // the watch's epoch the reply came in
-	_       uint32
+	Flags   uint32 // udpSrcUnread
 }
+
+// udpSrcUnread (udpReplyEvent.Flags): the datagram's source could not be read
+// (an IPv6 extension header first), so whose it is cannot be told: it counts.
+const udpSrcUnread = 1
 
 func (d udpDest) String() string {
 	var a netip.Addr
@@ -121,7 +129,7 @@ func (h *Hooks) startProvenUDP(cg string) (uint32, error) {
 // reads its reports. An error leaves nothing attached.
 func startUDPWatch(objs *bpfObjects, cg string) (*udpWatch, error) {
 	if objs.UdpReplyEpoch == nil || objs.UdpReplyEvents == nil || objs.UdpMemberSocksFailures == nil || objs.UdpReplyEventsLost == nil ||
-		objs.K_udpIngress == nil || objs.K_udpEgress == nil || objs.K_udpSockRelease == nil {
+		objs.K_udpIngress == nil || objs.K_udpEgress == nil || objs.K_udpSockRelease == nil || objs.K_udpBind4 == nil || objs.K_udpBind6 == nil {
 		return nil, errors.New("keploy's BPF objects are not loaded: the UDP watch's programs and maps are missing")
 	}
 	// 2: the kernel reads an epoch never set (0) as 1.
@@ -134,6 +142,8 @@ func startUDPWatch(objs *bpfObjects, cg string) (*udpWatch, error) {
 		attach ebpf.AttachType
 		name   string
 	}{
+		{objs.K_udpBind4, ebpf.AttachCGroupInet4Bind, "k_udp_bind4"},
+		{objs.K_udpBind6, ebpf.AttachCGroupInet6Bind, "k_udp_bind6"},
 		{objs.K_udpIngress, ebpf.AttachCGroupInetIngress, "k_udp_ingress"},
 		{objs.K_udpEgress, ebpf.AttachCGroupInetEgress, "k_udp_egress"},
 		{objs.K_udpSockRelease, ebpf.AttachCgroupInetSockRelease, "k_udp_sock_release"},
@@ -211,7 +221,17 @@ func (w *udpWatch) watch(logger *zap.Logger) {
 // handle counts a report by the epoch it came in: one of the epoch the
 // kernel is in waits for the snapshot that moves it on.
 func (w *udpWatch) handle(e udpReplyEvent) string {
-	what := fmt.Sprintf("UDP to %s answered from port %d", e.Dst, e.SrcPort)
+	on := "UDP to " + e.Dst.String()
+	if e.Dst.IPVersion == 0 {
+		// A socket registered at bind() that has asked no one yet (a
+		// server's unreadable first datagram): the kernel has no
+		// destination for it (k_udp.h).
+		on = "UDP on a socket the application bound"
+	}
+	what := fmt.Sprintf("%s answered from port %d", on, e.SrcPort)
+	if e.Flags&udpSrcUnread != 0 {
+		what = on + " got a datagram from a source keploy could not read"
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if e.Epoch == w.epoch {

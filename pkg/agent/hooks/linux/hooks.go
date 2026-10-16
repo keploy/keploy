@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -251,7 +252,33 @@ func hookSpec() (*ebpf.CollectionSpec, error) {
 			prog.AttachType = p.aType
 		}
 	}
+	shrinkUnswitchedMaps(spec)
 	return spec, nil
+}
+
+// unswitchedMaps are the maps only the proven switch's UDP watch uses, which
+// the kernel allocates whole at load (an LRU hash, a ring buffer): with the
+// switch off nothing uses them, so they are loaded at their smallest, and
+// the watch costs nothing (udpwatch.go).
+var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events"}
+
+// shrinkUnswitchedMaps loads unswitchedMaps at their smallest when the
+// proven switch is off: one entry, or one page for a ring buffer.
+func shrinkUnswitchedMaps(spec *ebpf.CollectionSpec) {
+	if provenswitch.On() {
+		return
+	}
+	for _, name := range unswitchedMaps {
+		m, ok := spec.Maps[name]
+		if !ok {
+			continue
+		}
+		if m.Type == ebpf.RingBuf {
+			m.MaxEntries = uint32(os.Getpagesize())
+		} else {
+			m.MaxEntries = 1
+		}
+	}
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {

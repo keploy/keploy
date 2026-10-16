@@ -50,7 +50,7 @@ const receiptTempPrefix = ".last-replay-"
 const (
 	FailedBySetup           = "setup"            // keploy could not start the run; the tests never ran
 	FailedByRunner          = "runner"           // the test command itself failed
-	FailedByStrict          = "strict"           // --strict: a call was missed, or the miss list was unreadable
+	FailedByStrict          = "strict"           // --strict: a counted miss, or the miss list or PID-map count was unreadable
 	FailedByMinCoverage     = "min-coverage"     // --min-coverage: the run covered too little, or wrote no report
 	FailedByKeploy          = "keploy"           // keploy itself did not complete the run
 	FailedByNothingVerified = "nothing-verified" // the run served none of the recorded calls, so it verified nothing

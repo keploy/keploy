@@ -230,9 +230,10 @@ func TestReplay_AnOlderKeploysRecordingOfExecutesWithoutTypesIsMatchedOnItsValue
 
 // Parameter types, unsigned flags and names are compared only when both
 // packets sent them (new_params_bind_flag 1): a packet sent without them
-// carries filled-in ones.
+// carries filled-in ones. The statement has one parameter, as the live
+// statement's PREPARE_OK says (matchCommand's liveStatementParams).
 func TestMatchExecute_TypesAreComparedOnlyWhenBothPacketsSentThem(t *testing.T) {
-	const q = "SELECT CONCAT(?, '-', ?) AS s"
+	const q = "SELECT CONCAT(?, '-') AS s"
 	bundle := func(flag byte, p mysql.Parameter) mysql.PacketBundle {
 		return mysql.PacketBundle{
 			Header: &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 16}, Type: "COM_STMT_EXECUTE"},
@@ -258,7 +259,7 @@ func TestMatchExecute_TypesAreComparedOnlyWhenBothPacketsSentThem(t *testing.T) 
 		{"the live one sent no name", 1, 0, mysql.Parameter{Type: 253, Name: "n", Value: "x"}, str(mysql.FieldTypeVarString), true},
 		{"neither sent, other values", 0, 0, str(mysql.FieldTypeString), mysql.Parameter{Type: 253, Value: "y"}, false},
 	} {
-		def, _, _ := matchStmtExecutePacketQueryAware(zap.NewNop(), bundle(tc.expFlag, tc.exp), bundle(tc.actFlag, tc.act), q, q, "m", util.NewNoiseChecker(nil))
+		def, _, _ := matchStmtExecutePacketQueryAware(zap.NewNop(), bundle(tc.expFlag, tc.exp), bundle(tc.actFlag, tc.act), q, q, 1, "m", util.NewNoiseChecker(nil))
 		if def != tc.wantDefinitive {
 			t.Errorf("%s: definitive = %v, want %v", tc.name, def, tc.wantDefinitive)
 		}

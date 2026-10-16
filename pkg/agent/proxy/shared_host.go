@@ -29,17 +29,22 @@ import (
 //     as a container on a network of its own reaches them (the default
 //     bridge's 172.17.0.1, where host-gateway still points, or the host's LAN
 //     address), where the keploy CLI gave them to the agent
-//     (containerkey.HostAddr: it gives them under the proven switch).
+//     (containerkey.HostAddr: it gives them under the proven switch); or at
+//     the address the namespace's /etc/hosts gives host.docker.internal or
+//     gateway.docker.internal. keploy's agent container maps
+//     host.docker.internal to host-gateway (pkg/platform/docker
+//     extra_hosts.go), the Docker host as its daemon resolves it, which is
+//     where Docker Desktop's host.docker.internal leads too though it is no
+//     gateway; the application reads the same /etc/hosts.
 //
 // A native application's default gateway is a router, another machine, so a
 // gateway counts only in docker mode. The host's other addresses where the
 // CLI gave the agent none (the proven switch off, or a daemon the CLI cannot
-// read as this host's: its list then carries no addresses), and Docker
-// Desktop's host.docker.internal, which is no gateway, are not told from
-// another machine's here. The namespace is read at
-// each call, for a host the recording holds (recordedEndpointMoved) or for the
-// next step of a connection keploy could not tie to the recording
-// (unlistedNextStep): nothing is cached.
+// read as this host's: its list then carries no addresses), and not named in
+// /etc/hosts, are not told from another machine's here. The namespace and its
+// /etc/hosts are read at each call, for a host the recording holds
+// (recordedEndpointMoved) or for the next step of a connection keploy could
+// not tie to the recording (unlistedNextStep): nothing is cached.
 func (p *Proxy) sharedHost(a netip.Addr) (name string, ok bool) {
 	a = a.Unmap()
 	if !a.IsValid() {
@@ -62,6 +67,13 @@ func (p *Proxy) sharedHost(a netip.Addr) (name string, ok bool) {
 	if slices.Contains(gateways, a) {
 		return "the Docker host (" + a.String() + ", the container's gateway)", true
 	}
+	readHosts := p.readDockerHostNames
+	if readHosts == nil {
+		readHosts = readDockerHostNames
+	}
+	if name, ok := readHosts()[a]; ok {
+		return "the Docker host (" + a.String() + ", " + name + ")", true
+	}
 	hostAddr := p.dockerHostAddr
 	if hostAddr == nil {
 		hostAddr = containerkey.HostAddr
@@ -70,6 +82,49 @@ func (p *Proxy) sharedHost(a netip.Addr) (name string, ok bool) {
 		return "the Docker host (" + a.String() + ", an address of its own)", true
 	}
 	return "", false
+}
+
+// dockerHostNames are the names Docker gives a container for the Docker host:
+// host.docker.internal (Docker Desktop's, and keploy's agent container's at
+// host-gateway) and gateway.docker.internal (Docker Desktop's).
+var dockerHostNames = []string{"host.docker.internal", "gateway.docker.internal"}
+
+// readDockerHostNames is the addresses /etc/hosts gives the Docker host's
+// names (dockerHostNames), each with the name. A read that fails gives
+// nothing.
+func readDockerHostNames() map[netip.Addr]string {
+	b, err := os.ReadFile("/etc/hosts")
+	if err != nil {
+		return nil
+	}
+	return dockerHostNamesIn(b)
+}
+
+// dockerHostNamesIn is readDockerHostNames over an /etc/hosts file's content:
+// "address name...", a # starting a comment.
+func dockerHostNamesIn(hosts []byte) map[netip.Addr]string {
+	out := map[netip.Addr]string{}
+	for _, line := range strings.Split(string(hosts), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		a, err := netip.ParseAddr(f[0])
+		if err != nil {
+			continue
+		}
+		for _, name := range f[1:] {
+			for _, want := range dockerHostNames {
+				if _, seen := out[a.Unmap()]; !seen && strings.EqualFold(name, want) {
+					out[a.Unmap()] = want
+				}
+			}
+		}
+	}
+	return out
 }
 
 // readNetns reads the network namespace the agent runs in: its interfaces'

@@ -1801,6 +1801,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			// the run, and one keploy.yml inherited is left out with a
 			// warning (Replayer.selectTestSets). -t "" names nothing.
 			c.cfg.Test.SelectedFromCommandLine = cmd.Flags().Changed("testsets") && len(config.TestSetNames(testSets)) > 0
+			// Whether the bound on the app's answer is the user's own
+			// (config.Test.APITimeoutSet): the flag, or keploy.yml.
+			c.cfg.Test.APITimeoutSet = cmd.Flags().Changed("api-timeout") || viper.InConfig("test.apiTimeout")
 
 			// get disable-mapping flag value
 			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {

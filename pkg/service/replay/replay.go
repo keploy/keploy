@@ -3032,10 +3032,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					missCategory(res)
 				}
 			}
+			// Under the proven switch a test keploy's agent lost a call of (or
+			// of a test before it) fails, as one with a miss does: read with
+			// its misses, before the comparison, so the verdict holds it.
+			lostCapture := read.failsOnCaptureLoss()
 			// The switch fails this test whatever its answer says when a call
-			// of it got no recorded answer or a recorded call of it was not
-			// made: a comparison that matches prints no pass line for it.
-			failedOnItsOwn := earlyMissed > 0 || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
+			// of it got no recorded answer, was not captured, or a recorded
+			// call of it was not made: a comparison that matches prints no
+			// pass line for it.
+			failedOnItsOwn := earlyMissed > 0 || lostCapture || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
+			// A matching answer does not pass a test the verdict fails anyway:
+			// one the switch fails on its own, or one --assert-dependencies (or
+			// a strict mock noise) fails for its diverged mock set with the
+			// switch off. Its comparison prints no pass line; it is compared as
+			// before.
+			noPassLine := failedOnItsOwn || resolveTestOutcome(true, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure()).Status != models.TestStatusPassed
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -3076,7 +3087,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					delete(variablesWhy, testCase.Name)
 				}
 				opts := resolved.opts
-				if failedOnItsOwn || len(varFailures) > 0 {
+				if noPassLine || len(varFailures) > 0 {
 					// The test case has failed on its own: no pass line.
 					opts = append(opts, httpMatcher.WithoutPassLine())
 				}
@@ -3152,7 +3163,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// is read first, so a test case it fails never prints the
 				// comparison's pass line.
 				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
-				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || failedOnItsOwn)
+				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || noPassLine)
 				if len(templateFailures) > 0 {
 					testPass = false
 					markTemplateFailures(testResult)
@@ -3226,6 +3237,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testset", testSetID),
 					zap.String("reason", vetoUnmatchedCallSwitchOff),
 					zap.Int("unmatchedCalls", missed))
+			}
+			// A test that lost a call fails in this cycle, as one with a miss
+			// does, so the result line, the counters and the retry list hold
+			// it: a --retry-passing-test cycle runs only the tests that
+			// passed, and one that ran it again and lost nothing passed it.
+			// Said whatever else failed it, as a miss is: a lost call may be
+			// why its answer is wrong.
+			if lostCapture {
+				outcome = failOnCaptureLoss(outcome)
+				r.logger.Error("keploy's agent could not capture every call while this test or a test before it ran; failing testcase (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID))
 			}
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
@@ -3617,7 +3640,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		failure += currentFailures
 		success = currentSuccess
 		obsolete += currentObsolete
-		if currentFailures == 0 || replay == 2 {
+		// The passing tests run again only after a cycle a test failed in,
+		// and not once a loss has tainted the set (proven switch): a test
+		// this cycle ran clean, before the loss, would be charged the loss in
+		// the next one, and that row would be its verdict.
+		if currentFailures == 0 || replay == 2 || r.captureTaintsTheSet() {
 			success = currentSuccess
 			for k, v := range currentPassingMocks {
 				passingTotalConsumedMocks[k] = v
@@ -4079,6 +4106,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Int("unmatchedCalls", streamMissed))
 				}
 			}
+			// And what keploy's agent could not capture while it ran (or a
+			// test before it did): under the proven switch that fails it too.
+			// Said here unless the mock-set mismatch line below says it (once).
+			streamLostCapture := streamRead.failsOnCaptureLoss()
+			if streamLostCapture && !mockSetMismatch {
+				r.logger.Error("keploy's agent could not capture every call while this streaming test or a test before it ran; failing it (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+					zap.String("testcase", tc.Name),
+					zap.String("testset", testSetID))
+			}
 			// Every result written for this test below attaches that read.
 			attachStreamMisses := func(res *models.TestResult) {
 				r.attachReadMockErrors(streamRead, testSetID, tc.Name, res)
@@ -4088,11 +4124,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
 			var streamOpts []httpMatcher.MatchOption
-			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 {
+			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 || streamLostCapture {
 				streamOpts = append(streamOpts, httpMatcher.WithoutPassLine())
 			}
 			testPass, testResult := r.compareHTTPResp(expectedStream, httpResp, testSetID, emitFailureLogs, streamOpts...)
-			if len(streamUnconsumed) > 0 || streamMissed > 0 {
+			if len(streamUnconsumed) > 0 || streamMissed > 0 || streamLostCapture {
 				testPass = false
 			}
 			if testResult == nil {
@@ -4167,14 +4203,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 {
+				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 || streamLostCapture {
 					reason := vetoUnconsumedTestMock
 					switch {
 					case len(streamUnconsumed) > 0:
-					case provenswitch.On():
+					case streamCallsMissed > 0 && provenswitch.On():
 						reason = vetoUnmatchedCall
-					default:
+					case streamCallsMissed > 0:
 						reason = vetoUnmatchedCallSwitchOff
+					default:
+						reason = vetoCaptureLoss
 					}
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
@@ -4400,7 +4438,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Strings("tests", missed))
 	}
 	// Read before any hook runs, as the evidence floor reads it: a loss while
-	// a test ran holds the prune and mappings.yaml below.
+	// a test ran holds the prune and mappings.yaml below. The loop failed
+	// each test it charged a loss already (lostCapture, streamLostCapture);
+	// failTestsWithCaptureLoss finds one only if a path wrote a result
+	// without that verdict, and adds CAPTURE_INCOMPLETE to each.
 	testsLostCapture := anyTestLostCapture(testCaseResults)
 	if tainted := failTestsWithCaptureLoss(testCaseResults); len(tainted) > 0 {
 		r.logger.Error("tests failed: keploy's agent could not capture every call while they or a test before them ran (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
@@ -5922,6 +5963,9 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
 		if pass {
+			// The quiet pre-match prints nothing, its pass line included:
+			// print it here, as Match does when it emits its logs.
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
 		}
@@ -5931,6 +5975,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		// and calling the helper here as well as below would log the skip twice
 		// for the same test case.
 		if !r.additiveAutoPassOff() && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
 		}

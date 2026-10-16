@@ -346,7 +346,11 @@ func IsTime(stringDate string) bool {
 }
 
 type SimulationConfig struct {
-	APITimeout      uint64
+	APITimeout uint64
+	// Unbounded: no clock bounds the app's answer, and APITimeout is not
+	// applied. The replay sets it under the proven switch when the user set
+	// no apiTimeout of their own (config.Test.APITimeoutSet, rule 15).
+	Unbounded       bool
 	RequestTimeout  time.Duration
 	ConfigPort      uint32
 	KeployPath      string
@@ -1017,6 +1021,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Prepare the HTTP request using the shared helper
 	cfg.RequestTimeout = time.Second * time.Duration(cfg.APITimeout)
+	if cfg.Unbounded {
+		cfg.RequestTimeout = 0
+	}
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
@@ -1082,6 +1089,11 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// Calculate streaming timeout
 	APITimeout := ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
 	cfg.RequestTimeout = time.Second * time.Duration(APITimeout)
+	if cfg.Unbounded {
+		// The stream's mocks keep their window (effectiveStreamMockWindow
+		// computes it on its own); only the clock on the app's answer goes.
+		cfg.RequestTimeout = 0
+	}
 
 	// Prepare the HTTP request using the shared helper
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
