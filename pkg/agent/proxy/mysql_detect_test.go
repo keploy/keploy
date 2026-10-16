@@ -42,6 +42,8 @@ func testProxy(t *testing.T) *Proxy {
 		// No address of the test's machine, nor its gateway, decides a verdict.
 		readNetns:      func() (own, gateways []netip.Addr) { return nil, nil },
 		dockerHostAddr: func(netip.Addr) bool { return false },
+		// Nor does this machine's /etc/hosts.
+		readDockerHostNames: func() map[netip.Addr]string { return nil },
 		// Built the way proxy.New does, so tests can drive SetMocksWithWindow —
 		// the call a stock agent actually makes to publish a test set's mocks.
 		dnsCache: newDNSCache(),

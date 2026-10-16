@@ -109,7 +109,11 @@ func TestThisMachineIsEveryAddressOfItsOwn(t *testing.T) {
 // A gateway is the Docker host only in docker mode.
 func TestAGatewayIsTheDockerHostOnlyInDockerMode(t *testing.T) {
 	gw := netip.MustParseAddr("172.17.0.1")
-	p := &Proxy{readNetns: func() (own, gateways []netip.Addr) { return nil, []netip.Addr{gw} }}
+	p := &Proxy{
+		readNetns: func() (own, gateways []netip.Addr) { return nil, []netip.Addr{gw} },
+		// This machine's /etc/hosts decides nothing.
+		readDockerHostNames: func() map[netip.Addr]string { return nil },
+	}
 	if name, ok := p.sharedHost(gw); ok {
 		t.Fatalf("a native application's gateway was taken for a shared host (%s)", name)
 	}
@@ -132,6 +136,9 @@ func TestTheDockerHostsOwnAddressesAreTheDockerHost(t *testing.T) {
 	p := &Proxy{
 		readNetns:      func() (own, gateways []netip.Addr) { return nil, []netip.Addr{netip.MustParseAddr("172.19.0.1")} },
 		dockerHostAddr: func(a netip.Addr) bool { return a == bridge },
+		// This machine's /etc/hosts decides nothing: in a container run with
+		// --add-host host.docker.internal:host-gateway it names 172.17.0.1.
+		readDockerHostNames: func() map[netip.Addr]string { return nil },
 	}
 	if name, ok := p.sharedHost(bridge); ok {
 		t.Fatalf("natively, an address the CLI gave was taken for the Docker host (%s)", name)
@@ -139,5 +146,58 @@ func TestTheDockerHostsOwnAddressesAreTheDockerHost(t *testing.T) {
 	p.IsDocker = true
 	if name, ok := p.sharedHost(netip.MustParseAddr("::ffff:172.17.0.1")); !ok || name != "the Docker host (172.17.0.1, an address of its own)" {
 		t.Fatalf("the Docker host's own address is %q, %v; want the Docker host", name, ok)
+	}
+}
+
+// The Docker host's names in /etc/hosts: host.docker.internal (keploy's agent
+// container maps it to host-gateway; Docker Desktop resolves it) and
+// gateway.docker.internal, whatever their case, IPv4 or IPv6; a comment, a
+// name of another machine and a malformed line name nothing.
+func TestTheDockerHostsNamesAreReadFromTheHostsFile(t *testing.T) {
+	got := dockerHostNamesIn([]byte("127.0.0.1\tlocalhost\n" +
+		"::1\tlocalhost ip6-localhost\n" +
+		"172.17.0.2\tapp\n" +
+		"192.168.65.254\tHost.Docker.Internal\n" +
+		"192.168.65.1 gateway.docker.internal # Docker Desktop\n" +
+		"fd00::1 host.docker.internal\n" +
+		"# 10.9.9.9 host.docker.internal\n" +
+		"not-an-address host.docker.internal\n" +
+		"10.1.2.3 db.test\n"))
+	want := map[netip.Addr]string{
+		netip.MustParseAddr("192.168.65.254"): "host.docker.internal",
+		netip.MustParseAddr("192.168.65.1"):   "gateway.docker.internal",
+		netip.MustParseAddr("fd00::1"):        "host.docker.internal",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("names %v, want %v", got, want)
+	}
+	for a, name := range want {
+		if got[a] != name {
+			t.Errorf("%s: %q, want %q", a, got[a], name)
+		}
+	}
+}
+
+// In docker mode, the address /etc/hosts gives host.docker.internal is the
+// Docker host, though it is no gateway of the container's: Docker Desktop's
+// (192.168.65.254), or docker0's 172.17.0.1 from a container on a network of
+// its own, where keploy's agent maps the name to host-gateway. A native
+// application's /etc/hosts says nothing of a container's host.
+func TestTheHostsFilesDockerHostIsTheDockerHost(t *testing.T) {
+	desktop := netip.MustParseAddr("192.168.65.254")
+	p := &Proxy{
+		readNetns:           func() (own, gateways []netip.Addr) { return nil, []netip.Addr{netip.MustParseAddr("172.19.0.1")} },
+		dockerHostAddr:      func(netip.Addr) bool { return false },
+		readDockerHostNames: func() map[netip.Addr]string { return map[netip.Addr]string{desktop: "host.docker.internal"} },
+	}
+	if name, ok := p.sharedHost(desktop); ok {
+		t.Fatalf("natively, /etc/hosts' host.docker.internal was taken for the Docker host (%s)", name)
+	}
+	p.IsDocker = true
+	if name, ok := p.sharedHost(netip.MustParseAddr("::ffff:192.168.65.254")); !ok || name != "the Docker host (192.168.65.254, host.docker.internal)" {
+		t.Fatalf("host.docker.internal's address is %q, %v; want the Docker host", name, ok)
+	}
+	if name, ok := p.sharedHost(netip.MustParseAddr("10.1.2.3")); ok {
+		t.Fatalf("another machine's address was taken for the Docker host (%s)", name)
 	}
 }
