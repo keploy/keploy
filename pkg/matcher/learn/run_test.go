@@ -172,6 +172,15 @@ func TestAValueComesFromTheTestsOwnCallBeforeTheRuns(t *testing.T) {
 	if !ok || !p.Run || p.Mock != "mock-0" {
 		t.Fatalf("with no own call the value comes from %+v (%v), want the run's", p, ok)
 	}
+	answered := Earlier{Mock: "mock-6", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.items.0.build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "body.items.0.build"}}}
+	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered, boot}, nil)
+	if !ok || !p.Run || p.Side != Request || p.Mock != "mock-0" {
+		t.Fatalf("a value the test's own answer gave, which the start-up sent, comes from %+v (%v), want where it was sent", p, ok)
+	}
+	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered}, nil)
+	if !ok || p.Side != Response || p.Mock != "mock-6" {
+		t.Fatalf("a value only an answer gave comes from %+v (%v), want that answer", p, ok)
+	}
 }
 
 // A request place that holds no variable, or whose live value is unknown,
