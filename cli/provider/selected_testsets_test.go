@@ -117,3 +117,55 @@ func TestTheTemplatizeTestSetsFlagIsTheCommandLinesOwnSelection(t *testing.T) {
 		})
 	}
 }
+
+// keploy sanitize -t "test-set-1, test-set-2" selects both sets, trimmed, and
+// keploy.yml's test.selectedTests selects none: sanitize's selection is the
+// command line's alone, which is why it refuses every name that is not
+// recorded with no keploy.yml leniency to apply (Tools.refuseUnrecorded).
+func TestTheSanitizeSelectionIsTheCommandLinesAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yml  string
+		args []string
+		want []string
+	}{
+		{"the help text's example", "", []string{"-t", "test-set-1, test-set-2"}, []string{"test-set-1", "test-set-2"}},
+		{"keploy.yml's test.selectedTests", "test:\n  selectedTests:\n    test-set-9: []\n", nil, nil},
+		{"an empty -t", "", []string{"-t", ""}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			savedFound := IsConfigFileFound
+			t.Cleanup(func() { IsConfigFileFound = savedFound; viper.Reset() })
+			project, configDir := t.TempDir(), t.TempDir()
+			if err := os.Mkdir(filepath.Join(project, "keploy"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.yml != "" {
+				if err := os.WriteFile(filepath.Join(configDir, "keploy.yml"), []byte(tc.yml), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := config.New()
+			c := NewCmdConfigurator(zap.NewNop(), cfg)
+			cmd := &cobra.Command{Use: "sanitize"}
+			if err := c.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			if err := cmd.ParseFlags(append([]string{"--path", project, "--config-path", configDir}, tc.args...)); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			if err := c.PreProcessFlags(cmd); err != nil {
+				t.Fatalf("PreProcessFlags: %v", err)
+			}
+			if err := c.ValidateFlags(context.Background(), cmd); err != nil {
+				t.Fatalf("ValidateFlags: %v", err)
+			}
+			got := utils.Keys(cfg.Test.SelectedTests)
+			slices.Sort(got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("selected %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
