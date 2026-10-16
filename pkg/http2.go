@@ -663,14 +663,17 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// keeps open past its recording ends on its keepalives (row W1).
 	//
 	// With no clock on the app's answer, the stall rule (answerWatch) ends an
-	// exchange the app makes no progress on: it takes no byte of the request
-	// and sends none back for AnswerStallGrace of keploy's runnable time.
+	// exchange the app makes no progress on: the whole call waits on the
+	// app, and AnswerStallGrace of keploy's runnable time with no frame of
+	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
 	answer := newAnswerWatch(cfg)
 	defer answer.stop()
+	defer answer.waiting()()
+	answer.closeOnCut(conn)
 	if provenswitch.On() {
-		pings = newPingWatch(answer.wrap(conn))
+		pings = newPingWatch(conn)
 		pings.answer = answer
 		dialed = pings
 	}
@@ -739,6 +742,11 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		answer.onCut(cancelStream)
 	}
 
+	reqMsgs := grpcReq.AllMessages()
+	if answer != nil {
+		answer.describe(path, grpcRequestSize(reqMsgs))
+	}
+
 	// Create a new stream
 	stream, err := clientConn.NewStream(callCtx, &grpc.StreamDesc{
 		StreamName:    path,
@@ -746,6 +754,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		ClientStreams: true,
 	}, path)
 	if err != nil {
+		if answer.didStall() {
+			return nil, answer.err()
+		}
 		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, tc.AppPort, err))
 	}
 
@@ -759,10 +770,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// zero-value body — the health check records message_length 0 with empty
 	// decoded_data and expects exactly one empty message. An empty payload
 	// here is a real message, not the absence of one.
-	reqMsgs := grpcReq.AllMessages()
-	if answer != nil {
-		answer.describe(path, grpcRequestSize(reqMsgs))
-	}
 	for i, m := range reqMsgs {
 		var requestPayload []byte
 		if m.DecodedData != "" {
@@ -848,6 +855,13 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// sent, so that only what came is compared.
 	heldOpen, heldAt, stalled := pings.heldOpen()
 	heldOpen = heldOpen && len(respMsgs) >= heldAt
+	if heldOpen && stalled && heldAt == 0 {
+		// Keepalives, and no message: nothing of the answer to compare.
+		// It fails closed, not judged (ErrAnswerStalled), never a pass on
+		// the recording's fill.
+		headers, data := pings.heldAnswer()
+		return nil, keptOpenWithNothing(path, headers, data)
+	}
 	if heldOpen {
 		respMsgs, drainErr = respMsgs[:heldAt], nil
 		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
@@ -855,12 +869,13 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}
 	// The stall rule cut the exchange, and no keepalive held it open: an
-	// answer that never began is none (ErrAnswerStalled), and a stream the
-	// app went silent on is judged on what came, the recording's rest in
-	// place of what did not (the stall's own fill), not judged as a whole.
+	// answer that never began, or none of whose messages came, is nothing to
+	// compare (ErrAnswerStalled), and a stream the app went silent on is
+	// judged on what came, the recording's rest in place of what did not
+	// (the stall's own fill), not judged as a whole.
 	var silent error
 	if !heldOpen && drainErr != nil && answer.didStall() {
-		if !answer.answered.Load() {
+		if !answer.answered.Load() || len(respMsgs) == 0 {
 			return nil, answer.err()
 		}
 		recorded := tc.GrpcResp.AllMessages()

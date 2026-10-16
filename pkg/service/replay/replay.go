@@ -3960,11 +3960,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 
 					if streamErr != nil {
-						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						if errors.Is(streamErr, pkg.ErrAnswerStalled) {
+							// Nothing of the stream came, the app keeping
+							// it open (the stall rule, or its keepalives):
+							// not judged, failing closed (ruling a).
+							sayNoAnswer(r.logger, tc.Name, streamErr, "failed to read streaming response")
+						} else {
+							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						}
 						noteNoAnswer(tc.Name, streamErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, streamErr)
+						markAnswerStalled(testCaseResult, streamErr)
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
@@ -4670,10 +4678,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.markNotJudged(testSetID)
 	}
 	if stalledAnswers := testsWithStalledAnswers(testCaseResults); len(stalledAnswers) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
-		// A test whose answer the stall rule ended has no verdict, so
-		// neither has its set (rule 15).
+		// A test whose exchange ended with nothing of its answer to
+		// compare has no verdict, so neither has its set (rule 15).
 		notJudged = alsoNotJudged(notJudged, stalledAnswersReason(stalledAnswers))
-		r.logger.Error("test-set is not judged: the app never answered some of its tests, or never took their whole request, within keploy's stall bound; the run goes on to the next test-set",
+		r.logger.Error("test-set is not judged: the app never answered some of its tests, sent nothing past an answer's headers, or never took a whole request, before keploy's stall bound passed or its keepalives showed it stalled; the run goes on to the next test-set",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", stalledAnswers),
 			zap.String("next_step", stalledAnswersRemedy+", then run the test-set again"))
