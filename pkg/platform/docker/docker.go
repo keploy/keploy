@@ -40,6 +40,22 @@ const (
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
 
+	// InternalNetworkName, InternalSubnet and AgentInternalIP address the agent
+	// on a compose network that denies the replayed app any egress.
+	//
+	// A STATIC address, because the agent's URI is settled before the container
+	// exists (AgentClient.Setup), so there is nothing to inspect yet. Both ends
+	// read these constants: the generator pins the agent here, and the caller
+	// that shares the daemon's network namespace dials it here.
+	//
+	// The subnet is deliberately obscure. It only has to avoid colliding with
+	// the Pod's own networks, and a replay Pod is short-lived and otherwise
+	// empty, so a fixed range costs nothing and removes an inspect-then-wire
+	// ordering problem entirely.
+	InternalNetworkName = "default"
+	InternalSubnet      = "172.31.253.0/24"
+	AgentInternalIP     = "172.31.253.10"
+
 	// AgentOutcomeFile is where a containerised agent serving a mock replay
 	// leaves what it served and what it could not match (models.MockOutcome)
 	// as it is stopped. Under docker compose that is the only account of the
@@ -1059,8 +1075,28 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add networks if specified
-	if len(opts.NetworkAliases) > 0 {
+	// Add networks if specified.
+	//
+	// The pinned-address branch comes FIRST and is exclusive: a caller that
+	// presets Agent.AgentURI shares the docker daemon's network namespace and
+	// dials the agent directly, on a compose network that denies the replayed
+	// app egress. That stack has one generated network and no aliases, and a
+	// second `networks` key here would be a duplicate mapping key -- invalid
+	// YAML that compose rejects.
+	if ip := PresetAgentIP(idc.conf); ip != "" {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: InternalNetworkName},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "ipv4_address"},
+					{Kind: yaml.ScalarNode, Value: ip, Tag: "!!str"},
+				}},
+			}},
+		)
+		idc.logger.Info("pinned the keploy-agent to a static compose address",
+			zap.String("ip", ip), zap.String("network", InternalNetworkName))
+	} else if len(opts.NetworkAliases) > 0 {
 		networksMapNode := &yaml.Node{Kind: yaml.MappingNode}
 
 		for netName, aliases := range opts.NetworkAliases {

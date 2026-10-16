@@ -3572,6 +3572,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						}
 					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
+					// The verdict is settled here, after the retry loop. See
+					// TestCaseReporter for why this is the only per-case
+					// post-verdict seam.
+					if reporter, ok := r.hookImpl.(TestCaseReporter); ok {
+						if err := reporter.AfterTestCaseRun(runTestSetCtx, testSetID, testCase, testCaseResult); err != nil {
+							utils.LogError(r.logger, err, "AfterTestCaseRun hook failed; the result stands and the replay continues",
+								zap.String("testcase", testCase.Name),
+								zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
+						}
+					}
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
 					// Finalize the capture window and persist a failed result so a

@@ -139,6 +139,25 @@ type TestCaseMutator interface {
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
+// TestCaseReporter is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion once a test case has its FINAL
+// verdict; implementations that do not need per-case reporting can safely omit
+// it without breaking existing code.
+//
+// It exists because there is no per-case post-verdict hook otherwise.
+// BeforeTestResult is handed the whole test set at once, and InsertTestCaseResult
+// is batched and flushed after the retry loop closes — so what looks like a live
+// feed is really a burst per test set. A supervising process that wants to show
+// progress while a long test set runs, or to stream results across a process
+// boundary, has nothing to attach to.
+//
+// Called at most once per test case, with the result that was recorded, after
+// retries have settled. Errors are logged and the replay continues: a reporter
+// that cannot report must not be able to fail a run whose tests passed.
+type TestCaseReporter interface {
+	AfterTestCaseRun(ctx context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error
+}
+
 // MockMutator is an optional extension to TestHooks.
 // RunTestSet detects it via type assertion after GetMocks returns and before
 // StoreMocks pushes mocks to the proxy. Implementations may mutate mocks
