@@ -78,10 +78,14 @@ jobs:
           AZURE_SAS_RO: ${{ secrets.AZURE_FUZZER_SAS_RO }}
         run: |
           set -euo pipefail
-          KEY="releases/mysql-fuzzer/latest/mysql-fuzzer-linux-amd64.tar.gz"
+          # A released version, not latest: a fuzzer release changes this lane only
+          # through a reviewed bump here (keploy/go-fuzzers tags v<version>-mysql).
+          VERSION="1.0.4"
+          KEY="releases/mysql-fuzzer/${VERSION}/mysql-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o mysql-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
+          echo "mysql fuzzer ${VERSION}: $(sha256sum mysql-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
           tar -xzf mysql-fuzzer-linux-amd64.tar.gz
           chmod +x ./mysql-fuzzer
           echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
@@ -146,11 +150,15 @@ jobs:
           AZURE_SAS_RO: ${{ secrets.AZURE_FUZZER_SAS_RO }}
         run: |
           set -euo pipefail
-          KEY="releases/grpc-fuzzer/latest/grpc-fuzzer-linux-amd64.tar.gz"
+          # A released version, not latest: a fuzzer release changes this lane only
+          # through a reviewed bump here (keploy/go-fuzzers tags v<version>-grpc).
+          VERSION="1.0.2"
+          KEY="releases/grpc-fuzzer/${VERSION}/grpc-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           echo "Downloading fuzzer from ${URL}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o grpc-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
+          echo "grpc fuzzer ${VERSION}: $(sha256sum grpc-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
           tar -xzf grpc-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
           echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
@@ -218,10 +226,14 @@ jobs:
           AZURE_SAS_RO: ${{ secrets.AZURE_FUZZER_SAS_RO }}
         run: |
           set -euo pipefail
-          KEY="releases/postgres-fuzzer/latest/postgres-fuzzer-linux-amd64.tar.gz"
+          # A released version, not latest: a fuzzer release changes this lane only
+          # through a reviewed bump here (keploy/go-fuzzers tags v<version>-postgres).
+          VERSION="1.0.9"
+          KEY="releases/postgres-fuzzer/${VERSION}/postgres-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o postgres-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
+          echo "postgres fuzzer ${VERSION}: $(sha256sum postgres-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
           tar -xzf postgres-fuzzer-linux-amd64.tar.gz
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
@@ -300,10 +312,14 @@ jobs:
           AZURE_SAS_RO: ${{ secrets.AZURE_FUZZER_SAS_RO }}
         run: |
           set -euo pipefail
-          KEY="releases/mongo-fuzzer/latest/mongo-fuzzer-linux-amd64.tar.gz"
+          # A released version, not latest: a fuzzer release changes this lane only
+          # through a reviewed bump here (keploy/go-fuzzers tags v<version>-mongo).
+          VERSION="1.0.4"
+          KEY="releases/mongo-fuzzer/${VERSION}/mongo-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o mongo-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
+          echo "mongo fuzzer ${VERSION}: $(sha256sum mongo-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
           tar -xzf mongo-fuzzer-linux-amd64.tar.gz
           chmod +x ./mongo-fuzzer
           echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT
