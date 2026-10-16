@@ -420,3 +420,49 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 		})
 	}
 }
+
+// A judged start feeds nothing of the template path: in a templated set, a
+// login whose answer began with a 500 and stalled is a judged FAILED, its
+// recorded capture takes no value from the stand-in (no literal
+// "{{capture ...}}" as the app's), and the next test sends the token the set
+// holds.
+func TestUnderTheSwitchAJudgedStartCapturesNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	saved := pkg.AnswerStallGrace
+	pkg.AnswerStallGrace = 300 * time.Millisecond
+	t.Cleanup(func() { pkg.AnswerStallGrace = saved })
+
+	var auth atomic.Value
+	app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
+		mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"tok`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})
+		mux.HandleFunc("/me", func(w http.ResponseWriter, r *http.Request) {
+			a.record(r)
+			auth.Store(r.Header.Get("Authorization"))
+			writeJSON(w, http.StatusOK, `{"user":"alice"}`)
+		})
+	})
+	conf := &tmplConf{stored: models.TestSet{Template: map[string]interface{}{"token": "T0rec00001"}}}
+	cases := []*models.TestCase{
+		tmplCase(1, app.addr, "POST", "/login", map[string]string{"Content-Type": "application/json"}, `{"user":"alice"}`,
+			recorded(200, nil, `{"token":"{{capture string .token}}"}`, conf.stored.Template)),
+		tmplCase(2, app.addr, "GET", "/me", map[string]string{"Authorization": "Bearer {{string .token}}"}, "",
+			recorded(200, nil, `{"user":"alice"}`, nil)),
+	}
+	h := newTmplHarness(t, conf, cases, nil)
+	h.run(t)
+	login := h.result(t, "test-1")
+	if login.Status != models.TestStatusFailed || login.FailureInfo.AnswerStalled != "" || len(login.Captured) != 0 {
+		t.Fatalf("test-1: %s, %+v, captured %+v; want a judged FAILED that captured nothing", login.Status, login.FailureInfo, login.Captured)
+	}
+	if got, _ := auth.Load().(string); got != "Bearer T0rec00001" {
+		t.Fatalf("test-2 sent %q; want the set's token, not a capture of the stand-in", got)
+	}
+}

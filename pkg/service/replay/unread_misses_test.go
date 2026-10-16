@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -222,33 +222,54 @@ func TestTheStalledAnswersNextStepFollowsWhatEndedIt(t *testing.T) {
 }
 
 // The start of a gRPC answer that began and sent no message is judged on its
-// metadata: a content-type that differs from the recording is a judged
-// difference, compared with the recording's messages and trailers; one that
-// matches is no difference (the test fails closed).
+// metadata against the expected answer as the replay renders it: a
+// content-type that differs from the recording (not a +codec of the same
+// type, which the matcher takes as the same) is a judged FAILED row, its
+// answer what came (the metadata, no message); one that matches, or none, is
+// no difference (the test fails closed).
 func TestAGRPCAnswersStartIsJudgedOnItsMetadata(t *testing.T) {
 	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
-	sent := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-1"}
-	sent.GrpcResp.Headers = models.GrpcHeaders{
+	view := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-1"}
+	view.GrpcResp.Headers = models.GrpcHeaders{
 		PseudoHeaders:   map[string]string{":status": "200"},
 		OrdinaryHeaders: map[string]string{"content-type": "application/grpc"},
 	}
-	sent.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
-	run := templates.NewRun(zap.NewNop(), nil, nil)
-	same := &models.GrpcResp{Headers: sent.GrpcResp.Headers}
-	if _, differs := r.answerStartDiffers(run, sent, same, "s"); differs {
+	view.GrpcResp.Body = models.GrpcLengthPrefixedMessage{DecodedData: `1: {"REC"}`}
+	view.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
+	if _, differs := r.startFailedRow(view, &models.GrpcResp{Headers: view.GrpcResp.Headers}, "s", time.Now()); differs {
 		t.Fatal("a start that matches the recording differs")
 	}
-	other := &models.GrpcResp{Headers: models.GrpcHeaders{
+	other := models.GrpcHeaders{
 		PseudoHeaders:   map[string]string{":status": "200"},
-		OrdinaryHeaders: map[string]string{"content-type": "application/grpc+json"},
-	}}
-	judged, differs := r.answerStartDiffers(run, sent, other, "s")
-	g, ok := judged.(*models.GrpcResp)
-	if !differs || !ok || g.Headers.OrdinaryHeaders["content-type"] != "application/grpc+json" || g.Trailers.OrdinaryHeaders["grpc-status"] != "0" {
-		t.Fatalf("%v, %+v; want the start that differs, with the recording's rest", differs, judged)
+		OrdinaryHeaders: map[string]string{"content-type": "text/plain"},
+	}
+	row, differs := r.startFailedRow(view, &models.GrpcResp{Headers: other}, "s", time.Now())
+	if !differs || row == nil || row.Status != models.TestStatusFailed || row.GrpcRes.Headers.OrdinaryHeaders["content-type"] != "text/plain" || row.GrpcRes.Body.DecodedData != "" || row.FailureInfo.AnswerStalled != "" {
+		t.Fatalf("%v, %+v; want a judged FAILED row holding what came", differs, row)
 	}
 	var none *models.GrpcResp
-	if _, differs := r.answerStartDiffers(run, sent, none, "s"); differs {
+	if _, differs := r.startFailedRow(view, none, "s", time.Now()); differs {
 		t.Fatal("no answer differs")
+	}
+}
+
+// An HTTP start is judged on its status and headers, an expected header that
+// holds template markup taken as the app sent it: a start that differs is a
+// judged FAILED row whose answer is what came (no body of the recording's).
+func TestAnHTTPAnswersStartIsJudgedWithItsTemplatedHeadersTheApps(t *testing.T) {
+	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
+	view := &models.TestCase{Kind: models.HTTP, Name: "test-1", HTTPResp: models.HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/json", "Set-Cookie": "sid={{capture string .sid}}; Path=/"},
+		Body:       `{"token":"{{capture string .token}}"}`,
+	}}
+	same := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Set-Cookie": "sid=S1live; Path=/"}}
+	if _, differs := r.startFailedRow(view, same, "s", time.Now()); differs {
+		t.Fatal("a start whose templated header the app filled differs")
+	}
+	other := &models.HTTPResp{StatusCode: 500, Header: same.Header}
+	row, differs := r.startFailedRow(view, other, "s", time.Now())
+	if !differs || row.Res.StatusCode != 500 || row.Res.Body != "" || row.Result.StatusCode.Normal {
+		t.Fatalf("%v, %+v; want a judged FAILED row on the 500, holding what came", differs, row)
 	}
 }

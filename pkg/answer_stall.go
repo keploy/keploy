@@ -88,6 +88,12 @@ func (e *AnswerStallError) Error() string {
 		what = fmt.Sprintf("the app stopped taking the test's request and never answered (it took %s)", took)
 	case !e.Answered:
 		what = "the app never answered"
+	case e.Untaken:
+		took := fmt.Sprintf("at most %d bytes of it", e.Sent)
+		if e.Request > 0 {
+			took = fmt.Sprintf("at most %d of its %d bytes; %d were never taken", e.Sent, e.Request, max(e.Request-e.Sent, 0))
+		}
+		what = fmt.Sprintf("the app sent its answer's headers and stopped taking the test's request (it took %s)", took)
 	case e.Stream:
 		came := ""
 		if e.Came != "" {

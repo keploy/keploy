@@ -783,7 +783,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
 			if answer.didStall() {
-				return nil, answer.err()
+				return stalledStart(stream, answer), answer.err()
 			}
 			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
 		}
@@ -792,7 +792,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Close the send side of the stream
 	if err := stream.CloseSend(); err != nil {
 		if answer.didStall() {
-			return nil, answer.err()
+			return stalledStart(stream, answer), answer.err()
 		}
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
@@ -803,7 +803,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	respHeaders, err := stream.Header()
 	if err != nil {
 		if answer.didStall() {
-			return nil, answer.err()
+			return stalledStart(stream, answer), answer.err()
 		}
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
@@ -1003,8 +1003,23 @@ func grpcHeadersOf(respHeaders metadata.MD) models.GrpcHeaders {
 // headersOnly is the answer of a stream whose headers came and nothing more
 // (an ErrAnswerStalled after its answer began): its headers, for the replay
 // to judge them against the recording before it calls the stream not judged.
+// nil with no metadata in hand: a start is never made up.
 func headersOnly(respHeaders metadata.MD) *models.GrpcResp {
+	if respHeaders == nil {
+		return nil
+	}
 	return &models.GrpcResp{Headers: grpcHeadersOf(respHeaders)}
+}
+
+// stalledStart is what of the answer a call the stall rule cut while keploy
+// still sent its request had: the app's headers, when they came before the
+// cut (the cut call's Header returns at once), else nothing.
+func stalledStart(stream grpc.ClientStream, answer *answerWatch) *models.GrpcResp {
+	if !answer.answered.Load() {
+		return nil
+	}
+	md, _ := stream.Header()
+	return headersOnly(md)
 }
 
 // grpcRequestSize is the size of reqMsgs on the wire, their 5-byte prefixes
