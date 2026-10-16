@@ -64,6 +64,10 @@ const (
 type HTTPStreamConfig struct {
 	Mode     HTTPStreamMode
 	Boundary string
+	// Target names the stream's request ("GET /events"), for what a stream
+	// that ended with nothing of its answer to compare says
+	// (AnswerStallError). Set only under the proven switch.
+	Target string
 }
 
 // StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
@@ -745,7 +749,6 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
-				DialContext:        cfg.answer.dial(),
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -759,7 +762,6 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
-				DialContext:        cfg.answer.dial(),
 			},
 		}
 	} else {
@@ -774,7 +776,6 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
-				DialContext:        cfg.answer.dial(),
 			},
 		}
 	}
@@ -1038,9 +1039,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		cfg.RequestTimeout = 0
 	}
 	// With no clock on the app's answer, the stall rule (answerWatch) ends
-	// an exchange the app makes no progress on.
+	// an exchange the app makes no progress on: the whole call waits on the
+	// app, and the cut cancels the request's context.
 	cfg.answer = newAnswerWatch(cfg)
 	defer cfg.answer.stop()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
@@ -1059,7 +1063,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
-	cfg.answer.answering()
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
+	}
 
 	defer func() {
 		if httpResp != nil && httpResp.Body != nil {
@@ -1124,7 +1131,9 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 
 	// With no clock on the app's answer, the stall rule (answerWatch) ends
 	// an exchange the app makes no progress on, the stream's read included:
-	// the returned Reader's Close ends the watch.
+	// this call waits on the app, then each read of the returned Reader
+	// does, and its Close ends the watch. The cut cancels the request's
+	// context.
 	cfg.answer = newAnswerWatch(cfg)
 	handedOff := false
 	defer func() {
@@ -1132,6 +1141,8 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			cfg.answer.stop()
 		}
 	}()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
 
 	// Prepare the HTTP request using the shared helper
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
@@ -1152,10 +1163,16 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
-	cfg.answer.answering()
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
+	}
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
+	if provenswitch.On() {
+		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+	}
 
 	logger.Debug("detected HTTP streaming response",
 		zap.String("testcase", tc.Name),
@@ -1171,7 +1188,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if gzErr != nil {
 			httpResp.Body.Close()
 			if cfg.answer.didStall() {
-				// Not one byte of the body came: nothing to compare.
+				// Not one byte of the stream came: nothing to compare.
 				return nil, cfg.answer.err()
 			}
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
@@ -1331,6 +1348,12 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 		// The stall rule cut the stream with every frame that came
 		// matching: judged on what came, not judged as a whole.
 		ok = true
+	}
+	if errors.As(err, &st) && !st.Stream && st.Target == "" && cfg.Target != "" {
+		// A stream with nothing of its answer to compare names its request.
+		named := *st
+		named.Target = cfg.Target
+		err = &named
 	}
 	return ok, body, info, err
 }
@@ -1570,6 +1593,11 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				// stream open past its recording, and the read ends there
 				// (ErrStreamHeldOpen).
 				if sseCommentsOnly(parseSSEFrame(frame)) {
+					if nextExpected == 0 {
+						// A recording of no frame, and the app sent
+						// none: nothing of the answer to compare.
+						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithNothing("", true, 0)
+					}
 					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
@@ -1652,11 +1680,19 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			// them, with no line between, and the app stalled short of
 			// its recording (ErrStreamStalled): the lines that came
 			// matched theirs.
+			// Either with no line come is nothing of the answer to
+			// compare: it fails closed, not judged (ErrAnswerStalled).
 			if readToEnd && nextExpected >= len(expectedQueue) {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithNothing("", true, 0)
+				}
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
 			}
 			keepalives++
 			if readToEnd && keepalives >= 2 {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithNothing("", true, 0)
+				}
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamStalled
 			}
 			continue
@@ -1797,6 +1833,8 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 	contentMatch := true
 	mismatchOffset := -1
 	buffer := make([]byte, 32*1024)
+	// cut: the stall rule cut the stream after bytes that differ came.
+	cut := false
 
 	for {
 		n, err := stream.Read(buffer)
@@ -1831,18 +1869,26 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 		}
 		if err != nil {
 			var st *AnswerStallError
+			if errors.As(err, &st) && actualSize == 0 {
+				// Cut by the stall rule with nothing of the stream
+				// come: nothing to compare.
+				return false, "0", nil, st
+			}
 			if errors.As(err, &st) && contentMatch {
 				// Cut by the stall rule, every byte that came matching.
 				return true, strconv.Itoa(actualSize), nil, st.asStream(fmt.Sprintf("%d of the %d recorded bytes came", actualSize, expectedSize))
 			}
 			if errors.As(err, &st) {
-				break // what came differs: the comparison says so below
+				// What came differs: the comparison says so below, by
+				// its content (the cut, not the app, set its size).
+				cut = true
+				break
 			}
 			return false, strconv.Itoa(actualSize), nil, err
 		}
 	}
 
-	if actualSize != expectedSize {
+	if actualSize != expectedSize && !cut {
 		logger.Debug("binary stream size mismatch",
 			zap.Int("expected_size", expectedSize),
 			zap.Int("actual_size", actualSize))

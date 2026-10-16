@@ -1,15 +1,20 @@
 package pkg
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -45,11 +50,13 @@ func TestTheAnswerStallRuleIsOnOnlyWithNoBoundOfTheUsers(t *testing.T) {
 	w.stop()
 }
 
-// The rule measures the app's missing progress in keploy's runnable time: a
-// byte the app sends back, or a byte of the request it takes, starts it again;
-// the grace passing with neither cuts the exchange. Wall time passing while
-// keploy could not run (a starved host) cuts nothing.
-func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWithNoProgress(t *testing.T) {
+// The rule measures, in keploy's runnable time, how long keploy waited on the
+// app with no progress: a byte of the answer, or of the request the app made
+// room for, starts it again; the grace passing with neither, while keploy
+// waits, cuts the exchange. Wall time passing while keploy could not run (a
+// starved host) cuts nothing, and neither does time keploy spent not waiting
+// on the app (a stream it is slow to read).
+func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWaitedWithNoProgress(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
 	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
@@ -58,8 +65,20 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWithNoProgress(t *testing
 	w.onCut(func() { cuts.Add(1) })
 	keploy, app := net.Pipe()
 	defer app.Close()
-	c := w.wrap(keploy)
+	w.closeOnCut(keploy)
+	ctx := w.bind(context.Background())
 
+	// Keploy does not wait on the app: no time accrues, however long.
+	waitArmed(t, clk, w)
+	for i := 0; i < 5; i++ {
+		clk.Advance(9 * time.Second)
+		waitArmed(t, clk, w)
+	}
+	if w.didStall() {
+		t.Fatal("cut while keploy was not waiting on the app")
+	}
+
+	done := w.waiting()
 	waitArmed(t, clk, w)
 	clk.Advance(9 * time.Second)
 	waitArmed(t, clk, w)
@@ -71,26 +90,35 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWithNoProgress(t *testing
 		t.Fatal("cut before the grace of runnable time passed")
 	}
 
-	// The app answers a byte: the stall starts again.
-	go func() { _, _ = app.Write([]byte("x")) }()
-	if _, err := c.Read(make([]byte, 1)); err != nil {
-		t.Fatal(err)
-	}
+	// A byte of the answer: the stall starts again.
+	w.gotAnswer(1)
 	clk.Advance(9 * time.Second)
 	waitArmed(t, clk, w)
 	if w.didStall() {
-		t.Fatal("progress did not start the stall again")
+		t.Fatal("a byte of the answer did not start the stall again")
 	}
 
-	// The app takes a byte of the request: progress too.
-	go func() { _, _ = app.Read(make([]byte, 1)) }()
-	if _, err := c.Write([]byte("y")); err != nil {
-		t.Fatal(err)
-	}
+	// A byte of the request taken: progress too.
+	w.sentBody(1)
+	w.progress()
 	clk.Advance(9 * time.Second)
 	waitArmed(t, clk, w)
 	if w.didStall() {
 		t.Fatal("a request byte taken did not start the stall again")
+	}
+
+	// The wait ends, and keploy is slow to wait again (a stream it reads
+	// late): that time is not the app's, and a wait that begins after it
+	// starts the stall again.
+	done()
+	clk.Advance(30 * time.Second)
+	waitArmed(t, clk, w)
+	done = w.waiting()
+	defer done()
+	clk.Advance(9 * time.Second)
+	waitArmed(t, clk, w)
+	if w.didStall() {
+		t.Fatal("the time keploy did not wait on the app was counted")
 	}
 
 	clk.Advance(time.Second)
@@ -100,38 +128,64 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWithNoProgress(t *testing
 	if n := cuts.Load(); n != 1 {
 		t.Fatalf("cut %d times, want once", n)
 	}
-	if _, err := c.Read(make([]byte, 1)); err == nil {
+	if ctx.Err() == nil {
+		t.Fatal("the cut left the request's context live")
+	}
+	if _, err := keploy.Read(make([]byte, 1)); err == nil {
 		t.Fatal("the cut left the connection open")
+	}
+	// A connection of the exchange that comes after the cut (dialled
+	// late) is closed at once.
+	late, lateApp := net.Pipe()
+	defer lateApp.Close()
+	w.closeOnCut(late)
+	if _, err := late.Read(make([]byte, 1)); err == nil {
+		t.Fatal("a connection added after the cut was left open")
 	}
 }
 
-// What the rule waited for: a request the app stopped taking (a write keploy
-// still waited on at the cut, and how much of the request had gone), or an
-// answer that never came. Neither began an answer: ErrAnswerStalled. A stream
-// cut after its answer began is an ErrStreamHeldOpen, saying what of its
-// recording came.
+// A clean end of a stream (io.EOF) is the app's end, never taken for the
+// cut, even after it: the cut's own error is never io.EOF. Any other error
+// after the cut is what the rule waited for.
+func TestAStreamsCleanEndIsNeverTakenForTheCut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	clk := &stall.ManualClock{}
+	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: time.Second, StallClock: clk})
+	defer w.stop()
+	done := w.waiting()
+	waitArmed(t, clk, w)
+	clk.Advance(time.Second)
+	for !w.didStall() {
+		time.Sleep(time.Millisecond)
+	}
+	done()
+	ended := &answerReader{ReadCloser: io.NopCloser(strings.NewReader("")), w: w}
+	if _, err := ended.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("%v; want the app's own end, io.EOF", err)
+	}
+	cut := &answerReader{ReadCloser: io.NopCloser(iotest.ErrReader(context.Canceled)), w: w}
+	if _, err := cut.Read(make([]byte, 1)); !errors.Is(err, ErrAnswerStalled) {
+		t.Fatalf("%v; want what the rule waited for", err)
+	}
+}
+
+// What the rule waited for: a request the app stopped taking (how much of it
+// had gone), an answer that never came, its headers alone, one stopped
+// part-way. None of them has anything to compare: ErrAnswerStalled. A stream
+// cut after some of its frames came is an ErrStreamHeldOpen, saying what of
+// its recording came; one none of whose frames came is an ErrAnswerStalled.
 func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
 	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	w.describe("POST /upload", 1000)
-	keploy, app := net.Pipe()
-	defer app.Close()
-	c := w.wrap(keploy)
 	w.sentBody(300)
-	written := make(chan error, 1)
-	go func() {
-		_, err := c.Write(make([]byte, 64)) // the app never reads it
-		written <- err
-	}()
-	for w.writing.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	defer w.waiting()()
 	waitArmed(t, clk, w)
 	clk.Advance(10 * time.Second)
-	if err := <-written; err == nil {
-		t.Fatal("the cut did not end the write")
+	for !w.didStall() {
+		time.Sleep(time.Millisecond)
 	}
 	err := w.err()
 	if !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) {
@@ -143,17 +197,41 @@ func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 		}
 	}
 
-	never := &AnswerStallError{Target: "GET /x", Waited: time.Minute}
-	if got, want := never.Error(), "the app never answered; waited 1m0s of keploy's runnable time for GET /x"; got != want {
-		t.Fatalf("%q, want %q", got, want)
+	for _, c := range []struct {
+		e    *AnswerStallError
+		want string
+	}{
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute}, "the app never answered; waited 1m0s of keploy's runnable time for GET /x"},
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true}, "the app sent its answer's headers and nothing of its body; waited 1m0s of keploy's runnable time for GET /x"},
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true, Read: 42}, "the app's answer stopped part-way, after 42 bytes of its body; waited 1m0s of keploy's runnable time for GET /x"},
+		{keptOpenWithNothing("/pkg.Svc/Method", false, 0), "the app never answered, and sent only keepalives, for /pkg.Svc/Method"},
+		{keptOpenWithNothing("", true, 0), "the app sent its answer's headers and nothing of its body, then only keepalives"},
+		{keptOpenWithNothing("GET /e", true, 9), "the app's answer stopped part-way, after 9 bytes of its body, then only keepalives, for GET /e"},
+		{&AnswerStallError{Target: "POST /chunked", Waited: time.Minute, Untaken: true, Sent: 7}, "the app stopped taking the test's request and never answered (it took at most 7 bytes of it); waited 1m0s of keploy's runnable time for POST /chunked"},
+	} {
+		if got := c.e.Error(); got != c.want {
+			t.Fatalf("%q, want %q", got, c.want)
+		}
+		if !errors.Is(c.e, ErrAnswerStalled) || errors.Is(c.e, ErrStreamHeldOpen) {
+			t.Fatalf("%q: want an ErrAnswerStalled: nothing to compare", c.want)
+		}
 	}
-	stream := streamCut(&AnswerStallError{Target: "GET /events", Waited: time.Minute, Answered: true}, 1, 3, "frame")
+	answered := &AnswerStallError{Target: "GET /events", Waited: time.Minute, Answered: true}
+	stream := streamCut(answered, 1, 3, "frame")
 	if !errors.Is(stream, ErrStreamHeldOpen) || errors.Is(stream, ErrAnswerStalled) || !strings.Contains(stream.Error(), "1 of the 3 recorded frames came") {
 		t.Fatalf("%v: want an ErrStreamHeldOpen saying what came", stream)
 	}
-	past := streamCut(&AnswerStallError{Target: "GET /events", Waited: time.Minute, Answered: true}, 3, 3, "frame")
+	past := streamCut(answered, 3, 3, "frame")
 	if !strings.Contains(past.Error(), "every recorded frame came, and the stream did not end") {
 		t.Fatalf("%v", past)
+	}
+	for _, recorded := range []int{0, 3} {
+		if none := streamCut(answered, 0, recorded, "frame"); !errors.Is(none, ErrAnswerStalled) || errors.Is(none, ErrStreamHeldOpen) {
+			t.Fatalf("%v: a stream none of whose frames came (of %d recorded) must fail closed, an ErrAnswerStalled", none, recorded)
+		}
+	}
+	if other := errors.New("x"); streamCut(other, 0, 1, "frame") != other {
+		t.Fatal("streamCut changed an error that is no stall")
 	}
 }
 
@@ -179,6 +257,76 @@ func stallApp(t *testing.T) string {
 			<-hold
 		case "/never", "/upload-unread":
 			<-hold
+		case "/sse-none":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/sse-keepalive-none":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(": ping\n\n"))
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/ndjson-keepalive-none":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte("\n\n"))
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/plain-short":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("alpha\n"))
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/multipart-short":
+			w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+			_, _ = w.Write([]byte("--frame\r\nContent-Type: text/plain\r\n\r\none\r\n--frame\r\n"))
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/binary-short", "/binary-differs", "/binary-none":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			switch r.URL.Path {
+			case "/binary-short":
+				_, _ = w.Write([]byte("abc"))
+			case "/binary-differs":
+				_, _ = w.Write([]byte("abX"))
+			}
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/sse-gzip", "/sse-br":
+			w.Header().Set("Content-Type", "text/event-stream")
+			var enc interface {
+				Write([]byte) (int, error)
+				Flush() error
+			}
+			if r.URL.Path == "/sse-gzip" {
+				w.Header().Set("Content-Encoding", "gzip")
+				enc = gzip.NewWriter(w)
+			} else {
+				w.Header().Set("Content-Encoding", "br")
+				enc = brotli.NewWriter(w)
+			}
+			_, _ = enc.Write([]byte("data: a\n\ndata: b\n\n"))
+			_ = enc.Flush()
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/partial":
+			w.Header().Set("Content-Length", "100")
+			_, _ = w.Write([]byte("0123456789"))
+			w.(http.Flusher).Flush()
+			<-hold
+		case "/ndjson-done":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte("{\"id\":1}\n{\"id\":2}\n"))
+		case "/upload-slow":
+			// Reads the body a piece at a time, each within the grace,
+			// the whole far longer than it.
+			buf := make([]byte, 4<<20)
+			for {
+				if _, err := io.ReadFull(r.Body, buf); err != nil {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/slow":
 			time.Sleep(100 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"ok":true}`))
@@ -240,6 +388,88 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			t.Fatalf("%v, %v; want judged on what came, not judged: short of the recording", ok, err)
 		}
 	})
+	// A stream none of whose frames came has nothing to compare: it fails
+	// closed (ErrAnswerStalled), whether the stall rule ended it or the
+	// app's keepalives did, never a pass on the recording.
+	t.Run("a stream that sends nothing", func(t *testing.T) {
+		for _, c := range []struct {
+			path, ctype string
+			chunks      []models.HTTPStreamChunk
+			says        string
+		}{
+			{"/sse-none", "text/event-stream", frames("data", "a"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /sse-none"},
+			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /sse-keepalive-none"},
+			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /ndjson-keepalive-none"},
+			{"/binary-none", "application/octet-stream", frames("raw", "abcdef"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /binary-none"},
+		} {
+			ok, err := readStream(t, stream(c.path, c.ctype, c.chunks))
+			if ok || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
+				t.Fatalf("%s: %v, %v; want it failing closed, an ErrAnswerStalled saying %q", c.path, ok, err, c.says)
+			}
+		}
+	})
+	t.Run("plain text and multipart short of their recordings", func(t *testing.T) {
+		ok, err := readStream(t, stream("/plain-short", "text/plain", frames("raw", "alpha", "beta")))
+		if !ok || !errors.Is(err, ErrStreamHeldOpen) || !strings.Contains(fmtErr(err), "1 of the 2 recorded lines came") {
+			t.Fatalf("plain text: %v, %v; want judged on what came, not judged", ok, err)
+		}
+		tc := stream("/multipart-short", "multipart/x-mixed-replace; boundary=frame", nil)
+		tc.HTTPResp.Body = "--frame\r\nContent-Type: text/plain\r\n\r\none\r\n--frame\r\nContent-Type: text/plain\r\n\r\ntwo\r\n--frame--\r\n"
+		ok, err = readStream(t, tc)
+		if !ok || !errors.Is(err, ErrStreamHeldOpen) || !strings.Contains(fmtErr(err), "1 of the 2 recorded parts came") {
+			t.Fatalf("multipart: %v, %v; want judged on what came, not judged", ok, err)
+		}
+	})
+	t.Run("a binary stream", func(t *testing.T) {
+		ok, err := readStream(t, stream("/binary-short", "application/octet-stream", frames("raw", "abcdef")))
+		if !ok || !errors.Is(err, ErrStreamHeldOpen) || !strings.Contains(fmtErr(err), "3 of the 6 recorded bytes came") {
+			t.Fatalf("%v, %v; want judged on what came, not judged", ok, err)
+		}
+		// A byte that came and differs fails the test, by its content:
+		// the cut, not the app, set how much came.
+		tc := stream("/binary-differs", "application/octet-stream", frames("raw", "abcdef"))
+		resp, err := SimulateHTTPStreaming(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Reader.Close()
+		ok, _, info, err := CompareHTTPStream(tc.HTTPResp, resp.Reader, resp.StreamConfig, map[string]struct{}{}, zap.NewNop())
+		if ok || err != nil || info == nil || info.Reason != "content mismatch starting near byte 0 of 3 bytes" {
+			t.Fatalf("%v, %+v, %v; want the test failed on the byte that differs", ok, info, err)
+		}
+	})
+	t.Run("a compressed stream past its recording", func(t *testing.T) {
+		for _, path := range []string{"/sse-gzip", "/sse-br"} {
+			tc := stream(path, "text/event-stream", frames("data", "a", "b"))
+			tc.HTTPReq.Header = map[string]string{"Accept-Encoding": "gzip, br"}
+			ok, err := readStream(t, tc)
+			if !ok || !errors.Is(err, ErrStreamHeldOpen) || !strings.Contains(fmtErr(err), "every recorded frame came, and the stream did not end") {
+				t.Fatalf("%s: %v, %v; want judged on what came, not judged", path, ok, err)
+			}
+		}
+	})
+	// A stream the app ended is judged, however late keploy reads it: the
+	// time keploy does not wait on the app is not the app's stall.
+	t.Run("a finished stream read late", func(t *testing.T) {
+		tc := stream("/ndjson-done", "application/x-ndjson", frames("raw", `{"id":1}`, `{"id":2}`))
+		resp, err := SimulateHTTPStreaming(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Reader.Close()
+		time.Sleep(4 * stallConfig().StallGrace)
+		ok, _, info, err := CompareHTTPStream(tc.HTTPResp, resp.Reader, resp.StreamConfig, map[string]struct{}{}, zap.NewNop())
+		if !ok || err != nil || info != nil {
+			t.Fatalf("%v, %+v, %v; want the finished stream judged, and passed", ok, info, err)
+		}
+	})
+	t.Run("an answer that stops part-way", func(t *testing.T) {
+		tc := &models.TestCase{Name: "partial", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/partial"}}
+		_, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial"; !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want {
+			t.Fatalf("%v; want %q", err, want)
+		}
+	})
 	t.Run("R5 an answer that never comes", func(t *testing.T) {
 		tc := &models.TestCase{Name: "never", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/never"}}
 		_, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
@@ -264,6 +494,12 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 		tc := &models.TestCase{Name: "slow", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/slow"}}
 		if _, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig()); err != nil {
 			t.Fatalf("SimulateHTTP: %v", err)
+		}
+	})
+	t.Run("an upload the app reads slowly", func(t *testing.T) {
+		tc := &models.TestCase{Name: "upload-slow", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: url + "/upload-slow", Body: strings.Repeat("x", 32<<20)}}
+		if _, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig()); err != nil {
+			t.Fatalf("SimulateHTTP: %v; want judged: the app took each piece of the request within the grace", err)
 		}
 	})
 	t.Run("a stream that trickles", func(t *testing.T) {
@@ -309,6 +545,9 @@ func TestTheGRPCWaitsThatNeverEndedEndOnTheStallRule(t *testing.T) {
 		if got := len(resp.AllMessages()); got != 2 {
 			t.Fatalf("returned %d messages, want what came and the recording's rest", got)
 		}
+		if got := resp.Trailers.OrdinaryHeaders["grpc-status"]; got != "0" {
+			t.Fatalf("grpc-status %q: keploy's own cut taken for the app's status", got)
+		}
 	})
 	t.Run("R4 a large request the app never reads", func(t *testing.T) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -329,6 +568,112 @@ func TestTheGRPCWaitsThatNeverEndedEndOnTheStallRule(t *testing.T) {
 		_, err = SimulateGRPC(context.Background(), grpcTestCase(ln.Addr().String(), reqs), "s", zap.NewNop(), stallConfig())
 		if !errors.Is(err, ErrAnswerStalled) || !strings.Contains(fmtErr(err), "stopped taking the test's request") || !strings.Contains(fmtErr(err), "were never taken") {
 			t.Fatalf("%v; want the request the app stopped taking", err)
+		}
+	})
+}
+
+// The app's keepalives are no progress: a gRPC app that sends them every
+// second, and never reads a large request (R4) or never answers one, still
+// ends on the stall rule, or on its keepalives (row W1). One that sent
+// nothing of its answer, its headers at most, fails closed
+// (ErrAnswerStalled), never a pass on the recording, with no bound of the
+// user's or with one.
+func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	drain := func(stream grpc.ServerStream) {
+		var m rawMessage
+		for stream.RecvMsg(&m) == nil {
+		}
+	}
+
+	t.Run("R4 against a server whose keepalives come every second", func(t *testing.T) {
+		counted := startKeepaliveServer(t, 1000, func(_ interface{}, _ grpc.ServerStream) error {
+			<-hold
+			return nil
+		})
+		addr := counted.Addr().String()
+		var reqs []models.GrpcLengthPrefixedMessage
+		big := strings.Repeat("y", 32<<10)
+		for i := 0; i < 64; i++ {
+			reqs = append(reqs, models.GrpcLengthPrefixedMessage{DecodedData: "1: {\"" + big + "\"}"})
+		}
+		cfg := stallConfig()
+		cfg.StallGrace = 3 * time.Second
+		_, err := SimulateGRPC(context.Background(), grpcTestCase(addr, reqs), "s", zap.NewNop(), cfg)
+		if !errors.Is(err, ErrAnswerStalled) || !strings.Contains(fmtErr(err), "stopped taking the test's request") || !strings.Contains(fmtErr(err), "were never taken") {
+			t.Fatalf("%v; want the request the app stopped taking", err)
+		}
+		if n := counted.pings.Load(); n < 2 {
+			t.Fatalf("the app sent %d keepalive(s) during the wait; the test needs it to send them", n)
+		}
+	})
+
+	t.Run("a large request the app reads slowly", func(t *testing.T) {
+		slow := startGRPCServer(t, 1000, time.Second, func(_ interface{}, stream grpc.ServerStream) error {
+			var m rawMessage
+			for stream.RecvMsg(&m) == nil {
+				time.Sleep(25 * time.Millisecond)
+			}
+			return stream.SendMsg(&rawMessage{data: pbMsg("one")})
+		}).Addr().String()
+		var reqs []models.GrpcLengthPrefixedMessage
+		big := strings.Repeat("y", 32<<10)
+		for i := 0; i < 64; i++ {
+			reqs = append(reqs, models.GrpcLengthPrefixedMessage{DecodedData: "1: {\"" + big + "\"}"})
+		}
+		tc := recordedAs(grpcTestCase(slow, reqs), pbMsg("one"))
+		if _, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), stallConfig()); err != nil {
+			t.Fatalf("SimulateGRPC: %v; want judged: the app took each message within the grace, its keepalives aside", err)
+		}
+	})
+
+	t.Run("nothing of the answer, the stall rule's grace", func(t *testing.T) {
+		addr := startStreamingServer(t, &streamingServer{holdOpen: hold})
+		addrHeaders := startGRPCServer(t, 1000, 0, func(_ interface{}, stream grpc.ServerStream) error {
+			drain(stream)
+			_ = stream.SendHeader(nil)
+			<-hold
+			return nil
+		}).Addr().String()
+		for _, c := range []struct{ addr, says string }{
+			{addr, "the app never answered; waited 300ms of keploy's runnable time for /pkg.Svc/Method"},
+			{addrHeaders, "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for /pkg.Svc/Method"},
+		} {
+			tc := recordedAs(grpcTestCase(c.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"))
+			resp, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+			if resp != nil || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
+				t.Fatalf("%v, %v; want it failing closed: %q", resp, err, c.says)
+			}
+		}
+	})
+
+	t.Run("nothing of the answer, the app's keepalives", func(t *testing.T) {
+		never := startKeepaliveServer(t, 1000, func(_ interface{}, stream grpc.ServerStream) error {
+			drain(stream)
+			<-hold
+			return nil
+		}).Addr().String()
+		headers := startKeepaliveServer(t, 1000, func(_ interface{}, stream grpc.ServerStream) error {
+			drain(stream)
+			_ = stream.SendHeader(nil)
+			<-hold
+			return nil
+		}).Addr().String()
+		for _, c := range []struct {
+			addr, says string
+			cfg        SimulationConfig
+		}{
+			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}},
+			{headers, "the app sent its answer's headers and nothing of its body, then only keepalives, for /pkg.Svc/Method", SimulationConfig{APITimeout: 60}},
+			{never, "the app never answered, and sent only keepalives, for /pkg.Svc/Method", SimulationConfig{Unbounded: true}},
+		} {
+			tc := recordedAs(grpcTestCase(c.addr, []models.GrpcLengthPrefixedMessage{{}}), pbMsg("one"))
+			resp, err := SimulateGRPC(context.Background(), tc, "s", zap.NewNop(), c.cfg)
+			if resp != nil || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
+				t.Fatalf("%+v: %v, %v; want it failing closed: %q", c.cfg, resp, err, c.says)
+			}
 		}
 	})
 }
