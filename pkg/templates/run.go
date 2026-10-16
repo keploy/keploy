@@ -119,6 +119,23 @@ func (r *Run) Apply(caps []Capture) {
 	}
 }
 
+// fork is a copy of r to resolve a response against without moving r: the
+// same recorded values, secrets and unusable keys, each key at r's value
+// now. It warns of nothing, r having warned of the same text already.
+func (r *Run) fork() *Run {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f := &Run{
+		logger:   zap.NewNop(),
+		recorded: copyStringMap(r.recorded),
+		values:   copyStringMap(r.values),
+		secrets:  copyStringMap(r.secrets),
+		unusable: copyStringMap(r.unusable),
+		warned:   map[string]bool{},
+	}
+	return f
+}
+
 // Values is a copy of each key's current value.
 func (r *Run) Values() map[string]string {
 	r.mu.Lock()
