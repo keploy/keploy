@@ -174,6 +174,44 @@ func TestRelayConfig_AClientUpgradesHandshakeIsChargedAsAnyClientHandshake(t *te
 	}
 }
 
+// The relay recordViaSupervisor runs carries the client-side handshake
+// events (withClientTLS) for this connection's destination: keploy's TLS
+// server tells them what a client-side upgrade's handshake, and the client
+// just after it, lost, charged as on every path. Without them a relay
+// upgrade's rejection or abandon was charged nothing.
+func TestTheRelaysUpgradesAreChargedAsEveryClientHandshake(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy_v2.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy_v2.go: %v", err)
+	}
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		fd, ok := n.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "recordViaSupervisor" {
+			return true
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var buf bytes.Buffer
+			_ = printer.Fprint(&buf, fset, call)
+			if buf.String() == "p.withClientTLS(ctx, remoteOf(dstConn))" {
+				found = true
+			}
+			return true
+		})
+		return false
+	})
+	if !found {
+		t.Fatal("recordViaSupervisor's relay does not run under p.withClientTLS(ctx, remoteOf(dstConn)): a client-side upgrade's handshake would be charged nothing")
+	}
+}
+
 // Every parser TLS upgrader the record path builds (MySQL's, Postgres's)
 // charges its client's handshake as the proxy's own are (clientTLSHandler),
 // to the connection's destination: given pTls.HandleTLSConnection bare, a
