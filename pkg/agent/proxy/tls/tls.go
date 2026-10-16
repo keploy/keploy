@@ -233,11 +233,17 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 		},
 	}
 
-	// Wrap the TCP conn with TLS
-	tlsConn := tls.Server(conn, config)
+	// Wrap the TCP conn with TLS, over a conn that hands crypto/tls a record
+	// at a time until the client's first byte after the handshake, so that
+	// whether it sent any is known (SilentSinceHandshake).
+	records := newRecordConn(conn)
+	tlsConn := tls.Server(records, config)
 
 	// Perform the handshake
 	err := tlsConn.Handshake()
+	if err == nil {
+		records.handshakeDone()
+	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
 		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}
