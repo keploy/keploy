@@ -391,6 +391,9 @@ func watchingPlaced(t *testing.T, f *fakeDocker, addrs ...string) (*dockerIndex,
 // command, entrypoint or labels of its own.
 var fpEmpty = Fingerprint(Config{})
 
+// lfpEmpty is fpEmpty's legacy fingerprint (legacyFingerprint).
+var lfpEmpty = legacyFingerprint(Config{})
+
 func lookup(t *testing.T, r *dockerIndex, dst string) (Container, bool) {
 	t.Helper()
 	c, ok, err := r.Lookup(netip.MustParseAddrPort(dst))
@@ -426,11 +429,11 @@ func testcontainers() *fakeDocker {
 func TestIndexFindsPublishedPortsOnThisHost(t *testing.T) {
 	r, _ := watching(t, testcontainers(), "10.0.0.5", "192.168.1.20")
 	for dst, want := range map[string]Container{
-		"127.0.0.1:49153":    {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
-		"[::1]:49153":        {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
-		"192.168.1.20:49153": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty}, // all addresses
-		"127.0.0.1:49200":    {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty},
-		"10.0.0.5:49300":     {ID: "redis", Image: "redis:latest", Port: 6379, Fingerprint: fpEmpty}, // bound to that address
+		"127.0.0.1:49153":    {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty, Legacy: lfpEmpty},
+		"[::1]:49153":        {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty, Legacy: lfpEmpty},
+		"192.168.1.20:49153": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty, Legacy: lfpEmpty}, // all addresses
+		"127.0.0.1:49200":    {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty, Legacy: lfpEmpty},
+		"10.0.0.5:49300":     {ID: "redis", Image: "redis:latest", Port: 6379, Fingerprint: fpEmpty, Legacy: lfpEmpty}, // bound to that address
 	} {
 		got, ok := lookup(t, r, dst)
 		if !ok || got != want {
@@ -442,9 +445,9 @@ func TestIndexFindsPublishedPortsOnThisHost(t *testing.T) {
 func TestIndexFindsAContainersOwnIP(t *testing.T) {
 	r, _ := watching(t, testcontainers())
 	for dst, want := range map[string]Container{
-		"172.17.0.2:5432": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
-		"[fd00::2]:5432":  {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty},
-		"172.17.0.3:4566": {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty},
+		"172.17.0.2:5432": {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty, Legacy: lfpEmpty},
+		"[fd00::2]:5432":  {ID: "pg", Image: "postgres:16-alpine", Port: 5432, Fingerprint: fpEmpty, Legacy: lfpEmpty},
+		"172.17.0.3:4566": {ID: "ls", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: fpEmpty, Legacy: lfpEmpty},
 	} {
 		got, ok := lookup(t, r, dst)
 		if !ok || got != want {
@@ -485,6 +488,11 @@ func TestIndexFillsFromTheList(t *testing.T) {
 	close(stuck)
 	if fp := <-got; fp != fpEmpty {
 		t.Fatalf("Fingerprint after the held read = %q", fp)
+	}
+	// Read with it, the legacy fingerprint a recording made before secrets
+	// were left out names the container by.
+	if fp, legacy, ok := r.Fingerprints(t.Context(), "pg"); !ok || fp != fpEmpty || legacy != lfpEmpty {
+		t.Fatalf("Fingerprints after the held read = %q, %q, %v; want %q, %q", fp, legacy, ok, fpEmpty, lfpEmpty)
 	}
 	if _, inspects, _ := f.count(); inspects != 4 {
 		t.Fatalf("the first list read %d containers, want every one it listed", inspects)
