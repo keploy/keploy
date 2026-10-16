@@ -860,6 +860,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		// It fails closed, not judged (ErrAnswerStalled), never a pass on
 		// the recording's fill.
 		headers, data := pings.heldAnswer()
+		if headers {
+			return headersOnly(respHeaders), keptOpenWithNothing(path, headers, data)
+		}
 		return nil, keptOpenWithNothing(path, headers, data)
 	}
 	if heldOpen {
@@ -875,8 +878,11 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// (the stall's own fill), not judged as a whole.
 	var silent error
 	if !heldOpen && drainErr != nil && answer.didStall() {
-		if !answer.answered.Load() || len(respMsgs) == 0 {
+		if !answer.answered.Load() {
 			return nil, answer.err()
+		}
+		if len(respMsgs) == 0 {
+			return headersOnly(respHeaders), answer.err()
 		}
 		recorded := tc.GrpcResp.AllMessages()
 		came := len(respMsgs)
@@ -913,35 +919,11 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Construct the response
 	grpcResp := &models.GrpcResp{
-		Headers: models.GrpcHeaders{
-			PseudoHeaders:   make(map[string]string),
-			OrdinaryHeaders: make(map[string]string),
-		},
+		Headers: grpcHeadersOf(respHeaders),
 		Trailers: models.GrpcHeaders{
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
 		},
-	}
-
-	// Convert response headers
-	for k, v := range respHeaders {
-		val := strings.Join(v, ", ")
-		if strings.HasPrefix(k, ":") {
-			grpcResp.Headers.PseudoHeaders[k] = val
-		} else {
-			grpcResp.Headers.OrdinaryHeaders[k] = val
-		}
-	}
-
-	// Add the :status pseudo-header since gRPC client abstracts it away
-	// For successful gRPC calls, HTTP status is always 200
-	if _, ok := grpcResp.Headers.PseudoHeaders[":status"]; !ok {
-		grpcResp.Headers.PseudoHeaders[":status"] = "200"
-	}
-
-	// Add standard gRPC headers if not present
-	if _, ok := grpcResp.Headers.OrdinaryHeaders["content-type"]; !ok {
-		grpcResp.Headers.OrdinaryHeaders["content-type"] = "application/grpc"
 	}
 
 	// Convert trailers
@@ -994,6 +976,35 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return grpcResp, ErrStreamHeldOpen
 	}
 	return grpcResp, nil
+}
+
+// grpcHeadersOf is the response headers respHeaders as a GrpcResp holds them:
+// with :status 200 and content-type application/grpc when the app sent none
+// (the gRPC client hides :status; a successful call's is always 200).
+func grpcHeadersOf(respHeaders metadata.MD) models.GrpcHeaders {
+	h := models.GrpcHeaders{PseudoHeaders: make(map[string]string), OrdinaryHeaders: make(map[string]string)}
+	for k, v := range respHeaders {
+		val := strings.Join(v, ", ")
+		if strings.HasPrefix(k, ":") {
+			h.PseudoHeaders[k] = val
+		} else {
+			h.OrdinaryHeaders[k] = val
+		}
+	}
+	if _, ok := h.PseudoHeaders[":status"]; !ok {
+		h.PseudoHeaders[":status"] = "200"
+	}
+	if _, ok := h.OrdinaryHeaders["content-type"]; !ok {
+		h.OrdinaryHeaders["content-type"] = "application/grpc"
+	}
+	return h
+}
+
+// headersOnly is the answer of a stream whose headers came and nothing more
+// (an ErrAnswerStalled after its answer began): its headers, for the replay
+// to judge them against the recording before it calls the stream not judged.
+func headersOnly(respHeaders metadata.MD) *models.GrpcResp {
+	return &models.GrpcResp{Headers: grpcHeadersOf(respHeaders)}
 }
 
 // grpcRequestSize is the size of reqMsgs on the wire, their 5-byte prefixes

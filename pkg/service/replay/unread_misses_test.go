@@ -10,9 +10,13 @@ import (
 	"sync"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // misses answers the harness's per-test GetMockErrors calls in test order:
@@ -202,5 +206,49 @@ func TestTestsKeployCannotCaptureAddsEachTestsAbandonedHandshakes(t *testing.T) 
 	want := models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 2, What: "to 10.0.0.9:443"}, unix(2)}
 	if fmt.Sprint(lost) != fmt.Sprint(want) {
 		t.Fatalf("what %+v, want %+v", lost, want)
+	}
+}
+
+// A stream the app sent only keepalives on is not changed by a bound of the
+// user's, so its next step never suggests one; the stall bound's does.
+func TestTheStalledAnswersNextStepFollowsWhatEndedIt(t *testing.T) {
+	keepalives := stalledAnswerRemedy(&pkg.AnswerStallError{Answered: true, Keepalives: true})
+	if strings.Contains(keepalives, "give the") || !strings.Contains(keepalives, "--api-timeout does not change this") {
+		t.Fatalf("keepalives' next step %q suggests a bound", keepalives)
+	}
+	if grace := stalledAnswerRemedy(&pkg.AnswerStallError{}); !strings.Contains(grace, "give the tests a bound of your own with --api-timeout") {
+		t.Fatalf("the stall bound's next step %q", grace)
+	}
+}
+
+// The start of a gRPC answer that began and sent no message is judged on its
+// metadata: a content-type that differs from the recording is a judged
+// difference, compared with the recording's messages and trailers; one that
+// matches is no difference (the test fails closed).
+func TestAGRPCAnswersStartIsJudgedOnItsMetadata(t *testing.T) {
+	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
+	sent := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-1"}
+	sent.GrpcResp.Headers = models.GrpcHeaders{
+		PseudoHeaders:   map[string]string{":status": "200"},
+		OrdinaryHeaders: map[string]string{"content-type": "application/grpc"},
+	}
+	sent.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
+	run := templates.NewRun(zap.NewNop(), nil, nil)
+	same := &models.GrpcResp{Headers: sent.GrpcResp.Headers}
+	if _, differs := r.answerStartDiffers(run, sent, same, "s"); differs {
+		t.Fatal("a start that matches the recording differs")
+	}
+	other := &models.GrpcResp{Headers: models.GrpcHeaders{
+		PseudoHeaders:   map[string]string{":status": "200"},
+		OrdinaryHeaders: map[string]string{"content-type": "application/grpc+json"},
+	}}
+	judged, differs := r.answerStartDiffers(run, sent, other, "s")
+	g, ok := judged.(*models.GrpcResp)
+	if !differs || !ok || g.Headers.OrdinaryHeaders["content-type"] != "application/grpc+json" || g.Trailers.OrdinaryHeaders["grpc-status"] != "0" {
+		t.Fatalf("%v, %+v; want the start that differs, with the recording's rest", differs, judged)
+	}
+	var none *models.GrpcResp
+	if _, differs := r.answerStartDiffers(run, sent, none, "s"); differs {
+		t.Fatal("no answer differs")
 	}
 }

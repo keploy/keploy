@@ -71,7 +71,10 @@ type AnswerStallError struct {
 	Came   string
 	// Keepalives: the app sent keepalives and nothing of its answer, and
 	// the keepalive rule ended the wait (row W1), not the grace.
-	Keepalives bool
+	// KeepalivesInBody: they were body bytes (an SSE comment, an NDJSON
+	// blank line), not frames beside it (a gRPC PING).
+	Keepalives       bool
+	KeepalivesInBody bool
 }
 
 func (e *AnswerStallError) Error() string {
@@ -97,9 +100,12 @@ func (e *AnswerStallError) Error() string {
 		what = fmt.Sprintf("the app's answer stopped part-way, after %d bytes of its body", e.Read)
 	}
 	if e.Keepalives {
-		if e.Answered {
+		switch {
+		case e.KeepalivesInBody && e.Answered && e.Read == 0:
+			what = "the app sent its answer's headers and nothing of its body but keepalives"
+		case e.Answered:
 			what += ", then only keepalives"
-		} else {
+		default:
 			what += ", and sent only keepalives"
 		}
 		if e.Target != "" {
@@ -122,6 +128,16 @@ func (e *AnswerStallError) Is(target error) bool {
 		return target == ErrStreamHeldOpen
 	}
 	return target == ErrAnswerStalled
+}
+
+// AnswerBegan reports whether err is an ErrAnswerStalled after the app's
+// answer began: its headers (status, gRPC metadata) came, and nothing of its
+// body. Those are judged against the recording first: a difference in them
+// is a judged failure, and only a start that matches fails closed, not
+// judged.
+func AnswerBegan(err error) bool {
+	var st *AnswerStallError
+	return errors.As(err, &st) && !st.Stream && st.Answered
 }
 
 // asStream is e for a streamed answer the comparison read up to the cut,
@@ -160,6 +176,12 @@ func keptOpenWithNothing(target string, answered bool, read int64) *AnswerStallE
 	return &AnswerStallError{Target: target, Answered: answered, Read: read, Keepalives: true}
 }
 
+// keptOpenWithKeepalivesOnly is keptOpenWithNothing for an HTTP stream whose
+// keepalives are body bytes (an SSE comment, an NDJSON blank line).
+func keptOpenWithKeepalivesOnly() *AnswerStallError {
+	return &AnswerStallError{Answered: true, Keepalives: true, KeepalivesInBody: true}
+}
+
 // answerWatch is the stall rule on one test's exchange with the app
 // (AnswerStallGrace). It measures how long keploy waited on the app with no
 // progress: the time accrues only while keploy waits on the app (waiting:
@@ -169,9 +191,9 @@ func keptOpenWithNothing(target string, answered bool, read int64) *AnswerStallE
 //   - HTTP: a byte of the request's body the transport took to write (it
 //     takes the next only once the app made room for it), the answer's
 //     headers, a byte of its body;
-//   - gRPC: the app's HEADERS, DATA and WINDOW_UPDATE frames, and the
-//     request's DATA keploy wrote (pingWatch), never a PING, its ACK or a
-//     SETTINGS frame.
+//   - gRPC: the app's HEADERS, CONTINUATION, DATA, WINDOW_UPDATE,
+//     RST_STREAM and GOAWAY frames, and the request's DATA keploy wrote
+//     (pingWatch), never a PING, its ACK or a SETTINGS frame.
 //
 // When keploy waited the grace with none, the watch cuts the exchange (cut:
 // the HTTP request's context cancelled, the gRPC stream cancelled and its
@@ -416,7 +438,8 @@ func (b *answerBody) Read(p []byte) (int, error) {
 
 // answerReader is a watched exchange's streamed answer as the comparison
 // reads it: each read is a wait on the app (waiting), a read the stall rule
-// cut ends with what the rule waited for, and its Close ends the watch. A
+// cut ends with what the rule waited for, and its end, or its Close, ends
+// the watch. A
 // clean end (io.EOF) stays one: the app ended the stream. The cut's own
 // error is never io.EOF (net/http answers a read of a request whose context
 // was cancelled with the cancellation).
@@ -431,6 +454,11 @@ func (r *answerReader) Read(p []byte) (int, error) {
 	done()
 	if err != nil && err != io.EOF && r.w.didStall() {
 		err = r.w.err()
+	}
+	if err != nil {
+		// The stream ended (its end, or its cut): nothing more is waited
+		// on, so the watch ends, even for a reader never closed.
+		r.w.stop()
 	}
 	return n, err
 }
