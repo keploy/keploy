@@ -3365,6 +3365,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// takes (readHTTP2UntilHeaders). On record the HTTP/2 parser claims
 	// every HTTP/2 connection whatever its HEADERS say, and the real server
 	// answers the preface, so nothing is waited for.
+	if provenswitch.On() && isHTTP2PrefacePrefix(initialBuf) {
+		// Part of the client preface came in the first read: the rest is on
+		// its way, and is read before anything is decided on it.
+		initialBuf, err = readHTTP2Preface(parserCtx, srcConn, initialBuf)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the HTTP/2 client preface")
+			return err
+		}
+	}
 	if provenswitch.On() && util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		if rule.Mode == models.MODE_TEST {
 			logger.Debug("HTTP/2 preface detected but no HEADERS frame yet; answering the preface and reading until HEADERS")
