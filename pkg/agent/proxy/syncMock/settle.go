@@ -494,8 +494,11 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 		return st
 	}
 	// Asked, the recording is stopping: a parser holding exchanges decides
-	// them now (HoldExchanges), and they are pending until it has.
+	// them now (HoldExchanges), and they are pending until it has; the
+	// requests in flight that began by the stop's instant are the ones this
+	// stop found (NoteStop).
 	m.stopHolds()
+	m.NoteStop(before)
 	var backlogs []Backlog
 	for _, w := range m.watermarks() {
 		if b, ok := w.(Backlog); ok {
