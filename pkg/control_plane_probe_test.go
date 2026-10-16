@@ -228,29 +228,23 @@ func TestAgentHealthTicker_ChecksTheGuardWhenTheAgentBecomesReady(t *testing.T) 
 	}))
 	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 
-	select {
-	case ready := <-readyCh:
-		require.True(t, ready)
-	case <-ctx.Done():
-		t.Fatal("the agent never became ready")
-	}
+	// No clock bounds either wait: an agent that never becomes ready, or a
+	// check that never lands, fails the run at go test's own -timeout,
+	// where a budget here would fail a correct run on a starved machine.
+	require.True(t, <-readyCh, "the agent never became ready")
 
 	// The readiness signal must not wait on the check, so the check is allowed
 	// to land after it — but it must land.
-	select {
-	case auth := <-probed:
-		require.Equal(t, "Bearer not-the-session-token", auth,
-			"the check presented a credential that a guarded agent would accept, which would prove nothing")
-	case <-time.After(5 * time.Second):
-		t.Fatal("the agent became ready but its control plane was never checked")
-	}
+	auth := <-probed
+	require.Equal(t, "Bearer not-the-session-token", auth,
+		"the check presented a credential that a guarded agent would accept, which would prove nothing")
 }
 
 // TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard holds
