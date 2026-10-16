@@ -804,22 +804,27 @@ func TestVariables_ADeclarationKeployCannotFollowIsRefused(t *testing.T) {
 	}
 }
 
-func TestVariables_SwitchOffTheBlockIsNotRead(t *testing.T) {
+// With the switch off the block is followed too: a call whose variables hold
+// is answered with this run's values, and one whose variables do not hold
+// goes on to the matcher as before.
+func TestVariables_SwitchOffTheBlockIsFollowed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "0")
 	h := newHTTP()
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
-	// As on main: the exact pass answers a call that holds the recorded value,
-	// as recorded, and nothing is bound.
-	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"ord-rec-1","item":"pen"}`))
-	if !ok || stub.Name != "mock-1" || stub.Spec.HTTPResp.Body != `{"id":"ord-rec-1"}` {
+	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"ord-live-9","item":"pen"}`))
+	if !ok || stub.Name != "mock-1" || stub.Spec.HTTPResp.Body != `{"id":"ord-live-9"}` {
 		t.Fatalf("switch off: ok=%v stub=%+v", ok, stub)
 	}
-	ok, stub, _ = matchVar(t, h, db, liveReq("GET", "/orders/ord-rec-1", ""))
-	if !ok || stub.Spec.HTTPResp.Body != `{"id":"ord-rec-1","item":"pen","n":1}` {
+	ok, stub, _ = matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
+	if !ok || stub.Spec.HTTPResp.Body != `{"id":"ord-live-9","item":"pen","n":1}` {
 		t.Fatalf("switch off: answered %v %+v", ok, stub)
 	}
-	if len(db.table.Snapshot()) != 0 {
-		t.Fatal("switch off bound a variable")
+	if b, ok := db.table.Lookup("orderId"); !ok || b.Value != "ord-live-9" {
+		t.Fatalf("switch off: bound %+v %v", b, ok)
+	}
+	other := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	if ok, _, _ := matchVar(t, h, other, liveReq("GET", "/orders/ord-rec-1", "")); !ok {
+		t.Fatal("switch off: a call whose variables do not hold was not left to the matcher")
 	}
 }
 

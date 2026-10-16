@@ -248,6 +248,11 @@ type ScopeWindow struct {
 	// used while it was open (design v14 §4): its REAL rows, and in a
 	// record, the REAL list its recording carries.
 	Real []RealUse `json:"real,omitempty"`
+	// Variables are, in a replay without the proven switch, the test
+	// variables in force when the test ended: the values its run made where
+	// its recording holds others, for reading its answers in the recording's
+	// terms.
+	Variables []VariableBinding `json:"variables,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made

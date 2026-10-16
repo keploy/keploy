@@ -12,7 +12,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
@@ -3674,23 +3673,17 @@ func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 }
 
 // learnedNoiseOf is the request noise a consumed start-up mock's state
-// carries: the tree's copy's, as before the proven switch, and under it the
-// caller's (the copy the learn step attached what it learned to).
-func learnedNoiseOf(tree, caller models.MockSpec) map[string][]string {
-	if provenswitch.On() {
-		return caller.ReqBodyNoise
-	}
-	return tree.ReqBodyNoise
+// carries: the caller's (the copy the learn step, or the noise detector,
+// attached what it learned to), which holds the tree's copy's too.
+func learnedNoiseOf(_, caller models.MockSpec) map[string][]string {
+	return caller.ReqBodyNoise
 }
 
-// variablesOf is what a consumed mock's state carries of its variables:
-// under the proven switch, its own (MockSpec.Variables) and the ones the
-// learn step learned on it (MockSpec.Learned), which record's full round
-// writes onto the recording. Without the switch nothing, as before it.
+// variablesOf is what a consumed mock's state carries of its variables: its
+// own (MockSpec.Variables) and the ones the learn step learned on it
+// (MockSpec.Learned), which a record's learning round writes onto the
+// recording.
 func variablesOf(spec models.MockSpec) models.MockVariables {
-	if !provenswitch.On() {
-		return nil
-	}
 	out := spec.Variables.Clone()
 	for name, v := range spec.Learned().Clone() {
 		if out == nil {
@@ -3703,10 +3696,10 @@ func variablesOf(spec models.MockSpec) models.MockVariables {
 
 // bindsOf is what a consumed mock's state carries of the variables the learn
 // step learned while answering it that are bound at an earlier mock
-// (MockSpec.LearnedBinds): under the proven switch only.
+// (MockSpec.LearnedBinds).
 func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
 	binds := spec.LearnedBinds()
-	if !provenswitch.On() || len(binds) == 0 {
+	if len(binds) == 0 {
 		return nil
 	}
 	out := make(map[string]models.MockVariables, len(binds))
@@ -3730,13 +3723,12 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	}
 	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
-	// Under the proven switch what record's full round learned onto a mock
-	// is cumulative across its states: a reusable recording the learn step
-	// pairs twice keeps both pairings' variables, binds and noise, whichever
-	// door each left through (a door that keeps the pool's copy, as
-	// MarkMockAsUsed does, hands the second pairing a copy without the
-	// first's).
-	if provenswitch.On() {
+	// What a record's learning round learned onto a mock is cumulative
+	// across its states: a reusable recording the learn step pairs twice
+	// keeps both pairings' variables, binds and noise, whichever door each
+	// left through (a door that keeps the pool's copy, as MarkMockAsUsed
+	// does, hands the second pairing a copy without the first's).
+	{
 		var prev models.MockState
 		var ok bool
 		if m.consumedPersistent != nil {

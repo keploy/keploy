@@ -43,6 +43,7 @@ func (p *bindProxy) BoundVariables() ([]models.VariableBinding, bool) {
 func TestStartTestVariables(t *testing.T) {
 	p := &bindProxy{}
 	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	p.table.Reset()
 	p.table.Bind(models.VariableBinding{Name: "old", Value: "x"})
 	if err := a.StartTestVariables([]models.VariableBinding{{Name: "id", Value: "u1"}}); err != nil {
 		t.Fatal(err)
@@ -174,5 +175,40 @@ func TestAManagerlessProxyCannotBeginGivenValues(t *testing.T) {
 	}
 	if _, kept := a.TestVariables(); kept {
 		t.Fatal("a proxy with no manager said it keeps variables")
+	}
+}
+
+type scoperProxy struct {
+	resetProxy
+	begun, ended int
+}
+
+func (p *scoperProxy) BeginTest() { p.begun++ }
+func (p *scoperProxy) EndTest()   { p.ended++ }
+
+// Without the switch the tests open at once are one test for the learn step
+// and the variables: it begins with the first and ends with the last.
+func TestOpenTestsAreOneTest(t *testing.T) {
+	p := &scoperProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	a.beginOpenTest("TestA", 1)
+	a.beginOpenTest("TestA", 1)
+	a.endOpenTest()
+	if p.begun != 1 || p.ended != 0 {
+		t.Fatalf("with one of two tests still open: %d begun, %d ended", p.begun, p.ended)
+	}
+	a.endOpenTest()
+	a.endOpenTest()
+	if p.begun != 1 || p.ended != 1 {
+		t.Fatalf("after both ended: %d begun, %d ended", p.begun, p.ended)
+	}
+	a.NoteScope("pkg", 1, "/repo", true)
+	a.beginOpenTest("pkg", 1)
+	if p.begun != 1 {
+		t.Fatalf("a suite began a test: %d begun", p.begun)
+	}
+	a.beginOpenTest("TestA", 1)
+	if p.begun != 2 {
+		t.Fatalf("the next test did not begin: %d begun", p.begun)
 	}
 }

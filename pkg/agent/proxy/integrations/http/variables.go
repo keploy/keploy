@@ -655,6 +655,33 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 	return len(strictDiff(asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
+// serveVariablesFirst is the variable pass without the proven switch: a call
+// a mock with variables fits, and whose variables hold, is answered by it; any
+// other call goes on to the matcher as before (done false). retry is true when
+// the call must be checked again.
+func (h *HTTP) serveVariablesFirst(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, table *variables.Table, gen uint64, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (served *models.Mock, done, retry bool, err error) {
+	withVars, _ := splitVariableMocks(pool)
+	if len(withVars) == 0 || table == nil {
+		return nil, false, false, nil
+	}
+	hits, _, err := h.variablePass(ctx, input, withVars, table, gen, headerNoise, userBodyNoise, urlNoise)
+	if err != nil || len(hits) == 0 {
+		return nil, false, false, err
+	}
+	hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+	served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
+	if err != nil || retry {
+		return nil, false, retry, err
+	}
+	if problem != nil {
+		return nil, false, table.Gen() != gen, nil
+	}
+	if commitCursor != nil {
+		commitCursor()
+	}
+	return served, true, false, nil
+}
+
 // pickHit chooses the hit that answers: the first of hits, and among the
 // reusable (ConsumeCursorSaturate) recordings of this call whose variables
 // hold, the first in record order not yet served, else the last (a call past
@@ -708,7 +735,14 @@ func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrati
 	if problem != nil {
 		return nil, problem, false, nil
 	}
-	if _, _, _, ok := table.BindAll(hit.gen, hit.binds); !ok {
+	if !provenswitch.On() {
+		if stale, ok := table.BindEach(hit.gen, hit.binds); !ok {
+			if stale {
+				return nil, nil, true, nil
+			}
+			return nil, &varProblem{mock: hit.mock.Name, why: "a variable it binds is bound to another value in this test"}, false, nil
+		}
+	} else if _, _, _, ok := table.BindAll(hit.gen, hit.binds); !ok {
 		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
