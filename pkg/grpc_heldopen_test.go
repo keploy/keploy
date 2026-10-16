@@ -29,7 +29,7 @@ import (
 // client has answered the one before. Nothing in it waits on a clock.
 type h2App struct {
 	addr string
-	// keepalives counts the PINGs it sent.
+	// keepalives counts the PINGs it sent, each counted before it goes out.
 	keepalives atomic.Int32
 	// exhausted closes when the script sent every keepalive it had and the
 	// client still had not ended the stream: the hang.
@@ -91,10 +91,12 @@ func (s *h2Stream) keepalive() bool {
 		return false
 	default:
 	}
+	// Counted before it goes out: a client that ends the call on it may
+	// return before a count taken after the write.
+	s.app.keepalives.Add(1)
 	if err := s.write(func() error { return s.fr.WritePing(false, [8]byte{}) }); err != nil {
 		return false
 	}
-	s.app.keepalives.Add(1)
 	select {
 	case <-s.acks:
 		return true
@@ -105,10 +107,10 @@ func (s *h2Stream) keepalive() bool {
 
 // pingNow sends a PING without waiting for its acknowledgement.
 func (s *h2Stream) pingNow() error {
+	s.app.keepalives.Add(1)
 	if err := s.write(func() error { return s.fr.WritePing(false, [8]byte{}) }); err != nil {
 		return err
 	}
-	s.app.keepalives.Add(1)
 	return nil
 }
 
@@ -242,16 +244,20 @@ func grpcStatusOf(resp *models.GrpcResp) string {
 // request's end may be the app's last flow-control ping, so the second ends
 // the wait: SimulateGRPC returns the messages that came before it, with
 // ErrStreamHeldOpen (no verdict). A message beyond the recording among them
-// is returned with them, so the comparison fails on it, as before.
+// is returned with them, so the comparison fails on it, as before. A
+// recording of none (trailers alone) is held past only by a message beyond
+// it: the app's headers and then keepalives alone are a stall, two
+// keepalives on (ErrStreamStalled).
 func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		sent     [][]byte
 		recorded [][]byte
+		stalled  bool
 	}{
-		{"every recorded message, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one"), pbMsg("two")}},
-		{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one")}},
-		{"an answer of trailers alone recorded, then keepalives", nil, [][]byte{nil}},
+		{"every recorded message, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one"), pbMsg("two")}, false},
+		{"a message beyond the recording, then keepalives", [][]byte{pbMsg("one"), pbMsg("two")}, [][]byte{pbMsg("one")}, false},
+		{"an answer of trailers alone recorded, then headers and keepalives", nil, [][]byte{nil}, true},
 	} {
 		recordedCode := codes.OK
 		if tc.sent == nil {
@@ -270,8 +276,8 @@ func TestAGRPCStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 				s.holdOpen(200)
 			})
 			resp, err := heldOpenCall(t, withStatus(recordedAs(grpcTestCase(app.addr, []models.GrpcLengthPrefixedMessage{{}}), tc.recorded...), recordedCode), app.exhausted)
-			if !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled) {
-				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen", err)
+			if !errors.Is(err, ErrStreamHeldOpen) || errors.Is(err, ErrStreamStalled) != tc.stalled {
+				t.Fatalf("SimulateGRPC: %v; want ErrStreamHeldOpen, stalled %v", err, tc.stalled)
 			}
 			if got := len(resp.AllMessages()); got != max(len(tc.sent), 1) {
 				t.Fatalf("returned %d messages, want what came (%d)", got, len(tc.sent))
@@ -336,6 +342,8 @@ func TestASlowAnswerIsJudgedUntilTheAppStallsOnItsKeepalives(t *testing.T) {
 			}
 			return s.trailers(codes.OK)
 		}, withStatus(recordedAs(&models.TestCase{}, nil), codes.OK), false, false},
+		{"an error after its headers", 2, func(s *h2Stream) error { return s.trailers(codes.NotFound) },
+			withStatus(recordedAs(&models.TestCase{}, nil), codes.NotFound), false, true},
 		{"an empty message after its headers", 2, func(s *h2Stream) error {
 			if err := s.message(nil); err != nil {
 				return err
@@ -637,7 +645,7 @@ func TestPingWatchHoldsAStreamOpenOnTheSecondPingAfterTheRequestEnds(t *testing.
 		{"a message not yet whole", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(both[:len(both)-1]), false), r(ping, false), r(ping, false), r(data(both[len(both)-1:]), false), r(ping, true)}, 2, false, false},
 		{"padded frames, a message across them", 2, []step{w(request), w(requestEnd), r(headers, false), r(padded(both[:9]), false), r(padded(both[9:]), false), r(ping, false), r(ping, true)}, 2, false, false},
 		{"empty messages", 2, []step{w(request), w(requestEnd), r(headers, false), r(data(append(grpcMessage(nil), grpcMessage(nil)...)), false), r(ping, false), r(ping, true)}, 2, false, false},
-		{"none recorded", 0, []step{w(request), w(requestEnd), r(headers, false), r(ping, false), r(ping, true)}, 0, true, false},
+		{"none recorded, its headers sent", 0, []step{w(request), w(requestEnd), r(headers, false), r(ping, false), r(ping, false), r(ping, true)}, 0, true, true},
 		{"the app ended the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(trailers, false), r(ping, false), r(ping, false)}, 1, false, false},
 		{"the app reset the stream", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(one), false), r(reset, false), r(ping, false), r(ping, false)}, 1, false, false},
 		{"a message beyond the recording", 1, []step{w(request), w(requestEnd), r(headers, false), r(data(both), false), r(ping, false), r(ping, true)}, 2, false, false},
