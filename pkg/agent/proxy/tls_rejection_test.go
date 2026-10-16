@@ -222,6 +222,9 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			got := map[models.CaptureLossKind]uint64{}
 			for _, l := range p.losses.Snapshot() {
 				got[l.Kind] = l.Count
+				if l.What != "to "+dst.RemoteAddr().String() {
+					t.Fatalf("%s: a loss names %q, want the connection's destination %s", l.Kind, l.What, dst.RemoteAddr())
+				}
 			}
 			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || got[models.CaptureLossSTARTTLS] != tc.starttls || len(got) > 3 {
 				t.Fatalf("%s: charged %v, want %d tls_handshake_failed, %d tls_handshake_abandoned and %d starttls_failed", tc.name, got, tc.failed, tc.abandoned, tc.starttls)

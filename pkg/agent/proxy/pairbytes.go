@@ -151,7 +151,8 @@ func (s *pairedConns) wakeLocked() {
 }
 
 // upTo is every connection held whose application connection is numbered
-// 1..n, or, when there is one, why they cannot be waited on: a wait that
+// 1..n, but for one the proxy serves with no session (noSession), which no
+// wait holds, or, when there is one, why they cannot be waited on: a wait that
 // holds none has nothing to tell (a kernel whose sock_diag gives no byte
 // counts fails only the waits that would read them).
 func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
