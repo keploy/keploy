@@ -3008,8 +3008,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under the proven switch strict failure is always on, so a test
 			// whose mock set diverged is never demoted: its response diff is the
 			// explanation of its FAILED verdict and must be printed
-			// (assertTestMocks is on under the switch).
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
+			// (assertTestMocks is on under the switch). --strict-failure keeps
+			// it FAILED too (resolveTestOutcome), so its diff is printed.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks() || r.strictFailure())
 
 			// This test's misses are read now, once, with its response in, so
 			// the verdict can hold a miss. Every result written for this test
@@ -3887,9 +3888,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// written (attachStreamDepResults), from the filtered list the
 			// streamed test's own verdict reads.
 			//
-			// Under the switch a diverged mock set demotes nothing, so the
-			// diff of a failed answer is printed as the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+			// Under the switch, or --strict-failure, a diverged mock set
+			// demotes nothing, so the diff of a failed answer is printed as
+			// the main loop prints it.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
 
 			if !ok {
 				// Handle streaming response type
@@ -4022,7 +4024,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
 				}
 			}
 
@@ -4198,14 +4200,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if provenswitch.On() {
-					// Under the switch a failed answer is FAILED whatever the
-					// mock set did: the set's other consumption (a session-tier
-					// mock it shares) is no reason to re-record it.
+				} else if r.strictFailure() {
+					// Under the switch, or --strict-failure, a failed answer is
+					// FAILED whatever the mock set did (the verdict below): the
+					// set's other consumption (a session-tier mock it shares) is
+					// no reason to re-record it.
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", provenswitch.Env+"=1"),
+						zap.String("reason", vetoFlagName(false, true)),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
