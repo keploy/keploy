@@ -298,3 +298,44 @@ func TestAsInt64RejectsUnrepresentable(t *testing.T) {
 		})
 	}
 }
+
+// An array's, a record's and a document's []byte elements round-trip
+// through JSON as bytes (the $pgtype: binary wrapper), not as a bare base64
+// string that reads back as text. (The JSON store reads a number as int64.)
+func TestPostgresV3Cell_JSONKeepsAnArraysAndARecordsBytes(t *testing.T) {
+	in := pgNestedCells()
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Count(string(body), `"$pgtype":"binary"`) != 7 {
+		t.Fatalf("want each of the 7 byte elements written as bytes: %s", body)
+	}
+	var back PostgresV3Cells
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	want := pgNestedCells()
+	want[2].Value.([]any)[0] = int64(1)
+	want[3].Value.(map[string]any)["parts"].([]any)[1] = int64(2)
+	if !reflect.DeepEqual(back, want) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, want, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
+
+// A mock written before, a bytea[] element as a bare base64 string, still
+// loads as that string.
+func TestPostgresV3Cell_AnOlderMocksBase64ElementStillLoads(t *testing.T) {
+	var back PostgresV3Cells
+	if err := json.Unmarshal([]byte(`[["b2s=","AQI="]]`), &back); err != nil {
+		t.Fatalf("an older mock's base64 element does not load: %v", err)
+	}
+	if want := (PostgresV3Cells{NewValueCell([]any{"b2s=", "AQI="})}); !reflect.DeepEqual(back, want) {
+		t.Fatalf("it loaded as %#v, want %#v", back, want)
+	}
+}

@@ -267,10 +267,45 @@ func cellValueToJSON(v any) any {
 		return floatToJSON(x)
 	case float32:
 		return floatToJSON(float64(x))
+	case []any, map[string]any:
+		// An array cell (bytea[], a multi-dim array), a record, or a
+		// json/jsonb document: written as before, but for a []byte element
+		// or value at any depth, which encoding/json would write as a bare
+		// base64 string that reads back as text. Such an element is
+		// written in the $pgtype: binary wrapper, as a []byte cell is, and
+		// recoverCellFromJSON reads it back as bytes.
+		return jsonBinaryElems(v)
 	}
 	// Default: emit value as-is. Numbers, strings, bools, generic
 	// jsonb-shaped maps/slices all flow through encoding/json's
 	// reflective path correctly.
+	return v
+}
+
+// jsonBinaryElems is v, an array, record or document cell's value, with
+// each []byte in it at any depth replaced by its $pgtype: binary wrapper
+// (cellValueToJSON), and everything else as it is: a container that holds
+// no []byte is itself.
+func jsonBinaryElems(v any) any {
+	if !holdsBytes(v) {
+		return v
+	}
+	switch x := v.(type) {
+	case []byte:
+		return cellValueToJSON(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = jsonBinaryElems(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = jsonBinaryElems(e)
+		}
+		return out
+	}
 	return v
 }
 
