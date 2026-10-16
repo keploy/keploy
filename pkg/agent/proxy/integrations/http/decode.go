@@ -32,8 +32,8 @@ var ErrMockNotMatched = models.ErrNoMockMatched
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
-		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
+		defer pUtil.RecoverInto(h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.

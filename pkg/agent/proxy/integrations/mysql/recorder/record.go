@@ -44,8 +44,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 
 	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
+		defer pUtil.RecoverInto(logger, clientConn, destConn, errCh)
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{

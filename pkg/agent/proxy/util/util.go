@@ -1011,31 +1011,91 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 	// is deferred once per parser read, and a flush on the clean path made every
 	// read wait on the process's one Sentry transport worker.
 	if r := recover(); r != nil {
-		logger.Error("Recovered from panic in parser, closing active connections")
-		if client != nil {
-			err := client.Close()
-			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
-					utils.LogError(logger, err, "failed to close the client connection")
-				}
-			}
-		}
-
-		if dest != nil {
-			err := dest.Close()
-			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
-					utils.LogError(logger, err, "failed to close the destination connection")
-				}
-			}
-		}
-		utils.HandleRecovery(logger, r, "Recovered from panic")
-		sentry.Flush(time.Second * 2)
+		recovered(logger, r, client, dest)
 	}
+}
+
+// ErrParserPanicked is the result a parser goroutine's caller reads when the
+// goroutine panicked (RecoverInto): the call it was serving was neither
+// answered from a mock nor recorded, so the connection did not end cleanly.
+var ErrParserPanicked = errors.New("keploy's parser panicked while serving this connection, so its call was neither answered from a mock nor recorded")
+
+// RecoverInto is Recover for a parser goroutine whose caller reads the
+// goroutine's result from result: a recovered panic is that result,
+// ErrParserPanicked, sent after the panic is logged and the connections are
+// closed. A goroutine that panics sends no result of its own, and its caller
+// read the channel's close as a clean end: a replay whose parser panicked
+// returned nil, as if every call had been answered, and nothing failed. It is
+// deferred after the goroutine's close of result, so it runs before it:
+//
+//	defer close(errCh)
+//	defer pUtil.RecoverInto(logger, clientConn, destConn, errCh)
+//
+// The send never blocks: result holds one value, and a parser goroutine sends
+// its result only as it returns, so a panic finds it empty. Should it not, the
+// result already there is the goroutine's, and the panic is still logged.
+func RecoverInto(logger *zap.Logger, client, dest net.Conn, result chan<- error) {
+	if logger == nil {
+		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
+		return
+	}
+	if r := recover(); r != nil {
+		recovered(logger, r, client, dest)
+		select {
+		case result <- ErrParserPanicked:
+		default:
+		}
+	}
+}
+
+// RecoverWith is Recover for a goroutine whose panic must also be counted:
+// then runs once the panic is recovered, before it is logged and client and
+// dest are closed by it (closes the unwind made earlier, the function's own
+// deferred ones, come first). The proxy's connection handler counts a panic
+// in it, synchronous parser code among it, as a capture loss; its connection
+// stays tracked until the accept loop forgets it, after this, so a test's end
+// that waits for it waits for the count.
+func RecoverWith(logger *zap.Logger, client, dest net.Conn, then func()) {
+	if logger == nil {
+		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
+		return
+	}
+	if r := recover(); r != nil {
+		if then != nil {
+			then()
+		}
+		recovered(logger, r, client, dest)
+	}
+}
+
+// recovered is what Recover, RecoverInto and RecoverWith do with a recovered
+// panic: log
+// it, close the parser's connections, and report it to Sentry.
+func recovered(logger *zap.Logger, r any, client, dest net.Conn) {
+	logger.Error("Recovered from panic in parser, closing active connections")
+	if client != nil {
+		err := client.Close()
+		if err != nil {
+			// Use string matching as a last resort to check for the specific error
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				// Log other errors
+				utils.LogError(logger, err, "failed to close the client connection")
+			}
+		}
+	}
+
+	if dest != nil {
+		err := dest.Close()
+		if err != nil {
+			// Use string matching as a last resort to check for the specific error
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				// Log other errors
+				utils.LogError(logger, err, "failed to close the destination connection")
+			}
+		}
+	}
+	utils.HandleRecovery(logger, r, "Recovered from panic")
+	sentry.Flush(time.Second * 2)
 }
 
 // RelayDrainIdle is how long a surviving copy direction may go with NO
