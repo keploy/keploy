@@ -1262,11 +1262,9 @@ func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
 // a use) naming that variable (Seen.Name), the first by name when two hold
 // one place. An echo is not named: it is its call's alone, and a later call
 // that reads its value back binds it there as a variable of the test
-// (ReadBack). e's own Seen is left as it was: the result holds a copy.
+// (ReadBack). e's own Seen is left as it was: the result holds a copy, with
+// no name at any other place.
 func Named(e Earlier, vars models.MockVariables) Earlier {
-	if len(vars) == 0 {
-		return e
-	}
 	names := make([]string, 0, len(vars))
 	for name := range vars {
 		names = append(names, name)
@@ -1289,6 +1287,7 @@ func Named(e Earlier, vars models.MockVariables) Earlier {
 	}
 	e.Seen = append([]Seen(nil), e.Seen...)
 	for i, s := range e.Seen {
+		e.Seen[i].Name = ""
 		if s.Side == Request && s.Place != "" {
 			e.Seen[i].Name = at[s.Place]
 		}
