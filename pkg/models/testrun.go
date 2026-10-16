@@ -259,6 +259,15 @@ type FailureInfo struct {
 	// verdict, and its set is not judged. Never a pass, and a failure only
 	// on what came.
 	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
+	// AnswerStalled says, under KEPLOY_PROVEN=1 with no apiTimeout of the
+	// user's, what the stall rule waited for when it ended the test's
+	// exchange before the app's answer began, or part-way through an answer
+	// that is not streamed: the app took none of the request, or not all of
+	// it, or sent nothing back for the rule's grace of keploy's runnable time
+	// (pkg.AnswerStallGrace, rule 15). Nothing was compared: the row is
+	// built as a test with no answer is (FAILED), and the test has no
+	// verdict all the same (VerdictUnknown), nor has its set.
+	AnswerStalled string `json:"answer_stalled,omitempty" yaml:"answer_stalled,omitempty"`
 }
 
 // NotJudged is why the test has no verdict, whatever its status says: what
@@ -287,18 +296,28 @@ func (fi FailureInfo) NotJudged() []string {
 	if fi.StreamHeldOpen != "" {
 		why = append(why, fi.StreamHeldOpen)
 	}
+	if fi.AnswerStalled != "" {
+		why = append(why, fi.AnswerStalled)
+	}
 	return why
 }
 
 // VerdictUnknown is why the test has no verdict although its row reads as
 // one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
-// (what could not be read can only add to why it failed) and for one keploy
-// skipped (IGNORED, which says it has no verdict). JUnit and the NDJSON mark
-// a test by this one predicate.
+// (what could not be read can only add to why it failed) unless nothing was
+// compared because the stall rule ended its answer (AnswerStalled), and for
+// one keploy skipped (IGNORED, which says it has no verdict). JUnit and the
+// NDJSON mark a test by this one predicate.
 func (r TestResult) VerdictUnknown() []string {
-	if r.Status == TestStatusFailed || r.Status == TestStatusIgnored {
+	if r.Status == TestStatusIgnored {
 		return nil
 	}
+	if r.Status == TestStatusFailed && r.FailureInfo.AnswerStalled == "" {
+		return nil
+	}
+	// A FAILED row whose answer the stall rule ended (AnswerStalled) was
+	// compared with nothing: its FAILED says no answer came, not that one
+	// differed.
 	return r.FailureInfo.NotJudged()
 }
 

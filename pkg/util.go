@@ -38,6 +38,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -381,6 +382,14 @@ type SimulationConfig struct {
 	// never be reached at fails the test at once, saying why, instead of
 	// being re-sent as an app still starting.
 	AppPortReachability AppPortReachability
+	// StallGrace and StallClock are the stall rule on the exchange when
+	// Unbounded, under the proven switch (answerWatch): its grace
+	// (AnswerStallGrace when 0) and the runnable clock it is measured on
+	// (the process's own when nil). Tests set them.
+	StallGrace time.Duration
+	StallClock stall.Clock
+	// answer is the stall rule's watch on this exchange, for the dial.
+	answer *answerWatch
 }
 
 // AppPortReachability is implemented by an instrumentation that can tell a
@@ -736,6 +745,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			Transport: &http.Transport{
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        cfg.answer.dial(),
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -749,6 +759,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				DisableKeepAlives:  true,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        cfg.answer.dial(),
 			},
 		}
 	} else {
@@ -763,6 +774,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				MaxIdleConns:       1,
 				DisableCompression: disableCompression,
 				TLSClientConfig:    cfg.TLSConfig,
+				DialContext:        cfg.answer.dial(),
 			},
 		}
 	}
@@ -906,7 +918,8 @@ func IsAppNoAnswer(err error) bool {
 	return isTimedOut(err) ||
 		errors.Is(err, context.Canceled) ||
 		isAnswerCutShort(err) ||
-		isGRPCNoAnswer(err)
+		isGRPCNoAnswer(err) ||
+		errors.Is(err, ErrAnswerStalled)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -1024,19 +1037,29 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if cfg.Unbounded {
 		cfg.RequestTimeout = 0
 	}
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on.
+	cfg.answer = newAnswerWatch(cfg)
+	defer cfg.answer.stop()
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	cfg.answer.answering()
 
 	defer func() {
 		if httpResp != nil && httpResp.Body != nil {
@@ -1049,6 +1072,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Read full response body
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
+		if cfg.answer.didStall() {
+			// The answer stopped part-way: nothing whole to compare.
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
@@ -1095,20 +1122,37 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		cfg.RequestTimeout = 0
 	}
 
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on, the stream's read included:
+	// the returned Reader's Close ends the watch.
+	cfg.answer = newAnswerWatch(cfg)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cfg.answer.stop()
+		}
+	}()
+
 	// Prepare the HTTP request using the shared helper
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	cfg.answer.answering()
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
@@ -1126,6 +1170,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		gzipReader, gzErr := gzip.NewReader(httpResp.Body)
 		if gzErr != nil {
 			httpResp.Body.Close()
+			if cfg.answer.didStall() {
+				// Not one byte of the body came: nothing to compare.
+				return nil, cfg.answer.err()
+			}
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			// A body that ended, by its own framing, before its first byte
 			// (io.EOF), or whose first bytes are not a gzip header, is the
@@ -1148,6 +1196,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			zap.String("content_encoding", contentEncoding))
 	}
 
+	if cfg.answer != nil {
+		streamReader = &answerReader{ReadCloser: streamReader, w: cfg.answer}
+		handedOff = true
+	}
 	return &StreamingHTTPResponse{
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
@@ -1273,6 +1325,17 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 // switch only when the user set an apiTimeout of their own, and otherwise by
 // no clock (SimulationConfig.Unbounded).
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	ok, body, info, err := compareHTTPStream(expectedResp, stream, cfg, jsonNoiseKeys, logger)
+	var st *AnswerStallError
+	if errors.As(err, &st) && st.Stream && info == nil {
+		// The stall rule cut the stream with every frame that came
+		// matching: judged on what came, not judged as a whole.
+		ok = true
+	}
+	return ok, body, info, err
+}
+
+func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
 		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
@@ -1544,7 +1607,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, err
+		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1641,7 +1704,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1707,7 +1770,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1767,6 +1830,14 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 			break
 		}
 		if err != nil {
+			var st *AnswerStallError
+			if errors.As(err, &st) && contentMatch {
+				// Cut by the stall rule, every byte that came matching.
+				return true, strconv.Itoa(actualSize), nil, st.asStream(fmt.Sprintf("%d of the %d recorded bytes came", actualSize, expectedSize))
+			}
+			if errors.As(err, &st) {
+				break // what came differs: the comparison says so below
+			}
 			return false, strconv.Itoa(actualSize), nil, err
 		}
 	}
@@ -2112,13 +2183,13 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 			break
 		}
 		if partErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
 		if partReadErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partReadErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partReadErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		if nextExpected >= len(expectedQueue) {

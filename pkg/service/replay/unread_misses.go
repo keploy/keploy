@@ -1,11 +1,15 @@
 package replay
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // markUnmatchedCallsUnread records on a test's result that its unmatched calls
@@ -120,6 +124,55 @@ func streamsHeldOpenReason(tests []string) string {
 
 // streamsHeldOpenRemedy is what to do about a stream the app held open.
 const streamsHeldOpenRemedy = "check why the app keeps the stream open after its recorded answer, or why the rest of its answer does not come, or record the test again"
+
+// markAnswerStalled marks result, a test with no answer, not judged when the
+// stall rule ended its exchange (pkg.ErrAnswerStalled, rule 15): nothing was
+// compared, so its FAILED says only that no answer came.
+func markAnswerStalled(result *models.TestResult, err error) {
+	if result != nil && errors.Is(err, pkg.ErrAnswerStalled) {
+		result.FailureInfo.AnswerStalled = err.Error()
+	}
+}
+
+// sayNoAnswer is the console's line for a test with no answer: for one the
+// stall rule ended, that it is not judged and what was waited for, not an
+// ordinary failure; else what as says, with the error.
+func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
+	if errors.Is(err, pkg.ErrAnswerStalled) {
+		logger.Error("not judged: "+err.Error(),
+			zap.String("testcase", test),
+			zap.String("next_step", "find why the app does not answer, or does not read the request; if it takes longer than that by design, give the test a bound of your own with --api-timeout"))
+		return
+	}
+	utils.LogError(logger, err, as)
+}
+
+// testsWithStalledAnswers names, under the proven switch, the tests of a set
+// whose exchange the stall rule ended before their answer came
+// (FailureInfo.AnswerStalled): they have no verdict, and the set is not
+// judged.
+func testsWithStalledAnswers(results []models.TestResult) []string {
+	if !provenswitch.On() {
+		return nil
+	}
+	var out []string
+	for _, r := range results {
+		if r.FailureInfo.AnswerStalled != "" {
+			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// stalledAnswersReason is the test-set report's reason for a set left
+// unjudged by tests whose answer never came.
+func stalledAnswersReason(tests []string) string {
+	return fmt.Sprintf("not judged: the app never answered %d test(s) (%s), or never took their whole request, within keploy's stall bound of runnable time; %s, then run the test-set again",
+		len(tests), strings.Join(tests, ", "), stalledAnswersRemedy)
+}
+
+// stalledAnswersRemedy is what to do about a test whose answer never came.
+const stalledAnswersRemedy = "find why the app does not answer, or does not read the request; if it takes longer than that by design, give the tests a bound of your own with --api-timeout"
 
 // testsKeployCannotCapture names, under the proven switch, the tests of a set
 // during or after which the application called what keploy cannot capture at
