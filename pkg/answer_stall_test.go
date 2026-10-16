@@ -208,6 +208,7 @@ func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 		{keptOpenWithNothing("", true, 0), "the app sent its answer's headers and nothing of its body, then only keepalives"},
 		{keptOpenWithNothing("GET /e", true, 9), "the app's answer stopped part-way, after 9 bytes of its body, then only keepalives, for GET /e"},
 		{keptOpenWithKeepalivesOnly(), "the app sent its answer's headers and nothing of its body but keepalives"},
+		{&AnswerStallError{Target: "POST /x", Waited: time.Minute, Answered: true, Untaken: true, Sent: 3, Request: 10}, "the app sent its answer's headers and stopped taking the test's request (it took at most 3 of its 10 bytes; 7 were never taken); waited 1m0s of keploy's runnable time for POST /x"},
 		{&AnswerStallError{Target: "POST /chunked", Waited: time.Minute, Untaken: true, Sent: 7}, "the app stopped taking the test's request and never answered (it took at most 7 bytes of it); waited 1m0s of keploy's runnable time for POST /chunked"},
 	} {
 		if got := c.e.Error(); got != c.want {
@@ -746,4 +747,12 @@ func fmtErr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// A start is never made up: with no metadata in hand there is none to
+// judge.
+func TestHeadersOnlyMakesUpNoStart(t *testing.T) {
+	if got := headersOnly(nil); got != nil {
+		t.Fatalf("headersOnly(nil) = %+v; want none", got)
+	}
 }

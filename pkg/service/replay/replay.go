@@ -2813,16 +2813,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					heldOpen, loopErr = loopErr.Error(), nil
 				}
 			}
-			// An answer that began (its status and headers, gRPC metadata)
-			// and then nothing of its body (pkg.AnswerBegan): what came is
-			// judged first. A difference in it is a judged failure, compared
-			// below with the recording's body in place of the one that never
-			// came; only a start that matches fails closed, not judged.
-			if loopErr != nil && pkg.AnswerBegan(loopErr) && resp != nil {
-				if judged, ok := r.answerStartDiffers(tmplRun, &sent, resp, testSetID); ok {
-					resp, loopErr = judged, nil
-				}
-			}
 
 			// The test case has its answer, or none: it ends here. Under exact
 			// serving the agent serves the pool from now, so what is read next
@@ -2836,6 +2826,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if status, ended := endedPartWay(); ended {
 					testSetStatus, exitLoop = status, true
 					break
+				}
+			}
+
+			if loopErr != nil && pkg.AnswerBegan(loopErr) && resp != nil {
+				// An answer that began (its status and headers, gRPC
+				// metadata) and then nothing of its body: its start is judged
+				// first, apart from the template and capture path. A start
+				// that differs is a judged failure; only one that matches
+				// fails closed, not judged, below.
+				if testCaseResult, differs := r.startFailedRow(noAnswerView(tmplRun, &sent), resp, testSetID, started); differs {
+					currentFailures++
+					testSetStatus = models.TestSetStatusFailed
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					if loopErr != nil {
+						utils.LogError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
+						break
+					}
+					continue
 				}
 			}
 
@@ -3963,13 +3972,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					if pkg.AnswerBegan(streamErr) {
 						// Its status and headers came, and nothing of the
-						// stream: judged on them first. A difference in them
-						// is a judged failure, compared below with the
-						// recording's body; only a start that matches fails
-						// closed, not judged.
+						// stream: judged on them first, apart from the
+						// template and capture path. A start that differs is
+						// a judged failure; only one that matches fails
+						// closed, not judged, below.
 						start := &models.HTTPResp{StatusCode: streamResp.StatusCode, StatusMessage: streamResp.StatusMessage, Header: streamResp.Header}
-						if _, differs := r.answerStartDiffers(tmplRun, &sent, start, testSetID); differs {
-							streamErr, streamMatched, capturedBody, streamMismatchInfo = nil, true, "", nil
+						if testCaseResult, differs := r.startFailedRow(expectedStream, start, testSetID, started); differs {
+							failure++
+							testSetStatus = models.TestSetStatusFailed
+							r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+							loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+							if loopErr != nil {
+								utils.LogError(r.logger, loopErr, "failed to save a streaming test result judged on its start")
+								break
+							}
+							continue
 						}
 					}
 

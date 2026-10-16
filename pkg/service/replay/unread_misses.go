@@ -3,12 +3,13 @@ package replay
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -166,38 +167,79 @@ func stalledAnswerRemedy(err error) string {
 // keepalives on: no bound changes it.
 const keepalivesRemedy = "find why the app sends only keepalives and nothing of its answer (a stream it waits to fill, an event that never comes at replay), or record the test again; --api-timeout does not change this"
 
-// answerStartDiffers judges the start of an answer that began and then sent
+// startFailedRow judges the start of an answer that began and then sent
 // nothing of its body (pkg.AnswerBegan): its status and headers (gRPC: its
-// metadata) against the recording's, with the recording's body and trailers
-// in place of those that never came. When they differ it reports true and
-// the answer to compare for the judged failure (the start, and the
-// recording's rest); when they match, false: the test fails closed, not
-// judged. It prints nothing: the comparison of the judged answer does.
-func (r *Replayer) answerStartDiffers(run *templates.Run, sent *models.TestCase, resp any, testSetID string) (any, bool) {
-	expected := noAnswerView(run, sent)
+// metadata) against view, the test's expected answer as the replay renders
+// it. The recording's body (gRPC: its messages and trailers) stands in for
+// the one that never came, so only the start is judged. An expected header
+// that holds template markup is the app's to fill, and is taken as the app
+// sent it.
+//
+// The judgement is apart from the replay's template and capture path: what
+// came feeds no capture, asserts no use, and moves no template value. When
+// the start differs it returns the test's FAILED row, judged on the start:
+// the comparison's result, printed, and as its answer what came (no body).
+// When it matches, nil and false: the test fails closed, not judged.
+func (r *Replayer) startFailedRow(view *models.TestCase, resp any, testSetID string, started time.Time) (*models.TestResult, bool) {
+	row := func(result *models.Result) *models.TestResult {
+		tr := &models.TestResult{
+			Kind:         view.Kind,
+			Name:         testSetID,
+			Status:       models.TestStatusFailed,
+			Started:      started.Unix(),
+			Completed:    time.Now().UTC().Unix(),
+			TestCaseID:   view.Name,
+			TestCasePath: filepath.Join(r.config.Path, testSetID),
+			MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+			Noise:        view.Noise,
+			TimeTaken:    time.Since(started).String(),
+		}
+		if result != nil {
+			tr.Result = *result
+			if result.FailureInfo.Risk != models.None {
+				tr.FailureInfo.Risk, tr.FailureInfo.Category = result.FailureInfo.Risk, result.FailureInfo.Category
+			}
+		}
+		return tr
+	}
 	switch got := resp.(type) {
 	case *models.HTTPResp:
 		if got == nil {
 			return nil, false
 		}
-		start := *got
-		start.Body = expected.HTTPResp.Body
+		exp := *view
+		exp.HTTPResp.Header = make(map[string]string, len(view.HTTPResp.Header))
+		for k, v := range view.HTTPResp.Header {
+			if a, ok := got.Header[k]; ok && strings.Contains(v, "{{") {
+				v = a
+			}
+			exp.HTTPResp.Header[k] = v
+		}
+		start := models.HTTPResp{StatusCode: got.StatusCode, StatusMessage: got.StatusMessage, Header: got.Header, Body: exp.HTTPResp.Body}
 		probe := start
-		if same, _ := r.compareHTTPResp(expected, &probe, testSetID, false); same {
+		if same, _ := r.compareHTTPResp(&exp, &probe, testSetID, false); same {
 			return nil, false
 		}
-		return &start, true
+		_, result := r.compareHTTPResp(&exp, &start, testSetID, true)
+		tr := row(result)
+		tr.Req = view.HTTPReq
+		tr.Res = models.HTTPResp{StatusCode: got.StatusCode, StatusMessage: got.StatusMessage, Header: got.Header, Body: got.Body}
+		return tr, true
 	case *models.GrpcResp:
 		if got == nil {
 			return nil, false
 		}
-		start := sent.GrpcResp
+		start := view.GrpcResp
 		start.Headers = got.Headers
 		probe := start
-		if same, _ := r.compareGRPCResp(expected, &probe, testSetID, false, true); same {
+		if same, _ := r.compareGRPCResp(view, &probe, testSetID, false, true); same {
 			return nil, false
 		}
-		return &start, true
+		_, result := r.compareGRPCResp(view, &start, testSetID, true, false)
+		tr := row(result)
+		tr.GrpcReq = view.GrpcReq
+		tr.GrpcRes = models.GrpcResp{Headers: got.Headers}
+		return tr, true
 	}
 	return nil, false
 }
