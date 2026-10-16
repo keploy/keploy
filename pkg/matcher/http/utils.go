@@ -61,11 +61,16 @@ func toStringSlice(v interface{}) []string {
 		for _, part := range strings.Split(x, ",") {
 			out = append(out, strings.TrimSpace(part))
 		}
+	case int, float64, json.Number:
+		// one code, as YAML (int) or JSON (float64) decodes it
+		out = append(out, toString(x))
 	}
 	return out
 }
 
-func toStringMap(val interface{}) map[string]string {
+// toStringMap reads an assertion's map value; false when val is no map it
+// knows.
+func toStringMap(val interface{}) (map[string]string, bool) {
 	out := make(map[string]string)
 	switch m := val.(type) {
 	case map[string]interface{}:
@@ -97,7 +102,66 @@ func toStringMap(val interface{}) map[string]string {
 		}
 
 	default:
-		// not a map we know—return empty
+		// not a map we know
+		return nil, false
 	}
-	return out
+	return out, true
+}
+
+// toJSONObject reads json_contains' value as the JSON object it names: a
+// string of JSON, or a map of any shape a test case's file decodes to (YAML
+// keys a map, nested ones included, by the assertions' key type). Its values
+// are what JSON gives (a number is a float64), so they compare with the
+// answer's body as encoding/json reads it; false when val names no object.
+func toJSONObject(val interface{}) (map[string]interface{}, bool) {
+	raw, isString := val.(string)
+	if !isString {
+		keyed := stringKeyed(val)
+		if _, isMap := keyed.(map[string]interface{}); !isMap {
+			return nil, false
+		}
+		b, err := json.Marshal(keyed)
+		if err != nil {
+			return nil, false
+		}
+		raw = string(b)
+	}
+	var out map[string]interface{}
+	if err := jsonUnmarshal234([]byte(raw), &out); err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// stringKeyed rewrites every map val holds, however nested, as a
+// map[string]interface{}, which encoding/json marshals.
+func stringKeyed(val interface{}) interface{} {
+	switch m := val.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			out[k] = stringKeyed(v)
+		}
+		return out
+	case map[models.AssertionType]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			out[string(k)] = stringKeyed(v)
+		}
+		return out
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			out[fmt.Sprint(k)] = stringKeyed(v)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(m))
+		for i, v := range m {
+			out[i] = stringKeyed(v)
+		}
+		return out
+	default:
+		return val
+	}
 }
