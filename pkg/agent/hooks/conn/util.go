@@ -95,6 +95,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}()
 
+	if !opts.IncludeStaticAssets && isStaticAssetResponse(req, resp) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		logger.Debug("skipping static asset test case; use --include-static-assets to record it")
+		return
+	}
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error

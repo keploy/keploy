@@ -117,6 +117,13 @@ Start your app under Keploy to convert real API calls into tests and mocks.
 keploy record -c "CMD_TO_RUN_APP"
 ```
 
+Recording skips successful GET/HEAD responses with static asset content types
+(images, CSS, JavaScript, fonts, audio, video) and common binary download types
+(octet-stream, PDF, WebAssembly, archives). Other responses, including JSON,
+HTML, XML, unknown content types, errors, and mutating requests, remain recordable.
+Use `keploy record --include-static-assets -c "CMD_TO_RUN_APP"` or set
+`record.includeStaticAssets: true` in `keploy.yml` to include those downloads.
+
 Example for Python:
 
 ```bash
