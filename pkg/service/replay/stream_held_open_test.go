@@ -13,7 +13,9 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
@@ -200,5 +202,79 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+// resultOf is the named test's result in the base-path run's report.
+func (b *bpRun) resultOf(t *testing.T, name string) models.TestResult {
+	t.Helper()
+	b.report.mu.Lock()
+	defer b.report.mu.Unlock()
+	for _, r := range b.report.results {
+		if r.TestCaseID == name {
+			return r
+		}
+	}
+	t.Fatalf("no result for %s", name)
+	return models.TestResult{}
+}
+
+// Under the proven switch with no apiTimeout of the user's, a test the app
+// never answers ends on the stall rule (pkg.AnswerStallGrace of keploy's
+// runnable time) instead of waiting for good (rule 15). Nothing was compared,
+// so its row is built as a test with no answer is, FAILED, which a reader of
+// the status alone sees as a failure, never a pass; it is marked not judged
+// (AnswerStalled), which JUnit, the NDJSON and the set read: the set is
+// INTERNAL_ERR, not judged, and the run exits non-zero either way. The
+// console says it is not judged and what was waited for, not an ordinary
+// failure.
+func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	saved := pkg.AnswerStallGrace
+	pkg.AnswerStallGrace = 300 * time.Millisecond
+	t.Cleanup(func() { pkg.AnswerStallGrace = saved })
+
+	app := newBPApp(t)
+	control := newBasePathRun(t, app.URL, "test-1", "test-2")
+	if code, err := control.start(t); err != nil || code != 0 || control.report.report.Status != string(models.TestSetStatusPassed) {
+		t.Fatalf("control: exit %d, %v, %+v; want every test answered and PASSED", code, err, control.report.report)
+	}
+
+	app.hold["/test-2"] = true
+	run := newBasePathRun(t, app.URL, "test-1", "test-2")
+	code, err := run.start(t)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	r := run.resultOf(t, "test-2")
+	if r.Status != models.TestStatusFailed {
+		t.Fatalf("the row is %s; a reader of the status alone must see no pass", r.Status)
+	}
+	want := "the app never answered; waited 300ms of keploy's runnable time for GET /test-2"
+	if r.FailureInfo.AnswerStalled != want {
+		t.Fatalf("AnswerStalled %q, want %q", r.FailureInfo.AnswerStalled, want)
+	}
+	if why := r.VerdictUnknown(); len(why) != 1 || why[0] != want {
+		t.Fatalf("VerdictUnknown %v; want the test not judged, saying what was waited for", why)
+	}
+	if rep := run.report.report; rep == nil || rep.Status != string(models.TestSetStatusInternalErr) || !strings.Contains(rep.FailureReason, "never answered 1 test(s) (test-2)") {
+		t.Fatalf("report %+v; want INTERNAL_ERR, not judged, naming test-2", rep)
+	}
+	if code == 0 {
+		t.Fatal("a run with a test not judged exited 0")
+	}
+	// Without the mark: the row's FAILED alone arms the run's exit code.
+	saved2 := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved2 })
+	utils.ErrCode = 0
+	armRunExitCode(nil, true, 1)
+	if utils.ErrCode == 0 {
+		t.Fatal("a FAILED row read without its mark left the exit code 0")
+	}
+	if said := run.said(zapcore.ErrorLevel, "not judged: "+want); len(said) != 1 {
+		t.Fatalf("the console said %d times that test-2 is not judged and what was waited for, want once", len(said))
+	}
+	if said := run.said(zapcore.ErrorLevel, "failed to simulate request"); len(said) != 0 {
+		t.Fatalf("the console called the stalled answer an ordinary failure: %v", said)
 	}
 }

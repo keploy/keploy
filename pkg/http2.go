@@ -661,10 +661,17 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Create gRPC client connection using the TCP connection. Under the
 	// proven switch the app's frames are watched (pingWatch): a stream it
 	// keeps open past its recording ends on its keepalives (row W1).
+	//
+	// With no clock on the app's answer, the stall rule (answerWatch) ends an
+	// exchange the app makes no progress on: it takes no byte of the request
+	// and sends none back for AnswerStallGrace of keploy's runnable time.
 	var dialed net.Conn = conn
 	var pings *pingWatch
+	answer := newAnswerWatch(cfg)
+	defer answer.stop()
 	if provenswitch.On() {
-		pings = newPingWatch(conn)
+		pings = newPingWatch(answer.wrap(conn))
+		pings.answer = answer
 		dialed = pings
 	}
 	dialer := func(context.Context, string) (net.Conn, error) { return dialed, nil }
@@ -729,6 +736,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		defer cancelStream()
 		callCtx = metadata.NewOutgoingContext(streamCtx, md)
 		pings.arm(recordedMessagesComplete(tc.GrpcResp), cancelStream)
+		answer.onCut(cancelStream)
 	}
 
 	// Create a new stream
@@ -752,6 +760,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// decoded_data and expects exactly one empty message. An empty payload
 	// here is a real message, not the absence of one.
 	reqMsgs := grpcReq.AllMessages()
+	if answer != nil {
+		answer.describe(path, grpcRequestSize(reqMsgs))
+	}
 	for i, m := range reqMsgs {
 		var requestPayload []byte
 		if m.DecodedData != "" {
@@ -764,12 +775,18 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			}
 		}
 		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
+			if answer.didStall() {
+				return nil, answer.err()
+			}
 			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
 		}
 	}
 
 	// Close the send side of the stream
 	if err := stream.CloseSend(); err != nil {
+		if answer.didStall() {
+			return nil, answer.err()
+		}
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
 
@@ -778,6 +795,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// answers nil; the error check stays for a client that does not.
 	respHeaders, err := stream.Header()
 	if err != nil {
+		if answer.didStall() {
+			return nil, answer.err()
+		}
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
@@ -833,6 +853,24 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
 			respMsgs = append(respMsgs, recorded[heldAt:]...)
 		}
+	}
+	// The stall rule cut the exchange, and no keepalive held it open: an
+	// answer that never began is none (ErrAnswerStalled), and a stream the
+	// app went silent on is judged on what came, the recording's rest in
+	// place of what did not (the stall's own fill), not judged as a whole.
+	var silent error
+	if !heldOpen && drainErr != nil && answer.didStall() {
+		if !answer.answered.Load() {
+			return nil, answer.err()
+		}
+		recorded := tc.GrpcResp.AllMessages()
+		came := len(respMsgs)
+		silent = streamCut(answer.err(), came, len(recorded), "message")
+		if came < len(recorded) {
+			respMsgs = append(respMsgs, recorded[came:]...)
+		}
+		drainErr = nil
+		heldOpen = true
 	}
 	if len(respMsgs) == 0 {
 		// A response carrying only trailers is legitimate (an error status, or
@@ -931,6 +969,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	logger.Info("successfully completed gRPC simulation",
 		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
+	if silent != nil {
+		return grpcResp, silent
+	}
 	if heldOpen && stalled {
 		return grpcResp, ErrStreamStalled
 	}
@@ -938,6 +979,22 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		return grpcResp, ErrStreamHeldOpen
 	}
 	return grpcResp, nil
+}
+
+// grpcRequestSize is the size of reqMsgs on the wire, their 5-byte prefixes
+// with them: what the stall rule says of a request the app did not take
+// whole. A payload that does not parse counts as empty.
+func grpcRequestSize(reqMsgs []models.GrpcLengthPrefixedMessage) int64 {
+	var n int64
+	for _, m := range reqMsgs {
+		n += 5
+		if m.DecodedData != "" {
+			if b, err := protoscope.NewScanner(m.DecodedData).Exec(); err == nil {
+				n += int64(len(b))
+			}
+		}
+	}
+	return n
 }
 
 // recordedMessagesComplete is how many response messages complete resp, the
