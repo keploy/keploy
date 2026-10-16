@@ -2608,6 +2608,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if rule == nil {
 		// The agent has no session yet (it has just started, or restarted,
 		// and its client has not armed it): the agent's own mode decides.
+		// Nothing on the connection is captured, so its close is no loss
+		// (pairClosing).
+		if tracked != nil {
+			p.paired.servedWithoutSession(tracked.Conn)
+		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
 

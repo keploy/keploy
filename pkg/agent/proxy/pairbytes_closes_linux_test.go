@@ -368,3 +368,80 @@ func TestAProxysCloseWithBytesUnreadIsALoss(t *testing.T) {
 		})
 	}
 }
+
+// A connection the proxy serves with no session captures nothing by design:
+// an agent not started in record or test mode closes it unanswered, with the
+// application's bytes unread, and an agent in record mode passes it through.
+// Neither is a capture loss, and no bytes wait holds one: no test is open on
+// it. The close of the unanswered one was charged app_bytes_lost (the hooks
+// lane's TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt).
+func TestAConnectionServedWithoutASessionIsNoCaptureLoss(t *testing.T) {
+	for _, mode := range []models.Mode{"", models.MODE_RECORD} {
+		t.Run("agent mode "+string(mode), func(t *testing.T) {
+			up, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = up.Close() })
+			reached := make(chan struct{}, 1)
+			go func() {
+				for {
+					c, err := up.Accept()
+					if err != nil {
+						return
+					}
+					reached <- struct{}{}
+					go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+				}
+			}()
+			f := &fakeCounter{dst: ipv4Dest(t, up.Addr().String())}
+			cfg := config.New()
+			cfg.ProxyPort = 0
+			cfg.Agent.Mode = mode
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, up.Addr().String())}, cfg)
+			p.SetListenerCounter(f)
+			ctx, cancel := context.WithCancel(context.Background())
+			ready, done := make(chan error, 1), make(chan error, 1)
+			go func() { done <- p.Serve(ctx, ready) }()
+			t.Cleanup(func() { cancel(); <-done })
+			if err := <-ready; err != nil {
+				t.Fatal(err)
+			}
+			c, err := net.Dial("tcp4", p.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			if _, err := c.Write([]byte("GET / HTTP/1.1\r\nHost: dep\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.WaitAccepted(ctx, 2); err != nil {
+				t.Fatal(err)
+			}
+			if mode == models.MODE_RECORD {
+				// Passed through (its destination reached), and open: no
+				// bytes wait holds it.
+				<-reached
+				if targets, err := p.pairTargets(2); err != nil || len(targets) != 0 {
+					t.Fatalf("pairTargets = %v, %v; want none: nothing on a connection served without a session is captured", targets, err)
+				}
+				_ = c.Close()
+			}
+			// The proxy closes its side: unanswered, or once the
+			// passthrough ends.
+			for {
+				ch := p.paired.changes()
+				p.paired.mu.Lock()
+				n := len(p.paired.byConn)
+				p.paired.mu.Unlock()
+				if n == 0 {
+					break
+				}
+				<-ch
+			}
+			if l := p.losses.Snapshot(); len(l) != 0 {
+				t.Fatalf("capture losses %+v, want none for a connection served without a session", l)
+			}
+		})
+	}
+}
