@@ -4,10 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestMatch_HeaderNoiseUpdate_123 ensures a test case's "header.<name>" noise is
@@ -773,4 +776,91 @@ func TestAssertionsUntieBody(t *testing.T) {
 	tc.Assertions = map[models.AssertionType]interface{}{models.StatusCode: 200}
 	pass, _ = Match(tc, answer, nil, true, false, zap.NewNop(), false)
 	assert.True(t, pass, "the assertions judge alone")
+}
+
+// A caller that failed the test case on its own (WithoutPassLine) gets no
+// pass line from the assertions that pass its answer either, and still the
+// failure line from those that fail it.
+func TestMatchAssertionsHonourWithoutPassLine(t *testing.T) {
+	var out strings.Builder
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&out)
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	for _, asserted := range []int{500, 201} {
+		out.Reset()
+		tc := &models.TestCase{
+			Name:       "test-1",
+			HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+			Assertions: map[models.AssertionType]interface{}{models.StatusCode: asserted},
+		}
+		pass, _ := Match(tc, &models.HTTPResp{StatusCode: 500, Body: `{"ok":true}`}, nil, false, false, zap.NewNop(), true, WithoutPassLine())
+		require.Equal(t, asserted == 500, pass, "the verdict is the assertions'")
+		require.NotContains(t, out.String(), "Testrun passed", "asserted %d", asserted)
+		if pass {
+			require.Empty(t, out.String(), "asserted %d", asserted)
+		} else {
+			require.Contains(t, out.String(), "Testrun failed", "asserted %d", asserted)
+		}
+	}
+}
+
+// When a test case's assertions judge its answer in place of the comparison
+// (AssertionsReplaceComparison), Match's console says what they say. A
+// comparison that matches printed "Testrun passed" for a test its failed
+// assertion fails, and one that differs printed "Testrun failed", with its
+// diff, for a test its assertions pass. What a failed assertion says is
+// printed under the line, as a diff is. Compared quietly, it prints nothing,
+// an assertion's failure included.
+func TestMatchConsoleSaysWhatTheAssertionsThatJudgeItSay(t *testing.T) {
+	var out strings.Builder
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&out)
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	for _, c := range []struct {
+		name     string
+		status   int
+		asserted int
+		wantPass bool
+		want     string
+	}{
+		{"the answer matches, its assertion fails", 200, 201, false, "Testrun failed"},
+		{"the answer differs, its assertion passes", 500, 500, true, "Testrun passed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name:       "test-1",
+				HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+				Assertions: map[models.AssertionType]interface{}{models.StatusCode: c.asserted},
+			}
+			actual := func() *models.HTTPResp { return &models.HTTPResp{StatusCode: c.status, Body: `{"ok":true}`} }
+			for _, loud := range []bool{true, false} {
+				out.Reset()
+				core, logs := observer.New(zap.ErrorLevel)
+				// The log lines go where the lines go, so their order shows.
+				console := zapcore.NewCore(zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.AddSync(&out), zap.ErrorLevel)
+				pass, _ := Match(tc, actual(), nil, false, false, zap.New(zapcore.NewTee(core, console)), loud)
+				require.Equal(t, c.wantPass, pass, "the verdict is the assertions'")
+				printed := out.String()
+				if !loud {
+					require.Empty(t, printed, "a quiet comparison printed")
+					require.Zero(t, logs.Len(), "a quiet comparison logged %v", logs.All())
+					continue
+				}
+				require.Contains(t, printed, c.want)
+				require.NotContains(t, printed, map[bool]string{true: "Testrun failed", false: "Testrun passed"}[c.wantPass])
+				require.Equal(t, !c.wantPass, logs.FilterMessage("status_code assertion failed").Len() == 1, "the failed assertion is said once, when it fails")
+				if !c.wantPass {
+					require.Less(t, strings.Index(printed, "Testrun failed"), strings.Index(printed, "status_code assertion failed"), "what the failed assertion says is under its line")
+				}
+			}
+		})
+	}
 }

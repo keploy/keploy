@@ -420,6 +420,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	skipSuccessMsg := false
+	// When the test case's assertions judge its answer in place of this
+	// comparison, the console says what they say (below), not what the
+	// comparison found: no diff, no failure for an answer they pass.
+	assertionsJudge := AssertionsReplaceComparison(tc)
 	if !pass {
 		isStatusMismatch := false
 		isHeaderMismatch := false
@@ -601,7 +605,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				)
 			}
 
-			if emitFailureLogs {
+			if emitFailureLogs && !assertionsJudge {
 				_, err := newLogger.Printf(logs)
 				if err != nil {
 					utils.LogError(logger, err, "failed to print the logs")
@@ -619,17 +623,45 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		skipSuccessMsg = true
 	}
 
+	if assertionsJudge {
+		// The assertions' verdict, the line that says it and, under that
+		// line, what each assertion that fails says, as a comparison's diff
+		// is printed under its line: printed above it, they would sit under
+		// the previous test case's line. AssertionMatch only reads tc and the
+		// answer, so the second call says what the first found. Compared
+		// quietly (emitFailureLogs false), nothing is said, an assertion's
+		// failure included: a caller that compares again with its logs on
+		// (compareHTTPRespForReplay) says it then, once.
+		pass, res := AssertionMatch(tc, actualResponse, zap.NewNop())
+		if emitFailureLogs {
+			if pass {
+				PrintPassLine(tc, logger, opts...)
+			} else {
+				printFailLine(tc, logger)
+				AssertionMatch(tc, actualResponse, logger)
+			}
+		}
+		return pass, res
+	}
+
 	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
 	// so we skip the success message as well
 	if !skipSuccessMsg && emitFailureLogs {
 		PrintPassLine(tc, logger, opts...)
 	}
 
-	if AssertionsReplaceComparison(tc) {
-		return AssertionMatch(tc, actualResponse, logger)
-	}
-
 	return pass, res
+}
+
+// printFailLine prints the "Testrun failed" line for tc, as Match prints it
+// above a comparison's diff, for a test case its assertions fail.
+func printFailLine(tc *models.TestCase, logger *zap.Logger) {
+	newLogger := ppNew234()
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetFailingColorScheme())
+	if _, err := newLogger.Printf(newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)); err != nil {
+		utils.LogError(logger, err, "failed to print the logs")
+	}
 }
 
 // AssertionsReplaceComparison reports whether tc's assertions judge its
