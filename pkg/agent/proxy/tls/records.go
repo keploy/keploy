@@ -1,7 +1,9 @@
 package tls
 
 import (
+	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -34,6 +36,12 @@ type recordConn struct {
 	done  atomic.Bool
 	after atomic.Uint64
 	pass  bool
+	// silent, when set (ClientEvents.SilentHangUp), is told, once, of the
+	// client's hang-up as the first read after the handshake ends with
+	// nothing read since: the end of the stream, or a reset, never keploy's
+	// own close of the connection.
+	silent     func(error)
+	silentOnce sync.Once
 }
 
 func newRecordConn(conn net.Conn) *recordConn {
@@ -44,6 +52,15 @@ func newRecordConn(conn net.Conn) *recordConn {
 // first, up to its five bytes), until the first byte after the handshake.
 // crypto/tls reads from one goroutine at a time.
 func (c *recordConn) Read(b []byte) (int, error) {
+	n, err := c.read(b)
+	if n == 0 && err != nil && c.silent != nil && c.done.Load() && c.after.Load() == 0 &&
+		IsClientGiveUp(err) && !errors.Is(err, net.ErrClosed) {
+		c.silentOnce.Do(func() { c.silent(err) })
+	}
+	return n, err
+}
+
+func (c *recordConn) read(b []byte) (int, error) {
 	if c.pass || len(b) == 0 {
 		n, err := c.Conn.Read(b)
 		c.count(n)
