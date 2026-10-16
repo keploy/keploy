@@ -135,27 +135,48 @@ func h2SettingsPreface(b []byte) bool {
 	return true
 }
 
+// saidOnceBound is how many destinations a saidOnce holds; past it, the one
+// added longest ago is forgotten.
+const saidOnceBound = 4096
+
 // saidOnce is a set of destinations: those a line was said for in this
 // recording session (Proxy.serverFirstSaid, reset by Record), each said once,
 // or those found to speak a server-first protocol (Proxy.serverFirstDests).
-// Bounded: past 4096 it starts over, so a run that reaches many destinations
-// says some again, or relays no more a destination it forgot, rather than
-// holding them all.
+// Bounded (saidOnceBound): past it the destination added longest ago is
+// forgotten, one at a time, so a run that reaches many destinations says one
+// again, or probes it as a port's first connection, rather than holding them
+// all, and never forgets the rest at once.
 type saidOnce struct {
-	mu   sync.Mutex
-	said map[string]struct{}
+	mu    sync.Mutex
+	said  map[string]struct{}
+	order []string
 }
 
+// first adds dest, and reports whether it was not in the set. A dest
+// already in it is seen again: it is now the one added last, the last to be
+// forgotten.
 func (s *saidOnce) first(dest string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.said == nil || len(s.said) >= 4096 {
-		s.said = map[string]struct{}{}
-	}
 	if _, ok := s.said[dest]; ok {
+		for i, d := range s.order {
+			if d == dest {
+				s.order = append(append(s.order[:i:i], s.order[i+1:]...), dest)
+				break
+			}
+		}
 		return false
 	}
+	if s.said == nil {
+		s.said = map[string]struct{}{}
+	}
+	for len(s.said) >= saidOnceBound && len(s.order) > 0 {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		delete(s.said, oldest)
+	}
 	s.said[dest] = struct{}{}
+	s.order = append(s.order, dest)
 	return true
 }
 
@@ -167,9 +188,25 @@ func (s *saidOnce) has(dest string) bool {
 	return ok
 }
 
+// drop takes dest out of the set.
+func (s *saidOnce) drop(dest string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.said[dest]; !ok {
+		return
+	}
+	delete(s.said, dest)
+	for i, d := range s.order {
+		if d == dest {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+}
+
 func (s *saidOnce) reset() {
 	s.mu.Lock()
-	s.said = nil
+	s.said, s.order = nil, nil
 	s.mu.Unlock()
 }
 
@@ -215,8 +252,11 @@ func (p *Proxy) relayServerFirst(ctx context.Context, src net.Conn, dstAddr stri
 	}
 	relay := &realdeps.Relay{Client: src, In: bufio.NewReader(src), Dest: dst}
 	if provenswitch.On() {
-		what := "to " + dstAddr
-		relay.Sent = func(int) { p.losses.Add(models.CaptureLossServerFirst, what) }
+		what, kind := "to "+dstAddr, models.CaptureLossServerFirst
+		if refused {
+			kind = models.CaptureLossRefusedAtAccept
+		}
+		relay.Sent = func(int) { p.losses.Add(kind, what) }
 	}
 	return relay.Run(ctx)
 }

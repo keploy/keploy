@@ -241,14 +241,14 @@ func (w *captureWatch) finish(testSetID string) bool {
 	var abandonedLate, relayedLate models.CaptureLosses
 	for _, c := range w.finalNotJudged.Since(w.chargedNotJudged) {
 		switch {
-		case c.Kind == models.CaptureLossServerFirst:
+		case c.Kind == models.CaptureLossServerFirst || c.Kind == models.CaptureLossRefusedAtAccept:
 			relayedLate = append(relayedLate, c)
 		case c.Kind.PerTest():
 			abandonedLate = append(abandonedLate, c)
 		}
 	}
 	if len(relayedLate) > 0 {
-		w.logger.Warn("the application sent data over a server-first protocol keploy passes through, after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
+		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("reason", relayedLate.NotJudgedText()),
 			zap.String("next_step", relayedLate.NotJudgedRemedy()+", then re-record"))

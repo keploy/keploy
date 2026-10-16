@@ -828,16 +828,20 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = ln.Close() })
+			acceptLoop := make(chan struct{})
 			go func() {
+				defer close(acceptLoop)
 				for {
 					c, err := ln.Accept()
 					if err != nil {
 						return
 					}
 					accepted.Add(1)
-					_, _ = c.Write([]byte("220 mail.test ESMTP\r\n"))
-					_, _ = io.Copy(io.Discard, c)
-					_ = c.Close()
+					go func() {
+						_, _ = c.Write([]byte("220 mail.test ESMTP\r\n"))
+						_, _ = io.Copy(io.Discard, c)
+						_ = c.Close()
+					}()
 				}
 			}()
 			dst := ln.Addr().String()
@@ -897,6 +901,14 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			if held {
 				want = 1 // the handshake's own dial, never relayed
 			}
+			// Every accept is counted once the accept loop has ended. The
+			// handshake's connection goes first, as handleConnection's
+			// deferred close lets it go at the run's end.
+			if pre != nil {
+				pre.CloseIfUnused()
+			}
+			_ = ln.Close()
+			awaitEvent(t, acceptLoop, "the destination's accept loop ending")
 			require.Equal(t, want, accepted.Load())
 			run := p.RealRun()
 			require.Empty(t, run.Incomplete, "its test was charged; the run is not charged again")
