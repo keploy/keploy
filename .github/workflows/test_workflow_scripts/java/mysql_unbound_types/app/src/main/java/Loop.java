@@ -40,6 +40,10 @@ import java.sql.ResultSet;
  *   - GET /attrread/{n}: n queries reading their attribute span
  *     (mysql_query_attribute_string(): the server answers with an attribute
  *     only through it).
+ *   - GET /pattr/{n}: one server-prepared statement executed n times, each
+ *     with its own value and a traceparent that differs on every call: the
+ *     attributes go on the COM_STMT_EXECUTE (a statement keeps its
+ *     attributes until they are cleared).
  */
 public class Loop {
     static final String FIXED_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
@@ -153,6 +157,37 @@ public class Loop {
                             try (ResultSet rs = ps.executeQuery()) {
                                 rs.next();
                                 sb.append(rs.getString("s")).append(';');
+                            }
+                        }
+                    }
+                }
+                body = sb.toString();
+            } catch (Exception e) {
+                code = 500;
+                body = "error: " + e;
+            }
+            byte[] out = body.getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(code, out.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(out); }
+        });
+        server.createContext("/pattr/", ex -> {
+            String body;
+            int code = 200;
+            try {
+                int n = Integer.parseInt(ex.getRequestURI().getPath().substring("/pattr/".length()));
+                Class<?> js = Class.forName("com.mysql.cj.jdbc.JdbcStatement");
+                java.lang.reflect.Method set = js.getMethod("setAttribute", String.class, Object.class);
+                java.lang.reflect.Method clear = js.getMethod("clearAttributes");
+                StringBuilder sb = new StringBuilder();
+                synchronized (conn) {
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT ? * 10 AS v")) {
+                        for (int i = 1; i <= n; i++) {
+                            clear.invoke(ps.unwrap(js));
+                            set.invoke(ps.unwrap(js), "traceparent", traceparent());
+                            ps.setInt(1, i);
+                            try (ResultSet rs = ps.executeQuery()) {
+                                rs.next();
+                                sb.append(rs.getLong("v")).append(';');
                             }
                         }
                     }
