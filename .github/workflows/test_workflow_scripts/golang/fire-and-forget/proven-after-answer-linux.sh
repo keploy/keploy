@@ -34,6 +34,11 @@
 #      non-zero, the report names the call among those made after the set's
 #      last test, and c-ping, whose answer it followed, passes.
 #
+#   8. An app that ignores SIGINT: keploy's stop at the set's end kills it
+#      once the stop's grace runs out, and the set is not judged (what the app
+#      would have done as it stopped is not known): keploy test exits
+#      non-zero, and the report names the kill and the grace.
+#
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
 # before the stop is the app's clock, and no case here asserts on it.
@@ -229,6 +234,30 @@ yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | gr
     fail "7 (HTTP, changed shutdown publish): the report does not name the publish among the calls made after the set's last test: $(grep -n -A3 'unclaimed' "$(REPORT)" | head -12)"
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
+
+APP_ENV="IGNORE_INT=1"
+record_ping() {
+    local dir="$1"
+    mkdir -p "$dir" && cd "$dir" || exit 1
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+        --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+    REC_PID=$!
+    wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
+    curl -s "http://127.0.0.1:$APP/c-ping" >/dev/null
+    wait_tests 1 "$REC_PID" || fail "$dir: keploy record wrote $(test_files) test cases, want 1"
+    stop_pid "$REC_PID"
+    REC_PID=""
+    own
+    cd "$WORK" || exit 1
+}
+record_ping ignores
+echo "== 8. an app that ignores SIGINT =="
+replay ignores as-recorded http
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
+    fail "8 (an app that ignores SIGINT): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+grep -m1 '^failure_reason:' "$(REPORT)" | grep -q 'so keploy killed it' ||
+    fail "8 (an app that ignores SIGINT): the report does not name the kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

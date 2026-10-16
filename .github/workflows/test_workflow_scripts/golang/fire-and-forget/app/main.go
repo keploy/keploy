@@ -1,7 +1,8 @@
 // A test application whose /a-publish answers 200 ms after it starts a
 // publish to a broker that it does not wait for (fire and forget), with SUFFIX
 // appended to the message; /b-other takes 3 s; /c-ping answers at once.
-// With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped.
+// With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped; with
+// IGNORE_INT set it ignores SIGINT.
 //
 // PROTO says how it publishes:
 //   - http: an HTTP POST on a connection of its own (no keep-alive);
@@ -211,6 +212,11 @@ func main() {
 	// answer, the app publishes "shutdown" (with SUFFIX), waits for the
 	// broker's reply and exits 0, as an app whose shutdown flushes a queue
 	// does. The call is made only once keploy stops the app.
+	// IGNORE_INT: the app ignores SIGINT, as one with no graceful stop does
+	// (a container's init with no handler for it): only a kill ends it.
+	if os.Getenv("IGNORE_INT") != "" {
+		signal.Ignore(syscall.SIGINT)
+	}
 	if os.Getenv("SHUTDOWN_PUBLISH") == "" {
 		log.Fatal(http.ListenAndServe(":8080", nil))
 	}
