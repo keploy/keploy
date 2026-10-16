@@ -32,6 +32,13 @@ type Seen struct {
 	Leaf  Leaf
 	Live  string
 	Place string
+	// Written: the request stores the value at Place (a body it creates or
+	// updates a record with), rather than only naming or comparing with it
+	// (ReadBack).
+	Written bool
+	// Name is the variable the learn step put at Place (bound or used
+	// there), "" for none (Named).
+	Name string
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -42,7 +49,10 @@ type Earlier struct {
 	At time.Time
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
-	Own  bool
+	Own bool
+	// Run: served while no test was open (Tracker.Served): a variable bound
+	// at it is the run's, which every later test uses (Tracker.RunName).
+	Run  bool
 	Seen []Seen
 }
 
@@ -90,6 +100,10 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
+	// Run: the mock was served while no test was open (Earlier.Run).
+	Run bool
+	// Name is the variable already at Var (Seen.Name), "" for none.
+	Name string
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -948,7 +962,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			}
 			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
 				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own}, true
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run}, true
 			}
 		}
 	}
@@ -1207,4 +1221,64 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 		return false
 	}
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
+}
+
+// minReadBack is the length below which a value is not read back: a short
+// value equal by chance to one the run made is not that value.
+const minReadBack = 6
+
+// ReadBack is where a value of a recorded answer was written earlier with
+// another value in this run: the request place, held whole, of the earliest
+// exchange served before whose recorded value is r's and whose live value
+// differs from it: where the value was first stored, so every read of it,
+// and every later write that carries it on, follows one variable. A call that answers with what an earlier call wrote (a
+// time, a code the application made and stored) is then answered with what
+// this run wrote there: r's place is an answer place of the variable bound
+// at that earlier place. Only a place the adapter marked Written is read
+// (it knows which of a request's places store a value, and which only
+// compare with one).
+func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
+	if r.Unnamed || r.Type != String || len(r.Value) < minReadBack {
+		return Place{}, false
+	}
+	served := append([]Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	for _, e := range served {
+		for _, s := range e.Seen {
+			if s.Side != Request || !s.Written || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
+				continue
+			}
+			return Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}, true
+		}
+	}
+	return Place{}, false
+}
+
+// Named is e with each request place that holds one of vars (as its bind or
+// a use) naming that variable (Seen.Name). An echo is not named: it is its
+// call's alone, and a later call that reads its value back binds it there
+// as a variable of the test (ReadBack).
+func Named(e Earlier, vars models.MockVariables) Earlier {
+	if len(vars) == 0 {
+		return e
+	}
+	at := map[string]string{}
+	for name, v := range vars {
+		if v.Echo {
+			continue
+		}
+		if v.Bind != "" {
+			at[v.Bind] = name
+		}
+		for _, u := range v.Use {
+			at[u] = name
+		}
+	}
+	for i, s := range e.Seen {
+		if s.Side == Request && s.Place != "" {
+			e.Seen[i].Name = at[s.Place]
+		}
+	}
+	return e
 }
