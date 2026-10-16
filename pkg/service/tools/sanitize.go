@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -31,17 +32,22 @@ var customGitleaksRules string
 func (t *Tools) Sanitize(ctx context.Context) error {
 	t.logger.Info("Starting sanitize process...")
 
+	// The recorded test sets: what the test store lists in the keploy
+	// folder, as keploy test and keploy templatize read them.
+	recorded, err := t.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		t.logger.Error("Failed to get test sets", zap.Error(err))
+		return fmt.Errorf("failed to get test sets: %w", err)
+	}
 	// From CLI: SelectedTests
 	testSets := t.extractTestSetIDs()
 	if len(testSets) == 0 {
-		var err error
-		testSets, err = t.testDB.GetAllTestSetIDs(ctx)
-		if err != nil {
-			t.logger.Error("Failed to get test sets", zap.Error(err))
-			return fmt.Errorf("failed to get test sets: %w", err)
-		}
+		testSets = recorded
 		t.logger.Info("No test sets specified, processing all test sets", zap.Int("count", len(testSets)))
 	} else {
+		if err := t.refuseUnrecorded(testSets, recorded); err != nil {
+			return err
+		}
 		t.logger.Info("Processing specified test sets", zap.Strings("testSets", testSets))
 	}
 
@@ -58,8 +64,11 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		// keploy/<testSetID>
 		testSetDir, err := t.locateTestSetDir(testSetID)
 		if err != nil {
-			t.logger.Error("Could not locate test set directory; skipping",
+			// A recorded set (the testDB listed it) whose folder is not
+			// where sanitize looks: left unsanitized, which fails the run.
+			t.logger.Error("Could not locate test set directory, so it was not sanitized",
 				zap.String("testSetID", testSetID), zap.Error(err))
+			failed = append(failed, testSetID)
 			continue
 		}
 		t.logger.Info("Sanitizing test set",
@@ -104,12 +113,53 @@ func (t *Tools) extractTestSetIDs() []string {
 	return ids
 }
 
-// locateTestSetDir resolves ./keploy/<testSetID> at the current working directory
+// keployDir is the keploy folder the run was given (-p, as config.Path), or
+// ./keploy where it was given none.
+func (t *Tools) keployDir() string {
+	if t.config != nil && t.config.Path != "" {
+		return t.config.Path
+	}
+	return filepath.Join(".", "keploy")
+}
+
+// locateTestSetDir resolves <keploy folder>/<testSetID>. It looked only in
+// ./keploy, whatever -p said: run elsewhere, sanitize skipped every set it
+// was asked for and exited 0 with their secrets in place.
 func (t *Tools) locateTestSetDir(testSetID string) (string, error) {
-	if p := filepath.Join(".", "keploy", testSetID); isDir(p) {
+	if p := filepath.Join(t.keployDir(), testSetID); isDir(p) {
 		return p, nil
 	}
-	return "", fmt.Errorf("keploy/%s not found in current directory", testSetID)
+	return "", fmt.Errorf("%s not found in %s", testSetID, t.keployDir())
+}
+
+// refuseUnrecorded refuses, naming them, the named test sets that are not
+// recorded: not listed by the test store (recorded), as keploy test and
+// keploy templatize decide it. A name that is not was skipped with an error
+// line and the run exited 0, leaving the set the user meant unsanitized; and
+// a folder of the keploy folder is no test set by being a folder (-t reports,
+// -t schema, -t . and -t ../elsewhere each passed for one, and exited 0).
+//
+// Every name here is the command line's (-t): ValidateFlags sets sanitize's
+// selection from -t alone, so keploy.yml's test.selectedTests never reaches
+// it. By the founder's ruling on P189 such a name is refused, with the proven
+// switch on or off, before anything is sanitized.
+func (t *Tools) refuseUnrecorded(names, recorded []string) error {
+	var unknown []string
+	for _, name := range names {
+		if !slices.Contains(recorded, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	err := fmt.Errorf("the test set(s) %s named for keploy sanitize are not recorded in %s", strings.Join(unknown, ", "), t.keployDir())
+	utils.LogError(t.logger, err, "keploy sanitize names a test set that is not recorded, so it sanitizes none",
+		zap.Strings("notRecorded", unknown),
+		zap.Strings("recorded", recorded),
+		zap.String("next_step", "name only recorded test sets in -t/--test-sets (comma-separated), and point -p at the folder that holds their keploy folder"))
+	return err
 }
 
 func isDir(p string) bool {
