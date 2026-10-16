@@ -567,6 +567,87 @@ func TestALaterSessionResetsAGlobalSurvivorOnceItIsInEffect(t *testing.T) {
 	}
 }
 
+// Mock sets up what a connection under the session needs -- above all a
+// mock manager, which the first session had none of until after it took
+// effect, so a replay connection served in between was dropped -- before the
+// session takes effect, and resets what was passed through without a session
+// as Record does: before the first session takes effect, after a later one
+// does. TestTheFirstReplaySessionResetsWhatWasPassedThroughBeforeItTakesEffect
+// and TestALaterReplaySessionResetsAGlobalSurvivorOnceItIsInEffect are which
+// session each reset sees; this pins where the set-up goes (the learn step's
+// new set too), which no event of a test tells apart.
+func TestMockSetsUpBeforeTheSessionTakesEffect(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy.go: %v", err)
+	}
+	var mock *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "Mock" && fd.Recv != nil {
+			mock = fd
+		}
+	}
+	if mock == nil {
+		t.Fatal("Proxy.Mock not found in proxy.go")
+	}
+	at := map[string][]token.Pos{}
+	ast.Inspect(mock.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				at[sel.Sel.Name] = append(at[sel.Sel.Name], call.Pos())
+			}
+		}
+		return true
+	})
+	sets := at["setSession"]
+	if len(sets) != 1 {
+		t.Fatalf("Mock calls setSession %d time(s), want once", len(sets))
+	}
+	for _, name := range []string{"NewSet", "setMockManager", "ResetForReplaySession", "ClearAllWorkerScopes"} {
+		if len(at[name]) != 1 || at[name][0] > sets[0] {
+			t.Fatalf("Mock calls %s %d time(s), or after setSession: want once, before the session takes effect", name, len(at[name]))
+		}
+	}
+	if ends := at["endNoSessionPassthroughs"]; len(ends) != 2 || ends[0] > sets[0] || ends[1] < sets[0] {
+		t.Fatal("Mock must reset what was passed through without a session before the first session takes effect, and a later session's once it is in effect")
+	}
+}
+
+// The first replay session resets what was passed through without a session
+// before it takes effect, as Record's does.
+func TestTheFirstReplaySessionResetsWhatWasPassedThroughBeforeItTakesEffect(t *testing.T) {
+	p, w := passedThroughWithoutASession(t, false)
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	if at := awaitEvent(t, w.at, "the passthrough's reset"); at != nil {
+		t.Fatal("the first replay session was already in effect when its passthrough was reset")
+	}
+}
+
+// A later replay session that does not pass through what global passthrough
+// kept (it intercepts TLS) resets it once it is in effect: reset before, the
+// application's reconnection would be the previous session's, a passthrough
+// the new session never resets.
+func TestALaterReplaySessionResetsAGlobalSurvivorOnceItIsInEffect(t *testing.T) {
+	p, w := passedThroughWithoutASession(t, true)
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.at: // the reset runs inside Mock, so it is in by now
+		t.Fatal("a replay session that passes through reset the global passthrough")
+	default:
+	}
+	if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true, OpportunisticTLSIntercept: true}); err != nil {
+		t.Fatal(err)
+	}
+	if at, now := awaitEvent(t, w.at, "the survivor's reset"), p.getSession(); at != now {
+		t.Fatalf("the survivor was reset under session %p, want the new session %p: its reconnection would be the previous session's", at, now)
+	}
+}
+
 // An agent started to record whose first session is a replay resets what it
 // passed through too: from Mock on, a connection's calls are served from
 // mocks, never from the live dependency.
