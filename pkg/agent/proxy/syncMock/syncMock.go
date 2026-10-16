@@ -219,7 +219,8 @@ type SyncMockManager struct {
 	// rescues, the memory-pressure wipe) preserve it instead of pruning. The
 	// effect is that static-dedup pruning only begins from the (N+1)-th test
 	// case, keeping the boot-through-Nth-test mock corpus complete. Mirrors
-	// firstReqSeen's lifecycle (set forward-only within a record session).
+	// firstReqSeen's lifecycle (set forward-only within a record session,
+	// and cleared as the next one starts: StartRecordSession).
 	resolvedTestCount int
 
 	// recentWindows is a COUNT-bounded ring of the most recently
@@ -3124,6 +3125,21 @@ func (h holdState) fields() []zap.Field {
 		zap.Int64("held_bytes_in_process", h.processBytes),
 		zap.Int("open_windows", h.open),
 	}
+}
+
+// StartRecordSession starts a recording: until its own first request
+// (SetFirstRequestSignaled), what the application calls is a startup call,
+// sent on as it is captured, and its first test cases are the startup window
+// again (resolvedTestCount). The manager is the process's, and outlives a
+// recording: a long-lived agent's next one, or keploy's own next session,
+// started with the earlier one's first request seen, and a call made before
+// its own first request waited, as a test's, for a test case's window that
+// never came. Called as a record session starts (the proxy's Record).
+func (m *SyncMockManager) StartRecordSession() {
+	m.mu.Lock()
+	m.firstReqSeen = false
+	m.resolvedTestCount = 0
+	m.mu.Unlock()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
