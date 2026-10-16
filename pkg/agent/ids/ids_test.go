@@ -110,3 +110,13 @@ func TestDocumentsWrittenInOneRecordedSecondKeepOneTime(t *testing.T) {
 		t.Fatalf("an id paired two ways is still dropped: %s", got)
 	}
 }
+
+func TestTheRunsPairsReachTheCLIWithTheirTimes(t *testing.T) {
+	m := &Map{}
+	m.Add("6ad092fc81cde9599b98d950", "6ad092fc5b32851dc1de69be")
+	m.AddTime("createdAt", "1792055846", "1792066198")
+	body := `[{"_id":"6ad092fc81cde9599b98d950","createdAt":1792055846,"other":1792055846}]`
+	if got, want := New(m.Pairs()).Rewrite(body), m.Rewrite(body); got != want || got != `[{"_id":"6ad092fc5b32851dc1de69be","createdAt":1792066198,"other":1792055846}]` {
+		t.Fatalf("the CLI's copy rewrites as the agent's does:\n cli %s\nagent %s", got, want)
+	}
+}

@@ -68,12 +68,20 @@ func (m *Map) ban(old, cur string) {
 	m.rep, m.back = nil, nil
 }
 
+// Pairs is every pair of m: an id or a code as it is, a time as its field, a
+// NUL and its value, which New reads back as a time.
 func (m *Map) Pairs() map[string]string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	out := make(map[string]string, len(m.next))
 	for k, v := range m.next {
 		out[k] = v
+	}
+	t := m.times
+	m.mu.Unlock()
+	if t != nil {
+		for k, v := range t.Pairs() {
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -183,6 +191,12 @@ func (m *Map) Reset() {
 func New(pairs map[string]string) *Map {
 	m := &Map{}
 	for old, cur := range pairs {
+		field, from, isTime := strings.Cut(old, "\x00")
+		_, to, _ := strings.Cut(cur, "\x00")
+		if isTime {
+			m.AddTime(field, from, to)
+			continue
+		}
 		m.Add(old, cur)
 	}
 	return m
