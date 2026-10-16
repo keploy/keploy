@@ -922,6 +922,7 @@ func TestAMySQLClientsTLSHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
 			mm := NewMockManager(nil, nil, zap.NewNop())
 			t.Cleanup(mm.Close)
