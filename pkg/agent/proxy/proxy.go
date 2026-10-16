@@ -189,6 +189,12 @@ type Proxy struct {
 	// only non-mock noise (OTel, health checks) is discarded — keeping the
 	// errChannel drained either way.
 	activeTestErrors atomic.Pointer[testErrorAccumulator]
+	// testWindows counts each test window's opening and closing (the
+	// misses windows above): each value names a window or the gap after
+	// it, never another (a read with no window open starts a new gap), for
+	// the events of a client's connection to tell whether they happened
+	// within one (testScopeNow).
+	testWindows atomic.Uint64
 	// captureMu serializes the drain goroutine's routing decision (read
 	// activeTestErrors, then add) against BeginTestErrorCapture / GetMockErrors
 	// opening or closing the window. Without it, the goroutine could add a miss
@@ -4796,7 +4802,9 @@ func (p *Proxy) openTestErrorCapture(carry bool) {
 	// dropped.
 	var unread []error
 	var between []error
-	if old := p.activeTestErrors.Swap(acc); old != nil {
+	old := p.activeTestErrors.Swap(acc)
+	p.testWindows.Add(1)
+	if old != nil {
 		if old.read {
 			between = old.drain()
 		} else {
@@ -4871,7 +4879,9 @@ func (p *Proxy) EndTestErrorCapture() []error {
 	if provenswitch.On() {
 		p.learnTracker.End()
 	}
-	if acc := p.activeTestErrors.Swap(nil); acc != nil {
+	acc := p.activeTestErrors.Swap(nil)
+	p.testWindows.Add(1)
+	if acc != nil {
 		return acc.drain()
 	}
 	return nil
@@ -4977,6 +4987,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		if acc := p.activeTestErrors.Swap(nil); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
 		}
+		p.testWindows.Add(1)
 		if provenswitch.On() {
 			// The test is over: no test is open until the next one begins.
 			p.learnTracker.End()
@@ -4993,6 +5004,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			rawErrs = append(rawErrs, acc.drain()...)
 			acc.read = true
 		}
+		p.testWindows.Add(1)
 	}
 	p.captureMu.Unlock()
 

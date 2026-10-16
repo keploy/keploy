@@ -383,7 +383,6 @@ func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
 	stop()
 	ev := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
 	ev.HandshakeBegin()
-	ev.HandshakeDone()
 	ev.SilentHangUp(context.Canceled)
 	ev.SilentHangUp(fmt.Errorf("read: %w", net.ErrClosed))
 	(&clientTLS{p: p, ctx: stopped, dst: "10.0.0.1:443"}).SilentHangUp(io.EOF)
@@ -399,10 +398,10 @@ func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
 // A Go client's http.Transport keeps the connection it dialled for a request
 // another connection served first: a spare, its handshake done, nothing sent.
 // It goes when the application stops, closed by the kernel with no
-// close_notify -- after the test it was dialled in, or outside every test. A
-// hang-up like a rejection's, but nothing was lost: it is charged only within
-// the test scope its handshake ended in, and this one is not. It was charged
-// a tls_handshake_abandoned, leaving a test not judged for every Go
+// close_notify -- after the test it was dialled in. A hang-up like a
+// rejection's, but nothing was lost: it is charged only within the scope its
+// handshake began in, and this one crossed the test's end. It was charged a
+// tls_handshake_abandoned, leaving a test not judged for every Go
 // application that leaves a spare.
 func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -527,69 +526,76 @@ func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
 	}
 }
 
-// An abandon is charged only within the test it began in: a silent hang-up
-// within the test scope its handshake ended in, the handshake's own within
-// the one it began in -- the open window of a test's misses (keploy test, a
-// replay) or the Universal Mocker's open test -- never after that test, in
-// the next one, or outside every test. A rejection keploy read is charged
-// wherever it happens.
-func TestAnAbandonIsChargedOnlyWithinTheTestItBeganIn(t *testing.T) {
+// An abandon is charged only when the handshake and the hang-up fall within
+// one scope -- a test (the open window of a test's misses, keploy test's or a
+// replay's; the Universal Mocker's open test) or the time outside tests (the
+// run's start, the gap between two tests, after the last one) -- never
+// across a boundary, a handshake that straddles one included. A rejection
+// keploy read is charged wherever it happens.
+func TestAnAbandonIsChargedOnlyWithinTheScopeItBeganIn(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop()}
 	abandoned := func() uint64 { return lossesOf(p, models.CaptureLossTLSAbandoned) }
 	handshake := func() *clientTLS {
 		ev := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
 		ev.HandshakeBegin()
-		ev.HandshakeDone()
 		return ev
+	}
+	want := func(n uint64, what string) {
+		t.Helper()
+		if got := abandoned(); got != n {
+			t.Fatalf("%s: %d abandoned, want %d", what, got, n)
+		}
 	}
 
 	handshake().SilentHangUp(io.EOF)
-	if n := abandoned(); n != 0 {
-		t.Fatalf("outside every test: %d abandoned, want 0", n)
-	}
+	want(1, "at the application's start, before any test, within one scope")
+
+	ev := handshake()
+	p.BeginTestErrorCapture() // a test begins
+	ev.SilentHangUp(io.EOF)
+	want(1, "a handshake before a test, hung up in it")
+
+	ev = handshake()
+	p.EndTestErrorCapture() // the test ends
+	ev.SilentHangUp(io.EOF)
+	want(1, "after its test ended")
 
 	p.BeginTestErrorCapture()
-	ev := handshake()
-	p.activeTestErrors.Store(nil) // the test ends: its misses are read
-	ev.SilentHangUp(io.EOF)
-	if n := abandoned(); n != 0 {
-		t.Fatalf("after its test ended: %d abandoned, want 0", n)
+	ev = handshake()
+	if _, err := p.GetMockErrors(context.Background()); err != nil { // keploy test's end of a test
+		t.Fatal(err)
 	}
+	ev.SilentHangUp(io.EOF)
+	want(1, "after its test's misses were read")
+
+	handshake().SilentHangUp(io.EOF)
+	want(2, "in the gap after a test, within it")
 
 	p.BeginTestErrorCapture()
 	ev = handshake()
 	p.ContinueTestErrorCapture() // the next test begins
 	ev.SilentHangUp(io.EOF)
-	if n := abandoned(); n != 0 {
-		t.Fatalf("in the next test: %d abandoned, want 0", n)
-	}
+	want(2, "in the next test")
 
 	handshake().SilentHangUp(io.EOF)
-	if n := abandoned(); n != 1 {
-		t.Fatalf("within its test: %d abandoned, want 1", n)
-	}
+	want(3, "within its test")
 
-	// A handshake that began in one test and ended in the next: its
-	// silent hang-up is the test it ended in, which it is still in.
-	ev = &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
-	ev.HandshakeBegin()
+	// A handshake that began in one test and ended in the next straddles a
+	// boundary, as a spare whose handshake the test's end overtook does:
+	// its silent hang-up is no scope's.
+	ev = handshake()
 	p.ContinueTestErrorCapture()
-	ev.HandshakeDone()
 	ev.SilentHangUp(io.EOF)
-	if n := abandoned(); n != 2 {
-		t.Fatalf("a handshake that ended in the next test, hung up in it: %d abandoned, want 2", n)
-	}
+	want(3, "a handshake that ended in the next test, hung up in it")
 
 	ev = &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
 	ev.HandshakeBegin()
-	p.activeTestErrors.Store(nil)
+	p.EndTestErrorCapture()
 	ev.HandshakeFailed(&pTls.HandshakeError{Err: io.EOF, CertificateSent: true})
-	if n := abandoned(); n != 2 {
-		t.Fatalf("a handshake abandoned after the test it began in: %d abandoned, want still 2", n)
-	}
+	want(3, "a handshake abandoned after the test it began in")
 	ev.HandshakeFailed(&net.OpError{Op: "remote error", Err: errors.New("tls: bad certificate")})
 	if n := lossesOf(p, models.CaptureLossTLSAbort); n != 1 {
-		t.Fatalf("a rejection outside every test: %d failed, want 1", n)
+		t.Fatalf("a rejection: %d failed, want 1", n)
 	}
 
 	ck := containerkey.Default
@@ -599,9 +605,10 @@ func TestAnAbandonIsChargedOnlyWithinTheTestItBeganIn(t *testing.T) {
 	ev = handshake()
 	ck.EndTest()
 	ev.SilentHangUp(io.EOF)
+	want(3, "the Universal Mocker's test, hung up after it")
+	handshake().SilentHangUp(io.EOF)
+	want(4, "the Universal Mocker's gap after a test, within it")
 	ck.BeginTest()
 	handshake().SilentHangUp(io.EOF)
-	if n := abandoned(); n != 3 {
-		t.Fatalf("the Universal Mocker's tests: %d abandoned, want 3 (one after its test, none; one within it, one)", n)
-	}
+	want(5, "the Universal Mocker's test, within it")
 }

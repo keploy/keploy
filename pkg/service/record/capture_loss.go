@@ -222,10 +222,14 @@ func (w *captureWatch) finish(testSetID string) bool {
 		}
 	}
 	if len(abandonedLate) > 0 {
-		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: whether a call was lost cannot be told, and no test case holds it ("+provenswitch.Env+"=1)",
+		// Most often a connection the application dialled, never used and
+		// closed at its stop (Go's http.Transport keeps such a spare): a
+		// rejection is made as its call is, during a test case, and named
+		// against it.
+		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: a client that does not trust keploy's CA rejects its certificate so, and so does a connection the application dialled, never used and closed at its stop (Go's http.Transport keeps such a spare), which lost nothing; no test case holds it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("reason", abandonedLate.NotJudgedText()),
-			zap.String("next_step", abandonedLate.NotJudgedRemedy()+", then re-record"))
+			zap.String("next_step", "if the client does not trust keploy's CA: "+abandonedLate.NotJudgedRemedy()+", then re-record"))
 	}
 	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 {
 		failed = true
