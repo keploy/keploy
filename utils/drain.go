@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -67,8 +68,7 @@ func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, tim
 		if !inProgress {
 			break
 		}
-		logger.Info("waiting for the keploy agent to finish stopping before giving up on the rest of the teardown",
-			zap.String("group", name))
+		logger.Info(stopWaitedFor(), zap.String("group", name))
 		select {
 		case e := <-done:
 			return e, false
@@ -110,8 +110,7 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 				zap.Duration("stalledFor", bound))
 			return nil, true
 		}
-		logger.Info("waiting for the keploy agent to finish stopping before giving up on the rest of the teardown",
-			zap.String("group", name))
+		logger.Info(stopWaitedFor(), zap.String("group", name))
 		select {
 		case <-done:
 		case <-idle:
@@ -302,11 +301,61 @@ func BeginAgentStop() (end func()) {
 	}
 }
 
+// daemonStops counts the stops of daemons the application left running
+// still in progress (BeginDaemonStop), which hold the drains as an agent's
+// stop does.
+var daemonStops atomic.Int64
+
+// BeginDaemonStop is BeginAgentStop for keploy's stop of the daemons an
+// application left running (pkg/platform/http, stopAdopted): it ends on its
+// own, at their exit or at a kill once they make no progress on their way
+// out, or at the press of Ctrl+C it offers; a drain that gave up first let the
+// next test set's application start while they still ran.
+func BeginDaemonStop() (end func()) {
+	// Counted before the hold, and uncounted after it ends: agentStops.n
+	// never falls below daemonStops (agentOnlyStopsIdle).
+	daemonStops.Add(1)
+	endHold := BeginAgentStop()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			endHold()
+			daemonStops.Add(-1)
+		})
+	}
+}
+
+// stopWaitedFor is what a drain says it waits for while a stop holds it.
+func stopWaitedFor() string {
+	if daemonStops.Load() > 0 {
+		return "waiting for keploy to finish stopping the daemons the application left running before giving up on the rest of the teardown"
+	}
+	return "waiting for the keploy agent to finish stopping before giving up on the rest of the teardown"
+}
+
 // AgentStopInProgress reports whether a stop of a keploy agent is holding
-// the drains (BeginAgentStop).
+// the drains (BeginAgentStop); a stop of daemons (BeginDaemonStop) alone is
+// none.
 func AgentStopInProgress() bool {
+	_, inProgress := agentOnlyStopsIdle()
+	return inProgress
+}
+
+// StopHoldsDrains reports whether a stop that ends on its own, of a keploy
+// agent or of the daemons an application left running, is holding the
+// drains (BeginAgentStop, BeginDaemonStop).
+func StopHoldsDrains() bool {
 	_, inProgress := agentStopsIdle()
 	return inProgress
+}
+
+// agentOnlyStopsIdle is agentStopsIdle for the stops of a keploy agent
+// alone: whether one is in progress, not a stop of daemons only. Its channel
+// is closed once no stop at all holds the drains.
+func agentOnlyStopsIdle() (idle <-chan struct{}, inProgress bool) {
+	agentStops.mu.Lock()
+	defer agentStops.mu.Unlock()
+	return agentStops.idle, int64(agentStops.n) > daemonStops.Load()
 }
 
 // agentStopsIdle returns a channel closed once no agent stop is in progress
@@ -340,7 +389,8 @@ func AwaitAgentExit(gone <-chan struct{}, bound time.Duration, interrupted <-cha
 			return false
 		case <-timer.C:
 		}
-		idle, inProgress := agentStopsIdle()
+		// A stop of daemons is not the agent's: its exit does not wait on it.
+		idle, inProgress := agentOnlyStopsIdle()
 		if !inProgress {
 			return false
 		}

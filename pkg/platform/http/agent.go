@@ -1716,6 +1716,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
+		// The daemons the app left are part of its run, and end with it
+		// (adopt_linux.go): none is judged in the next test set, and the app
+		// started again can bind their ports.
+		stopAdopted(a.logger)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
 		}
