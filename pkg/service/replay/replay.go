@@ -2800,8 +2800,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			// A gRPC stream the app kept open past its recording
-			// (pkg.ErrStreamHeldOpen): every recorded message came. They are
+			// A gRPC stream the app kept open on keepalives
+			// (pkg.ErrStreamHeldOpen): past its recording, every recorded
+			// message having come, or short of it (pkg.ErrStreamStalled,
+			// whose rest SimulateGRPC took from the recording). What came is
 			// compared, with the recorded trailers the app never sent, and
 			// the test has no verdict (FailureInfo.StreamHeldOpen, row W1).
 			var heldOpen string
@@ -3821,7 +3823,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// holds a use (streamTemplateFailures).
 			var received *bytes.Buffer
 			// Why the stream was not read to its end, when the app kept it
-			// open past its recording (pkg.ErrStreamHeldOpen, row W1).
+			// open on keepalives, past its recording or short of it
+			// (pkg.ErrStreamHeldOpen, row W1).
 			var streamHeldOpen string
 
 			// Mirror the non-streaming reset-resend: a docker userland-proxy reset on
@@ -3939,9 +3942,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
 					}
 					if errors.Is(streamErr, pkg.ErrStreamHeldOpen) {
-						// Every recorded frame came, then the app kept the
-						// stream open past its recording: compared as it came,
-						// and the test has no verdict (row W1).
+						// The app kept the stream open on keepalives, past
+						// its recording or short of it: compared as far as
+						// it came, and the test has no verdict (row W1).
 						streamHeldOpen, streamErr = streamErr.Error(), nil
 					}
 
@@ -4650,10 +4653,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.markNotJudged(testSetID)
 	}
 	if heldOpen := testsWithStreamsHeldOpen(testCaseResults); len(heldOpen) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
-		// A test whose app kept its stream open past the recording has no
-		// verdict, so neither has its set (row W1).
+		// A test whose app kept its stream open on keepalives, past the
+		// recording or short of it, has no verdict, so neither has its
+		// set (row W1).
 		notJudged = alsoNotJudged(notJudged, streamsHeldOpenReason(heldOpen))
-		r.logger.Error("test-set is not judged: the app kept its stream open past the recording in some of its tests; the run goes on to the next test-set",
+		r.logger.Error("test-set is not judged: the app kept its stream open on keepalives in some of its tests, past the end of its recording or with the rest of it not coming; the run goes on to the next test-set",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", heldOpen),
 			zap.String("next_step", streamsHeldOpenRemedy+", then run the test-set again"))

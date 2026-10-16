@@ -17,6 +17,14 @@ import (
 // beyond them, and no end. A stream held open sends nothing else, so its
 // keepalives are what ends the wait, and no clock does.
 //
+// It also ends the drain of a stream that stalls short of its recording: two
+// keepalives in a row with no message between them, the app neither ending
+// the stream nor sending the rest of its answer (row W1, round 2). Without it
+// a stream that sent fewer messages than recorded, then only keepalives,
+// would be waited on for good. A count of the app's own keepalives decides,
+// not a clock, so an app idle for two of its keepalive intervals before the
+// rest of its answer is not judged.
+//
 // Not every PING an app sends is a keepalive. A gRPC server also pings to
 // size its flow-control window (BDP): on the request's data, with at most one
 // unanswered, so once the request's last frame (END_STREAM) has gone out the
@@ -41,6 +49,10 @@ type pingWatch struct {
 	r        frameWalk
 	afterEnd int  // the app's PINGs since the request ended
 	appEnded bool // the app ended the stream (END_STREAM, RST_STREAM)
+	begun    bool // the app sent its response headers, and not its end
+	// lastKeepalive is how many messages had come at the app's last
+	// keepalive, -1 before its first.
+	lastKeepalive int
 	// The gRPC messages in the app's DATA: came are whole.
 	padPending bool
 	dataLeft   int
@@ -57,6 +69,7 @@ type pingWatch struct {
 	cut      func()
 	held     atomic.Bool
 	heldAt   int
+	stalled  bool // held short of the recording (written before held)
 	received atomic.Int64
 }
 
@@ -90,7 +103,7 @@ func (f *frameWalk) next(b []byte) (header bool, payload, rest []byte) {
 }
 
 func newPingWatch(c net.Conn) *pingWatch {
-	return &pingWatch{Conn: c}
+	return &pingWatch{Conn: c, lastKeepalive: -1}
 }
 
 // arm starts the watch: once complete response messages have come, the app's
@@ -101,13 +114,14 @@ func (w *pingWatch) arm(complete int, cut func()) {
 	w.armed.Store(true)
 }
 
-// heldOpen reports whether the app held the stream open past its recording,
-// and after how many messages: the drain has them all when it does.
-func (w *pingWatch) heldOpen() (bool, int) {
+// heldOpen reports whether the app held the stream open, after how many
+// messages (the drain has them all when it does), and whether short of its
+// recording: stalled.
+func (w *pingWatch) heldOpen() (held bool, at int, stalled bool) {
 	if w == nil || !w.held.Load() {
-		return false, 0
+		return false, 0, false
 	}
-	return true, w.heldAt
+	return true, w.heldAt, w.stalled
 }
 
 // gotMessage tells the watch the drain has had n messages, and reports
@@ -180,6 +194,8 @@ func (w *pingWatch) scanRead(b []byte) {
 			w.ping()
 		case w.r.typ == http2.FrameRSTStream:
 			w.appEnded = true
+		case w.r.typ == http2.FrameHeaders && !w.r.flags.Has(http2.FlagHeadersEndStream):
+			w.begun = true
 		}
 		if endsStream(w.r.typ, w.r.flags) {
 			// Its payload, the stream's last messages, still counts.
@@ -226,15 +242,30 @@ func (w *pingWatch) data(p []byte) {
 }
 
 // ping is a PING of the app's: after the request's end, the first may be the
-// app's last flow-control ping, and a later one is a keepalive. A keepalive
-// after every recorded message, on a stream the app has not ended, holds it
-// open: what the app sends after it is not waited for, and does not count.
+// app's last flow-control ping, and a later one is a keepalive. On a stream
+// the app has not ended, a keepalive holds it open when every recorded
+// message has come and the app began its answer (its headers, for a
+// recording of none), or when the keepalive before it saw the same messages:
+// the app stalled short of its recording. What the app sends after it is not
+// waited for, and does not count.
 func (w *pingWatch) ping() {
 	if !w.ended.Load() {
 		return
 	}
 	w.afterEnd++
-	if w.afterEnd < 2 || w.appEnded || !w.armed.Load() || w.came < w.complete || w.held.Load() {
+	if w.afterEnd < 2 {
+		return
+	}
+	prev := w.lastKeepalive
+	w.lastKeepalive = w.came
+	if w.appEnded || !w.armed.Load() || w.held.Load() {
+		return
+	}
+	switch {
+	case w.came >= w.complete && (w.begun || w.came > 0):
+	case prev == w.came:
+		w.stalled = true
+	default:
 		return
 	}
 	w.heldAt = w.came

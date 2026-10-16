@@ -821,10 +821,18 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// returned, with ErrStreamHeldOpen: the test has no verdict, and what the
 	// app sent after it is not its answer. A message beyond the recording
 	// among them still fails the comparison, as before.
-	heldOpen, heldAt := pings.heldOpen()
+	//
+	// A stream that stalled short of its recording (two keepalives, and no
+	// message between them) is returned with ErrStreamStalled: the messages
+	// that came, then the recording's for the rest, which the app never
+	// sent, so that only what came is compared.
+	heldOpen, heldAt, stalled := pings.heldOpen()
 	heldOpen = heldOpen && len(respMsgs) >= heldAt
 	if heldOpen {
 		respMsgs, drainErr = respMsgs[:heldAt], nil
+		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
+			respMsgs = append(respMsgs, recorded[heldAt:]...)
+		}
 	}
 	if len(respMsgs) == 0 {
 		// A response carrying only trailers is legitimate (an error status, or
@@ -923,6 +931,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	logger.Info("successfully completed gRPC simulation",
 		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
+	if heldOpen && stalled {
+		return grpcResp, ErrStreamStalled
+	}
 	if heldOpen {
 		return grpcResp, ErrStreamHeldOpen
 	}
@@ -931,12 +942,16 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 // recordedMessagesComplete is how many response messages complete resp, the
 // recorded answer: a keepalive after them, under the proven switch, is one
-// beyond the recording (pingWatch). One empty message is also how a recording
-// keeps an answer of trailers alone (SimulateGRPC), so none completes it.
+// beyond the recording (pingWatch). One empty message is how a recording keeps
+// an answer of trailers alone (SimulateGRPC), and also an empty message
+// (google.protobuf.Empty): the recorded status tells them apart, an error
+// being an answer of trailers alone, which none completes.
 func recordedMessagesComplete(resp models.GrpcResp) int {
 	msgs := resp.AllMessages()
 	if len(msgs) == 1 && msgs[0].MessageLength == 0 && msgs[0].DecodedData == "" {
-		return 0
+		if code := strings.TrimSpace(resp.Trailers.OrdinaryHeaders["grpc-status"]); code != "" && code != "0" {
+			return 0
+		}
 	}
 	return len(msgs)
 }

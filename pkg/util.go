@@ -1298,6 +1298,24 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 // recording that is no keepalive fails the test, as before.
 var ErrStreamHeldOpen = errors.New("the app kept the stream open past its recording")
 
+// ErrStreamStalled ends the read of a stream, under the proven switch, that
+// stalled short of its recording (row W1, round 2): the app neither ended it
+// nor sent the rest of its recorded answer, and sent keepalives, two in a row
+// with no frame (gRPC: message) between them. It is an ErrStreamHeldOpen
+// (errors.Is): the test has no verdict, never a pass or a failure on the rest
+// that did not come, and the wait never hangs. What came is still compared,
+// and a difference in it fails the test. An app idle for two of its
+// keepalive intervals before the rest of its answer is not judged either.
+var ErrStreamStalled error = streamStalledError{}
+
+type streamStalledError struct{}
+
+func (streamStalledError) Error() string {
+	return "the app kept the stream open and sent no more of its recording, keepalive after keepalive"
+}
+
+func (streamStalledError) Is(target error) bool { return target == ErrStreamHeldOpen }
+
 // trailingFrame is the mismatch of a frame the answer streamed after the
 // recorded ones (index of them): under the proven switch a stream is read to
 // its end, and one that goes on past its recording differs from it.
@@ -1559,18 +1577,28 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
+	// keepalives counts the blank lines since the last line.
+	keepalives := 0
 	for scanner.Scan() {
 		line := canonicalizeNDJSONLine(scanner.Text())
 		if line == "" {
 			// A blank line is NDJSON's keepalive. One after the recorded
 			// lines is beyond the recorded keepalives (a recording keeps
 			// none: it drops blank lines): the app kept the stream open
-			// past its recording (ErrStreamHeldOpen).
+			// past its recording (ErrStreamHeldOpen). Two in a row before
+			// them, with no line between, and the app stalled short of
+			// its recording (ErrStreamStalled): the lines that came
+			// matched theirs.
 			if readToEnd && nextExpected >= len(expectedQueue) {
 				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
 			}
+			keepalives++
+			if readToEnd && keepalives >= 2 {
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamStalled
+			}
 			continue
 		}
+		keepalives = 0
 
 		if nextExpected >= len(expectedQueue) {
 			if readToEnd {
