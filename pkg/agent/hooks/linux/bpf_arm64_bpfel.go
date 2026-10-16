@@ -35,8 +35,10 @@ const (
 	bpfMapProxyListenerMark           = "proxy_listener_mark"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
+	bpfMapUdpMemberAddrs              = "udp_member_addrs"
 	bpfMapUdpMemberSocks              = "udp_member_socks"
 	bpfMapUdpMemberSocksFailures      = "udp_member_socks_failures"
+	bpfMapUdpPeerFirst                = "udp_peer_first"
 	bpfMapUdpReplyEpoch               = "udp_reply_epoch"
 	bpfMapUdpReplyEvents              = "udp_reply_events"
 	bpfMapUdpReplyEventsLost          = "udp_reply_events_lost"
@@ -54,6 +56,8 @@ const (
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
 	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
 	bpfProgK_udp6Sendmsg              = "k_udp6_sendmsg"
+	bpfProgK_udpBind4                 = "k_udp_bind4"
+	bpfProgK_udpBind6                 = "k_udp_bind6"
 	bpfProgK_udpEgress                = "k_udp_egress"
 	bpfProgK_udpIngress               = "k_udp_ingress"
 	bpfProgK_udpSockRelease           = "k_udp_sock_release"
@@ -116,6 +120,8 @@ type bpfProgramSpecs struct {
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_sendmsg"`
+	K_udpBind4              *ebpf.ProgramSpec `ebpf:"k_udp_bind4"`
+	K_udpBind6              *ebpf.ProgramSpec `ebpf:"k_udp_bind6"`
 	K_udpEgress             *ebpf.ProgramSpec `ebpf:"k_udp_egress"`
 	K_udpIngress            *ebpf.ProgramSpec `ebpf:"k_udp_ingress"`
 	K_udpSockRelease        *ebpf.ProgramSpec `ebpf:"k_udp_sock_release"`
@@ -145,8 +151,10 @@ type bpfMapSpecs struct {
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
+	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
 	UdpMemberSocksFailures      *ebpf.MapSpec `ebpf:"udp_member_socks_failures"`
+	UdpPeerFirst                *ebpf.MapSpec `ebpf:"udp_peer_first"`
 	UdpReplyEpoch               *ebpf.MapSpec `ebpf:"udp_reply_epoch"`
 	UdpReplyEvents              *ebpf.MapSpec `ebpf:"udp_reply_events"`
 	UdpReplyEventsLost          *ebpf.MapSpec `ebpf:"udp_reply_events_lost"`
@@ -197,8 +205,10 @@ type bpfMaps struct {
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
+	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
 	UdpMemberSocksFailures      *ebpf.Map `ebpf:"udp_member_socks_failures"`
+	UdpPeerFirst                *ebpf.Map `ebpf:"udp_peer_first"`
 	UdpReplyEpoch               *ebpf.Map `ebpf:"udp_reply_epoch"`
 	UdpReplyEvents              *ebpf.Map `ebpf:"udp_reply_events"`
 	UdpReplyEventsLost          *ebpf.Map `ebpf:"udp_reply_events_lost"`
@@ -225,8 +235,10 @@ func (m *bpfMaps) Close() error {
 		m.ProxyListenerMark,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
+		m.UdpMemberAddrs,
 		m.UdpMemberSocks,
 		m.UdpMemberSocksFailures,
+		m.UdpPeerFirst,
 		m.UdpReplyEpoch,
 		m.UdpReplyEvents,
 		m.UdpReplyEventsLost,
@@ -257,6 +269,8 @@ type bpfPrograms struct {
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
 	K_udp6Sendmsg           *ebpf.Program `ebpf:"k_udp6_sendmsg"`
+	K_udpBind4              *ebpf.Program `ebpf:"k_udp_bind4"`
+	K_udpBind6              *ebpf.Program `ebpf:"k_udp_bind6"`
 	K_udpEgress             *ebpf.Program `ebpf:"k_udp_egress"`
 	K_udpIngress            *ebpf.Program `ebpf:"k_udp_ingress"`
 	K_udpSockRelease        *ebpf.Program `ebpf:"k_udp_sock_release"`
@@ -279,6 +293,8 @@ func (p *bpfPrograms) Close() error {
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,
 		p.K_udp6Sendmsg,
+		p.K_udpBind4,
+		p.K_udpBind6,
 		p.K_udpEgress,
 		p.K_udpIngress,
 		p.K_udpSockRelease,
