@@ -363,6 +363,10 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		case "/agent/containers": // a docker-mode agent: it takes container lists
 			_, _ = io.Copy(io.Discard, req.Body)
 			w.WriteHeader(http.StatusNoContent)
+		case "/agent/containers/settle":
+			// The CLI's ask for settles, held open: this agent's first uses
+			// ask none, so it ends when the CLI's session does.
+			<-req.Context().Done()
 		case "/agent/mock":
 			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
