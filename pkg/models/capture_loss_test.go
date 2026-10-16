@@ -244,3 +244,20 @@ func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
 		t.Fatalf("remedy %q", notJudged.NotJudgedRemedy())
 	}
 }
+
+// A connection a destination refused at accept, relayed (P250), is a loss of
+// its own kind: not judged, the test's own, with its text and remedy.
+func TestARefusalAtAcceptIsALossOfItsOwnKind(t *testing.T) {
+	k := CaptureLossRefusedAtAccept
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	l := CaptureLosses{{Kind: k, Count: 1, What: "to 10.0.0.9:6379"}}
+	_, notJudged := l.Split()
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "refused the application's connections at accept") || strings.Contains(text, "server-first") {
+		t.Fatalf("text %q", text)
+	}
+	if remedy := notJudged.NotJudgedRemedy(); !strings.Contains(remedy, "refused") || strings.Contains(remedy, "mock.real") {
+		t.Fatalf("remedy %q", remedy)
+	}
+}

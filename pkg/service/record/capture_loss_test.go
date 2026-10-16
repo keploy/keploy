@@ -188,7 +188,7 @@ func TestARecordingSaysAServerFirstProtocolItPassedThrough(t *testing.T) {
 	if n := len(logs.FilterMessageSnippet("abandoned its handshake with keploy's proxy").All()); n != 0 {
 		t.Fatalf("%d late lines call it an abandoned TLS handshake", n)
 	}
-	late := logs.FilterMessageSnippet("server-first protocol keploy passes through, after the last test case was recorded").All()
+	late := logs.FilterMessageSnippet("keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded").All()
 	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "sent data on them 1 time(s)") || !strings.Contains(fmt.Sprint(late[0].ContextMap()["next_step"]), "mock.real") {
 		t.Fatalf("%d lines for the late one, want one WARN naming 1 send and mock.real: %+v", len(late), late)
 	}

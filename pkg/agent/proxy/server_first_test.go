@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -419,6 +420,8 @@ func TestARefusalAtAcceptIsRelayedAndTeachesThePortNothing(t *testing.T) {
 		defer c.Close()
 		if <-refuse {
 			_, _ = io.WriteString(c, "-ERR [SYS/TEMP] too busy\r\n")
+			// What the client says anyway, read before the close.
+			_, _ = bufio.NewReader(c).ReadString('\n')
 			return
 		}
 		smtpServer(make(chan string, 4))(c)
@@ -438,6 +441,9 @@ func TestARefusalAtAcceptIsRelayedAndTeachesThePortNothing(t *testing.T) {
 		if got, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(got, "-ERR ") {
 			t.Fatalf("the application got %q, %v; want the refusal", got, err)
 		}
+		if _, err := io.WriteString(app, "QUIT\r\n"); err != nil {
+			t.Fatal(err)
+		}
 		if rest, err := r.ReadString('\n'); err != io.EOF || rest != "" {
 			t.Fatalf("after the refusal the application got %q, %v; want the close", rest, err)
 		}
@@ -448,6 +454,17 @@ func TestARefusalAtAcceptIsRelayedAndTeachesThePortNothing(t *testing.T) {
 		}
 		if n := logs.FilterMessage("keploy passed through " + addr + "'s refusal at accept, not recorded").Len(); n != 1 {
 			t.Fatalf("said the refusal %d times, want once", n)
+		}
+		// What the application sent on it is a refusal's loss, not a
+		// server-first protocol's.
+		var refused models.CaptureLoss
+		for _, c := range p.CaptureLosses() {
+			if c.Kind == models.CaptureLossRefusedAtAccept {
+				refused = c
+			}
+		}
+		if refused.Count != 1 || serverFirstLoss(p).Count != 0 {
+			t.Fatalf("losses %+v; want the one send counted as a refusal's", p.CaptureLosses())
 		}
 		refuse <- false
 		callServerFirst(t, p, nil, false)
@@ -535,5 +552,240 @@ func TestAnH2cServersSettingsAtAcceptIsDispatchedAsBefore(t *testing.T) {
 				t.Fatalf("an h2c destination counted as a server-first loss: %+v", c)
 			}
 		})
+	}
+}
+
+// A destination marked as speaking a server-first protocol, its port
+// learned not to be MySQL, is probed again on each record connection, not
+// relayed blindly: the address may be another service's by now (a
+// container's port reused, testcontainers' random ports). A client-first one
+// there is dispatched as main's probe dispatches a port's first connection,
+// with the switch off and on; one that still greets is relayed. A client
+// speaking first is no evidence another service is there (an eager client
+// of the same server-first destination does too), so the mark stays, and
+// each connection is decided by its own probe.
+func TestAMarkedDestinationThatIsAnotherServiceNowIsDispatchedAsOnMain(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := ln.Addr().String()
+			served := make(chan string, 8)
+			serve := func(ln net.Listener, handle func(net.Conn)) <-chan struct{} {
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for {
+						c, err := ln.Accept()
+						if err != nil {
+							return
+						}
+						go handle(c)
+					}
+				}()
+				return done
+			}
+			stopped := serve(ln, smtpServer(served))
+			core, logs := observer.New(zap.WarnLevel)
+			p := recordingProxy(t, addr, zap.New(core))
+			callServerFirst(t, p, served, false)
+			port := uint32(mustPort(t, addr))
+			if !p.serverFirstDests.has(addr) || !p.mysqlPorts.IsKnownNotMysql(port) {
+				t.Fatal("the SMTP destination was not marked, or its port not learned")
+			}
+			callServerFirst(t, p, served, false) // still greets: relayed, still marked
+			if !p.serverFirstDests.has(addr) {
+				t.Fatal("a destination that still greets lost its mark")
+			}
+
+			// The address is a client-first service's now.
+			_ = ln.Close()
+			<-stopped
+			ln2, err := net.Listen("tcp4", addr)
+			if err != nil {
+				t.Skipf("cannot listen at %s again: %v", addr, err)
+			}
+			t.Cleanup(func() { _ = ln2.Close() })
+			serve(ln2, silentUntilAsked)
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			_ = app.SetDeadline(time.Now().Add(10 * time.Second))
+			if _, err := io.WriteString(app, "hello\n"); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := bufio.NewReader(app).ReadString('\n'); err != nil || got != "ok hello\n" {
+				t.Fatalf("the client-first service's answer %q, %v", got, err)
+			}
+			_ = app.Close()
+			awaitEvent(t, done, "the handling ending")
+			if n := logs.FilterMessage("keploy cannot record " + addr + notRecorded).Len(); n != 1 {
+				t.Fatalf("said %d times it cannot record %s; the client-first service must not be said so", n, addr)
+			}
+			if c := serverFirstLoss(p); proven != "" && c.Count != 2 {
+				t.Fatalf("server-first loss %+v; want the 2 SMTP sends only", c)
+			}
+		})
+	}
+}
+
+// The destinations a saidOnce holds are bounded, the oldest forgotten one at
+// a time, never all at once; drop forgets one.
+func TestASaidOnceForgetsItsOldestDestinationOnly(t *testing.T) {
+	var s saidOnce
+	for i := 0; i < saidOnceBound+1; i++ {
+		if !s.first(fmt.Sprintf("10.0.0.1:%d", i)) {
+			t.Fatalf("destination %d said before", i)
+		}
+	}
+	if s.has("10.0.0.1:0") {
+		t.Fatal("the oldest destination was kept past the bound")
+	}
+	if !s.has("10.0.0.1:1") || !s.has(fmt.Sprintf("10.0.0.1:%d", saidOnceBound)) {
+		t.Fatal("more than the oldest destination was forgotten")
+	}
+	if s.first("10.0.0.1:1") {
+		t.Fatal("a destination held was said again")
+	}
+	s.drop("10.0.0.1:1")
+	if s.has("10.0.0.1:1") || !s.first("10.0.0.1:1") {
+		t.Fatal("drop did not forget the destination")
+	}
+}
+
+// A marked destination's mark goes only on the destination's own evidence
+// that another service is there (MySQL, a client-first protocol's preamble),
+// not on a verdict that says nothing of what speaks there: an application
+// that connects and closes, a greeting outside the known server-first ones
+// (an SMTP 421), a destination that cannot be dialled for a while, a client
+// that speaks before the greeting. After each, its next 220 connection is
+// relayed, with the switch off and on.
+func TestAMarkedDestinationKeepsItsMarkWithoutEvidence(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			var busy atomic.Bool
+			served := make(chan string, 8)
+			listen := func(addr string) (net.Listener, <-chan struct{}) {
+				ln, err := net.Listen("tcp4", addr)
+				if err != nil {
+					t.Skipf("cannot listen at %s: %v", addr, err)
+				}
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for {
+						c, err := ln.Accept()
+						if err != nil {
+							return
+						}
+						if busy.Load() {
+							go func() {
+								_, _ = io.WriteString(c, "421 busy, try later\r\n")
+								_ = c.Close()
+							}()
+							continue
+						}
+						go smtpServer(served)(c)
+					}
+				}()
+				return ln, done
+			}
+			ln, stopped := listen("127.0.0.1:0")
+			addr := ln.Addr().String()
+			core, logs := observer.New(zap.DebugLevel)
+			p := recordingProxy(t, addr, zap.New(core))
+			// decided waits for the probe's next verdict: a client that
+			// waits to be greeted speaks only after it.
+			decided := func(before int) {
+				t.Helper()
+				ch := make(chan struct{})
+				go func() {
+					defer close(ch)
+					for logs.FilterMessage("mysql probe result").Len() <= before {
+						time.Sleep(time.Millisecond)
+					}
+				}()
+				awaitEvent(t, ch, "the probe's verdict")
+			}
+			callServerFirst(t, p, served, false)
+			mustBeMarked := func(after string) {
+				t.Helper()
+				if !p.serverFirstDests.has(addr) {
+					t.Fatalf("the mark went after %s", after)
+				}
+			}
+			mustBeMarked("the first call")
+
+			// The application connects and closes.
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			_ = app.Close()
+			awaitEvent(t, done, "the handling of a connection closed at once")
+			mustBeMarked("a connection the application closed at once")
+
+			// A 421, and the destination closes: the client, waiting to be
+			// greeted, speaks only once the probe has decided on the 421.
+			busy.Store(true)
+			before := logs.FilterMessage("mysql probe result").Len()
+			app, src = acceptedConn(t)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			decided(before)
+			_ = app.SetDeadline(time.Now().Add(10 * time.Second))
+			_, _ = io.WriteString(app, "QUIT\r\n")
+			_, _ = io.ReadAll(app)
+			_ = app.Close()
+			awaitEvent(t, done, "the handling of a 421")
+			mustBeMarked("a 421")
+			busy.Store(false)
+
+			// An eager client, speaking before the greeting.
+			app, src = acceptedConn(t)
+			if _, err := io.WriteString(app, "EHLO eager\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			_ = app.SetDeadline(time.Now().Add(10 * time.Second))
+			r := bufio.NewReader(app)
+			_, _ = r.ReadString('\n')
+			_ = app.Close()
+			awaitEvent(t, done, "the handling of an eager client")
+			if got := awaitEvent(t, served, "the eager EHLO reaching the destination"); got != "EHLO eager" {
+				t.Fatalf("the destination got %q; want the eager client's EHLO, dispatched to it", got)
+			}
+			mustBeMarked("a client that spoke first")
+
+			// The destination cannot be dialled for a while.
+			_ = ln.Close()
+			<-stopped
+			app, src = acceptedConn(t)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			awaitEvent(t, done, "the handling of a connection that cannot be dialled")
+			_ = app.Close()
+			mustBeMarked("a failed dial")
+
+			ln2, _ := listen(addr)
+			t.Cleanup(func() { _ = ln2.Close() })
+			callServerFirst(t, p, served, false)
+			mustBeMarked("the destination greeting again")
+		})
+	}
+}
+
+// A destination seen again is the last to be forgotten.
+func TestASaidOnceKeepsADestinationSeenAgain(t *testing.T) {
+	var s saidOnce
+	s.first("smtp")
+	for i := 1; i < saidOnceBound; i++ {
+		s.first(fmt.Sprintf("ftp-data:%d", i))
+	}
+	s.first("smtp") // seen again
+	s.first("ftp-data:new")
+	if !s.has("smtp") || s.has("ftp-data:1") {
+		t.Fatal("the destination seen again was forgotten before an older one")
 	}
 }

@@ -167,9 +167,11 @@ type Proxy struct {
 	// (relayServerFirst).
 	serverFirstSaid saidOnce
 	// serverFirstDests is the destinations found to speak a server-first
-	// protocol: a later connection to one, its port learned not to be MySQL
-	// and the probe skipped, is relayed too (relayServerFirst). It lives as
-	// long as the port cache it goes with (mysqlPorts), not one session.
+	// protocol: a later record connection to one, its port learned not to
+	// be MySQL, is probed again rather than skipped (probeMysql), so it is
+	// relayed if it still greets so, and dispatched as on main if it is
+	// another service now. Kept for the agent's life, as the port cache is,
+	// the oldest forgotten past its bound.
 	serverFirstDests saidOnce
 	// hold is the handshake hold's lifecycle (handshake_hold.go).
 	hold holdState
@@ -2891,7 +2893,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// A record's local destination is listed mocked, except a server-first
 	// one keploy relays (relayServerFirst): it is reached for real, and
 	// nothing of it is recorded.
-	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept && !(probe.Reason == "known-not-mysql" && p.serverFirstDests.has(dstAddr))) {
+	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept) {
 		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
 	}
 	if err != nil {
@@ -2910,13 +2912,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.String("reason", probe.Reason),
 		zap.Uint32("destPort", destInfo.Port))
 
-	if rule.Mode != models.MODE_TEST && (probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept ||
-		probe.Reason == "known-not-mysql" && p.serverFirstDests.has(dstAddr)) {
+	if rule.Mode != models.MODE_TEST && (probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept) {
 		// The destination spoke first with a server-first protocol's
-		// greeting, now or on an earlier connection (its port learned, the
-		// probe skipped), whose client waits to be greeted; or, under the
-		// switch, refused the connection at accept. Relayed from the
-		// greeting, not dispatched on the client's first bytes (P250).
+		// greeting (on a port already learned, the probe looked again at a
+		// destination marked as one), whose client waits to be greeted; or,
+		// under the switch, refused the connection at accept. Relayed from
+		// the greeting, not dispatched on the client's first bytes (P250).
 		return p.relayServerFirst(parserCtx, srcConn, dstAddr, predialed, probe.Reason == reasonRefusedAtAccept, p.logger.With(zap.String("Destination Address", dstAddr)))
 	}
 
