@@ -111,6 +111,13 @@ const (
 	// (PerTest); what the destination sends on its own charges nothing.
 	// Only under the proven switch.
 	CaptureLossServerFirst CaptureLossKind = "server_first"
+	// CaptureLossRefusedAtAccept (P250): a connection in record whose
+	// destination refused it at accept (a RESP error, a MySQL ERR packet in
+	// place of its handshake) was relayed, so the application got the
+	// refusal, and nothing of it recorded. Counted as CaptureLossServerFirst
+	// is (NotJudged, PerTest), with its own text. Only under the proven
+	// switch.
+	CaptureLossRefusedAtAccept CaptureLossKind = "refused_at_accept"
 )
 
 // NotJudged reports whether a loss of kind k leaves the tests it taints
@@ -119,7 +126,7 @@ const (
 // or a TLS handshake abandoned without a word, which keploy cannot tell lost
 // a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept
 }
 
 // runScoped says a loss of kind k is counted from the run's base however far
@@ -190,7 +197,7 @@ func (l CaptureLosses) NotJudgedText() string {
 // keploy's CA; list a server-first destination in mock.real. Empty for
 // none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, tls, serverFirst bool
+	var unix, tls, serverFirst, refused bool
 	for _, c := range l {
 		switch c.Kind {
 		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
@@ -199,6 +206,8 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 			tls = true
 		case CaptureLossServerFirst:
 			serverFirst = true
+		case CaptureLossRefusedAtAccept:
+			refused = true
 		}
 	}
 	var do []string
@@ -210,6 +219,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if serverFirst {
 		do = append(do, "list the server-first destination in keploy.yml mock.real, to reach it for real by design")
+	}
+	if refused {
+		do = append(do, "find why the destination refused the application's connections (its connection limit, or its protected mode)")
 	}
 	return strings.Join(do, ", and ")
 }
@@ -247,7 +259,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (CaptureLossRealUncaptured is a test's own too, but never in the agent's
 // counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -408,6 +420,8 @@ func captureLossText(c CaptureLoss) string {
 		return "keploy cannot see the application's calls over Unix sockets here, so whether this test or one before it made one cannot be told"
 	case CaptureLossServerFirst:
 		return fmt.Sprintf("the application's calls over a server-first protocol keploy has no parser for (its server greets first: SMTP, FTP, POP3) were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
+	case CaptureLossRefusedAtAccept:
+		return fmt.Sprintf("a destination refused the application's connections at accept, and its calls on them were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}
