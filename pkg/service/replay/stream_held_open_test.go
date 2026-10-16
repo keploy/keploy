@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
@@ -27,9 +28,10 @@ import (
 var heldOpenLines = []string{`{"id":1}`, `{"id":2}`}
 
 // heldOpenApps is an app with a streamed HTTP answer and a gRPC side that,
-// in mode holdPast, keep their streams open past their recorded answers, and
-// in mode stallShort, short of them, sending keepalives: NDJSON blank lines,
-// and gRPC PINGs (grpc-go sends one after a second without activity). Each
+// in mode holdPast, keep their streams open past their recorded answers, in
+// mode stallShort, short of them, and in mode sendNothing with nothing of
+// them, sending keepalives: NDJSON blank lines, and gRPC PINGs (grpc-go
+// sends one after a second without activity). Each
 // sends at most a bounded number of keepalives, and exhausted counts the
 // streams that sent them all and were still read: what a replay that waits
 // for the end does.
@@ -42,11 +44,12 @@ type heldOpenApps struct {
 }
 
 // The apps' modes: ending as recorded, holding the stream open past the
-// recorded answer, and stalling short of it.
+// recorded answer, stalling short of it, and with none of it.
 const (
 	asRecorded int32 = iota
 	holdPast
 	stallShort
+	sendNothing
 )
 
 func newHeldOpenApps(t *testing.T) *heldOpenApps {
@@ -58,7 +61,7 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			mode := apps.mode.Load()
 			for i, line := range heldOpenLines {
-				if mode == stallShort && i > 0 {
+				if mode == stallShort && i > 0 || mode == sendNothing {
 					break
 				}
 				_, _ = w.Write([]byte(line + "\n"))
@@ -99,7 +102,16 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 			}
 			mode := apps.mode.Load()
 			out := []byte{0x0a, 0x02, 'o', 'k'}
-			if mode != stallShort {
+			// Two messages as recorded, one short of the recording, or
+			// none.
+			sends := 2
+			switch mode {
+			case stallShort:
+				sends = 1
+			case sendNothing:
+				sends = 0
+			}
+			for i := 0; i < sends; i++ {
 				if err := stream.SendMsg(&out); err != nil {
 					return err
 				}
@@ -203,6 +215,48 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 			}
 		})
 	}
+
+	// Keepalives and nothing of the answer: nothing to compare, so each
+	// test fails closed, FAILED and marked not judged (AnswerStalled, the
+	// coordinator's ruling (a)), never a pass on the recording; the set is
+	// not judged.
+	t.Run("with nothing of its answer", func(t *testing.T) {
+		apps.mode.Store(sendNothing)
+		t.Cleanup(func() { apps.mode.Store(asRecorded) })
+		h := newTmplHarness(t, &tmplConf{}, cases, nil)
+		core, logs := observer.New(zapcore.InfoLevel)
+		h.r.logger = zap.New(core)
+		status := h.run(t)
+		if n := apps.exhausted.Load(); n != 0 {
+			t.Fatalf("%d stream(s) sent every keepalive they had and were still read", n)
+		}
+		for name, says := range map[string]string{
+			"test-1": "the app sent its answer's headers and nothing of its body, then only keepalives, for GET /stream",
+			"test-2": "only keepalives, for /orders.Orders/Get",
+		} {
+			r := h.result(t, name)
+			if r.Status != models.TestStatusFailed || !strings.Contains(r.FailureInfo.AnswerStalled, says) || r.FailureInfo.StreamHeldOpen != "" || len(r.VerdictUnknown()) == 0 {
+				t.Fatalf("%s: %s, %+v; want FAILED, not judged: %q", name, r.Status, r.FailureInfo, says)
+			}
+		}
+		if status != models.TestSetStatusInternalErr {
+			t.Fatalf("the set is %s, want INTERNAL_ERR: not judged", status)
+		}
+		reason := h.report.report.FailureReason
+		for _, want := range []string{"never answered 2 test(s)", "test-1", "test-2"} {
+			if !strings.Contains(reason, want) {
+				t.Fatalf("failure reason %q does not say %q", reason, want)
+			}
+		}
+		// The console says the stream is not judged and why, not that its
+		// read failed.
+		if n := logs.FilterMessage("not judged: the app sent its answer's headers and nothing of its body, then only keepalives, for GET /stream").Len(); n != 1 {
+			t.Fatalf("the console said %d times that test-1 is not judged, want once", n)
+		}
+		if n := logs.FilterMessage("failed to read streaming response").Len(); n != 0 {
+			t.Fatalf("the console called test-1's stream a failed read %d time(s)", n)
+		}
+	})
 }
 
 // resultOf is the named test's result in the base-path run's report.
@@ -263,11 +317,15 @@ func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
 	if code == 0 {
 		t.Fatal("a run with a test not judged exited 0")
 	}
-	// Without the mark: the row's FAILED alone arms the run's exit code.
+	// Without the mark: the row's FAILED alone is counted a failure, and
+	// that count arms the run's exit code.
+	if n := run.replayer.totalTestFailed; n != 1 {
+		t.Fatalf("the run counted %d failed test(s), want the stalled row's FAILED", n)
+	}
 	saved2 := utils.ErrCode
 	t.Cleanup(func() { utils.ErrCode = saved2 })
 	utils.ErrCode = 0
-	armRunExitCode(nil, true, 1)
+	armRunExitCode(nil, true, run.replayer.totalTestFailed)
 	if utils.ErrCode == 0 {
 		t.Fatal("a FAILED row read without its mark left the exit code 0")
 	}
