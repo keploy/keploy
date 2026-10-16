@@ -436,6 +436,13 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	open := tracker.Open()
 	inScope := map[string]bool{}
 	owner, _ := mockDb.(integrations.TestOwnership)
+	if integrations.ExactServing(mockDb) {
+		// Under exact serving the store alone says what the open test owns:
+		// what its per-test tier shows, as on the bare manager. A worker's
+		// view made before exact serving began passes straight through, and
+		// its allowlist is the scope it was made for, not the open test's.
+		owner = nil
+	}
 	windows, _ := mockDb.(integrations.TestWindows)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
