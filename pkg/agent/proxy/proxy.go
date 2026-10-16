@@ -4232,8 +4232,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		OutgoingOptions: opts,
 	}
 	p.ensureHandshakeHold(rule)
-	p.setSession(rule)
-	p.ensureHandshakeHold(rule) // the listener may have opened in between
+	// What a connection under the session needs is set up before the
+	// session takes effect, as Record does: a mock manager above all (the
+	// first session's had none, and a connection under it was dropped).
+	//
 	// Reuse the existing MockManager when this proxy has already been
 	// put into mock mode at least once. Replay calls Mock() per test-set
 	// (Agent.MockOutgoing → Proxy.Mock); allocating a fresh MockManager
@@ -4277,13 +4279,24 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// recycled PID in this session.
 	p.ClearAllWorkerScopes()
 
+	// What was passed through while there was no session is reset before the
+	// first session takes effect, so the application's reconnection is
+	// served under it (one that comes before it is refused, and reconnects
+	// again); a later session resets what it does not pass through once it
+	// is in effect, so the reconnections are its own (Record).
+	first := p.getSession() == nil
+	if first {
+		p.endNoSessionPassthroughs(rule)
+	}
+	p.setSession(rule)
+	if !first {
+		p.endNoSessionPassthroughs(rule)
+	}
+	p.ensureHandshakeHold(rule) // the listener may have opened in between
+
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
-
-	// The session is set up: what was passed through while there was none
-	// is reset, so it reconnects and is served under the session.
-	p.endNoSessionPassthroughs(rule)
 
 	p.nsSwitchMutex.Lock()
 	defer p.nsSwitchMutex.Unlock()
