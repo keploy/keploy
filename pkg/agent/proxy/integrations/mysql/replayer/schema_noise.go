@@ -301,7 +301,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := g.engine.KnownNoise(mock, noise)
-			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96)
+			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
 		}
 	}
 	if !seen {
@@ -452,6 +452,57 @@ func queryBodyValue(sql string) any {
 		q["comments"] = shape.comments
 	}
 	return q
+}
+
+// maskAttributeDiffs masks, in a mismatch report's field diffs, the recorded
+// and live values of a query attribute (a parameter sent with a name on
+// either side): its name, not its value's shape, may make it a secret
+// (executeForLog).
+func maskAttributeDiffs(diffs []models.MockFieldDiff, mock *models.Mock, live *mysql.PacketBundle) []models.MockFieldDiff {
+	named := func(b *mysql.PacketBundle, i int) bool {
+		if b == nil {
+			return false
+		}
+		var ps []mysql.Parameter
+		switch m := b.Message.(type) {
+		case *mysql.StmtExecutePacket:
+			if m != nil {
+				ps = m.Parameters
+			}
+		case *mysql.QueryPacket:
+			if m != nil {
+				ps = m.Parameters
+			}
+		}
+		return i < len(ps) && ps[i].Name != ""
+	}
+	var recorded *mysql.PacketBundle
+	if mock != nil && len(mock.Spec.MySQLRequests) == 1 {
+		recorded = &mock.Spec.MySQLRequests[0].PacketBundle
+	}
+	for i := range diffs {
+		rest, ok := strings.CutPrefix(diffs[i].Path, "body.parameters.")
+		if !ok {
+			continue
+		}
+		idx, field, _ := strings.Cut(rest, ".")
+		n, err := strconv.Atoi(idx)
+		if err != nil || field == "name" || field == "type" || field == "unsigned" {
+			// Everything else under the parameter is its value, an
+			// enveloped one ($bin, $ts) included.
+			continue
+		}
+		if named(live, n) || named(recorded, n) {
+			// The side the field is absent from stays empty.
+			if diffs[i].Kind != models.DiffKindMissingInMock {
+				diffs[i].Expected = maskedAttributeValue
+			}
+			if diffs[i].Kind != models.DiffKindMissingInLive {
+				diffs[i].Actual = maskedAttributeValue
+			}
+		}
+	}
+	return diffs
 }
 
 // mysqlRequestBodyJSON serializes the drift-carrying content of a command
