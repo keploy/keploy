@@ -12,6 +12,9 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -156,5 +159,66 @@ func TestARecordUpgradersHandshakeErrorIsTheHandshakesOwn(t *testing.T) {
 	_, _, err := handleClientTLS(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != io.EOF {
 		t.Fatalf("handleClientTLS returned %v (%T), want io.EOF itself", err, err)
+	}
+}
+
+// A client-side TLS upgrade a parser asks the relay for (STARTTLS, Postgres's
+// SSLRequest, MySQL's SSL request) is a client-side handshake with keploy's
+// proxy like any other: a client that hangs up before keploy answered lost
+// nothing, one that abandons it once keploy's certificate is out leaves its
+// test not judged, and a rejection is a loss of that test's. Every failure
+// was charged starttls_failed -- "keploy could not make the upgrade", a taint
+// of every later test -- a client's cancel included: a false red.
+func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		client                      func(t *testing.T, app net.Conn)
+		failed, abandoned, starttls uint64
+	}{
+		{"a client that hangs up before keploy answered", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example")[:20])
+		}, 0, 0, 0},
+		{"a client that closes once keploy's certificate is in, without an alert", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example"))
+			_, _ = app.Read(make([]byte, 1<<14))
+		}, 0, 1, 0},
+		{"a Go client that rejects keploy's certificate", func(t *testing.T, app net.Conn) {
+			_ = tls.Client(app, &tls.Config{ServerName: "db.example"}).Handshake()
+		}, 1, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app, src := acceptedConn(t)
+			upstream, dst := acceptedConn(t)
+			r := relay.New(relay.Config{
+				Logger:                  zap.NewNop(),
+				OnCaptureLoss:           p.losses.Add,
+				OnClientHandshakeFailed: p.relayClientHandshake(dst),
+				TLSUpgradeFn:            newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil),
+			}, src, connseq.NewUpstream(dst))
+			ctx, cancel := context.WithCancel(context.Background())
+			ran := make(chan struct{})
+			go func() { defer close(ran); _ = r.Run(ctx) }()
+			t.Cleanup(func() { cancel(); _ = app.Close(); _ = upstream.Close(); <-ran })
+
+			r.Directives() <- directive.UpgradeTLS(nil, &tls.Config{}, "the parser asked for TLS")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tc.client(t, app)
+				_ = app.Close()
+			}()
+			if ack := <-r.Acks(); ack.OK {
+				t.Fatal("the upgrade succeeded")
+			}
+			<-done
+			got := map[models.CaptureLossKind]uint64{}
+			for _, l := range p.losses.Snapshot() {
+				got[l.Kind] = l.Count
+			}
+			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || got[models.CaptureLossSTARTTLS] != tc.starttls || len(got) > 3 {
+				t.Fatalf("%s: charged %v, want %d tls_handshake_failed, %d tls_handshake_abandoned and %d starttls_failed", tc.name, got, tc.failed, tc.abandoned, tc.starttls)
+			}
+		})
 	}
 }
