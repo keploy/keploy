@@ -17,6 +17,11 @@
 #      e-wait-1, which the call was made in, fails, and d-after-1 passes.
 #   3. HTTP, the recorded message: every test passes.
 #   4. HTTP, a changed message: as 2.
+#   5. TCP, the app no longer publishes: the set fails, keploy test exits
+#      non-zero; e-wait-1, which recorded the call, fails for it, and
+#      d-after-1 passes. The publish is a connection of its own, with one
+#      exchange, opened and closed inside e-wait-1: the test's whole, its
+#      first exchange included.
 #
 # Not here, a known limit: a call made after the set's LAST test is judged by
 # a read of the set's misses at its end (unit tests: unclaimed_calls_test.go),
@@ -118,15 +123,15 @@ record() {
     cd "$WORK" || exit 1
 }
 
-# replay <dir> <name> <proto> [suffix]: keploy test of dir's recording, the
-# broker down; RC is its exit code.
+# replay <dir> <name> <proto> [suffix] [nopublish]: keploy test of dir's
+# recording, the broker down; RC is its exit code.
 replay() {
-    local dir="$1" name="$2" proto="$3" suffix="${4:-}" broker before
+    local dir="$1" name="$2" proto="$3" suffix="${4:-}" nopublish="${5:-}" broker before
     broker="$(broker_of "$proto")"
     REPLAY_DIR="$WORK/$dir"
     cd "$REPLAY_DIR" || exit 1
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env PROTO=$proto BROKER=$broker SUFFIX=$suffix ../ff-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish ../ff-app" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -171,6 +176,9 @@ expect_pass "3 (HTTP, as recorded)"
 echo "== 4. HTTP, a changed message =="
 replay http changed http "-changed"
 expect_after_fails "4 (HTTP, changed)"
+echo "== 5. TCP, the app no longer publishes =="
+replay tcp unmade tcp "" 1
+expect_after_fails "5 (TCP, no publish)"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

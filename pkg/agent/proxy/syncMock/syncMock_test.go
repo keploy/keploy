@@ -2348,3 +2348,41 @@ func TestResolveRangeOwnsEveryTestMockUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// Under the proven switch a Generic exchange stated per-test that reaches the
+// manager after its window resolved (one held behind its connection's first
+// exchange) is owned by that window on the late path, and mapped to its test.
+func TestALateGenericTestMockIsOwnedByItsResolvedWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ch := make(chan *models.Mock, 8)
+	mapCh := make(chan models.TestMockMapping, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetMappingChannel(context.Background(), mapCh)
+	mgr.SetFirstRequestSignaled()
+	base := time.Now().Add(-time.Second)
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", true, true)
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, &models.Mock{Kind: models.GENERIC, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+		ReqTimestampMock: base.Add(2 * time.Millisecond),
+	}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}})
+	mgr.mu.Unlock()
+	mgr.FlushOwnedWindows()
+	select {
+	case m := <-ch:
+		if !strings.HasPrefix(m.Name, "mock-") {
+			t.Fatalf("the late exchange was flushed as %q, want owned (renamed mock-...)", m.Name)
+		}
+		select {
+		case mp := <-mapCh:
+			if mp.TestName != "test-1" || len(mp.MockIDs) != 1 || mp.MockIDs[0] != m.Name {
+				t.Fatalf("mapped %+v, want test-1 owning %s", mp, m.Name)
+			}
+		default:
+			t.Fatal("the late exchange was not mapped to its test")
+		}
+	default:
+		t.Fatal("the late exchange was not flushed")
+	}
+}

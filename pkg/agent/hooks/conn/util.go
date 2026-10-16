@@ -293,6 +293,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		return
 	case t <- testCase:
 		sent = true
+		// Without --sync no resolve ends the window: it is noted a test
+		// case's here, before the ingress ends it (syncMock.TestSpanAt).
+		// With --sync ResolveKept noted it, and its window has ended.
+		syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 	}
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {

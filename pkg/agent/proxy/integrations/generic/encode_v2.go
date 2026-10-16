@@ -1,6 +1,7 @@
 package generic
 
 import (
+	"context"
 	"errors"
 	"io"
 	"time"
@@ -146,11 +147,52 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// exchanges counts the connection's exchanges flushed so far, those
 	// left out included (exchangeLifetime).
 	exchanges := 0
+	ctx := context.Background()
+	if sess != nil && sess.Ctx != nil {
+		ctx = sess.Ctx
+	}
+	emit := func(m *models.Mock) {
+		// An ended session's context would discard an ordinary emit of what
+		// the recorder held until it ended.
+		send := sess.EmitMock
+		if ctx.Err() != nil {
+			send = sess.EmitMockOnShutdown
+		}
+		if err := send(m); err != nil && logger != nil {
+			logger.Debug("generic v2: EmitMock returned error", zap.Error(err))
+		}
+	}
+	// hold is the connection's first exchange, and those after it, while the
+	// test that owns its request may own the whole connection (preambleHold).
+	// lastAt is the connection's latest chunk time.
+	var hold *preambleHold
+	var lastAt time.Time
+	// A parser that leaves holding (a panic the supervisor recovers) reports
+	// what it held as left out, as any exchange it could not record, and
+	// takes its hold off the stop's count: the stop is not to wait on it
+	// forever.
+	defer func() {
+		if hold != nil {
+			// Off the count whatever the report does.
+			defer hold.handedOn()
+			for _, m := range hold.release(false) {
+				sess.ReportLeftOut(m, "the Generic recorder stopped while it held this exchange")
+			}
+		}
+	}()
+	release := func(wholly bool) {
+		if hold == nil {
+			return
+		}
+		hold.handOn(wholly, emit)
+		hold = nil
+	}
 	flushMock := func() (leftOutFor string, leftOut bool) {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
 			return "", false
 		}
-		lifetime := exchangeLifetime(exchanges)
+		n := exchanges
+		lifetime := exchangeLifetime(n)
 		exchanges++
 		reset := func() {
 			genericRequests = nil
@@ -193,6 +235,28 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 			reset()
 			return reason, true
 		}
+		// A held exchange is consumed input, as an emitted one is: the
+		// session's pending work is cleared, or an idle spell while it is
+		// held reads as a hung parser.
+		switch {
+		case hold != nil:
+			hold.add(mock)
+			sess.MockHeld()
+			if hold.outlived() {
+				release(false)
+			}
+			reset()
+			return "", false
+		case n == 0:
+			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt); hold != nil {
+				sess.MockHeld()
+				if hold.outlived() {
+					release(false)
+				}
+				reset()
+				return "", false
+			}
+		}
 		// EmitMock runs sess.OnMockRecorded before sending on sess.Mocks
 		// and short-circuits if the incomplete flag is set. Any error
 		// from EmitMock (ctx cancellation mid-send) is logged but does
@@ -208,7 +272,36 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// Drain every event the two reader goroutines produce. The closer
 	// goroutine above closes `events` once both readers return, which
 	// is the only termination signal this loop observes.
-	for ev := range events {
+drain:
+	for {
+		// While the recorder holds the connection's first exchange, the
+		// window that may own it leaving the open ones may decide it, and the
+		// recording's stop, or the parser's end, decides it.
+		var changes, stopping, done <-chan struct{}
+		if hold != nil {
+			changes, stopping, done = hold.changes(), hold.stopping, ctx.Done()
+		}
+		var ev chunkEvent
+		select {
+		case <-changes:
+			hold.refresh()
+			if hold.outlived() {
+				release(false)
+			}
+			continue
+		case <-stopping:
+			// The recording's stop has begun: decided with what is known.
+			release(hold.wholly())
+			continue
+		case <-done:
+			release(hold.wholly())
+			continue
+		case e, ok := <-events:
+			if !ok {
+				break drain
+			}
+			ev = e
+		}
 		if ev.err != nil {
 			// End-of-stream for this side. Classify benign terminations
 			// (EOF / ErrClosed / deadline) distinctly from unexpected
@@ -226,6 +319,22 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 		// their timestamps would bias the pairing logic.
 		if len(ev.bytes) == 0 {
 			continue
+		}
+		// The connection's life, by its chunks' recorded times: a held
+		// first exchange is the preamble once a chunk comes after the
+		// answer of the test that owns it.
+		at := ev.writtenAt
+		if ev.dir == fakeconn.FromClient {
+			at = ev.readAt
+		}
+		if at.After(lastAt) {
+			lastAt = at
+		}
+		if hold != nil {
+			hold.saw(lastAt)
+			if hold.outlived() {
+				release(false)
+			}
 		}
 
 		switch ev.dir {
@@ -411,6 +520,13 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 	// Final flush for any in-flight exchange that had at least one
 	// request and one response chunk by the time streams closed.
 	flushMock()
+	// The connection has ended: the first exchange held until now is the
+	// test's when the connection's whole lay inside it (preambleHold), known
+	// once the test's answer is.
+	if hold != nil {
+		hold.settle(ctx)
+		release(hold.wholly())
+	}
 	return nil
 }
 
