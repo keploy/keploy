@@ -100,9 +100,10 @@ func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr st
 // libcurl and Node.js under TLS 1.2 reject a certificate they do not trust
 // so, once the handshake is done, and a client that gave up looks the same.
 // A client that sent anything after its handshake -- a call, or its
-// close_notify -- is not charged, nor is one keploy's own stop cut short.
+// close_notify -- is not charged, nor is one keploy's own stop cut short, nor
+// a read keploy ended itself (a cancel, its own close of the connection).
 func (p *Proxy) chargeSilentClient(ctx context.Context, err error, clientTLS net.Conn, dstAddr string) {
-	if ctx.Err() != nil || !pTls.IsClientGiveUp(err) || !pTls.SilentSinceHandshake(clientTLS) {
+	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) || !pTls.IsClientGiveUp(err) || !pTls.SilentSinceHandshake(clientTLS) {
 		return
 	}
 	p.losses.Add(models.CaptureLossTLSAbandoned, "to "+dstAddr)

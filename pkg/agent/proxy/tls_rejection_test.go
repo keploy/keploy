@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // cancelAfterHello is a client's connection that the client gives up on once
@@ -242,6 +244,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 // charged: a pooled connection it used and leaves idle until it closes has
 // sent bytes. These were all charged nothing.
 func TestAClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
 		name      string
 		max       uint16
@@ -288,5 +291,33 @@ func TestAClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
 				t.Fatalf("%s: charged %v, want %d tls_handshake_abandoned and no tls_handshake_failed", tc.name, got, tc.abandoned)
 			}
 		})
+	}
+}
+
+// A silent client is charged only for its own hang-up: not for a read keploy
+// ended itself -- a parser's cancel, keploy's own close of the connection,
+// keploy's stop -- however silent the client was since its handshake.
+func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	app, src := acceptedConn(t)
+	go func() {
+		_ = tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example"}).Handshake()
+	}()
+	conn, _, err := pTls.HandleTLSConnection(context.Background(), zap.NewNop(), src, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{logger: zap.NewNop()}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	p.chargeSilentClient(context.Background(), context.Canceled, conn, "10.0.0.1:443")
+	p.chargeSilentClient(context.Background(), fmt.Errorf("read: %w", net.ErrClosed), conn, "10.0.0.1:443")
+	p.chargeSilentClient(stopped, io.EOF, conn, "10.0.0.1:443")
+	if l := p.losses.Snapshot(); len(l) != 0 {
+		t.Fatalf("charged %+v for reads the client did not end", l)
+	}
+	p.chargeSilentClient(context.Background(), io.EOF, conn, "10.0.0.1:443")
+	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbandoned || l[0].What != "to 10.0.0.1:443" {
+		t.Fatalf("charged %+v, want one tls_handshake_abandoned to 10.0.0.1:443 for the client's own hang-up", l)
 	}
 }
