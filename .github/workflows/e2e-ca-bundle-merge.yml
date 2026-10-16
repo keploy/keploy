@@ -24,11 +24,15 @@ on:
       - pkg/agent/proxy/tls/**
       - tests/e2e/ca-bundle-merge/**
       - .github/workflows/e2e-ca-bundle-merge.yml
+      # run.sh pulls and builds through it.
+      - .github/workflows/test_workflow_scripts/docker-build-retry.sh
   pull_request:
     paths:
       - pkg/agent/proxy/tls/**
       - tests/e2e/ca-bundle-merge/**
       - .github/workflows/e2e-ca-bundle-merge.yml
+      # run.sh pulls and builds through it.
+      - .github/workflows/test_workflow_scripts/docker-build-retry.sh
 
 permissions:
   contents: read
