@@ -29,6 +29,17 @@ type fingerprintsResolver interface {
 	Fingerprints(ctx context.Context, id string) (fp, legacy string, ok bool)
 }
 
+// settler is a resolver that can catch up with the daemon (Docker's
+// index): Settle waits until it has listed the daemon since Settle was
+// called, placing the running containers it did not hold, or ctx ends, so a
+// container Docker started before a connection's first use is placed though
+// its start event has not reached the index. It never waits for a
+// container's configuration. One that cannot (a docker-mode agent's list,
+// which only its CLI gives) places what its lists say.
+type settler interface {
+	Settle(ctx context.Context)
+}
+
 // resolver finds the container behind a destination from its index, without
 // waiting on anything. err says the daemon cannot be read.
 type resolver interface {
@@ -89,7 +100,8 @@ const (
 // A connection is named when the proxy accepts it, from the index, which
 // never waits on Docker; its key is taken at its first use (a call matched,
 // a mock stamped), waiting, if it must, for the index's read of its
-// container's configuration.
+// container's configuration, and, for a connection the index did not place,
+// for a list of the daemon asked then (place).
 type Keyer struct {
 	mu sync.Mutex
 	// res is the index: the local daemon's, or, in a docker-mode agent, the
@@ -119,7 +131,9 @@ type Keyer struct {
 	// its first use (or at its accept, in a run whose mock.real lists
 	// container: entries: Placed), after the containers the index was
 	// placing at its accept are placed, so a container Docker started a
-	// moment before is still named.
+	// moment before is still named; and, if it still places none there,
+	// after a list of the daemon asked then (settler), so one whose start
+	// event reaches the index after that use is named too.
 	unplaced map[string]*pendingConn
 	// recorded is, for the test set the agent was given, the recorded
 	// groups (a key in one scope) whose mocks came from two or more
@@ -430,9 +444,10 @@ func (k *Keyer) PlacedOrPlacing(dst string) (c Container, ok bool, wait func(fn 
 
 // Placed is the container connection connID reaches: the one Name gave it,
 // or the one its look-up again finds (place), after the containers the index
-// was placing at its accept are placed. It never waits for a container's
-// configuration, nor for a container started since. ok is false when the
-// connection reaches none, or ctx ends first.
+// was placing at its accept are placed, and, finding none, a list of the
+// daemon asked then. It never waits for a container's configuration, nor for
+// a container's start event. ok is false when the connection reaches none,
+// or ctx ends first.
 func (k *Keyer) Placed(ctx context.Context, connID string) (Container, bool) {
 	k.mu.Lock()
 	c, ok := k.conns[connID]
@@ -482,8 +497,12 @@ func couldBeContainer(a netip.Addr) bool {
 // index was placing at its accept are placed (not those started since, which
 // would hold every call while containers keep starting; nor any container's
 // configuration's read, which a container Docker holds can wedge), and names
-// it if the index places it now. A use while that look-up runs waits for it;
-// a later use takes its outcome.
+// it if the index places it now. Finding none, it looks once more after the
+// index has listed the daemon since (settler): a container Docker started
+// before this use, whose start event the index has not taken (its stream
+// lags the daemon on a busy host), is placed from that list, not waited for
+// by its event. A use while that look-up runs waits for it; a later use
+// takes its outcome.
 func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 	k.mu.Lock()
 	p := k.unplaced[connID]
@@ -514,6 +533,12 @@ func (k *Keyer) place(ctx context.Context, connID string) (Container, bool) {
 		res.AwaitReadsOf(ctx, p.placingAtAccept)
 	}
 	got, ok, err := res.Lookup(p.ap)
+	if s, can := res.(settler); can && err == nil && !ok {
+		// Not placed yet, though its container may have started before
+		// this use: its start event can reach the index after it.
+		s.Settle(ctx)
+		got, ok, err = res.Lookup(p.ap)
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	defer close(p.lookedUp)
