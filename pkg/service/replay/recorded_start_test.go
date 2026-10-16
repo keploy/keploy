@@ -23,7 +23,7 @@ func (f *recordedStartDB) RecordedFirstTestStart(context.Context, string) (time.
 }
 
 func testCaseAt(at time.Time) *models.TestCase {
-	return &models.TestCase{HTTPReq: models.HTTPReq{Timestamp: at}}
+	return &models.TestCase{Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at}, HTTPResp: models.HTTPResp{Timestamp: at.Add(time.Second)}}
 }
 
 var recordedT0 = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
@@ -64,6 +64,31 @@ func TestStagingShapeKeepsTheFirstHeldTestOtherwise(t *testing.T) {
 			r := &Replayer{logger: zap.NewNop(), testDB: db}
 			if got := r.recordedSetShape(context.Background(), "test-set-0", held).firstTestStart; !got.Equal(first) {
 				t.Fatalf("the staging cutoff is %v; want the first held test %v", got, first)
+			}
+		})
+	}
+}
+
+// A set's first recorded test is the earliest window any of its tests opens,
+// gRPC tests' included. It was read from the HTTP request alone, so a gRPC set
+// was staged with no first test: the agent read every mock of the recording
+// back from disk to stage it.
+func TestASetsFirstRecordedTestIsItsEarliestWindowOfAnyKind(t *testing.T) {
+	grpcAt := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: at}, GrpcResp: models.GrpcResp{Timestamp: at.Add(time.Second)}}
+	}
+	for name, tc := range map[string]struct {
+		cases []*models.TestCase
+		want  time.Time
+	}{
+		"gRPC only":              {[]*models.TestCase{grpcAt("g-1", recordedT0), grpcAt("g-2", recordedT0.Add(time.Minute))}, recordedT0},
+		"gRPC before HTTP":       {[]*models.TestCase{testCaseAt(recordedT0.Add(time.Minute)), grpcAt("g-1", recordedT0)}, recordedT0},
+		"HTTP before gRPC":       {[]*models.TestCase{grpcAt("g-1", recordedT0.Add(time.Minute)), testCaseAt(recordedT0)}, recordedT0},
+		"none carries a request": {[]*models.TestCase{{Name: "untimed", Kind: models.HTTP}}, time.Time{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := recordedSetShapeOf(tc.cases).firstTestStart; !got.Equal(tc.want) {
+				t.Fatalf("the set's first recorded test is %v; want %v", got, tc.want)
 			}
 		})
 	}

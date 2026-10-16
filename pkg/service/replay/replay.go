@@ -5494,19 +5494,20 @@ func (r *Replayer) consumedForAgent(total map[string]models.MockState, region ma
 }
 
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
-// in the set. testDB returns cases sorted by request timestamp, so it is the
-// first one's; a case with no request time contributes nothing rather than
-// pinning the cutoff to the zero time.
+// in the set: the earliest start of the window a test opens on the agent
+// (testWindowOf; HTTP and gRPC). A case with no request time contributes
+// nothing rather than pinning the cutoff to the zero time. Read from every
+// case rather than the first: testDB sorts HTTP cases by their request time,
+// and a gRPC case's is elsewhere.
 func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
+	var first time.Time
 	for _, tc := range testCases {
-		if tc == nil {
-			continue
-		}
-		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
-			return ts
+		start, _ := testWindowOf(tc)
+		if !start.IsZero() && (first.IsZero() || start.Before(first)) {
+			first = start
 		}
 	}
-	return time.Time{}
+	return first
 }
 
 // recordedSetShape is what the staging call tells the agent about the set's
