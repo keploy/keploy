@@ -67,6 +67,9 @@ type pingWatch struct {
 	complete int
 	cut      func()
 	held     atomic.Bool
+	// answer is the stall rule's watch on the exchange (answerWatch), told
+	// when the app's answer begins (its response headers).
+	answer   *answerWatch
 	heldAt   int
 	stalled  bool // held short of the recording (written before held)
 	received atomic.Int64
@@ -165,9 +168,14 @@ func (w *pingWatch) scanWrite(b []byte) {
 	}
 	for len(b) > 0 {
 		var header bool
-		header, _, b = w.w.next(b)
+		var payload []byte
+		header, payload, b = w.w.next(b)
 		if header && endsStream(w.w.typ, w.w.flags) {
 			w.ended.Store(true)
+		}
+		if !header && w.w.typ == http2.FrameData {
+			// The request's messages, as the stall rule counts them.
+			w.answer.sentBody(len(payload))
 		}
 	}
 }
@@ -193,6 +201,8 @@ func (w *pingWatch) scanRead(b []byte) {
 			w.ping()
 		case w.r.typ == http2.FrameRSTStream:
 			w.appEnded = true
+		case w.r.typ == http2.FrameHeaders:
+			w.answer.answering()
 		}
 		if endsStream(w.r.typ, w.r.flags) {
 			// Its payload, the stream's last messages, still counts.

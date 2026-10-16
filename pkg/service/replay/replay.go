@@ -2830,11 +2830,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if loopErr != nil {
-				utils.LogError(r.logger, loopErr, "failed to simulate request")
+				sayNoAnswer(r.logger, testCase.Name, loopErr, "failed to simulate request")
 				noteNoAnswer(testCase.Name, loopErr)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, loopErr)
+				markAnswerStalled(testCaseResult, loopErr)
 				// Finalize the capture window even on this early exit, so a miss
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
@@ -3852,11 +3853,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if simErr != nil {
-				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
+				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, simErr)
+				markAnswerStalled(testCaseResult, simErr)
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -4661,6 +4663,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", heldOpen),
 			zap.String("next_step", streamsHeldOpenRemedy+", then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
+	if stalledAnswers := testsWithStalledAnswers(testCaseResults); len(stalledAnswers) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		// A test whose answer the stall rule ended has no verdict, so
+		// neither has its set (rule 15).
+		notJudged = alsoNotJudged(notJudged, stalledAnswersReason(stalledAnswers))
+		r.logger.Error("test-set is not judged: the app never answered some of its tests, or never took their whole request, within keploy's stall bound; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", stalledAnswers),
+			zap.String("next_step", stalledAnswersRemedy+", then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
 	}
