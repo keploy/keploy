@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -152,6 +153,15 @@ func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 	utils.LogError(logger, err, as)
 }
 
+// sayStartJudged is the console's line for a test whose answer began and then
+// sent nothing of its body, judged on its start (startFailedRow): that it
+// failed on its start, and that its body never came. The start's diff is
+// printed with it.
+func sayStartJudged(logger *zap.Logger, test string, err error) {
+	logger.Error("failed on its answer's start, which differs from the recording; nothing whole of its body came: "+err.Error(),
+		zap.String("testcase", test))
+}
+
 // stalledAnswerRemedy is what to do about a test whose answer never came:
 // for one the app's keepalives ended (pkg.AnswerStallError.Keepalives), a
 // bound of the user's changes nothing, so it is never suggested.
@@ -180,7 +190,7 @@ const keepalivesRemedy = "find why the app sends only keepalives and nothing of 
 // the start differs it returns the test's FAILED row, judged on the start:
 // the comparison's result, printed, and as its answer what came (no body).
 // When it matches, nil and false: the test fails closed, not judged.
-func (r *Replayer) startFailedRow(view *models.TestCase, resp any, testSetID string, started time.Time) (*models.TestResult, bool) {
+func (r *Replayer) startFailedRow(run *templates.Run, sent, view *models.TestCase, resp any, testSetID string, started time.Time) (*models.TestResult, bool) {
 	row := func(result *models.Result) *models.TestResult {
 		tr := &models.TestResult{
 			Kind:         view.Kind,
@@ -199,6 +209,7 @@ func (r *Replayer) startFailedRow(view *models.TestCase, resp any, testSetID str
 			if result.FailureInfo.Risk != models.None {
 				tr.FailureInfo.Risk, tr.FailureInfo.Category = result.FailureInfo.Risk, result.FailureInfo.Category
 			}
+			tr.FailureInfo.Assessment = result.FailureInfo.Assessment
 		}
 		return tr
 	}
@@ -208,19 +219,18 @@ func (r *Replayer) startFailedRow(view *models.TestCase, resp any, testSetID str
 			return nil, false
 		}
 		exp := *view
-		exp.HTTPResp.Header = make(map[string]string, len(view.HTTPResp.Header))
-		for k, v := range view.HTTPResp.Header {
-			if a, ok := got.Header[k]; ok && strings.Contains(v, "{{") {
-				v = a
-			}
-			exp.HTTPResp.Header[k] = v
-		}
+		exp.HTTPResp.Header = r.startHeaders(run, sent, view, got)
 		start := models.HTTPResp{StatusCode: got.StatusCode, StatusMessage: got.StatusMessage, Header: got.Header, Body: exp.HTTPResp.Body}
 		probe := start
 		if same, _ := r.compareHTTPResp(&exp, &probe, testSetID, false); same {
 			return nil, false
 		}
 		_, result := r.compareHTTPResp(&exp, &start, testSetID, true)
+		// The body was not compared: what came of it is the row's, in
+		// place of the stand-in the comparison was given.
+		for i := range result.BodyResult {
+			result.BodyResult[i].Actual = got.Body
+		}
 		tr := row(result)
 		tr.Req = view.HTTPReq
 		tr.Res = models.HTTPResp{StatusCode: got.StatusCode, StatusMessage: got.StatusMessage, Header: got.Header, Body: got.Body}
@@ -236,6 +246,13 @@ func (r *Replayer) startFailedRow(view *models.TestCase, resp any, testSetID str
 			return nil, false
 		}
 		_, result := r.compareGRPCResp(view, &start, testSetID, true, false)
+		// No message came: the rows say so, not the stand-in's.
+		for i := range result.BodyResult {
+			result.BodyResult[i].Actual = ""
+			if result.BodyResult[i].Type == models.GrpcLength {
+				result.BodyResult[i].Actual = "0"
+			}
+		}
 		tr := row(result)
 		tr.GrpcReq = view.GrpcReq
 		tr.GrpcRes = models.GrpcResp{Headers: got.Headers}
@@ -256,6 +273,34 @@ func testsWithStalledAnswers(results []models.TestResult) []string {
 	for _, r := range results {
 		if r.FailureInfo.AnswerStalled != "" {
 			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// startHeaders is the expected answer's headers to judge a start against:
+// view's, the replay's no-answer view, with each header that holds a
+// placeholder in the recording resolved as the main path resolves it
+// (templates.Run.ExpectedStart), against the headers that came, on a copy of
+// this run, so the run itself moves no value: its captures take the app's
+// text where the literal text and uses around them match (a cookie by its
+// parts, its Expires read as the template package reads it), then its uses
+// take each key's value after them. A header that uses a key the body
+// captures is taken as the app sent it, its value being in the body that
+// never came. One the answer does not satisfy keeps its markup, and the
+// comparison calls it a difference. In a set with no template, headers are
+// compared as written.
+func (r *Replayer) startHeaders(run *templates.Run, sent, view *models.TestCase, got *models.HTTPResp) map[string]string {
+	out := make(map[string]string, len(view.HTTPResp.Header))
+	for k, v := range view.HTTPResp.Header {
+		out[k] = v
+	}
+	if run == nil || sent == nil {
+		return out
+	}
+	for k, v := range run.ExpectedStart(sent.HTTPResp, models.HTTPResp{StatusCode: got.StatusCode, Header: got.Header}, templates.ExpectOptions{IgnoreOrdering: r.responseIgnoreOrdering()}) {
+		if _, ok := out[k]; ok {
+			out[k] = v
 		}
 	}
 	return out

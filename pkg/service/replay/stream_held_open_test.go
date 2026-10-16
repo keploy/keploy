@@ -414,6 +414,9 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 			if c.judged && r.Result.StatusCode.Normal {
 				t.Fatalf("test-2's status compared normal: %+v; want the 500 judged against the recorded 200", r.Result.StatusCode)
 			}
+			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /test-2"); (len(said) == 1) != c.judged {
+				t.Fatalf("the console said %d time(s) that test-2 failed on its start", len(said))
+			}
 			if rep := run.report.report; rep == nil || rep.Status != string(c.set) {
 				t.Fatalf("report %+v; want the set %s", rep, c.set)
 			}

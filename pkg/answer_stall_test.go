@@ -315,6 +315,13 @@ func stallApp(t *testing.T) string {
 			_, _ = w.Write([]byte("0123456789"))
 			w.(http.Flusher).Flush()
 			<-hold
+		case "/partial-gzip":
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			_, _ = gz.Write([]byte("0123456789"))
+			_ = gz.Flush()
+			w.(http.Flusher).Flush()
+			<-hold
 		case "/ndjson-done":
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			_, _ = w.Write([]byte("{\"id\":1}\n{\"id\":2}\n"))
@@ -488,9 +495,21 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial"; !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want || !AnswerBegan(err) {
 			t.Fatalf("%v; want %q", err, want)
 		}
-		// Its start goes with the error, for the replay to judge it.
-		if resp == nil || resp.StatusCode != 200 || resp.Header["Content-Length"] != "100" {
-			t.Fatalf("returned %+v; want the status and headers that came", resp)
+		// Its start goes with the error, for the replay to judge it, and
+		// the part of its body that came.
+		if resp == nil || resp.StatusCode != 200 || resp.Header["Content-Length"] != "100" || resp.Body != "0123456789" {
+			t.Fatalf("returned %+v; want the status, headers and part of the body that came", resp)
+		}
+	})
+	t.Run("an encoded answer that stops part-way", func(t *testing.T) {
+		tc := &models.TestCase{Name: "partial-gzip", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/partial-gzip", Header: map[string]string{"Accept-Encoding": "gzip"}}}
+		resp, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
+		if !errors.Is(err, ErrAnswerStalled) || !AnswerBegan(err) {
+			t.Fatalf("%v; want an answer that began and stalled", err)
+		}
+		// The part that came is kept decoded, as a whole body would be.
+		if resp == nil || resp.Header["Content-Encoding"] != "gzip" || resp.Body != "0123456789" {
+			t.Fatalf("returned %+v; want the part of the body that came, decoded", resp)
 		}
 	})
 	t.Run("R5 an answer that never comes", func(t *testing.T) {

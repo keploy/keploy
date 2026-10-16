@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -236,40 +238,161 @@ func TestAGRPCAnswersStartIsJudgedOnItsMetadata(t *testing.T) {
 	}
 	view.GrpcResp.Body = models.GrpcLengthPrefixedMessage{DecodedData: `1: {"REC"}`}
 	view.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
-	if _, differs := r.startFailedRow(view, &models.GrpcResp{Headers: view.GrpcResp.Headers}, "s", time.Now()); differs {
+	if _, differs := r.startFailedRow(nil, view, view, &models.GrpcResp{Headers: view.GrpcResp.Headers}, "s", time.Now()); differs {
 		t.Fatal("a start that matches the recording differs")
 	}
 	other := models.GrpcHeaders{
 		PseudoHeaders:   map[string]string{":status": "200"},
 		OrdinaryHeaders: map[string]string{"content-type": "text/plain"},
 	}
-	row, differs := r.startFailedRow(view, &models.GrpcResp{Headers: other}, "s", time.Now())
+	row, differs := r.startFailedRow(nil, view, view, &models.GrpcResp{Headers: other}, "s", time.Now())
 	if !differs || row == nil || row.Status != models.TestStatusFailed || row.GrpcRes.Headers.OrdinaryHeaders["content-type"] != "text/plain" || row.GrpcRes.Body.DecodedData != "" || row.FailureInfo.AnswerStalled != "" {
 		t.Fatalf("%v, %+v; want a judged FAILED row holding what came", differs, row)
 	}
 	var none *models.GrpcResp
-	if _, differs := r.startFailedRow(view, none, "s", time.Now()); differs {
+	if _, differs := r.startFailedRow(nil, view, view, none, "s", time.Now()); differs {
 		t.Fatal("no answer differs")
 	}
 }
 
-// An HTTP start is judged on its status and headers, an expected header that
-// holds template markup taken as the app sent it: a start that differs is a
-// judged FAILED row whose answer is what came (no body of the recording's).
+// An HTTP start is judged on its status and headers. A header that holds a
+// capture is resolved as the main path resolves it, on a throwaway run: the
+// app's value is taken where the literal text and uses around it match (a
+// cookie by its parts, its Expires date standing when it gives the recorded
+// lifetime), and the run itself moves no value. A start that differs is a
+// judged FAILED row whose answer is what came.
 func TestAnHTTPAnswersStartIsJudgedWithItsTemplatedHeadersTheApps(t *testing.T) {
 	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
-	view := &models.TestCase{Kind: models.HTTP, Name: "test-1", HTTPResp: models.HTTPResp{
+	run := templates.NewRun(zap.NewNop(), map[string]interface{}{"sid": "S0rec", "token": "T0rec"}, nil)
+	sent := &models.TestCase{Kind: models.HTTP, Name: "test-1", HTTPResp: models.HTTPResp{
 		StatusCode: 200,
-		Header:     map[string]string{"Content-Type": "application/json", "Set-Cookie": "sid={{capture string .sid}}; Path=/"},
-		Body:       `{"token":"{{capture string .token}}"}`,
+		Header: map[string]string{
+			"Content-Type": "application/json",
+			"Date":         "Mon, 05 Oct 2026 10:00:00 GMT",
+			"Set-Cookie":   "sid={{capture string .sid}}; Expires=Mon, 05 Oct 2026 11:00:00 GMT; Path=/",
+		},
+		Body: `{"token":"{{capture string .token}}"}`,
 	}}
-	same := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json", "Set-Cookie": "sid=S1live; Path=/"}}
-	if _, differs := r.startFailedRow(view, same, "s", time.Now()); differs {
-		t.Fatal("a start whose templated header the app filled differs")
+	view := noAnswerView(run, sent)
+	answer := func(status int, cookie string) *models.HTTPResp {
+		return &models.HTTPResp{StatusCode: status, Header: map[string]string{
+			"Content-Type": "application/json",
+			"Date":         "Sat, 17 Oct 2026 09:00:00 GMT",
+			"Set-Cookie":   cookie,
+		}, Body: `{"tok`}
 	}
-	other := &models.HTTPResp{StatusCode: 500, Header: same.Header}
-	row, differs := r.startFailedRow(view, other, "s", time.Now())
-	if !differs || row.Res.StatusCode != 500 || row.Res.Body != "" || row.Result.StatusCode.Normal {
+	same := answer(200, "sid=S1live; Expires=Sat, 17 Oct 2026 10:00:00 GMT; Path=/")
+	if _, differs := r.startFailedRow(run, sent, view, same, "s", time.Now()); differs {
+		t.Fatal("a start whose templated cookie the app filled, its Expires moved by the same lifetime, differs")
+	}
+	if got := run.Values()["sid"]; got != "S0rec" {
+		t.Fatalf("judging the start moved the run's sid to %q", got)
+	}
+	path := answer(200, "sid=S1live; Expires=Sat, 17 Oct 2026 10:00:00 GMT; Path=/admin")
+	if _, differs := r.startFailedRow(run, sent, view, path, "s", time.Now()); !differs {
+		t.Fatal("a templated cookie whose Path differs was taken as the app's")
+	}
+	row, differs := r.startFailedRow(run, sent, view, answer(500, same.Header["Set-Cookie"]), "s", time.Now())
+	if !differs || row.Res.StatusCode != 500 || row.Res.Body != `{"tok` || row.Result.StatusCode.Normal {
 		t.Fatalf("%v, %+v; want a judged FAILED row on the 500, holding what came", differs, row)
+	}
+	for _, b := range row.Result.BodyResult {
+		if b.Actual != `{"tok` {
+			t.Fatalf("the result's body row says %q came; %q did", b.Actual, `{"tok`)
+		}
+	}
+	// In a set with no template, a header is compared as written.
+	plain := &models.TestCase{Kind: models.HTTP, Name: "test-2", HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Literal": "{{not a template}}"}}}
+	if _, differs := r.startFailedRow(nil, plain, plain, &models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Literal": "anything"}}, "s", time.Now()); !differs {
+		t.Fatal("a header written with braces in a set with no template was taken as a pattern")
+	}
+}
+
+// A judged start's headers are those the main path would compare: a use of
+// a key a cookie of the same answer captures is at the captured value, and a
+// use of a key the body captures (a created resource's Location) is the
+// app's, its value being in the body that never came. A start that matches
+// so fails closed; a header at the old value is a judged difference.
+func TestAStartsHeaderThatUsesAValueTheSameAnswerCapturesIsJudgedAsTheMainPathJudgesIt(t *testing.T) {
+	r := &Replayer{logger: zap.NewNop(), config: &config.Config{}}
+	run := templates.NewRun(zap.NewNop(), map[string]interface{}{"id": "REC", "sid": "S1"}, nil)
+	sent := &models.TestCase{Kind: models.HTTP, Name: "test-1", HTTPResp: models.HTTPResp{
+		StatusCode: 201,
+		Header: map[string]string{
+			"Content-Type": "application/json",
+			"Location":     "/orders/{{string .id}}",
+			"Set-Cookie":   "sid={{capture string .sid}}; Path=/",
+			"X-Sid":        "{{string .sid}}",
+		},
+		Body: `{"id":"{{capture string .id}}"}`,
+	}}
+	view := noAnswerView(run, sent)
+	answer := func(sid string) *models.HTTPResp {
+		return &models.HTTPResp{StatusCode: 201, Header: map[string]string{
+			"Content-Type": "application/json",
+			"Location":     "/orders/NEW",
+			"Set-Cookie":   "sid=S2; Path=/",
+			"X-Sid":        sid,
+		}}
+	}
+	if row, differs := r.startFailedRow(run, sent, view, answer("S2"), "s", time.Now()); differs {
+		t.Fatalf("a start the main path would match was judged FAILED: %+v", row.Result.HeadersResult)
+	}
+	if _, differs := r.startFailedRow(run, sent, view, answer("S1"), "s", time.Now()); !differs {
+		t.Fatal("a header at the value its cookie's capture replaced was taken as matching")
+	}
+	if got := run.Values(); got["id"] != "REC" || got["sid"] != "S1" {
+		t.Fatalf("judging the start moved the run's values to %v", got)
+	}
+}
+
+// drainOrder is prHooks that records, when each test is sent, how many reads
+// of the consumed mocks came before it.
+type drainOrder struct {
+	prHooks
+	mu      *sync.Mutex
+	reads   *int
+	atStart map[string]int
+}
+
+func (d drainOrder) SimulateRequest(ctx context.Context, tc *models.TestCase, set string) (interface{}, error) {
+	d.mu.Lock()
+	d.atStart[tc.Name] = *d.reads
+	d.mu.Unlock()
+	return d.prHooks.SimulateRequest(ctx, tc, set)
+}
+
+func (d drainOrder) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	d.mu.Lock()
+	*d.reads++
+	d.mu.Unlock()
+	return d.prHooks.GetConsumedMocks(ctx)
+}
+
+// Under the proven switch a test that ends early (here, failing closed on an
+// answer that never came) reads what it consumed before its row is filed, so
+// before the next test runs: its calls are its own, never the next test's
+// drain's. Without the switch an early row files as it always did, its calls
+// read only by the next test's drain.
+func TestUnderTheSwitchAnEarlyRowsConsumptionIsItsOwn(t *testing.T) {
+	for _, proven := range []string{"1", ""} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			h := newPartialRunHarness(t, 2, 0)
+			var mu sync.Mutex
+			reads := 0
+			hooks := drainOrder{
+				prHooks: prHooks{simErr: map[string]error{"test-1": &pkg.AnswerStallError{Target: "GET /x"}}},
+				mu:      &mu, reads: &reads, atStart: map[string]int{},
+			}
+			h.replayer.hookImpl = hooks
+			h.run(t)
+			mu.Lock()
+			defer mu.Unlock()
+			between := hooks.atStart["test-2"] - hooks.atStart["test-1"]
+			if want := map[string]int{"1": 1, "": 0}[proven]; between != want {
+				t.Fatalf("%d read(s) of the consumed mocks between test-1's send and test-2's; want %d", between, want)
+			}
+		})
 	}
 }
