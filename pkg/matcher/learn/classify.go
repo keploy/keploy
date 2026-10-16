@@ -903,6 +903,11 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	v := dc.of(recorded, now)
+	// The test's own call that sent the value is the place, before one of
+	// the run's that sent it too: only a test's own calls carry its
+	// variables.
+	var first Place
+	found := false
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -911,11 +916,20 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
-				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, true
+			if ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v); ok {
+				p := Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}
+				if e.Own {
+					return p, true
+				}
+				if !found {
+					first, found = p, true
+				}
 			}
 		}
+	}
+	if found {
+		return first, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),

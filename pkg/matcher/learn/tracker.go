@@ -77,15 +77,20 @@ func NewTracker() *Tracker {
 // before it (the previous set's tests, its start-up, between its tests) is no
 // earlier place of the new set's, and no test is open until the next Begin.
 // Mock names restart in every set (mock-0 again), so a mock served in one set
-// must not stand for, or hide, another set's mock of its name.
+// must not stand for, or hide, another set's mock of its name: the set's
+// start-up takes a test number no request of the previous set holds, so a
+// request of that set answered after the set changed is nobody's.
 func (t *Tracker) NewSet() {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
+	t.epoch++
+	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
+	t.names, t.taken = nil, nil
 	t.open, t.began = false, false
 	t.mu.Unlock()
 }
@@ -307,7 +312,8 @@ func drifted(e Earlier) bool {
 // Name is the name of test number n's variable bound at place of mock: the
 // same for every call that uses it, no other variable's in the test
 // (variables are named per test), and none of reserved (the test case's
-// template keys). ok is false when that test has ended. A nil tracker,
+// template keys). ok is false when that test has ended. A place of the run's
+// (RunName) is named the run's variable's name, whatever n. A nil tracker,
 // which knows of no test, names a variable by its place alone.
 func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
@@ -341,9 +347,10 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 }
 
 // runPrefix begins the name of a run's variable: "run-session". A test's
-// variable is named by its place alone, and a test case's template keys are
-// its own, so a run's name, given once for the whole set when a test first
-// uses the value, collides with neither in any later test.
+// variable is named by its place alone, so a run's name, given once for the
+// whole set when a test first uses the value, collides with none in any
+// later test; a test case's template keys are the test's own, and one of
+// this form would be read as the run's.
 const runPrefix = "run-"
 
 // RunName names the variable bound at place of mock, an exchange of the run

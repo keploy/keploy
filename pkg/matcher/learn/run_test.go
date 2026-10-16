@@ -125,13 +125,35 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 	if !tr.Begun() {
 		t.Fatal("a test has begun in this set, and the tracker says none has")
 	}
+	last, _, _, _ := tr.Test()
 	tr.NewSet()
 	if tr.Begun() {
 		t.Fatal("a new set begins with no test begun, and the tracker says one has")
 	}
-	tr.Served(7, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	tr.Served(last, sent("mock-2", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	tr.Served(last+9, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
-		t.Fatalf("an exchange of a test that never ran is kept: %+v", earlier)
+		t.Fatalf("a request of the previous set, or of a test that never ran, is kept as the new set's: %+v", earlier)
+	}
+	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil); ok {
+		t.Fatalf("a request of the previous set named a variable %q in the new set", name)
+	}
+}
+
+// A value the test's own earlier call sent, which a start-up call sent too,
+// comes from the test's own call: only a test's own calls carry its
+// variables.
+func TestAValueComesFromTheTestsOwnCallBeforeTheRuns(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
+	own := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
+	p, ok := appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot, own}, nil)
+	if !ok || !p.Own || p.Mock != "mock-5" {
+		t.Fatalf("the value comes from %+v (%v), want the test's own call", p, ok)
+	}
+	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot}, nil)
+	if !ok || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("with no own call the value comes from %+v (%v), want the run's", p, ok)
 	}
 }
 

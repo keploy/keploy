@@ -18,7 +18,8 @@ type Binding = models.VariableBinding
 //
 // With KeepRun, a value bound before the first scope began (the run's
 // start-up, before its first test) is the run's: every scope sees it. What is
-// bound between two scopes, once one began, goes with the next scope.
+// bound between two scopes, once one began, is forgotten when the next
+// begins.
 type Table struct {
 	mu   sync.Mutex
 	vals map[string]Binding
@@ -214,9 +215,9 @@ func (t *Table) Reset() {
 	t.mu.Unlock()
 }
 
-// Close ends the open scope. What is bound before the next one begins goes
-// with the next scope: only what was bound before the first scope began is
-// the run's.
+// Close ends the open scope. What is bound before the next one begins is
+// forgotten when it does: only what was bound before the first scope began
+// is the run's.
 func (t *Table) Close() {
 	t.mu.Lock()
 	t.vals = nil
