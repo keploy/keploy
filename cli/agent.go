@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/routes"
+	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -77,6 +78,30 @@ func agentFailed(ctx context.Context, err error) bool {
 	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
 }
 
+// containerTeardownProgressFile is where a containerised agent reports its
+// teardown (kdocker.AgentTeardownProgressFile). A variable only so that a test
+// running the agent command in-process points it at its own directory, not
+// at a path every process on the host shares.
+var containerTeardownProgressFile = kdocker.AgentTeardownProgressFile
+
+// reportTeardown has the agent report its teardown's progress, for the CLI
+// that stops it: it kills a stopping agent only once that has stopped making
+// progress (utils.ReportTeardownProgress). A native agent is told where
+// (--teardown-progress-file, flagPath), and that path is checked before the
+// agent, root under sudo, writes there; a containerised one writes into its
+// own container (containerTeardownProgressFile), where the CLI reads it
+// back.
+func reportTeardown(ctx context.Context, logger *zap.Logger, flagPath string, isDocker bool) {
+	switch {
+	case flagPath != "":
+		if err := utils.ReportTeardownProgressTo(ctx, logger, flagPath); err != nil {
+			logger.Warn("not reporting the agent's teardown progress: the CLI that stops it will wait for it to exit however long it takes", zap.Error(err))
+		}
+	case isDocker:
+		utils.ReportTeardownProgress(ctx, logger, containerTeardownProgressFile)
+	}
+}
+
 func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
@@ -84,8 +109,13 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			// A hang-up kills the agent, as it did before NewCtx made one
-			// stop keploy gracefully: see utils.DieOnHangup.
+			// stop keploy gracefully: see utils.DieOnHangup. Not once it is
+			// shutting down: see utils.IgnoreHangupOnceStopping.
 			utils.DieOnHangup()
+			utils.IgnoreHangupOnceStopping(ctx)
+			// The CLI's forced stop of an agent it may not signal itself
+			// (sudo's): see utils.DieOnEscalation.
+			utils.DieOnEscalation(ctx)
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -136,6 +166,12 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				watchParentProcess(ctx, logger, int(clientPID))
 			}
 
+			progressFile, pfErr := cmd.Flags().GetString("teardown-progress-file")
+			if pfErr != nil {
+				logger.Debug("could not read the teardown-progress-file flag", zap.Error(pfErr))
+			}
+			reportTeardown(ctx, logger, progressFile, isDocker)
+
 			startAgentCh := make(chan int)
 			daemonSet := isDaemonSetAgent()
 			// Read directly, like client-pid above, so this never depends on
@@ -158,17 +194,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// frame stream it drains after the stop
 			// (models.DrainsAfterStopHeader): the client is draining what this
 			// agent captured before the stop, and stops the agent once it has
-			// (POST /agent/stop). A client that dies drops its streams (and
-			// the parent-death watchdog above stops a native agent); a second
-			// signal stops the agent at once.
-			utils.SetSignalHold(func(stopNow <-chan struct{}) {
+			// (POST /agent/stop). A client that dies drops its streams, and
+			// the parent-death watchdog above ends a native agent's stop that
+			// still holds for it (endForGoneClient). A
+			// repeated signal does not cut this short: it may be the first
+			// again, as the sudo that runs the agent hands it on
+			// (utils.SetSignalHold). The user's second Ctrl+C reaches the
+			// client, whose drain then ends and closes the streams; a client
+			// that must stop the agent regardless asks it over its API, or
+			// escalates (utils.DieOnEscalation), and either ends this wait.
+			utils.SetSignalHold(func() {
 				if routes.RecordingClients() == 0 {
 					return
 				}
-				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished, or at a second signal")
-				if !routes.WaitForRecordingClients(stopNow) {
-					logger.Warn("stopping the agent while a recording's client was still saving what it captured before the stop: what the client had not received yet is lost")
-				}
+				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished")
+				routes.WaitForRecordingClients()
 			})
 			go func() {
 				select {
@@ -204,15 +244,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
-				utils.LogError(logger, err, "failed to setup agent")
-				if agentFailed(ctx, err) {
-					// The specific code when the failure carries one: the CLI
-					// that launched this agent reads it back as its own
-					// (pkg/platform/http AgentClient.Setup), which is how a
-					// user is told "grant privileges" apart from "mount
-					// tracefs".
-					utils.SetExitCodeOnce(utils.ExitCodeFor(err))
+				if !agentFailed(ctx, err) {
+					// Stopped, not failed (agentFailed): Setup said so.
+					return nil
 				}
+				utils.LogError(logger, err, "failed to setup agent")
+				// The specific code when the failure carries one: the CLI
+				// that launched this agent reads it back as its own
+				// (pkg/platform/http AgentClient.Setup), which is how a user
+				// is told "grant privileges" apart from "mount tracefs".
+				utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 				return nil
 			}
 

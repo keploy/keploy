@@ -100,13 +100,80 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 	}
 }
 
+// extraCall tells, for an exchange no mock answered under exact serving (the
+// proven switch), whether it is one exchange more than the open test
+// recorded: one its own mocks already answered, matched as the per-test pool
+// is (exactly, or at the per-test similarity). It returns how many times the
+// test recorded that exchange, 0 when it is not one or exact serving is off.
+func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
+	answered := answeredExchanges(mockDb)
+	if len(answered) == 0 {
+		return 0
+	}
+	idx := findExactMatch(answered, reqBuffs)
+	if idx == -1 {
+		idx = findBinaryMatch(answered, reqBuffs, 0.9)
+	}
+	if idx == -1 {
+		return 0
+	}
+	n := 0
+	for _, mk := range answered {
+		if sameRequests(mk.Spec.GenericRequests, answered[idx].Spec.GenericRequests) {
+			n++
+		}
+	}
+	return max(n, 1)
+}
+
+// answeredExchanges are, under exact serving (the proven switch), the open
+// test's Generic mocks that have answered, in the order they did: in no read
+// any more, each answers once. None when exact serving is off.
+func answeredExchanges(mockDb integrations.MockMemDb) []*models.Mock {
+	er, ok := mockDb.(integrations.ExactConsumedReader)
+	if !ok {
+		return nil
+	}
+	var answered []*models.Mock
+	for _, mk := range er.ConsumedTestMocks() {
+		if mk.Kind == models.GENERIC {
+			answered = append(answered, mk)
+		}
+	}
+	return answered
+}
+
+// sameRequests reports whether two recorded exchanges sent the same bytes.
+func sameRequests(a, b []models.Payload) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i].Message) != len(b[i].Message) {
+			return false
+		}
+		for j := range a[i].Message {
+			if a[i].Message[j] != b[i].Message[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // buildGenericMismatchReport builds the universal mock-miss report for the
 // generic (opaque TCP) parser. Field-level diffs are impossible for unparsed
 // wire bytes, so the report carries the closest candidate by Jaccard
 // similarity with its score — enough for the user to tell "nothing remotely
 // similar was recorded" (re-record) apart from "a near-miss exists"
 // (protocol drift, likely needs re-record of just this dependency).
-func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb integrations.MockMemDb) *models.MockMismatchReport {
+//
+// answered are, under exact serving, the open test's exchanges that already
+// answered (answeredExchanges), which no read shows any more: compared after
+// the pool's, so a test's changed exchange is still told how close it is to
+// the one it recorded. They are only compared, never served. The caller
+// passes none for an extra call.
+func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb integrations.MockMemDb, answered []*models.Mock) *models.MockMismatchReport {
 	summary := fmt.Sprintf("opaque TCP exchange (%d request buffer(s), first %d bytes)", len(reqBuffs), func() int {
 		if len(reqBuffs) == 0 {
 			return 0
@@ -124,6 +191,7 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 			genericMocks = append(genericMocks, m)
 		}
 	}
+	genericMocks = append(genericMocks, answered...)
 	if len(genericMocks) == 0 {
 		return mismatch.NewReport(mismatch.ProtocolGeneric, summary).
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()

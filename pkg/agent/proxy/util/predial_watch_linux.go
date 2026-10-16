@@ -108,18 +108,72 @@ func closedByPeer(conn net.Conn) bool {
 // the proxy's end of its connection: the kernel's count of bytes received on
 // the socket, which also counts what the proxy has already read.
 func ReceivedNothing(conn net.Conn) bool {
-	sc, ok := conn.(syscall.Conn)
+	nothing, known := ArrivedNothing(conn)
+	return known && nothing
+}
+
+// Waiting reports what the socket under conn holds for its reader, without
+// reading it: bytes, or the peer's close. Both are false when nothing waits,
+// or when there is no socket to look at. A Go read whose deadline has already
+// passed fails without looking at the socket, so a read stopped by a deadline
+// before it began cannot say whether anything had arrived; this can.
+//
+// Wrappers are looked through by NetConn, so data says only that the socket
+// holds bytes: a Read of a wrapper that transforms them (a *tls.Conn) may still
+// block. firstRead.stop in the proxy reads at once on data, so it relies on its
+// conn being bare or a byte-transparent wrapper (util.Conn).
+func Waiting(conn net.Conn) (data, closed bool) {
+	rc, ok := rawSocket(conn)
 	if !ok {
-		return false
+		return false, false
 	}
-	rc, err := sc.SyscallConn()
-	if err != nil {
-		return false
+	var b [1]byte
+	_ = rc.Control(func(fd uintptr) {
+		n, _, rerr := unix.Recvfrom(int(fd), b[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		switch {
+		case rerr == nil:
+			data, closed = n > 0, n == 0
+		case errors.Is(rerr, unix.EAGAIN), errors.Is(rerr, unix.EINTR):
+		default:
+			closed = true
+		}
+	})
+	return data, closed
+}
+
+// ArrivedNothing reports whether the peer of conn has sent nothing on it so
+// far, by the kernel's count of bytes received on the socket under conn (which
+// counts what has been read, by a wrapper's buffer or anyone, too). known is
+// false when there is no socket to ask.
+func ArrivedNothing(conn net.Conn) (nothing, known bool) {
+	rc, ok := rawSocket(conn)
+	if !ok {
+		return false, false
 	}
-	nothing := false
 	_ = rc.Control(func(fd uintptr) {
 		info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
-		nothing = err == nil && info.Bytes_received == 0
+		if err == nil {
+			nothing, known = info.Bytes_received == 0, true
+		}
 	})
-	return nothing
+	return nothing, known
+}
+
+// rawSocket is the socket under conn, looked for through wrappers that give
+// the connection beneath (NetConn), at most 8 deep so a cycle cannot hang.
+func rawSocket(conn net.Conn) (syscall.RawConn, bool) {
+	for i := 0; ; i++ {
+		if sc, ok := conn.(syscall.Conn); ok {
+			rc, err := sc.SyscallConn()
+			return rc, err == nil
+		}
+		if i == 8 || conn == nil {
+			return nil, false
+		}
+		u, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil, false
+		}
+		conn = u.NetConn()
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/config/loader"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
@@ -167,6 +168,16 @@ type CmdConfigurator struct {
 // a test can see the call without pinning the switch for the rest of its
 // process, since a pin cannot be undone; a test pins this default.
 var pinProvenSwitch = provenswitch.Pin
+
+// setDockerHost is what the agent's --docker-host flag decides: the Docker
+// endpoint its container keys are resolved through. A variable so a test can
+// see the call.
+var setDockerHost = containerkey.SetDockerHost
+
+// usePushedContainers is what a docker-mode agent does at start under the
+// proven switch: it has no Docker socket, so it names container destinations
+// from the list its keploy CLI pushes. A variable so a test can see the call.
+var usePushedContainers = containerkey.UsePushed
 
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
@@ -331,6 +342,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// and the local users that would read it there are the ones this token
 		// exists to keep out of the control plane.
 		cmd.Flags().String("token-file", "", "path to the file holding this session's agent control-plane token (set by the keploy client)")
+		cmd.Flags().String("teardown-progress-file", "", "path the agent reports its teardown progress to once it is stopped (set by the keploy client; utils.ReportTeardownProgress)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -382,6 +394,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
+		// Internal orchestrator→agent flag: the Docker endpoint the client
+		// uses (its DOCKER_HOST), which sudo drops, for naming container
+		// destinations (containerkey.AgentArgs). Passed only under the proven
+		// switch; without it the agent asks the environment's endpoint.
+		cmd.Flags().String(containerkey.AgentFlag, "", "Internal: the Docker endpoint of the keploy client that starts this agent, for naming container destinations. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(containerkey.AgentFlag)
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 		// --ca-java-home is the manual override for the app-aware Java
@@ -492,7 +510,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
-		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+		cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false: a non-JSON body is compared only when it differs in kind from the recorded one - JSON against non-JSON, or empty against non-empty - or under KEPLOY_PROVEN=1, which compares every body)")
 		cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		cmd.Flags().Bool("mock-noise-detection", c.cfg.Test.MockNoiseDetection, "Detect request-body fields that drift between recording and replay and persist them as field-path noise (req_body_noise) during auto-replay matching. Available to any parser that implements the shared mock-noise adapter")
 		cmd.Flags().Bool("mock-noise-strict", c.cfg.Test.MockNoiseStrict, "Strictly enforce learned request-body noise during mock matching: a candidate mock carrying req_body_noise is rejected when any field OUTSIDE its learned/user-configured noise drifted. Available to any parser that implements the shared mock-noise adapter")
@@ -504,7 +522,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		// defaulting this true would flip existing suites red on upgrade.
 		// See keploy-consumer-design-v2.md §5 (false-pass row 0) and §7 slice 4.
 		cmd.Flags().Bool("assert-dependencies", c.cfg.Test.AssertDependencies, "Fail a test whose recorded per-test dependency was NOT observed during that test's window (an expected, mapped, non-reusable-tier mock went unconsumed): FAILED status, failed test set, non-zero exit. Default false — such a test is demoted to OBSOLETE today and the run still exits 0. Unlike --strict-failure (which promotes only tests whose RESPONSE also failed) this catches the response-matched-but-dependency-vanished case. ELIGIBILITY: only per-test-tier mocks are asserted; untagged HTTP/Postgres/MySQL egress is session-tier and is excluded, so for such a recording nothing is eligible and every test reports dependencies_checked=false (NOT CHECKED, not clean). keploy logs one warning per test set naming the reason whenever the assertion cannot run. Full contract: the assertDependencies doc in config.")
-		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
+		cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of the test cases that pass from what they consumed (a test case that does not pass keeps its recorded mapping)")
 		// Start the user app ONCE for the whole replay run instead of
 		// restarting it per test-set. Required to surface cross-test-set
 		// bugs that need a long-lived TCP connection (asyncpg, JDBC pool,
@@ -1142,6 +1160,20 @@ func (c *CmdConfigurator) keployFolderPath(path string) (string, error) {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+	// The calls keploy.yaml declares shared apply to every mock this process
+	// derives the lifetime of (loading a recording to replay it), and travel
+	// with the derived lifetime to the agent.
+	models.SetSessionCalls(c.cfg.SessionCalls)
+	for i, rule := range c.cfg.SessionCalls {
+		if problem := rule.Problem(); problem != "" {
+			c.logger.Warn("a sessionCalls rule in keploy.yaml matches no call",
+				zap.Int("rule", i),
+				zap.String("host", rule.Host),
+				zap.String("problem", problem),
+				zap.String("next_step", "name the call's host as its request does, for example host: auth.example.com or host: auth.example.com:8443, and narrow it with method and pathPrefix"))
+		}
+	}
+
 	// The --json flag isn't registered on every subcommand (record / agent
 	// don't define it in enterprise builds), so Lookup + fallback avoids
 	// an early-return that would skip every subsequent validation step
@@ -1437,6 +1469,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		// The selection is -t's alone: keploy.yml's test.selectedTests does
+		// not reach keploy sanitize, which refuses every name -t gives that
+		// is not recorded (Tools.refuseUnrecorded).
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
@@ -1532,6 +1567,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			return nil
+		}
+
+		// Under the proven switch mock.real replaces every setting that made
+		// calls live (U18): their flags are refused here, their keploy.yml
+		// keys dropped at the end of this case.
+		if err := refusePassthroughFlags(cmd, passthroughFlags...); err != nil {
+			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
+			return err
 		}
 
 		// Before the command type: refusing an engine does not depend on it,
@@ -1648,7 +1691,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
+		if !provenswitch.On() {
+			// Under the switch the flag is refused above, and its keploy.yml
+			// default (bypassRules) is dropped below.
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
 
 		if cmd.Name() == "record" {
 			metadata, err := cmd.Flags().GetString("metadata")
@@ -1749,6 +1796,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if len(testSets) != 0 {
 				config.SetSelectedTests(c.cfg, testSets)
 			}
+			// Whether the selection is this command line's own: with the
+			// proven switch off, a name it gives that is not recorded fails
+			// the run, and one keploy.yml inherited is left out with a
+			// warning (Replayer.selectTestSets). -t "" names nothing.
+			c.cfg.Test.SelectedFromCommandLine = cmd.Flags().Changed("testsets") && len(config.TestSetNames(testSets)) > 0
 
 			// get disable-mapping flag value
 			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
@@ -1974,6 +2026,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.DisableMapping = disableMapping
 			}
 		}
+		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
 
 	case "normalize":
 		var err error
@@ -2005,6 +2058,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Path, err = c.keployFolder(c.cfg.Path); err != nil {
 			return err
 		}
+		// -t "test-set-1, test-set-2", the help text's own example, keeps the
+		// space after the comma: each name is trimmed, as keploy test's are.
+		c.cfg.Templatize.TestSets = config.TestSetNames(c.cfg.Templatize.TestSets)
+		c.cfg.Templatize.TestSetsFromCommandLine = cmd.Flags().Changed("testsets") && len(c.cfg.Templatize.TestSets) > 0
 	case "agent":
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -2078,6 +2135,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.logger.Warn("KEPLOY_PROVEN in the agent's own environment is ignored: an agent takes the proven switch only from the --proven flag of the keploy that starts it",
 				zap.String("value", v), zap.Bool("proven", provenswitch.On()))
 		}
+		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
+			setDockerHost(host)
+		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
 		// Changed() — but the gate now records that the flag was PRESENT
@@ -2119,6 +2179,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.IsDocker = isdocker
+		if isdocker && provenswitch.On() {
+			// keploy's agent container has no Docker socket: it names
+			// container destinations from the list its keploy CLI pushes
+			// (containerkey).
+			usePushedContainers()
+		}
 
 		enableTesting, err := cmd.Flags().GetBool("enable-testing")
 		if err != nil {
@@ -2457,7 +2523,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("record-requests", c.cfg.Mock.RecordRequests, "Record the app's incoming requests and responses as test cases (on by default; --record-requests=false turns it off); pass the app's port with --pass-through-ports so the tests reach it")
 	case "replay":
 		cmd.Flags().String("on-miss", c.cfg.Mock.OnMiss, "What to do when an outgoing call matches no recorded mock: fail | passthrough | record")
-		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if any recorded mock was missed (dependency contract drift)")
+		cmd.Flags().Bool("strict", c.cfg.Mock.Strict, "Exit non-zero if a call missed its recorded mock (dependency contract drift); a DNS lookup or a connection that sent nothing does not count")
 		cmd.Flags().Bool("emit-mock-events", c.cfg.Mock.EmitMockEvents, "Log one line per mock as it is first served (stdout; stderr under --json)")
 		cmd.Flags().Uint64P("delay", "d", 0, "Seconds to wait for the runner to be ready before it starts issuing calls")
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
@@ -2660,7 +2726,18 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		utils.LogError(c.logger, err, "failed to read pass-through-ports")
 		return errors.New("failed to read pass-through-ports")
 	}
-	config.SetByPassPorts(c.cfg, bypassPorts)
+	if provenswitch.On() {
+		// keploy.yml's settings that made calls live go, mock.real replacing
+		// them (U18); the command's own --pass-through-ports, which keeps
+		// the app's ingress port off the proxy until the ingress row (PR 4),
+		// is kept.
+		dropPassthroughKeys(c.logger, c.cfg, "mock")
+		if cmd.Flags().Changed("pass-through-ports") {
+			config.SetByPassPorts(c.cfg, bypassPorts)
+		}
+	} else {
+		config.SetByPassPorts(c.cfg, bypassPorts)
+	}
 
 	// Mock-set name.
 	if err := c.readMockSetName(cmd); err != nil {

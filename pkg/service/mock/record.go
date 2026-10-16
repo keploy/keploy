@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -38,6 +41,39 @@ const mockDrainStall = 5 * time.Second
 // per recording.
 const mockDrainQuiet = 500 * time.Millisecond
 
+// mockDrainNotice is how often drainTrailingMocks says it is still saving, and
+// that another interrupt stops it now.
+var mockDrainNotice = 5 * time.Second
+
+// recordsJudged is set by a build that judges what keploy mock record keeps
+// (JudgeRecords).
+var recordsJudged atomic.Bool
+
+// JudgeRecords says this build judges what keploy mock record keeps, test by
+// test (keploy enterprise's judging): under the proven switch a record then
+// keeps its recording whenever it read what each test did, even when the
+// command failed, for the judging to commit. Without it a failed record
+// keeps nothing, as before the switch, so the previous recording is never
+// lost to a record no one judges.
+//
+// A build that calls it takes over the set's backup: under the switch Record
+// then makes no .<set>.previous copy of its own and never puts the set back,
+// so the caller must back the whole set up before Record (verdicts.yaml
+// included) and restore it on any failure, or a failed record loses the
+// previous recording.
+func JudgeRecords() { recordsJudged.Store(true) }
+
+// replaysJudged is set by a build that judges a replay (JudgeReplays).
+var replaysJudged atomic.Bool
+
+// JudgeReplays says this build sets a replay's exit code from keploy's
+// verdict on each test (keploy enterprise's judging). Under the proven switch
+// a replay in a build without it is refused: its exit code would be only the
+// test command's, and a test keploy fails after it has ended (one left open
+// when the command exited) or a call made outside every test that got no
+// recorded answer does not fail the command.
+func JudgeReplays() { replaysJudged.Store(true) }
+
 // Record runs the wrapped test command and captures every outgoing dependency
 // call into the configured named mock set. It writes ONLY mocks (no incoming
 // test cases), overwrites the set in place so a re-record produces a clean
@@ -46,6 +82,13 @@ const mockDrainQuiet = 500 * time.Millisecond
 func (m *mockService) Record(ctx context.Context) error {
 	name := m.setName()
 	requests := m.requests()
+	started := time.Now()
+	if err := m.refuseProvenDocker("record"); err != nil {
+		return err
+	}
+	if err := m.checkRealDeps(); err != nil {
+		return err
+	}
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -149,7 +192,40 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	restore, existed, err := m.saveSet(name)
+	// Under the proven switch the record leaves what each test did against
+	// real infra (design v14 §7.4's R0) for judging, whether or not the
+	// recording is kept. Registered before the restore below, so it runs
+	// after it: a restore puts the previous set back, or removes a fresh one.
+	var recordTests []models.ScopeWindow
+	var recordReal *models.RealRun
+	// recordNotJudged is what the recording lacks because keploy cannot
+	// capture it at all (decision 20), for whatever judges the recording.
+	var recordNotJudged models.CaptureLosses
+	// recordLosses is, for a judged record, what the agent could not capture
+	// that no test was charged with: judging fails the run on it, as on
+	// recordLossesUnread, why that could not be read.
+	var recordLosses models.CaptureLosses
+	var recordLossesUnread string
+	recordJudged := false
+	defer func() {
+		// Only a build that judges the record reads these results; written
+		// otherwise, they would recreate a fresh set's folder a failed
+		// record's restore just removed.
+		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
+			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
+				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
+			}, recordTests)
+		}
+	}()
+	saveSet := m.saveSet
+	if provenswitch.On() && recordsJudged.Load() {
+		// The judging build backs the whole set up itself, list carried, and
+		// puts it back when the record is not judged: a second backup here
+		// would restore the folder without its list.
+		saveSet = m.existsOnly
+	}
+	restore, existed, err := saveSet(name)
 	if err != nil {
 		// No restorable copy of the set — refuse before deleting its mappings
 		// or cases below, so a failed backup can never destroy the recording.
@@ -190,6 +266,17 @@ func (m *mockService) Record(ctx context.Context) error {
 		// The old cases stay until the run has ended so the new ones are numbered after them: a flow
 		// re-recorded on its own must not reuse the names of the flows the set carries.
 		defer m.deleteCases(persistCtx, name, m.caseNames(persistCtx, name))
+	}
+
+	// The run's mock.real (proven switch only), before the capture arms:
+	// those destinations are reached for real from the first connection.
+	if err := m.pushRealDeps(ctx); err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
+		stopReason = "keploy could not hand its agent mock.real"
+		utils.LogError(m.logger, err, stopReason)
+		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
 	// 4. Arm the record proxy and stream captured mocks.
@@ -269,7 +356,10 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		mockCount++
 		kind := mk.Spec.Metadata["type"]
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", start: mk.Start, ref: mk.StartRef})
+		// Under the proven switch a protocol-phase mock is the pool's, never
+		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
+		protocol := provenswitch.On() && mk.IsProtocolPhase()
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: mk.Spec.ReqTimestampMock, pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -296,6 +386,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	// 4b. With --record-requests, also store the app's incoming requests as test cases.
 	var casesSeen atomic.Int64
 	capture := m.captureCases(captureCtx, persistCtx, name, &casesSeen, requests)
+
+	// 4c. What the agent had already refused a place in its PID maps before
+	//     the test command runs: the run's own refusals are what it grows by
+	//     (PIDMapReader). Read here, with the compose app still parked.
+	pidBase := m.pidMapBaseline(ctx, "record")
+	lossesBase := m.captureLossBaseline(ctx)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -354,7 +450,25 @@ func (m *mockService) Record(ctx context.Context) error {
 	drainFrom.Store(drainStart.UnixNano())
 	lost := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
 		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
-	}, func() uint64 { return uint64(heldSeen.Load()) })
+	}, func() uint64 { return uint64(heldSeen.Load()) }, recordDrainWords)
+	// 8a's count, read while the recording's stream is still open: an agent
+	// that is being stopped too (a stop sent to it, a container stop) holds
+	// its HTTP server only while a recording's streams are open, and once
+	// they close it answers no more, which would read as a lost count and
+	// keep a recording that is short of an untracked process's calls.
+	pidCheck := m.pidMapRefusedDuring(persistCtx, pidBase, "record")
+	// So is what else it could not capture (under the proven switch).
+	lostAll, lostErr := m.captureLossesDuring(persistCtx, lossesBase)
+	// A record that is judged keeps what it captured whatever the agent
+	// could not capture (design v14 §7.5): each test's window carries what
+	// was lost while it ran or before it (a loss charges the test open when
+	// it happened and every later one), so judging keeps the previous
+	// recording of each test charged with one, and commits the new one of
+	// each clean test. What no test was charged with (a loss after the last
+	// test) is the run's, read after the windows (runLosses below), for
+	// judging to fail the run on. Before, one loss dropped the whole set,
+	// clean tests too, with no per-test file written.
+	judgedRecord := provenswitch.On() && recordsJudged.Load()
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
 		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
@@ -363,6 +477,61 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	capture.wait(mockDrainStall)
 
+	// 8a. A process the agent could not track -- the kernel refused it a place
+	//     in its PID map -- made calls the agent never saw, so the recording
+	//     is missing them, with nothing to show where. Kept, it would replay
+	//     green wherever the agent tracks every process, the missing calls
+	//     reaching the real dependency. So it is not kept, however the run
+	//     ended, and the run fails: the runner's own code first, keploy's 1
+	//     when the runner passed or was stopped. A record that is judged is
+	//     kept: the refusal is on the windows of the tests charged with it,
+	//     and judging keeps their previous recordings (judgedRecord above).
+	//     (Read above, before the stream closed.)
+	if refused := pidCheck.refused; pidCheck.known && refused.Any() && judgedRecord {
+		m.logger.Error("the agent could not track every process the test command ran, so their calls were not recorded: the tests charged with it keep their previous recordings in judging",
+			append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", refused.CaptureIncomplete()))...)
+	} else if pidCheck.known && refused.Any() {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+		}
+		reason := refused.CaptureIncomplete()
+		msg := "the recording was not kept: the agent could not track every process the test command ran, so their calls were not recorded; the existing mock set (if any) was left unchanged"
+		if refused.Target == 0 {
+			msg = "the recording was not kept: the agent could not exclude every process that predates the test command, so their children's calls may have been recorded as the test command's; the existing mock set (if any) was left unchanged"
+		}
+		m.logger.Error(msg, append(pidMapFields(refused), zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", reason))...)
+		if parent.Err() == nil {
+			m.propagateExit(appErr, "record")
+		}
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return errors.New("the recording is incomplete: " + reason)
+	}
+	// Under the proven switch, any other loss of capture during the run:
+	// the recording misses what was lost, so it is not kept either.
+	//     (Read above, before the stream closed.) A call keploy cannot
+	//     capture at all (decision 20) does not discard the recording: it is
+	//     said below.
+	lostLosses, lostNotJudged := lostAll.Split()
+	recordNotJudged = lostNotJudged
+	if t := lostLosses.Text(); t != "" && judgedRecord {
+		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t))
+	} else if t != "" {
+		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
+		}
+		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
+			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.String("reason", t))
+		if parent.Err() == nil {
+			m.propagateExit(appErr, "record")
+		}
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return errors.New("the recording is incomplete: " + t)
+	}
+	lossesUnread := false
+	if pidCheck.unreadable == nil && lostErr != nil {
+		pidCheck.unreadable, lossesUnread = lostErr, true // said below, as a lost PID-map count is
+	}
 	// The agent still held mocks when the drain ended (said above, at ERROR):
 	// what was captured is not the whole run, and promoted it would replace
 	// the set it was recorded to update with one that is short of mocks.
@@ -381,6 +550,27 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Error(err),
 			zap.String("next_step", "re-record the mock set"))
 		return err
+	}
+	// 8b'. The test command called what keploy cannot capture at all: the
+	//      recording lacks those calls, and a replay of it would make them
+	//      for real. Kept, not vouched for in silence.
+	if t := lostNotJudged.NotJudgedText(); t != "" {
+		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, or a TLS client abandoned its handshake: such calls are not in it ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
+	}
+	// 8b. The agent counts, but its count could not be read: nothing shows a
+	//     process went untracked, and nothing shows none did. The recording
+	//     is kept -- a lost read is no evidence against it, and record has no
+	//     --strict to ask for more -- but it is not vouched for in silence.
+	if pidCheck.unreadable != nil {
+		unread, reason := "tracked every process the test command ran", models.CaptureUnverified(pidCheck.unreadable)
+		if lossesUnread {
+			unread, reason = "captured every call the test command made", models.CaptureLossesUnverified(pidCheck.unreadable)
+		}
+		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent "+unread,
+			zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("reason", reason),
+			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}
 
 	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
@@ -416,7 +606,59 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 9. Correlate per-test scope windows into mappings.yaml (best-effort).
 	var windows []models.ScopeWindow
-	if m.mappingDB != nil {
+	if provenswitch.On() {
+		// What each test did is the record's judging input: a record that
+		// cannot read it keeps nothing and says so. The read waits on the
+		// run's own context, not a clock: the user's interrupt, or the agent
+		// process exiting, ends it.
+		var werr error
+		if windows, werr = m.readWindows(ctx); werr != nil {
+			m.propagateExit(appErr, "record")
+			stopReason = "keploy could not read what each test did from its agent, so nothing was kept"
+			if parent.Err() != nil {
+				stopReason = "the recording was stopped before keploy read what each test did, so nothing was kept"
+			}
+			utils.LogError(m.logger, werr, stopReason, zap.String("mock-set", name),
+				zap.String("next_step", "check the agent's log, then record again"))
+			return fmt.Errorf("%s: %w", stopReason, werr)
+		}
+		// What the run saw of mock.real beyond its tests, read once the
+		// last test ended: as much the record's judging input as the
+		// windows, and as strictly read.
+		var rerr error
+		if recordReal, rerr = m.realRun(ctx); rerr != nil {
+			m.propagateExit(appErr, "record")
+			stopReason = "keploy could not read the run's mock.real destinations from its agent, so nothing was kept"
+			utils.LogError(m.logger, rerr, stopReason, zap.String("mock-set", name),
+				zap.String("next_step", "check the agent's log, then record again"))
+			return fmt.Errorf("%s: %w", stopReason, rerr)
+		}
+		// What the agent could not capture that no test was charged with:
+		// read after the windows, whose read ends, failed, a test whose
+		// process went away and charges it, so only what came after every
+		// test's end is left.
+		if judgedRecord {
+			judgedLost, _ := lostAll.Split()
+			var refused models.PIDMapRefusals
+			if pidCheck.known {
+				refused = pidCheck.refused
+			}
+			var unread error
+			if recordLosses, unread = m.runLosses(ctx, lossesBase, judgedLost, lostErr, refused); unread != nil {
+				recordLossesUnread = unread.Error()
+			}
+			if t := recordLosses.Text(); t != "" {
+				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run ("+provenswitch.Env+"=1)",
+					zap.String("mock-set", name), zap.String("reason", t),
+					zap.String("next_step", "fix what the reason names, then record again"))
+			}
+			if recordLossesUnread != "" {
+				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
+					zap.String("mock-set", name), zap.String("reason", recordLossesUnread),
+					zap.String("next_step", "check the agent's log for why its count could not be read, then record again"))
+			}
+		}
+	} else if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
 	}
 	if len(windows) > 0 {
@@ -427,17 +669,41 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	starts := appStarts(windows)
 	windows, suites := splitSuites(windows)
-	if err := repeatedScope(windows, existed); err != nil {
+	var retries []models.ScopeWindow
+	if provenswitch.On() {
+		// A test ID that ran more than once in a round is retried (design
+		// v14 §6.1, U16): its last attempt is its recording, and it failed
+		// if any attempt failed. The calls of the earlier attempts are no
+		// test's and no pool's.
+		var retried map[string]int
+		windows, retries, retried = foldRetries(windows)
+		for _, id := range slices.Sorted(maps.Keys(retried)) {
+			m.logger.Warn("a test ran more than once: its last attempt is its recording, and it counts failed if any attempt failed",
+				zap.String("test", id), zap.Int("attempts", retried[id]), zap.String("mock-set", name))
+		}
+	} else if err := repeatedScope(windows, existed); err != nil {
 		m.propagateExit(appErr, "record")
 		m.logger.Error(err.Error())
 		return err
 	}
+	recordTests, recordJudged = windows, true
 	keep = runnerPassed(appErr)
-	if keep && mockCount == 0 && len(capture.list()) == 0 {
+	judged := provenswitch.On() && recordsJudged.Load() && len(windows) > 0
+	if judged {
+		// Under the proven switch, in a build that judges what the record
+		// keeps, what each test recorded is kept whether or not the command
+		// passed, and whether or not it made a call: judging commits it test
+		// by test (design v14 §7.5), keeping the previous recording of a
+		// test that failed or did not run, and recording a test that made no
+		// call as one with no mocks. Otherwise the record is kept or not as
+		// before.
+		keep = true
+	}
+	if keep && mockCount == 0 && len(capture.list()) == 0 && !judged {
 		keep = false
 		m.logger.Warn("no outgoing calls were captured; the existing mock set (if any) was left unchanged; the runner made no mockable dependency calls, or its traffic was not intercepted",
 			zap.String("mock-set", name),
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", nothingCapturedNext()))
 		m.propagateExit(appErr, "record")
 		return nil
 	}
@@ -451,7 +717,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
-			byTest := correlateScopes(windows, recorded)
+			byTest := correlateScopes(windows, dataPlane(recorded))
 			owned := recorded
 			var plan bootPlan
 			if len(starts) > 0 {
@@ -466,6 +732,14 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if len(byTest) > 0 {
 				if err := m.mappingDB.UpsertBatch(persistCtx, name, byTest); err != nil {
+					if provenswitch.On() {
+						// Without them no test of the set can be judged
+						// (design v14 §5.2): the record fails and says so.
+						m.propagateExit(appErr, "record")
+						stopReason = "keploy could not write which recorded calls each test made (mappings.yaml)"
+						utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name), zap.String("next_step", "free the disk or fix the set directory's permissions, then record again"))
+						return fmt.Errorf("%s: %w", stopReason, err)
+					}
 					m.logger.Warn("failed to write per-test mappings; replay will serve the whole set per test", zap.Error(err))
 				} else {
 					m.logger.Info("wrote per-test mock mappings", zap.Int("tests", len(byTest)), zap.String("mock-set", name))
@@ -479,11 +753,15 @@ func (m *mockService) Record(ctx context.Context) error {
 				tc.Dir = w.Dir
 				byCase[w.Name] = tc
 			}
+			if provenswitch.On() {
+				stampBegins(byCase, windows)
+				stampReal(byCase, windows)
+			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, recorded), suites)
+				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
 			}
 		}
 	}
@@ -496,7 +774,12 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 10. Publish the set to the store (registry upload in enterprise; no-op on files).
 	if !runnerPassed(appErr) {
-		m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+		if keep {
+			// Under the proven switch: judging commits it test by test.
+			m.logger.Warn("tests failed; the recording is kept for judging, which keeps each failed test's previous recording, and is not published", zap.String("mock-set", name))
+		} else {
+			m.logger.Warn("tests failed; the recording was not kept or published, and the previous recording is left as it was", zap.String("mock-set", name))
+		}
 	} else if err := m.store.Push(persistCtx, name); err != nil {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
@@ -507,7 +790,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
-			zap.String("next_step", "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"))
+			zap.String("next_step", nothingCapturedNext()))
 	}
 
 	// 13. Propagate the runner's exit code so a CI 're-record on merge' job
@@ -536,18 +819,88 @@ func runnerPassed(appErr models.AppError) bool {
 
 // agentWindows reads the windows the runner itself posted to the agent's scope API; none is not an error.
 func (m *mockService) agentWindows(ctx context.Context) []models.ScopeWindow {
-	reader, ok := m.instrumentation.(ScopeReader)
-	if !ok {
-		return nil
-	}
-	scopeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-	defer cancel()
-	windows, err := reader.GetScopeWindows(scopeCtx)
+	windows, err := m.readWindows(ctx)
 	if err != nil {
 		m.logger.Debug("failed to read per-test scope windows from the agent", zap.Error(err))
 		return nil
 	}
 	return windows
+}
+
+// readWindows reads the run's per-test windows from the agent. Under the
+// proven switch they are what each test did, which judging and keploy's
+// verdict rest on: the read has no deadline (the agent closes a test whose
+// process went away before it answers; its answer, or the connection's
+// close, ends the wait), and a failed read is an error, never "no tests".
+func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, error) {
+	reader, ok := m.instrumentation.(ScopeReader)
+	if !ok {
+		if provenswitch.On() {
+			return nil, errors.New("this keploy cannot read what each test did from its agent")
+		}
+		return nil, nil
+	}
+	if !provenswitch.On() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, agentEpilogueTimeout)
+		defer cancel()
+	}
+	all, err := reader.GetScopeWindows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m.takeRunWindows(all), nil
+}
+
+// takeRunWindows returns the windows of the run's tests, and keeps the
+// windows that are no test's apart: the claims (m.claims), the refusals
+// (m.refusals) and where the run's calls to local listeners went (m.live,
+// m.mocked). Every reader of a run's windows goes through it.
+func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWindow {
+	windows := all[:0:0]
+	m.claims, m.refusals, m.live, m.mocked = nil, nil, nil, nil
+	for _, w := range all {
+		switch {
+		case w.Refused != nil:
+			m.refusals = append(m.refusals, *w.Refused)
+		case w.Claim != "":
+			m.claims = append(m.claims, w)
+		case w.Live != nil:
+			m.live = append(m.live, *w.Live)
+		case w.Mocked != nil:
+			m.mocked = append(m.mocked, *w.Mocked)
+		default:
+			windows = append(windows, w)
+		}
+	}
+	return windows
+}
+
+// claimKeyAt is the key of the claim a call made at at belongs to: the
+// latest claim made at or before it (claims are in the order they were
+// made); "" before the first, which is models.PoolKeyNone's.
+func claimKeyAt(claims []models.ScopeWindow, at time.Time) string {
+	key := ""
+	for _, c := range claims {
+		if c.Start.After(at) {
+			break
+		}
+		key = c.Claim
+	}
+	return key
+}
+
+// existsOnly is saveSet for a build whose judging keeps the set's backup: it
+// only says whether the set exists, and restores nothing.
+func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
+	if m.config.Path == "" {
+		return func(bool) {}, true, nil
+	}
+	_, err := os.Stat(filepath.Join(m.config.Path, name))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, true, err
+	}
+	return func(bool) {}, err == nil, nil
 }
 
 // saveSet backs the named set up to a sibling .<name>.previous directory so a
@@ -664,13 +1017,16 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 // capturedMock is one recorded mock's name + request timestamp + source worker
 // PID, used to correlate mocks into per-test scope windows.
 type capturedMock struct {
-	name  string
-	ts    time.Time
-	pid   uint32 // source worker PID (0 if unknown); enables exact parallel attribution
-	end   time.Time
-	boot  bool
-	start string
-	ref   string
+	name string
+	ts   time.Time
+	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	end  time.Time
+	boot bool
+	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
+	// so in no test's mapping and in the pool.
+	protocol bool
+	start    string
+	ref      string
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -738,6 +1094,18 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 	return byTest
 }
 
+// dataPlane is the captured mocks less the protocol-phase ones (none
+// without the proven switch): only data-plane mocks go in a test's mapping.
+func dataPlane(mocks []capturedMock) []capturedMock {
+	out := mocks[:0:0]
+	for _, mk := range mocks {
+		if !mk.protocol {
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
 // correlateCases lists each flow's test cases by the window their request fell in; a case outside every window stays unmapped.
 func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, steps []models.ScopeWindow) map[string]models.MappedTestCase {
 	byTest := make(map[string]models.MappedTestCase)
@@ -791,6 +1159,37 @@ func correlateCases(windows []models.ScopeWindow, mocks, cases []capturedMock, s
 	return byTest
 }
 
+// stampBegins keeps, for each test, when it began in this recording: its
+// replay moves the clock of the run's processes to that instant while the
+// test is open (design v14 §3.4). A name with more than one window (a
+// subtest run twice) keeps its earliest begin.
+func stampBegins(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if w.Start.IsZero() {
+			continue
+		}
+		tc := byCase[w.Name]
+		if tc.At.IsZero() || w.Start.Before(tc.At) {
+			tc.At = w.Start
+		}
+		byCase[w.Name] = tc
+	}
+}
+
+// stampReal writes into each test's mapping the mock.real destinations it
+// used while it was open (design v14 §4): its replays run on the real clock,
+// and the verdict asks that CI reach them.
+func stampReal(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if len(w.Real) == 0 {
+			continue
+		}
+		tc := byCase[w.Name]
+		tc.Real = mergeSorted(tc.Real, realDests(w.Real))
+		byCase[w.Name] = tc
+	}
+}
+
 func flowOf(windows []models.ScopeWindow, test string) string {
 	flow := test
 	for _, w := range windows {
@@ -801,11 +1200,13 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 	return flow
 }
 
-func startupMocks(windows []models.ScopeWindow, mocks []capturedMock) []models.MockEntry {
+func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
 	var out []models.MockEntry
 	for _, mk := range mocks {
-		if mk.boot || containing(windows, mk.ts) == "" {
-			out = append(out, models.MockEntry{Name: mk.name})
+		if mk.boot || mk.protocol || containing(windows, mk.ts) == "" {
+			// Under the proven wire, the pool slice of the key it was made
+			// under (design v14 §5.2); claims are none without it.
+			out = append(out, models.MockEntry{Name: mk.name, Key: claimKeyAt(claims, mk.ts)})
 		}
 	}
 	return out
@@ -840,9 +1241,23 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // already captured). Calls something left running keeps making do not hold
 // it. It must be called BEFORE the capture context is cancelled - see the
 // call site.
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64) (lost bool) {
+//
+// The user can end it: every mockDrainNotice it says what it is still doing
+// (words.saving), and, once the run has been interrupted, that another
+// interrupt stops it now and what that costs (words.stopNow;
+// utils.StopNowNotice), and from then the next one does (StopNow). One that
+// came before is not the user's answer to that: a stop sent to both sudo and
+// keploy reaches keploy a second time from sudo, as the first does. A drain
+// the user ends so did not get what the agent still held: it is lost (said
+// with words.gaveUp).
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords) (lost bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
+	notice := utils.NewStopNowNotice(mockDrainNotice)
+	defer notice.Withdraw()
+	notices := time.NewTicker(mockDrainNotice)
+	defer notices.Stop()
+	savedAtStart := arrived()
 
 	last, _ := held()
 	looks := utils.BacklogLooks{Stall: mockDrainStallLooks}
@@ -861,18 +1276,21 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// A second interrupt that reached the agent too ends its
 				// stream as it gives the drain up: the user's stop.
 				select {
-				case <-utils.InterruptedAgain():
-					m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
-						zap.String("next_step", "mocks the agent still held were not saved"))
+				case <-utils.StopNow():
+					return m.stoppedNow(words)
 				default:
 					return m.agentEndedDrain(&looks, arrived() == lookedAt)
 				}
 			}
 			return false
-		case <-utils.InterruptedAgain():
-			m.logger.Warn("stopped saving the mocks the agent captured before the run ended, at a second interrupt",
-				zap.String("next_step", "mocks the agent still held were not saved"))
-			return false
+		case <-utils.StopNow():
+			return m.stoppedNow(words)
+		case <-notices.C:
+			msg := words.saving
+			if notice.Next() {
+				msg += "; " + words.stopNow
+			}
+			m.logger.Info(msg, zap.Uint64("sinceTheEnd", arrived()-savedAtStart))
 		case <-quiet.C:
 			// Quiet means the stream brought nothing held while the consumer
 			// was free to take it: a consumer still persisting one is not
@@ -902,6 +1320,44 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 			return gaveUp
 		}
 	}
+}
+
+// drainWords is how drainTrailingMocks speaks to its caller's user: of what
+// it is still doing, and of what ending it at a second interrupt costs.
+type drainWords struct {
+	// saving is what it is still doing, said every mockDrainNotice.
+	saving string
+	// stopNow, added to that once it offers to stop at the next interrupt,
+	// says so and what doing so costs.
+	stopNow string
+	// gaveUp and nextStep are said at WARN when the user ends it so.
+	gaveUp, nextStep string
+}
+
+// recordDrainWords are keploy mock record's: a recording ended before it has
+// every mock the agent captured is not saved over the existing set.
+var recordDrainWords = drainWords{
+	saving:   "Still saving the mocks the keploy agent captured before the run ended",
+	stopNow:  "press Ctrl+C again to stop now: this recording is then not saved, and the existing mock set is kept",
+	gaveUp:   "stopped saving the mocks the agent captured before the run ended, at a second interrupt",
+	nextStep: "this recording was not saved; the existing mock set is kept. Re-record it",
+}
+
+// replayDrainWords are keploy mock replay's: it collects the requests the
+// agent captured, for the run's report. A run short of them is not judged
+// (Replay).
+var replayDrainWords = drainWords{
+	saving:   "Still collecting the requests the keploy agent captured before the run ended",
+	stopNow:  "press Ctrl+C again to stop now: this run then ends unjudged, as one stopped before it finished",
+	gaveUp:   "stopped collecting the requests the agent captured before the run ended, at a second interrupt",
+	nextStep: "this run ends unjudged, as one stopped before it finished; the last run's receipt is kept. Run it again",
+}
+
+// stoppedNow is drainTrailingMocks ended by the user's second interrupt
+// (utils.StopNow): what the agent still held is not had, so the drain is lost.
+func (m *mockService) stoppedNow(words drainWords) (lost bool) {
+	m.logger.Warn(words.gaveUp, zap.String("next_step", words.nextStep))
+	return true
 }
 
 // runFailure is why a run the user did not stop ended: the agent's container
@@ -1001,4 +1457,87 @@ func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks
 		m.logger.Info("could not ask the keploy agent what it still holds from before the run ended; waiting for it", zap.Error(err))
 	}
 	return wait, false
+}
+
+// nothingCapturedNext is what to do about a record that captured no call.
+// Under the proven switch a test's calls are captured once its harness
+// reports it to keploy, so the integration is named; with the switch off the
+// advice is as it was.
+func nothingCapturedNext() string {
+	if provenswitch.On() {
+		return "confirm the tests call an external dependency (HTTP, MySQL, ...) and report themselves to keploy: in Go, make `defer keploytest.T(t)()` each test's first line (github.com/keploy/go-sdk/v3/keploytest)"
+	}
+	return "confirm the test command actually calls an external dependency (HTTP, MySQL, ...), and on macOS run it via a docker command"
+}
+
+// foldRetries keeps, of each top-level test that ran more than once, its
+// last attempt's window, failed if any attempt failed, and returns the
+// earlier attempts' windows apart, with how often each retried test ran.
+func foldRetries(windows []models.ScopeWindow) ([]models.ScopeWindow, []models.ScopeWindow, map[string]int) {
+	last := map[string]int{}
+	failed := map[string]bool{}
+	runs := map[string]int{}
+	for i, w := range windows {
+		if parentOf(windows, w.Name) != "" {
+			continue
+		}
+		runs[w.Name]++
+		if j, ok := last[w.Name]; !ok || !w.Start.Before(windows[j].Start) {
+			last[w.Name] = i
+		}
+		if w.Outcome != models.ScopeOutcomePassed && w.Outcome != models.ScopeOutcomeSkipped {
+			failed[w.Name] = true
+		}
+	}
+	var kept, earlier []models.ScopeWindow
+	retried := map[string]int{}
+	// An earlier attempt's subtest windows go with it: a subtest window
+	// that began inside an earlier attempt of its parent.
+	inEarlier := func(w models.ScopeWindow) bool {
+		top := parentOf(windows, w.Name)
+		if top == "" || runs[top] < 2 {
+			return false
+		}
+		for i, p := range windows {
+			if p.Name == top && i != last[top] && !w.Start.Before(p.Start) && !w.Start.After(p.End) {
+				return true
+			}
+		}
+		return false
+	}
+	for i, w := range windows {
+		if inEarlier(w) {
+			earlier = append(earlier, w)
+			continue
+		}
+		if parentOf(windows, w.Name) != "" || runs[w.Name] < 2 {
+			kept = append(kept, w)
+			continue
+		}
+		retried[w.Name] = runs[w.Name]
+		if last[w.Name] != i {
+			earlier = append(earlier, w)
+			continue
+		}
+		if failed[w.Name] {
+			w.Outcome = models.ScopeOutcomeFailed
+		}
+		kept = append(kept, w)
+	}
+	return kept, earlier, retried
+}
+
+// withoutRetries is mocks without those captured during an earlier attempt
+// of a retried test (foldRetries).
+func withoutRetries(mocks []capturedMock, earlier []models.ScopeWindow) []capturedMock {
+	if len(earlier) == 0 {
+		return mocks
+	}
+	out := make([]capturedMock, 0, len(mocks))
+	for _, mk := range mocks {
+		if containing(earlier, mk.ts) == "" {
+			out = append(out, mk)
+		}
+	}
+	return out
 }

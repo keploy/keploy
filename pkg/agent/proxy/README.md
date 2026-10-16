@@ -58,7 +58,9 @@ Split responsibilities:
   - Activity-based watchdog → if no bytes forwarded and no mocks emitted
     for `HangBudget` (default 60 s) while pending work is outstanding,
     the parser is declared hung. Activity-based (not absolute) so
-    30-second LLM responses and `pg_sleep(45)` don't falsely trip it.
+    30-second LLM responses and `pg_sleep(45)` don't falsely trip it, and
+    counted in the time the process could run (`utils/stall`), not wall
+    time, so a parser starved of CPU is not retired for waiting on it.
   - Memory cap — per-connection buffered-to-parser bytes are tracked;
     breach triggers abort.
   - Goroutine accounting — parser-spawned helpers register for cancel

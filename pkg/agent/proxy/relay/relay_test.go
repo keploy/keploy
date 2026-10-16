@@ -14,6 +14,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -296,7 +298,7 @@ func TestTeeSpillsOnChannelFull(t *testing.T) {
 		// window, which is time the process could run: on a starved host
 		// many times its length in wall time. The harness bounds teardown in
 		// wall time, so the window runs on an injected clock.
-		stallClock: newFakeStallClock(onTime),
+		stallClock: &stall.ManualClock{Step: stall.OnTime},
 	})
 
 	// Send many small chunks while NOT draining the FakeConn — this used to
@@ -1306,5 +1308,28 @@ func TestDesyncedRelayKeepsFeedingAResyncCapableParser(t *testing.T) {
 	if got := drops.count(DropDesynced); got != 0 {
 		t.Fatalf("%s drops = %d, want 0 for a resync-capable parser; reasons=%v",
 			DropDesynced, got, drops.snapshot())
+	}
+}
+
+// A TLS upgrade the relay could not make is a capture loss: what follows on
+// the connection is not parsed, so the relay says so, once per failed upgrade.
+func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var kinds []models.CaptureLossKind
+	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string) {
+		mu.Lock()
+		kinds = append(kinds, k)
+		mu.Unlock()
+	}}) // no TLSUpgradeFn: the upgrade cannot be made
+	h.r.Directives() <- directive.UpgradeTLS(&tls.Config{}, &tls.Config{}, "no-upgrader")
+	// No deadline of its own: the test binary's -timeout bounds it.
+	if ack := <-h.r.Acks(); ack.OK {
+		t.Fatal("expected OK=false without an upgrader")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(kinds) != 1 || kinds[0] != models.CaptureLossSTARTTLS {
+		t.Fatalf("capture losses %v, want one %s", kinds, models.CaptureLossSTARTTLS)
 	}
 }

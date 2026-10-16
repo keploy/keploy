@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -51,6 +52,15 @@ func (r *Relay) processDirectives(ctx context.Context, stopping <-chan struct{})
 	}
 }
 
+// clientHandshakeError is a client-side TLS upgrade whose handshake failed
+// (TLSUpgradeFn with isClient=false): handleDirective hands err to
+// Config.OnClientHandshakeFailed.
+type clientHandshakeError struct{ err error }
+
+func (e *clientHandshakeError) Error() string { return "client TLS upgrade: " + e.err.Error() }
+
+func (e *clientHandshakeError) Unwrap() error { return e.err }
+
 // handleDirective dispatches on Kind. Returns the Ack to emit.
 // stopping is the relay-wide teardown signal; handlers that need to
 // wait for forwarder coordination (currently only KindUpgradeTLS) plumb
@@ -58,7 +68,19 @@ func (r *Relay) processDirectives(ctx context.Context, stopping <-chan struct{})
 func (r *Relay) handleDirective(ctx context.Context, stopping <-chan struct{}, d directive.Directive) directive.Ack {
 	switch d.Kind {
 	case directive.KindUpgradeTLS:
-		return r.handleUpgradeTLS(ctx, stopping, d)
+		ack := r.handleUpgradeTLS(ctx, stopping, d)
+		var client *clientHandshakeError
+		switch {
+		case ack.OK || ctx.Err() != nil:
+		case errors.As(ack.Err, &client) && r.cfg.OnClientHandshakeFailed != nil:
+			// The client's side of the handshake failed: the proxy
+			// charges it as any client-side handshake.
+			r.cfg.OnClientHandshakeFailed(ctx, client.err)
+		case r.cfg.OnCaptureLoss != nil:
+			// What follows on this connection is not parsed.
+			r.cfg.OnCaptureLoss(models.CaptureLossSTARTTLS, "a TLS upgrade the parser asked for")
+		}
+		return ack
 	case directive.KindPauseDir:
 		return r.handlePauseDir(d)
 	case directive.KindResumeDir:
@@ -671,7 +693,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			return &directive.Ack{
 				Kind:            d.Kind,
 				OK:              false,
-				Err:             fmt.Errorf("client TLS upgrade: %w", err),
+				Err:             &clientHandshakeError{err: err},
 				PreamblePayload: preamblePayload,
 			}
 		}

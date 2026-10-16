@@ -1,0 +1,264 @@
+//go:build linux
+
+package proxy
+
+import (
+	"context"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
+)
+
+// wiringParser is a parser the tests reach through handleConnection, as
+// production reaches one: while it serves, it reports what the tracker says
+// of the connection, and, when hold is set, holds a request first.
+type wiringParser struct {
+	p    *Proxy
+	hold bool
+	saw  chan wiringSaw
+}
+
+type wiringSaw struct {
+	unknown []string
+	held    int32
+}
+
+func (wiringParser) MatchType(context.Context, []byte) bool { return true }
+func (wiringParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
+	return nil
+}
+func (w wiringParser) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	release := func() {}
+	if w.hold {
+		release = integrations.HoldRequest(ctx)
+	}
+	var held int32
+	w.p.inflight.mu.Lock()
+	for tc := range w.p.inflight.conns {
+		held += tc.held.Load()
+	}
+	w.p.inflight.mu.Unlock()
+	w.saw <- wiringSaw{unknown: w.p.inflight.Unknown(true), held: held}
+	release()
+	return nil
+}
+
+// serveThrough hands a kept connection to handleConnection with typ's parser
+// as the only one, as the accept loop does, and returns what the parser saw.
+func serveThrough(t *testing.T, typ integrations.IntegrationType, hold bool) wiringSaw {
+	t.Helper()
+	t.Setenv("KEPLOY_PROVEN", "1")
+	saved := containerkey.Default
+	containerkey.Default = containerkey.NewKeyer(containerAt{addr: "none"})
+	t.Cleanup(func() { containerkey.Default = saved })
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_TEST
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:50051")}, cfg)
+	w := wiringParser{p: p, hold: hold, saw: make(chan wiringSaw, 1)}
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{typ: w}
+	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: typ}}
+	_ = p.Mock(context.Background(), models.OutgoingOptions{DisableMysqlAutoDetect: true, Mocking: true})
+	app, src := acceptedConn(t)
+	tc := p.inflight.track(src)
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), tc) }()
+	if _, err := io.WriteString(app, "hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	saw := awaitEvent(t, w.saw, "the parser being handed the connection")
+	awaitEvent(t, done, "handleConnection returning")
+	return saw
+}
+
+// A connection a parser that reads ahead serves, through handleConnection,
+// is unknown while the parser does not mark what it holds: handleConnection
+// wraps the connection again before the parser has it, and the mark goes to
+// the connection the accept kept (review B1: the mark never reached it). One
+// a parser that answers before it reads again serves is not.
+func TestHandleConnectionMarksTheKeptConnectionOfAReadAheadParser(t *testing.T) {
+	if got := serveThrough(t, integrations.GRPC, false).unknown; strings.Join(got, ",") != "grpc" {
+		t.Fatalf("a gRPC parser that does not mark its holds served a kept connection: unknown %v, want [grpc]", got)
+	}
+	if got := serveThrough(t, integrations.HTTP, false).unknown; len(got) != 0 {
+		t.Fatalf("an HTTP parser served it: unknown %v, want none", got)
+	}
+}
+
+// A parser holds its requests on the connection the accept kept: the holder
+// handleConnection hands it reaches it.
+func TestHandleConnectionHandsTheParserTheKeptConnectionsHolder(t *testing.T) {
+	if got := serveThrough(t, integrations.HTTP, true).held; got != 1 {
+		t.Fatalf("a parser's hold through handleConnection: held %d on the kept connection, want 1", got)
+	}
+}
+
+// keptCounter is a listener counter that checks, as it numbers each
+// accepted connection, that the proxy already keeps it (review B3).
+type keptCounter struct {
+	fakeCounter
+	mu      sync.Mutex
+	kept    func(peer *net.TCPAddr) bool
+	counted int
+	early   int
+}
+
+func (k *keptCounter) MarkProxyListener(rc syscall.RawConn) error {
+	return k.fakeCounter.MarkProxyListener(rc)
+}
+
+func (k *keptCounter) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing, error) {
+	var peer *net.TCPAddr
+	_ = rc.Control(func(fd uintptr) {
+		sa, err := unix.Getpeername(int(fd))
+		if err != nil {
+			return
+		}
+		switch a := sa.(type) {
+		case *unix.SockaddrInet4:
+			peer = &net.TCPAddr{IP: net.IP(a.Addr[:]), Port: a.Port}
+		case *unix.SockaddrInet6:
+			peer = &net.TCPAddr{IP: net.IP(a.Addr[:]), Port: a.Port}
+		}
+	})
+	k.mu.Lock()
+	k.counted++
+	if k.kept != nil && !k.kept(peer) {
+		k.early++
+	}
+	k.mu.Unlock()
+	return k.fakeCounter.ProxyConnPair(rc)
+}
+
+// keeps reports whether p keeps a connection from peer.
+func keeps(p *Proxy) func(peer *net.TCPAddr) bool {
+	return func(peer *net.TCPAddr) bool {
+		if peer == nil {
+			return false
+		}
+		p.inflight.mu.Lock()
+		defer p.inflight.mu.Unlock()
+		for tc := range p.inflight.conns {
+			if ra, ok := tc.RemoteAddr().(*net.TCPAddr); ok && ra.Port == peer.Port && ra.IP.Equal(peer.IP) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// A connection is kept before it is counted as accepted: a wait that saw the
+// count reach it finds it, and its unread request, among the kept ones. Kept
+// after, a test's end could see the count reached and nothing pending while
+// the request sat unread.
+func TestAConnectionIsKeptBeforeItIsCountedAccepted(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	k := &keptCounter{}
+	p, _ := startListening(t, k, func(p *Proxy) { k.kept = keeps(p) })
+	addr := p.Listener.Addr().String()
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		_, _ = c.Read(make([]byte, 1))
+	}
+	if err := p.WaitAccepted(context.Background(), 4); err != nil {
+		t.Fatalf("WaitAccepted(4): %v", err)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	// The first is the proxy's own check of the count (the canary), which no
+	// test's end waits on, and which it never keeps.
+	if k.early != 1 || k.counted != 4 {
+		t.Fatalf("%d of %d connections were counted accepted before the proxy kept them, want only its own check", k.early, k.counted)
+	}
+}
+
+// The generic parser ends when the application closes its connection once
+// answered, with the switch off as on: its handler is done, and the
+// connection held nothing. Before, it polled the closed connection for ever,
+// never done, and a test's end waited on it for ever while the polling
+// counted as progress (review B2).
+func TestTheGenericParserEndsWhenTheApplicationCloses(t *testing.T) {
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", on)
+			tr := &inflight{}
+			app, proxy := acceptedPair(t, tr)
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "1")
+			ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+			ctx, cancel := context.WithCancel(integrations.WithRequestHolder(ctx, proxy))
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- generic.New(zap.NewNop()).MockOutgoing(ctx, proxy, nil, genericStore{}, models.OutgoingOptions{})
+			}()
+			if _, err := io.WriteString(app, "PING"); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, 4)
+			if _, err := io.ReadFull(app, got); err != nil || string(got) != "PONG" {
+				t.Fatalf("answer %q, %v", got, err)
+			}
+			_ = app.Close()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("the parser ended with %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the generic parser polled a connection the application closed and never ended")
+			}
+			if h := proxy.held.Load(); h != 0 {
+				t.Fatalf("held %d after the connection ended", h)
+			}
+		})
+	}
+}
+
+// The progress of a connection that holds work is its own: bytes read, a
+// request held or released, its close. A read that returns nothing (a
+// deadline waited out, the end of a closed connection) moves none, so a
+// polling parser's connection cannot keep a stuck wait looking alive.
+func TestAPendingConnectionsProgressIsItsOwn(t *testing.T) {
+	tr := &inflight{}
+	_, idle := acceptedPair(t, tr)
+	app, busy := acceptedPair(t, tr)
+	// Neither handler reads: both hold work, in a replay.
+	got := tr.PendingProgress(true)
+	if len(got) != 2 {
+		t.Fatalf("pending %v, want both", got)
+	}
+	before := got[idle.id]
+	if _, err := io.WriteString(app, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := busy.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idle.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = idle.Read(make([]byte, 1))
+	now := tr.PendingProgress(true)
+	if now[idle.id] != before {
+		t.Fatalf("the idle connection's progress moved %d -> %d on a read that returned nothing", before, now[idle.id])
+	}
+	if now[busy.id] == got[busy.id] {
+		t.Fatal("a read that returned bytes moved no progress for its connection")
+	}
+}

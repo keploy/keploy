@@ -179,3 +179,28 @@ func TestRunTestSetClearsTheSetsNotJudgedMark(t *testing.T) {
 		t.Fatal("another set's mark was cleared")
 	}
 }
+
+// A set's not-judged reason gives what its tests could not be judged for: a
+// Unix socket's count as the latest test saw it (it only grows), and each
+// test's abandoned TLS handshakes added up (each is only its own test's).
+func TestTestsKeployCannotCaptureAddsEachTestsAbandonedHandshakes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ab := models.CaptureLoss{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.9:443"}
+	unix := func(n uint64) models.CaptureLoss {
+		return models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: n, What: "/run/db.sock"}
+	}
+	results := []models.TestResult{
+		{TestCaseID: "test-1", FailureInfo: models.FailureInfo{CannotCapture: models.CaptureLosses{ab}}},
+		{TestCaseID: "test-2"},
+		{TestCaseID: "test-3", FailureInfo: models.FailureInfo{CannotCapture: models.CaptureLosses{ab, unix(1)}}},
+		{TestCaseID: "test-4", FailureInfo: models.FailureInfo{CannotCapture: models.CaptureLosses{unix(2)}}},
+	}
+	tests, lost := testsKeployCannotCapture(results)
+	if fmt.Sprint(tests) != "[test-1 test-3 test-4]" {
+		t.Fatalf("tests %v", tests)
+	}
+	want := models.CaptureLosses{{Kind: models.CaptureLossTLSAbandoned, Count: 2, What: "to 10.0.0.9:443"}, unix(2)}
+	if fmt.Sprint(lost) != fmt.Sprint(want) {
+		t.Fatalf("what %+v, want %+v", lost, want)
+	}
+}

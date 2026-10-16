@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -121,25 +122,241 @@ func visibleIn(v workerView, m *models.Mock) bool {
 }
 
 // keep returns the mocks visible to this worker: those in its allowlist plus any
-// that belong to no test (absent from the universe of mapped names).
+// that belong to no test (absent from the universe of mapped names), less what
+// its open test consumed (DeleteFilteredMock). With no test open to the worker
+// it is the whole pool less what ended tests consumed (spent).
+//
+// That holds for the calls a scoped view serves. A call served the bare
+// manager (scopedFor: a connection opened before any worker registered, or
+// one with no pid) sees the whole pool, held and spent recordings included,
+// and its consume deletes them from the store.
 func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, error) {
-	if s.live && err == nil {
-		return byStart(s.pid, mocks), nil
-	}
-	if err != nil {
+	if err != nil || s.passThrough() {
 		return mocks, err
 	}
+	if s.live {
+		return without(byStart(s.pid, mocks), s.consumed(workerView{})), nil
+	}
 	v := s.current()
+	gone := s.consumed(v)
 	if v.allow == nil || v.universe == nil {
-		return mocks, nil
+		return without(mocks, gone), nil
 	}
 	out := mocks[:0:0]
 	for _, m := range mocks {
-		if visibleIn(v, m) {
+		if visibleIn(v, m) && (gone == nil || !gone(m.Name)) {
 			out = append(out, m)
 		}
 	}
 	return out, nil
+}
+
+// consumed returns whether this view, resolved as v for one read, hides a
+// recording, by name, as consumed: one the test open to it consumed
+// (DeleteFilteredMock) or, with no test open, one an ended test consumed
+// (spent). nil when it hides none.
+func (s *scopedMockDb) consumed(v workerView) func(name string) bool {
+	switch {
+	case s.live:
+		return s.usedUpIn(starts.Default.Scope(s.pid))
+	case s.src == nil:
+		return nil
+	case v.allow == nil || v.universe == nil:
+		if sl, ok := s.MockMemDb.(spentLister); ok {
+			return sl.spentNames()
+		}
+		return nil
+	}
+	return s.usedUpIn(v.scope)
+}
+
+// without returns mocks less those whose name drop reports, mocks itself when
+// drop is nil.
+func without(mocks []*models.Mock, drop func(name string) bool) []*models.Mock {
+	if drop == nil {
+		return mocks
+	}
+	out := mocks[:0:0]
+	for _, m := range mocks {
+		if m != nil && drop(m.Name) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// usedUpHolder is the store's record of the recordings a worker's test
+// consumed (MockManager.holdUsedUp), and spentLister its record of what ended
+// tests consumed (MockManager.Spend).
+type usedUpHolder interface {
+	holdUsedUp(key string, kind models.Kind) bool
+	usedUpKeys() func(key string) bool
+}
+
+type spentLister interface {
+	spentNames() func(name string) bool
+}
+
+// usedUpIn returns whether a recording, by name, was consumed in scope: nil
+// when none was.
+func (s *scopedMockDb) usedUpIn(scope string) func(name string) bool {
+	if scope == "" {
+		return nil
+	}
+	h, ok := s.MockMemDb.(usedUpHolder)
+	if !ok {
+		return nil
+	}
+	held := h.usedUpKeys()
+	if held == nil {
+		return nil
+	}
+	prefix := keptPrefix(scope)
+	return func(name string) bool { return held(prefix + name) }
+}
+
+// DeleteFilteredMock consumes mock. A recording of the test open to this
+// worker (its mapping names it) is held used up for the test instead of
+// deleted from the store: no later read of the test shows it, and once the
+// test ends it is spent (Proxy.noteRetained), so no call between tests is
+// served it, while a run of the same test again (a retry, -count=2, a watch
+// mode rerun), a new scope, is served it afresh, as a test begun without a
+// worker pid is (MockManager.SetScopeMocks). Any other mock is consumed by
+// the store. A call served the bare manager instead of a scoped view (see
+// keep) deletes even a scoped test's recording, as before.
+func (s *scopedMockDb) DeleteFilteredMock(mock models.Mock) bool {
+	h, ok := s.MockMemDb.(usedUpHolder)
+	if !ok || s.passThrough() {
+		return s.MockMemDb.DeleteFilteredMock(mock)
+	}
+	scope, own := s.openScopeOwns(&mock)
+	if !own {
+		return s.MockMemDb.DeleteFilteredMock(mock)
+	}
+	if !h.holdUsedUp(keptPrefix(scope)+mock.Name, mock.Kind) {
+		return false // consumed already, as a delete of a deleted mock
+	}
+	s.MockMemDb.MarkMockAsUsed(mock)
+	if !s.live && s.src != nil {
+		s.src.noteRetained(scope, s.MockMemDb, mock)
+	}
+	return true
+}
+
+// openScopeOwns returns the scope of the test open to this worker and whether
+// mock is that test's recording: its mapping names it.
+func (s *scopedMockDb) openScopeOwns(mock *models.Mock) (string, bool) {
+	switch {
+	case s.live:
+		scope := starts.Default.Scope(s.pid)
+		owned, known := starts.Default.Owns(s.pid, mock.Name)
+		return scope, scope != "" && known && owned
+	case s.src != nil:
+		v := s.current()
+		if v.allow == nil || v.scope == "" {
+			return "", false
+		}
+		_, mine := v.allow[mock.Name]
+		return v.scope, mine
+	}
+	return "", false
+}
+
+// MarkMockAsUsed forwards a match that keeps the mock, and records a stateful
+// dependency's per-test recording the worker's scope kept for its repeats,
+// to be consumed when the scope ends (Proxy.noteRetained).
+func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
+	if !s.MockMemDb.MarkMockAsUsed(mock) {
+		return false
+	}
+	if s.passThrough() {
+		return true
+	}
+	// Only the open test's own: a recording every test may be served stays
+	// for the next.
+	if s.src != nil && !s.live && retainsForRepeats(&mock) && s.OwnedByOpenTest(&mock) {
+		s.src.noteRetained(s.current().scope, s.MockMemDb, mock)
+	}
+	return true
+}
+
+// ExactServing forwards the store's exact serving
+// (integrations.ExactServingReader). scopedFor hands a connection opened under
+// exact serving the bare manager, but a view made before it began serves its
+// connection for the connection's life, and under exact serving the parsers
+// on it must see that MarkMockAsUsed's false for a named mock is a refusal.
+func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
+
+// FindStagedNotOwned forwards the store's lookup of a staged mock the open
+// test does not own (integrations.StagedFinder), "" from a store that has
+// none: under exact serving a Generic miss on a view made before it began is
+// diagnosed as one on the bare manager is.
+func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	if f, ok := s.MockMemDb.(integrations.StagedFinder); ok {
+		return f.FindStagedNotOwned(kind, match)
+	}
+	return ""
+}
+
+var _ integrations.StagedFinder = (*scopedMockDb)(nil)
+
+// passThrough reports whether this view passes every read and consume
+// straight to the store it wraps: while the store serves each test exactly
+// its own mocks (exact serving, the proven switch), it alone decides what
+// every read shows and whether a consume may answer. A view made before
+// exact serving began, which serves its connection for the connection's
+// life, then narrows nothing by its worker's or start's scope, holds no
+// consumed recording of its own, keys no cursor or kept recording by its
+// scope, and hands each consume's answer, a refusal included, to the
+// parser, as the bare manager scopedFor hands a connection opened under
+// exact serving does. That holds while an agent serves one test process and
+// one open test at a time, as it does under the switch (scope_proven); once
+// workers run tests in parallel under it, the scoped cursors and kept
+// recordings this bypasses are needed again.
+func (s *scopedMockDb) passThrough() bool { return s.ExactServing() }
+
+// ConsumedTestMocks forwards the store's answered test mocks
+// (integrations.ExactConsumedReader), none when it keeps none, so a parser on
+// a view made before exact serving began still tells a call its test made once
+// more than it recorded from one it never recorded.
+func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
+	if er, ok := s.MockMemDb.(integrations.ExactConsumedReader); ok {
+		return er.ConsumedTestMocks()
+	}
+	return nil
+}
+
+var (
+	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
+	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
+)
+
+// StagedMocks forwards the store's staged mocks (integrations.StagedReader),
+// none when it keeps none: the learn step's earlier places are the
+// recording's, whatever this view's allowlist shows.
+func (s *scopedMockDb) StagedMocks() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.StagedReader); ok {
+		return sr.StagedMocks()
+	}
+	return nil
+}
+
+var _ integrations.StagedReader = (*scopedMockDb)(nil)
+
+// OwnedByTest implements integrations.TestOwnership: a mock is the open
+// test's own when its worker's current allowlist (the test's mapping) names
+// it.
+func (s *scopedMockDb) OwnedByTest(m *models.Mock) (owned, known bool) {
+	if s.live || m == nil {
+		return false, false
+	}
+	v := s.current()
+	if v.allow == nil {
+		return false, false
+	}
+	_, owned = v.allow[m.Name]
+	return owned, true
 }
 
 func (s *scopedMockDb) GetFilteredMocks() ([]*models.Mock, error) {
@@ -184,9 +401,13 @@ func (s *scopedMockDb) GetSessionMocksInWindow(start, end time.Time) ([]*models.
 // always wraps the mock manager, which has it.
 func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if r, ok := s.MockMemDb.(integrations.SessionKeyReader); ok {
+		if s.passThrough() {
+			return r.RangeSessionMocksWithKey(ix, key, fn)
+		}
 		v := s.current()
+		gone := s.consumed(v)
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !visibleIn(v, mk) || fn(mk)
+			return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -276,9 +497,12 @@ func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	if !ok {
 		return -1
 	}
-	if s.live {
+	switch {
+	case s.passThrough():
+		s.lastScope = ""
+	case s.live:
 		s.lastScope = starts.Default.Scope(s.pid)
-	} else {
+	default:
 		s.lastScope = s.current().scope
 	}
 	return c.MockCursorIndex(s.cursorKey(key), n)
@@ -288,6 +512,39 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	if c, ok := s.MockMemDb.(integrations.MockCursor); ok {
 		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
 	}
+}
+
+// InTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InTestWindow(t time.Time) bool {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InTestWindow(t)
+	}
+	return false
+}
+
+// InRecordedTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.InRecordedTestWindow(t)
+	}
+	return false, false
+}
+
+// SameRecordedTestWindow forwards integrations.TestWindows.
+func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
+	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
+		return w.SameRecordedTestWindow(a, b)
+	}
+	return false, false
+}
+
+// Variables forwards the replay's variable table. Under the proven switch one
+// test is open at a time in an agent, so every view shares the one table.
+func (s *scopedMockDb) Variables() *variables.Table {
+	if v, ok := s.MockMemDb.(integrations.VariableStore); ok {
+		return v.Variables()
+	}
+	return nil
 }
 
 func (s *scopedMockDb) cursorKey(key string) string {
@@ -388,6 +645,8 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	if p.workerScope == nil {
 		p.workerScope = make(map[uint32]workerScopeEntry)
 	}
+	// The scope this one replaces ends here.
+	ended := p.takeRetainedLocked(p.workerScope[pid].scope)
 	// Each registration is a new scope (the worker's next test, or a re-run of
 	// the same one), named by its place in the scope sequence, so its
 	// stateful cursors start over. Replace (never mutate) the entry so a set
@@ -395,6 +654,146 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	at := p.stampWorkerLocked(pid)
 	p.workerScope[pid] = workerScopeEntry{allow: set, scope: fmt.Sprintf("w%d.%d", pid, at)}
 	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
+}
+
+// retainedUse is a per-test recording of a stateful dependency a worker's
+// scope was served and kept for the scope's repeats of the request (a cursor
+// mock, models.ConsumeCursorSaturate), and the store that holds it.
+type retainedUse struct {
+	db   integrations.MockMemDb
+	name string
+}
+
+// retainsForRepeats reports whether a match keeps m for its test's repeats
+// rather than consuming it: a stated per-test HTTP recording of a stateful
+// dependency (the HTTP integration's updateMock marks it used instead).
+func retainsForRepeats(m *models.Mock) bool {
+	return m.TestModeInfo.Lifetime == models.LifetimePerTest &&
+		m.TestModeInfo.Consume == models.ConsumeCursorSaturate && m.StatesLifetime()
+}
+
+// noteRetained records that scope was served and kept mock (retainedUse).
+func (p *Proxy) noteRetained(scope string, db integrations.MockMemDb, mock models.Mock) {
+	if scope == "" {
+		return
+	}
+	p.workerScopeMu.Lock()
+	defer p.workerScopeMu.Unlock()
+	if p.retained == nil {
+		p.retained = make(map[string][]retainedUse)
+	}
+	p.retained[scope] = append(p.retained[scope], retainedUse{db: db, name: mock.Name})
+}
+
+// takeRetainedLocked removes and returns what scope kept for its repeats.
+// workerScopeMu must be held.
+func (p *Proxy) takeRetainedLocked(scope string) []retainedUse {
+	if scope == "" {
+		return nil
+	}
+	uses := p.retained[scope]
+	delete(p.retained, scope)
+	return uses
+}
+
+// consumeRetained spends what an ended scope kept for its repeats
+// (MockManager.Spend): the test is over, so no later test, and no call
+// between tests, is served its recordings, as when its matches consumed them;
+// a later run of the same test is.
+func consumeRetained(uses []retainedUse) {
+	for _, u := range uses {
+		if sp, ok := u.db.(interface{ Spend(...string) }); ok {
+			sp.Spend(u.name)
+		}
+	}
+}
+
+// KeepForRepeats and KeptForRepeats key a worker's kept recordings by its
+// scope, as its cursors are, so a later run of the same test starts afresh.
+func (s *scopedMockDb) KeepForRepeats(name string) {
+	if k, ok := s.MockMemDb.(integrations.RepeatKeeper); ok {
+		k.KeepForRepeats(s.keptKey(name))
+	}
+}
+
+func (s *scopedMockDb) KeptForRepeats() func(name string) bool {
+	k, ok := s.MockMemDb.(integrations.RepeatKeeper)
+	if !ok {
+		return nil
+	}
+	kept := k.KeptForRepeats()
+	if kept == nil {
+		return nil
+	}
+	prefix := keptPrefix(s.scope())
+	return func(name string) bool { return kept(prefix + name) }
+}
+
+func (s *scopedMockDb) keptKey(name string) string {
+	return keptPrefix(s.scope()) + name
+}
+
+// scope is the scope this view serves a call in now: the test open to it, or
+// its worker's.
+func (s *scopedMockDb) scope() string {
+	switch {
+	case s.passThrough():
+		return ""
+	case s.live:
+		return starts.Default.Scope(s.pid)
+	case s.src != nil:
+		return s.current().scope
+	}
+	return ""
+}
+
+func keptPrefix(scope string) string {
+	if scope == "" {
+		return ""
+	}
+	return scope + "\x00"
+}
+
+// OwnedByOpenTest reports whether m is the recording of the test open to this
+// worker (integrations.TestOwner): its test's mapping names it. A mock mapped
+// to no test, which every worker sees, is no test's own; so is every mock
+// while no test is open to the worker. A view with no mapping to tell by asks
+// the store it wraps.
+func (s *scopedMockDb) OwnedByOpenTest(m *models.Mock) bool {
+	if m == nil {
+		return false
+	}
+	if s.passThrough() {
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
+	if s.live {
+		if owned, known := starts.Default.Owns(s.pid, m.Name); known {
+			return owned
+		}
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
+	v := s.current()
+	if v.allow == nil || v.universe == nil {
+		return integrations.OwnedByOpenTest(s.MockMemDb, m)
+	}
+	_, mine := v.allow[m.Name]
+	return mine
+}
+
+// Spent hides what an ended test kept for its repeats (MockManager.Spent)
+// from this worker, unless it is the worker's current test's own: a later run
+// of the same test is served its recordings again.
+func (s *scopedMockDb) Spent(m *models.Mock) bool {
+	sr, ok := s.MockMemDb.(integrations.SpentReader)
+	if !ok || !sr.Spent(m) {
+		return false
+	}
+	if s.live || s.src == nil || s.passThrough() {
+		return true
+	}
+	_, mine := s.current().allow[m.Name]
+	return !mine
 }
 
 // workerScopeEntry is a registered worker's current test: the mock names it
@@ -419,11 +818,14 @@ func (p *Proxy) stampWorkerLocked(pid uint32) uint64 {
 // test has no mapping). Idempotent.
 func (p *Proxy) ClearWorkerScope(pid uint32) {
 	p.workerScopeMu.Lock()
-	if _, ok := p.workerScope[pid]; ok {
+	var ended []retainedUse
+	if e, ok := p.workerScope[pid]; ok {
+		ended = p.takeRetainedLocked(e.scope)
 		delete(p.workerScope, pid)
 		p.stampWorkerLocked(pid)
 	}
 	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
 }
 
 // ClearAllWorkerScopes wipes every worker scope and the mapped universe. Called
@@ -432,6 +834,7 @@ func (p *Proxy) ClearWorkerScope(pid uint32) {
 func (p *Proxy) ClearAllWorkerScopes() {
 	p.workerScopeMu.Lock()
 	p.workerScope = nil
+	p.retained = nil
 	p.mappedUniverse = nil
 	p.scopeSeq++
 	p.universeAt = p.scopeSeq
@@ -473,6 +876,12 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if kpid == 0 || mgr == nil {
 		return mgr
 	}
+	// Under exact serving (the proven switch) the manager itself decides what
+	// every read shows (exact.go): no per-worker or per-start view narrows or
+	// widens it.
+	if mm, ok := mgr.(*MockManager); ok && mm.exactView() != nil {
+		return mgr
+	}
 	if starts.Default.Active() {
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
 	}
@@ -491,6 +900,13 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	born := p.scopeSeq
 	p.workerScopeMu.Unlock()
 	return &scopedMockDb{MockMemDb: mgr, src: p, chain: chain, born: born}
+}
+
+// WorkerViewForTest is the mock view a call from pid gets (scopedFor), for the
+// tests of a parser outside this package that serve it as a scoped worker's
+// call.
+func (p *Proxy) WorkerViewForTest(pid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
+	return p.scopedFor(pid, mgr)
 }
 
 // ancestorChain is pid and its ancestors, nearest first, read from /proc once
@@ -569,6 +985,13 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.
 var (
-	_ integrations.MockCursor = (*MockManager)(nil)
-	_ integrations.MockCursor = (*scopedMockDb)(nil)
+	_ integrations.MockCursor    = (*MockManager)(nil)
+	_ integrations.MockCursor    = (*scopedMockDb)(nil)
+	_ integrations.TestOwnership = (*scopedMockDb)(nil)
 )
+
+// StatesLifetimes answers for the recording the view is cut from: whether it
+// states its kind mocks' lifetimes is the set's, not the worker's.
+func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
+	return integrations.StatesLifetimes(s.MockMemDb, kind)
+}

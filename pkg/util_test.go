@@ -2416,6 +2416,35 @@ func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
 	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")
 }
 
+// A health check's headers are the agent's only when it answered 200: an
+// answer other than 200 (a proxy's 503, an agent still starting) says nothing
+// about the agent, whatever headers it carries, and is no answer at all, as
+// none is when nothing listens. Each check here has a definite answer, so none
+// has a deadline.
+func TestAgentHealthAnswer_IsOnlyAHealthyAnswersHeaders(t *testing.T) {
+	answer := func(status int) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Keploy-Proven", "off")
+			w.WriteHeader(status)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL + "/agent"
+	}
+
+	header := agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusOK))
+	require.NotNil(t, header, "a 200 is a healthy answer")
+	require.Equal(t, "off", header.Get("X-Keploy-Proven"), "the headers returned are not the answer's")
+
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, answer(http.StatusServiceUnavailable)),
+		"the headers of a 503 were taken for the agent's")
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close()
+	require.Nil(t, agentHealthAnswer(context.Background(), zap.NewNop(), &http.Client{}, goneURL+"/agent"),
+		"an address nothing answers on gave headers")
+}
+
 // Each health check waits twice as long as the last one that ran out of time,
 // up to a ceiling; a check that failed fast (nothing listening yet) or got an
 // answer leaves the wait as it was, so a local agent keeps its quick check.
@@ -2434,5 +2463,66 @@ func TestNextAgentHealthWait(t *testing.T) {
 		{"answered", 2 * time.Second, false, 2 * time.Second},
 	} {
 		require.Equal(t, tc.want, nextAgentHealthWait(tc.wait, tc.timedOut), tc.name)
+	}
+}
+
+// A per-test mock whose recorder stated its lifetime (MetadataLifetimeKey) is
+// the data of the test it was recorded in: the window filter serves it in its
+// own window, and in the startup band when it predates the first test, and
+// lax mode never promotes it to the reusable pool, where every other test
+// would be served it. A per-test mock recorded before lifetimes were stated is
+// promoted as it always was. KEPLOY_STRICT_MOCK_WINDOW=0, the escape hatch for
+// recordings that predate classification, leaves a stated mock as stated.
+func TestFilterByTimeStampTierAware_StatedPerTestIsNeverPromoted(t *testing.T) {
+	prevOverride, prevExplicitOff := strictWindowEnvOverride, strictWindowEnvExplicitOff
+	t.Cleanup(func() {
+		strictWindowEnvOverride, strictWindowEnvExplicitOff = prevOverride, prevExplicitOff
+	})
+
+	first := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC) // the first test window starts
+	after := first.Add(10 * time.Second)                   // this test's window
+	before := after.Add(2 * time.Second)
+	mock := func(name string, req time.Time, stated string, lifetime models.Lifetime) *models.Mock {
+		m := &models.Mock{
+			Version: "api.keploy.io/v1beta1",
+			Name:    name,
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+				ReqTimestampMock: req,
+				ResTimestampMock: req.Add(time.Millisecond),
+			},
+			TestModeInfo: models.TestModeInfo{Lifetime: lifetime, LifetimeDerived: true},
+		}
+		if stated != "" {
+			m.Spec.Metadata[models.MetadataLifetimeKey] = stated
+		}
+		return m
+	}
+	mocks := []*models.Mock{
+		mock("stated-startup", first.Add(-time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-earlier-test", first.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-own", after.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-later-test", before.Add(time.Second), models.MetadataLifetimePerTest, models.LifetimePerTest),
+		mock("stated-session", first.Add(time.Second), models.MetadataLifetimeSession, models.LifetimeSession),
+		mock("unstated-earlier-test", first.Add(time.Second), "", models.LifetimePerTest),
+	}
+
+	for _, tc := range []struct {
+		name        string
+		explicitOff bool
+		unfiltered  []string
+	}{
+		{"lax", false, []string{"stated-session", "unstated-earlier-test"}},
+		{"KEPLOY_STRICT_MOCK_WINDOW=0", true, []string{"stated-session", "unstated-earlier-test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			strictWindowEnvOverride, strictWindowEnvExplicitOff = false, tc.explicitOff
+			filtered, unfiltered := filterByTimeStampTierAware(context.Background(), zap.NewNop(), mocks, after, before, false, first)
+			assert.ElementsMatch(t, []string{"stated-startup", "stated-own"}, mockNames(filtered),
+				"a stated per-test mock is served in its own window and the startup band only")
+			assert.ElementsMatch(t, tc.unfiltered, mockNames(unfiltered),
+				"lax promotion reaches unstated per-test mocks only")
+		})
 	}
 }

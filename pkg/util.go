@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -1245,6 +1246,14 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 
 // CompareHTTPStream compares an expected HTTP response with a streaming response.
 // It returns whether they match, the captured body content, mismatch details (if any), and any error.
+//
+// Without the proven switch the comparison stops at the last recorded frame
+// (part, or byte), so a stream that goes on is not waited for. Under the
+// switch every response is compared whole (O-K): the stream is read to its
+// end, and a frame after the recorded ones is a difference (trailingFrame).
+// The read is bounded as the request is: the user's --api-timeout, or the
+// recorded duration plus 10 s (ComputeStreamingTimeoutSeconds), which fails
+// the test if the stream does not end by then.
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
@@ -1260,6 +1269,28 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 	default:
 		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
+}
+
+// trailingFrame is the mismatch of a frame the answer streamed after the
+// recorded ones (index of them): under the proven switch a stream is read to
+// its end, and one that goes on past its recording differs from it.
+func trailingFrame(index int, frame string) *StreamMismatchInfo {
+	return &StreamMismatchInfo{
+		FrameIndex:    index,
+		ExpectedFrame: "(the recorded stream ended)",
+		ActualFrame:   frame,
+		Reason:        fmt.Sprintf("the stream went on after its %d recorded frames", index),
+	}
+}
+
+// sseCommentsOnly reports whether an SSE frame holds comment lines alone.
+func sseCommentsOnly(fields []sseField) bool {
+	for _, f := range fields {
+		if !f.comment {
+			return false
+		}
+	}
+	return len(fields) > 0
 }
 
 func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
@@ -1406,6 +1437,7 @@ type expectedSSEFrame struct {
 }
 
 func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedSSEQueue(expectedResp)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1422,6 +1454,17 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				// A frame of comments alone (": ping") is a keepalive: it
+				// carries no event, and how many arrive depends on how long
+				// the stream took, so one after the recorded frames is not
+				// a difference.
+				if sseCommentsOnly(parseSSEFrame(frame)) {
+					continue
+				}
+				actualQueue = append(actualQueue, frame)
+				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1446,7 +1489,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1479,6 +1522,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1493,6 +1537,10 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional NDJSON data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1521,7 +1569,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1549,6 +1597,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 }
 
 func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1560,6 +1609,10 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		line := canonicalizePlainTextLine(scanner.Text())
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1582,7 +1635,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1610,6 +1663,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 }
 
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedBytes := expectedBinaryBytes(expectedResp)
 	expectedSize := len(expectedBytes)
 	actualSize := 0
@@ -1631,7 +1685,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 			}
 			actualSize += n
-			if actualSize >= expectedSize {
+			if actualSize >= expectedSize && !readToEnd {
 				if actualSize > expectedSize {
 					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
 						zap.Int("expected_size", expectedSize),
@@ -1968,6 +2022,7 @@ func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
 }
 
 func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	if strings.TrimSpace(boundary) == "" {
 		return false, "", nil, fmt.Errorf("missing multipart boundary for stream comparison")
 	}
@@ -1998,6 +2053,10 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, actualPart.describe())
+				return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), trailingFrame(len(expectedQueue), actualPart.describe()), nil
+			}
 			logger.Debug("received additional multipart stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_parts", len(expectedQueue)))
 			break
@@ -2022,7 +2081,7 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
 				zap.Int("matched_parts", nextExpected))
 			break
@@ -2636,7 +2695,10 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+// AgentHealthTicker checks the agent's health endpoint every checkInterval
+// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// returns when ctx ends too, and closes agentReadyCh either way, so a receive
+// that gets false means ctx ended first.
 //
 // Each check waits agentHealthFirstWait for its answer to begin with, and twice
 // as long after a check that ran out of time (nextAgentHealthWait), so an agent
@@ -2646,17 +2708,46 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-// and signals on the provided channel when the agent becomes available or unavailable.
-// It respects the context timeout and returns when the context is cancelled.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+	defer close(agentReadyCh)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+		select {
+		case agentReadyCh <- true:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// AgentHealthTickerWithAnswer is AgentHealthTicker that sends, in place of
+// true, the headers of the answer that found the agent healthy (never nil),
+// so the caller reads what that same answer said, with no second request that
+// an agent which has since stopped answering, or a budget that has since run
+// out, could fail. A receive that gets nil means ctx ended first.
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+	defer close(answers)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+		select {
+		case answers <- header:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// agentHealthTicker is the loop of the two above: it checks the agent's health
+// every checkInterval until an answer finds it healthy, hands that answer's
+// headers to ready, which reports whether it delivered them (false when ctx
+// ended first), and returns; or it returns when ctx ends.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
-	defer close(agentReadyCh)
 
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
-	agentStarted := false
 
 	for {
 		select {
@@ -2664,72 +2755,70 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 			return
 		case <-ticker.C:
 			checkCtx, cancel := context.WithTimeout(ctx, wait)
-			isHealthy := isAgentHealthy(checkCtx, logger, client, agentURI)
-			timedOut := !isHealthy && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
 			if next := nextAgentHealthWait(wait, timedOut); next != wait {
 				logger.Debug("agent health check ran out of time; the next one waits longer",
 					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 				wait = next
 			}
-
-			if isHealthy && !agentStarted {
-				// Agent became healthy
-				agentStarted = true
-				select {
-				case agentReadyCh <- true:
-					// Only now, and off this goroutine. The check is a
-					// diagnostic: every caller races this send against a
-					// readiness deadline, and spending any of that budget on
-					// it could fail the user's run with "did not become ready"
-					// against an agent that had just answered its health
-					// check. Detached from ctx for the same reason it runs at
-					// all — the caller cancels this context as soon as it has
-					// its answer, which would cancel the check before it could
-					// report anything.
-					go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
-					return
-				case <-ctx.Done():
-					return
-				}
-			} else if !isHealthy && agentStarted {
-				// Agent became unhealthy
-				agentStarted = false
-				select {
-				case agentReadyCh <- false:
-				case <-ctx.Done():
-					return
-				}
+			if header == nil {
+				continue
 			}
+			if ready(header) {
+				// Only now, and off this goroutine. The check is a
+				// diagnostic: every caller races this signal against a
+				// readiness deadline, and spending any of that budget on it
+				// could fail the user's run with "did not become ready"
+				// against an agent that had just answered its health check.
+				// Detached from ctx for the same reason it runs at all --
+				// the caller cancels this context as soon as it has its
+				// answer, which would cancel the check before it could
+				// report anything.
+				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+			}
+			return
 		}
 	}
 }
 
-// isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) bool {
+// agentHealthAnswer checks whether the agent is running and healthy by calling
+// its /agent/health endpoint, and returns the headers of a healthy (200)
+// answer, never nil, or nil when there was none: no answer, or an answer
+// other than 200, whose headers say nothing about the agent.
+func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
 	logger.Debug("Checking agent health", zap.String("url", healthURL))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		logger.Debug("Failed to create health check request", zap.Error(err))
-		return false
+		return nil
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Debug("Failed to read agent health response body", zap.Error(err))
-		return false
+		return nil
 	}
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	if resp.Header == nil {
+		// A RoundTripper other than net/http's may leave it nil; healthy is
+		// never nil.
+		return http.Header{}
+	}
+	return resp.Header
 }
 
 // TestSetMocksReader is an optional extension of the mock store a replay, the
@@ -3229,7 +3318,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// pool even when the cached Lifetime field is the zero value
 		// (LifetimePerTest). metadata.scope is deliberately NOT
 		// consulted here.
-		if p.Spec.Metadata != nil &&
+		if p.Spec.Metadata != nil && !p.StatesLifetime() &&
 			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
 			if p.Spec.Metadata["type"] == "config" {
 				p.TestModeInfo.Lifetime = models.LifetimeSession
@@ -3297,7 +3386,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		if strict {
+		// A per-test mock whose recorder stated its lifetime is the data of
+		// the test it was recorded in, and is served to no other test whatever
+		// the window mode: lax promotion exists for recordings whose recorders
+		// could not tell data from shared traffic, which this one did. Nor does
+		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
+		// to another test: an HTTP call every test may make is declared in
+		// keploy.yaml (models.SessionCallRule).
+		if strict || p.StatesLifetime() {
 			// Per-test, out-of-window. Genuine stale cross-test bleed
 			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
 			// dropped — the strictMockWindow guarantee. The startup-init band
@@ -3314,8 +3410,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 				// runs without --debug. Tagged with "diag/" so it is
 				// obviously diagnostic. Will be demoted/removed once the
 				// strict-window regression on listmonk + pgtype-tour is
-				// root-caused.
-				logger.Info("diag/strict-mode drop: per-test mock outside window",
+				// root-caused. A stated mock dropped outside strict mode is
+				// at Debug: every test's staging leaves out every other
+				// test's mocks, which is the design, not a regression.
+				log := logger.Info
+				if !strict {
+					log = logger.Debug
+				}
+				log("diag/strict-mode drop: per-test mock outside window",
 					zap.String("mock", p.Name),
 					zap.String("kind", string(p.Kind)),
 					zap.String("connID", p.ConnectionID),
@@ -3508,8 +3610,10 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 
 		// Out-of-window per-test: strict drops, lax promotes to unfiltered.
-		// The startup-init band was already claimed above, in both modes.
-		if strict {
+		// The startup-init band was already claimed above, in both modes. A
+		// per-test mock whose recorder stated its lifetime is dropped in both,
+		// as filterByTimeStampTierAware drops it.
+		if strict || p.StatesLifetime() {
 			// Per-mock diagnostic: emit hash + window deltas at Debug
 			// for the three-tier strict-drop path so a CI log can
 			// identify which postgres / mongo / etc. mock the per-test
@@ -3622,6 +3726,13 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	}
 	if m.TestModeInfo.LifetimeDerived {
 		return m.TestModeInfo.Lifetime
+	}
+	// A recorder's statement decides over the type tag, as DeriveLifetime
+	// decides it.
+	if m.StatesLifetime() {
+		c := *m
+		c.DeriveLifetime()
+		return c.TestModeInfo.Lifetime
 	}
 	if m.Spec.Metadata != nil {
 		switch m.Spec.Metadata["type"] {

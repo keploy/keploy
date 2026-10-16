@@ -48,6 +48,10 @@ const (
 	DiffKindTypeChanged   MockFieldDiffKind = "type_changed"    // same field, different JSON type
 	DiffKindMissingInLive MockFieldDiffKind = "missing_in_live" // recorded mock has it, live request doesn't
 	DiffKindMissingInMock MockFieldDiffKind = "missing_in_mock" // live request has it, recorded mock doesn't
+	// DiffKindVariable: a place that holds a test variable holds another value
+	// than the variable's this run (Expected: the variable's value; Actual: the
+	// live value).
+	DiffKindVariable MockFieldDiffKind = "variable"
 )
 
 // MockFieldDiff is one field-level difference between the live request and the
@@ -68,12 +72,37 @@ type MockFieldDiff struct {
 // right remediation (re-record vs add noise vs fix candidate selection).
 const (
 	MatchPhaseNoMocks    = "no_mocks"             // no mocks were available to compare for this protocol: the pool is empty, or none survived filtering
-	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys
+	MatchPhaseSchema     = "no_schema_candidates" // nothing matched method/path/header-keys/query-keys (and, under the proven switch, the host)
 	MatchPhaseBody       = "body_mismatch"        // schema candidates existed, request body ruled them all out
 	MatchPhaseStrict     = "strict_noise_reject"  // candidates rejected by strict req-body-noise enforcement
 	MatchPhaseExhausted  = "no_match"             // full cascade ran and nothing matched
 	MatchPhaseProtoError = "protocol_error"       // matching aborted on a protocol/decode error
+	// MatchPhaseVariable: a recorded call fit this one except that a test
+	// variable it carries does not hold (proven switch): the call sent another
+	// value than the one the variable was bound to this run, used it before
+	// the call that binds it, or the mock declares a place keploy cannot follow.
+	MatchPhaseVariable = "variable_mismatch"
+	// MatchPhaseNoRequest: the client sent nothing. It waited for its server
+	// to speak first, nothing answered it, and it closed the connection: no
+	// call was made, so the miss is reported for its next step and fails no
+	// test by itself (a dependency's TCP health check closes the same way).
+	MatchPhaseNoRequest = "no_request"
 )
+
+// CountsAgainstTest reports whether a miss is evidence against the test it was
+// made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
+// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way).
+// Every verdict, count and evidence line that judges misses reads this.
+func (c UnmatchedCall) CountsAgainstTest() bool {
+	return !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+}
+
+// CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
+// is made from, for the places that hold the report and not the call.
+func (r *MockMismatchReport) CountsAgainstTest() bool {
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase}.CountsAgainstTest()
+}
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
 // They answer a question the match cascade cannot: did any of the mocks this
@@ -205,6 +234,34 @@ type MockMismatchReport struct {
 	// are redacted by the producing parser before they land here.
 	ClosestMockReq string // rendered request of the closest mock
 	ReceivedReq    string // rendered request the app actually sent
+	// MissKind is MissExtraCall when the matcher found the call identical to
+	// one the open test's own mocks had already answered (exact serving,
+	// under the proven switch), and Recorded is how many times that call was
+	// recorded for the test. The proxy files every other miss by where it was
+	// made. Empty without the switch.
+	MissKind string
+	Recorded int
+	// Differs names the compared fields in which the call differs from the
+	// closest recording (host, header.<name>, body.<path>, ...), never a
+	// value: the reason keploy gives for a failed test names them (proven
+	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
+	Differs []string
+	// VariablePlaces are, under the proven switch only, the URL path places
+	// (url.path[<n>]) of a test variable on this call: those declared by the
+	// closest mock or by a mock on the call's route (DeclaredPathPlaces), the
+	// place a variable miss names, and the segments that hold a value the
+	// test's variables have. The call holds the application's values there,
+	// which the miss's shape writes {} (MissShape); the summary then names
+	// the path escaped, as a place counts segments.
+	VariablePlaces []string
+	// NotOwned says, under the proven switch, the call is ClosestMock, a
+	// recording the open test does not own (byte for byte, or at the per-test
+	// similarity): likely one another test recorded, which the replay names
+	// (UnmatchedCall.RecordedIn).
+	NotOwned bool
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
@@ -239,6 +296,13 @@ type ParserError struct {
 	Err             error
 	MismatchReport  *MockMismatchReport // nil when no diff is available
 	At              time.Time           // when the miss reached the proxy; a miss with no report has only this to say when it happened
+	// MissKind is where the miss was made (MissInTest, MissExtraCall,
+	// MissOutsideTest), set by the proxy under exact serving; empty without
+	// the proven switch.
+	MissKind string
+	// Recorded is, for MissExtraCall, how many times the call was recorded
+	// for the test.
+	Recorded int
 }
 
 type ParserErrorType string

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -25,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -40,6 +43,13 @@ type ClientMockStorage struct {
 	// mocks on disk; UpdateMockParams loads only the current window from it.
 	diskMocks *proxyPkg.DiskMocks
 	mu        sync.RWMutex
+	// refused names the mocks this store refused under the proven switch
+	// (variables this keploy cannot follow, followable): each was logged as
+	// it was refused. A mapping that lists one owns nothing for it, and the
+	// call it recorded misses (mocksByName). The value says whether the mock
+	// is a test mock (data-plane): one is a recorded call its test is judged
+	// for (refusedOf).
+	refused map[string]bool
 }
 
 type Agent struct {
@@ -133,6 +143,24 @@ type Agent struct {
 	// behavior instead of being silently ignored.
 	incomingMu sync.Mutex
 
+	// clockMu serialises the moves of the run's frozen clock (beginTestClock,
+	// endTestClock, releaseTestClock) with their state, so a begin and an end
+	// that cross never land out of order. clockHeld is the open test (its
+	// worker and name) that holds the clock; clockMoved is the test whose
+	// move is in force, the zero key when the clock is at the start time.
+	// They part when a test's end cannot move the clock back: the test no
+	// longer holds it, so the next test can begin, but the clock is still off
+	// the start time until a move back succeeds. clockMu is never held while
+	// scopeMu is taken.
+	clockMu    sync.Mutex
+	clockHeld  scopeKey
+	clockMoved scopeKey
+	// clockHeldStart is the holder's worker's start time (procStartTime),
+	// "" when the agent cannot see that process: a begin from another worker
+	// while the holder's has exited (or its pid is another process's now)
+	// knows the holder's end will never come.
+	clockHeldStart string
+
 	// scope state backs the /agent/scope/* and /agent/mock/stats API that a
 	// user's test runner (pytest / go test / jest / glue-code) calls to mark
 	// per-test boundaries. In record mode it collects the agent-clock window for
@@ -142,8 +170,11 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
-	scopeTable   map[string][]string // replay: test name -> mock names (from mappings.yaml)
-	loadedMocks  int                 // replay: count of mocks stored, for /agent/mock/stats
+	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
+	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
+	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
+	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
+	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -153,6 +184,20 @@ type Agent struct {
 	// noteEndOfGated said so this session.
 	gatedScopes    map[scopeKey]struct{}
 	gatedEndWarned bool
+
+	// provenMu guards proven, the single-worker integration wire's state
+	// (scope_proven.go), served under the proven switch. Never held while
+	// taking scopeMu.
+	provenMu sync.Mutex
+	proven   provenWire
+	// wire is held across every operation of the wire (a claim, a begin,
+	// an end, the final reap) so they never interleave; taken before
+	// provenMu.
+	wire wireLock
+
+	// replay, under the proven switch: the start time of the process that
+	// opened each window in workerOpen (procStartTime), where it is known.
+	openProc map[scopeKey]string
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -166,6 +211,11 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 	}
 	if coreAgent.ProxyHook != nil && proxy != nil {
 		proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
+	}
+	// Where the run's calls to local listeners went, which the proxy tells
+	// under the proven switch only (topology_proven.go).
+	if s, ok := proxy.(topologySinkSetter); ok {
+		s.SetTopologySink(instrumentation)
 	}
 	coreAgent.RegisterIncomingProxy(ip)
 	// Propagate the connection-pool idle retention from config into
@@ -182,6 +232,10 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 	return instrumentation
 }
 
+// agentReadyFile is kdocker.AgentReadyFile, which Setup removes: a variable
+// only so that a test running Setup leaves the host's alone.
+var agentReadyFile = kdocker.AgentReadyFile
+
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
@@ -190,7 +244,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	// CLI has stored mocks on the agent. The file is re-created later
 	// by the MakeAgentReady HTTP handler in pkg/agent/routes/record.go
 	// once setup is complete.
-	if err := os.Remove(kdocker.AgentReadyFile); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(agentReadyFile); err != nil && !os.IsNotExist(err) {
 		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
 	}
 
@@ -204,8 +258,22 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	mismatch.SetMockMode(a.config.Agent.MockMode)
 
 	a.logger.Debug("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
+	// Setup returns only once what it started is torn down, however it
+	// returns: Hook's teardown (the proxy's, which restores nsswitch.conf and
+	// removes the CA from the trust store, then the hooks' unload) runs on
+	// the group, and the process exits as soon as Setup returns (main). A
+	// stop that came before the port handoff, or while Hook was loading,
+	// returned at once and so cut that teardown short. stop ends the run
+	// whatever ctx does, for a Setup that returns before ctx is done.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+	tearDown := func() error {
+		stop()
+		a.logger.Debug("waiting for the agent's teardown before Setup returns")
+		return errGrp.Wait()
+	}
 
 	// Capture the process-lifetime ctx (with errgroup attached) so
 	// StartIncomingProxy can keep the ingress listener alive across
@@ -228,7 +296,17 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		Rules:         rules,
 	})
 	if err != nil {
-		a.logger.Error("failed to hook into the app", zap.Error(err))
+		if ctx.Err() != nil {
+			// The stop came while the agent was starting: nothing failed.
+			a.logger.Info("The agent was stopped while it was starting; stopping what it had started", zap.Error(err))
+		} else {
+			a.logger.Error("failed to hook into the app", zap.Error(err))
+		}
+		// What Hook loaded or started before it failed, or before the stop
+		// that ended it, is torn down before the process exits.
+		if terr := tearDown(); terr != nil && !errors.Is(terr, context.Canceled) {
+			utils.LogError(a.logger, terr, "error while tearing down a failed agent setup")
+		}
 		return err
 	}
 
@@ -242,11 +320,14 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():
 		a.logger.Info("Context cancelled before agent becomes healthy. Stopping the agent.")
+		if terr := tearDown(); terr != nil && !errors.Is(terr, context.Canceled) {
+			utils.LogError(a.logger, terr, "error while stopping the agent before it became healthy")
+		}
 		return nil
 	}
 
 	<-ctx.Done()
-	err = errGrp.Wait()
+	err = tearDown()
 	if err != nil && !errors.Is(err, context.Canceled) {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
@@ -526,22 +607,35 @@ const (
 // are lazily re-created by openWindow/NoteScope, so nil is the correct zero.
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
-	a.workerOpen = nil
+	a.workerOpen, a.openProc = nil, nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
 	// A gate belongs to the replay that installed it; the CLI installs this
 	// session's after the reset.
 	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
 	a.gatedScopes, a.gatedEndWarned = nil, false
+	// The tests' recorded begins belong to the replay that installed them;
+	// the clock's holder is given back by releaseTestClock, before this.
+	a.testBegins = nil
+	a.testReal = nil
+	// keploy test's pool belongs to the set that staged it.
+	a.testPool = nil
 	a.scopeMu.Unlock()
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+	// First, so a clock that cannot move back fails the session before
+	// anything of the previous one is reset (MockOutgoing).
+	if err := a.releaseTestClock(ctx); err != nil {
+		return nil, fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
+	}
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
 	starts.Default.Reset()
 	ids.Default.Reset()
-	a.resetScopeState()
+	if err := a.resetSession(ctx); err != nil {
+		return nil, err
+	}
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -576,6 +670,13 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	}
 	a.logger.Debug("MockOutgoing function called", zap.Any("options", redactedOpts))
 
+	// A test the previous session left holding the run's clock (its end never
+	// came, or could not move it back) gives it back before the new session
+	// starts; a clock that cannot move back fails the session, which would
+	// otherwise start on it, before anything of the previous one is reset.
+	if err := a.releaseTestClock(ctx); err != nil {
+		return fmt.Errorf("keploy could not move the run's clock back from the previous session's last test: %w", err)
+	}
 	// A new mock-serving session begins here (called once per replay). Clear the
 	// on-miss capture buffer so a reused / long-lived agent process (compose,
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
@@ -583,7 +684,9 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	httpparser.ResetCaptured()
 	starts.Default.Reset()
 	ids.Default.Reset()
-	a.resetScopeState()
+	if err := a.resetSession(ctx); err != nil {
+		return err
+	}
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -620,22 +723,56 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
 	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
+	// The body below adds the proxy's goroutines (start(), whose shutdown
+	// removes the CA) and the hooks' (their unload) to their groups. The
+	// teardown waits on those groups only once the body is over: a stop that
+	// came while it ran found them still empty, returned at once, and left
+	// the work the body added after it to no one, cut short by the exit.
+	bodyDone := make(chan struct{})
+	defer close(bodyDone)
+	// startErr is the proxy's failure to start, which the body reports: the
+	// teardown, which reads it once the body is over, does not report it
+	// again as a failure to stop.
+	var startErr error
 	parentErrGrp.Go(func() error {
 		<-ctx.Done()
 
+		// Each stage of the teardown is a step of its progress, which the
+		// CLI that stopped this agent reads (utils.TeardownStep).
+		utils.TeardownStep()
+		// Cancelled first: what the body is waiting on in the proxy ends.
 		proxyCtxCancel()
+		<-bodyDone
 		err := proxyErrGrp.Wait()
-		if err != nil {
+		switch {
+		case err != nil && startErr != nil:
+			a.logger.Debug("the proxy's group ended with its failed start", zap.Error(err))
+		case err != nil:
 			utils.LogError(a.logger, err, "failed to stop the proxy")
 		}
+		utils.TeardownStep()
 
 		hookCtxCancel()
 		err = hookErrGrp.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to unload the hooks")
 		}
+		utils.TeardownStep()
 		return nil
 	})
+
+	// The start below -- the hooks' load, the proxy's start, its CA install
+	// -- is teardown work while a stop waits for it (bodyDone): it runs on
+	// this goroutine, and a stop that came while it ran is kept from killing
+	// the agent part way only while it makes progress here
+	// (utils.BeginTeardownWork). It ends before bodyDone closes.
+	// Where that progress cannot be seen (utils.TeardownProgressSeen), the
+	// start is not marked so: it would count as progress throughout, and a
+	// start wedged against the hooks' contract would never be killed.
+	if utils.TeardownProgressSeen() {
+		starting := utils.BeginTeardownWork()
+		defer starting()
+	}
 
 	// load hooks if the mode changes ..
 	hookCfg := coreAgent.HookCfg{
@@ -651,7 +788,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to load hooks")
+		if ctx.Err() != nil {
+			a.logger.Debug("the hooks' load ended with the stop", zap.Error(err))
+		} else {
+			utils.LogError(a.logger, err, "failed to load hooks")
+		}
 		return fmt.Errorf("failed to hook into the app: %w", err)
 	}
 
@@ -679,6 +820,9 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.ProxyHook != nil {
 		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
 	}
+	// Under the proven switch, the proxy's listener is marked for the hooks'
+	// count of the connections waiting for it (proxyconns.go).
+	a.markProxyListener()
 
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
@@ -686,7 +830,12 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	})
 
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to start proxy")
+		startErr = err
+		if ctx.Err() != nil {
+			a.logger.Debug("the proxy's start ended with the stop", zap.Error(err))
+		} else {
+			utils.LogError(a.logger, err, "failed to start proxy")
+		}
 		// StartProxy may have spawned proxy goroutines before the
 		// failure point (TCP accept loop, TCP DNS, UDP DNS) — they
 		// stay live until proxyCtx is cancelled. Before this fix
@@ -708,7 +857,47 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 }
 
 func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
-	return a.Proxy.GetMockErrors(ctx)
+	// Under the proven switch a replay's read of its misses waits, as a
+	// test's end does, until every call the application made is in the
+	// proxy's hands and answered (settle_proven.go): the run's last read
+	// included, so a call made after the last test's end is read, never
+	// filed after it. One keploy cannot settle is a read that cannot vouch
+	// for every miss.
+	var settleErr error
+	if provenswitch.On() && a.replaying() {
+		// keploy test reads a test case's misses after its end: what the
+		// listener dropped since is no test's, and is not compared here.
+		_, settleErr = a.settle(ctx, true)
+	}
+	errs, err := a.Proxy.GetMockErrors(ctx)
+	if settleErr != nil && err == nil {
+		err = fmt.Errorf("%w: keploy could not tell that every call reached it: %v", models.ErrUnmatchedCallsUnread, settleErr)
+	}
+	if err != nil && !errors.Is(err, models.ErrUnmatchedCallsUnread) {
+		// A read that failed is answered without its list over HTTP: the
+		// misses the wire charged stay for the read that succeeds. A read
+		// that could not vouch for every miss is answered with what it read,
+		// the charged misses included.
+		return errs, err
+	}
+	// The misses the proven wire charged to a test at its end were drained
+	// from the proxy then; they are still the run's misses.
+	if charged := a.takeChargedMisses(); len(charged) > 0 {
+		errs = append(charged, errs...)
+	}
+	return errs, err
+}
+
+// PIDMapRefusals counts the inserts into the hooks' PID maps the kernel has
+// refused since they loaded, each of them a process whose calls this agent
+// could not intercept (models.PIDMapRefusals). Hooks that do not count them give
+// models.ErrPIDMapRefusalsUnsupported, "unknown".
+func (a *Agent) PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
+	r, ok := a.Hooks.(coreAgent.PIDMapReporter)
+	if !ok {
+		return models.PIDMapRefusals{}, models.ErrPIDMapRefusalsUnsupported
+	}
+	return r.PIDMapRefusals(ctx)
 }
 
 // BeginTestErrorCapture opens a per-test mock-error capture window so the
@@ -722,6 +911,12 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
 		b.BeginTestErrorCapture()
 	}
+	if t := a.realTracker(); t != nil && provenswitch.On() {
+		// A set's first test: what the REAL connections did before it (the
+		// app's start-up) touched no test and is the run's already; its own
+		// uses start here.
+		t.BeginTest()
+	}
 	return nil
 }
 
@@ -731,6 +926,12 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
 	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
 		c.ContinueTestErrorCapture()
+		if t := a.realTracker(); t != nil && provenswitch.On() {
+			// What was not captured while no test case ran is the run's
+			// (design v14 §3.2 as amended for class e); this one's starts
+			// here.
+			t.BeginTest()
+		}
 		return nil
 	}
 	return a.BeginTestErrorCapture(ctx)
@@ -802,6 +1003,20 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+	if provenswitch.On() {
+		// Which recorded container keys are ambiguous is read from the whole
+		// set, before any mock is refused or consumed.
+		var tally containerkey.RecordedTally
+		for _, m := range storage.filtered {
+			tally.Add(m)
+		}
+		for _, m := range storage.unfiltered {
+			tally.Add(m)
+		}
+		containerkey.Default.SetRecorded(&tally)
+		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
+		storage.unfiltered = a.refuseUnfollowable(storage.unfiltered, storage)
+	}
 
 	// Derive Lifetime once per mock before they enter the runtime pool.
 	// Idempotent: DeriveLifetime short-circuits when the Lifetime
@@ -915,6 +1130,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// collecting from the resident slices afterward would silently drop it.
 	var asyncMocks []*models.Mock
 	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
+	// Under the proven switch, which recorded container keys are ambiguous
+	// is read from the whole set (containerkey.RecordedTally), every mock
+	// counted as it is decoded, before any is refused or parked on disk.
+	proven := provenswitch.On()
+	var tally containerkey.RecordedTally
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -929,6 +1149,13 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mock := &m
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(mock)
+		if proven {
+			tally.Add(mock)
+		}
+		if proven && !a.followable(mock) {
+			storage.noteRefused(mock)
+			continue
+		}
 		if wantAsync && mock.IsAsync() {
 			asyncMocks = append(asyncMocks, mock)
 		}
@@ -949,6 +1176,9 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			storage.unfiltered = append(storage.unfiltered, mock)
 		}
 	}
+	if proven {
+		containerkey.Default.SetRecorded(&tally)
+	}
 	if disk != nil {
 		disk.Finalize()
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
@@ -967,6 +1197,56 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		zap.Int("filtered", len(storage.filtered)),
 		zap.Int("unfiltered", len(storage.unfiltered)))
 	return nil
+}
+
+// followable reports whether this keploy can follow the variables a mock
+// declares (models.MockVariables): those of a plain HTTP call. A mock whose
+// variables it cannot follow is never served, under the proven switch: served
+// as recorded, it would answer a call whose variable does not hold. It is
+// named in an error, and the call it was recorded for misses.
+func (a *Agent) followable(m *models.Mock) bool {
+	if m == nil || len(m.Spec.Variables) == 0 {
+		return true
+	}
+	why := ""
+	switch {
+	case m.Kind != models.HTTP:
+		why = "keploy follows variables on HTTP calls only"
+	case m.IsAsync():
+		why = "keploy does not follow variables on an async HTTP call"
+	default:
+		return true
+	}
+	a.logger.Error("keploy cannot follow the variables of a recorded call, so it will not answer that call",
+		zap.String("mock", m.Name), zap.String("kind", string(m.Kind)), zap.String("why", why),
+		zap.String("next_step", "re-record the test with this keploy, or remove the variables block of "+m.Name+" to replay the call as recorded"))
+	return false
+}
+
+// refuseUnfollowable drops the mocks whose variables this keploy cannot follow
+// (followable), noting each in store.
+func (a *Agent) refuseUnfollowable(mocks []*models.Mock, store *ClientMockStorage) []*models.Mock {
+	out := mocks[:0]
+	for _, m := range mocks {
+		if a.followable(m) {
+			out = append(out, m)
+		} else if m != nil {
+			store.noteRefused(m)
+		}
+	}
+	return out
+}
+
+// noteRefused notes that the store refused mock; before the store is
+// published.
+func (s *ClientMockStorage) noteRefused(mock *models.Mock) {
+	if mock == nil || mock.Name == "" {
+		return
+	}
+	if s.refused == nil {
+		s.refused = map[string]bool{}
+	}
+	s.refused[mock.Name] = !mock.IsProtocolPhase()
 }
 
 // maxStreamPresize bounds the slice capacity pre-allocated from a /storemocks
@@ -1096,7 +1376,8 @@ const (
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
-	case params.UseMappingBased && len(params.MockMapping) > 0:
+	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
+		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
 	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
@@ -1184,9 +1465,78 @@ func dedupByName(a, b []*models.Mock) []*models.Mock {
 	return out
 }
 
+// ResetVariables forgets every test variable the replay has bound: a test
+// begins. Under the proven switch the agent's route calls it for every mock
+// filter a keploy test sends (one per test case, before the test case is
+// sent), and BeginScopeAt as a test of keploy mock replay begins.
+func (a *Agent) ResetVariables() {
+	if resetter, ok := a.Proxy.(coreAgent.VariableResetter); ok {
+		resetter.ResetVariables()
+	}
+}
+
+// StartTestVariables begins a test's variables: it forgets what the previous
+// test bound and binds the values the test's own request gave, under one lock.
+func (a *Agent) StartTestVariables(given []models.VariableBinding) error {
+	binder, ok := a.Proxy.(coreAgent.VariableBinder)
+	if !ok {
+		if len(given) == 0 {
+			a.ResetVariables()
+			return nil
+		}
+		return errors.New("this keploy agent's proxy keeps no test variables")
+	}
+	if !binder.StartVariables(given) && len(given) > 0 {
+		return errors.New("this keploy agent holds no mocks to bind the test's variables to")
+	}
+	return nil
+}
+
+// TestVariables returns the test variables the current test has bound, and
+// false when this agent's proxy keeps none.
+func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
+	binder, ok := a.Proxy.(coreAgent.VariableBinder)
+	if !ok {
+		return nil, false
+	}
+	return binder.BoundVariables()
+}
+
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	// keploy test's exact serving, under the proven switch (exact_proven.go).
+	if params.Exact != nil && provenswitch.On() {
+		return a.serveKeployTestExactly(ctx, params)
+	}
+	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params)
+	if err != nil {
+		return err
+	}
 
+	// Atomically update mocks AND the active test window when the proxy
+	// supports the WindowedProxy extension. Otherwise fall back to the
+	// stable SetMocks contract — third-party proxies without window
+	// support keep working in legacy lax mode.
+	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
+			return err
+		}
+	} else {
+		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
+			utils.LogError(a.logger, err, "failed to set mocks on proxy")
+			return err
+		}
+	}
+
+	return nil
+}
+
+// mocksForParams is the pool UpdateMockParams stages for params: the per-test
+// and the session tier, filtered as params ask. It also applies what the
+// staging call carries beside the pool (the startup cutoff, the recorded
+// windows, the stateful cursors' reset), as UpdateMockParams always has.
+func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams) ([]*models.Mock, []*models.Mock, error) {
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
 	// test fires FIRST, so a --test-sets selection, an ignored test or the
@@ -1252,7 +1602,10 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 					"timestamp falls outside the outer test window will be dropped rather than promoted "+
 					"across tests. If your replays start reporting missing mocks after an upgrade, this "+
 					"is likely why. To opt out: set KEPLOY_STRICT_MOCK_WINDOW=0 in the environment, OR "+
-					"test.strictMockWindow: false in keploy.yaml.",
+					"test.strictMockWindow: false in keploy.yaml. A recording whose recorder stated each "+
+					"mock's lifetime (spec.metadata.lifetime) serves each test its own calls in every mode: "+
+					"declare an HTTP call every test may make in keploy.yaml (sessionCalls), or record the "+
+					"test set again.",
 				zap.Bool("viaPerCallFlag", params.StrictMockWindow),
 				zap.Bool("viaEnvOverride", !params.StrictMockWindow && strictEnabled),
 				zap.String("escape_hatch_env", "KEPLOY_STRICT_MOCK_WINDOW=0"),
@@ -1266,7 +1619,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
-		return fmt.Errorf("no mocks stored for client ID")
+		return nil, nil, fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
 
@@ -1317,12 +1670,12 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return err
+		return nil, nil, err
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load the carry-over mocks for this test from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-		return err
+		return nil, nil, err
 	}
 
 	a.logger.Debug("Original mocks before filtering",
@@ -1344,7 +1697,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// MockManager.SetMocksWithWindow enforce strict semantics.
 
 	// Apply filtering based on parameters
-	if params.UseMappingBased && len(params.MockMapping) > 0 {
+	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
 		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
@@ -1422,23 +1775,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 	}
 
-	// Atomically update mocks AND the active test window when the proxy
-	// supports the WindowedProxy extension. Otherwise fall back to the
-	// stable SetMocks contract — third-party proxies without window
-	// support keep working in legacy lax mode.
-	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
-		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
-			return err
-		}
-	} else {
-		if err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
-			utils.LogError(a.logger, err, "failed to set mocks on proxy")
-			return err
-		}
-	}
-
-	return nil
+	return filteredMocks, unfilteredMocks, nil
 }
 
 // ServedMocks reports the mocks served so far this session, keyed by mock name.

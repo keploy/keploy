@@ -28,11 +28,25 @@
 # Against v3.6.71, which read each of these to its end, every case before
 # large-report is killed at the time or memory limit.
 #
+# Every case runs twice: without the proven switch (today's default) and under
+# KEPLOY_PROVEN=1, which the flip makes the default (cases named proven-*).
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Env: RECORD_BIN (the keploy binary under test). E2E_IMAGE overrides the
 # image, which defaults to the runner's own distribution so the binary finds
 # the libc it was built against.
 set -uo pipefail
 
+# This lane's directory: lane_switch.sh.
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
 # shellcheck disable=SC1091
@@ -68,7 +82,7 @@ run() {
   local dir="$WORK/$1" start mem="${3:-1g}"
   start=$(date +%s)
   docker run --rm --network none --memory "$mem" --memory-swap "$mem" \
-    --user "$(id -u):$(id -g)" -e HOME="/work/$1/home" \
+    --user "$(id -u):$(id -g)" -e HOME="/work/$1/home" -e KEPLOY_PROVEN="$PROVEN" \
     -v "$WORK:/work" -w "/work/$1" "$IMAGE" \
     timeout -s KILL "${2:-$KILL_SECONDS}" /work/keploy report --disable-tele >"$dir/out.log" 2>&1
   echo $? >"$dir/exit"
@@ -122,78 +136,86 @@ succeeds() {
   fi
 }
 
-mkcase fifo-config
-mkfifo "$WORK/fifo-config/keploy.yml"
-run fifo-config
-refuses fifo-config "keploy.yml: not a regular file: it is a FIFO"
+# cases <prefix> <KEPLOY_PROVEN value>: every case, each named <prefix><case>.
+cases() {
+  local P="$1" c m
+  PROVEN="$2"
+  mkcase "${P}fifo-config"
+  mkfifo "$WORK/${P}fifo-config/keploy.yml"
+  run "${P}fifo-config"
+  refuses "${P}fifo-config" "keploy.yml: not a regular file: it is a FIFO"
 
-mkcase devzero-config
-ln -s /dev/zero "$WORK/devzero-config/keploy.yml"
-run devzero-config
-refuses devzero-config "keploy.yml: not a regular file: it is a device"
+  mkcase "${P}devzero-config"
+  ln -s /dev/zero "$WORK/${P}devzero-config/keploy.yml"
+  run "${P}devzero-config"
+  refuses "${P}devzero-config" "keploy.yml: not a regular file: it is a device"
 
-mkcase fifo-override
-printf 'path: ""\n' >"$WORK/fifo-override/keploy.yml"
-mkfifo "$WORK/fifo-override/fifo-override.keploy.yml"
-run fifo-override
-refuses fifo-override "failed to merge override config file" "fifo-override.keploy.yml: not a regular file: it is a FIFO"
+  mkcase "${P}fifo-override"
+  printf 'path: ""\n' >"$WORK/${P}fifo-override/keploy.yml"
+  mkfifo "$WORK/${P}fifo-override/${P}fifo-override.keploy.yml"
+  run "${P}fifo-override"
+  refuses "${P}fifo-override" "failed to merge override config file" "${P}fifo-override.keploy.yml: not a regular file: it is a FIFO"
 
-# A report, or the reports directory, keploy cannot read is reported as an
-# error, as any unreadable report is. (`keploy report` then exits 0, as it
-# does for any report it cannot read; that is not what this checks.)
-for c in fifo-report devzero-report fifo-reports-dir; do
-  mkcase "$c"
-  printf 'path: ""\n' >"$WORK/$c/keploy.yml"
-  mkdir -p "$WORK/$c/keploy"
-done
-mkdir -p "$WORK/fifo-report/keploy/reports/test-run-0" "$WORK/devzero-report/keploy/reports/test-run-0"
-mkfifo "$WORK/fifo-report/keploy/reports/test-run-0/test-set-0-report.yaml"
-ln -s /dev/zero "$WORK/devzero-report/keploy/reports/test-run-0/test-set-0-report.yaml"
-mkfifo "$WORK/fifo-reports-dir/keploy/reports"
-for c in fifo-report devzero-report fifo-reports-dir; do
-  run "$c"
-  m="not a regular file"
-  [ "$c" = fifo-reports-dir ] && m="not a directory: it is a FIFO"
-  returned "$c" && says "$c" "$m"
-done
+  # A report, or the reports directory, keploy cannot read is reported as an
+  # error, as any unreadable report is. (`keploy report` then exits 0, as it
+  # does for any report it cannot read; that is not what this checks.)
+  for c in ${P}fifo-report ${P}devzero-report ${P}fifo-reports-dir; do
+    mkcase "$c"
+    printf 'path: ""\n' >"$WORK/$c/keploy.yml"
+    mkdir -p "$WORK/$c/keploy"
+  done
+  mkdir -p "$WORK/${P}fifo-report/keploy/reports/test-run-0" "$WORK/${P}devzero-report/keploy/reports/test-run-0"
+  mkfifo "$WORK/${P}fifo-report/keploy/reports/test-run-0/test-set-0-report.yaml"
+  ln -s /dev/zero "$WORK/${P}devzero-report/keploy/reports/test-run-0/test-set-0-report.yaml"
+  mkfifo "$WORK/${P}fifo-reports-dir/keploy/reports"
+  for c in ${P}fifo-report ${P}devzero-report ${P}fifo-reports-dir; do
+    run "$c"
+    m="not a regular file"
+    [ "$c" = "${P}fifo-reports-dir" ] && m="not a directory: it is a FIFO"
+    returned "$c" && says "$c" "$m"
+  done
 
-mkcase large-report
-printf 'path: ""\n' >"$WORK/large-report/keploy.yml"
-mkdir -p "$WORK/large-report/keploy/reports/test-run-0"
-# 1200 passing tests, each with a 20 KB JSON body that the matcher records as
-# expected and actual too, then a failed one: 75 MB, shaped like a report
-# keploy writes (reportdb's TestGetReportReadsALargeReportKeployWrites reads
-# back one that keploy's own InsertReport wrote).
-# `keploy report` prints the failed test only if it read the report.
-awk 'BEGIN {
-  body = "{\"items\":["
-  for (i = 0; length(body) < 20480; i++) body = body sprintf("%s{\"id\":%d,\"name\":\"item-%d\"}", (i ? "," : ""), i, i)
-  body = body "]}"
-  print "version: api.keploy.io/v1beta1"; print "name: test-set-0-report"; print "status: FAILED"
-  print "success: 1200"; print "failure: 1"; print "total: 1201"; print "tests:"
-  for (t = 0; t <= 1200; t++) {
-    status = t < 1200 ? "PASSED" : "FAILED"; actual = t < 1200 ? body : "{}"
-    print "    - kind: Http"; print "      name: test-set-0"; printf "      status: %s\n", status
-    printf "      test_case_id: test-%d\n", t
-    print "      resp:"; print "        status_code: 200"; printf "        body: \047%s\047\n", actual
-    print "      result:"; print "        body_result:"; printf "            - normal: %s\n", (t < 1200 ? "true" : "false")
-    print "              type: JSON"
-    printf "              expected: \047%s\047\n", body; printf "              actual: \047%s\047\n", actual
-  }
-}' >"$WORK/large-report/keploy/reports/test-run-0/test-set-0-report.yaml"
-# Reading 75 MB takes CI's race-built binary about 25 s and 780 MB (1 to 3 s
-# and 260 MB without -race). This case shows keploy reads what it writes, not
-# that a read is bounded, so it runs with room: 180 s and 2 GiB.
-run large-report 180 2g
-if [ "$(cat "$WORK/large-report/exit")" -ne 0 ] || ! grep -aqF "test-1200" "$WORK/large-report/out.log"; then
-  fail "large-report: keploy did not read a report it writes (exit $(cat "$WORK/large-report/exit"))"
-  tail -n 5 "$WORK/large-report/out.log"
-fi
+  mkcase "${P}large-report"
+  printf 'path: ""\n' >"$WORK/${P}large-report/keploy.yml"
+  mkdir -p "$WORK/${P}large-report/keploy/reports/test-run-0"
+  # 1200 passing tests, each with a 20 KB JSON body that the matcher records as
+  # expected and actual too, then a failed one: 75 MB, shaped like a report
+  # keploy writes (reportdb's TestGetReportReadsALargeReportKeployWrites reads
+  # back one that keploy's own InsertReport wrote).
+  # `keploy report` prints the failed test only if it read the report.
+  awk 'BEGIN {
+    body = "{\"items\":["
+    for (i = 0; length(body) < 20480; i++) body = body sprintf("%s{\"id\":%d,\"name\":\"item-%d\"}", (i ? "," : ""), i, i)
+    body = body "]}"
+    print "version: api.keploy.io/v1beta1"; print "name: test-set-0-report"; print "status: FAILED"
+    print "success: 1200"; print "failure: 1"; print "total: 1201"; print "tests:"
+    for (t = 0; t <= 1200; t++) {
+      status = t < 1200 ? "PASSED" : "FAILED"; actual = t < 1200 ? body : "{}"
+      print "    - kind: Http"; print "      name: test-set-0"; printf "      status: %s\n", status
+      printf "      test_case_id: test-%d\n", t
+      print "      resp:"; print "        status_code: 200"; printf "        body: \047%s\047\n", actual
+      print "      result:"; print "        body_result:"; printf "            - normal: %s\n", (t < 1200 ? "true" : "false")
+      print "              type: JSON"
+      printf "              expected: \047%s\047\n", body; printf "              actual: \047%s\047\n", actual
+    }
+  }' >"$WORK/${P}large-report/keploy/reports/test-run-0/test-set-0-report.yaml"
+  # Reading 75 MB takes CI's race-built binary about 25 s and 780 MB (1 to 3 s
+  # and 260 MB without -race). This case shows keploy reads what it writes, not
+  # that a read is bounded, so it runs with room: 180 s and 2 GiB.
+  run "${P}large-report" 180 2g
+  if [ "$(cat "$WORK/${P}large-report/exit")" -ne 0 ] || ! grep -aqF "test-1200" "$WORK/${P}large-report/out.log"; then
+    fail "${P}large-report: keploy did not read a report it writes (exit $(cat "$WORK/${P}large-report/exit"))"
+    tail -n 5 "$WORK/${P}large-report/out.log"
+  fi
 
-mkcase control
-printf 'path: ""\nappName: demo\n' >"$WORK/control/keploy.yml"
-run control
-succeeds control
+  mkcase "${P}control"
+  printf 'path: ""\nappName: demo\n' >"$WORK/${P}control/keploy.yml"
+  run "${P}control"
+  succeeds "${P}control"
+}
+
+half off && cases "" ""
+half on && cases proven- 1
 
 if [ "$FAIL" -ne 0 ]; then
   echo "config-guard e2e FAILED"

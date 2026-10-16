@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -85,6 +89,107 @@ func preferH2From(ctx context.Context) bool {
 	return v
 }
 
+// TLSLayerHolder is a connection whose close the proxy reads before it
+// happens (pkg/agent/proxy's trackedConn): handed the TLS layer the proxy
+// serves over it, its close reads through that layer what its socket still
+// holds unread. A TLS client's close_notify, which carries no call, and data
+// look alike to the socket's own count of unread bytes -- TLS 1.3 encrypts
+// the alert -- and only the layer tells them apart.
+type TLSLayerHolder interface {
+	HoldTLSLayer(*tls.Conn)
+}
+
+// PassTLSLayer hands tlsConn to the first connection under conn that holds
+// one (TLSLayerHolder), through the wrappers between (their NetConn, or
+// Unwrap), if there is one. A wrapper that exposes neither passes it on
+// itself by holding it (the relay's).
+func PassTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
+	c := conn
+	for i := 0; c != nil && i < 16; i++ { // a wrapper chain, never a cycle
+		if h, ok := c.(TLSLayerHolder); ok {
+			h.HoldTLSLayer(tlsConn)
+			return
+		}
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
+			return
+		}
+	}
+}
+
+// IsClientGiveUp reports whether err, from the proxy's side of a client-side
+// TLS handshake (HandleTLSConnection), is the client leaving without a word:
+// it closed or reset its connection -- its own cancel, a request timeout, its
+// stop -- and made no call keploy failed to capture. Every other failure lost
+// its call: a certificate alert keploy read (Go, Java, rustls), one it could
+// not (OpenSSL sends its TLS 1.3 alert in plaintext, which crypto/tls reads
+// as "bad record MAC"), any other alert, a ClientHello keploy's server
+// refused, a certificate keploy could not make. A client that rejects
+// keploy's certificate by closing without an alert (Node.js) reads as a give
+// up too: nothing on the wire tells the two apart.
+func IsClientGiveUp(err error) bool {
+	// neterr: syscall's ECONNRESET and EPIPE never match on Windows, whose
+	// sockets give Winsock's codes.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) || neterr.IsConnAborted(err)
+}
+
+// HandshakeError is a client-side handshake with keploy's proxy that failed
+// (HandleTLSConnection's error): Err, and whether keploy had produced the
+// certificate it answers the client with, so the client had it, or was being
+// sent it, when the handshake failed.
+type HandshakeError struct {
+	Err             error
+	CertificateSent bool
+}
+
+func (e *HandshakeError) Error() string { return e.Err.Error() }
+
+func (e *HandshakeError) Unwrap() error { return e.Err }
+
+// CertificateSent reports whether err, from HandleTLSConnection, failed once
+// keploy had sent the client its certificate (HandshakeError): a client that
+// hangs up then, without a word, may have rejected it -- Node.js does so --
+// or given up, and nothing on the wire tells the two apart. One that hung up
+// before rejected nothing.
+func CertificateSent(err error) bool {
+	var he *HandshakeError
+	return errors.As(err, &he) && he.CertificateSent
+}
+
+// HandshakeCause is the handshake's own error under a HandshakeError: what
+// a caller that tells errors apart by identity (io.EOF) compares.
+func HandshakeCause(err error) error {
+	var he *HandshakeError
+	if errors.As(err, &he) {
+		return he.Err
+	}
+	return err
+}
+
+// clientHandshakeReportKey carries WithClientHandshakeReport's report.
+type clientHandshakeReportKey struct{}
+
+// WithClientHandshakeReport is ctx carrying report, which HandleTLSConnection
+// calls with its error when a client-side handshake made under ctx fails: an
+// integration that makes its own client handshake (MySQL's, on its client's
+// SSLRequest) is charged so as the proxy charges its own handshakes, without
+// the error having to come back up through the integration.
+func WithClientHandshakeReport(ctx context.Context, report func(error)) context.Context {
+	return context.WithValue(ctx, clientHandshakeReportKey{}, report)
+}
+
+// reportClientHandshake hands err to ctx's report, if it carries one.
+func reportClientHandshake(ctx context.Context, err error) {
+	if report, ok := ctx.Value(clientHandshakeReportKey{}).(func(error)); ok && report != nil {
+		report(err)
+	}
+}
+
 // dstIPCtxKey carries the IP the client dialled into HandleTLSConnection, the
 // same way preferH2CtxKey carries the h2 hint.
 type dstIPCtxKey struct{}
@@ -118,11 +223,13 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	if ca == nil {
 		err := fmt.Errorf("no MITM CA available for this run")
 		utils.LogError(logger, err, "Failed to obtain the signing CA")
+		reportClientHandshake(ctx, err)
 		return nil, false, err
 	}
 	caPrivKey := ca.signer
 	caCertParsed := ca.cert
 
+	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
@@ -132,7 +239,13 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, dstIP)
+					cert, err := certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, dstIP)
+					if err == nil {
+						// crypto/tls sends it next, in the server's
+						// first flight.
+						certSent.Store(true)
+					}
+					return cert, err
 				},
 				ClientAuth: tls.RequestClientCert,
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -151,8 +264,14 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	err := tlsConn.Handshake()
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
-		return nil, false, err
+		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}
+		reportClientHandshake(ctx, herr)
+		return nil, false, herr
 	}
+
+	// The connection the proxy closes with care is handed the layer: its
+	// close reads through it what its socket still holds (TLSLayerHolder).
+	PassTLSLayer(conn, tlsConn)
 
 	// 4. (Optional) Check what kind of connection happened
 	// You can log this to verify if the client actually used mTLS or just standard TLS

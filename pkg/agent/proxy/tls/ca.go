@@ -886,6 +886,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			}
 		}()
 
+		// Recorded before the install, as on Linux below: whatever it leaves
+		// in the ROOT store is removed by this run's teardown however the
+		// install ends (removeWindowsCAByName finds nothing to remove when it
+		// added nothing). A persisted per-user CA is kept across runs (so the
+		// ROOT-store prompt fires at most once); an ephemeral one is removed
+		// at teardown.
+		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
+
 		// Install certificate using certutil
 		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
 			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
@@ -899,10 +907,6 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias); err != nil {
 			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 		}
-
-		// A persisted per-user CA is kept across runs (so the ROOT-store prompt
-		// fires at most once); an ephemeral one is removed at teardown.
-		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
 
 		// Set environment variables for Node.js and Python to use the custom CA
 		if err := SetEnvForPath(logger, tempCertPath); err != nil {
@@ -932,6 +936,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	sweepRunLeftovers(logger, ca.runID)
 
 	certFileName := runCertFileName(ca)
+	// Recorded before the first anchor is written, so that whatever this
+	// install leaves in the trust store -- an anchor, the JDK alias -- is
+	// removed by this run's teardown (TeardownNativeCA) however the install
+	// ends: also when it fails part way, or the stop cuts it short (the stop
+	// cancels ctx, which kills the store's update after the anchors are
+	// written). Recorded only once the update had succeeded, such an install
+	// left its anchor trusted until the next run's sweep.
+	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
 	var finalCAPath string
 	for _, path := range caPaths {
 		caPath := filepath.Join(path, certFileName)
@@ -965,10 +977,6 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
-
-	// Record what we installed so teardown removes exactly this run's anchor and
-	// JDK alias (native CAs are ephemeral, so remove is always true here).
-	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
 
 	// Set Env Vars pointing to the installed cert.
 	//

@@ -208,6 +208,18 @@ type OutgoingOptions struct {
 	// so a field placed where it takes a word of its own grows the Session of
 	// every connection.
 	SkipTLSMITM bool
+	// Learn turns the learn step on (design v14 §7.2, row L; package
+	// matcher/learn): the agent pairs a request no recorded mock answers
+	// exactly with the mock it drifted from and learns what drifted, and a
+	// miss carries its reason. Only record's full round sets it, under the
+	// proven switch: the round that replays the build that was just
+	// recorded. Like SkipTLSMITM it sits in the padding after the TLS
+	// switches.
+	Learn bool `json:"Learn,omitempty"`
+	// LearnPool lets the learn step pair pool mocks too, not only the test's
+	// own: a full record replaces the pool, a partial one never changes it
+	// (design §7.2 step 10, §7.5).
+	LearnPool bool `json:"LearnPool,omitempty"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -245,8 +257,8 @@ type OutgoingOptions struct {
 	DisableMysqlAutoDetect bool
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only the
-	// inference that covers a moved endpoint is turned off. See
-	// Config.DisableMysqlEndpointDrift.
+	// judgement that covers a moved endpoint (by its container or host) is
+	// turned off. See Config.DisableMysqlEndpointDrift.
 	DisableMysqlEndpointDrift bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
@@ -403,6 +415,18 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	MemoryLimit       uint64
 	ConfigPath        string
+	// AppExtraHosts are the app's own host entries, "name:address" (docker
+	// run --add-host, a container's ExtraHosts). The app joins the agent
+	// container's network namespace, where Docker refuses host entries of the
+	// app's own, so the agent container carries them, and the app reads them
+	// from the /etc/hosts it shares with it. A compose service's extra_hosts
+	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
+	AppExtraHosts []string
+	// HostGateway says the daemon resolves the address host-gateway (Docker
+	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
+	// host.docker.internal to it, as Docker Desktop does for every container,
+	// unless the app maps that name itself.
+	HostGateway bool
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have

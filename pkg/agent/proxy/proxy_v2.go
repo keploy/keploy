@@ -224,7 +224,11 @@ func (p *Proxy) recordViaSupervisor(
 	defer stopRecordingStamp()
 
 	relayCfg := relay.Config{
-		Logger: logger,
+		Logger:        logger,
+		OnCaptureLoss: p.losses.Add,
+		// A client-side upgrade's failed handshake is charged as any
+		// client-side handshake with the proxy, not as starttls_failed.
+		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
 		// captured once per connection: the relay calls the returned fn with
 		// no options in hand. With the flag unset this is the historic
@@ -245,7 +249,7 @@ func (p *Proxy) recordViaSupervisor(
 		// that can really have cost a mock. Once the parser's Run has
 		// returned, it also says which chunks it had read (parserReads).
 		OnCarried:            reads.carried,
-		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
 		// A hole in this connection's capture: every test case recorded while

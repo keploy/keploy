@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -535,14 +536,20 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
 		}
+		// explained names the sets a case of which failed or has no verdict,
+		// shown or not: --test-case can leave such a set no case, and its
+		// failure is still a case's, not one no case explains.
+		var explained map[string]bool
 		if len(r.config.Report.TestCaseIDs) > 0 {
+			explained = make(map[string]bool, len(reports))
 			for name, rep := range reports {
+				explained[name] = slices.ContainsFunc(rep.Tests, redCase)
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
 				rep.Total = len(rep.Tests)
 				reports[name] = rep
 			}
 		}
-		return r.generateJUnit(reports)
+		return r.generateJUnit(reports, explained)
 	}
 
 	// --format json (NDJSON, one object per test result). Deliberately placed
@@ -1208,9 +1215,15 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 					sb.WriteString(fmt.Sprintf("      %s: live %q, absent in recording\n", d.Path, d.Actual))
 				case models.DiffKindTypeChanged:
 					sb.WriteString(fmt.Sprintf("      %s: type changed (recorded %s, live %s)\n", d.Path, d.Expected, d.Actual))
+				case models.DiffKindVariable:
+					sb.WriteString(fmt.Sprintf("      %s: the test's variable is %q, the call sent %q\n", d.Path, d.Expected, d.Actual))
 				default:
 					sb.WriteString(fmt.Sprintf("      %s: recorded %q, live %q\n", d.Path, d.Expected, d.Actual))
 				}
+			}
+			if uc.MatchPhase == models.MatchPhaseVariable && uc.Diff != "" {
+				// It names the variable and where the test bound it.
+				sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
 			}
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
@@ -1420,13 +1433,17 @@ func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiff
 // renderTemplateFailures writes one line per template variable place a test
 // case failed on: where, the placeholder, and why. A placeholder refused when
 // the set loaded is said under its own heading: the test case was never sent,
-// so no answer was compared.
+// so no answer was compared. So is a test set refused whole, which is no
+// placeholder's refusal (wholeSetRefusal).
 func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
-	var failed, refused []models.TemplateFailure
+	var failed, refused, set []models.TemplateFailure
 	for _, f := range fs {
-		if f.Refused {
+		switch {
+		case wholeSetRefusal(f):
+			set = append(set, f)
+		case f.Refused:
 			refused = append(refused, f)
-		} else {
+		default:
 			failed = append(failed, f)
 		}
 	}
@@ -1436,6 +1453,7 @@ func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
 	}{
 		{"=== TEMPLATE VARIABLES THE ANSWER DID NOT SATISFY ===", failed},
 		{"=== TEMPLATE PLACEHOLDERS REFUSED WHEN THE TEST SET LOADED (THE TEST CASE WAS NOT SENT) ===", refused},
+		{"=== TEST SET REFUSED WHEN IT LOADED (THE TEST CASE WAS NOT SENT) ===", set},
 	} {
 		if len(s.fs) == 0 {
 			continue

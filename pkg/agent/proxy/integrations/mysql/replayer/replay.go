@@ -3,6 +3,8 @@ package replayer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -59,19 +61,27 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 		zap.Int("data_mocks", dataMocks),
 		zap.Bool("has_mysql_mocks", hasMySQLMocks))
 
+	// A client that opens a MySQL connection waits to be greeted, and with no
+	// session (handshake) mock there is nothing to greet it with: the proxy
+	// closes the connection unanswered. That is a miss, returned so the proxy
+	// queues it before it closes the connection. These two returned nil, and a
+	// test whose application was refused its database passed with no miss.
+	dst := destinationOf(dstCfg)
 	if !hasMySQLMocks {
 		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil
+		return newConnectionMiss(dst, stepGreeting, "no MySQL session mock is loaded, so there is no recorded server greeting", models.MatchPhaseNoMocks, 0)
 	}
 
 	if len(configMocks) == 0 {
 		utils.LogError(logger, nil, "no mysql config mocks found for handshake")
-		return nil
+		return newConnectionMiss(dst, stepGreeting,
+			fmt.Sprintf("none of the %d MySQL mocks in the session pool is a handshake (config) mock, so there is no recorded server greeting", totalMySQLMocks),
+			models.MatchPhaseNoMocks, 0)
 	}
 
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
-		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
+		defer pUtil.RecoverInto(logger, clientConn, nil, errCh)
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{
@@ -93,8 +103,24 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts, dstCfg)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate initial handshake")
+			if errors.Is(err, models.ErrNoMockMatched) {
+				// A miss is not a failure to simulate the handshake: it is
+				// logged where it is found, and the proxy reports it with
+				// its mismatch report.
+				logger.Debug("the initial handshake missed", zap.Error(err))
+			} else {
+				utils.LogError(logger, err, "failed to simulate initial handshake")
+			}
 			errCh <- err
+			return
+		}
+
+		if res.refused {
+			// The recorded refusal of the login was served: the server
+			// closes a refused connection, and the proxy closes this one
+			// once Replay returns.
+			logger.Debug("served the recorded refusal of the login; ending the connection")
+			errCh <- nil
 			return
 		}
 
@@ -110,7 +136,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 		logger.Debug("Initial handshake completed successfully")
 
 		// Simulate the client-server interaction (command phase)
-		err = simulateCommandPhase(ctx, logger, clientConn, mockDb, decodeCtx, opts)
+		err = simulateCommandPhase(ctx, logger, clientConn, dst, mockDb, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to simulate command phase")

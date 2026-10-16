@@ -68,6 +68,7 @@ type sessionStep struct {
 // They are made again in the order the kinds were first made in, except
 // readiness, which releases the app and so goes last.
 const (
+	stepRealDeps     = "real-deps"
 	stepTestSetHook  = "before-test-set-compose"
 	stepMockOutgoing = "mock-outgoing"
 	stepStoreMocks   = "store-mocks"
@@ -75,8 +76,16 @@ const (
 	stepScopeTable   = "scope-table"
 	stepSetTable     = "set-table"
 	stepScopeGate    = "scope-gate"
+	stepTestBegins   = "test-begins"
 	stepAgentReady   = "agent-ready"
 )
+
+// stepExactStage is a set's staging under exact serving (KEPLOY_PROVEN,
+// models.ExactServing.Stage): it stages the set's mocks once, and each test
+// case's filter after it only says what is served. It is a kind of its own,
+// so the latest of those filters does not replace it, and a restarted agent
+// is staged before it is told what to serve.
+const stepExactStage = "exact-stage"
 
 // staleStreamGrace is how long setting a restarted agent up waits for the
 // streams to see their old agent gone (its connection closing) before it cuts
@@ -386,6 +395,8 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
+	// A docker-mode agent that restarted holds no container list.
+	a.pushContainers(ctx)
 	return a.session().reapply(ctx, a.logger)
 }
 
@@ -424,7 +435,23 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.MockMapping = slices.Clone(params.MockMapping)
+	params.Variables = slices.Clone(params.Variables)
+	if params.Exact != nil {
+		ex := *params.Exact
+		ex.Pool = slices.Clone(ex.Pool)
+		ex.Owned = slices.Clone(ex.Owned)
+		params.Exact = &ex
+	}
 	return params
+}
+
+// mockParamsStep is the step kind a mock filter is recorded under: a set's
+// staging under exact serving is its own (stepExactStage).
+func mockParamsStep(params models.MockFilterParams) string {
+	if params.Exact != nil && params.Exact.Stage {
+		return stepExactStage
+	}
+	return stepMockParams
 }
 
 // resumeStream is called when a stream's connection ended. Once the session

@@ -69,6 +69,16 @@ type composeInstr struct {
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
+	// table and pool are the per-test table and the pool slices the last
+	// proven table push sent.
+	table, pool map[string][]string
+	// begins is what the last push of the tests' recorded begins sent, and
+	// beginsErr what it fails with.
+	begins    map[string]time.Time
+	beginsErr error
+	// windows is what the agent answers the windows read with.
+	windows []models.ScopeWindow
+
 	consumedMocks []models.MockState
 	consumedErr   error
 	mockErrors    []models.UnmatchedCall
@@ -81,6 +91,9 @@ type composeInstr struct {
 	// agentFailure is what the agent's container says about how it stopped
 	// (ComposeAgentFailureReader); nil: it outlived the app.
 	agentFailure func() error
+	// windowsErr is what reading the per-test windows (ScopeReader) fails
+	// with; nil: the run had no per-test windows.
+	windowsErr error
 
 	mu         sync.Mutex
 	events     []string
@@ -107,7 +120,7 @@ func newInstr(t *testing.T, lifetime agentLifetime, runBlocks bool, runResult mo
 		f.mu.Unlock()
 		if !f.agentUp() {
 			// In reality nothing is listening at all and the probe gets a
-			// connection refusal; both are "not healthy" to isAgentHealthy,
+			// connection refusal; both are "not healthy" to agentHealthAnswer,
 			// and a served 503 avoids racing a listener open and closed.
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -193,6 +206,27 @@ func (f *composeInstr) released() bool {
 		}
 	}
 	return false
+}
+
+func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	return f.windows, f.windowsErr
+}
+
+// PushScopeTable takes the per-test table (ScopePusher).
+func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
+
+// PushProvenTable takes the per-test table and the pool slices
+// (ProvenTablePusher), and keeps the slices.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string) error {
+	f.table, f.pool = table, pool
+	return nil
+}
+
+// PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
+// fails with beginsErr.
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string) error {
+	f.begins = begins
+	return f.beginsErr
 }
 
 func (f *composeInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
@@ -553,7 +587,7 @@ func TestComposeAgentDyingMidRunIsKeploysFailure(t *testing.T) {
 			shortAgentBudget(t)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 137})
 			instr.runUntilReady = true
-			died := errors.New("the keploy agent stopped while the test command was running: the keploy-agent container keploy-v3-x exited with code 137")
+			died := errors.New("the keploy agent stopped while the app was running: the keploy-agent container keploy-v3-x exited with code 137")
 			instr.agentFailure = func() error { return died }
 			cfg := instrConfig(instr, utils.DockerCompose, "docker compose up")
 			cfg.Mock.OnMiss = string(models.MissFail)

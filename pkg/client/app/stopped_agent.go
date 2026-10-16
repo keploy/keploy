@@ -93,6 +93,64 @@ func (s StoppedAgent) AgentFailed() bool {
 	return s.App.ExitCode == 128+int(syscall.SIGKILL) || s.App.ExitCode == 128+int(syscall.SIGTERM)
 }
 
+// AgentDiedAfterReady is AgentFailed for a run keploy saw its agent ready in
+// (keploy record's, once its recording is under way): the agent crashed
+// (agentCrashed) and so stopped the project -- before compose ever started
+// the app (its container never started: no exit of its own), or under the
+// app, taking it with it (the app killed by a signal, 137 or 143, not ended
+// with a code of its own or for running out of its own memory). appExit is
+// the app's exit as keploy got it, which decides when docker could not say
+// how the app's container ended: unlike AgentFailed, an unknown app is never
+// read as one that never started.
+//
+// Only a crash counts, not compose's own stop of the agent (0, or 143 / 137
+// from its TERM and its KILL after the grace period): compose stops the agent
+// when the user stops the project, and when another of the project's
+// services fails, and neither is the agent's failure. The price: an agent
+// something else SIGKILLed after it was ready leaves the app's own end to
+// decide.
+func (s StoppedAgent) AgentDiedAfterReady(appExit int) bool {
+	if !s.agentCrashed() {
+		return false
+	}
+	if s.AppNeverStarted() {
+		return true
+	}
+	if s.App != nil && !s.App.Running {
+		// The app's own end, as docker reports it, decides: killed with the
+		// agent, or a code of its own, after which the agent crashed.
+		if s.App.OOMKilled {
+			return false
+		}
+		appExit = s.App.ExitCode
+	}
+	return appExit == 128+int(syscall.SIGKILL) || appExit == 128+int(syscall.SIGTERM)
+}
+
+// AppNeverStarted reports whether docker says the app's container never
+// started: its state is still "created", compose having provisioned it and
+// stopped the project before starting it (it starts the app only once the
+// agent's healthcheck passes). An app docker could not report is not one.
+func (s StoppedAgent) AppNeverStarted() bool {
+	return s.App != nil && s.App.Status == "created"
+}
+
+// agentCrashed reports whether the agent's container ended on its own rather
+// than being stopped by compose: an exit other than 0, compose's TERM (143) or
+// its KILL (137) -- the rule isTransientComposeDependencyFailure reads
+// compose's stop of the agent by -- plus a kill for running out of memory,
+// which that rule (made for a retry) leaves out.
+func (s StoppedAgent) agentCrashed() bool {
+	a := s.Agent
+	if a == nil || a.Running || a.ExitCode == 0 {
+		return false
+	}
+	if a.OOMKilled {
+		return true
+	}
+	return a.ExitCode != 128+int(syscall.SIGTERM) && a.ExitCode != 128+int(syscall.SIGKILL)
+}
+
 // MockOutcome is what the agent served and missed in a mock replay, decoded
 // from the account it left as compose stopped it -- or why there is none. An
 // account keploy did not get is never an empty one: read as "served nothing,
@@ -119,8 +177,8 @@ type stoppedAgent struct {
 }
 
 // StoppedAgent returns what keploy read from the stopped keploy-agent compose
-// service, and false when nothing was read: not a compose mock run, or a run
-// that was interrupted.
+// service, and false when nothing was read: not a compose mock run or compose
+// recording, or a run that was interrupted.
 func (a *App) StoppedAgent() (StoppedAgent, bool) {
 	a.stopped.mu.Lock()
 	defer a.stopped.mu.Unlock()
@@ -130,13 +188,15 @@ func (a *App) StoppedAgent() (StoppedAgent, bool) {
 	return *a.stopped.read, true
 }
 
-// readStoppedAgent reads the agent's end of a compose mock run out of its
-// stopped container: how it ended beside how the app did, and -- for a replay
-// -- what it served and missed. It must run after `docker compose up` has
-// returned and before ComposeDown removes the container: run() defers it after
-// the teardown, so it runs first.
+// readStoppedAgent reads the agent's end of a compose mock run, or of a
+// compose recording, out of its stopped container: how it ended beside how
+// the app did (which says whether the agent is what stopped the project:
+// AgentFailed), and -- for a mock replay -- what it served and missed. It
+// must run after `docker compose up` has returned and before ComposeDown
+// removes the container: run() defers it after the teardown, so it runs
+// first.
 func (a *App) readStoppedAgent(ctx context.Context) {
-	if a.kind != utils.DockerCompose || !a.opts.MockMode || a.keployContainer == "" {
+	if a.kind != utils.DockerCompose || a.keployContainer == "" || !(a.opts.MockMode || a.opts.Mode == models.MODE_RECORD) {
 		return
 	}
 	if ctx.Err() != nil {
@@ -152,7 +212,7 @@ func (a *App) readStoppedAgent(ctx context.Context) {
 	if a.container != "" {
 		read.App, _ = a.containerState(readCtx, a.container)
 	}
-	if a.opts.Mode == models.MODE_TEST {
+	if a.opts.MockMode && a.opts.Mode == models.MODE_TEST {
 		if agentErr != nil {
 			// Docker answers "not found" for a container it does not know
 			// exactly as for a file the container lacks, and that is not

@@ -40,7 +40,14 @@ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 func main() {
 	setVersion()
 	ctx := utils.NewCtx()
+	// An agent's teardown records its steps, and its long stages as work in
+	// progress, through to the MarkDetachDone below: the CLI that stops it may
+	// take one that stops taking them for wedged (utils.DeclareTeardownSteps).
+	utils.DeclareTeardownSteps()
 	start(ctx)
+	// An agent has detached everything by now: what is left is the exit
+	// (utils.MarkDetachDone).
+	utils.MarkDetachDone()
 	os.Exit(utils.ErrCode)
 }
 

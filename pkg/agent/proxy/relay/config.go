@@ -9,6 +9,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -47,7 +49,7 @@ const (
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
 	// receives every chunk. And it is time the process could RUN, not wall
-	// time (see stallMeter): a starved process's parser cannot read either.
+	// time (utils/stall): a starved process's parser cannot read either.
 	// It only elapses when the parser frees nothing at all for this long,
 	// which is taken as "gone" — the whole remaining queue is then abandoned
 	// at once and reported, rather than the wait being re-entered per chunk.
@@ -114,6 +116,22 @@ type Config struct {
 	// logger is substituted.
 	Logger *zap.Logger
 
+	// OnCaptureLoss, when set, is told of each call the relay could not
+	// capture: today a TLS upgrade (STARTTLS, Postgres SSLRequest) it could
+	// not make, after which the connection is not parsed. kind and what are
+	// as for models.CaptureLoss. Nil is safe.
+	OnCaptureLoss func(kind models.CaptureLossKind, what string)
+
+	// OnClientHandshakeFailed, when set, is handed the error of a
+	// client-side TLS upgrade that failed in its handshake (TLSUpgradeFn
+	// with isClient=false), in place of the STARTTLS loss OnCaptureLoss is
+	// told of: it is a client-side handshake with keploy's proxy like any
+	// other, which the proxy tells apart -- a client that hung up, one that
+	// abandoned it once keploy's certificate was out, one that rejected
+	// the certificate -- rather than an upgrade keploy could not make. Not
+	// called once ctx is done. Nil keeps the STARTTLS loss.
+	OnClientHandshakeFailed func(ctx context.Context, err error)
+
 	// PerConnCap is the soft cap on parser-owned buffered bytes.
 	// When the number of bytes currently sitting in the tee channel
 	// (i.e. read from the socket but not yet consumed by the parser)
@@ -148,9 +166,9 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
-	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
-	// process's own clocks. Tests set it to drive the window.
-	stallClock stallClock
+	// stallClock measures ConsumerStallGrace (stall.Meter); nil is the
+	// process's own runnable clock. Tests set it to drive the window.
+	stallClock stall.Clock
 	// beforeTee, when set, runs on a forwarder after it has written a chunk
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.

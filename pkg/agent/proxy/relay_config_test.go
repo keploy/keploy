@@ -159,6 +159,59 @@ func TestRelayConfig_TLSUpgradeFnVerifiesOnTheSameFlag(t *testing.T) {
 	}
 }
 
+// A client-side upgrade's failed handshake is charged as any client-side
+// handshake with the proxy (relayClientHandshake), to this connection's
+// destination, never as starttls_failed: unbound, every client that cancels a
+// STARTTLS or Postgres SSLRequest handshake fails its test and every later
+// one. The behaviour is TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake
+// and the relay's TestAFailedClientSideUpgradeGoesToTheClientHandshakeHook.
+func TestRelayConfig_AClientUpgradesHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
+	t.Parallel()
+
+	fields, _ := relayConfigLiteral(t)
+	if got, want := fields["OnClientHandshakeFailed"], "p.relayClientHandshake(dstConn)"; got != want {
+		t.Fatalf("OnClientHandshakeFailed is %q, want %q", got, want)
+	}
+}
+
+// Every parser TLS upgrader the record path builds (MySQL's, Postgres's)
+// charges its client's handshake as the proxy's own are (clientTLSHandler),
+// to the connection's destination: given pTls.HandleTLSConnection bare, a
+// rejection of keploy's certificate there was charged nothing. The behaviour
+// is TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn.
+func TestEveryRecordUpgraderChargesItsClientsHandshake(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy.go: %v", err)
+	}
+	var handlers []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewConnTLSUpgrader" && len(call.Args) == 4 {
+			var buf bytes.Buffer
+			if err := printer.Fprint(&buf, fset, call.Args[3]); err != nil {
+				t.Fatal(err)
+			}
+			handlers = append(handlers, buf.String())
+		}
+		return true
+	})
+	if len(handlers) != 2 {
+		t.Fatalf("%d NewConnTLSUpgrader calls in proxy.go, want the two record paths' (MySQL's probe branch, the parsers'): %v", len(handlers), handlers)
+	}
+	for _, h := range handlers {
+		if h != "p.clientTLSHandler(dstAddr)" {
+			t.Fatalf("a record upgrader terminates its client's TLS with %q, want p.clientTLSHandler(dstAddr)", h)
+		}
+	}
+}
+
 // The half-close grace is an operator knob whose whole point is being
 // reachable without a rebuild, so the one line binding it into the relay
 // is worth pinning: delete it and the field silently reverts to the

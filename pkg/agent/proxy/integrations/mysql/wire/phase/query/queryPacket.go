@@ -47,8 +47,6 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	}
 	pos += n
 
-	packet.ParameterCount = int(paramCount)
-
 	if pos >= len(data) {
 		return nil, fmt.Errorf("malformed query packet: missing parameter_set_count")
 	}
@@ -59,6 +57,16 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 		return nil, fmt.Errorf("malformed query packet: expected parameter_set_count of 1, got %d", paramSetCount)
 	}
 	pos += n
+
+	// A count the packet cannot hold is malformed: every query attribute
+	// takes at least its 2-byte type (new_params_bind_flag is always 1). Compared
+	// unconverted: near MaxInt64, (count+7)/8 below overflowed negative and
+	// the slice panicked, past MaxInt64 the count converted negative, and a
+	// count of 8 per byte left allocated parameters far past the packet.
+	if paramCount > uint64((len(data)-pos)/2) {
+		return nil, fmt.Errorf("malformed query packet: parameter_count %d is more than the packet can hold", paramCount)
+	}
+	packet.ParameterCount = int(paramCount)
 
 	if paramCount > 0 {
 
@@ -102,10 +110,12 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 			// Handle length-encoded values (only for types that require variable-length data)
 			switch mysql.FieldType(param.Type) {
 			case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
-				// Read the length of the parameter value
+				// Read the length of the parameter value. Compared
+				// unconverted: a length past MaxInt64 turned negative as an
+				// int, passed the check, and the slice panicked.
 				length, _, n := utils.ReadLengthEncodedInteger(data[pos:])
 				pos += n
-				if pos+int(length) > len(data) {
+				if length > uint64(len(data)-pos) {
 					return nil, io.ErrUnexpectedEOF
 				}
 

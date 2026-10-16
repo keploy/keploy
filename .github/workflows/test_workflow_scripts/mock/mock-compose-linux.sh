@@ -10,6 +10,19 @@
 # compose path works at all; the ORDER of the agent calls is pinned by
 # TestComposeOrdering in pkg/service/mock, which can see it directly.
 #
+# Without the proven switch: today's default, which the flip deletes with the
+# switch. Under KEPLOY_PROVEN=1, which the flip makes the default, this
+# release runs a mock record's test command natively only: keploy cannot
+# tell, inside a container, which process runs the tests; and this build
+# refuses every replay under the switch, as it does not judge each test.
+# Step 0 checks both are refused before anything starts: no compose project,
+# no agent.
+# The runner's harness speaks scope protocol v1 (keploy_v1.py); without the
+# switch the agent has no claim route, and it speaks the scope API as it was.
+#
+# MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
+# a job of its own.
+#
 # Env: RECORD_BIN / REPLAY_BIN (the keploy binaries under test), set by the
 # calling workflow from .github/actions/download-binary's `path` output. The
 # agent image must be loaded as ghcr.io/keploy/keploy:v3-dev —
@@ -21,34 +34,51 @@ set -uo pipefail
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
+# This lane's directory: the shared harness (keploy_v1.py).
+# shellcheck source-path=SCRIPTDIR
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-keploy}"
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
+# A lane that could not load it would skip both halves and pass: fail instead.
+# shellcheck source=lane_switch.sh
+if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
+  echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside this lane, in $MOCK_DIR"; exit 1; }
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {
-  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml docker-compose.linger.yml; do
+  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml docker-compose.linger.yml docker-compose.reclinger.yml; do
     [ -f "$f" ] && sudo docker compose -f "$f" down --remove-orphans >/dev/null 2>&1
   done
+  # After the project is down, so a dependency still starting cannot write its
+  # ready file again for the next case.
+  rm -f release dep-ready ./*.done
 }
 trap cleanup EXIT
 
 cat > dep.py <<'PY'
-import json, http.server
+import json, http.server, os
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         b = json.dumps({"path": self.path, "price": 42}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
-http.server.HTTPServer(("0.0.0.0", 9411), H).serve_forever()
+srv = http.server.HTTPServer(("0.0.0.0", 9411), H)  # bound and listening here
+# Say so to the runner, which waits for it (the shared /w volume).
+open("/w/dep-ready", "w").close()
+srv.serve_forever()
 PY
 
 # The wrapped "test runner": makes its dependency calls and exits, which is
-# what ends a mock recording. It retries so the first call does not race the
-# dependency service's own startup.
+# what ends a mock recording. It waits for the dependency service to say it is
+# listening (dep-ready), so its first call does not race that service's own
+# startup.
 cat > runner.py <<'PY'
 import json, os, sys, time, urllib.request
 DEP = os.environ.get("DEP_URL", "http://dep:9411")
@@ -66,56 +96,67 @@ def get(path):
 # the agent's network namespace, at the address keploy exports for exactly
 # this kind of caller.
 import urllib.error
+# Under `keploy record` (RECORD_APP=1) the runner is just the recorded app:
+# keploy exports no mock agent address for it, so it skips the mock
+# control-plane checks and scopes.
+RECORD_APP = os.environ.get("RECORD_APP") == "1"
 AGENT = os.environ.get("KEPLOY_MOCK_AGENT")
-if not AGENT:
+if not AGENT and not RECORD_APP:
     print("FAILED: keploy did not export KEPLOY_MOCK_AGENT", flush=True)
     sys.exit(1)
-try:
-    urllib.request.urlopen(urllib.request.Request(
-        AGENT + "/agent/scope/begin", data=json.dumps({"name": "unauthenticated-probe"}).encode(),
-        headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
-    print("FAILED: the agent served /agent/scope/begin to a caller with no token", flush=True)
-    sys.exit(1)
-except urllib.error.HTTPError as e:
-    if e.code != 401:
-        print("FAILED: expected 401 for an unauthenticated scope call, got", e.code, flush=True)
+if not RECORD_APP:
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            AGENT + "/agent/scope/begin", data=json.dumps({"name": "unauthenticated-probe"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"), timeout=5).read()
+        print("FAILED: the agent served /agent/scope/begin to a caller with no token", flush=True)
         sys.exit(1)
-print("AGENT REFUSED AN UNAUTHENTICATED CALLER", flush=True)
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            print("FAILED: expected 401 for an unauthenticated scope call, got", e.code, flush=True)
+            sys.exit(1)
+    print("AGENT REFUSED AN UNAUTHENTICATED CALLER", flush=True)
 
 # keploy rewrites the app's depends_on to condition: service_started, so the
-# dependency may not be listening yet. Retry on /warmup, which the assertions
-# below do NOT count, so a retry can never inflate the recorded mock count.
-for attempt in range(30):
-    try:
-        get("/warmup")
-        break
-    except Exception as e:
-        if attempt == 29:
-            print("FAILED to reach the dependency:", type(e).__name__, e, flush=True)
-            sys.exit(1)
-        time.sleep(1)
+# dependency may not be listening yet. The first call is /warmup, which the
+# assertions below do NOT count.
+# When the dependency is a service in the project (DEP_IN_PROJECT=1), wait,
+# with no count or clock, until it says it is listening (dep.py creates
+# /w/dep-ready once bound): one that never comes up exits, and compose aborts
+# the project over it, which stops this runner. Then -- and at once when keploy's
+# mocks answer it, staged before compose releases this runner -- one try,
+# final: a /warmup that fails then is keploy's proxy or mock failing.
+if os.environ.get("DEP_IN_PROJECT") == "1":
+    while not os.path.exists("/w/dep-ready"):
+        time.sleep(0.2)
+try:
+    get("/warmup")
+except Exception as e:
+    print("FAILED to reach the dependency:", type(e).__name__, e, flush=True)
+    sys.exit(1)
 
 # The priced calls are one test, scoped the way a harness scopes it, with its
 # verdict sent at the end: under compose the agent is stopped with the runner,
 # so what the replay knows about the test comes from the account it leaves.
-# A failed scope call is ignored, so a step that takes the agent away runs
-# exactly as it would without one.
-TOKEN = os.environ.get("KEPLOY_MOCK_AGENT_TOKEN")
-def scope(path, body):
-    h = {"Content-Type": "application/json"}
-    if TOKEN:
-        h["Authorization"] = "Bearer " + TOKEN
-    try:
-        urllib.request.urlopen(urllib.request.Request(AGENT + path, data=json.dumps(body).encode(), headers=h, method="POST"), timeout=5).read()
-    except Exception as e:
-        print("scope call failed:", type(e).__name__, flush=True)
-
-scope("/agent/scope/begin", {"name": "compose_test"})
+# Any answer the harness cannot trust fails the runner.
+# No pid on the scope API without the switch: this process's pid is its
+# container's, and the agent (--pid=host) scopes a worker by the host pid it
+# sees on each connection, so a worker scope keyed on it would never apply
+# and the runner would be served the whole pool. Its test narrows the one
+# pid-less scope instead.
+# The recorded app under `keploy record` (RECORD_APP) has no run to claim and
+# no test to scope.
+import keploy_v1 as k
+if not RECORD_APP:
+    print("CLAIM=" + k.claim(".", os.getcwd()), flush=True)
+    assert k.begin("compose_test", "runner.py", pid=None) is None, "keploy told the runner to skip compose_test"
 for p in ["/price/aapl", "/price/msft", "/price/goog"]:
     body = get(p)
     assert body["path"] == p, body
     print("ok", p, body, flush=True)
-scope("/agent/scope/end", {"name": "compose_test", "outcome": "passed"})
+if not RECORD_APP:
+    reason = k.end("compose_test", "passed", file="runner.py", pid=None)
+    assert reason is None, "keploy failed compose_test: %s" % reason
 # A call the recording does not have, made only when asked. The runner does not
 # depend on its answer: it is there for keploy to report as missed.
 if os.environ.get("UNRECORDED"):
@@ -125,8 +166,11 @@ if os.environ.get("UNRECORDED"):
         print("unrecorded call failed as expected:", type(e).__name__, flush=True)
 print("RUNNER PASSED 3", flush=True)
 # Stay up after the calls when asked, for a step that needs the runner alive
-# while something else happens to the project.
-time.sleep(int(os.environ.get("LINGER", "0")))
+# while something else happens to the project: until that step ends it, or
+# releases it (the file LINGER_UNTIL names appears) when it could not act.
+UNTIL = os.environ.get("LINGER_UNTIL")
+while UNTIL and not os.path.exists(UNTIL):
+    time.sleep(0.2)
 sys.exit(EXIT)
 PY
 
@@ -147,7 +191,7 @@ YML
   if [ -n "${1:-}" ]; then echo "      - $1"; fi
 }
 
-{ echo "services:"; runner_service; cat <<'YML'
+{ echo "services:"; runner_service DEP_IN_PROJECT=1; cat <<'YML'
     depends_on: [dep]
   dep:
     image: python:3.11-slim
@@ -169,7 +213,20 @@ YML
 { echo "services:"; runner_service UNRECORDED=/price/tsla; } > docker-compose.miss.yml
 
 # Same again, but the runner stays up after its calls.
-{ echo "services:"; runner_service LINGER=60; } > docker-compose.linger.yml
+{ echo "services:"; runner_service LINGER_UNTIL=/w/release; } > docker-compose.linger.yml
+
+# The recorded project (with its dependency), the runner staying up after its
+# calls: what `keploy record` records, while something happens to the project.
+{ echo "services:"; runner_service LINGER_UNTIL=/w/release; echo "      - RECORD_APP=1"; echo "      - DEP_IN_PROJECT=1"; cat <<'YML'
+    depends_on: [dep]
+  dep:
+    image: python:3.11-slim
+    container_name: mockc-dep
+    working_dir: /w
+    volumes: [".:/w"]
+    command: python dep.py
+YML
+} > docker-compose.reclinger.yml
 
 # The runner proves the agent refused it (AGENT REFUSED ...). The agent and the
 # CLI each say so too when the token did not arrive, so a run is failed on
@@ -188,6 +245,33 @@ priced_mocks() {
   echo "${n:-0}"
 }
 
+# no_project_started LOG WHAT: keploy refused before compose or its agent ran.
+no_project_started() {
+  if [ -n "$(sudo docker ps -aq --filter name=mockc-runner)" ] || [ -n "$(sudo docker ps -aq --filter name=keploy-v3)" ]; then
+    echo "FAIL: $2 started a container before refusing:"; sudo docker ps -a; FAIL=1
+  fi
+  grep -q "RUNNER PASSED 3\|AGENT REFUSED" "$1" && { echo "FAIL: $2 ran the runner"; FAIL=1; }
+}
+
+if half on; then
+echo "== 0. under the proven switch, a compose record and replay are refused before anything starts =="
+for verb in record replay; do
+  BIN=$RECORD_BIN
+  [ "$verb" = replay ] && BIN=$REPLAY_BIN
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$BIN" mock "$verb" \
+    -c "docker compose up" --container-name mockc-runner --name e2e-proven --disable-tele > "proven-$verb.log" 2>&1
+  RC=$?
+  echo "$verb under the switch exit=$RC"
+  [ "$RC" -eq 1 ] || { echo "FAIL: under the switch a compose $verb should be refused with exit 1, got $RC"; tail -20 "proven-$verb.log"; FAIL=1; }
+  WHY="keploy mock record with KEPLOY_PROVEN runs the test command natively in this release"
+  [ "$verb" = replay ] && WHY="keploy mock replay under KEPLOY_PROVEN needs a keploy build that judges each test (keploy enterprise)"
+  grep -qF "$WHY" "proven-$verb.log" || { echo "FAIL: the refused compose $verb does not say: $WHY"; FAIL=1; }
+  no_project_started "proven-$verb.log" "a compose $verb under the switch"
+done
+cleanup
+fi
+
+if half off; then
 echo "== 1. record a compose project =="
 sudo -E env PATH="$PATH" "$RECORD_BIN" mock record \
   -c "docker compose up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rec.log
@@ -260,23 +344,37 @@ echo "failing-runner replay exit=$RC"
 [ "$RC" -eq 7 ] || { echo "FAIL: keploy must mirror the runner's exit code 7, got $RC"; FAIL=1; }
 cleanup
 
+# when_runner_passed <log> <done> <cmd...>: a case's background helper. Once
+# the runner has made its calls (said in <log>), runs <cmd...>, which ends the
+# lingering runner; if <cmd...> could not act, it releases the runner
+# (./release) instead, so the case ends and fails on its own assertions. If
+# the case's keploy run ended first (<done> exists), it does nothing. Every
+# wait is on an event: no clock decides anything.
+when_runner_passed() {
+  local log=$1 done=$2
+  shift 2
+  until grep -q "RUNNER PASSED 3" "$log" 2>/dev/null || [ -e "$done" ]; do sleep 0.5; done
+  [ -e "$done" ] && return 0
+  "$@" || touch release
+}
+
 echo "== 5. an agent that dies mid-run is keploy's failure, not the runner's =="
 # The agent is a service in the project: when it dies, compose aborts the
 # project and stops the runner, whose exit is then compose's stop (137/143),
 # not its verdict. keploy must say its agent died and exit with its own 1.
-( for _ in $(seq 1 240); do grep -q "RUNNER PASSED 3" agentdies.log 2>/dev/null && break; sleep 0.5; done
-  agent=$(sudo docker ps --format '{{.Names}}' | grep '^keploy-v3-' | head -1)
+( when_runner_passed agentdies.log agentdies.done sh -c 'agent=$(sudo docker ps --format "{{.Names}}" | grep "^keploy-v3-" | head -1)
   echo "killing the agent container ${agent:-<none found>}"
-  [ -n "$agent" ] && sudo docker kill "$agent" >/dev/null ) &
+  [ -n "$agent" ] && sudo docker kill "$agent" >/dev/null' ) &
 KILLER=$!
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.linger.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee agentdies.log
 RC=${PIPESTATUS[0]}
+touch agentdies.done
 wait "$KILLER"
 echo "replay whose agent was killed exit=$RC"
 grep -q "RUNNER PASSED 3" agentdies.log || { echo "FAIL: the runner never got as far as the kill"; FAIL=1; }
 [ "$RC" -eq 1 ] || { echo "FAIL: keploy must exit its own 1 when its agent dies, got $RC (compose stopping the runner, mirrored as the runner's own exit)"; FAIL=1; }
-grep -q "the keploy agent stopped while the test command was running" agentdies.log || { echo "FAIL: keploy did not say its agent died"; FAIL=1; }
+grep -q "the keploy agent stopped while the app was running" agentdies.log || { echo "FAIL: keploy did not say its agent died"; FAIL=1; }
 sudo grep -q '^failedBy: keploy' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not blame keploy:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives the runner an exit of its own:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 # Killed, the agent left no account of what it served: what it served and
@@ -284,6 +382,46 @@ sudo grep -q '^runnerExitCode: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: 
 # saw -- --strict passes it, and it is metered as zero.
 grep -q 'mock replay summary.*"missed": "unknown"' agentdies.log || { echo "FAIL: the replay summary gives a killed agent's outcome as known"; FAIL=1; }
 sudo grep -q '^missed: -1' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt gives a killed agent's misses as known:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
+
+cleanup
+
+echo "== 6. keploy record: an agent that crashes after it was ready fails the recording (#4772) =="
+# keploy record records the project's runner. A Go crash of the agent
+# (SIGQUIT: a goroutine dump, exit 2) is keploy's failure, whatever compose
+# then does to the runner: exit 1, naming the agent -- not 0, and not the
+# runner's 143 or 137.
+( when_runner_passed recdies.log recdies.done sh -c 'agent=$(sudo docker ps --format "{{.Names}}" | grep "^keploy-v3-" | head -1)
+  echo "crashing the agent container ${agent:-<none found>} (SIGQUIT)"
+  [ -n "$agent" ] && sudo docker kill -s QUIT "$agent" >/dev/null' ) &
+KILLER=$!
+sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+  -c "docker compose -f docker-compose.reclinger.yml up" --container-name mockc-runner --disable-tele 2>&1 | tee recdies.log
+RC=${PIPESTATUS[0]}
+touch recdies.done
+wait "$KILLER"
+echo "record whose agent crashed exit=$RC"
+grep -q "RUNNER PASSED 3" recdies.log || { echo "FAIL: the runner never got as far as the crash"; FAIL=1; }
+[ "$RC" -eq 1 ] || { echo "FAIL: keploy record must exit its own 1 when its agent crashes after it was ready, got $RC"; FAIL=1; }
+grep -q "the compose project stopped after the keploy-agent was ready" recdies.log || { echo "FAIL: keploy record did not say its agent stopped the project"; FAIL=1; }
+grep -q "the keploy agent stopped while the app was running" recdies.log || { echo "FAIL: keploy record did not name the agent's crash"; FAIL=1; }
+cleanup
+
+echo "== 7. keploy record: the app stopped (docker stop) ends the recording normally =="
+# A SIGTERM to the recorded app is a stop, not a death: exit 0, and compose's
+# own stop of the agent with it is not the agent's failure.
+( when_runner_passed recstop.log recstop.done sh -c 'echo "stopping the runner (docker stop)"; sudo docker stop mockc-runner >/dev/null' ) &
+STOPPER=$!
+sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+  -c "docker compose -f docker-compose.reclinger.yml up" --container-name mockc-runner --disable-tele 2>&1 | tee recstop.log
+RC=${PIPESTATUS[0]}
+touch recstop.done
+wait "$STOPPER"
+echo "record whose app was stopped exit=$RC"
+grep -q "RUNNER PASSED 3" recstop.log || { echo "FAIL: the runner never got as far as the stop"; FAIL=1; }
+[ "$RC" -eq 0 ] || { echo "FAIL: keploy record must end normally (exit 0) when its app is stopped by SIGTERM, got $RC"; FAIL=1; }
+grep -q '"app_exit_code": 143' recstop.log || { echo "FAIL: keploy record did not take the app's SIGTERM for a stop"; FAIL=1; }
+grep -q "failed to record" recstop.log && { echo "FAIL: keploy record says a stopped recording failed"; FAIL=1; }
+fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK COMPOSE E2E: PASSED"; else echo "MOCK COMPOSE E2E: FAILED"; fi
 exit "$FAIL"

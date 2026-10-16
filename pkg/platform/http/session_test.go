@@ -303,6 +303,8 @@ type restartingAgent struct {
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
+	// order is every call that met the agent up, as "METHOD path".
+	order []string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -321,6 +323,7 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.conns[req.URL.Path]++
 		n := r.conns[req.URL.Path]
+		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
 		}
@@ -351,6 +354,11 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(models.TestMockMapping{TestName: fmt.Sprintf("mapping-%d", n)})
 		case "/agent/pcap/traffic", "/agent/pcap/keylog":
 			_, _ = fmt.Fprintf(w, "%s#%d\n", req.URL.Path, n)
+		case "/agent/containers": // a docker-mode agent: it takes container lists
+			_, _ = io.Copy(io.Discard, req.Body)
+			w.WriteHeader(http.StatusNoContent)
+		case "/agent/mock":
+			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
 			t.Errorf("unexpected request %s", req.URL.Path)
 		}
@@ -673,5 +681,37 @@ func TestStreamCaughtUpOnlyToTheAgentItReached(t *testing.T) {
 	st.caughtUp(conn)
 	if !restarts(t, st) {
 		t.Fatal("a stream on a replaced agent did not reconnect to the newest")
+	}
+}
+
+// Under exact serving a set's staging is a step of its own: the filters that
+// open a test case or serve the pool after it replace each other, never the
+// staging, and a restarted agent is staged before it is told what to serve.
+func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
+	stage := models.MockFilterParams{Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-9"}}}
+	open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}
+	pool := models.MockFilterParams{Exact: &models.ExactServing{}}
+	if mockParamsStep(stage) != stepExactStage || mockParamsStep(open) != stepMockParams || mockParamsStep(pool) != stepMockParams || mockParamsStep(models.MockFilterParams{}) != stepMockParams {
+		t.Fatal("a filter is recorded under the wrong step")
+	}
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepStoreMocks, noteStep(&got, &mu, "store"))
+	s.record(mockParamsStep(stage), noteStep(&got, &mu, "stage"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-1"))
+	s.record(mockParamsStep(pool), noteStep(&got, &mu, "pool"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-2"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "store stage open test-2"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+	// The copy recorded shares nothing with the call's exact serving.
+	c := copyMockParams(stage)
+	stage.Exact.Pool[0] = "changed"
+	if c.Exact.Pool[0] != "mock-9" {
+		t.Fatalf("the copy changed with the original: %+v", c.Exact)
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // CorrelationsFromMock detects request→response value echoes on an HTTP mock: a
@@ -146,10 +147,15 @@ func hasMixedEntropy(s string) bool {
 // per-match recompute or a shared-pointer mutation race. No-op when the mock
 // already carries correlations (a learn pass or disk already set them) or has
 // none to find. Detection is static (reads only the recording), so this is the
-// natural place to run it. Unconditional by design: it only populates an
-// in-memory field; the replay gate controls whether honor acts on it.
+// natural place to run it. It only populates an in-memory field; the replay
+// gate controls whether honor acts on it.
+//
+// Under the proven switch nothing is detected: what a value looks like
+// decides nothing there. The learn step writes an echo as a variable of its
+// call instead (models.MockVariable.Echo), from what changed between the
+// recording and its replay.
 func MaterializeCorrelations(m *models.Mock) {
-	if m == nil || len(m.Spec.Correlations) > 0 {
+	if m == nil || len(m.Spec.Correlations) > 0 || provenswitch.On() {
 		return
 	}
 	if c := CorrelationsFromMock(m); len(c) > 0 {

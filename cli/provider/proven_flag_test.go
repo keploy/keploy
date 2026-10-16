@@ -2,13 +2,17 @@ package provider
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/log"
 )
 
 // runAgentFlags parses an agent argv the way `keploy agent` does and returns
@@ -108,5 +112,140 @@ func TestValidateFlagsRefusesAnUnreadableProvenValue(t *testing.T) {
 	c, cmd := reportCmd(t, cfg)
 	if err := c.ValidateFlags(context.Background(), cmd); err != nil && strings.Contains(err.Error(), provenswitch.Env) {
 		t.Fatalf("KEPLOY_PROVEN=1 was refused: %v", err)
+	}
+}
+
+// pinCaseEnv names, in the child process TestAgentSaysItsSwitchIsOnOnlyWhenPinnedOn
+// starts for each case, the case that child runs.
+const pinCaseEnv = "KEPLOY_TEST_PROVEN_PIN_CASE"
+
+// The agent says its switch is on, at Debug, exactly when it pinned it on: the
+// line is the agent's own record, in its log, that it got --proven, which the
+// mock_mismatch_streaming lane greps for. Driven through the real pin
+// (provenswitch.Pin) and the real logger the agent rebuilds for itself. A pin
+// lasts for the rest of its process by design, and nothing may undo it, so
+// each case runs in a process of its own: this test starts this test binary
+// again for it, and the pin ends with that process.
+func TestAgentSaysItsSwitchIsOnOnlyWhenPinnedOn(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		args []string
+		want bool
+	}{
+		{"--proven", "", []string{"--" + provenswitch.AgentFlag}, true},
+		{"no flag, KEPLOY_PROVEN=1 in the agent's environment", "1", nil, false},
+		{"no flag", "", nil, false},
+	}
+	if name := os.Getenv(pinCaseEnv); name != "" {
+		for _, tc := range cases {
+			if tc.name == name {
+				agentSaysItsSwitchIsOn(t, tc.args, tc.want)
+				return
+			}
+		}
+		t.Fatalf("no case named %q", name)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			child := exec.Command(os.Args[0], "-test.run=^TestAgentSaysItsSwitchIsOnOnlyWhenPinnedOn$", "-test.count=1", "-test.v")
+			// The last value of a variable in Env is the one the child gets.
+			child.Env = append(os.Environ(), pinCaseEnv+"="+tc.name, provenswitch.Env+"="+tc.env)
+			out, err := child.CombinedOutput()
+			if err != nil {
+				t.Fatalf("the agent's case failed in its own process: %v\n%s", err, out)
+			}
+			// A child that ran no test at all also exits 0.
+			if !strings.Contains(string(out), "--- PASS: TestAgentSaysItsSwitchIsOnOnlyWhenPinnedOn") {
+				t.Fatalf("the agent's case did not run in its own process:\n%s", out)
+			}
+		})
+	}
+}
+
+// agentSaysItsSwitchIsOn runs the agent's flag handling on args with the real
+// pin, and checks that the agent said its switch is on exactly when want, and
+// that its switch is on exactly then. It pins this process's switch for good.
+func agentSaysItsSwitchIsOn(t *testing.T, args []string, want bool) {
+	t.Helper()
+	const line = "the proven model's staging switch is on in this agent"
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Cleanup(log.TestOnlyResetSink)
+	cfg := config.New()
+	cmd, logger := newAgentCmdForTest(t, cfg)
+	pinProvenSwitch = provenswitch.Pin // the real pin; newAgentCmdForTest restores its seam
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("the agent refused %q: %v", args, err)
+	}
+	c := NewCmdConfigurator(logger, cfg)
+	if err := c.PreProcessFlags(cmd); err != nil {
+		t.Fatalf("PreProcessFlags: %v", err)
+	}
+	cfg.Debug = true
+	out := captureStdout(t, func() {
+		if err := c.ValidateFlags(context.Background(), cmd); err != nil {
+			t.Errorf("ValidateFlags: %v", err)
+		}
+		_ = logger.Sync()
+	})
+	if got := strings.Contains(out, line); got != want {
+		t.Fatalf("the agent said its switch is on: %v, want %v (pinned on: %v)\n%s", got, want, provenswitch.On(), out)
+	}
+	if provenswitch.On() != want {
+		t.Fatalf("the agent's switch is on: %v, want %v", provenswitch.On(), want)
+	}
+}
+
+// A native agent is told its client's Docker endpoint (sudo drops
+// DOCKER_HOST), through a hidden flag, and resolves container keys there.
+func TestAgentDockerHostFlagSetsTheEndpoint(t *testing.T) {
+	var got []string
+	prev := setDockerHost
+	setDockerHost = func(h string) { got = append(got, h) }
+	t.Cleanup(func() { setDockerHost = prev })
+
+	runAgentFlags(t, "--"+containerkey.AgentFlag+"=unix:///run/user/1000/docker.sock")
+	if len(got) != 1 || got[0] != "unix:///run/user/1000/docker.sock" {
+		t.Fatalf("--%s set the endpoint %q; want it once", containerkey.AgentFlag, got)
+	}
+	got = nil
+	runAgentFlags(t)
+	if len(got) != 0 {
+		t.Fatalf("without the flag the endpoint was set to %q", got)
+	}
+
+	viper.Reset()
+	cmd, _ := newAgentCmdForTest(t, config.New())
+	if f := cmd.Flags().Lookup(containerkey.AgentFlag); f == nil || !f.Hidden {
+		t.Fatalf("`keploy agent` has no hidden --%s flag: %+v", containerkey.AgentFlag, f)
+	}
+}
+
+// An agent in keploy's container has no Docker socket, so under the switch it
+// names container destinations from the list its keploy CLI pushes.
+func TestDockerModeAgentTakesPushedContainers(t *testing.T) {
+	calls := 0
+	prev := usePushedContainers
+	usePushedContainers = func() { calls++ }
+	t.Cleanup(func() { usePushedContainers = prev })
+
+	// runAgentFlags does not pin the real switch, so the agent's argv
+	// carries --proven as its launcher passes it, and the switch is on in
+	// this process's environment too.
+	t.Setenv(provenswitch.Env, "1")
+	runAgentFlags(t, "--"+provenswitch.AgentFlag, "--is-docker")
+	if calls != 1 {
+		t.Fatalf("a docker-mode agent took pushed containers %d times, want once", calls)
+	}
+	runAgentFlags(t, "--"+provenswitch.AgentFlag)
+	if calls != 1 {
+		t.Fatal("a native agent took pushed containers")
+	}
+	// Without the switch nothing is touched.
+	t.Setenv(provenswitch.Env, "")
+	runAgentFlags(t, "--is-docker")
+	if calls != 1 {
+		t.Fatal("a docker-mode agent without the switch touched container keys")
 	}
 }

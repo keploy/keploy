@@ -10,7 +10,10 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +36,9 @@ import (
 //	                          with hitMu as that leaf)
 //	sigMu                    (window-change signal; a LEAF — nothing is
 //	                          taken under it, and it may be taken under any)
+//	swapMu  →  exact.outside.mu  →  treesMu  →  TreeDb.mu
+//	                         (prepareOutside reads the staged trees under the
+//	                          staging lock; nothing takes swapMu under it)
 //	swapMu  →  treesMu, carry.mu
 //	                         (fileCarryOver, under SetMocksWithWindow;
 //	                          carry.mu is a LEAF, also taken bare by
@@ -51,6 +57,12 @@ import (
 // the atomic variants above.
 
 type MockManager struct {
+	// servedObserver, when set, is told of every mock a parser is served
+	// (consumed or reused), before the claim takes it out of the pool and
+	// outside the manager's own locks: under the proven switch, the learn
+	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
+	servedObserver atomic.Pointer[func(*models.Mock)]
+
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
 	unfiltered *TreeDb
@@ -112,6 +124,17 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+	// servedCount counts, per mock name, every time the mock answered a
+	// request this session, reset with consumedPersistent. A mock that may
+	// answer more than once keeps its first-use timestamp and its usage in
+	// consumedPersistent, so only a count tells that it answered again.
+	servedCount map[string]uint64
+	// scopeConsumed names the per-test mocks served while a test of keploy
+	// mock replay begun without a worker pid was open (SetScopeMocks), in any
+	// way: consumed out of its per-test tier, or used where it stays. The
+	// staging that ends such a test leaves them out, so a test's recording
+	// answers no call after its test ended. Reset with consumedPersistent.
+	scopeConsumed map[string]struct{}
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -119,6 +142,32 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+	// kept are the per-test recordings an exact match kept for its test's
+	// byte-identical repeats (integrations.RepeatKeeper), by key (a worker's
+	// view prefixes its scope). Guarded by cursorMu, and dropped with the
+	// per-test cursors at every staging.
+	kept map[string]struct{}
+	// usedUp are the recordings a worker's test consumed, held for the test
+	// instead of deleted, so a run of the same test again is served them
+	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
+	// cursorMu, and dropped with the per-test cursors at every staging.
+	usedUp map[string]struct{}
+
+	// spent are the per-test recordings of stateful dependencies a worker's
+	// test kept for its repeats, by name, once that test is over (Spend):
+	// Spent hides them from every reader but a later scope of the same test
+	// (scopedMockDb.Spent). Reset with the replay session.
+	spentMu sync.RWMutex
+	spent   map[string]struct{}
+
+	// vars holds the test variables this replay has bound (package
+	// variables): reset as each test case of keploy test and each test of
+	// keploy mock replay begins. Read only under the proven switch.
+	vars variables.Table
+
+	// exact is exact serving, under the proven switch (exact.go): when on,
+	// it decides what every read shows and which consume succeeds.
+	exact exactState
 
 	// Optimized lookup maps
 	statelessFiltered   map[models.Kind]map[string][]*models.Mock
@@ -137,6 +186,19 @@ type MockManager struct {
 	windowMu    sync.RWMutex
 	windowStart time.Time
 	windowEnd   time.Time
+	// scopeOpen is a test of keploy mock replay that its harness began
+	// without a worker pid, while it runs (SetScopeMocks): a test window with
+	// no recorded-time bounds, since such a test is served the mocks its
+	// mapping names rather than the ones recorded in a span of time. It makes
+	// the window active and the set's first test fired, and leaves
+	// windowStart/windowEnd zero. Every window staging (SetMocksWithWindow,
+	// SetMocksWithWindowThreeTier, SetScopeMocks) sets it, with the window,
+	// after the trees: true only for SetScopeMocks opening a test;
+	// SetCurrentTestWindow clears it with the window it sets; SetFilteredMocks
+	// and SetUnFilteredMocks leave it. Guarded by windowMu; the stagings write
+	// it under swapMu, so WindowSnapshot reads it with testFiredThisSet
+	// tear-free.
+	scopeOpen bool
 
 	// firstWindowStart caches the earliest windowStart observed across
 	// all SetMocksWithWindow calls for this manager's lifetime. It's
@@ -198,7 +260,19 @@ type MockManager struct {
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
 	recordedWindows atomic.Pointer[models.WindowSchedule]
-	windowsSeeded   *models.WindowSchedule
+	// testWindows is the last set's recorded test windows as seeded, kept
+	// whether or not the release rule uses them: where a recorded mock falls
+	// among them (InRecordedTestWindow).
+	testWindows   atomic.Pointer[models.WindowSchedule]
+	windowsSeeded *models.WindowSchedule
+
+	// statedKinds are the kinds of which a mock staged since the current
+	// set's boundary states its lifetime (models.Mock.StatesLifetime): the
+	// set's recording serves each of their per-test mocks to its own test
+	// only (StatesLifetimes). A set's first staging hands over its whole
+	// recording; a later one only adds. Replaced, never mutated, under
+	// swapMu.
+	statedKinds atomic.Pointer[map[models.Kind]bool]
 
 	// windowSig is closed, and replaced by a fresh channel, every time the
 	// published test window changes (SetMocksWithWindow, SetCurrentTestWindow),
@@ -374,6 +448,8 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		revByKind:           make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
 		consumedPersistent:  make(map[string]models.MockState),
+		servedCount:         make(map[string]uint64),
+		scopeConsumed:       make(map[string]struct{}),
 		connectionTrees:     make(map[string]*TreeDb),
 		connectionLastTs:    make(map[string]time.Time),
 		sweeperStop:         make(chan struct{}),
@@ -470,6 +546,9 @@ func (m *MockManager) IsClosed() bool {
 // references to the cleared trees still observe valid (empty) trees
 // rather than panicking.
 func (m *MockManager) ResetForReplaySession() {
+	m.spentMu.Lock()
+	m.spent = nil
+	m.spentMu.Unlock()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
 	m.connectionLastTs = make(map[string]time.Time)
@@ -484,6 +563,15 @@ func (m *MockManager) ResetForReplaySession() {
 		return true
 	})
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
+	// Exact serving belongs to one replay session. One that served exactly
+	// goes on serving, until the agent serves the next session, only the
+	// protocol-phase mocks of what is staged: no data-plane mock of the
+	// previous session answers an application kept alive across them.
+	m.exact.fired.Store(false)
+	m.exact.last.Store(nil)
+	if m.exact.view.Load() != nil {
+		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
+	}
 
 	// The never-drained per-name consumption history belongs to ONE test set.
 	//
@@ -532,6 +620,12 @@ func (m *MockManager) ResetForReplaySession() {
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
+	}
+	if m.servedCount != nil {
+		m.servedCount = make(map[string]uint64)
+	}
+	if m.scopeConsumed != nil {
+		m.scopeConsumed = make(map[string]struct{})
 	}
 	m.consumedMu.Unlock()
 
@@ -598,6 +692,17 @@ func (m *MockManager) runIdleSweeper() {
 const connectionSweepInterval = 1 * time.Minute
 
 func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
+	filtered, unfiltered = m.statelessMocks(kind, key)
+	// Under exact serving a mock a parser evicted is gone, as from every
+	// other read: until the next begin or end, or for a data-plane recording
+	// consumed outside every test, until the next staging.
+	if v := m.exactView(); v != nil {
+		filtered, unfiltered = v.unspent(filtered), v.unspent(unfiltered)
+	}
+	return filtered, unfiltered
+}
+
+func (m *MockManager) statelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
 		key = strings.ToLower(dns.Fqdn(key))
 	}
@@ -688,6 +793,9 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.perTest("", results), nil
+	}
 	return results, nil
 }
 
@@ -708,9 +816,43 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 	m.windowMu.Lock()
 	m.windowStart = start
 	m.windowEnd = end
+	m.scopeOpen = false
 	m.windowMu.Unlock()
 	atomic.StoreUint64(&m.droppedOutOfWindow, 0)
 	m.signalWindowChange()
+}
+
+// InTestWindow reports whether a mock recorded at t was recorded inside the
+// window of the test the replay runs now (integrations.TestWindows).
+func (m *MockManager) InTestWindow(t time.Time) bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	if m.windowStart.IsZero() || m.windowEnd.IsZero() || t.IsZero() {
+		return false
+	}
+	return !t.Before(m.windowStart) && !t.After(m.windowEnd)
+}
+
+// InRecordedTestWindow reports whether a mock recorded at t was recorded
+// inside the window of some recorded test of the set (SeedRecordedWindows);
+// known is false when the replay seeded none (integrations.TestWindows).
+func (m *MockManager) InRecordedTestWindow(t time.Time) (inside, known bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || t.IsZero() {
+		return false, false
+	}
+	return s.Contains(t), true
+}
+
+// SameRecordedTestWindow reports whether a and b were recorded inside one
+// recorded test's window; known is false when the replay seeded none.
+func (m *MockManager) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 || a.IsZero() || b.IsZero() {
+		return false, false
+	}
+	i := s.IndexOf(a)
+	return i >= 0 && i == s.IndexOf(b), true
 }
 
 // IsTestWindowActive reports whether a non-zero test window is currently
@@ -724,10 +866,21 @@ func (m *MockManager) SetCurrentTestWindow(start, end time.Time) {
 // Concurrency: acquires windowMu for read only. A racy observation is
 // tolerable — callers that need strict window/pool atomicity go
 // through GetPerTestMocksInWindow (which snapshots both under swapMu).
+//
+// A test of keploy mock replay begun without a worker pid (SetScopeMocks) is
+// an active window too, one with no recorded-time bounds.
 func (m *MockManager) IsTestWindowActive() bool {
+	if v := m.exactView(); v != nil {
+		return v.test != ""
+	}
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
-	return !m.windowStart.IsZero() && !m.windowEnd.IsZero()
+	return m.windowActiveLocked()
+}
+
+// windowActiveLocked is IsTestWindowActive with windowMu held.
+func (m *MockManager) windowActiveLocked() bool {
+	return m.scopeOpen || (!m.windowStart.IsZero() && !m.windowEnd.IsZero())
 }
 
 // GetFilteredMocksInWindow returns non-config filtered mocks whose recorded
@@ -786,6 +939,10 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		return true
 	})
 
+	// Under exact serving the test's mapping decides, not a recorded time.
+	if v := m.exactView(); v != nil {
+		return v.perTest("", all), nil
+	}
 	if start.IsZero() || end.IsZero() {
 		return all, nil
 	}
@@ -881,7 +1038,94 @@ func (m *MockManager) SetMocksWithWindow(filtered, unfiltered []*models.Mock, st
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&filtered, &unfiltered)
-	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end)
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, start, end, false)
+}
+
+// SetScopeMocks stages the pool of keploy mock replay, with the proven switch
+// off, for a test its harness began (open) or ended (!open) without a worker
+// pid. Such a test is served the mocks its mapping names, not the ones
+// recorded in a span of time, so it has no recorded-time window to stage.
+//
+// open: filtered is the test's whole per-test pool and goes into the per-test
+// tier as it is, with no window containment and no startup-init routing;
+// unfiltered is the session tier; the startup tier is emptied. The test window
+// is open (IsTestWindowActive, and HasFirstTestFired with it) until the next
+// staging, with no time bounds: CurrentTestWindow stays zero, so nothing that
+// reads time bounds (GetFilteredMocksInWindow, carry-over, matchers comparing
+// recorded times) changes. Tier-aware parsers route the test's calls to the
+// per-test tier and report a miss as one inside a test.
+//
+// !open: the pool between tests, staged exactly as a models.BaseTime staging
+// stages it (everything in the startup tier), which closes the window, less
+// every per-test mock served while a test was open (scopeConsumed): a test's
+// recording answers no call after its test ended. Between tests is routed as
+// before any test, as it was before tests opened windows, and what is served
+// there is served from the startup tier, re-armed by each staging as always.
+// A begin stages a test's own mocks afresh, so a test run again is served its
+// whole recording.
+//
+// Like a models.BaseTime staging, each call starts a new staging epoch. A
+// reader that takes swapMu (WindowSnapshot, GetPerTestMocksInWindow) sees the
+// trees and the window of one staging; the others see each change as it
+// lands, the trees before the window, as with any staging.
+func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bool) {
+	defer m.signalWindowChange()
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	if !open {
+		served := m.scopeServed()
+		filtered, unfiltered = withoutScopeServed(filtered, served), withoutScopeServed(unfiltered, served)
+		ownForStaging(&filtered, &unfiltered)
+		m.setMocksWithWindowLocked(filtered, unfiltered, nil, models.BaseTime, time.Now(), false)
+		return
+	}
+	ownForStaging(&filtered, &unfiltered)
+	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
+	// the zero-window staging below leaves alone.
+	m.stagingEpoch.Add(1)
+	m.carry.reset()
+	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
+	// A zero window is no time window: the per-test tier takes filtered as
+	// it is, the startup tier is rebuilt empty, and the published window
+	// stays zero, published with the open scope.
+	m.setMocksWithWindowLocked(filtered, unfiltered, nil, time.Time{}, time.Time{}, true)
+}
+
+// scopeIsOpen reports whether a test begun without a worker pid is open
+// (SetScopeMocks).
+func (m *MockManager) scopeIsOpen() bool {
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.scopeOpen
+}
+
+// scopeServed is a copy of scopeConsumed: the per-test mocks served while a
+// test begun without a worker pid was open.
+func (m *MockManager) scopeServed() map[string]struct{} {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]struct{}, len(m.scopeConsumed))
+	for name := range m.scopeConsumed {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+// withoutScopeServed is mocks less the per-test mocks in served.
+func withoutScopeServed(mocks []*models.Mock, served map[string]struct{}) []*models.Mock {
+	if len(served) == 0 {
+		return mocks
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, mk := range mocks {
+		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest {
+			if _, ok := served[mk.Name]; ok {
+				continue
+			}
+		}
+		out = append(out, mk)
+	}
+	return out
 }
 
 // mockOwner settles which objects a staging call may stamp.
@@ -954,7 +1198,13 @@ func (o mockOwner) own(in []*models.Mock) []*models.Mock {
 // explicitStartup is SetMocksWithWindowThreeTier's startup slice: it joins
 // the startup tier this call builds, and is stamped with the rest of the
 // staging, before any tier is published.
-func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time) {
+//
+// scope opens a test with no time bounds (SetScopeMocks); it is published
+// with the window, and every other staging closes one.
+func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitStartup []*models.Mock, start, end time.Time, scope bool) {
+	// Every staging starts the per-test stateful cursors over: a test's own
+	// recordings of a request advance their cursor within that test alone.
+	m.resetPerTestCursors()
 	// Track the earliest window-start we've ever seen on this manager.
 	// Used below to distinguish startup-init mocks (recorded before
 	// any test fired) from stale previous-test mocks. Once set, only
@@ -1030,6 +1280,8 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
 			m.windowMu.Unlock()
+			// The previous set's recording is not this one's.
+			m.statedKinds.Store(nil)
 		}
 		// Wave-3 H3 fix: include BOTH filtered (per-test) and unfiltered
 		// (session + connection) mocks in the startup pool during initial
@@ -1063,6 +1315,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			startupInit = append(startupInit, mk)
 		}
 	}
+	m.noteStatedLifetimes(filtered, unfiltered, explicitStartup)
 
 	// Pre-filter per-test mocks by the outer test window. Zero start or
 	// zero end means "no window" and we preserve the legacy behaviour
@@ -1389,12 +1642,18 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// SetMocksWithWindow call — the first real test — overwrites them
 	// with real timestamps, at which point IsTestWindowActive becomes
 	// true and the dispatcher routes to PerTest as intended.
+	//
+	// A scope is closed by every staging but the one that opens it, BaseTime
+	// staging included: that staging moves the pool to the startup tier, so a
+	// test window left open over it would route the test's calls to an empty
+	// per-test tier.
+	m.windowMu.Lock()
 	if !isInitialStaging {
-		m.windowMu.Lock()
 		m.windowStart = start
 		m.windowEnd = end
-		m.windowMu.Unlock()
 	}
+	m.scopeOpen = scope
+	m.windowMu.Unlock()
 	// Counter reflects pre-filtering drops for THIS test; legacy
 	// match-time filtering in GetFilteredMocksInWindow will add zero
 	// now that the tree is pre-filtered, which keeps the semantic
@@ -1422,6 +1681,9 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.reusable("", results, m.treeValues(m.startupTree(), "")), nil
+	}
 	return results, nil
 }
 
@@ -1460,7 +1722,7 @@ func (m *MockManager) SetMocksWithWindowThreeTier(filtered, unfiltered, startup 
 	// mocks the caller partitioned that the heuristic can't derive on its
 	// own. The slice is stamped, filed and indexed for counting with the
 	// rest of the staging, before any tier is published.
-	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end)
+	m.setMocksWithWindowLocked(filtered, unfiltered, startup, start, end, false)
 }
 
 // GetSessionMocks returns the UNION of startup-tier and session-tier
@@ -1497,6 +1759,13 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 	session, err := m.GetSessionScopedMocks()
 	if err != nil {
 		return nil, err
+	}
+	// Under exact serving the open test's unanswered mocks lead the union:
+	// it is every mock a parser that reads nothing else may serve.
+	if v := m.exactView(); v != nil {
+		if owned := v.unanswered(""); len(owned) > 0 {
+			startup = append(owned, startup...)
+		}
 	}
 	if len(startup) == 0 {
 		return session, nil
@@ -1540,10 +1809,13 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // caller advances via AdvanceMockCursor only once the response is actually
 // served (a successful claim), so a failed/retried match does not skip a
 // recorded response. Session-scoped: the cursor map is cleared per test-set
-// (ResetStatefulCursors). Satisfies the matcher's optional cursor interface;
-// parsers that do not type-assert it are unaffected.
+// (ResetStatefulCursors). The map also keeps the HTTP variable pass's served
+// marks, one per reusable recording under a key of its own (n = 2: served or
+// not), which reset with the cursors. Satisfies the matcher's optional cursor
+// interface; parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
-	if n <= 1 {
+	key, cursored := m.exactCursorKey(key)
+	if n <= 1 || !cursored {
 		// Zero or one recorded response: always the first (only) one — identical
 		// to the legacy reuse behaviour, no cursor state needed.
 		return 0
@@ -1562,7 +1834,8 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 // to n-1), so a hot repeated request never grows it unbounded. Call it only
 // after the chosen response was actually served.
 func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
-	if n <= 1 {
+	key, cursored := m.exactCursorKey(key)
+	if n <= 1 || !cursored {
 		return
 	}
 	m.cursorMu.Lock()
@@ -1578,6 +1851,168 @@ func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
 		next = n
 	}
 	m.cursors[key] = next
+}
+
+// Spend records that the test which kept the named per-test recordings of
+// stateful dependencies for its repeats is over (integrations.SpentReader).
+func (m *MockManager) Spend(names ...string) {
+	if len(names) == 0 {
+		return
+	}
+	m.spentMu.Lock()
+	defer m.spentMu.Unlock()
+	if m.spent == nil {
+		m.spent = make(map[string]struct{}, len(names))
+	}
+	for _, n := range names {
+		m.spent[n] = struct{}{}
+	}
+}
+
+// Spent reports whether mk is a per-test recording a test kept for its
+// repeats and is over with (Spend).
+func (m *MockManager) Spent(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	m.spentMu.RLock()
+	defer m.spentMu.RUnlock()
+	_, spent := m.spent[mk.Name]
+	return spent
+}
+
+// resetPerTestCursors drops every per-test stateful cursor
+// (models.IsPerTestSequenceKey), and keeps the reusable ones, whose
+// sequences run across tests.
+func (m *MockManager) resetPerTestCursors() {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	for k := range m.cursors {
+		if models.IsPerTestSequenceKey(k) {
+			delete(m.cursors, k)
+		}
+	}
+	m.kept = nil
+	m.usedUp = nil
+}
+
+// holdUsedUp records that the recording key names (a scope and a name) was
+// consumed in that scope, as DeleteFilteredMock records a delete: false when
+// it already was. The revisions move as a delete moves them, so a parser that
+// caches what it read reads again.
+func (m *MockManager) holdUsedUp(key string, kind models.Kind) bool {
+	m.cursorMu.Lock()
+	if _, held := m.usedUp[key]; held {
+		m.cursorMu.Unlock()
+		return false
+	}
+	if m.usedUp == nil {
+		m.usedUp = make(map[string]struct{})
+	}
+	m.usedUp[key] = struct{}{}
+	m.cursorMu.Unlock()
+	m.bumpRevisionKind(kind)
+	m.bumpRevisionAll()
+	return true
+}
+
+// usedUpKeys returns whether a recording, by key, is held used up
+// (holdUsedUp): nil when none is. It reads a copy, taken under one lock.
+func (m *MockManager) usedUpKeys() func(key string) bool {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return snapshotKeys(m.usedUp)
+}
+
+// spentNames returns whether a recording, by name, is spent (Spend): nil
+// when none is. It reads a copy, taken under one lock.
+func (m *MockManager) spentNames() func(name string) bool {
+	m.spentMu.RLock()
+	defer m.spentMu.RUnlock()
+	return snapshotKeys(m.spent)
+}
+
+// snapshotKeys returns a lookup in a copy of set, or nil when set is empty.
+func snapshotKeys(set map[string]struct{}) func(string) bool {
+	if len(set) == 0 {
+		return nil
+	}
+	cp := make(map[string]struct{}, len(set))
+	for k := range set {
+		cp[k] = struct{}{}
+	}
+	return func(k string) bool {
+		_, ok := cp[k]
+		return ok
+	}
+}
+
+// KeepForRepeats records that an exact match kept the recording key names for
+// its test's byte-identical repeats (integrations.RepeatKeeper).
+func (m *MockManager) KeepForRepeats(key string) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.kept == nil {
+		m.kept = make(map[string]struct{})
+	}
+	m.kept[key] = struct{}{}
+}
+
+// KeptForRepeats returns whether an exact match kept a recording, by key, for
+// its test's repeats since the last staging: nil when none is. It reads a
+// copy, taken under one lock.
+func (m *MockManager) KeptForRepeats() func(key string) bool {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	return snapshotKeys(m.kept)
+}
+
+// OwnedByOpenTest reports whether mk is the open test's own recording
+// (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
+// the per-test pool served for it: under exact serving, the test's mapping
+// (ServeExactTest); else the per-test tier, by the test's recorded window when
+// it has one, as GetPerTestMocksInWindow serves it. With no test open (the staging before the
+// first test, between tests, or a replay that opens none) no mock is.
+func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	if v := m.exactView(); v != nil {
+		// The open test's test mocks (ServeExactTest), by name: its index
+		// is fixed when the view is made.
+		_, owned := v.index[mk.Name]
+		return v.test != "" && owned
+	}
+	m.windowMu.RLock()
+	active := m.windowActiveLocked()
+	start, end := m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	if !active {
+		return false
+	}
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+	if !tree.holds(mk.TestModeInfo, mk) {
+		return false
+	}
+	if start.IsZero() || end.IsZero() {
+		return true
+	}
+	return inRecordedWindow(mk, start, end)
+}
+
+// inRecordedWindow is GetFilteredMocksInWindow's test of one mock against a
+// test's recorded window: its request inside it, or no recorded times.
+func inRecordedWindow(mk *models.Mock, start, end time.Time) bool {
+	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
+	if req.IsZero() || res.IsZero() {
+		return true
+	}
+	if res.Before(req) {
+		return false
+	}
+	return !req.Before(start) && !req.After(end)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
@@ -1600,6 +2035,12 @@ func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
 	m.cursorMu.Unlock()
+}
+
+// Variables returns the table of the test variables this replay has bound.
+// Satisfies the matchers' optional integrations.VariableStore capability.
+func (m *MockManager) Variables() *variables.Table {
+	return &m.vars
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
@@ -1627,6 +2068,9 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.reusable("", results, m.treeValues(m.unfilteredTree(), "")), nil
+	}
 	return results, nil
 }
 
@@ -1657,6 +2101,9 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, results, m.treeValues(m.unfilteredTree(), kind)), nil
+	}
 	return results, nil
 }
 
@@ -1699,10 +2146,20 @@ func (m *MockManager) GetSessionScopedMocks() ([]*models.Mock, error) {
 // because the two bits live under different locks (windowMu vs
 // swapMu). For pair-coherent reads use WindowSnapshot, which
 // takes both locks in declared order and returns a tear-free snapshot.
+//
+// A test of keploy mock replay begun without a worker pid has fired while it
+// runs (SetScopeMocks), so WindowSnapshot never reads Active without
+// FirstTestFired for it. Its end goes back to the routing before it: unlike a
+// test window, a scope does not stay fired.
 func (m *MockManager) HasFirstTestFired() bool {
+	if m.exactView() != nil {
+		return m.exact.fired.Load()
+	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
-	return m.testFiredThisSet
+	m.windowMu.RLock()
+	defer m.windowMu.RUnlock()
+	return m.testFiredThisSet || m.scopeOpen
 }
 
 // FirstTestWindowStart returns this set's startup-init cutoff: the earliest
@@ -1758,20 +2215,27 @@ func (m *MockManager) FirstTestWindowStart() time.Time {
 // legacy parsers and out-of-repo consumers; those callers don't need
 // the pair and a single-lock read is materially cheaper per call.
 func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
+	// Under exact serving a test is open between its begin and its end,
+	// whatever the recorded times say.
+	if v := m.exactView(); v != nil {
+		return models.WindowSnapshot{Active: v.test != "", FirstTestFired: m.exact.fired.Load()}
+	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return models.WindowSnapshot{
-		Active:         !m.windowStart.IsZero() && !m.windowEnd.IsZero(),
-		FirstTestFired: m.testFiredThisSet,
+		Active:         m.windowActiveLocked(),
+		FirstTestFired: m.testFiredThisSet || m.scopeOpen,
 	}
 }
 
 // CurrentTestWindow returns the [start, end] request-timestamp bounds of the
 // outer test currently being replayed (as set by SetCurrentTestWindow /
-// SetMocksWithWindow). Both zero means no window is active (initial staging
-// or between tests). Read under windowMu so callers see a tear-free pair.
+// SetMocksWithWindow). Both zero means no time window: none is active
+// (initial staging or between tests), or the active one has no recorded-time
+// bounds (SetScopeMocks), which IsTestWindowActive tells apart. Read under
+// windowMu so callers see a tear-free pair.
 //
 // Exposed for matchers that receive data mocks in the SESSION pool (because
 // the enterprise agent lax-promotes per-test data mocks to session and lets
@@ -1782,6 +2246,11 @@ func (m *MockManager) WindowSnapshot() models.WindowSnapshot {
 // register's read-back of a freshly-generated id) so each consumes the row
 // recorded at that position rather than a stale earlier-test row.
 func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
+	// Under exact serving no recorded time narrows what a test is served:
+	// its mapping does.
+	if m.exactView() != nil {
+		return time.Time{}, time.Time{}
+	}
 	m.windowMu.RLock()
 	defer m.windowMu.RUnlock()
 	return m.windowStart, m.windowEnd
@@ -1797,6 +2266,49 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // overhead at all.
 func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return m.GetFilteredMocksInWindow()
+}
+
+// StatesLifetimes reports whether the recording of the set being replayed
+// states its kind mocks' lifetimes (models.Mock.StatesLifetime): a mock of the
+// kind staged since the set's boundary does. Its per-test mocks are then
+// served to their own test only, and a test that misses a call another test
+// recorded is told how to declare it shared (keploy.yaml sessionCalls). It
+// holds after the test's own mocks are consumed, which a scan of the pools
+// does not. See integrations.StatesLifetimes.
+func (m *MockManager) StatesLifetimes(kind models.Kind) bool {
+	if kinds := m.statedKinds.Load(); kinds != nil {
+		return (*kinds)[kind]
+	}
+	return false
+}
+
+// noteStatedLifetimes adds the kinds of which a mock of the slices states its
+// lifetime to statedKinds. Under swapMu.
+func (m *MockManager) noteStatedLifetimes(slices ...[]*models.Mock) {
+	cur := m.statedKinds.Load()
+	var next map[models.Kind]bool
+	for _, ms := range slices {
+		for _, mk := range ms {
+			if mk == nil || !mk.StatesLifetime() {
+				continue
+			}
+			if cur != nil && (*cur)[mk.Kind] {
+				continue
+			}
+			if next == nil {
+				next = map[models.Kind]bool{}
+				if cur != nil {
+					for k := range *cur {
+						next[k] = true
+					}
+				}
+			}
+			next[mk.Kind] = true
+		}
+	}
+	if next != nil {
+		m.statedKinds.Store(&next)
+	}
 }
 
 // GetConnectionMocks returns connection-scoped mocks (Lifetime ==
@@ -1816,6 +2328,16 @@ func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 //   - Every successful read touches connectionLastTs so the
 //     idle-sweeper doesn't reclaim an active connection.
 func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) {
+	mocks, err := m.connectionMocks(connID)
+	// Under exact serving a connection mock a parser evicted is gone, as from
+	// every other read (unspent).
+	if v := m.exactView(); v != nil && err == nil {
+		mocks = v.unspent(mocks)
+	}
+	return mocks, err
+}
+
+func (m *MockManager) connectionMocks(connID string) ([]*models.Mock, error) {
 	if connID == "" {
 		return nil, nil
 	}
@@ -2118,6 +2640,9 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.perTest(kind, results), nil
+	}
 	return results, nil
 }
 
@@ -2136,6 +2661,9 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		}
 		return true
 	})
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, results, m.treeValues(m.startupTree(), kind)), nil
+	}
 	return results, nil
 }
 
@@ -2323,6 +2851,20 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	m.observeServed(new)
+	// The copy the parser reports carries what it detected and what the
+	// learn step learned onto the recording; the exact view knows it by
+	// name, as it knows old.
+	served := new
+	if served == nil {
+		served = old
+	}
+	switch m.exactConsume(served, false) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	// Snapshot the legacy tree pointer safely
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
@@ -2408,10 +2950,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			IsFiltered:       new.TestModeInfo.IsFiltered,
 			SortOrder:        new.TestModeInfo.SortOrder,
 			Type:             new.Spec.Metadata["type"],
+			DataPlane:        dataPlaneTyped(new),
 			Lifetime:         new.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
+			Variables:        variablesOf(new.Spec),
+			Binds:            bindsOf(new.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2437,6 +2982,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
+	switch m.exactConsumeValue(mock, true) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
@@ -2459,10 +3011,13 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			IsFiltered:       mock.TestModeInfo.IsFiltered,
 			SortOrder:        mock.TestModeInfo.SortOrder,
 			Type:             mock.Spec.Metadata["type"],
+			DataPlane:        dataPlaneTyped(&mock),
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2497,7 +3052,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// Returning true here keeps the caller contract ("consumed, stop looping")
 	// exactly as it was, while the mock that actually gets consumed is now the
 	// one the caller matched instead of whatever shared its key.
-	if m.DeleteStartupMock(mock) {
+	if m.deleteStartupMock(mock) {
 		return true
 	}
 	// Last, the carry-over tier (RegisterCarryOver kinds only): a mock
@@ -2514,10 +3069,13 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				IsFiltered:       mk.TestModeInfo.IsFiltered,
 				SortOrder:        mk.TestModeInfo.SortOrder,
 				Type:             mk.Spec.Metadata["type"],
+				DataPlane:        dataPlaneTyped(mk),
 				Lifetime:         mk.TestModeInfo.Lifetime,
 				ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 				ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+				Variables:        variablesOf(mock.Spec),
+				Binds:            bindsOf(mock.Spec),
 				CarryOver:        true,
 			}); err != nil {
 				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
@@ -2531,6 +3089,13 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
+	switch m.exactConsumeValue(mock, true) {
+	case exactServed:
+		return true
+	case exactRefused:
+		return false
+	}
 	m.treesMu.RLock()
 	globalTree := m.unfiltered
 	m.treesMu.RUnlock()
@@ -2563,10 +3128,13 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			IsFiltered:       mock.TestModeInfo.IsFiltered,
 			SortOrder:        mock.TestModeInfo.SortOrder,
 			Type:             mock.Spec.Metadata["type"],
+			DataPlane:        dataPlaneTyped(&mock),
 			Lifetime:         mock.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -2611,7 +3179,20 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
 func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
+	m.observeServedCopy(mock)
+	return m.deleteStartupMock(mock)
+}
+
+// deleteStartupMock is DeleteStartupMock without telling the served
+// observer: for a caller that told it already.
+func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 	if mock.Name == "" {
+		return false
+	}
+	switch m.exactConsumeValue(mock, true) {
+	case exactServed:
+		return true
+	case exactRefused:
 		return false
 	}
 	m.treesMu.RLock()
@@ -2658,10 +3239,13 @@ func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
 			IsFiltered:       mk.TestModeInfo.IsFiltered,
 			SortOrder:        mk.TestModeInfo.SortOrder,
 			Type:             mk.Spec.Metadata["type"],
+			DataPlane:        dataPlaneTyped(mk),
 			Lifetime:         mk.TestModeInfo.Lifetime,
 			ReqTimestampMock: models.FormatMockTimestamp(mk.Spec.ReqTimestampMock),
 			ResTimestampMock: models.FormatMockTimestamp(mk.Spec.ResTimestampMock),
-			ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
+			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
+			Variables:        variablesOf(mock.Spec),
+			Binds:            bindsOf(mock.Spec),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -2747,8 +3331,14 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 // garbage once the call returns, and no schedule is left installed or parked.
 func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 	if len(ws) == 0 {
+		// A set with none: the learn step knows none, not the previous
+		// set's.
+		m.testWindows.Store(nil)
 		return
 	}
+	// The learn step tells the pool's mocks from a test's by them, whatever
+	// the release rule does with them (InRecordedTestWindow).
+	m.testWindows.Store(models.NewWindowSchedule(ws))
 	if !models.CarryOverRegistered() {
 		m.swapMu.Lock()
 		m.windowsSeeded = nil
@@ -2777,6 +3367,12 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 // callers) or no kind registered a carry-over predicate: consumers then treat
 // everything as released, as before. The returned schedule is immutable.
 func (m *MockManager) RecordedWindows() *models.WindowSchedule {
+	// Under exact serving what the view shows is due: a test's push is its
+	// own mocks, served while it is open, and the pool's is served between
+	// tests. No recorded window paces it (CurrentTestWindow is zero).
+	if m.exactView() != nil {
+		return nil
+	}
 	return m.recordedWindows.Load()
 }
 
@@ -2806,7 +3402,8 @@ func (m *MockManager) WindowChanged() <-chan struct{} {
 
 // StagingEpoch identifies the current staging snapshot. It changes at every
 // staging call (SetMocksWithWindow with models.BaseTime): a new test set, or the
-// same set staged again for a replacement agent. Anything a consumer derived
+// same set staged again for a replacement agent; and at every SetScopeMocks,
+// which re-stages the pool as a test of keploy mock replay begins or ends. Anything a consumer derived
 // from a staging snapshot — a per-set delivery queue — must be rebuilt when it
 // changes. Zero until the first staging call.
 func (m *MockManager) StagingEpoch() uint64 {
@@ -2832,7 +3429,14 @@ func (m *MockManager) signalWindowChange() {
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+	m.observeServedCopy(mock)
 	if mock.Name == "" {
+		return false
+	}
+	switch m.exactConsumeValue(mock, false) {
+	case exactServed:
+		return true
+	case exactRefused:
 		return false
 	}
 	m.bumpHitCount(mock.Name, mock.Kind)
@@ -2843,6 +3447,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		IsFiltered:       mock.TestModeInfo.IsFiltered,
 		SortOrder:        mock.TestModeInfo.SortOrder,
 		Type:             mock.Spec.Metadata["type"],
+		DataPlane:        dataPlaneTyped(&mock),
 		Lifetime:         mock.TestModeInfo.Lifetime,
 		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
@@ -2850,6 +3455,11 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// (e.g. Pulsar) that consume via MarkMockAsUsed rather than the
 		// Delete*/Update* paths, so UpdateMocks can persist it back to disk.
 		ReqBodyNoise: reqBodyNoiseOf(mock.Spec),
+		// What record's full round learned onto a mock this door keeps (a
+		// reusable stateful recording, a scoped worker's held own mock), as
+		// the other doors carry it (nil with the switch off).
+		Variables: variablesOf(mock.Spec),
+		Binds:     bindsOf(mock.Spec),
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -3018,11 +3628,43 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 
 // ---------- bookkeeping ----------
 
-// flagMockAsUsed records that a mock was consumed from the network.
-// The first call for a given name establishes its position in the consumption
-// order; subsequent calls for the same name update the stored state in-place
-// without changing its position. This preserves true network call order in
-// GetConsumedMocks.
+// SetServedObserver makes f told of every mock a parser is served, from now
+// on (nil: none).
+func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
+	if f == nil {
+		m.servedObserver.Store(nil)
+		return
+	}
+	m.servedObserver.Store(&f)
+}
+
+// observeServed tells the served observer of mock before a parser's claim
+// takes it out of the pool, so a request reading the pool and then the
+// observer's record never finds it in neither (the learn step's earlier
+// places). A claim that then fails was another connection's serve of the
+// same mock: the observer is told of a mock that was served either way.
+func (m *MockManager) observeServed(mock *models.Mock) {
+	if mock == nil || mock.Name == "" {
+		return
+	}
+	if f := m.servedObserver.Load(); f != nil {
+		(*f)(mock)
+	}
+}
+
+// observeServedCopy is observeServed of a mock a door took by value: the
+// observer keeps a copy of its own, made only when there is an observer (the
+// proven switch), so the door's mock does not move to the heap without one.
+func (m *MockManager) observeServedCopy(mock models.Mock) {
+	if mock.Name == "" {
+		return
+	}
+	if f := m.servedObserver.Load(); f != nil {
+		c := mock
+		(*f)(&c)
+	}
+}
+
 // reqBodyNoiseOf returns the field-path request-body noise detected on a mock's
 // request (nil when none was detected). Used to carry schema-detected noise out
 // on MockState so UpdateMocks can persist it. Every parser — HTTP and non-HTTP
@@ -3031,6 +3673,54 @@ func reqBodyNoiseOf(spec models.MockSpec) map[string][]string {
 	return spec.ReqBodyNoise
 }
 
+// learnedNoiseOf is the request noise a consumed start-up mock's state
+// carries: the tree's copy's, as before the proven switch, and under it the
+// caller's (the copy the learn step attached what it learned to).
+func learnedNoiseOf(tree, caller models.MockSpec) map[string][]string {
+	if provenswitch.On() {
+		return caller.ReqBodyNoise
+	}
+	return tree.ReqBodyNoise
+}
+
+// variablesOf is what a consumed mock's state carries of its variables:
+// under the proven switch, its own (MockSpec.Variables) and the ones the
+// learn step learned on it (MockSpec.Learned), which record's full round
+// writes onto the recording. Without the switch nothing, as before it.
+func variablesOf(spec models.MockSpec) models.MockVariables {
+	if !provenswitch.On() {
+		return nil
+	}
+	out := spec.Variables.Clone()
+	for name, v := range spec.Learned().Clone() {
+		if out == nil {
+			out = models.MockVariables{}
+		}
+		out[name] = v
+	}
+	return out
+}
+
+// bindsOf is what a consumed mock's state carries of the variables the learn
+// step learned while answering it that are bound at an earlier mock
+// (MockSpec.LearnedBinds): under the proven switch only.
+func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
+	binds := spec.LearnedBinds()
+	if !provenswitch.On() || len(binds) == 0 {
+		return nil
+	}
+	out := make(map[string]models.MockVariables, len(binds))
+	for m, v := range binds {
+		out[m] = v.Clone()
+	}
+	return out
+}
+
+// flagMockAsUsed records that a mock was consumed from the network.
+// The first call for a given name establishes its position in the consumption
+// order; subsequent calls for the same name update the stored state in-place
+// without changing its position. This preserves true network call order in
+// GetConsumedMocks.
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
@@ -3038,7 +3728,33 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Timestamp == 0 {
 		mock.Timestamp = time.Now().UnixNano() // when it was first served, so a client can tell which test used it
 	}
+	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	// Under the proven switch what record's full round learned onto a mock
+	// is cumulative across its states: a reusable recording the learn step
+	// pairs twice keeps both pairings' variables, binds and noise, whichever
+	// door each left through (a door that keeps the pool's copy, as
+	// MarkMockAsUsed does, hands the second pairing a copy without the
+	// first's).
+	if provenswitch.On() {
+		var prev models.MockState
+		var ok bool
+		if m.consumedPersistent != nil {
+			prev, ok = m.consumedPersistent[mock.Name]
+		} else if idx, exists := m.consumedIndex[mock.Name]; exists {
+			prev, ok = m.consumedList[idx], true
+		}
+		if ok {
+			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
+			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
+			if len(prev.ReqBodyNoise) > 0 {
+				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)
+			}
+		}
+	}
+	if inScope && m.scopeConsumed != nil {
+		m.scopeConsumed[mock.Name] = struct{}{}
+	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
 		m.consumedList[idx] = mock // update state, preserve position and first use
@@ -3052,8 +3768,23 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if m.consumedPersistent != nil {
 		m.consumedPersistent[mock.Name] = mock
 	}
+	if m.servedCount != nil {
+		m.servedCount[mock.Name]++
+	}
 	m.consumedMu.Unlock()
 	return nil
+}
+
+// ServedCounts returns a copy of how many times each mock answered a request
+// this session. Never drained.
+func (m *MockManager) ServedCounts() map[string]uint64 {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	out := make(map[string]uint64, len(m.servedCount))
+	for k, v := range m.servedCount {
+		out[k] = v
+	}
+	return out
 }
 
 // GetConsumedMocks returns and drains the list of mocks that were consumed
@@ -3300,11 +4031,17 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 // window. A parser serves them after the running test's own mocks and consumes
 // them through DeleteFilteredMock. Empty while no kind is registered.
 func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
+	if v := m.exactView(); v != nil {
+		return v.keep(m.carry.snapshot("")), nil
+	}
 	return m.carry.snapshot(""), nil
 }
 
 // GetCarryOverMocksByKind is GetCarryOverMocks for one kind.
 func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if v := m.exactView(); v != nil {
+		return v.keep(m.carry.snapshot(kind)), nil
+	}
 	return m.carry.snapshot(kind), nil
 }
 

@@ -147,6 +147,9 @@ type prReportDB struct {
 	onRead     func()
 	readErr    error
 	dropOnRead string
+	// dupOnRead returns the named test's result twice, as a store that kept
+	// an earlier cycle's row beside the last one does.
+	dupOnRead string
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
@@ -159,6 +162,9 @@ func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]mode
 	out := make([]models.TestResult, 0, len(f.results))
 	for _, r := range f.results {
 		if r.TestCaseID != f.dropOnRead {
+			out = append(out, r)
+		}
+		if r.TestCaseID == f.dupOnRead {
 			out = append(out, r)
 		}
 	}
@@ -232,6 +238,12 @@ type prInstr struct {
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// windowAfter is the start of the window of the test the agent was last
+	// told to serve: a send's AfterTime, or, under exact serving (the proven
+	// switch), the recorded start of the test case it opened (of cases). A
+	// send that serves the pool between test cases leaves it.
+	windowAfter time.Time
+	cases       []*models.TestCase
 	// allParams is every send, in order.
 	allParams []models.MockFilterParams
 	// perTestScope makes the stand-in agent answer each send the way an agent
@@ -290,8 +302,12 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 	}
 }
-func (f *prInstr) GetErrorChannel() <-chan error                                    { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error)    { return f.errs() }
+func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
+func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
+
+// TestVariables answers as an agent that bound no test variable does: the
+// stand-in agent serves no mock with variables.
+func (f *prInstr) TestVariables(context.Context) ([]models.VariableBinding, error)  { return nil, nil }
 func (f *prInstr) BeforeSimulate(context.Context, *time.Time, string, string) error { return nil }
 func (f *prInstr) AfterSimulate(context.Context, string, string) error              { return nil }
 func (f *prInstr) BeforeTestRun(context.Context, string) error                      { return nil }
@@ -318,6 +334,16 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	switch ex := params.Exact; {
+	case ex == nil || ex.Stage:
+		f.windowAfter = params.AfterTime
+	case ex.Test != "":
+		for _, tc := range f.cases {
+			if tc.Name == ex.Test {
+				f.windowAfter = tc.HTTPReq.Timestamp
+			}
+		}
+	}
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
@@ -494,7 +520,7 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	// first — which on a v6-first host is not where the listener is.
 	cfg.Test.Host = "127.0.0.1"
 	reportDB := &prReportDB{}
-	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{})}
+	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{}), cases: cases}
 	mocks := &prMockDB{}
 	mappings := &prMappingDB{}
 	r := &Replayer{
@@ -534,10 +560,22 @@ func (p *prRun) streaming(names ...string) {
 
 func (p *prRun) run(t *testing.T) models.TestSetStatus {
 	t.Helper()
+	return p.runTestSet(t, false)
+}
+
+// runServing runs the test set as one of several an agent serves (serveTest:
+// the agent and the application outlive the test set).
+func (p *prRun) runServing(t *testing.T) models.TestSetStatus {
+	t.Helper()
+	return p.runTestSet(t, true)
+}
+
+func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	p.cancel = cancel
-	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", serveTest)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
 	}
@@ -863,7 +901,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 // (the default) a run creates mappings.yaml only when none exists, and never
 // touches it again. A run that left tests without a verdict or an answer has no
 // entries for them, so creating the file from it leaves those tests out for
-// good. The startup-only backfill would create the file just the same.
+// good. (The startup-only backfill writes only into a file that exists.)
 // --update-test-mapping writes a run with an unanswered test either way:
 // mapdb.Insert replaces only the entries this run has, so into an existing file
 // the unanswered test keeps its own, and a new file gains it on the next such

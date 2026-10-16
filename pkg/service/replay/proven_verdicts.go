@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -79,9 +80,11 @@ func testMocksUnknown(armed bool, owned int, fetchErr error) bool {
 
 // failTestsWithMisses fails, under the proven switch, every test that would
 // otherwise pass or be demoted while one of its calls got no recorded answer,
-// and names them. DNS is left out: resolution order is not deterministic, and
-// a DNS miss is protocol-phase. Run over a set's results before the
-// BeforeTestResult hook, so the hook sees the verdicts it is to act on.
+// and names them. DNS lookups and connections that sent nothing are left out
+// (dataPlaneMisses): resolution order is not deterministic and a DNS miss is
+// protocol-phase, and a connection that sent nothing made no call. Run over a
+// set's results before the BeforeTestResult hook, so the hook sees the
+// verdicts it is to act on.
 func failTestsWithMisses(results []models.TestResult) []string {
 	if !provenswitch.On() {
 		return nil
@@ -102,15 +105,9 @@ func failTestsWithMisses(results []models.TestResult) []string {
 }
 
 // dataPlaneMisses counts the calls that got no recorded answer, DNS lookups
-// left out.
+// and connections that sent nothing (models.MatchPhaseNoRequest) left out.
 func dataPlaneMisses(calls []models.UnmatchedCall) int {
-	n := 0
-	for _, c := range calls {
-		if !strings.EqualFold(c.Protocol, "DNS") {
-			n++
-		}
-	}
-	return n
+	return len(dataPlaneCalls(calls))
 }
 
 // verdictCounts counts a set's per-test verdicts, one per test: the results the
@@ -170,6 +167,9 @@ func tallyFromVerdicts(loop setTally, results []models.TestResult, complete bool
 // set the run judged (PASSED or FAILED) is FAILED when a test failed and PASSED
 // otherwise; any other status (the app halted, keploy lost part of the run, the
 // user stopped it) is kept, since no per-test verdict can vouch for the set.
+// A PASSED set none of whose tests has a verdict, every one IGNORED, is made
+// IGNORED at the end of the set (everyTestIgnored), once every status that
+// says more (not judged, a partial run) has had its say.
 func statusFromVerdicts(current models.TestSetStatus, failed int) models.TestSetStatus {
 	if current != models.TestSetStatusPassed && current != models.TestSetStatusFailed {
 		return current
@@ -180,12 +180,31 @@ func statusFromVerdicts(current models.TestSetStatus, failed int) models.TestSet
 	return models.TestSetStatusPassed
 }
 
+// everyTestIgnored reports whether, under the proven switch, a set about to be
+// reported PASSED verified nothing: none of its tests passed, failed or was
+// obsolete, and some were IGNORED, skipped one by one or quarantined by a hook.
+// Such a set is reported IGNORED, as a set the run skips whole is, and never
+// PASSED (design §8.2 rule 1: a run that verified nothing does not pass; the
+// run's verdict is enterprise's, which fails such a run). A set with no test
+// at all is scoredNothing's. With the switch off it stays PASSED.
+func everyTestIgnored(status models.TestSetStatus, passed, failed, obsolete, ignored int) bool {
+	return provenswitch.On() && status == models.TestSetStatusPassed &&
+		passed+failed+obsolete == 0 && ignored > 0
+}
+
 // consumedUnreadReason is the test-set report's reason for a set left unjudged
 // because the mocks some of its tests consumed could not be read. It names
 // the first few; each one's row is marked (FailureInfo.TestMocksUnread).
 func consumedUnreadReason(tests []string) string {
 	return fmt.Sprintf("not judged: the mocks that %d test(s) consumed could not be read from keploy's agent (%s), so whether each made every recorded call is unknown; check the agent's log, then run the test-set again",
 		len(tests), firstNames(tests, 10))
+}
+
+// variablesUnjudgedReason is why a test set is not judged when keploy could not
+// check what some tests captured against what their dependency calls carried.
+func variablesUnjudgedReason(tests []string, why string) string {
+	return fmt.Sprintf("not judged: keploy could not check what %d test(s) captured against what their dependency calls carried (%s): %s",
+		len(tests), firstNames(tests, 10), why)
 }
 
 // firstNames joins up to n names, and says how many more there are.
@@ -235,6 +254,49 @@ func failOnMisses(o testOutcome) testOutcome {
 	return o
 }
 
+// failTestsWithCaptureLoss fails, under the proven switch, every test that
+// would otherwise pass or be demoted while keploy's agent could not capture
+// every call (FailureInfo.CaptureIncomplete: what testCaptureLosses charged
+// it -- a taint since its test set began, so the test running at the loss and
+// every later one; a failed TLS handshake only the test it happened in), adds
+// CAPTURE_INCOMPLETE, and names them.
+func failTestsWithCaptureLoss(results []models.TestResult) []string {
+	if !provenswitch.On() {
+		return nil
+	}
+	var failed []string
+	for i := range results {
+		r := &results[i]
+		if len(r.FailureInfo.CaptureIncomplete) == 0 {
+			continue
+		}
+		if r.Status == models.TestStatusPassed || r.Status == models.TestStatusObsolete {
+			r.Status = models.TestStatusFailed
+			failed = append(failed, r.TestCaseID)
+		}
+		if r.Status == models.TestStatusFailed {
+			r.FailureInfo.Category = appendCategoryUnique(slices.Clone(r.FailureInfo.Category), models.CaptureIncompleteCategory)
+		}
+	}
+	return failed
+}
+
+// anyTestLostCapture reports whether, under the proven switch, the agent lost
+// a call while one of these tests ran (FailureInfo.CaptureIncomplete): the
+// mocks recorded for a lost call were consumed by nobody, so the set's
+// consumption is no basis for the prune or mappings.yaml.
+func anyTestLostCapture(results []models.TestResult) bool {
+	if !provenswitch.On() {
+		return false
+	}
+	for i := range results {
+		if len(results[i].FailureInfo.CaptureIncomplete) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // missCategory adds UNMATCHED_CALL to a FAILED test whose call got no
 // recorded answer (under the proven switch), so the report, JUnit and the
 // NDJSON say why it failed.
@@ -250,6 +312,12 @@ func missCategory(r *models.TestResult) {
 // answer (KEPLOY_PROVEN=1).
 const vetoUnmatchedCall = "a call this test made got no recorded answer (" + provenswitch.Env + "=1)"
 
+// vetoUnmatchedCallSwitchOff is the reason a test whose mock set diverged is
+// FAILED rather than demoted to OBSOLETE, with the proven switch off, when a
+// call it made got no recorded answer: a miss is no sign its recording is out
+// of date, and the demotion would turn its failure into a green run.
+const vetoUnmatchedCallSwitchOff = "a call this test made got no recorded answer"
+
 // testEvidence is the evidence against a test, as its results carried it
 // before the BeforeTestResult hook ran: the calls of it no mock answered
 // (data-plane only), the recorded calls it did not make, and the categories
@@ -258,6 +326,14 @@ type testEvidence struct {
 	misses     []models.UnmatchedCall
 	unconsumed []models.UnconsumedMock
 	categories []models.FailureCategory
+	// capture is what the agent could not capture while it or an earlier
+	// test of its set ran (FailureInfo.CaptureIncomplete).
+	capture models.CaptureLosses
+	// templates are the template variable places (or the refusal) a FAILED
+	// row of it failed on (TestResult.TemplateFailures). A row the mock
+	// set's divergence demoted to OBSOLETE before the hook is no evidence:
+	// it was not failed.
+	templates []models.TemplateFailure
 }
 
 // hookSnapshot is what the set's results said before the hook ran, under the
@@ -270,11 +346,13 @@ type hookSnapshot struct {
 	evidence map[string]testEvidence
 }
 
-// dataPlaneCalls are the calls of calls that are not DNS lookups.
+// dataPlaneCalls are the calls of calls that are not DNS lookups, nor
+// connections whose client sent nothing (models.MatchPhaseNoRequest): no call
+// was made there, and a dependency's TCP health check ends the same way.
 func dataPlaneCalls(calls []models.UnmatchedCall) []models.UnmatchedCall {
 	var out []models.UnmatchedCall
 	for _, c := range calls {
-		if !strings.EqualFold(c.Protocol, "DNS") {
+		if c.CountsAgainstTest() {
 			out = append(out, c)
 		}
 	}
@@ -302,6 +380,8 @@ func cloneResult(r models.TestResult) models.TestResult {
 	r.FailureInfo.UnmatchedCalls = slices.Clone(r.FailureInfo.UnmatchedCalls)
 	r.FailureInfo.UnconsumedMocks = slices.Clone(r.FailureInfo.UnconsumedMocks)
 	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
+	r.FailureInfo.CaptureIncomplete = slices.Clone(r.FailureInfo.CaptureIncomplete)
+	r.TemplateFailures = slices.Clone(r.TemplateFailures)
 	return r
 }
 
@@ -321,20 +401,38 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 			snap.rows[r.TestCaseID] = cloneResult(r)
 		}
 		misses := dataPlaneCalls(r.FailureInfo.UnmatchedCalls)
-		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
+		templates := failedOnTemplates(r)
+		if len(misses) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 && len(templates) == 0 {
 			continue
 		}
 		e := snap.evidence[r.TestCaseID]
 		e.misses = append(e.misses, misses...)
 		e.unconsumed = append(e.unconsumed, r.FailureInfo.UnconsumedMocks...)
+		if len(e.capture) == 0 {
+			e.capture = slices.Clone(r.FailureInfo.CaptureIncomplete)
+		}
+		if len(e.templates) == 0 {
+			e.templates = slices.Clone(templates)
+		}
 		for _, c := range r.FailureInfo.Category {
-			if c == models.CallUnmatched || c == models.DependencyMissing {
+			if c == models.CallUnmatched || c == models.DependencyMissing || c == models.CaptureIncompleteCategory ||
+				(len(templates) > 0 && (c == models.TemplateVariable || c == models.TestSetRefused)) {
 				e.categories = appendCategoryUnique(e.categories, c)
 			}
 		}
 		snap.evidence[r.TestCaseID] = e
 	}
 	return snap
+}
+
+// failedOnTemplates are the template variable places (or the refusal) a FAILED
+// row failed on: evidence the hook cannot clear. A row that was not failed
+// carries none, whatever it names.
+func failedOnTemplates(r models.TestResult) []models.TemplateFailure {
+	if r.Status != models.TestStatusFailed {
+		return nil
+	}
+	return r.TemplateFailures
 }
 
 // holdEvidenceFloor holds, under the proven switch, the set's verdicts against
@@ -350,7 +448,9 @@ func snapshotEvidence(results []models.TestResult) *hookSnapshot {
 //     make a test vanish from the tally. A row of a test that did not exist
 //     before the hook is FAILED.
 //   - A test with evidence against it (a call it made that no mock answered,
-//     or a recorded call it did not make, before the hook or still) counts
+//     a recorded call it did not make, a call keploy's agent could not
+//     capture while it or an earlier test ran, before the hook or still, or a
+//     template variable place it failed on before the hook) counts
 //     FAILED, unless every row of it is quarantined (IGNORED). When none of
 //     its rows is FAILED, every row that is not IGNORED is set FAILED;
 //     a test that has a FAILED row already counts FAILED, and its other rows
@@ -387,16 +487,20 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 	for _, id := range before.tests {
 		rows := rowsOf[id]
 		snap := before.evidence[id]
-		misses, unconsumed, allIgnored, failedRow := false, false, true, -1
+		misses, unconsumed, capture, templates, allIgnored, failedRow := false, false, false, false, true, -1
 		for _, i := range rows {
 			misses = misses || dataPlaneMisses(results[i].FailureInfo.UnmatchedCalls) > 0
 			unconsumed = unconsumed || len(results[i].FailureInfo.UnconsumedMocks) > 0
+			capture = capture || len(results[i].FailureInfo.CaptureIncomplete) > 0
+			templates = templates || len(results[i].TemplateFailures) > 0
 			allIgnored = allIgnored && results[i].Status == models.TestStatusIgnored
 			if failedRow < 0 && results[i].Status == models.TestStatusFailed {
 				failedRow = i
 			}
 		}
-		if !misses && !unconsumed && len(snap.misses) == 0 && len(snap.unconsumed) == 0 {
+		// A template failure counts only as the loop wrote it (snap): one a
+		// row names that was not failed before the hook is no evidence.
+		if !misses && !unconsumed && !capture && len(snap.misses) == 0 && len(snap.unconsumed) == 0 && len(snap.capture) == 0 && len(snap.templates) == 0 {
 			continue
 		}
 		// The row that carries the test's verdict, and so its evidence.
@@ -418,6 +522,19 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 		if !unconsumed && len(snap.unconsumed) > 0 {
 			v.FailureInfo.UnconsumedMocks = slices.Clone(snap.unconsumed)
 		}
+		if !capture && len(snap.capture) > 0 {
+			v.FailureInfo.CaptureIncomplete = slices.Clone(snap.capture)
+		}
+		if len(snap.templates) > 0 {
+			if !templates {
+				v.TemplateFailures = slices.Clone(snap.templates)
+			}
+			// As markTemplateFailures writes it: a template failure is high
+			// risk, whatever the hook made of it. The set's tally reads the
+			// result's risk; JUnit the row's.
+			v.FailureInfo.Risk = models.High
+			v.Result.FailureInfo.Risk = models.High
+		}
 		if failedRow < 0 && !allIgnored {
 			for _, i := range rows {
 				if results[i].Status != models.TestStatusIgnored {
@@ -431,7 +548,7 @@ func holdEvidenceFloor(results []models.TestResult, before *hookSnapshot) ([]mod
 			if r.Status != models.TestStatusFailed && r.Status != models.TestStatusIgnored {
 				continue
 			}
-			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 {
+			if i != verdictRow && dataPlaneMisses(r.FailureInfo.UnmatchedCalls) == 0 && len(r.FailureInfo.UnconsumedMocks) == 0 && len(r.FailureInfo.CaptureIncomplete) == 0 && len(r.TemplateFailures) == 0 {
 				continue
 			}
 			cats := slices.Clone(r.FailureInfo.Category)
@@ -461,6 +578,51 @@ func noteConsumers(consumers map[string][]string, test string, consumed []models
 			consumers[m.Name] = append(consumers[m.Name], test)
 		}
 	}
+}
+
+// markRecordedIn names, on each call of the set's results no mock answered
+// that is a recording its test does not own (FailureInfo.UnmatchedCalls,
+// NotOwned: the parser matched it to ClosestMock), the other test that owns
+// that recording (owners: each owned mock's tests, sorted), if one does: the
+// call is likely one that test recorded, such as a later exchange of a
+// connection it opened at record time and this test opened at replay. A
+// recording its own test owns too, or none owns (one recorded between tests),
+// is named with none. It returns "test: call (closest mock, recorded in test)"
+// for each it named.
+func markRecordedIn(results []models.TestResult, owners map[string][]string) []string {
+	var named []string
+	for i := range results {
+		r := &results[i]
+		for j := range r.FailureInfo.UnmatchedCalls {
+			c := &r.FailureInfo.UnmatchedCalls[j]
+			by := owners[c.ClosestMock]
+			if !c.NotOwned || c.ClosestMock == "" || len(by) == 0 || slices.Contains(by, r.TestCaseID) {
+				continue
+			}
+			c.RecordedIn = by[0]
+			named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, by[0]))
+		}
+	}
+	return named
+}
+
+// ownersOf is the tests that own each mock of the plan, by name, sorted.
+func (p *exactPlan) ownersOf() map[string][]string {
+	if p == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for test, names := range p.owned {
+		for _, n := range names {
+			if !slices.Contains(out[n], test) {
+				out[n] = append(out[n], test)
+			}
+		}
+	}
+	for _, tests := range out {
+		sort.Strings(tests)
+	}
+	return out
 }
 
 // markConsumedBy names, on each unconsumed test mock of the set's results

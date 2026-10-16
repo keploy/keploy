@@ -19,6 +19,7 @@ import (
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -654,6 +655,10 @@ type unreadableCases struct {
 	broken string
 }
 
+func (u *unreadableCases) GetAllTestSetIDs(context.Context) ([]string, error) {
+	return []string{"test-set-0", "test-set-1"}, nil
+}
+
 func (u *unreadableCases) GetTestCases(_ context.Context, id string) ([]*models.TestCase, error) {
 	if id == u.broken {
 		return nil, errors.New("open keploy/" + id + "/tests: permission denied")
@@ -677,4 +682,48 @@ func TestTemplatize_ASetWhoseTestCasesCannotBeReadNamesTheSetsAfterIt(t *testing
 	assert.Equal(t, []interface{}{"test-set-1"}, stopped[0].ContextMap()["notTemplatized"])
 	assert.Len(t, logs.FilterLevelExact(zap.ErrorLevel).All(), 1, "the error is logged once: %v", logs.All())
 	assert.Zero(t, db.updated)
+}
+
+// keploy templatize -t "test-set-0,test-set-9": a named set that is not
+// recorded is refused, naming it, and nothing is templatized, under the
+// proven switch whoever named it and, with the switch off, when the command
+// line named it. With the switch off, one keploy.yml's templatize.testSets
+// inherited is left out with a Warn naming it, and the rest is templatized.
+func TestTemplatize_ANameThatIsNotRecordedIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		switchOn        bool
+		fromCommandLine bool
+	}{
+		{"switch off, -t", false, true},
+		{"switch on, -t", true, true},
+		{"switch on, keploy.yml", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.switchOn {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			s := newSetOnDisk(t, setfile.FormatYAML, createThenRead(), map[string]interface{}{})
+			plain := s.files(t)
+			cfg := &config.Config{Path: s.dir, Templatize: config.Templatize{TestSets: []string{"test-set-0", "test-set-9"}, TestSetsFromCommandLine: tc.fromCommandLine}}
+			err := NewTools(zap.NewNop(), s.conf, s.db, nil, nil, cfg).Templatize(context.Background())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "test-set-9")
+			assert.Equal(t, plain, s.files(t), "nothing is templatized")
+		})
+	}
+	t.Run("switch off, keploy.yml", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		s := newSetOnDisk(t, setfile.FormatYAML, createThenRead(), map[string]interface{}{})
+		plain := s.files(t)
+		core, logs := observer.New(zap.WarnLevel)
+		cfg := &config.Config{Path: s.dir, Templatize: config.Templatize{TestSets: []string{"test-set-0", "test-set-9"}}}
+		require.NoError(t, NewTools(zap.New(core), s.conf, s.db, nil, nil, cfg).Templatize(context.Background()))
+		warned := logs.FilterMessageSnippet("not recorded").All()
+		require.Len(t, warned, 1)
+		assert.Equal(t, []interface{}{"test-set-9"}, warned[0].ContextMap()["notRecorded"])
+		assert.NotEqual(t, plain, s.files(t), "the recorded set named is templatized")
+	})
 }

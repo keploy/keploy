@@ -16,6 +16,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -217,10 +218,52 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Exact serving's pool call begins no test (BeginsTestVariables below):
+	// values it gave would be bound nowhere.
+	if provenswitch.On() && !updateParamsReq.FilterParams.BeginsTestVariables() && len(updateParamsReq.FilterParams.Variables) > 0 {
+		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that serves the pool between test cases begins no test, and gives no values to bind"))
+		return
+	}
 	if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
+	}
+	// Under the proven switch a mock filter a client sends starts a test:
+	// keploy test sends one per test case, before the test case is sent, so
+	// a test case begins with no variable bound. The scope begins after the
+	// new pool is in, so a call checked against the previous pool binds
+	// nothing in it (variables.Table). The agent's own filters, as a test of
+	// keploy mock replay begins and ends, do not come through here.
+	// The filter carries the values the test case's request sends: they are
+	// bound as the scope begins.
+	// An agent that can only forget begins the test with nothing bound, and
+	// refuses values it cannot bind: dropped, they would leave every call
+	// that uses one unbound, a failure of the app that is keploy's.
+	// Exact serving's pool call (models.ExactServing, between test cases)
+	// begins no test: the variables the test case bound stay readable, and
+	// keploy test reads them after it (MockFilterParams.BeginsTestVariables).
+	if provenswitch.On() && updateParamsReq.FilterParams.BeginsTestVariables() {
+		given := updateParamsReq.FilterParams.Variables
+		switch s := a.svc.(type) {
+		case variableStarter:
+			if err := s.StartTestVariables(given); err != nil {
+				utils.LogError(a.logger, err, "failed to begin the test's variables")
+				respondAgent(w, r, http.StatusInternalServerError, err)
+				return
+			}
+		case interface{ ResetVariables() }:
+			s.ResetVariables()
+			if len(given) > 0 {
+				refuseGiven(w, r, a.logger)
+				return
+			}
+		default:
+			if len(given) > 0 {
+				refuseGiven(w, r, a.logger)
+				return
+			}
+		}
 	}
 
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
@@ -233,6 +276,47 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// variableStarter begins a test's variables with the values its test case's
+// request gave bound (proven switch).
+type variableStarter interface {
+	StartTestVariables(given []models.VariableBinding) error
+}
+
+// testVariables is the agent's side of a test's variables (proven switch).
+type testVariables interface {
+	variableStarter
+	TestVariables() ([]models.VariableBinding, bool)
+}
+
+// refuseGiven answers a mock filter whose test case gave values this agent
+// cannot bind.
+func refuseGiven(w http.ResponseWriter, r *http.Request, logger *zap.Logger) {
+	err := errors.New("this keploy agent cannot bind the values a test case's request sends; run the keploy agent of this keploy version")
+	utils.LogError(logger, err, "failed to begin the test's variables")
+	respondAgent(w, r, http.StatusNotImplemented, err)
+}
+
+// HandleTestVariables answers GET /agent/variables: the test variables the
+// current test has bound, under the proven switch (a 404 without it, as
+// before the switch existed).
+func (a *Agent) HandleTestVariables(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(testVariables)
+	if !provenswitch.On() || !ok {
+		http.NotFound(w, r)
+		return
+	}
+	bound, kept := s.TestVariables()
+	if !kept {
+		http.Error(w, "this keploy agent keeps no test variables", http.StatusNotImplemented)
+		return
+	}
+	if bound == nil {
+		bound = []models.VariableBinding{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models.TestVariablesResp{Variables: bound})
 }
 
 func (a *Agent) HandleIDs(w http.ResponseWriter, _ *http.Request) {

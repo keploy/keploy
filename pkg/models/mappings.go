@@ -6,10 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
 const MappingKind = "TestMocksMapping"
+
+// MappingSourceKeployTest is the Mapping.Source of a mappings.yaml keploy test
+// wrote: what a replay's passing tests consumed, not what each test recorded.
+// Under the proven switch it does not say what a test owns.
+const MappingSourceKeployTest = "keploy test"
 
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
@@ -19,6 +25,11 @@ type MockEntry struct {
 	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 	Start            string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	// Key is, for a start-up (pool) mock recorded under the proven switch,
+	// the key of the claim active when it was recorded: replay serves it
+	// only while a test process of that key holds the run and no test is
+	// open. Empty means PoolKeyNone.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -74,6 +85,12 @@ type Mapping struct {
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
 	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+	// Source is the keploy command that wrote the file's test entries, when
+	// it is not keploy record: MappingSourceKeployTest. A writer that names
+	// none keeps the file's, keploy record's writes included. Empty in a file
+	// only keploy record wrote, in one keploy test wrote before it said so,
+	// and in one a cloud store handed back (which keeps no source).
+	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
 }
 
 type BootSpec struct {
@@ -114,6 +131,16 @@ type MappedTestCase struct {
 	CaseSteps map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty" bson:"case_steps,omitempty"`
 	Dir       string              `json:"dir,omitempty" yaml:"dir,omitempty" bson:"dir,omitempty"`
 	Starts    int                 `json:"starts,omitempty" yaml:"starts,omitempty" bson:"starts,omitempty"`
+	// At is when the test began in its recording: the clock its replay runs
+	// on while it is open (design v14 §3.4). Written and read only under the
+	// proven switch; zero in recordings made before keploy kept it, and in
+	// those made without the switch.
+	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
+	// Real is the mock.real destinations the test used while it was open in
+	// its recording (design v14 §4): its replay runs on the real clock, and
+	// the verdict fails when CI never reaches one. Written and read only
+	// under the proven switch; empty in recordings made without it.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -124,6 +151,16 @@ type persistedTestFormat struct {
 	CaseSteps   map[string]string   `json:"case_steps,omitempty" yaml:"case_steps,omitempty"`
 	Dir         string              `json:"dir,omitempty" yaml:"dir,omitempty"`
 	Starts      int                 `json:"starts,omitempty" yaml:"starts,omitempty"`
+}
+
+// writtenTestFormat is how a test entry is written: the persisted format and
+// the test's recorded begin, last and omitted when zero, so an entry without
+// one is written as it was before keploy kept it. The begin stays out of
+// persistedTestFormat, which also picks the shape an entry is read in.
+type writtenTestFormat struct {
+	persistedTestFormat `yaml:",inline"`
+	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string  `json:"real,omitempty" yaml:"real,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -138,11 +175,79 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return tc.persistedFormat(), nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(tc.persistedFormat())
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+}
+
+// errRecordedBegin is a test entry whose at: is not a time.
+const errRecordedBegin = "a test's recorded begin (at) is not a time: %w"
+
+// recordedBeginYAML is a test entry's at: under the proven switch. One that is
+// not a time is an error, never a reason to read the entry in another shape and
+// lose its mocks. With the switch off the entry reads as it did before keploy
+// kept the begin: at: is not read.
+func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
+	if !provenswitch.On() || !nodeHasField(node, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `yaml:"at"`
+	}
+	if err := node.Decode(&at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
+}
+
+// errRecordedReal is a test entry whose real: is not a list of destinations.
+const errRecordedReal = "a test's mock.real destinations (real) are not a list of strings: %w"
+
+// recordedRealYAML is a test entry's real: under the proven switch. One that
+// is not a list of strings is an error, never a reason to read the entry
+// without it: its replay would run frozen and its verdict would not ask for
+// the destinations. With the switch off real: is not read.
+func recordedRealYAML(node *yaml.Node) ([]string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `yaml:"real"`
+	}
+	if err := node.Decode(&r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
+}
+
+// recordedRealJSON is recordedRealYAML for a JSON entry.
+func recordedRealJSON(data []byte) ([]string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "real") {
+		return nil, nil
+	}
+	var r struct {
+		Real []string `json:"real"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf(errRecordedReal, err)
+	}
+	return r.Real, nil
+}
+
+// recordedBeginJSON is recordedBeginYAML for a JSON entry.
+func recordedBeginJSON(data []byte) (time.Time, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "at") {
+		return time.Time{}, nil
+	}
+	var at struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(data, &at); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
+	}
+	return at.At, nil
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -164,6 +269,24 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 //	      - name: mock-1
 //	        kind: Redis
 func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
+	at, err := recordedBeginYAML(node)
+	if err != nil {
+		return err
+	}
+	rl, err := recordedRealYAML(node)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalYAMLEntry(node); err != nil {
+		return err
+	}
+	tc.At, tc.Real = at, rl
+	return nil
+}
+
+// unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
+// format's other fields, in whichever shape the entry has.
+func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	perr := node.Decode(&persisted)
@@ -208,6 +331,23 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
 func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
+	at, err := recordedBeginJSON(data)
+	if err != nil {
+		return err
+	}
+	rl, err := recordedRealJSON(data)
+	if err != nil {
+		return err
+	}
+	if err := tc.unmarshalJSONEntry(data); err != nil {
+		return err
+	}
+	tc.At, tc.Real = at, rl
+	return nil
+}
+
+// unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
+func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
 	var persisted persistedTestFormat
 	perr := json.Unmarshal(data, &persisted)
 	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {

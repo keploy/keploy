@@ -530,9 +530,12 @@ tool report_killed report
 grep -q "test set test-set-0: refused when the test set loaded: an interrupted write left its files behind" report_killed.log \
   || fail "keploy report does not show the refused set's reason: $(tail -20 report_killed.log)"
 grep -q "No failed tests found" report_killed.log && fail "keploy report says no test failed in the refused set"
+grep -q "TEST_SET_REFUSED" report_killed.log || fail "keploy report does not file the refused set under TEST_SET_REFUSED: $(tail -20 report_killed.log)"
+grep -q "TEMPLATE_VARIABLE" report_killed.log && fail "keploy report files the refused set under TEMPLATE_VARIABLE, though no template variable failed"
 tool report_killed_junit report --format junit
 grep -q "test case refused when its test set loaded, not sent" report_killed_junit.log || fail "keploy report --format junit does not fail the refused set's test cases: $(grep -m3 testsuite report_killed_junit.log)"
 grep -q 'failures="0"' report_killed_junit.log && fail "keploy report --format junit counts no failure in the refused set: $(grep -m3 testsuite report_killed_junit.log)"
+grep -q "template variable test set" report_killed_junit.log && fail "keploy report --format junit calls the refused set a template variable"
 tool report_killed_json report --format json
 grep -q '"where":"test set test-set-0"' report_killed_json.log || fail "keploy report --format json does not carry the refused set's reason: $(tail -3 report_killed_json.log)"
 grep -q '"refused":true' report_killed_json.log || fail "keploy report --format json does not say the refused set's test cases were refused"

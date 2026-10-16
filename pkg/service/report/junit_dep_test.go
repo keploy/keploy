@@ -352,6 +352,45 @@ func TestBuildFailureNamesTheProvenEvidence(t *testing.T) {
 	}
 }
 
+// Under the proven switch a call is named in the JUnit body by its shape, as
+// the proven model's evidence names it: a gRPC call by its RPC, and no ID,
+// email or token of a URL that its look or a variable's place marks, no query
+// value, and no SQL literal reaches the CI artifact.
+func TestBuildFailureNamesACallByItsShape(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	r := models.TestResult{
+		Kind:   models.HTTP,
+		Status: models.TestStatusFailed,
+		Result: models.Result{StatusCode: models.IntResult{Normal: true}},
+		FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{Protocol: "HTTP", ActualSummary: "GET /users/alice@example.com/orders/12345?token=s3cret", Destination: "api:8080"},
+			{Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM cards WHERE number = '4111111111111111'", Destination: "db:3306"},
+			{Protocol: "Redis", ActualSummary: "GET session:550e8400-e29b-41d4-a716-446655440000", Destination: "cache:6379"},
+			{Protocol: "gRPC", ActualSummary: "/orders.v1.OrderService/PlaceOrder", Destination: "orders:9090"},
+			{Protocol: "HTTP", ActualSummary: "GET /carts/kqzxwvbn", Destination: "api:8080", FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]"}}},
+		},
+			CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossDropped, Count: 1, What: "per_conn_cap on a connection to api:8080/users/alice@example.com?token=s3cret"}}},
+	}
+	body := buildFailure(r).Text
+	for _, want := range []string{
+		"call with no recorded answer: HTTP GET /users/{}/orders/{}?token={} (to api:8080)",
+		"call with no recorded answer: MySQL COM_QUERY SELECT * FROM cards WHERE number = ? (to db:3306)",
+		"call with no recorded answer: Redis (to cache:6379)",
+		"call with no recorded answer: gRPC /orders.v1.OrderService/PlaceOrder (to orders:9090)",
+		"call with no recorded answer: HTTP GET /carts/{} (to api:8080)",
+		"(per_conn_cap on a connection to api:8080/users/{}?token={})",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body does not say %q:\n%s", want, body)
+		}
+	}
+	for _, v := range []string{"alice@example.com", "12345", "s3cret", "4111111111111111", "550e8400-e29b-41d4-a716-446655440000", "kqzxwvbn"} {
+		if strings.Contains(body, v) {
+			t.Fatalf("body holds the value %q the app sent:\n%s", v, body)
+		}
+	}
+}
+
 // Under the switch a gRPC failure's assessment reasons are in the JUnit body:
 // a protoscope reorder says so, with the proto-files way out for a map. With
 // the switch off the body is as before.
@@ -367,5 +406,17 @@ func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
 		if got := strings.Contains(buildFailure(res).Text, "--proto-file"); got != on {
 			t.Fatalf("switch %v: the body names the proto-files way out %v, want %v", on, got, on)
 		}
+	}
+}
+
+// A connection whose client sent nothing (models.MatchPhaseNoRequest) is no
+// call with no recorded answer: the JUnit evidence leaves it out, as the
+// verdict does.
+func TestProvenEvidenceLeavesOutAConnectionThatSentNothing(t *testing.T) {
+	lines := provenEvidenceLines(models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest},
+	}})
+	if len(lines) != 0 {
+		t.Fatalf("evidence lines = %q, want none", lines)
 	}
 }

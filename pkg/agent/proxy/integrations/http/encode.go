@@ -143,8 +143,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	// synchronous implementation. Only parseFinalHTTP calls are replaced
 	// with enqueueMock sends.
 	g.Go(func() error {
-		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
+		defer pUtil.RecoverInto(h.Logger, clientConn, destConn, errCh)
 		defer func() {
 			close(mockDataCh)
 			<-recorderDone

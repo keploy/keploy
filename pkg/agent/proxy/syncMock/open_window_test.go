@@ -834,16 +834,25 @@ func heldCount(mgr *SyncMockManager) int {
 }
 
 // ResolveKept ends the request's window in the critical section that takes
-// what was held for it, before it hands the mocks on. A send can wait on a full
-// output channel (sendBudget per mock); a window left open meanwhile pinned the
-// hold, and the bound — which never gives up a claimed window — let it grow
-// without limit. OnDrop runs inside those sends, after the lock is let go, so
-// the test looks from there.
+// what was held for it, before it hands the mocks on. A send used to wait on a
+// full output channel (a budget per mock); a window left open meanwhile pinned
+// the hold, and the bound — which never gives up a claimed window — let it
+// grow without limit. Sends no longer wait (they queue), so the test has the
+// resolve's send dropped inside the resolve's own call: a drainer is said to
+// be live and the process's out queue to be at its byte bound, and OnDrop,
+// told with no lock held, looks from there. (Dropped by a real drainer, on its
+// own goroutine, the look raced the resolve's end of the window: a window
+// ended after the sends passed 40 runs of 40.) Not parallel: the process's
+// bound (processOutQueued) is every manager's.
 func TestResolveKeptEndsTheWindowBeforeItsSends(t *testing.T) {
-	t.Parallel()
-	out := make(chan *models.Mock) // never read: every send waits out its budget
+	out := make(chan *models.Mock) // never read
 	maps := make(chan models.TestMockMapping, 16)
 	mgr := openWindowManager(out, maps)
+	mgr.outQueueMu.Lock()
+	mgr.out.draining = true
+	mgr.outQueueMu.Unlock()
+	processOutQueued.Add(outQueueMaxBytes)
+	defer processOutQueued.Add(-outQueueMaxBytes)
 
 	start := time.Now().Add(-20 * time.Second)
 	slow := mgr.OpenWindow(start, nil)
@@ -871,7 +880,7 @@ func TestResolveKeptEndsTheWindowBeforeItsSends(t *testing.T) {
 	mgr.ResolveKept(slow, start, end, "test-slow", true)
 	slow.Close()
 	if !looked.Load() {
-		t.Fatal("fixture: the resolve's send never waited out its budget")
+		t.Fatal("fixture: the resolve's send was not dropped in its call")
 	}
 	if openDuringSend != 0 {
 		t.Fatalf("the window was still open while its resolve sent its mocks (%d open)", openDuringSend)
@@ -2249,14 +2258,16 @@ func TestStartupMockSentForAClaimIsInTheClaimersMappingOnly(t *testing.T) {
 func TestStartupMockSentForAClaimAndDroppedIsToldToTheTestThatTakesIt(t *testing.T) {
 	t.Parallel()
 	t.Run("dropped before the resolve", func(t *testing.T) {
-		out := make(chan *models.Mock) // no reader: the send's budget runs out
+		out := make(chan *models.Mock) // no reader: the send is given up
 		maps := make(chan models.TestMockMapping, 16)
 		mgr := lateMockTestManager(out, maps, true)
+		stalledOutClock(mgr)
 		start := time.Now().Add(-time.Second)
 		w := mgr.OpenWindow(start, nil)
 		call := httpMockAt(start.Add(10 * time.Millisecond))
 		mgr.AddMock(call)
 		mgr.FlushOwnedWindows()
+		waitOutQueue(t, mgr)
 		if mgr.DropCount() != 1 {
 			t.Fatalf("fixture: %d mocks dropped, want the startup mock", mgr.DropCount())
 		}
@@ -2305,6 +2316,7 @@ func TestStartupMockSentForAClaimAndDroppedIsToldToTheTestThatTakesIt(t *testing
 		out := make(chan *models.Mock) // no reader
 		maps := make(chan models.TestMockMapping, 16)
 		mgr := lateMockTestManager(out, maps, true)
+		stalledOutClock(mgr)
 		start := time.Now().Add(-time.Second)
 		a := mgr.OpenWindow(start, nil)
 		a.Yield(start.Add(5 * time.Millisecond))
@@ -2312,6 +2324,7 @@ func TestStartupMockSentForAClaimAndDroppedIsToldToTheTestThatTakesIt(t *testing
 		call := httpMockAt(start.Add(10 * time.Millisecond))
 		mgr.AddMock(call)
 		mgr.FlushOwnedWindows() // dropped
+		waitOutQueue(t, mgr)
 		a.Keep()
 		mgr.ResolveKept(a, start, start.Add(20*time.Millisecond), "test-a", true)
 		a.Close()

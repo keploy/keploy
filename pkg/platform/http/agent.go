@@ -14,6 +14,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/token"
 
 	"github.com/docker/docker/api/types/container"
@@ -47,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -57,6 +60,9 @@ const (
 
 // TODO: Need to refactor this file
 type AgentClient struct {
+	// streamEnds says, for each frame stream (models.FrameStream), whether
+	// the agent ended the latest one with its end marker (StreamEnded).
+	streamEnds   sync.Map
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
@@ -76,12 +82,6 @@ type AgentClient struct {
 	// under docker compose (the project starts it), nor for an agent another
 	// process started (a k8s sidecar).
 	startedAgent atomic.Bool
-	// agentReached is the latest start's flag that the agent it started
-	// answered its readiness check (waitForAgent), so its HTTP server was up.
-	// Until then a refused request is an agent that is not listening yet, not
-	// one going away. One flag per start (startAgent): the stop of an earlier
-	// start, which a setup retry leaves to its grace, reads its own.
-	agentReached atomic.Pointer[atomic.Bool]
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
@@ -102,6 +102,73 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+
+	// run is the agent's current start (startAgent); guarded by mu. A stop
+	// reads how to end the agent from the run it stops, never from a later one.
+	run *agentRun
+}
+
+// agentRun is one start of the agent.
+//
+// The agent removes what it attached to the kernel as it shuts down, TLS
+// uprobes included, and the kernel abandons a uprobe removal whose thread is
+// killed part way ("failed to unregister, leaking uprobe"), leaving the
+// breakpoint in every process that maps the probed library. So the CLI stops
+// an agent by asking it, or by SIGTERM, and waits for it (gone) while its
+// teardown makes progress -- killing it only once that stops, or it has
+// detached everything and not exited, or the user presses Ctrl+C once keploy
+// has said a press stops it (stopWatch: a press answering the first offer has
+// it die once no teardown work in progress is making progress, one answering
+// an offer made after a press kills it at once -- an agent sudo runs as root,
+// which no kill ends at once, is waited for instead until it has exited or
+// halted); never on a timer, never by a hang-up from closing its terminal
+// (endAgent, stopAgentContainerFor). That holds before the agent answers too:
+// it attaches its uprobes first.
+//
+// ready is set once the agent answered its readiness check (waitForAgent), so
+// its HTTP server was up. It decides two things. A native agent whose stop
+// request then fails as if it were going away is waited for before it is
+// signalled (endAgent); before it answered, the same failure says only that it
+// is not listening yet. And an unanswered agent's container is sent SIGTERM
+// again while it is waited for: its PID 1 may still have been the OSS image's
+// entrypoint, which drops a SIGTERM (resendSIGTERM). One run per start
+// (startAgent): the stop of an earlier start, which a setup retry waits for,
+// reads its own.
+type agentRun struct {
+	ready    atomic.Bool
+	gone     chan struct{} // closed once the agent process (or its container's client) has exited
+	goneOnce sync.Once
+	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
+	// or found an agent sudo runs as root halted after a press (stopWatch):
+	// what waits for its exit waits no more.
+	letGo     chan struct{}
+	letGoOnce sync.Once
+}
+
+func newAgentRun() *agentRun { return &agentRun{gone: make(chan struct{}), letGo: make(chan struct{})} }
+
+// stoppedAtOnce says its stop killed it at once at the user's Ctrl+C, or
+// found a root agent halted after one (stopWatch.run returned true).
+func (r *agentRun) stoppedAtOnce() { r.letGoOnce.Do(func() { close(r.letGo) }) }
+
+// exited marks the agent gone; it may be called more than once.
+func (r *agentRun) exited() { r.goneOnce.Do(func() { close(r.gone) }) }
+
+// isGone reports whether the agent has exited.
+func (r *agentRun) isGone() bool {
+	select {
+	case <-r.gone:
+		return true
+	default:
+		return false
+	}
+}
+
+// currentRun is the agent's current start, or nil before the first.
+func (a *AgentClient) currentRun() *agentRun {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.run
 }
 
 // AgentReadsConsumedPerTestOnly reports whether the agent's last
@@ -134,9 +201,16 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 // kubelet stops a sidecar with its pod), and an agent that held for the
 // client would only be killed at that stop's timeout. Every request that
 // opens the stream carries it, a reconnection too.
+//
+// The stream carries its recording's token too (models.StreamEndTokenHeader),
+// whoever started the agent: the recording's stop asks the agent to end the
+// streams of that token (EndRecordingStreams).
 func (a *AgentClient) markDrainsAfterStop(ctx context.Context, req *http.Request) {
 	if models.DrainsAfterStop(ctx) && a.startedAgent.Load() {
 		req.Header.Set(models.DrainsAfterStopHeader, "true")
+	}
+	if tok := models.StreamEndToken(ctx); tok != "" {
+		req.Header.Set(models.StreamEndTokenHeader, tok)
 	}
 }
 
@@ -179,6 +253,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
+	ended := a.newStreamEnd(models.TestCaseStream)
 
 	// The first response's framing is checked here, where it can still fail
 	// the call; see readIncoming for the rest.
@@ -197,7 +272,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readIncoming(ctx, res, tcChan)
+			done := a.readIncoming(ctx, res, tcChan, ended)
 			if res.Body != nil {
 				if err := res.Body.Close(); err != nil {
 					utils.LogError(a.logger, err, "failed to close response body for incoming request")
@@ -221,7 +296,9 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 // stream ends, in the stream's framing (multipart, or a legacy JSON stream).
 // It reports whether the stream must not go on: ctx is done, or the response
 // cannot be read at all.
-func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase) (done bool) {
+//
+// A stream the agent ends with its end marker sets ended, and is done.
+func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	contentType := res.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -233,13 +310,32 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 			utils.LogError(a.logger, nil, "missing multipart boundary in content-type", zap.String("content-type", contentType))
 			return true
 		}
-		return a.readIncomingParts(ctx, res, boundary, tcChan)
+		return a.readIncomingParts(ctx, res, boundary, tcChan, ended)
 	}
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
 
+// sayAgentSummary says, in this client's own log, what the agent's summary of
+// the session says it lost (models.StreamEndSummary): for an agent this client
+// did not start (docker compose's, kubelet's), whose own log reaches the user
+// through compose or kubelet.
+func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
+	if s.LeftOutInFlight > 0 {
+		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
+			zap.Uint64("test_cases", s.LeftOutInFlight))
+	}
+	if s.Unsettled > 0 {
+		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
+			zap.Int("test_cases", s.Unsettled))
+	}
+	if s.MassSuppressed {
+		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
+			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
+	}
+}
+
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
-func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase) (done bool) {
+func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
 	var pendingTestCase *models.TestCase
 
@@ -260,6 +356,19 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			break
 		}
 
+		if part.FormName() == models.StreamEndPart {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams): no more to read, nor to resume.
+			// Its marker says what the session lost: said here for an agent
+			// this client did not start, whose own log reaches the user
+			// through compose or kubelet, and can be cut off as it stops.
+			var sum models.StreamEndSummary
+			if err := json.NewDecoder(part).Decode(&sum); err == nil && !a.startedAgent.Load() {
+				a.sayAgentSummary(sum)
+			}
+			ended.Store(true)
+			return true
+		}
 		if part.FormName() == "metadata" {
 			var tc models.TestCase
 			if err := json.NewDecoder(part).Decode(&tc); err != nil {
@@ -370,13 +479,39 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 const mockHandoffBuffer = 1024
 
 // mockHandoffGrace bounds how long the decoder waits for the consumer to take a
-// mock before giving up on it. Only reachable if the consumer has stopped
-// draining entirely; a busy one drains in milliseconds.
+// mock before giving up on it, in the time this process could run
+// (utils/stall), not wall time: a CLI starved of CPU has a consumer that could
+// not run either. Only reachable if the consumer has stopped draining
+// entirely; a busy one drains in milliseconds.
 const mockHandoffGrace = 30 * time.Second
+
+// handOff offers m to ch, and reports whether it was taken before ch's reader
+// took nothing for grace of the time the process could run (on clk; nil: the
+// process's own).
+func handOff[T any](ch chan<- T, m T, clk stall.Clock, grace time.Duration) bool {
+	select {
+	case ch <- m:
+		return true
+	default:
+	}
+	meter := stall.NewMeter(clk, grace)
+	defer meter.Stop()
+	for {
+		select {
+		case ch <- m:
+			return true
+		case <-meter.Wait():
+			if meter.Expired() {
+				return false
+			}
+		}
+	}
+}
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
+	a.pushContainers(ctx)
 
 	// Mirror the mock-noise pair onto BOTH spellings before the struct is
 	// marshalled. This is the send-side twin of the normalise Proxy.Record and
@@ -437,6 +572,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	// recording arrives. A decoded mock waiting there was the widest of the
 	// three places a trailing mock could be lost.
 	mockChan := make(chan *models.Mock, mockHandoffBuffer)
+	ended := a.newStreamEnd(models.MockStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -451,7 +587,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			stream.close()
 		}()
 		for {
-			dropped := a.readMocks(res, mockChan)
+			dropped := a.readMocks(res, mockChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
@@ -472,8 +608,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 // readMocks hands the mocks of one outgoing stream to mockChan until the
 // stream ends. It reports whether it dropped one because the consumer stopped
-// taking them, after which the stream must not go on.
-func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock) (dropped bool) {
+// taking them, or the agent ended the stream with its end marker (ended is
+// set), after which the stream must not go on.
+func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock, ended *atomic.Bool) (stop bool) {
 	decoder := gob.NewDecoder(res.Body)
 	for {
 		var mock models.Mock
@@ -484,6 +621,12 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 			}
 			utils.LogError(a.logger, err, "failed to decode mock from stream")
 			break
+		}
+		if mock.Kind == models.StreamEndKind {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 
 		// Offer the mock rather than racing the context for it.
@@ -502,10 +645,7 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		// is logged as an error, because the alternative - a mock set
 		// indistinguishable from one where the call never happened - is
 		// what made this class of bug take an investigation to find.
-		select {
-		case mockChan <- &mock:
-			// Send the decoded mock to the channel
-		case <-time.After(mockHandoffGrace):
+		if !handOff(mockChan, &mock, nil, mockHandoffGrace) {
 			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
 				zap.Duration("waited", mockHandoffGrace))
@@ -570,6 +710,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	res.Body = conn.body(res.Body)
 
 	mappingChan := make(chan models.TestMockMapping)
+	ended := a.newStreamEnd(models.MappingStream)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -584,7 +725,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 			stream.close()
 		}()
 		for {
-			done := a.readMappings(ctx, res, mappingChan)
+			done := a.readMappings(ctx, res, mappingChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getmappings")
 			}
@@ -605,7 +746,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 // readMappings hands the mappings of one mappings stream to mappingChan until
 // the stream ends. It reports whether ctx is done, after which the stream must
 // not go on.
-func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping) (done bool) {
+func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mappingChan chan<- models.TestMockMapping, ended *atomic.Bool) (done bool) {
 	decoder := json.NewDecoder(res.Body)
 	for {
 		var mapping models.TestMockMapping
@@ -614,6 +755,12 @@ func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mapp
 				utils.LogError(a.logger, err, "failed to decode mapping from stream")
 			}
 			return false
+		}
+		if mapping.StreamEnd {
+			// The agent ended the stream on this client's request, after all
+			// it had (EndRecordingStreams).
+			ended.Store(true)
+			return true
 		}
 		select {
 		case <-ctx.Done():
@@ -629,6 +776,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 			a.session().record(stepMockOutgoing, func(c context.Context) error { return a.MockOutgoing(c, opts) })
 		}
 	}()
+	a.pushContainers(ctx)
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -1266,7 +1414,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
-			a.session().record(stepMockParams, func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
 		}
 	}()
 	// Only a successful answer that says so sets it again below; a call that
@@ -1446,6 +1594,106 @@ func (a *AgentClient) GetMockStats(ctx context.Context) (models.MockStats, error
 	return stats, nil
 }
 
+// GetPIDMapRefusals fetches GET /pidmaps: the inserts into the agent's PID maps
+// the kernel has refused since its hooks loaded, each of them a process they
+// could not track (models.PIDMapRefusals). An agent older than the
+// route (404) or one that cannot count them (501) gives
+// models.ErrPIDMapRefusalsUnsupported, which is "unknown", not "none".
+func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, error) {
+	url := fmt.Sprintf("%s/pidmaps", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to ask the agent for refused PID map inserts: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for pidmaps")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return models.PIDMapRefusals{}, fmt.Errorf("%w: agent returned %d", models.ErrPIDMapRefusalsUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return models.PIDMapRefusals{}, agentRespErr("get refused PID map inserts", res, rawBody)
+	}
+	var refusals models.PIDMapRefusals
+	if err := json.NewDecoder(res.Body).Decode(&refusals); err != nil {
+		return models.PIDMapRefusals{}, fmt.Errorf("failed to decode the refused PID map inserts: %w", err)
+	}
+	return refusals, nil
+}
+
+// GetCaptureLosses fetches GET /capturelosses: every kind of capture loss the
+// agent has counted since it started (models.CaptureLosses). An agent older
+// than the route (404) or one that cannot count (501) gives
+// models.ErrCaptureLossesUnsupported, which is "unknown", not "none".
+func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get capture losses", res, rawBody)
+	}
+	var losses models.CaptureLosses
+	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses: %w", err)
+	}
+	return losses, nil
+}
+
+// GetUnchargedCaptureLosses asks the agent what it could not capture since
+// the run began that no test was charged with: what was lost after the last
+// test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
+// is ErrCaptureLossesUnsupported.
+func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ask the agent for the capture losses no test was charged with: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/uncharged")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get the capture losses no test was charged with", res, rawBody)
+	}
+	var losses models.CaptureLosses
+	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
+		return nil, fmt.Errorf("failed to decode the capture losses no test was charged with: %w", err)
+	}
+	return losses, nil
+}
+
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	app, err := a.getApp()
 	if err != nil {
@@ -1504,9 +1752,6 @@ func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
 // for a clean exit — so the readiness wait in Setup can stop the moment the
 // agent is gone instead of polling a dead port for the whole ready budget.
 func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts models.SetupOptions) (<-chan error, error) {
-	// A new agent has not answered yet, whatever the one before it did (a
-	// setup retry starts another), and the one before it keeps its own flag.
-	a.agentReached.Store(new(atomic.Bool))
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -1515,9 +1760,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	// Buffered: the exit is reported whether or not anyone is still waiting.
 	exited := make(chan error, 1)
 
-	// Create a context for the agent that can be cancelled independently
-	agentCtx, cancel := context.WithCancel(ctx)
-	a.agentCancel = cancel
+	agentCtx, cancel, run, err := a.beginRun(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if a.conf.Record.Synchronous {
 		opts.Synchronous = true
 	}
@@ -1528,7 +1774,11 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
-			err := a.startInDocker(agentCtx, a.logger, opts)
+			err := a.startInDocker(agentCtx, a.logger, opts, run)
+			// `docker run` has returned: the container has exited -- unless the
+			// stop could not reach it (the engine refused `kill`, or sudo -n),
+			// in which case cmd.Cancel killed the client and it may still run.
+			run.exited()
 			// `docker run` exits with the agent's own status, so this carries
 			// the reason an agent that could not start gave for it.
 			exited <- err
@@ -1540,8 +1790,9 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 		})
 	} else {
 		// Start the agent as a native process
-		err := a.startNativeAgent(agentCtx, opts, exited)
+		err := a.startNativeAgent(agentCtx, opts, exited, run)
 		if err != nil {
+			run.exited() // nothing was started, or nothing waits for it
 			cancel()
 			return nil, err
 		}
@@ -1618,6 +1869,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// The proven model's staging switch: sudo drops KEPLOY_PROVEN on the way to
 	// the agent, so it travels as a flag.
 	args = append(args, provenswitch.AgentArgs()...)
+	// And the Docker endpoint the tests' containers run on, which sudo drops
+	// too, so the agent can name container destinations (containerkey).
+	args = append(args, containerkey.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
 	// pattern (and for the same reason) as --disable-mapping above: the
 	// orchestrator has already applied flag > yaml > default, and the native
@@ -1678,10 +1932,7 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 
 // startNativeAgent starts the keploy agent as a native process. The process's
 // exit is sent on exited.
-func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions, exited chan<- error) error {
-	// This start's flag (startAgent set it): its stop reads it, whatever a
-	// setup retry starts after it.
-	reached := a.agentReached.Load()
+func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions, exited chan<- error, run *agentRun) error {
 
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -1695,15 +1946,14 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return err
 	}
 
-	args := a.nativeAgentArgs(opts)
+	args, progress, removeProgress := a.nativeAgentLaunch(opts)
 
 	// The PTY and the cached-credentials probe both exist for one reason: sudo
 	// may prompt for a password. On a platform where the agent is never
 	// elevated (darwin) there is no prompt, and taking the PTY path anyway is
 	// pure cost — startNativeAgentWithPTY puts the user's real terminal into
-	// raw mode for the whole run, swallows their keystrokes into a pty nothing
-	// reads, and closes the master on stop, which delivers SIGHUP to an agent
-	// that would otherwise have shut down gracefully.
+	// raw mode for the whole run and swallows their keystrokes into a pty
+	// nothing reads.
 	elevates := agentUtils.AgentNeedsElevation(runtime.GOOS)
 
 	sudoCached := false
@@ -1713,7 +1963,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	if elevates && agentUtils.NeedsPTY() && !sudoCached {
-		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp, reached, exited)
+		err := a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited, run, progress, removeProgress)
+		if err != nil {
+			removeProgress()
+		}
+		return err
 	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
@@ -1728,31 +1982,45 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	a.mu.Unlock()
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
+		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
 	}
 
 	pid := cmd.Process.Pid
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
-	// procDone is closed once the agent process has exited.
-	procDone := make(chan struct{})
+
+	// Reaped by a goroutine of its own, outside the group: a caller waiting on
+	// the group is let go once the stop has killed the agent at once at the
+	// user's Ctrl+C (stopWatch, awaitAgentExit), while it finishes dying.
+	reaped := make(chan error, 1)
+	go func() {
+		defer utils.Recover(a.logger)
+		err := cmd.Wait()
+		run.exited()
+		removeProgress()
+		// Reported BEFORE the group goroutine below can return it: returning
+		// it cancels the group, and the readiness wait must find the exit
+		// already here when it sees that cancellation.
+		exited <- err
+		reaped <- err
+	}()
 
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
-
-		err := cmd.Wait()
-		close(procDone)
-		// Reported BEFORE the error is returned below: returning it cancels
-		// the group, and the readiness wait must find the exit already here
-		// when it sees that cancellation.
-		exited <- err
+		err, ok := a.awaitAgentExit(ctx, reaped, run, pid)
+		if !ok {
+			return nil
+		}
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
 		}
 		a.mu.Lock()
-		a.agentCmd = nil
+		if a.agentCmd == cmd { // not a later start's
+			a.agentCmd = nil
+		}
 		a.mu.Unlock()
 		a.logger.Debug("agent process stopped")
 		return nil
@@ -1766,17 +2034,38 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
-		// This start's agent, not whichever a.agentCmd names by now: a setup
-		// retry starts the next one while this one is still given its grace.
-		a.stopAgentProcess(reached, a.requestAgentStop, procDone, unlessExited(procDone, func() {
-			if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-				a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
-			}
-		}))
+		a.stopNativeAgent(run, pid, cmd, progress)
 		return nil
 	})
 
 	return nil
+}
+
+// nativeAgentLaunch is the argv of a native agent this client starts
+// (nativeAgentArgs), telling it where to report its teardown's progress once
+// it is stopped, which its stop reads (endAgent); and that path, with how to
+// remove it once the agent has exited.
+func (a *AgentClient) nativeAgentLaunch(opts models.SetupOptions) (args []string, progress string, removeProgress func()) {
+	args = a.nativeAgentArgs(opts)
+	progress, removeProgress = teardownProgressPath(a.logger)
+	if progress != "" {
+		args = append(args, "--teardown-progress-file", progress)
+	}
+	return args, progress, removeProgress
+}
+
+// teardownProgressPath returns where a native agent this client starts
+// reports its teardown's progress (utils.ReportTeardownProgress), in a
+// directory of that start's own, and how to remove the directory once the
+// agent has exited. "" when no directory could be made: the agent then reports
+// nothing, and is never killed for want of progress.
+func teardownProgressPath(logger *zap.Logger) (string, func()) {
+	dir, err := os.MkdirTemp("", "keploy-agent-stop-")
+	if err != nil {
+		logger.Debug("could not make a directory for the agent's teardown progress", zap.Error(err))
+		return "", func() {}
+	}
+	return filepath.Join(dir, utils.TeardownProgressFileName), func() { _ = os.RemoveAll(dir) }
 }
 
 // StartedAgent reports whether this client started the agent it talks to
@@ -1786,15 +2075,17 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 func (a *AgentClient) StartedAgent() bool { return a.startedAgent.Load() }
 
 // agentStoppingGrace bounds how long the CLI waits for an agent that is
-// already going away (agentGoingAway) to exit before it signals it: it only
-// catches an agent that hangs on its way out. The stop request before it
-// (agentStopRequestTimeout), it, and the signal's own wait before a kill
-// (agentUtils.StopSignalWait) stay within the 30 s the recorders' teardown
-// waits on the goroutine that stops the agent (DrainErrGroup: "record-setup",
-// "mock-record"), so such an agent is stopped before that wait gives up on
-// it: killed, when it was started on its own (agentUtils.StopCommand); one
-// started on a terminal for sudo's password has its terminal closed and is
-// sent SIGTERM, never killed (agentUtils.StopPTYCommand).
+// already going away (agentGoingAway) to exit before it sends it SIGTERM
+// (endAgent). A signal that reaches an agent on its way out is a second one to
+// it, which it reports as such at the end of a recording that lost nothing, so
+// the signal is kept for an agent that has reported no teardown by the end of
+// the grace. A signal is not a kill: the CLI then waits for the exit while the
+// teardown makes progress (stopWatch). The stop request before it
+// (agentStopRequestTimeout) and it stay within the 30 s the recorders'
+// teardown waits on the goroutine that stops the agent (DrainErrGroup:
+// "record-setup", "mock-record"), so such an agent is signalled before that
+// wait could give up on it -- which it does not while the agent reports the
+// steps of its teardown (stopWatch).
 var agentStoppingGrace = 15 * time.Second
 
 // agentStopRequestTimeout bounds the stop request itself (requestAgentStop),
@@ -1806,58 +2097,15 @@ const agentStopRequestTimeout = 5 * time.Second
 // connection, or no longer listens. A signal that reached the agent too stops
 // it once its recording client has closed its streams (the agent's signal
 // hold), and the client's own stop request then finds it on its way out. The
-// same errors from an agent that never answered (agentReached) say only that
+// same errors from an agent that never answered (agentRun.ready) say only that
 // it is not listening yet.
 func agentGoingAway(err error) bool {
 	return err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		neterr.IsConnRefused(err) || neterr.IsConnReset(err))
 }
 
-// stopAgentProcess stops a native agent: it asks it to (requestStop), and
-// signals it (kill) when the request fails for another reason, or the agent
-// never answered (reached, its start's agentReached: one still starting,
-// which nothing else signals, as it runs in a process group of its own), or an
-// agent already going away (agentGoingAway) has not exited (procDone) within
-// agentStoppingGrace. Signalled on its way out, the agent took it for a second
-// signal and said what it was still saving is lost, at the end of a recording
-// that had lost nothing.
-func (a *AgentClient) stopAgentProcess(reached *atomic.Bool, requestStop func() error, procDone <-chan struct{}, kill func()) {
-	err := requestStop()
-	if err == nil {
-		a.logger.Info("Keploy agent stopped.")
-		return
-	}
-	if reached != nil && reached.Load() && agentGoingAway(err) {
-		a.logger.Debug("the keploy agent is already stopping; waiting for it to exit", zap.Error(err))
-		select {
-		case <-procDone:
-			a.logger.Info("Keploy agent stopped.")
-			return
-		case <-time.After(agentStoppingGrace):
-			a.logger.Warn("the keploy agent was stopping but has not exited; sending it a stop signal",
-				zap.Duration("waited", agentStoppingGrace))
-		}
-	} else {
-		a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
-	}
-	kill()
-}
-
-// unlessExited returns kill, made a no-op once procDone is closed: an agent
-// that has exited is not signalled. Its PID may be another process's by then.
-func unlessExited(procDone <-chan struct{}, kill func()) func() {
-	return func() {
-		select {
-		case <-procDone:
-			return
-		default:
-		}
-		kill()
-	}
-}
-
 // startNativeAgentWithPTY starts the agent with PTY support for interactive input (e.g., sudo password)
-func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group, reached *atomic.Bool, exited chan<- error) error {
+func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group, exited chan<- error, run *agentRun, progress string, removeProgress func()) error {
 	// Create command configured for PTY
 	cmd := agentUtils.NewAgentCommandForPTY(keployBin, args)
 
@@ -1878,24 +2126,34 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 	pid := cmd.Process.Pid
 	a.logger.Debug("keploy agent started with PTY", zap.Int("pid", pid))
 
-	// procDone is closed once the agent process has exited.
-	procDone := make(chan struct{})
+	// Reaped outside the group, for the reason given in startNativeAgent.
+	reaped := make(chan error, 1)
+	go func() {
+		defer utils.Recover(a.logger)
+		err := ptyHandle.Wait()
+		run.exited()
+		removeProgress()
+		// Before the group goroutine returns it, as in startNativeAgent.
+		exited <- err
+		reaped <- err
+	}()
 
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
-
-		err := ptyHandle.Wait()
-		close(procDone)
-		// Before the return below, for the reason given in startNativeAgent.
-		exited <- err
+		err, ok := a.awaitAgentExit(ctx, reaped, run, pid)
+		if !ok {
+			return nil
+		}
 		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
 		}
 		a.mu.Lock()
-		a.agentCmd = nil
-		a.agentPTY = nil
+		if a.agentPTY == ptyHandle { // not a later start's
+			a.agentCmd = nil
+			a.agentPTY = nil
+		}
 		a.mu.Unlock()
 		a.logger.Debug("agent process stopped")
 		return nil
@@ -1909,13 +2167,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		}
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
-		// This start's agent, not whichever a.agentPTY names by now (a setup
-		// retry starts the next one meanwhile).
-		a.stopAgentProcess(reached, a.requestAgentStop, procDone, unlessExited(procDone, func() {
-			if stopErr := agentUtils.StopPTYCommand(ptyHandle, a.logger); stopErr != nil {
-				a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
-			}
-		}))
+		a.stopPTYAgent(run, pid, ptyHandle, progress)
 		return nil
 	})
 
@@ -1973,12 +2225,209 @@ func (a *AgentClient) stopAgent() {
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
 	}
 
-	// If PTY is active, close it to unblock stdin/stdout copies
+	// The PTY is never closed here: closing it hangs the agent up, and a
+	// hung-up agent dies where it stands. The agent's stop goroutine ends it
+	// (stopPTYAgent) -- SIGTERM to sudo, which also ends sudo at its password
+	// prompt -- and the PTY is closed once it has exited (PTYHandle.Wait). The
+	// terminal is the user's again at once, though.
 	if a.agentPTY != nil {
-		// Use the utils function to gracefully stop PTY
-		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
-			a.logger.Debug("failed to stop PTY command", zap.Error(err))
+		a.agentPTY.RestoreTerminal()
+	}
+}
+
+// nativeStopPoll is how often the CLI reads a stopping native agent's
+// teardown progress. It only spaces the reads: what counts is the agent's own
+// beats (stopWatch).
+const nativeStopPoll = 250 * time.Millisecond
+
+// stopNativeAgent stops a natively started agent on the CLI's stop: asked
+// over its API, or sent SIGTERM (its leader: sudo hands it on), and waited for
+// while its teardown makes progress, which it reports at progress (endAgent).
+func (a *AgentClient) stopNativeAgent(run *agentRun, pid int, cmd *exec.Cmd, progress string) {
+	var reach killReach
+	reach.firstAtOnce, reach.noAtOnce = agentUtils.KillAgentReach(cmd)
+	a.endAgent(run, pid, a.requestAgentStop,
+		func() error { return agentUtils.TerminateCommand(cmd, a.logger) },
+		func(now bool) error { return agentUtils.KillAgentCommand(cmd, a.logger, now) }, reach,
+		readProgressFile(progress))
+}
+
+// stopPTYAgent stops an agent started on a PTY on the CLI's stop: the user's
+// terminal is restored at once (keploy may exit before the agent does), then
+// it is stopped as stopNativeAgent stops one, its SIGTERM going to sudo with
+// the PTY left open. The same SIGTERM ends sudo when it is still at its
+// password prompt: sudo exits on it there.
+func (a *AgentClient) stopPTYAgent(run *agentRun, pid int, h *agentUtils.PTYHandle, progress string) {
+	h.RestoreTerminal()
+	var reach killReach
+	reach.firstAtOnce, reach.noAtOnce = agentUtils.KillPTYReach(h)
+	a.endAgent(run, pid, a.requestAgentStop,
+		func() error { return agentUtils.TerminatePTYCommand(h, a.logger) },
+		func(now bool) error { return agentUtils.KillPTYCommand(h, a.logger, now) }, reach,
+		readProgressFile(progress))
+}
+
+// endAgent stops a native agent on the CLI's stop, and returns once it has
+// exited, or been killed at once at the user's Ctrl+C.
+//
+// It asks the agent over its API (ask). If that fails, the agent is sent
+// SIGTERM (terminate) -- whether or not it has answered its readiness check
+// yet: an agent attaches its TLS uprobes before it answers (the proxy's
+// AfterStart), so one that has not answered may already be removing them on
+// that signal -- except one that answered and is already going away
+// (agentGoingAway), which got its stop some other way: it is sent SIGTERM only
+// if it has reported no teardown within agentStoppingGrace. Then it is waited
+// for while its teardown makes progress, and killed (kill) only once it has
+// stopped making any, or has detached everything and not exited -- kill(false),
+// on which it dies once no teardown work in progress is making progress -- or
+// at the user's Ctrl+C once the stop has said a press stops it, as that offer
+// says: kill(false) at a press answering the first offer, kill(true), at
+// once, at one answering an offer made after a press (stopWatch). reach is
+// what kill does where that differs (Windows, sudo): the offers say so. An
+// agent sudo runs as root (reach.noAtOnce), which no kill ends at once, is
+// waited for after a press until it has exited or halted. An agent already
+// reaped is never signalled: its pid may be another process's by now.
+func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() error, kill func(now bool) error, reach killReach, read func(context.Context) (utils.TeardownProgress, bool)) {
+	ifRunning := func(f func() error) func() error {
+		return func() error {
+			if run.isGone() {
+				return nil
+			}
+			return f()
 		}
+	}
+	terminate = ifRunning(terminate)
+	killIfRunning := func(now bool) error {
+		if run.isGone() {
+			return nil
+		}
+		return kill(now)
+	}
+	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
+	// one before may be a copy of the stop itself (stopWatch).
+	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
+		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
+		settled: sudoAgentSettled(pid)}
+
+	err := ask()
+	switch {
+	case err == nil:
+		a.logger.Info("Asked the keploy agent to stop", zap.Int("pid", pid))
+	case run.isGone():
+		return
+	case run.ready.Load() && agentGoingAway(err):
+		a.logger.Debug("the keploy agent is already stopping", zap.Error(err))
+		// Joined before endAgent returns: no signal outlives the stop.
+		watched, nudged := make(chan struct{}), make(chan struct{})
+		defer func() { close(watched); <-nudged }()
+		after := agentStoppingGrace
+		go func() {
+			defer close(nudged)
+			grace := time.NewTimer(after)
+			defer grace.Stop()
+			select {
+			case <-watched:
+				return
+			case <-grace.C:
+			}
+			if _, reported := read(context.Background()); reported {
+				a.logger.Debug("the keploy agent is reporting its teardown; it is not signalled")
+				return
+			}
+			a.logger.Warn("the keploy agent was stopping but has reported no teardown; sending it a stop signal",
+				zap.Duration("waited", agentStoppingGrace))
+			if err := terminate(); err != nil {
+				a.logger.Debug("failed to signal the keploy agent to stop", zap.Error(err))
+			}
+		}()
+	default:
+		a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+		if err := terminate(); err != nil {
+			a.logger.Debug("failed to signal the keploy agent to stop", zap.Error(err))
+		}
+	}
+	if watch.run() {
+		run.stoppedAtOnce()
+	}
+}
+
+// beginRun begins a start of the agent: one agent at a time, so a retried
+// start (RetryAgentSetup) first waits for the agent it replaces to finish its
+// shutdown, which is waited for while it makes progress (agentRun) -- it
+// would otherwise run beside the new one, its hooks still attached for the
+// same client. The new start gets a run of its own, not ready until its agent
+// answers, and a context the CLI's stop cancels independently of ctx's other
+// users.
+func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.CancelFunc, *agentRun, error) {
+	if err := a.awaitPreviousAgent(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	agentCtx, cancel := context.WithCancel(ctx)
+	run := newAgentRun()
+	a.mu.Lock()
+	a.agentCancel = cancel
+	a.run = run
+	a.mu.Unlock()
+	return agentCtx, cancel, run, nil
+}
+
+// agentExitBound is how long a step that needs a stopped agent gone waits
+// for its exit while no stop is holding the drains (utils.AwaitAgentExit): the
+// drains' own bound.
+var agentExitBound = 30 * time.Second
+
+// awaitPreviousAgent returns once the agent of the previous start, if any, has
+// exited -- or with an error when ctx ends, the user interrupts again, or the
+// wait has run agentExitBound with no stop holding the drains
+// (utils.AwaitAgentExit): a new agent beside the old one would hook the same
+// client twice.
+func (a *AgentClient) awaitPreviousAgent(ctx context.Context) error {
+	prev := a.currentRun()
+	if prev == nil || prev.isGone() {
+		return nil
+	}
+	a.logger.Info("Waiting for the previous keploy agent to exit before starting a new one (Ctrl+C stops waiting)")
+	again := utils.InterruptedAfter(utils.RepeatInterrupts())
+	stop, waited := make(chan struct{}), make(chan struct{})
+	defer close(waited)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-again:
+		case <-waited:
+			return
+		}
+		close(stop)
+	}()
+	if utils.AwaitAgentExit(prev.gone, agentExitBound, stop) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	return fmt.Errorf("the previous keploy agent has not exited")
+}
+
+// awaitAgentExit is the group's wait for a native agent's exit (reaped). Once
+// the stop has killed the agent at once at the user's Ctrl+C, or found an
+// agent sudo runs as root halted after a press (run.letGo: stopWatch hears
+// only one given once it said that one stops the agent now, never a copy of
+// the stop's own signal), it lets the group go -- and with it a caller
+// waiting on the group -- while the agent finishes dying on its own; ok is
+// false then.
+func (a *AgentClient) awaitAgentExit(ctx context.Context, reaped <-chan error, run *agentRun, pid int) (err error, ok bool) {
+	select {
+	case err = <-reaped:
+		return err, true
+	case <-ctx.Done():
+	}
+	select {
+	case err = <-reaped:
+		return err, true
+	case <-run.letGo:
+		a.logger.Warn("Stopped waiting for the keploy agent; it is still shutting down on its own",
+			zap.Int("pid", pid))
+		return nil, false
 	}
 }
 
@@ -2094,55 +2543,67 @@ func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	}
 }
 
+// agentReadyBudget is how long one bring-up of the agent may stall: the
+// daemon's answer to its version (Setup), and then the agent's readiness
+// (waitForAgent). KEPLOY_AGENT_READY_TIMEOUT, or a retry's own, overrides it.
+func agentReadyBudget(opts models.SetupOptions) time.Duration {
+	if opts.AgentReadyTimeout > 0 {
+		return opts.AgentReadyTimeout
+	}
+	return pkg.AgentReadyTimeout()
+}
+
 // waitForAgent blocks until the agent started by startAgent answers its health
-// check (nil), its process ends (exited), its ready budget runs out, or ctx is
-// cancelled.
+// check (nil, or a refusal wrapping provenswitch.ErrAgentSwitch when that
+// answer reports a proven switch that is not this keploy's), its process ends
+// (exited), its ready budget runs out, or ctx is cancelled.
 func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isDockerCmd bool, opts models.SetupOptions) error {
 	// Wait up to the agent's own healthcheck budget for it to become ready.
 	// Under heavy CI docker-daemon contention the agent container can take
 	// well over a minute just to start (observed: a local-image `docker run`
 	// taking 126s), so a 60s wait gave up prematurely and tore down a
 	// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-	readyTimeout := pkg.AgentReadyTimeout()
-	if opts.AgentReadyTimeout > 0 {
-		readyTimeout = opts.AgentReadyTimeout
-	}
+	readyTimeout := agentReadyBudget(opts)
 	agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
-	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, a.logger, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
+	// The run this wait is for: startAgent's, made just before it.
+	run := a.currentRun()
+
+	// The headers of the health answer that finds the agent ready, which its
+	// proven switch is read from (below).
+	answers := make(chan http.Header, 1)
+	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers, 1*time.Second)
 
 	// agentCtx is ctx's child, so its Done covers the caller's cancellation
-	// as well as the budget running out, and the ticker closes agentReadyCh
-	// (ready == false) on either. Which of those it was is decided below, in
+	// as well as the budget running out, and the ticker closes answers
+	// (answer == nil) on either. Which of those it was is decided below, in
 	// order, rather than by whichever case the select happens to pick when
 	// several are ready at once.
-	var ready bool
+	var answer http.Header
 	select {
 	case exitErr := <-exited:
 		return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
 	case <-agentCtx.Done():
-	case ready = <-agentReadyCh:
+	case answer = <-answers:
 	}
-	if ready {
-		// It answered: its HTTP server is up (agentReached).
-		if reached := a.agentReached.Load(); reached != nil {
-			reached.Store(true)
+	if answer != nil {
+		// It answered: running (agentRun).
+		if run != nil {
+			run.ready.Store(true)
 		}
-		// Within the same readiness budget as the health check: an agent that
-		// answered it once and then stops answering is not ready either.
-		err := a.checkAgentSwitch(agentCtx)
-		if err == nil {
-			return nil
-		}
-		if ctx.Err() == nil && agentCtx.Err() == nil {
+		// The agent's proven switch must be this keploy's (provenswitch.
+		// CheckAgent), and it is taken from the very answer that found the
+		// agent ready, not from another request: nothing more is asked of the
+		// agent, so a run with the switch off asks it exactly what it always
+		// did, and an agent whose answer has been taken is not waited on
+		// again, whether it has since exited or stopped answering. A refusal
+		// names both sides; the agent is stopped rather than left running.
+		if err := provenswitch.CheckAgent(answer.Get(provenswitch.HealthHeader)); err != nil {
 			a.stopAgent()
 			return err
 		}
-		// The caller's context ended, or the budget ran out mid-read: not a
-		// switch that was read, so it is handled below exactly as an agent
-		// that never became ready.
+		return nil
 	}
 	if ctx.Err() != nil {
 		// The caller's Ctrl+C -- or a goroutine in the caller's errgroup
@@ -2171,25 +2632,6 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	// Sentinel so the caller can retry a fresh bring-up on this specific,
 	// nondeterministic stall without retrying deterministic failures.
 	return fmt.Errorf("%w", pkg.ErrAgentNotReady)
-}
-
-// checkAgentSwitch refuses an agent whose proven switch is not this keploy's
-// (provenswitch.CheckAgent), naming both sides: its parsers and this CLI's
-// verdicts would run different paths. It runs once the agent has answered its
-// health check, so its own read of /health is to an agent that is up. With the
-// switch off here a failed read changes nothing, as before the switch existed;
-// with it on, an agent whose switch cannot be read is not run against. A
-// refusal wraps provenswitch.ErrAgentSwitch; the caller reports it.
-func (a *AgentClient) checkAgentSwitch(ctx context.Context) error {
-	reported, err := a.readAgentSwitch(ctx)
-	if err != nil {
-		if !provenswitch.On() {
-			a.logger.Debug("could not read the agent's proven switch; it is off here, so nothing depends on it", zap.Error(err))
-			return nil
-		}
-		return fmt.Errorf("%w: the switch is on in this keploy (%s) and the agent's could not be read: %w", provenswitch.ErrAgentSwitch, provenswitch.Env, err)
-	}
-	return provenswitch.CheckAgent(reported)
 }
 
 // readAgentSwitch reads the agent's report of its proven switch from /health:
@@ -2360,6 +2802,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
+	forgetContainers(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -2383,8 +2826,25 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
+		// The agent container maps host.docker.internal to the Docker host
+		// (host-gateway) where the daemon resolves it (extra_hosts.go). The
+		// question has the bring-up's own budget, as waitForAgent's wait does:
+		// a daemon that does not answer it in that time would not start the
+		// agent either, and running out fails this bring-up as a stalled one
+		// (retried), rather than hanging setup with nothing said, or answering
+		// no.
+		readyBudget := agentReadyBudget(opts)
+		versionCtx, cancelVersion := context.WithTimeout(ctx, readyBudget)
+		opts.HostGateway, err = kdocker.HostGatewaySupported(versionCtx, a.dockerClient)
+		cancelVersion()
+		if err != nil {
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			return fmt.Errorf("%w: the Docker daemon did not answer its version within %s", pkg.ErrAgentNotReady, readyBudget)
+		}
 
-		var appPorts, appNetworks []string
+		var appPorts, appNetworks, appHosts []string
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -2392,7 +2852,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -2429,7 +2889,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			cmd, appPorts, appNetworks = agentUtils.ExtractDockerFlags(cmd)
+			cmd, appHosts = agentUtils.ExtractAddHosts(cmd)
 		}
+		opts.AppExtraHosts = appHosts
 
 		opts.AppPorts = appPorts
 		if len(appNetworks) > 0 {
@@ -2447,6 +2909,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
 		opts.ClientNSPID = uint32(os.Getpid())
+		if !isDockerCmd && provenswitch.On() {
+			// The run's members are this process's descendants: keep a daemon
+			// the app starts among them (adopt_linux.go, P146).
+			adoptDaemons(a.logger)
+		}
 		var agentExited <-chan error
 		agentExited, err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
@@ -2553,6 +3020,17 @@ func exportMockScopeEnv(logger *zap.Logger, opts models.SetupOptions, agentPort 
 	if err := os.Setenv("KEPLOY_MOCK_SESSION", session); err != nil {
 		logger.Debug("failed to export KEPLOY_MOCK_SESSION", zap.Error(err))
 	}
+	// A claim marker inherited from an enclosing keploy run (this keploy was
+	// started by a test of another run) names a process of that run: left
+	// in place, this run's test processes would take themselves for its
+	// helpers and never claim, and their tests would pass unjudged. Only
+	// the proven wire has claims; with the switch off the environment is
+	// left as it was.
+	if provenswitch.On() {
+		if err := os.Unsetenv(models.TestPIDEnv); err != nil {
+			logger.Debug("failed to remove "+models.TestPIDEnv, zap.Error(err))
+		}
+	}
 }
 
 func (a *AgentClient) getApp() (*app.App, error) {
@@ -2614,9 +3092,10 @@ func (e *agentContainerExit) ExitCode() int { return e.code }
 //
 // Under compose the agent is a service in the project, and when it stops
 // first, compose aborts the project over it: the exit that reaches keploy is
-// compose reporting the dependency it lost, or the test command's code after
-// compose stopped it, and neither is the test command's verdict. The agent's
-// container, read before keploy's teardown removes it, says which it was.
+// compose reporting the dependency it lost, or the app's code after compose
+// stopped it (the test command's, under keploy mock), and neither is the
+// app's own verdict. The agent's container, read before keploy's teardown
+// removes it, says which it was. keploy mock and keploy record both ask.
 //
 // An agent that stopped before the app ever started could not start at all,
 // and its exit status says why, exactly as a native agent's does
@@ -2644,7 +3123,47 @@ func (a *AgentClient) composeAgentFailure(stopped app.StoppedAgent) error {
 	if !stopped.AppStarted() {
 		return a.agentStoppedBeforeReady(exit, true)
 	}
-	return fmt.Errorf("the keploy agent stopped while the test command was running: %w", exit)
+	return fmt.Errorf("the keploy agent stopped while the app was running: %w", exit)
+}
+
+// ComposeEndAfterReady is what ended a docker compose run keploy saw its
+// agent ready in, when the app's own end does not stand: the keploy agent
+// having crashed -- under the running app, or before compose started it --
+// as keploy's own failure; or the project stopping before compose ever
+// started the app, though compose reported 0, as the project's failure, not
+// a clean end. nil when the app's own end stands. keploy record asks it once
+// its recording is under way; appExit is the app's exit as keploy got it,
+// which stands in for the app's container when docker could not say how that
+// ended (StoppedAgent.AgentDiedAfterReady).
+func (a *AgentClient) ComposeEndAfterReady(appExit int) error {
+	ap, err := a.getApp()
+	if err != nil {
+		return nil
+	}
+	stopped, ok := ap.StoppedAgent()
+	if !ok {
+		return nil
+	}
+	return composeEndAfterReady(stopped, appExit)
+}
+
+// composeEndAfterReady is ComposeEndAfterReady for what keploy read from the
+// stopped agent's container.
+func composeEndAfterReady(stopped app.StoppedAgent, appExit int) error {
+	if stopped.AgentDiedAfterReady(appExit) {
+		exit := &agentContainerExit{container: stopped.Container, code: stopped.Agent.ExitCode, oomKilled: stopped.Agent.OOMKilled}
+		if stopped.AppNeverStarted() {
+			return fmt.Errorf("the keploy agent stopped before compose started the app: %w", exit)
+		}
+		return fmt.Errorf("the keploy agent stopped while the app was running: %w", exit)
+	}
+	// Compose reports 0 for an app it never started, in a race (see
+	// App.run): another of the project's services failed first, and nothing
+	// ran to be recorded.
+	if appExit == 0 && stopped.AppNeverStarted() {
+		return errors.New("compose never started the app (another of the project's services ended it), though it reported 0")
+	}
+	return nil
 }
 
 // appContainerExit is the app's container no longer running, as docker
@@ -2705,7 +3224,7 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
+func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
 	}, opts)
@@ -2720,42 +3239,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return err
 	}
 
-	cmd.Cancel = func() error {
-		logger.Debug("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
-
-		containerName := opts.KeployContainer
-
-		// Try stopping the container without sudo first (works if user is in docker group)
-		cli := engine.Active().CLI
-		stopCmd := exec.Command(cli, "stop", containerName)
-		if output, err := stopCmd.CombinedOutput(); err != nil {
-			// If that fails on Linux, try with sudo -n (non-interactive, won't prompt for password)
-			if runtime.GOOS == "linux" {
-				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
-				stopCmd = exec.Command("sudo", "-n", cli, "stop", containerName)
-				if output, err := stopCmd.CombinedOutput(); err != nil {
-					logger.Debug("Could not stop the docker container. It may have already stopped.",
-						zap.String("container", containerName),
-						zap.Error(err),
-						zap.String("output", string(output)))
-				} else {
-					logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
-				}
-			} else {
-				logger.Debug("Could not stop the docker container. It may have already stopped.",
-					zap.String("container", containerName),
-					zap.Error(err),
-					zap.String("output", string(output)))
-			}
-		} else {
-			logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
-		}
-
-		if cmd.Process != nil {
-			return utils.SendSignal(logger, cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer)
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
@@ -2778,6 +3262,227 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	return nil
+}
+
+// dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's
+// container (stopAgentContainerFor) and then kills the client -- through
+// cmd.Process, not its raw pid, which cmd.Wait may have reaped already.
+func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name string) func() error {
+	return func() error {
+		stopAgentContainerFor(logger, run, name)
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+}
+
+// stopAgentContainerFor stops the agent's container on the CLI's stop: it is
+// sent SIGTERM and waited for while its teardown makes progress
+// (stopAgentContainer), answered or not -- the agent attaches its TLS uprobes
+// before it answers (agentRun). The signal is sent synchronously, as `stop`
+// always was, so it has gone out before keploy can exit. An agent that never
+// answered is sent SIGTERM again until it reports its teardown
+// (resendSIGTERM).
+func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
+	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
+	if stopAgentContainer(logger, name, !run.ready.Load()) {
+		run.stoppedAtOnce()
+	}
+}
+
+// containerEngineCommand is the container engine's CLI running args under
+// ctx, as name (the engine's CLI, or sudo). It runs in a process group of its
+// own, so a terminal's Ctrl+C does not interrupt it.
+func containerEngineCommand(ctx context.Context, name string, argv ...string) *exec.Cmd {
+	c := exec.CommandContext(ctx, name, argv...)
+	agentUtils.SetOwnProcessGroup(c)
+	// Once ctx is cancelled the process is killed -- but under sudo that is
+	// sudo, and the root engine client it ran keeps the output pipe open until
+	// it exits by itself. Do not wait for that pipe.
+	c.WaitDelay = time.Second
+	return c
+}
+
+// engineCLI runs the container engine's CLI for one stop of an agent's
+// container: as root or in the docker group without sudo, or -- on Linux,
+// when that is refused -- with sudo -n (non-interactive). Which of the two is
+// decided by the first command that succeeds and kept for the rest of the
+// stop, so a later command that fails for reasons of its own (a `cp` of a file
+// the agent has not written yet) does not try sudo again.
+type engineCLI struct {
+	logger *zap.Logger
+	mode   atomic.Int32 // engineUndecided, engineDirect or engineSudo
+}
+
+const (
+	engineUndecided int32 = iota
+	engineDirect
+	engineSudo
+)
+
+func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
+
+// run runs the engine's CLI with args under ctx (containerEngineCommand), and
+// returns what output takes from it.
+func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
+	cli := engine.Active().CLI
+	direct := func() ([]byte, error) { return output(containerEngineCommand(ctx, cli, args...)) }
+	sudo := func() ([]byte, error) {
+		return output(containerEngineCommand(ctx, "sudo", append([]string{"-n", cli}, args...)...))
+	}
+	switch e.mode.Load() {
+	case engineDirect:
+		return direct()
+	case engineSudo:
+		return sudo()
+	}
+	out, err := direct()
+	if err == nil {
+		e.mode.CompareAndSwap(engineUndecided, engineDirect)
+		return out, nil
+	}
+	if ctx.Err() != nil || runtime.GOOS != "linux" {
+		return out, err
+	}
+	e.logger.Debug("container engine command without sudo failed, trying with sudo -n",
+		zap.Strings("args", args), zap.Error(err))
+	out, err = sudo()
+	if err == nil {
+		e.mode.CompareAndSwap(engineUndecided, engineSudo)
+	}
+	return out, err
+}
+
+// combined runs args and returns their output, stderr included.
+func (e *engineCLI) combined(ctx context.Context, args ...string) ([]byte, error) {
+	return e.run(ctx, (*exec.Cmd).CombinedOutput, args...)
+}
+
+// stdout runs args and returns their stdout alone.
+func (e *engineCLI) stdout(ctx context.Context, args ...string) ([]byte, error) {
+	return e.run(ctx, (*exec.Cmd).Output, args...)
+}
+
+// dockerStopPoll is how often the CLI reads a stopping agent container's
+// teardown progress (a `cp` out of the container). It only spaces the reads:
+// what counts is the agent's own beats (stopWatch).
+var dockerStopPoll = time.Second
+
+// stopAgentContainer stops an agent's container, and returns once it has
+// exited, or once it killed it at once at the user's Ctrl+C (killedAtOnce).
+// It sends the agent SIGTERM
+// (`kill --signal SIGTERM`, synchronously) and waits for the container to stop
+// (`wait`) while the agent's teardown makes progress, which it reports in its
+// container (readContainerProgress). It kills it only once it has stopped
+// making any, or has detached everything and not exited -- with the
+// escalation signal (`kill --signal SIGUSR2`), on which the agent dies once no
+// teardown work in progress is making progress -- or at the user's Ctrl+C
+// once the stop has said a press stops it, as that offer says: the escalation
+// signal at a press answering the first offer, and at once (`kill`, SIGKILL)
+// at one answering an offer made after a press (stopWatch). Not `stop`, whose
+// grace period (10 s by default) ends in a SIGKILL however the teardown is
+// doing (agentRun says why that must not land in it). unanswered (the agent
+// never answered its readiness check) has SIGTERM sent again until the agent
+// reports its teardown (resendSIGTERM).
+func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (killedAtOnce bool) {
+	logger = logger.With(zap.String("container", name))
+	cli := newEngineCLI(logger)
+	// kill(false) sends the agent the escalation signal, on which it dies
+	// once no teardown work in progress is making progress
+	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
+	kill := func(now bool) error {
+		args := []string{"kill", "--signal", "SIGUSR2", name}
+		if now {
+			args = []string{"kill", name}
+		}
+		out, err := cli.combined(context.Background(), args...)
+		if err != nil {
+			logger.Debug("Could not kill the agent container. It may have already stopped.",
+				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		}
+		return err
+	}
+	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
+		logger.Debug("Could not signal the agent container. It may have already stopped.",
+			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		return
+	}
+	// The wait returns when the container has stopped; at once, with an
+	// error, when it is already gone (--rm removed it).
+	waitCtx, stopWaiting := context.WithCancel(context.Background())
+	defer stopWaiting()
+	gone := make(chan struct{})
+	go func() {
+		defer close(gone)
+		if out, err := cli.combined(waitCtx, "wait", name); err != nil {
+			logger.Debug("stopped waiting for the agent container",
+				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		}
+	}()
+	reported := make(chan struct{})
+	resent := make(chan struct{})
+	if unanswered {
+		// Joined before the stop returns: no resend outlives it.
+		first, most := sigtermResendFirst, sigtermResendMax
+		go func() {
+			defer close(resent)
+			resendSIGTERM(waitCtx, reported, logger, cli, name, first, most)
+		}()
+	} else {
+		close(resent)
+	}
+	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
+	// one before may be a copy of the stop itself (stopWatch).
+	killedAtOnce = stopWatch{logger: logger, gone: gone, read: readContainerProgress(cli, name),
+		kill: kill, poll: dockerStopPoll, reported: reported}.run()
+	stopWaiting()
+	<-gone
+	<-resent
+	return killedAtOnce
+}
+
+// sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits
+// before its first resend; each wait after it is twice the one before, up to
+// sigtermResendMax.
+var (
+	sigtermResendFirst = time.Second
+	sigtermResendMax   = 30 * time.Second
+)
+
+// resendSIGTERM sends the agent's container SIGTERM again, first after first
+// and then at intervals doubling up to most, until the agent reports its
+// teardown (reported: it got a SIGTERM) or ctx ends (the container has
+// exited, or the stop is over). An agent that never answered may have been
+// signalled while its PID 1 was still the OSS image's entrypoint (sh, then
+// sudo before it handles signals), and a pid namespace's init is sent only
+// the signals it handles: that SIGTERM was dropped. The intervals space the
+// resends out; nothing is decided by them.
+func resendSIGTERM(ctx context.Context, reported <-chan struct{}, logger *zap.Logger, cli *engineCLI, name string, first, most time.Duration) {
+	every := first
+	for {
+		next := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			next.Stop()
+			return
+		case <-reported:
+			next.Stop()
+			logger.Debug("the agent has reported its teardown: it got a SIGTERM, and is not sent another")
+			return
+		case <-next.C:
+		}
+		if out, err := cli.combined(ctx, "kill", "--signal", "SIGTERM", name); err != nil && ctx.Err() == nil {
+			logger.Debug("could not signal the agent container again",
+				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
+		}
+		if every *= 2; every > most {
+			every = most
+		}
+	}
 }
 
 // startInDockerWithPTY starts the docker agent with PTY support for interactive input (e.g., sudo password)
@@ -2806,8 +3511,10 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 	err = ptyHandle.Wait()
 
 	a.mu.Lock()
-	a.agentCmd = nil
-	a.agentPTY = nil
+	if a.agentPTY == ptyHandle { // not a later start's
+		a.agentCmd = nil
+		a.agentPTY = nil
+	}
 	a.mu.Unlock()
 
 	if err != nil {
@@ -2948,18 +3655,64 @@ func (a *AgentClient) BacklogBefore(ctx context.Context, before time.Time) (mode
 		return models.AgentBacklog{}, fmt.Errorf("the agent answered %s", resp.Status)
 	}
 	var out struct {
-		Pending   bool   `json:"pending"`
-		Progress  uint64 `json:"progress"`
-		WaitingOn string `json:"waitingOn"`
+		Pending    bool   `json:"pending"`
+		Progress   uint64 `json:"progress"`
+		WaitingOn  string `json:"waitingOn"`
+		EndMarkers bool   `json:"endMarkers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return models.AgentBacklog{}, err
 	}
-	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn}
+	b := models.AgentBacklog{Verdict: models.BacklogClear, Progress: out.Progress, WaitingOn: out.WaitingOn, EndMarkers: out.EndMarkers}
 	if out.Pending {
 		b.Verdict = models.BacklogPending
 	}
 	return b, nil
+}
+
+// EndRecordingStreams asks the agent to end the frame streams of the
+// recording whose token is token (models.StreamEndPath, StreamEndTokenHeader):
+// each puts on its stream what it still has, then its end marker
+// (StreamEnded), and ends; one this client reopens after that ends at once. A
+// recording's stop asks once the agent has said it holds nothing more from
+// before it, if the agent said it can (models.AgentBacklog.EndMarkers).
+func (a *AgentClient) EndRecordingStreams(ctx context.Context, token string) error {
+	if a.conf.Agent.AgentURI == "" {
+		return errors.New("no agent to end the streams of")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.conf.Agent.AgentURI+models.StreamEndPath+"?token="+neturl.QueryEscape(token), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent answered %s", resp.Status)
+	}
+	return nil
+}
+
+// StreamEnded reports whether the agent ended the latest stream of kind with
+// its end marker (EndRecordingStreams): every frame it had for this client is
+// read. A stream that ended any other way (the agent went away) did not.
+func (a *AgentClient) StreamEnded(kind models.FrameStream) bool {
+	if v, ok := a.streamEnds.Load(kind); ok {
+		return v.(*atomic.Bool).Load()
+	}
+	return false
+}
+
+// newStreamEnd is the end flag of a new stream of kind (StreamEnded).
+func (a *AgentClient) newStreamEnd(kind models.FrameStream) *atomic.Bool {
+	ended := new(atomic.Bool)
+	a.streamEnds.Store(kind, ended)
+	return ended
 }
 
 // NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
@@ -3025,25 +3778,37 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
 
 	for {
-		// The agent's proven switch must be this keploy's before the agent is
-		// told to release the app; a definite disagreement ends the wait.
-		// Until the agent answers its health check there is nothing to read,
-		// and the wait goes on as it always has.
-		if reported, err := a.readAgentSwitch(ctx); err == nil {
-			if err := provenswitch.CheckAgent(reported); err != nil {
-				return err
-			}
-		} else {
-			a.logger.Debug("agent health not readable yet, retrying...", zap.Error(err))
-			select {
-			case <-ctx.Done():
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					return fmt.Errorf("timeout waiting for agent to become ready")
+		// With the switch on, the agent's proven switch must be read and be
+		// this keploy's before the agent is told to release the app: a
+		// definite disagreement ends the wait, while an agent whose switch
+		// cannot be read yet is not released and the wait goes on. With it
+		// off nothing is read, and the agent is told to release the app
+		// exactly as before the switch existed. Nothing is lost by that: the
+		// agent compose starts is the one this keploy wrote into the file
+		// (AddKeployAgentToCompose, which refuses a compose file that already
+		// has a keploy-agent), and its command carries --proven only when the
+		// switch is on here (GenerateKeployAgentService, provenswitch.AgentArgs).
+		// The runner calls this for a native or docker-run agent too, whose
+		// switch its bring-up already checked, with the switch on or off
+		// (waitForAgent).
+		if provenswitch.On() {
+			reported, err := a.readAgentSwitch(ctx)
+			if err == nil {
+				if err := provenswitch.CheckAgent(reported); err != nil {
+					return err
 				}
-				return ctx.Err()
-			case <-ticker.C:
+			} else {
+				a.logger.Debug("the agent's proven switch is not readable yet, retrying...", zap.Error(err))
+				select {
+				case <-ctx.Done():
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						return fmt.Errorf("timeout waiting for agent to become ready")
+					}
+					return ctx.Err()
+				case <-ticker.C:
+				}
+				continue
 			}
-			continue
 		}
 
 		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
@@ -3204,9 +3969,17 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, url, path string, flag
 // GetScopeWindows fetches the per-test scope windows the wrapped runner reported
 // during a `keploy mock record` session (via /agent/scope/*), so the CLI can
 // correlate captured mocks into mappings.yaml. A missing endpoint (older agent)
-// returns an empty slice, degrading to suite-level recording.
+// returns nil, degrading to suite-level recording; under the proven switch it
+// is an error. Under the switch the read is the run's last (?final=1), which
+// closes the run: call it only once the test command has exited.
 func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	url := fmt.Sprintf("%s/scope/windows", a.conf.Agent.AgentURI)
+	if provenswitch.On() {
+		// Every read the CLI makes is the run's last, once its command
+		// exited: the agent fails a test still open. With the switch off
+		// the read is the one keploy made before the switch.
+		url += "?final=1"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scope-windows request: %w", err)
@@ -3220,6 +3993,12 @@ func (a *AgentClient) GetScopeWindows(ctx context.Context) ([]models.ScopeWindow
 		res.Body.Close()
 	}()
 	if res.StatusCode == http.StatusNotFound {
+		// An agent without the scope API. Under the proven switch what each
+		// test did is keploy's verdict, so an agent that cannot say is an
+		// error, never "no tests".
+		if provenswitch.On() {
+			return nil, errors.New("this keploy agent does not report what each test did (its scope windows answered 404); run the agent of this keploy version")
+		}
 		return nil, nil
 	}
 	if res.StatusCode != http.StatusOK {
@@ -3260,6 +4039,80 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("set table returned status %d: %s", res.StatusCode, string(b))
+	}
+	return nil
+}
+
+// PushProvenTable hands the agent, under the proven switch, the per-test
+// table and each key's pool slice (models.ScopeTableReq.Pool) in one
+// request. Every answer but 200 is an error: a replay judged per test must
+// not run on an agent that serves its tests and pool otherwise.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string) (retErr error) {
+	if pool == nil {
+		pool = map[string][]string{}
+	}
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			t, p := maps.Clone(table), maps.Clone(pool)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool})
+	if err != nil {
+		return fmt.Errorf("failed to marshal scope table: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/scope/table", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create scope-table request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push scope table: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// PushTestBegins hands the agent when each test of the replayed recording
+// began, so it moves the run's clock per test (models.TestBeginsReq). They
+// are given again to a restarted agent, like the scope table. An agent that
+// cannot take them is an error: the tests would run on another clock than
+// their recording's.
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded, recordedReal := maps.Clone(begins), maps.Clone(real)
+			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded, recordedReal) })
+		}
+	}()
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/clock", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send the agent the tests' recorded begins: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("the agent did not take the tests' recorded begins: status %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
@@ -3340,6 +4193,48 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 	return nil
 }
 
+// PushScopeSkips hands the agent the proven model's gate: the tests to skip,
+// by ID, each with its reason; an empty map skips nothing. Made again on a
+// restarted agent, like the scope gate. Any answer but 200 is a failure: a
+// replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string) (retErr error) {
+	defer func() {
+		if retErr == nil && a.session().recording() {
+			recorded := maps.Clone(skip)
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded) })
+		}
+	}()
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/replay/gate", a.conf.Agent.AgentURI), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create the scope-gate request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push the tests to skip: %w", err)
+	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
+	answer, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent refused the tests to skip: status %d: %s", res.StatusCode, string(answer))
+	}
+	var ack models.ScopeGateResp
+	if err := json.Unmarshal(answer, &ack); err != nil || ack.V != models.ScopeProtocolVersion {
+		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without KEPLOY_PROVEN=1", string(answer))
+	}
+	if ack.Skips != len(skip) {
+		return fmt.Errorf("the agent applies %d of the %d tests to skip", ack.Skips, len(skip))
+	}
+	return nil
+}
+
 // DrainCapturedMocks fetches (and clears) the mocks the proxy captured on miss
 // during a `--on-miss record` replay session. The CLI appends them to the set.
 func (a *AgentClient) DrainCapturedMocks(ctx context.Context) ([]*models.Mock, error) {
@@ -3381,9 +4276,10 @@ const fromContainerStopBudget = 45 * time.Second
 // published ports until it exits, and the bind only frees once it has.
 const fromContainerRestoreBudget = 90 * time.Second
 
-// appNetworkingFromContainer reads the published ports and user networks off an
-// already-running container, in the shapes GenerateDockerCommand expects:
-// AppPorts as whole `-p …` flags, AppNetworks as bare names.
+// appNetworkingFromContainer reads the published ports, user networks and host
+// entries off an already-running container, in the shapes GenerateDockerCommand
+// expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
+// AppExtraHosts as NAME:ADDRESS.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -3394,10 +4290,15 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports []string, networks []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// Its host entries, which its replacement cannot carry under the agent's
+	// network mode: the agent container carries them (AppExtraHosts).
+	if inspect.HostConfig != nil {
+		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -3447,7 +4348,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, nil
+	return ports, networks, hosts, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts
@@ -3476,9 +4377,20 @@ func (a *AgentClient) RestoreFromContainer() {
 		if usrApp, err := a.getApp(); err == nil {
 			usrApp.RemoveReplacement()
 		}
+		run := a.currentRun()
 		a.stopAgent()
 		if !a.fromContainerWasRunning {
 			return
+		}
+		// The agent holds the app's ports until its container has exited:
+		// restore after that -- or, as a drain gives up, once the wait has run
+		// its bound with no stop holding the drains, or once its stop killed
+		// it at once at the user's Ctrl+C (run.letGo; utils.AwaitAgentExit).
+		// restoreSourceContainer then retries the start while the ports are
+		// still held.
+		if run != nil && !utils.AwaitAgentExit(run.gone, agentExitBound, run.letGo) {
+			a.logger.Warn("Restoring your container while the keploy agent container is still shutting down",
+				zap.String("container", a.fromContainer))
 		}
 		a.restoreSourceContainer(a.fromContainer)
 	})
@@ -4071,4 +4983,30 @@ func (a *AgentClient) GetIDPairs(ctx context.Context) (map[string]string, error)
 		return nil, err
 	}
 	return pairs, nil
+}
+
+// TestVariables returns the test variables the agent bound in the current test
+// (GET /agent/variables; proven switch).
+func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBinding, error) {
+	if a.conf.Agent.AgentURI == "" {
+		return nil, errors.New("keploy has no agent to read the test's variables from")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.conf.Agent.AgentURI+"/variables", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return nil, agentRespErr("get test variables", res, rawBody)
+	}
+	var out models.TestVariablesResp
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Variables, nil
 }

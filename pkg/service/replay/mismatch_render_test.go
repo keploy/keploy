@@ -158,3 +158,20 @@ func TestPrintFailuresTable_NoCausesWithoutAnOutOfScopeMiss(t *testing.T) {
 		t.Errorf("shared causes must not appear without an out-of-scope miss:\n%s", out)
 	}
 }
+
+// A variable that did not hold is printed as the diff naming the variable,
+// its value in this test and what the call sent; never as a request diff
+// against the recording, which holds neither.
+func TestPrintMismatchReport_AVariableThatDidNotHold(t *testing.T) {
+	r := &models.MockMismatchReport{
+		Protocol: "HTTP", ActualSummary: "GET /orders/o9", ClosestMock: "mock-2", MatchPhase: models.MatchPhaseVariable,
+		Diff:           `mock mock-2: variable orderId is "o1" in this test (taken at mock-1 body.id), and this call sent "o9" at url.path[1]`,
+		ClosestMockReq: "GET /orders/r1 HTTP/1.1\r\n\r\n", ReceivedReq: "GET /orders/o9 HTTP/1.1\r\n\r\n",
+		FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]", Kind: models.DiffKindVariable, Expected: "o1", Actual: "o9"}},
+		NextSteps:  "fix the application",
+	}
+	out := captureStdout(t, func() { printMismatchReport(r) })
+	if !strings.Contains(out, `variable orderId is "o1" in this test`) || strings.Contains(out, "/orders/r1") {
+		t.Errorf("printed:\n%s", out)
+	}
+}

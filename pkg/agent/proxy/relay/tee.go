@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -206,9 +207,9 @@ type tee struct {
 	// [Config.ConsumerStallGrace]; see DefaultConsumerStallGrace for why it
 	// bounds stalled time rather than total teardown time.
 	stallGrace time.Duration
-	// clock measures the stall window (see stallMeter): realStallClock
-	// outside tests.
-	clock stallClock
+	// clock measures the stall window (stall.Meter): nil, the process's own
+	// runnable clock, outside tests.
+	clock stall.Clock
 
 	// consumerGone is the FakeConn's close signal, supplied to [tee.start].
 	// It fires only when the parser itself abandons the connection, which
@@ -286,7 +287,6 @@ func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time
 		logger:     logger,
 		cap:        capBytes,
 		stallGrace: stallGrace,
-		clock:      realStallClock{},
 		memCheck:   memCheck,
 		onDrop:     onDrop,
 		out:        make(chan fakeconn.Chunk, chanBuf),
@@ -647,15 +647,15 @@ func (t *tee) drain() {
 		// comes back a wall-clock timer has long expired and wins the race
 		// against a consumer that is about to take the chunk. That abandoned
 		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
-		// host load 9). See stallMeter for how the time is measured.
+		// host load 9). See utils/stall for how the time is measured.
 	deliver:
 		for {
-			var stall *stallMeter
+			var meter *stall.Meter
 			var stallC <-chan time.Time
 			var closing <-chan struct{}
 			if t.closedFlag.Load() {
-				stall = newStallMeter(t.clock, t.stallGrace)
-				stallC = stall.wait()
+				meter = stall.NewMeter(t.clock, t.stallGrace)
+				stallC = meter.Wait()
 			} else {
 				// Still open, so no bound — but a drain parked here must still
 				// learn that close() happened, or it would block forever and
@@ -666,20 +666,20 @@ func (t *tee) drain() {
 			for {
 				select {
 				case t.out <- c:
-					stall.stop()
+					meter.Stop()
 					break deliver
 
 				case <-t.consumerGone:
 					// The parser closed its FakeConn: nothing will read this,
 					// and the verdict covers the whole connection, not just
 					// the chunk in hand.
-					stall.stop()
+					meter.Stop()
 					t.abandon(c)
 					return
 
 				case <-stallC:
-					if !stall.expired() {
-						stallC = stall.wait()
+					if !meter.Expired() {
+						stallC = meter.Wait()
 						continue
 					}
 					// Out full, and the consumer freed nothing, for a whole
@@ -690,6 +690,7 @@ func (t *tee) drain() {
 					// flush tempting in the first place. Deciding once gets
 					// both: a progressing consumer never trips the window, a
 					// stopped one costs one window total.
+					meter.Stop()
 					t.abandon(c)
 					return
 
@@ -702,137 +703,6 @@ func (t *tee) drain() {
 			}
 		}
 	}
-}
-
-// stallTick is how often the drain samples a stall window (see stallMeter).
-const stallTick = 10 * time.Millisecond
-
-// stallMeter measures, for the drain's stall window, how long the process
-// could have run since the window began: the time a consumer that is still
-// reading had to take a chunk.
-//
-// It samples every tick (stallTick, or the grace when shorter).
-//   - A process can run for at most its CPU limit (a container's --cpus, a
-//     pod's CPU limit: processCPULimit) of each second of wall time, and one
-//     consumer for at most one CPU's worth: the interval counts scaled by
-//     that share. At --cpus 0.1 the window is ten times the grace in wall
-//     time. Without a limit, or at one CPU or more, it is wall time, as it
-//     was before, for a process with CPU to spare, busy or idle.
-//   - A sample that comes late, more than a tick after it was due, shows the
-//     process was held off the CPU for part of the interval (frozen, stopped,
-//     or waiting behind other work on an overloaded host): only what it ran
-//     then counts, its CPU time, and never more than the scaled interval. A
-//     freeze of any length counts as the CPU the process used before it froze.
-//
-// A sample that comes on time does not show that the process could run the
-// whole interval when it has a CPU limit: CFS hands out the quota in per-CPU
-// slices, so the drain's thread can wake on time while the consumer's thread
-// is throttled. Hence the scaling. And counting samples (a ticker, a tick per
-// sample) overcounts a starved process: the tick pending across a freeze is
-// delivered at once when it resumes, and counts a whole tick for the few
-// milliseconds it ran.
-type stallMeter struct {
-	clk          stallClock
-	grace, tick  time.Duration
-	lastWall     time.Time
-	lastCPU, ran time.Duration
-	cpuOK        bool
-	share        float64 // of wall time the process can run: its CPU limit, at most 1
-	timerC       <-chan time.Time
-	stopTimer    func() bool
-	samples      int
-}
-
-func newStallMeter(clk stallClock, grace time.Duration) *stallMeter {
-	m := &stallMeter{clk: clk, grace: grace, tick: min(stallTick, max(grace, time.Millisecond)), share: 1}
-	if l, ok := clk.cpuLimit(); ok && l > 0 && l < 1 {
-		m.share = l
-	}
-	m.lastWall, m.lastCPU, m.cpuOK = clk.now()
-	return m
-}
-
-// wait arms the next sample.
-func (m *stallMeter) wait() <-chan time.Time {
-	m.timerC, m.stopTimer = m.clk.after(m.tick)
-	return m.timerC
-}
-
-// stop releases the pending sample's timer. Nil-safe.
-func (m *stallMeter) stop() {
-	if m != nil && m.stopTimer != nil {
-		m.stopTimer()
-	}
-}
-
-// expired takes a sample, and reports whether the process has had the whole
-// grace to run.
-func (m *stallMeter) expired() bool {
-	m.samples++
-	wall, cpu, cpuOK := m.clk.now()
-	iv := max(wall.Sub(m.lastWall), 0)
-	could := time.Duration(float64(iv) * m.share)
-	switch {
-	case iv <= 2*m.tick || !m.cpuOK || !cpuOK:
-		// On time (or no CPU clock to tell).
-		m.ran += could
-	default:
-		m.ran += min(could, max(cpu-m.lastCPU, 0))
-	}
-	m.lastWall, m.lastCPU, m.cpuOK = wall, cpu, cpuOK
-	return m.ran >= m.grace
-}
-
-// stallClock is what a stall window is measured with: the wall clock, this
-// process's CPU time (ok false when it cannot be read), its CPU limit, and a
-// timer. A field of the tee (tee.clock) so tests can drive it.
-type stallClock interface {
-	now() (wall time.Time, cpu time.Duration, ok bool)
-	cpuLimit() (cpus float64, ok bool)
-	after(d time.Duration) (<-chan time.Time, func() bool)
-}
-
-// realStallClock is the process's own clocks.
-type realStallClock struct{}
-
-func (realStallClock) now() (time.Time, time.Duration, bool) {
-	cpu, ok := processCPUTime()
-	return time.Now(), cpu, ok
-}
-
-// cpuLimit is processCPULimit, read at most once per cpuLimitRefresh: a stall
-// meter is made for each chunk a teardown waits on, and reading the cgroup
-// files each time would cost a starved process the CPU it lacks. A limit
-// changes rarely (a pod resized in place); the window follows it within the
-// refresh.
-func (realStallClock) cpuLimit() (float64, bool) {
-	c := &cpuLimitCache
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.at.IsZero() || time.Since(c.at) >= cpuLimitRefresh {
-		c.cpus, c.ok = readCPULimit()
-		c.at = time.Now()
-	}
-	return c.cpus, c.ok
-}
-
-// cpuLimitRefresh is how long realStallClock keeps a CPU limit it read.
-const cpuLimitRefresh = 10 * time.Second
-
-// readCPULimit reads the process's CPU limit (processCPULimit; tests count
-// the reads).
-var readCPULimit = processCPULimit
-
-var cpuLimitCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	cpus float64
-	ok   bool
-}
-
-func (realStallClock) after(d time.Duration) (<-chan time.Time, func() bool) {
-	t := time.NewTimer(d)
-	return t.C, t.Stop
 }
 
 // abandon gives up on a chunk that could not be delivered plus everything

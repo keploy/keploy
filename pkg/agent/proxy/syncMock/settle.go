@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // settle.go holds a test case until its verdict under the rule for unrecorded
@@ -67,9 +68,31 @@ type Backlog interface {
 	PendingBefore(before time.Time) bool
 }
 
+// HeldProgressor is a Watermark that can count the progress of what keeps the
+// verdict for a test case of pod recorded over [start, end] from being final:
+// a count that moves whenever it gets further (a parser behind its window
+// consumes bytes or returns, the queue a mock of its window waits in moves),
+// and not for what does not hold it (another connection's parser, a capture
+// that is busy elsewhere). The hold lets a test case go unsettled only once
+// that has not moved for its bound.
+type HeldProgressor interface {
+	HeldProgress(namespace, pod string, start, end time.Time) uint64
+}
+
 const (
-	// TestCaseHoldMax bounds how long a test case is held for its verdict.
-	TestCaseHoldMax = 30 * time.Second
+	// TestCaseHoldMax bounds how long a test case is held for its verdict
+	// while what keeps it from being final makes no progress (HeldProgressor,
+	// else since it came), in the time the process could run (utils/stall):
+	// a busy capture working through its backlog, or one starved of CPU, does
+	// not have its test cases let go unsettled for taking long.
+	//
+	// It outlasts the mock stream's own bound (outChanStall, looked at every
+	// stall.CheckEvery of it): a test case held for a mock of its window
+	// queued for a consumer that took nothing since the last hand-on is let
+	// go once the queue has given that mock up and recorded its test as
+	// dropped (it is then left out), not just before, saved without it. Both
+	// stalls start at that hand-on (HandOnProgress).
+	TestCaseHoldMax = outChanStall + 2*time.Second
 	// TestCaseHoldBytes bounds the bytes of test cases held at once: past
 	// it, the oldest are released first.
 	TestCaseHoldBytes int64 = 32 << 20
@@ -91,8 +114,14 @@ type Held struct {
 
 type heldEntry struct {
 	Held
-	at   time.Time
-	size int64
+	// stallFrom is the hold's clock (Runnable) when what keeps the verdict
+	// from being final last moved (progress, counted: it was read), or when
+	// the test case came, or, while it waits behind an earlier one of its
+	// pod, when what holds that one last moved.
+	stallFrom time.Duration
+	progress  uint64
+	counted   bool
+	size      int64
 	// fence is the token of the barrier opened once its verdict settled
 	// (Fenced); 0 until then.
 	fence uint64
@@ -107,21 +136,37 @@ type TestCaseHold struct {
 	maxBytes int64
 	q        []heldEntry
 	bytes    int64
-	now      func() time.Time
+	// clk measures maxAge (utils/stall). hold holds the process clock while
+	// any test case is held, so it costs no sampling while none is (release
+	// lets it go); nil for a test's clock.
+	clk     stall.Clock
+	hold    func() func()
+	release func()
 }
 
-// NewTestCaseHold holds test cases for w, for at most maxAge each and maxBytes
-// in all (TestCaseHoldMax and TestCaseHoldBytes in production).
+// NewTestCaseHold holds test cases for w, for at most maxAge each without
+// progress (TestCaseHoldMax) and maxBytes in all (TestCaseHoldBytes).
 func NewTestCaseHold(w Watermark, maxAge time.Duration, maxBytes int64) *TestCaseHold {
-	return &TestCaseHold{w: w, maxAge: maxAge, maxBytes: maxBytes, now: time.Now}
+	return &TestCaseHold{w: w, maxAge: maxAge, maxBytes: maxBytes, clk: stall.ProcessClock(), hold: stall.Hold}
 }
 
 // Add holds tc, of pod (namespace, pod; either "" when not known). Release
 // hands it back, at once when its verdict is final already.
 func (h *TestCaseHold) Add(tc *models.TestCase, namespace, pod string) {
+	if h.hold != nil && h.release == nil {
+		h.release = h.hold()
+	}
 	size := testCaseSize(tc)
-	h.q = append(h.q, heldEntry{Held: Held{TC: tc, Namespace: namespace, Pod: pod}, at: h.now(), size: size})
+	h.q = append(h.q, heldEntry{Held: Held{TC: tc, Namespace: namespace, Pod: pod}, stallFrom: h.clk.Runnable(), size: size})
 	h.bytes += size
+}
+
+// idle lets the process clock go once nothing is held.
+func (h *TestCaseHold) idle() {
+	if len(h.q) == 0 && h.release != nil {
+		h.release()
+		h.release = nil
+	}
 }
 
 // Len is how many test cases are held.
@@ -135,6 +180,7 @@ func (h *TestCaseHold) Drain() []*models.TestCase {
 		out = append(out, e.TC)
 	}
 	h.q, h.bytes = nil, 0
+	h.idle()
 	return out
 }
 
@@ -158,11 +204,19 @@ func (h *TestCaseHold) EarliestStarts(fn func(namespace, pod string, start time.
 // Bytes is about how many bytes the held test cases take.
 func (h *TestCaseHold) Bytes() int64 { return h.bytes }
 
-// Oldest is the earliest end of a test case held, zero when none is.
+// Oldest is the earliest end of a test case held (TestCase.CompletedAt: a
+// gRPC one's is its response's), zero when none is. A stop waits while it is
+// at or before the stop (NoteHeld). One with no wire time at all says
+// nothing of when it ran and is skipped: taken as zero, it would say that
+// nothing is held.
 func (h *TestCaseHold) Oldest() time.Time {
 	var oldest time.Time
 	for _, e := range h.q {
-		if end := e.TC.HTTPResp.Timestamp; oldest.IsZero() || end.Before(oldest) {
+		end := e.TC.CompletedAt()
+		if end.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || end.Before(oldest) {
 			oldest = end
 		}
 	}
@@ -176,30 +230,38 @@ func (h *TestCaseHold) Release() []Held {
 	if len(h.q) == 0 {
 		return nil
 	}
-	now := h.now()
+	now := h.clk.Runnable()
 	over := h.bytes - h.maxBytes
 	type podKey struct{ ns, pod string }
-	var blocked map[podKey]bool
+	// blocked is, for each pod whose first held test case stays, where that
+	// one's stall began (stalled).
+	var blocked map[podKey]time.Duration
 	var out []Held
 	keep := h.q[:0]
 	for _, e := range h.q {
 		k := podKey{e.Namespace, e.Pod}
+		from, behind := blocked[k]
 		release := false
 		switch {
 		case over > 0:
 			// Past the byte budget: the oldest go first, settled or not.
 			release = true
 			e.Unsettled = !h.final(&e)
-		case blocked[k]:
+		case behind:
+			// Held behind an earlier one of its pod, it is held by what
+			// holds that one: its stall runs from that one's, not from when
+			// it came, or it would be let go the moment that one goes, for
+			// the time it waited behind it.
+			e.stallFrom = max(e.stallFrom, from)
 		case h.final(&e):
 			release = true
-		case now.Sub(e.at) >= h.maxAge:
+		case h.stalled(&e, now) >= h.maxAge:
 			release, e.Unsettled = true, true
 		default:
 			if blocked == nil {
-				blocked = make(map[podKey]bool)
+				blocked = make(map[podKey]time.Duration)
 			}
-			blocked[k] = true
+			blocked[k] = e.stallFrom
 		}
 		if release {
 			if e.Unsettled {
@@ -217,7 +279,31 @@ func (h *TestCaseHold) Release() []Held {
 	if len(h.q) == 0 {
 		h.q = nil // do not keep a burst's backing array
 	}
+	h.idle()
 	return out
+}
+
+// stalled is how long, on the hold's clock, what keeps e's verdict from
+// being final has made no progress: since it last moved (HeldProgressor), or,
+// when the watermark cannot count it, since e came. A capture's Progressor is
+// not taken for it: it moves with every parser of the capture, and a busy
+// capture would keep a test case whose own blocker has stopped held for as
+// long as anything else moves. A count read for the first time does not move
+// stallFrom: the stall runs from when e came, or from where Release carried
+// it while e waited behind an earlier one of its pod.
+func (h *TestCaseHold) stalled(e *heldEntry, now time.Duration) time.Duration {
+	w, ok := h.w.(HeldProgressor)
+	var p uint64
+	if ok {
+		p = w.HeldProgress(e.Namespace, e.Pod, e.TC.HTTPReq.Timestamp, e.TC.HTTPResp.Timestamp)
+	}
+	if ok && (!e.counted || p != e.progress) {
+		if e.counted {
+			e.stallFrom = now
+		}
+		e.progress, e.counted = p, true
+	}
+	return max(now-e.stallFrom, 0)
 }
 
 // final reports whether e's verdict is final: settled, and past its fence
@@ -394,8 +480,11 @@ type PendingExplainer interface {
 // BacklogBefore is what this recording may still hand over from before
 // `before` (BacklogState): a test case the recorder's stream holds for its
 // verdict that ended by then, one the ingress is still building or has queued
-// for the stream, or, as each Backlog watermark tells, a capture reader or
-// parser that has not got past it. Known only when a Backlog watermark is set:
+// for the stream, a mock requested by then that the manager has yet to hand on
+// (handOnPendingBefore), a mapping of a test from before it that the manager
+// has decided and not yet put on the mapping stream (mappingOwedBefore), or, as
+// each Backlog watermark tells, a capture reader or parser that has not got
+// past it. Known only when a Backlog watermark is set:
 // without one nothing can tell whether a parser is behind.
 func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	var st BacklogState
@@ -429,6 +518,14 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	if why := m.incoming.pendingBefore(before); why != "" {
 		pending(why)
 	}
+	if !st.Pending {
+		if why := m.handOnPendingBefore(before); why != "" {
+			pending(why)
+		}
+	}
+	if !st.Pending && m.mappingOwedBefore(before) {
+		pending("a test's mapping from before it is not yet on the agent's mapping stream")
+	}
 	for _, b := range backlogs {
 		if st.Pending {
 			break
@@ -444,6 +541,42 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 		}
 	}
 	return st
+}
+
+// handOnPendingBefore says why the manager may still hand on a mock requested
+// at or before `before`, "" when it may not: one in its buffer that the next
+// flush takes out of it (flushTakeLocked: a parser that ran behind its traffic
+// handed it over after its window resolved, or it is a session or startup mock
+// no window owns), one owed back to a resolved window, which that flush hands
+// on, or one on its way to the stream. The flush runs on a ticker, which a
+// starved agent runs late: until it has, the mock is the agent's, not in
+// transit. A mock no window can take yet stays buffered for a request that may
+// still claim it, and is not counted: such a request is one the ingress is
+// still building, which is pending already, or one that ended after `before`.
+func (m *SyncMockManager) handOnPendingBefore(before time.Time) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mk := range m.buffer {
+		if mk == nil || mk.Spec.ReqTimestampMock.After(before) {
+			continue
+		}
+		if take, _, _, _ := m.flushTakeLocked(mk); take != flushKeep {
+			return "a mock requested before it waits in the agent's mock buffer for the next flush"
+		}
+	}
+	for _, o := range m.owed {
+		if !o.mock.Spec.ReqTimestampMock.After(before) {
+			return "a mock requested before it is owed back to its test, at the next flush"
+		}
+	}
+	m.sendingMu.Lock()
+	defer m.sendingMu.Unlock()
+	for _, at := range m.sending {
+		if !at.After(before) {
+			return "a mock requested before it is being sent on the agent's mock stream"
+		}
+	}
+	return ""
 }
 
 // Watermark is what tells when the verdict for a test case of this recording
@@ -466,7 +599,10 @@ func (m *SyncMockManager) Watermark() Watermark {
 // test cases (a DaemonSet agent's), and is never added beside another.
 type allWatermarks []Watermark
 
-var _ Explainer = allWatermarks(nil)
+var (
+	_ Explainer      = allWatermarks(nil)
+	_ HeldProgressor = allWatermarks(nil)
+)
 
 func (a allWatermarks) Settled(namespace, pod string, start, end time.Time) bool {
 	for _, w := range a {
@@ -475,6 +611,27 @@ func (a allWatermarks) Settled(namespace, pod string, start, end time.Time) bool
 		}
 	}
 	return true
+}
+
+// HeldProgress sums what the watermarks that hold the verdict (those that do
+// not say it is Settled) count of their progress (HeldProgressor). One that
+// does not hold it says nothing of what does. When one that holds it cannot
+// count it, nothing can tell its progress, and another's must not stand for
+// it: the count does not move, and the test case goes once the bound has
+// passed since it came (or since the count last moved).
+func (a allWatermarks) HeldProgress(namespace, pod string, start, end time.Time) uint64 {
+	var n uint64
+	for _, w := range a {
+		if w.Settled(namespace, pod, start, end) {
+			continue
+		}
+		p, ok := w.(HeldProgressor)
+		if !ok {
+			return 0
+		}
+		n += p.HeldProgress(namespace, pod, start, end)
+	}
+	return n
 }
 
 func (a allWatermarks) HeldBy(namespace, pod string, start, end time.Time, fence uint64) fmt.Stringer {
@@ -499,14 +656,22 @@ type incomingBacklog struct {
 	next     uint64
 	building map[uint64]time.Time
 	queues   map[uint64]func() int
-	// built counts the test cases built (or given up): progress.
+	// built counts the test cases built (or given up) that a stop waits on:
+	// progress. Once a stop has asked (asked), only those from before the
+	// time it asked about count: what the app serves after the stop says
+	// nothing of that backlog, and counted, a docker compose app's steady
+	// traffic would keep a stop waiting on a backlog that does not move.
 	built atomic.Uint64
+	// asked is the latest time a stop asked about (pendingBefore), in Unix
+	// nanoseconds; 0 before any did.
+	asked atomic.Int64
 }
 
 // pendingBefore says why a test case from before `before` may still come from
 // the ingress: one whose response came by then is still being built, or a
 // queue holds test cases (whose times it cannot tell). "" when none may.
 func (b *incomingBacklog) pendingBefore(before time.Time) string {
+	b.asked.Store(before.UnixNano())
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, resp := range b.building {
@@ -547,7 +712,9 @@ func (m *SyncMockManager) BuildingTestCase(resp time.Time) (done func()) {
 			b.mu.Lock()
 			delete(b.building, id)
 			b.mu.Unlock()
-			b.built.Add(1)
+			if asked := b.asked.Load(); asked == 0 || resp.UnixNano() <= asked {
+				b.built.Add(1)
+			}
 		})
 	}
 }

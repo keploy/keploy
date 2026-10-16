@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"net/netip"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -19,13 +20,38 @@ import (
 
 //TODO: rename this file.
 
-// Get Used by proxy
-func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, error) {
-	d, err := h.GetDestinationInfo(srcPort)
-	if err != nil {
+// redirectKey is redirect_proxy_map's key (struct redirect_key_t): the
+// application's end of a connection, its address (IPv4 as v4-mapped, word by
+// word in network order) and port.
+type redirectKey struct {
+	IP   [4]uint32
+	Port uint32
+}
+
+func redirectKeyFor(app netip.AddrPort) redirectKey {
+	a := app.Addr()
+	if a.Is4() {
+		a = netip.AddrFrom16(a.As16()) // v4-mapped
+	}
+	b := a.As16()
+	var k redirectKey
+	for i := range k.IP {
+		// Each word as the kernel stores it: the address's bytes in order.
+		k.IP[i] = binary.NativeEndian.Uint32(b[4*i:])
+	}
+	k.Port = uint32(app.Port())
+	return k
+}
+
+// GetForConn is the original destination of the connection whose application
+// end is app (agent.ConnDestInfo), used by the proxy.
+func (h *Hooks) GetForConn(_ context.Context, app netip.AddrPort) (*agent.NetworkAddress, error) {
+	h.m.Lock()
+	defer h.m.Unlock()
+	d := structs.DestInfo{}
+	if err := h.redirectProxyMap.Lookup(redirectKeyFor(app), &d); err != nil {
 		return nil, err
 	}
-
 	return &agent.NetworkAddress{
 		Version:   d.IPVersion,
 		IPv4Addr:  d.DestIP4,
@@ -35,32 +61,42 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	}, nil
 }
 
-// GetDestinationInfo retrieves destination information associated with a source port.
-func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
+// DeleteForConn drops the redirect of the connection whose application end
+// is app, once the proxy has it.
+func (h *Hooks) DeleteForConn(_ context.Context, app netip.AddrPort) error {
 	h.m.Lock()
 	defer h.m.Unlock()
-	destInfo := structs.DestInfo{}
-	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
-		return nil, err
-	}
-	return &destInfo, nil
-}
-
-func (h *Hooks) Delete(_ context.Context, srcPort uint16) error {
-	return h.CleanProxyEntry(srcPort)
-}
-
-func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
-	h.m.Lock()
-	defer h.m.Unlock()
-	err := h.redirectProxyMap.Delete(srcPort)
-	if err != nil {
+	if err := h.redirectProxyMap.Delete(redirectKeyFor(app)); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			// Gone already (the LRU evicted it, or its connection's close
+			// dropped it): the delete's work is done, and the proxy routes
+			// the connection by what it read, or by its pairing.
+			h.logger.Debug("the redirect was already gone", zap.String("application end", app.String()))
+			return nil
+		}
 		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
-	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
+	h.logger.Debug("successfully removed entry from redirect proxy map", zap.String("application end", app.String()))
 	return nil
 }
+
+// errRedirectByPort is Get's and Delete's answer on Linux: a redirect is
+// keyed by the application's address and port (GetForConn), which a source
+// port alone does not name.
+var errRedirectByPort = errors.New("the Linux hooks name a connection's destination by the application's address and port (GetForConn), not its source port alone")
+
+// Get implements agent.DestInfo; the proxy uses GetForConn.
+func (h *Hooks) Get(_ context.Context, _ uint16) (*agent.NetworkAddress, error) {
+	return nil, errRedirectByPort
+}
+
+// Delete implements agent.DestInfo; the proxy uses DeleteForConn.
+func (h *Hooks) Delete(_ context.Context, _ uint16) error {
+	return errRedirectByPort
+}
+
+var _ agent.ConnDestInfo = (*Hooks)(nil)
 
 func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 	err := h.clientRegistrationMap.Update(uint64(0), clientInfo, ebpf.UpdateAny)

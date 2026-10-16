@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -155,139 +154,31 @@ func TestMatch_StatefulCursorKeyIsTheRequest(t *testing.T) {
 	}
 }
 
-// windowedMemDb is mockMemDb with a test running: CurrentTestWindow reports the
-// window the replayer opened for it (its recorded request..response times).
-type windowedMemDb struct {
-	*mockMemDb
-	start, end time.Time
-}
+// noCursor is a store whose cursor is absent (a negative index).
+type noCursor struct{}
 
-func (w *windowedMemDb) CurrentTestWindow() (time.Time, time.Time) { return w.start, w.end }
+func (noCursor) MockCursorIndex(string, int) int    { return -1 }
+func (noCursor) AdvanceMockCursor(string, int, int) {}
 
-// headMock is a recorded S3 HEAD of one object made at ts: a session-reusable
-// HTTP_CLIENT mock with cursor consumption, as DeriveLifetime classifies it.
-func headMock(name string, ts time.Time) *models.Mock {
-	m := httpMock(name, "HEAD", "http://minio:9000/bucket/set-1/mocks.yaml")
-	m.Spec.ReqTimestampMock = ts
-	m.TestModeInfo.Lifetime = models.LifetimeSession
-	m.TestModeInfo.Consume = models.ConsumeCursorSaturate
-	return m
-}
-
-func headReq() *req {
-	return &req{method: "HEAD", url: &url.URL{Path: "/bucket/set-1/mocks.yaml"}, header: http.Header{}}
-}
-
-// TestMatch_CursorPrefersRunningTestsRecording: two tests made the same HEAD,
-// test1 before the object existed (404) and test2 after (200). When test1 is not
-// replayed (excluded, or failed before its HEAD), test2 must still get its own
-// 200, not the 404 the set-wide cursor holds first.
-func TestMatch_CursorPrefersRunningTestsRecording(t *testing.T) {
-	h := newHTTP()
-	ctx := context.Background()
+// servedPick takes the first recording not yet served, marks it once the
+// call is answered, and stays on the last once all are; a store that keeps
+// no cursor serves the first, as without the capability.
+func TestServedPick(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
-
-	db := &windowedMemDb{
-		mockMemDb: &mockMemDb{
-			mocks: []*models.Mock{
-				headMock("head-404-test1", base.Add(500*time.Millisecond)),
-				headMock("head-200-test2", base.Add(2500*time.Millisecond)),
-			},
-			updateUnFilteredReturn: true,
-		},
-		// test2 is running; test1 [base, base+1s] was skipped.
-		start: base.Add(2 * time.Second),
-		end:   base.Add(3 * time.Second),
-	}
-
-	ok, stub, _, err := h.match(ctx, headReq(), db, nil, nil, nil, true, false, false, true, true)
-	if err != nil || !ok || stub == nil {
-		t.Fatalf("ok=%v stub=%v err=%v", ok, stub, err)
-	}
-	if stub.Name != "head-200-test2" {
-		t.Fatalf("test2 served %q, want its own %q — a skipped test's recording must not shift onto the next test", stub.Name, "head-200-test2")
-	}
-}
-
-// TestMatch_CursorTestScopeThenSetWideFallback: the running test's own
-// recordings are served in record order and saturate on its last; a test with
-// no recording of its own falls back to the set-wide cursor, which has moved
-// past what the earlier test was served instead of restarting at the first
-// recording of the set.
-func TestMatch_CursorTestScopeThenSetWideFallback(t *testing.T) {
-	h := newHTTP()
-	ctx := context.Background()
-	base := time.Unix(1_700_000_000, 0)
-
-	db := &windowedMemDb{
-		mockMemDb: &mockMemDb{
-			mocks: []*models.Mock{
-				headMock("test1-404", base.Add(500*time.Millisecond)),
-				headMock("test2-a", base.Add(2200*time.Millisecond)),
-				headMock("test2-b", base.Add(2600*time.Millisecond)),
-				headMock("between-tests", base.Add(4*time.Second)),
-			},
-			updateUnFilteredReturn: true,
-		},
-		start: base.Add(2 * time.Second),
-		end:   base.Add(3 * time.Second),
-	}
-
-	serve := func(step string, want string) {
-		t.Helper()
-		ok, stub, _, err := h.match(ctx, headReq(), db, nil, nil, nil, true, false, false, true, true)
-		if err != nil || !ok || stub == nil {
-			t.Fatalf("%s: ok=%v stub=%v err=%v", step, ok, stub, err)
-		}
-		if stub.Name != want {
-			t.Fatalf("%s served %q, want %q", step, stub.Name, want)
+	group := []*models.Mock{cursorMock("r1", base), cursorMock("r2", base.Add(time.Second))}
+	db := &mockMemDb{}
+	var got []int
+	for i := 0; i < 3; i++ {
+		idx, commit := servedPick(group, db)
+		got = append(got, idx)
+		if commit != nil {
+			commit()
 		}
 	}
-	serve("test2 call 1", "test2-a")
-	serve("test2 call 2", "test2-b")
-	serve("test2 call 3", "test2-b") // saturates on the test's own last recording
-
-	// test3 recorded no HEAD of this object: set-wide fallback, after test2's.
-	db.start, db.end = base.Add(5*time.Second), base.Add(6*time.Second)
-	serve("test3 call 1", "between-tests")
-}
-
-// TestMatch_CursorOverlappingTestWindowsDoNotReServe: tests whose recorded
-// windows overlap (concurrent incoming requests) share the recordings made in
-// the overlap. T1 [0s,10s] and T2 [5s,15s] each made the same HEAD, recorded at
-// 6s and 8s, so both recordings are in both windows. T1 is served the 6s one;
-// T2 must then get the 8s one, not the 6s one again, as it would on the
-// set-wide cursor alone: a test's own recordings are taken from where the
-// set-wide cursor stands.
-func TestMatch_CursorOverlappingTestWindowsDoNotReServe(t *testing.T) {
-	h := newHTTP()
-	ctx := context.Background()
-	base := time.Unix(1_700_000_000, 0)
-
-	db := &windowedMemDb{
-		mockMemDb: &mockMemDb{
-			mocks: []*models.Mock{
-				headMock("head-6s", base.Add(6*time.Second)),
-				headMock("head-8s", base.Add(8*time.Second)),
-			},
-			updateUnFilteredReturn: true,
-		},
+	if got[0] != 0 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("picked %v, want [0 1 1]", got)
 	}
-	for _, step := range []struct {
-		test       string
-		start, end time.Duration
-		want       string
-	}{
-		{"T1", 0, 10 * time.Second, "head-6s"},
-		{"T2", 5 * time.Second, 15 * time.Second, "head-8s"},
-	} {
-		db.start, db.end = base.Add(step.start), base.Add(step.end)
-		ok, stub, _, err := h.match(ctx, headReq(), db, nil, nil, nil, true, false, false, true, true)
-		if err != nil || !ok || stub == nil {
-			t.Fatalf("%s: ok=%v stub=%v err=%v", step.test, ok, stub, err)
-		}
-		if stub.Name != step.want {
-			t.Fatalf("%s [%v, %v] served %q, want %q — a recording the set-wide cursor has passed must not be served again", step.test, step.start, step.end, stub.Name, step.want)
-		}
+	if idx, commit := servedPick(group, noCursor{}); idx != 0 || commit != nil {
+		t.Fatalf("no cursor: picked %d (commit %v), want the first and no commit", idx, commit != nil)
 	}
 }

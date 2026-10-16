@@ -120,7 +120,8 @@ func mappedNames(m *models.Mapping, test string) map[string]bool {
 // A push or carry-over SEND consumed during a failing test, outside its own
 // window, is kept by the prune and mapped to its own window's test. The failing
 // test's own mocks are pruned as before, and a flagged mock consumed in its own
-// (gap) window follows that test's verdict.
+// (gap) window follows that test's verdict. The failing test itself is not
+// mapped: it keeps its recorded mapping (mapping_verdicts.go).
 func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 	h := newPartialRunHarness(t, 3, 0)
 	pinWindows(h)
@@ -159,7 +160,7 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 		wrongBody: map[string]bool{"test-2": true},
 		consumedFor: func() []models.MockState {
 			h.instr.mu.Lock()
-			after := h.instr.lastParams.AfterTime
+			after := h.instr.windowAfter
 			h.instr.mu.Unlock()
 			return byTest[byStart[after]]
 		},
@@ -191,11 +192,8 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 	if !t1["own-1"] || !t1["send-1"] || !t1["msg-1"] {
 		t.Errorf("test-1 maps %v; want own-1, send-1 and msg-1 (its window's mocks, wherever they were consumed)", t1)
 	}
-	if t2["send-1"] || t2["msg-1"] {
-		t.Errorf("test-2 maps %v; a mock of test-1's window must not be mapped to the test that happened to run", t2)
-	}
-	if !t2["own-2"] || !t2["msg-2"] {
-		t.Errorf("test-2 maps %v; want own-2, and msg-2 from its gap", t2)
+	if len(t2) != 0 {
+		t.Errorf("test-2 failed and the write maps it to %v; a test that did not pass keeps its recorded mapping", t2)
 	}
 	if t3 := mappedNames(m, "test-3"); !t3["own-3"] || !t3["early-send-3"] {
 		t.Errorf("test-3 maps %v; want own-3, and early-send-3, which test-2 consumed before test-3 ran", t3)
@@ -204,8 +202,40 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 	for _, e := range m.Startup {
 		boot = boot || e.Name == "boot-msg"
 	}
-	if !boot || t2["boot-msg"] {
-		t.Errorf("startup section %+v, test-2 %v; want boot-msg in the startup section only", m.Startup, t2)
+	if !boot {
+		t.Errorf("startup section %+v; want boot-msg in it", m.Startup)
+	}
+}
+
+// What the running test consumed is attributed by recorded window before the
+// write decides whose entries it takes: its own mocks, and a flagged mock
+// recorded in the gap after its window, are its; a flagged mock of an earlier
+// window (or of its gap) is that window's test's, and one from before every
+// window is the startup section's. (The RunTestSet test above sees only the
+// passing tests' entries, so the running test's own is pinned here.)
+func TestCarryOverAttributionMapsTheRunningTestsOwnAndGapMocks(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	a.mapConsumed(mapping, "test-1", attrAt(1000), attrAt(1100), []models.MockState{consumedAt("own-1", 1050, models.Deleted, false)})
+	a.mapConsumed(mapping, "test-2", attrAt(2000), attrAt(2100), []models.MockState{
+		consumedAt("own-2", 2050, models.Deleted, false),
+		consumedAt("send-1", 1060, models.Deleted, true),
+		consumedAt("msg-1", 1500, models.Updated, true),
+		consumedAt("msg-2", 2500, models.Updated, true),
+		consumedAt("boot-msg", 500, models.Updated, true),
+	})
+	if t2 := mappedNames(mapping, "test-2"); len(t2) != 2 || !t2["own-2"] || !t2["msg-2"] {
+		t.Fatalf("test-2 maps %v; want only own-2, and msg-2 from its gap", t2)
+	}
+	if t1 := mappedNames(mapping, "test-1"); !t1["send-1"] || !t1["msg-1"] {
+		t.Fatalf("test-1 maps %v; want send-1 and msg-1, its window's mocks consumed while test-2 ran", t1)
+	}
+	if len(mapping.Startup) != 1 || mapping.Startup[0].Name != "boot-msg" {
+		t.Fatalf("startup section = %+v; want boot-msg alone", mapping.Startup)
 	}
 }
 

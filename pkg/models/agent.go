@@ -107,6 +107,10 @@ func (r AgentResp) Err() error {
 type TestMockMapping struct {
 	TestName string   `json:"test_name"`
 	MockIDs  []string `json:"mock_ids"`
+	// StreamEnd marks the end of an agent's mapping stream, written once a
+	// recording's client asked it to end its streams (StreamEndPath) and it
+	// has put on the stream all it had: no test or mocks of its own.
+	StreamEnd bool `json:"stream_end,omitempty" yaml:"-"`
 }
 
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
@@ -135,6 +139,11 @@ type ScopeReq struct {
 	// that cannot skip would run the test anyway, against a pool the gate never
 	// narrowed for it.
 	CanSkip bool `json:"canSkip,omitempty"`
+	// File and Project qualify the test's ID under the proven wire (TestID):
+	// the test file a harness names, and its project (a Jest displayName).
+	// A Go test sends neither; its instance's key is the path.
+	File    string `json:"file,omitempty"`
+	Project string `json:"project,omitempty"`
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
@@ -179,6 +188,8 @@ func NormalizeScopeOutcome(s string) string {
 // {"status":"ok"}, as before, so a harness that predates gating — or decodes
 // the answer as strings — is unaffected, and a missing action means "run".
 type ScopeBeginResp struct {
+	// V is ScopeProtocolVersion under the proven wire, absent otherwise.
+	V      int    `json:"v,omitempty"`
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
@@ -197,6 +208,11 @@ const ScopeActionSkip = "skip"
 type ScopeGateReq struct {
 	Run    []string `json:"run"`
 	Reason string   `json:"reason,omitempty"`
+	// Skip is the proven model's gate (design v14 §6.1): the tests keploy
+	// skips, by ID, each with the reason its harness skips it with. It is a
+	// deny list: every test it does not name runs. Read under the proven
+	// switch, where it replaces Run.
+	Skip map[string]string `json:"skip,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -225,7 +241,33 @@ type ScopeWindow struct {
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// Evidence is, under the proven wire, what keploy saw that failed the
+	// test at its end in a replay; nil when nothing did.
+	Evidence *ScopeEvidence `json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open (design v14 §4): its REAL rows, and in a
+	// record, the REAL list its recording carries.
+	Real []RealUse `json:"real,omitempty"`
+	// Claim, under the proven wire, makes this no test's window but a claim:
+	// from Start on, the run's test process is the one that claimed it with
+	// this key (POST /agent/instance), until the next claim. A call made
+	// while no test is open belongs to the pool slice of that key (design
+	// v14 §5.2).
+	Claim string `json:"claim,omitempty"`
+	// Refused, under the proven wire, makes this no test's window but a
+	// refusal keploy made at Start (RunRefusal).
+	Refused *RunRefusal `json:"refused,omitempty"`
+	// Live and Mocked, under the proven wire, make this no test's window
+	// but one row of where the run's calls to local listeners went
+	// (LiveRow, MockedRow), first seen at Start.
+	Live   *LiveRow   `json:"live,omitempty"`
+	Mocked *MockedRow `json:"mocked,omitempty"`
 }
+
+// PoolKeyNone is the pool slice of calls made before any test process
+// claimed the run, and the slice a pool mock recorded without a key serves
+// (design v14 U21).
+const PoolKeyNone = "-"
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
@@ -234,6 +276,25 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 	Root     string              `json:"root,omitempty"`
 	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// Pool is, under the proven switch, each key's pool slice: the names of
+	// the mocks recorded while no test was open, by the key of the claim
+	// then (PoolKeyNone for none, and for a mock recorded without a key).
+	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
+	// between tests"; only a nil one is left out (with the switch off).
+	Pool map[string][]string `json:"pool,omitzero"`
+}
+
+// TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
+// CLI sends: when each test of the replayed recording began
+// (MappedTestCase.At), by test name. Under the proven switch the agent moves
+// the clock of the run's processes to a test's begin while the test is open,
+// and back to the run's start time after it (design v14 §3.4).
+type TestBeginsReq struct {
+	Begins map[string]time.Time `json:"begins"`
+	// Real is, by test, the mock.real destinations its recording lists: such
+	// a test runs on the real clock, not at its recorded begin (design v14
+	// §3.4, F3). Absent when no test lists any.
+	Real map[string][]string `json:"real,omitempty"`
 }
 
 type SetTable struct {
@@ -303,6 +364,11 @@ type MockStreamHeader struct {
 
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
+	// ExactMapping makes MockMapping the test's whole recording even when
+	// it is empty: a test recorded with no call is served no per-test mock,
+	// only the reusable tier. Without it an empty mapping means "none
+	// supplied", which leaves the whole pool armed.
+	ExactMapping bool `json:"exactMapping,omitempty"`
 	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
 	// in the set being staged, which the replayer knows because it loads test
 	// cases sorted by request timestamp. The agent seeds the manager's
@@ -343,6 +409,45 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+
+	// Variables are the test variables the test's own request carries (its
+	// test case's template values), under the proven switch: a mock filter
+	// starts a test, and the agent binds these as the test begins, so a
+	// dependency call that uses one is asserted to send that value. Empty for
+	// every other caller.
+	Variables []VariableBinding `json:"variables,omitempty"`
+
+	// Exact makes the call keploy test's exact serving, under the proven
+	// switch (design v14 §5.2): the agent stages nothing per test, and
+	// serves each test case exactly its own mocks. nil for every other
+	// caller, and always without the switch.
+	Exact *ExactServing `json:"exact,omitempty"`
+}
+
+// ExactServing is what a keploy test filter asks of exact serving, under the
+// proven switch.
+type ExactServing struct {
+	// Stage is the set's staging call: the agent stages every mock of the
+	// set once (the rest of the filter says how, as without exact serving),
+	// then serves Pool between test cases.
+	Stage bool `json:"stage,omitempty"`
+	// Pool is, on the staging call, the set's pool: every mock no test
+	// case's mapping lists. It answers between test cases, beside the
+	// protocol-phase mocks.
+	Pool []string `json:"pool,omitempty"`
+	// Test opens this test case, which owns the data-plane mocks of Owned
+	// (its mapping). Without Stage, an empty Test serves the pool again.
+	Test  string   `json:"test,omitempty"`
+	Owned []string `json:"owned,omitempty"`
+}
+
+// BeginsTestVariables reports whether, under the proven switch, the agent
+// begins a test's variables as it applies this filter: every filter but
+// exact serving's pool call. That call ends a test case's serving, and the
+// variables its dependency calls bound stay readable until the next test
+// case's filter begins the next scope: keploy test reads them after it.
+func (p MockFilterParams) BeginsTestVariables() bool {
+	return p.Exact == nil || p.Exact.Stage || p.Exact.Test != ""
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent
@@ -373,6 +478,10 @@ type BeforeSimulateRequest struct {
 	TimeStamp    time.Time `json:"timestamp"`
 	TestSetID    string    `json:"testSetID"`
 	TestCaseName string    `json:"testCaseName"`
+	// Real, under the proven switch, is the mock.real destinations the test
+	// case's recording lists: its request runs on the real clock, not at
+	// TimeStamp (design v14 §3.4, F3).
+	Real []string `json:"real,omitempty"`
 }
 
 type AfterSimulateRequest struct {
@@ -456,6 +565,13 @@ func (v BacklogVerdict) String() string {
 // case or a mock captured before a time.
 type AgentBacklog struct {
 	Verdict BacklogVerdict
+	// EndMarkers says the agent counts in its answer the mappings it owes for
+	// tests from before the time asked about, and ends its frame streams, each
+	// with a marker after all it had, when a recording's client asks it to
+	// (StreamEndPath): its client's drains then end on those events, not on a
+	// stream's quiet. False from an agent that predates it, whose client goes
+	// by quiet as before.
+	EndMarkers bool
 	// Progress is a count that moves whenever the agent's capture gets
 	// further: with BacklogPending, a stop tells a backlog being worked
 	// through from one that is not moving. Zero from an agent that predates
@@ -464,6 +580,72 @@ type AgentBacklog struct {
 	// WaitingOn says what is pending, when the agent can tell.
 	WaitingOn string
 }
+
+// StreamEndPath is the agent route a recording's client POSTs to, once the
+// agent has said it holds nothing more from before the client's stop, to have
+// the agent end that recording's frame streams (test cases, mocks, mappings),
+// named by their token (?token=, StreamEndTokenHeader): each puts on the
+// stream what it still has, then its end marker (StreamEndKind,
+// TestMockMapping.StreamEnd, a "stream-end" part), and ends.
+const StreamEndPath = "/record/end"
+
+// StreamEndTokenHeader carries, on each frame stream's request, the token of
+// the recording the stream is for: the agent ends the streams of the token a
+// client names (StreamEndPath), that recording's alone, whoever started the
+// agent (the client, or docker compose).
+const StreamEndTokenHeader = "Keploy-Stream-End-Token"
+
+type streamEndTokenKey struct{}
+
+// WithStreamEndToken marks the frame streams opened on ctx as a recording's
+// whose token is tok (StreamEndTokenHeader).
+func WithStreamEndToken(ctx context.Context, tok string) context.Context {
+	return context.WithValue(ctx, streamEndTokenKey{}, tok)
+}
+
+// StreamEndToken is the recording token of the frame streams opened on ctx
+// (WithStreamEndToken): "" when none.
+func StreamEndToken(ctx context.Context) string {
+	t, _ := ctx.Value(streamEndTokenKey{}).(string)
+	return t
+}
+
+// StreamEndKind is the kind of the marker that ends an agent's mock stream
+// (StreamEndPath): a control frame, no mock, never recorded, and no
+// dependency kind (mock.go's kinds).
+const StreamEndKind Kind = "KeployStreamEnd"
+
+// StreamEndPart is the form name of the multipart part that ends an agent's
+// test-case stream (StreamEndPath). Its body is the session's StreamEndSummary.
+const StreamEndPart = "stream-end"
+
+// StreamEndSummary is the body of the test-case stream's end marker
+// (StreamEndPart): what the agent's summary of the session says it lost, for
+// its client to say in its own log. An agent docker compose runs logs through
+// compose, which can drop its last lines as the stack stops: the client tears
+// the stack down once its drains end at the markers.
+type StreamEndSummary struct {
+	TestCasesSent       int `json:"tcs_sent_to_cli"`
+	TestCasesSuppressed int `json:"tcs_suppressed_total"`
+	// LeftOutInFlight: test cases left out because each stayed in flight
+	// while mocks it may have made had to be let go.
+	LeftOutInFlight uint64 `json:"tcs_left_out_in_flight"`
+	// Unsettled: test cases saved before the agent had parsed all the
+	// traffic they overlap.
+	Unsettled int `json:"tcs_released_unsettled"`
+	// MassSuppressed: a large share of the session's test cases was
+	// suppressed (the agent's summary says so at WARN).
+	MassSuppressed bool `json:"mass_suppressed"`
+}
+
+// FrameStream names one of an agent's frame streams to a recording's client.
+type FrameStream string
+
+const (
+	TestCaseStream FrameStream = "incoming"
+	MockStream     FrameStream = "outgoing"
+	MappingStream  FrameStream = "mappings"
+)
 
 // DrainsAfterStopHeader marks an agent frame stream (test cases, mocks,
 // mappings) whose client drains it after a recording's stop and closes it

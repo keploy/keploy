@@ -48,6 +48,9 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
 		// write, so omitempty keeps the noise key out of the doc entirely.
 		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		// The places of the call that hold a test variable's value, as a
+		// kind-agnostic top-level block (nil, so omitted, for most mocks).
+		Variables: mock.Spec.Variables.Clone(),
 	}
 
 	var spec any
@@ -314,6 +317,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// survives regardless of the spec envelope. NewDocNoise returns nil when
 		// empty, so omitempty drops the key.
 		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		// The places of the call that hold a test variable's value, as a
+		// kind-agnostic top-level block (nil, so omitted, for most mocks).
+		Variables: mock.Spec.Variables.Clone(),
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
@@ -687,6 +693,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			// (only HTTP sets Async, and HTTP is a builtin that never takes this
 			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
+			mock.Spec.Variables = m.Variables.Clone()
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -871,7 +878,8 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
-		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
+		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
+		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
 		mocks = append(mocks, &mock)
 	}
 
@@ -1916,7 +1924,8 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
 			mock.Spec.ReqBodyNoise = rb
 		}
-		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
+		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
+		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

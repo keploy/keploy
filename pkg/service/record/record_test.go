@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -437,14 +440,14 @@ from a send that completed.
 A send to f.incoming / f.outgoing / f.mappings completes at the FORWARDER,
 which is one hop before the consumer and is spawned by GetTestAndMockChans --
 several hundred lines before Start spawns anything that reads it. Start then
-has a `ctx.Err()` gate to pass. So a test that sends and immediately cancels is
-racing that gate, and when it loses, Start returns context.Canceled and the
-test's own require.NoError fails. MEASURED on four tests in this file with a
-200ms sleep in front of the gate: 5/5 red, every time at the same assertion.
+has its consumers to spawn. A test that sends and immediately cancels used to
+race a `ctx.Err()` gate there (removed: a stop before the consumers now
+drains); waiting for a persisted test case still pins the test to the path it
+is named for.
 
-A persisted test case is the first thing that can only happen AFTER the gate --
-the consumer that writes it is spawned past it -- so it is exactly the signal
-these tests need. Polling rather than sleeping: a sleep long enough to be safe
+A persisted test case is the first thing that can only happen once Start's
+consumers are running -- the consumer that writes it is one -- so it is
+exactly the signal these tests need. Polling rather than sleeping: a sleep long enough to be safe
 on a loaded machine is a sleep paid on every green run, and one short enough
 not to be is the flake all over again.
 
@@ -469,7 +472,7 @@ func waitForPersistedTestCase(t *testing.T, db *recTestDB, name string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("test case %q was never persisted, so the recording never got "+
-				"past Start's post-setup gate; cancelling now would assert on a race "+
+				"past Start's consumers starting; cancelling now would assert on a race "+
 				"rather than on the behaviour under test", name)
 		}
 		time.Sleep(time.Millisecond)
@@ -570,6 +573,7 @@ type recTelemetry struct {
 	sessionTestCount int64
 	sessionRecorded  bool
 	sessionStatus    string
+	sessionReason    string
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -582,12 +586,13 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
 func (tl *recTelemetry) RecordedTestAndMocks()        {}
-func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, _ string) {
+func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.sessionTestCount = testCount
 	tl.sessionRecorded = true
 	tl.sessionStatus = status
+	tl.sessionReason = reason
 }
 
 type recTestSetConf struct{}
@@ -798,7 +803,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 	}
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -903,7 +908,7 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 	})
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -1031,7 +1036,7 @@ func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
 	}
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -1143,7 +1148,7 @@ func TestStart_FailedRevokeKeepsTheTestInTheShortPoolCount(t *testing.T) {
 	})
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, &testDB.recTestDB, "test-1")
@@ -1225,8 +1230,9 @@ gateBlockingInstr blocks inside GetOutgoing until the test releases it.
 
 That is the only way to hold GetTestAndMockChans open while the test
 arranges the state Start must survive: the INCOMING forwarder is already
-spawned by then (GetIncoming runs first), so the test can fill it and
-cancel ctx before Start ever reaches its post-setup gate.
+spawned by then (GetIncoming runs first), so the test can fill it before
+Start goes on to its one return between the streams and the consumers: the
+agent's refusal of this keploy's proven switch (MakeAgentReadyForDockerCompose).
 */
 type gateBlockingInstr struct {
 	*fakeInstr
@@ -1250,15 +1256,23 @@ func (g *gateBlockingInstr) Run(ctx context.Context, _ models.RunOptions) models
 	return models.AppError{AppErrorType: models.ErrCtxCanceled}
 }
 
+// MakeAgentReadyForDockerCompose refuses, as an agent without this keploy's
+// proven switch does.
+func (g *gateBlockingInstr) MakeAgentReadyForDockerCompose(context.Context) error {
+	return provenswitch.ErrAgentSwitch
+}
+
 /*
 START MUST TELL THE FORWARDERS WHEN NO CONSUMER IS COMING.
 
 This is the PRODUCTION half of the shutdown-wedge fix, and until this test
 existed nothing covered it. GetTestAndMockChans spawns three forwarders on
 reqCtx (WithoutCancel); Start spawns their consumers three hundred lines
-later, past an `if ctx.Err() != nil` gate that returns. On that path the
-forwarders are alive with nobody reading, and each ends by handing over an
-item it has already taken from the agent -- a send that parks forever.
+later, past a return: the agent's refusal of this keploy's proven switch
+(once, an `if ctx.Err() != nil` gate too, whose stop now drains instead). On
+that path the forwarders are alive with nobody reading, and each ends by
+handing over an item it has already taken from the agent -- a send that
+parks forever.
 
 `consumersStarted` plus `defer frames.Abandon()` is what closes it.
 MEASURED, both halves are load-bearing and both were invisible to the
@@ -1275,6 +1289,9 @@ healthy path, so it is not a benchmark -- 30s and ~3s do not overlap under
 any load this suite runs at.
 */
 func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T) {
+	// The refusal fails the run, which arms the process's exit code.
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
 	f := &fakeInstr{
 		mappings: make(chan models.TestMockMapping),
 		incoming: make(chan *models.TestCase),
@@ -1285,6 +1302,13 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		release:   make(chan struct{}),
 		entered:   make(chan struct{}),
 	}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the compose agent's health check
+	}))
+	defer agent.Close()
+	cfg := &config.Config{}
+	cfg.CommandType = string(utils.DockerCompose)
+	cfg.Agent.AgentURI = agent.URL
 	r := &Recorder{
 		logger:          zap.NewNop(),
 		testDB:          &recTestDB{},
@@ -1294,10 +1318,11 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		instrumentation: instr,
 		testSetConf:     recTestSetConf{},
 		hooks:           BaseRecordHooks{},
-		config:          &config.Config{},
+		config:          cfg,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	/*
 	 * RELEASED ON EVERY EXIT. Any t.Fatal below would otherwise leave
 	 * GetOutgoing parked, holding Start and its errgroup for the rest of
@@ -1338,10 +1363,9 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		}
 	}
 
-	// Ctrl+C lands while the tail is still in flight, THEN setup finishes.
-	// Start now finds ctx.Err() != nil at its gate and returns without ever
-	// spawning a consumer.
-	cancel()
+	// Setup finishes with the tail still in flight, and the agent refuses
+	// this keploy's proven switch: Start returns without ever spawning a
+	// consumer.
 	release()
 
 	started := time.Now()
@@ -1353,7 +1377,7 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 	elapsed := time.Since(started)
 
 	if elapsed > 20*time.Second {
-		t.Fatalf("Start took %s to return after cancellation. The forwarders were "+
+		t.Fatalf("Start took %s to return after the agent refused its proven switch. The forwarders were "+
 			"never told that no consumer was coming, so one is parked on its "+
 			"shutdown hand-over and teardown is waiting out the full "+
 			"DrainErrGroup budget -- and that goroutine is leaked for the "+
@@ -1476,8 +1500,9 @@ func TestStart_AnUnreachableAgentDoesNotLeaveTheMappingConsumerParked(t *testing
 	 * THIS WAIT IS LOAD-BEARING, and a comment here previously said it
 	 * was not. MEASURED with the bug present: a 300ms sleep failed 5/5,
 	 * no wait at all passed 0/5 -- because cancel() beat Start's
-	 * post-setup gate, consumersStarted stayed false, consumeMappings was
-	 * never spawned, and nothing could park. A too-short wait does not
+	 * post-open ctx check (since removed: a stop there now drains),
+	 * consumersStarted stayed false, consumeMappings was never spawned, and
+	 * nothing could park. A too-short wait does not
 	 * weaken this test, it makes it VACUOUS, which on a loaded machine is
 	 * what a sleep eventually is.
 	 */
@@ -1922,8 +1947,8 @@ func TestGetTestAndMockChans_AnErrorAfterTheSpawnStillReleasesTheForwarder(t *te
 // Both forwarders deliberately hand over an item already taken from the agent
 // when ctx is cancelled, so the tail is not silently dropped. That send must
 // complete even when NOTHING is consuming — which is a reachable state, not a
-// hypothetical: Start can return at its post-setup ctx.Err() gate before it
-// spawns the consumers, while these forwarders run on reqCtx (WithoutCancel)
+// hypothetical: Start can return before it spawns the consumers (the agent's
+// refusal of this keploy's proven switch), while these forwarders run on reqCtx (WithoutCancel)
 // and keep pulling from the agent. On an unbuffered channel the handover parks
 // forever: a 30s DrainErrGroup timeout on every affected Ctrl+C and a goroutine
 // leaked for the process lifetime, which compounds in the DaemonSet embedding
@@ -1990,7 +2015,8 @@ func TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer(t *test
 				 * Start's abandon defer is registered AFTER the stop defer that
 				 * calls reqCtxCancel(), and Go runs defers LIFO, so abandon
 				 * always runs FIRST. It also fires only when consumersStarted is
-				 * false, whose single reachable return is the ctx.Err() gate. So
+				 * false, whose single reachable return is the agent's refusal
+				 * of this keploy's proven switch. So
 				 * `abandon_then_cancel` is the production order, and
 				 * `cancel_then_abandon` names no path this binary can take.
 				 *

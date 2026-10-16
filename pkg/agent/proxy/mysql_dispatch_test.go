@@ -18,8 +18,12 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	mysqlparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
+	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	mysqlmodels "go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -545,4 +549,404 @@ func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
 		t.Error("the parser was invoked with the kill switch tripped")
 	}
 	<-done
+}
+
+// closeHook runs onClose once, the first time the client's connection is
+// closed, before closing it.
+type closeHook struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *closeHook) Close() error {
+	c.once.Do(c.onClose)
+	return c.Conn.Close()
+}
+
+// mysqlReplayMisses serves one MySQL connection through the proxy's replay
+// dispatch from a session pool holding session, with app playing the
+// application, and returns the misses the test it was made in reads. The test
+// reads them the moment the application's connection is closed: the earliest a
+// harness that ends on the failed database call can read them. A miss queued
+// only after that close is therefore missing from what this returns, whatever
+// the scheduler does.
+func mysqlReplayMisses(t *testing.T, session []*models.Mock, app func(net.Conn)) []models.UnmatchedCall {
+	t.Helper()
+	// Under the switch the proxy's error drain runs, and GetMockErrors waits
+	// for it on events. Without the switch it would wait for the drain on a
+	// two-second clock, so the proxy runs without one there: GetMockErrors
+	// then sweeps the error channel itself, and reads whatever was queued by
+	// the time the connection is closed, with no clock involved.
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+	if provenswitch.On() {
+		p = startedDrainProxy(t, 16)
+	}
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	now := time.Now()
+	mm.SetMocksWithWindow(nil, session, now.Add(-time.Hour), now.Add(time.Hour))
+
+	ctx := context.Background()
+	p.BeginTestErrorCapture() // the test begins
+	appEnd, pipeEnd := net.Pipe()
+	t.Cleanup(func() { _ = appEnd.Close() })
+	var misses []models.UnmatchedCall
+	var readErr error
+	agentEnd := &closeHook{Conn: pipeEnd, onClose: func() {
+		misses, readErr = p.GetMockErrors(ctx) // the test ends: its database call failed
+	}}
+	connCtx := context.WithValue(context.WithValue(ctx, models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = p.mockMySQLOutgoing(connCtx, agentEnd, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+		_ = agentEnd.Close() // handleConnection's deferred close
+	}()
+	app(appEnd)
+	<-closed // the misses were read: onClose has run
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return misses
+}
+
+// eachSwitchState runs test with the proven switch off and on: a MySQL miss is
+// queued before its connection is closed either way.
+func eachSwitchState(t *testing.T, test func(t *testing.T)) {
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			test(t)
+		})
+	}
+}
+
+// requireOneMySQLMiss fails the test unless misses is the one MySQL miss of a
+// connection to 10.0.0.5:3306 that summary names.
+func requireOneMySQLMiss(t *testing.T, misses []models.UnmatchedCall, summary string) {
+	t.Helper()
+	if len(misses) != 1 {
+		t.Fatalf("the test read %d misses when its application's MySQL connection was closed; want its one miss (with none, the test passes although its database call failed): %+v", len(misses), misses)
+	}
+	if m := misses[0]; m.Protocol != "MySQL" || m.ActualSummary != summary || m.Destination != "10.0.0.5:3306" {
+		t.Fatalf("miss %+v; want a MySQL miss of %q at 10.0.0.5:3306", m, summary)
+	}
+}
+
+// A MySQL connection the test set holds no session mock for is closed
+// unanswered, and the test it was made in has that miss by the time the
+// application sees its connection fail. Before, the parser returned nil and
+// the test passed with no miss.
+func TestAMySQLConnectionWithNoMocksIsAMissOfItsTest(t *testing.T) {
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMisses(t, nil, func(app net.Conn) {
+			if got, err := io.ReadAll(app); len(got) != 0 || err != nil {
+				t.Errorf("the application read %q, %v; want its connection closed unanswered", got, err)
+			}
+		})
+		requireOneMySQLMiss(t, misses, "connection phase: new connection")
+	})
+}
+
+// A MySQL handshake no recorded one matches is a miss of the test it was made
+// in, by the time the application sees its connection fail. Before, the
+// parser's error did not wrap models.ErrNoMockMatched, so the proxy dropped
+// it from the test's misses and the test passed.
+func TestAMySQLHandshakeNoMockMatchesIsAMissOfItsTest(t *testing.T) {
+	const caps = uint32(mysqlmodels.CLIENT_PROTOCOL_41 | mysqlmodels.CLIENT_PLUGIN_AUTH | mysqlmodels.CLIENT_SECURE_CONNECTION)
+	hr41 := func(user string) *mysqlmodels.HandshakeResponse41Packet {
+		return &mysqlmodels.HandshakeResponse41Packet{CapabilityFlags: caps, MaxPacketSize: 1 << 24, CharacterSet: 0x21,
+			Username: user, AuthResponse: make([]byte, 20), AuthPluginName: string(mysqlmodels.Native)}
+	}
+	packet := func(seq uint8, typ string, msg interface{}) mysqlmodels.PacketBundle {
+		return mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: seq}, Type: typ}, Message: msg}
+	}
+	handshake := &models.Mock{
+		Kind: models.MySQL,
+		Name: "mock-0",
+		Spec: models.MockSpec{
+			Metadata:      map[string]string{"type": "config", "connID": "0"},
+			MySQLRequests: []mysqlmodels.Request{{PacketBundle: packet(1, mysqlmodels.HandshakeResponse41, hr41("app"))}},
+			MySQLResponses: []mysqlmodels.Response{
+				{PacketBundle: packet(0, mysqlmodels.AuthStatusToString(mysqlmodels.HandshakeV10), &mysqlmodels.HandshakeV10Packet{
+					ProtocolVersion: 0x0a, ServerVersion: "8.0.36", ConnectionID: 7, AuthPluginData: make([]byte, 20),
+					CapabilityFlags: caps, CharacterSet: 0x21, StatusFlags: 2, AuthPluginName: string(mysqlmodels.Native)})},
+				{PacketBundle: packet(2, mysqlmodels.StatusToString(mysqlmodels.OK), &mysqlmodels.OKPacket{Header: mysqlmodels.OK, StatusFlags: 2})},
+			},
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+	eachSwitchState(t, func(t *testing.T) {
+		misses := mysqlReplayMisses(t, []*models.Mock{handshake}, func(app net.Conn) {
+			if _, err := readOneMySQLPacket(app); err != nil {
+				t.Errorf("reading the greeting: %v", err)
+				return
+			}
+			payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), hr41("intruder"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := app.Write(append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 1}, payload...)); err != nil {
+				t.Errorf("sending the HandshakeResponse41: %v", err)
+				return
+			}
+			if got, err := io.ReadAll(app); len(got) != 0 || err != nil {
+				t.Errorf("the application read %q, %v after its handshake; want its connection closed unanswered", got, err)
+			}
+		})
+		requireOneMySQLMiss(t, misses, "connection phase: HandshakeResponse41")
+	})
+}
+
+// mysqlTestHR41 is the HandshakeResponse41 a client of user sends, asking for
+// plugin.
+func mysqlTestHR41(user string, plugin mysqlmodels.AuthPluginName) *mysqlmodels.HandshakeResponse41Packet {
+	const caps = uint32(mysqlmodels.CLIENT_PROTOCOL_41 | mysqlmodels.CLIENT_PLUGIN_AUTH | mysqlmodels.CLIENT_SECURE_CONNECTION)
+	return &mysqlmodels.HandshakeResponse41Packet{CapabilityFlags: caps, MaxPacketSize: 1 << 24, CharacterSet: 0x21,
+		Username: user, AuthResponse: make([]byte, 20), AuthPluginName: string(plugin)}
+}
+
+// mysqlTestPacket is one recorded packet.
+func mysqlTestPacket(seq uint8, typ string, msg interface{}) mysqlmodels.PacketBundle {
+	return mysqlmodels.PacketBundle{Header: &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{SequenceID: seq}, Type: typ}, Message: msg}
+}
+
+// mysqlTestVerdict is the server's final answer on a login, at seq: its OK, or
+// its refusal.
+func mysqlTestVerdict(seq uint8, refused bool) mysqlmodels.Response {
+	if refused {
+		return mysqlmodels.Response{PacketBundle: mysqlTestPacket(seq, mysqlmodels.StatusToString(mysqlmodels.ERR),
+			&mysqlmodels.ERRPacket{Header: mysqlmodels.ERR, ErrorCode: 1045, SQLStateMarker: "#", SQLState: "28000", ErrorMessage: "Access denied"})}
+	}
+	return mysqlmodels.Response{PacketBundle: mysqlTestPacket(seq, mysqlmodels.StatusToString(mysqlmodels.OK), &mysqlmodels.OKPacket{Header: mysqlmodels.OK, StatusFlags: 2})}
+}
+
+// mysqlTestHandshake is a recorded handshake of user "app" with
+// 10.0.0.5:3306 asking for plugin, recorded at at: the greeting and the
+// client's HandshakeResponse41, then the server's answers and the client's
+// further packets.
+func mysqlTestHandshake(name string, at time.Time, plugin mysqlmodels.AuthPluginName, answers []mysqlmodels.Response, requests ...mysqlmodels.Request) *models.Mock {
+	return &models.Mock{
+		Kind: models.MySQL,
+		Name: name,
+		Spec: models.MockSpec{
+			Metadata:      map[string]string{"type": "config", "connID": name, "destAddr": "10.0.0.5:3306"},
+			MySQLRequests: append([]mysqlmodels.Request{{PacketBundle: mysqlTestPacket(1, mysqlmodels.HandshakeResponse41, mysqlTestHR41("app", plugin))}}, requests...),
+			MySQLResponses: append([]mysqlmodels.Response{
+				{PacketBundle: mysqlTestPacket(0, mysqlmodels.AuthStatusToString(mysqlmodels.HandshakeV10), &mysqlmodels.HandshakeV10Packet{
+					ProtocolVersion: 0x0a, ServerVersion: "8.0.36", ConnectionID: 7, AuthPluginData: make([]byte, 20),
+					CapabilityFlags: mysqlTestHR41("app", plugin).CapabilityFlags, CharacterSet: 0x21, StatusFlags: 2, AuthPluginName: string(plugin)})},
+			}, answers...),
+			ReqTimestampMock: at,
+			ResTimestampMock: at,
+		},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession},
+	}
+}
+
+// mysqlTestNative is a recorded mysql_native_password login, refused or not.
+func mysqlTestNative(name string, at time.Time, refused bool) *models.Mock {
+	return mysqlTestHandshake(name, at, mysqlmodels.Native, []mysqlmodels.Response{mysqlTestVerdict(2, refused)})
+}
+
+// mysqlTestFullAuth is a recorded caching_sha2_password full authentication
+// without TLS, refused (a wrong password, on MySQL 8) or not.
+func mysqlTestFullAuth(name string, at time.Time, refused bool) *models.Mock {
+	return mysqlTestHandshake(name, at, mysqlmodels.CachingSha2,
+		[]mysqlmodels.Response{
+			{PacketBundle: mysqlTestPacket(2, mysqlmodels.AuthStatusToString(mysqlmodels.AuthMoreData),
+				&mysqlmodels.AuthMoreDataPacket{StatusTag: mysqlmodels.AuthMoreData, Data: mysqlmodels.CachingSha2PasswordToString(mysqlmodels.PerformFullAuthentication)})},
+			{PacketBundle: mysqlTestPacket(4, mysqlmodels.AuthStatusToString(mysqlmodels.AuthMoreData), &mysqlmodels.AuthMoreDataPacket{StatusTag: mysqlmodels.AuthMoreData, Data: "PUBLIC KEY"})},
+			mysqlTestVerdict(6, refused),
+		},
+		mysqlmodels.Request{PacketBundle: mysqlmodels.PacketBundle{
+			Header:  &mysqlmodels.PacketInfo{Header: &mysqlmodels.Header{PayloadLength: 1, SequenceID: 3}, Type: mysqlmodels.CachingSha2PasswordToString(mysqlmodels.RequestPublicKey)},
+			Message: "request_public_key",
+		}},
+		mysqlmodels.Request{PacketBundle: mysqlTestPacket(5, mysqlmodels.EncryptedPassword, "encrypted")},
+	)
+}
+
+// writeMySQLPacket writes payload to c as one packet with sequence id seq.
+func writeMySQLPacket(c net.Conn, seq uint8, payload []byte) error {
+	_, err := c.Write(append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}, payload...))
+	return err
+}
+
+// A login the recording refused and then, retried, let in, is let in on every
+// connection, through the real mock manager: at boot, where the manager does
+// not move a reused handshake, inside a test window, where it does, and for
+// connections opened at once. Which recorded verdict a login gets depends on
+// nothing a connection changes in the pool, with mysql_native_password and
+// with caching_sha2_password, whose refusal comes at the end of a full
+// authentication. No miss is queued for any of them.
+func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	for _, tc := range []struct {
+		name      string
+		plugin    mysqlmodels.AuthPluginName
+		handshake func(name string, at time.Time, refused bool) *models.Mock
+	}{
+		{"mysql_native_password", mysqlmodels.Native, mysqlTestNative},
+		{"caching_sha2_password full authentication", mysqlmodels.CachingSha2, mysqlTestFullAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 64)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			rec := time.Now().Add(-time.Hour)
+			session := func() []*models.Mock {
+				return []*models.Mock{tc.handshake("mock-refused", rec, true), tc.handshake("mock-ok", rec.Add(time.Second), false)}
+			}
+
+			// login opens one connection and returns the first byte of the
+			// server's final answer on the login.
+			login := func() (byte, error) {
+				appEnd, agentEnd := net.Pipe()
+				connCtx := context.WithValue(context.WithValue(context.Background(), models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+				served := make(chan struct{})
+				go func() {
+					defer close(served)
+					_ = p.mockMySQLOutgoing(connCtx, agentEnd, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+					_ = agentEnd.Close()
+				}()
+				defer func() { _ = appEnd.Close(); <-served }()
+				if _, err := readOneMySQLPacket(appEnd); err != nil {
+					return 0, err
+				}
+				payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), mysqlTestHR41("app", tc.plugin))
+				if err != nil {
+					return 0, err
+				}
+				if err := writeMySQLPacket(appEnd, 1, payload); err != nil {
+					return 0, err
+				}
+				answer, err := readOneMySQLPacket(appEnd)
+				if err != nil {
+					return 0, err
+				}
+				if tc.plugin == mysqlmodels.CachingSha2 && answer[4] == mysqlmodels.AuthMoreData {
+					// A full authentication: ask for the public key, and send
+					// the password encrypted with it.
+					if err := writeMySQLPacket(appEnd, 3, []byte{byte(mysqlmodels.RequestPublicKey)}); err != nil {
+						return 0, err
+					}
+					if _, err := readOneMySQLPacket(appEnd); err != nil {
+						return 0, err
+					}
+					if err := writeMySQLPacket(appEnd, 5, make([]byte, 32)); err != nil {
+						return 0, err
+					}
+					if answer, err = readOneMySQLPacket(appEnd); err != nil {
+						return 0, err
+					}
+				}
+				return answer[4], nil
+			}
+			loginOK := func(phase string, i int) {
+				t.Helper()
+				got, err := login()
+				if err != nil || got != mysqlmodels.OK {
+					t.Errorf("%s, connection %d: verdict %#x, %v; want the recorded OK", phase, i, got, err)
+				}
+			}
+
+			p.BeginTestErrorCapture()
+			mm.SetMocksWithWindow(nil, session(), models.BaseTime, time.Now().Add(time.Hour)) // boot
+			for i := 1; i <= 3; i++ {
+				loginOK("at boot", i)
+			}
+			mm.SetMocksWithWindow(nil, session(), time.Now().Add(-time.Minute), time.Now().Add(time.Hour)) // a test window
+			for i := 1; i <= 3; i++ {
+				loginOK("in a test window", i)
+			}
+			var wg sync.WaitGroup
+			for i := 1; i <= 4; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					loginOK("at once", i)
+				}(i)
+			}
+			wg.Wait()
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil || len(misses) != 0 {
+				t.Fatalf("misses %+v, %v; want none: every login was answered from the recording", misses, err)
+			}
+		})
+	}
+}
+
+// A MySQL client that asks for TLS (an SSLRequest) makes a client-side TLS
+// handshake with keploy's proxy, which the MySQL replayer makes itself: it is
+// charged as any client-side handshake with the proxy -- a rejection of
+// keploy's certificate is a loss, an abandon once the certificate is out
+// leaves the test not judged, a client that hangs up before keploy answered
+// lost nothing. The replayer's handshake was charged nothing: a test whose
+// database connection keploy's certificate failed had no capture loss.
+func TestAMySQLClientsTLSHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
+	sslRequest := func(app net.Conn) error {
+		if _, err := readOneMySQLPacket(app); err != nil {
+			return fmt.Errorf("reading the greeting: %w", err)
+		}
+		caps := mysqlTestHR41("app", mysqlmodels.Native).CapabilityFlags | mysqlmodels.CLIENT_SSL
+		payload := make([]byte, 32)
+		payload[0], payload[1], payload[2], payload[3] = byte(caps), byte(caps>>8), byte(caps>>16), byte(caps>>24)
+		payload[6], payload[8] = 0x01, 0x21 // max packet 1<<16, utf8
+		_, err := app.Write(append([]byte{byte(len(payload)), 0, 0, 1}, payload...))
+		return err
+	}
+	for _, tc := range []struct {
+		name              string
+		client            func(t *testing.T, app net.Conn)
+		failed, abandoned uint64
+	}{
+		{"a client that hangs up before keploy answered", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example")[:20])
+		}, 0, 0},
+		{"a client that closes once keploy's certificate is in, without an alert", func(t *testing.T, app net.Conn) {
+			_, _ = app.Write(rawHello(t, "db.example"))
+			_, _ = app.Read(make([]byte, 1<<14))
+		}, 0, 1},
+		{"a Go client that rejects keploy's certificate", func(t *testing.T, app net.Conn) {
+			_ = tls.Client(app, &tls.Config{ServerName: "db.example"}).Handshake()
+		}, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.MYSQL: mysqlparser.New(zap.NewNop())}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			now := time.Now()
+			mm.SetMocksWithWindow(nil, []*models.Mock{mysqlTestNative("mock-0", now, false)}, now.Add(-time.Hour), now.Add(time.Hour))
+			app, src := acceptedConn(t)
+			connCtx := context.WithValue(context.WithValue(context.Background(), models.ClientConnectionIDKey, "1"), models.DestConnectionIDKey, "2")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = p.mockMySQLOutgoing(connCtx, src, "10.0.0.5:3306", mm, models.OutgoingOptions{})
+				_ = src.Close()
+			}()
+			if err := sslRequest(app); err != nil {
+				t.Fatal(err)
+			}
+			tc.client(t, app)
+			_ = app.Close()
+			<-done
+			got := map[models.CaptureLossKind]uint64{}
+			for _, l := range p.losses.Snapshot() {
+				got[l.Kind] = l.Count
+				if l.What != "to 10.0.0.5:3306" {
+					t.Fatalf("%s: a loss names %q, want the destination", l.Kind, l.What)
+				}
+			}
+			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || len(got) > 2 {
+				t.Fatalf("%s: charged %v, want %d tls_handshake_failed and %d tls_handshake_abandoned", tc.name, got, tc.failed, tc.abandoned)
+			}
+		})
+	}
 }

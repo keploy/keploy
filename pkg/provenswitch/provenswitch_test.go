@@ -152,3 +152,17 @@ func TestIgnoredEnv(t *testing.T) {
 		}
 	}
 }
+
+// Unpin hands the switch back to KEPLOY_PROVEN.
+func TestUnpin(t *testing.T) {
+	t.Cleanup(Unpin)
+	t.Setenv(Env, "1")
+	Pin(false)
+	if On() {
+		t.Fatal("pinned off, the switch read the environment")
+	}
+	Unpin()
+	if !On() {
+		t.Fatal("unpinned, the switch did not read KEPLOY_PROVEN=1")
+	}
+}

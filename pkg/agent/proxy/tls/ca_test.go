@@ -2,6 +2,7 @@ package tls
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -785,6 +787,51 @@ func TestGenerateTrustStore_RejectsTruncatedTrailingBlock(t *testing.T) {
 	}
 	if _, statErr := os.Stat(jksPath); statErr == nil {
 		t.Fatal("truststore file should not exist when generateTrustStore errored — leaving a partial JKS would defeat the guard")
+	}
+}
+
+// An install the stop cuts short is still removed by the teardown. The stop
+// cancels the context the install runs under, which kills the trust store's
+// update (update-ca-certificates) once this run's anchor is already written;
+// any other failure of the update leaves the anchor written just the same.
+// The install recorded what it wrote only once the update had succeeded, so
+// TeardownNativeCA removed nothing and the anchor stayed trusted -- for a
+// run whose CA key is gone -- until the next start's sweep.
+func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the trust-store anchors are Linux's")
+	}
+	store, bin := t.TempDir(), t.TempDir()
+	update := filepath.Join(bin, "keploy-test-update-ca")
+	// The update the stop killed: it ends in failure.
+	if err := os.WriteFile(update, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing else on PATH: no JDK keystore is touched.
+	t.Setenv("PATH", bin)
+	t.Setenv("JAVA_HOME", "")
+	oldPaths, oldCmds := caStorePath, caStoreUpdateCmd
+	caStorePath, caStoreUpdateCmd = []string{store + "/"}, []string{"keploy-test-update-ca"}
+	t.Cleanup(func() {
+		caStorePath, caStoreUpdateCmd = oldPaths, oldCmds
+		recordNativeInstall(nil)
+	})
+
+	ca, err := generateRunCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, ""); err == nil {
+		t.Fatal("the install succeeded with a trust-store update that failed")
+	}
+	anchor := filepath.Join(store, runCertFileName(ca))
+	if _, err := os.Stat(anchor); err != nil {
+		t.Fatalf("the install did not write this run's anchor before its update: %v", err)
+	}
+
+	TeardownNativeCA(zap.NewNop())
+	if _, err := os.Stat(anchor); !os.IsNotExist(err) {
+		t.Fatalf("the teardown left this run's anchor %s in the trust store (stat: %v)", anchor, err)
 	}
 }
 

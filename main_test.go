@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
-	"github.com/spf13/cobra"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+
+	"github.com/spf13/cobra"
 	"path/filepath"
 	"testing"
 
@@ -102,5 +106,56 @@ func TestWritesKeployFolder(t *testing.T) {
 		if got := writesKeployFolder(root(), c.args[1:]); got != c.want {
 			t.Errorf("writesKeployFolder(%v) = %v, want %v", c.args[1:], got, c.want)
 		}
+	}
+}
+
+// main says its agent records the steps of its whole teardown before the
+// command runs, and that the detach is done once the command has returned and
+// before the process exits (utils.DeclareTeardownSteps, utils.MarkDetachDone):
+// the CLI that stops an agent kills it for want of progress only when it says
+// the first, and once it has stopped detaching only when it says the second.
+func TestMainReportsItsTeardownSteps(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" {
+			body = fn.Body.List
+		}
+	}
+	at := func(pkg, name string) int {
+		for i, st := range body {
+			es, ok := st.(*ast.ExprStmt)
+			if !ok {
+				continue
+			}
+			call, ok := es.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			switch fun := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				if x, ok := fun.X.(*ast.Ident); ok && x.Name == pkg && fun.Sel.Name == name {
+					return i
+				}
+			case *ast.Ident:
+				if pkg == "" && fun.Name == name {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	declare, start, done, exit := at("utils", "DeclareTeardownSteps"), at("", "start"), at("utils", "MarkDetachDone"), at("os", "Exit")
+	if start < 0 || exit < 0 {
+		t.Fatalf("main no longer calls start and os.Exit as statements (start=%d exit=%d)", start, exit)
+	}
+	if declare < 0 || declare > start {
+		t.Errorf("main does not call utils.DeclareTeardownSteps before start (at %d, start at %d)", declare, start)
+	}
+	if done < 0 || done < start || done > exit {
+		t.Errorf("main does not call utils.MarkDetachDone after start and before os.Exit (at %d, start %d, exit %d)", done, start, exit)
 	}
 }

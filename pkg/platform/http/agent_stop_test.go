@@ -15,16 +15,16 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
-	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // An agent whose recording client has closed its streams stops by itself (the
 // signal that reached it too, held until then), and shuts its HTTP server: the
 // client's stop request then fails with EOF, or is refused. From an agent that
-// was up (agentReached, which stopAgentProcess checks), that is the agent on
-// its way out, not one to signal.
+// was up (agentRun.ready, which endAgent checks), that is the agent on its way
+// out, not one to signal at once.
 func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	// A server that closes the connection without answering, as a server
 	// shutting down does to a request it had not started on.
@@ -50,93 +50,233 @@ func TestAgentGoingAwayIsHowAStoppingAgentAnswers(t *testing.T) {
 	}
 }
 
-// The stop of a native agent: one that answers is not signalled; one that was
-// up and is already going away is waited for, and signalled only if it does
-// not exit; one whose stop request fails otherwise, or that never answered
-// (still starting: refused, as nothing listens yet), is signalled at once.
-func TestStopAgentProcessSignalsOnlyAnAgentThatWillNotGo(t *testing.T) {
-	defer func(g time.Duration) { agentStoppingGrace = g }(agentStoppingGrace)
+// hangBound turns a regression that would hang a test into a failure. It is
+// not part of any assertion: every positive assertion waits on its event, and
+// this bound is only how long a test gives that event before saying it never
+// came.
+const hangBound = 2 * time.Minute
 
-	exited := make(chan struct{})
-	close(exited)
-	never := make(chan struct{})
+// within runs f and fails the test if it has not returned within hangBound.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(hangBound):
+		t.Fatalf("%s did not return within %v", what, hangBound)
+	}
+}
+
+// returnsWithin reports whether done is closed within d. It asserts only that
+// something has NOT happened yet; every positive assertion waits on the event.
+func returnsWithin(done <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// theStopWasASignal: the recording was stopped by the user's interrupt
+// (utils.Interrupted), which a stop's offer to stop the agent now waits on.
+func theStopWasASignal(t *testing.T) {
+	t.Helper()
+	utils.MarkInterrupted()
+	t.Cleanup(utils.ClearInterrupted)
+}
+
+// ctrlCWhileWaited is the user's Ctrl+C while keploy waits for a stopping
+// agent, pressed as told: once the stop has said a press stops the agent
+// (stopWatch's offer), which a press before does not count. It presses until
+// one is heard.
+func ctrlCWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for !utils.MarkInterruptedAgain() {
+		if time.Now().After(deadline) {
+			t.Fatal("no stop ever said Ctrl+C stops the agent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// ctrlCAgainWhileWaited is the user's next Ctrl+C, once the stop has answered
+// the one before (withdrawn its offer) and offered again: it presses until a
+// press has found no offer standing, and then one is heard.
+func ctrlCAgainWhileWaited(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	withdrawn := false
+	for {
+		heard := utils.MarkInterruptedAgain()
+		if withdrawn && heard {
+			return
+		}
+		withdrawn = withdrawn || !heard
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never offered again")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// endAgent's decision on the CLI's stop. The agent is asked first, and one
+// that answers is not signalled. One that was up and is already going away is
+// signalled only if, after the grace, it has reported no teardown. One whose
+// stop request fails otherwise, or that never answered (still starting:
+// refused, as nothing listens yet), is signalled at once. The agent is then
+// waited for (a
+// terminate stands for SIGTERM, on which it exits). One already reaped is
+// never signalled: its pid may be another process's by then.
+func TestEndAgent(t *testing.T) {
+	defer func(g time.Duration) { agentStoppingGrace = g }(agentStoppingGrace)
 	goingAway := fmt.Errorf(`Post "http://localhost:1/agent/stop": %w`, io.EOF)
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	failed := errors.New("agent stop http 500: boom")
+	const (
+		goingAwayLog = "already stopping"
+		decidedLog   = "reporting its teardown; it is not signalled"
+		nudgedLog    = "has reported no teardown"
+	)
 	for _, tc := range []struct {
-		name     string
-		reached  bool
-		stopErr  error
-		procDone chan struct{}
-		grace    time.Duration
-		killed   bool
+		name  string
+		ask   error
+		ready bool
+		// exitOnAsk: it exits as it is asked; exitAt: it exits by itself once
+		// endAgent has logged this; reaped: it had exited before the stop.
+		exitOnAsk  bool
+		exitAt     string
+		reaped     bool
+		reports    bool
+		grace      time.Duration
+		interrupt  bool
+		wantSignal bool
+		wantKill   bool
 	}{
-		{"it answers", true, nil, never, time.Hour, false},
-		{"it is going away, and exits", true, goingAway, exited, time.Hour, false},
-		{"it is not listening any more, and exits", true, refused, exited, time.Hour, false},
-		{"it is going away, but never exits", true, goingAway, never, 50 * time.Millisecond, true},
-		{"its stop request fails otherwise", true, errors.New("agent stop http 500: boom"), exited, time.Hour, true},
-		// Its process would exit (procDone closed): one taken for going away
-		// is waited for and not signalled.
-		{"it never answered: still starting", false, refused, exited, time.Hour, true},
+		{name: "it answers", ready: true, exitOnAsk: true, grace: time.Hour},
+		{name: "it answers, never answered before", exitOnAsk: true, grace: time.Hour},
+		{name: "it is going away, and exits", ask: goingAway, ready: true, exitAt: goingAwayLog, grace: time.Hour},
+		{name: "it is not listening any more, and exits", ask: refused, ready: true, exitAt: goingAwayLog, grace: time.Hour},
+		{name: "it is going away and reports its teardown: never signalled", ask: goingAway, ready: true, reports: true, exitAt: decidedLog, grace: time.Millisecond},
+		{name: "it is going away but reports nothing after the grace", ask: goingAway, ready: true, grace: time.Millisecond, wantSignal: true},
+		{name: "its stop request fails otherwise", ask: failed, ready: true, grace: time.Hour, wantSignal: true},
+		{name: "it never answered: still starting", ask: refused, grace: time.Hour, wantSignal: true},
+		{name: "it never answered, and fails otherwise", ask: failed, grace: time.Hour, wantSignal: true},
+		{name: "it was already reaped", ask: failed, ready: true, reaped: true, grace: time.Hour},
+		{name: "it was already reaped, going away", ask: goingAway, ready: true, reaped: true, grace: time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			t.Cleanup(utils.ResetInterruptedAgain)
+			if tc.interrupt {
+				utils.MarkInterruptedAgain()
+			}
 			agentStoppingGrace = tc.grace
-			a := &AgentClient{logger: zap.NewNop()}
-			reached := new(atomic.Bool)
-			reached.Store(tc.reached)
-			var killed atomic.Bool
-			a.stopAgentProcess(reached, func() error { return tc.stopErr }, tc.procDone, func() { killed.Store(true) })
-			if killed.Load() != tc.killed {
-				t.Fatalf("signalled=%v, want %v", killed.Load(), tc.killed)
+			core, logs := observer.New(zap.DebugLevel)
+			a := &AgentClient{logger: zap.New(core)}
+			run := newAgentRun()
+			run.ready.Store(tc.ready)
+			if tc.reaped {
+				run.exited()
+			}
+			var signalled, killed atomic.Bool
+			ask := func() error {
+				if tc.exitOnAsk {
+					run.exited()
+				}
+				return tc.ask
+			}
+			terminate := func() error {
+				signalled.Store(true)
+				run.exited() // the agent exits on SIGTERM
+				return nil
+			}
+			kill := func(bool) error {
+				killed.Store(true)
+				run.exited()
+				return nil
+			}
+			read := func(context.Context) (utils.TeardownProgress, bool) {
+				return utils.TeardownProgress{Seq: 1}, tc.reports
+			}
+			returned := make(chan struct{})
+			if tc.exitAt != "" {
+				// It exits once endAgent has got that far, and only then, so a
+				// stop that signals it before is caught.
+				go func() {
+					for logs.FilterMessageSnippet(tc.exitAt).Len() == 0 {
+						select {
+						case <-returned:
+							return
+						case <-time.After(time.Millisecond):
+						}
+					}
+					run.exited()
+				}()
+			}
+			go func() { a.endAgent(run, 1, ask, terminate, kill, killReach{}, read); close(returned) }()
+			select {
+			case <-returned:
+			case <-time.After(time.Minute):
+				t.Fatal("endAgent did not return")
+			}
+			if signalled.Load() != tc.wantSignal || killed.Load() != tc.wantKill {
+				t.Fatalf("signalled=%v killed=%v, want %v and %v", signalled.Load(), killed.Load(), tc.wantSignal, tc.wantKill)
+			}
+			if tc.wantSignal && tc.ready && agentGoingAway(tc.ask) && logs.FilterMessageSnippet(nudgedLog).Len() == 0 {
+				t.Fatal("signalled an agent going away without saying why")
 			}
 		})
 	}
 }
 
-// The stop request, the grace for an agent on its way out, and the signal's
-// wait before a kill end before the recorders' teardown stops waiting on the
-// goroutine that stops the agent (30 s): otherwise an agent that hangs as it
-// goes is killed only after that wait gave up, if at all.
-func TestAgentStoppingGraceEndsBeforeTheTeardownWait(t *testing.T) {
-	if total := agentStopRequestTimeout + agentStoppingGrace + agentUtils.StopSignalWait; total >= 30*time.Second {
-		t.Fatalf("the stop request (%v), the grace (%v) and the signal's wait (%v) take %v, not under the teardown's 30 s wait",
-			agentStopRequestTimeout, agentStoppingGrace, agentUtils.StopSignalWait, total)
-	}
-}
+// Each start of the agent waits for the agent before it to exit -- one agent
+// at a time -- and gets a run of its own that has not answered, whatever the
+// one before it did; the run before it keeps its own, which its stop reads.
+func TestBeginRunWaitsForThePreviousAgentAndStartsFresh(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	a := &AgentClient{logger: zap.NewNop()}
+	prev := newAgentRun()
+	prev.ready.Store(true)
+	a.run = prev
 
-// Each agent a setup starts has not answered yet, whatever the one before it
-// did: a refused stop request to it is an agent still starting, signalled at
-// once (stopAgentProcess), not one on its way out. And the stop of the one
-// before it, which a setup retry leaves to its grace, still reads that one as
-// having answered: it is waited for, not signalled at once.
-func TestAStartedAgentIsNotReachedUntilItAnswers(t *testing.T) {
-	a := &AgentClient{logger: zap.NewNop(), conf: &config.Config{}}
-	before := new(atomic.Bool)
-	before.Store(true) // the agent before it answered
-	a.agentReached.Store(before)
-	_, _ = a.startAgent(context.Background(), false, models.SetupOptions{})
-	if r := a.agentReached.Load(); r == nil || r.Load() {
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if _, _, _, err := a.beginRun(ended); err == nil {
+		t.Fatal("began a new run while the previous agent was still running")
+	}
+	if a.currentRun() != prev {
+		t.Fatal("a start that did not begin replaced the previous run")
+	}
+
+	prev.exited()
+	_, stop, run, err := a.beginRun(context.Background())
+	if err != nil {
+		t.Fatalf("after the previous agent exited: %v", err)
+	}
+	defer stop()
+	if run == prev || a.currentRun() != run {
+		t.Fatal("the new start did not get a run of its own")
+	}
+	if run.ready.Load() {
 		t.Fatal("a new agent inherits the one before it having answered")
 	}
-	if !before.Load() {
-		t.Fatal("starting a new agent took back that the one before it answered: its stop signals it at once")
+	if !prev.ready.Load() {
+		t.Fatal("beginning a new run took back that the agent before it answered")
 	}
 }
 
-// An agent that has exited is not signalled: its PID may be another
-// process's by then.
-func TestAnAgentThatExitedIsNotSignalled(t *testing.T) {
-	procDone := make(chan struct{})
-	var killed atomic.Int32
-	kill := unlessExited(procDone, func() { killed.Add(1) })
-	kill()
-	if killed.Load() != 1 {
-		t.Fatal("an agent still running was not signalled")
-	}
-	close(procDone)
-	kill()
-	if killed.Load() != 1 {
-		t.Fatal("an agent that had exited was signalled")
+// The stop request and the grace for an agent on its way out end before the
+// recorders' teardown stops waiting on the goroutine that stops the agent
+// (30 s): otherwise an agent that hangs as it goes is signalled only after
+// that wait gave up, if at all.
+func TestAgentStoppingGraceEndsBeforeTheTeardownWait(t *testing.T) {
+	if total := agentStopRequestTimeout + agentStoppingGrace; total >= 30*time.Second {
+		t.Fatalf("the stop request (%v) and the grace (%v) take %v, not under the teardown's 30 s wait",
+			agentStopRequestTimeout, agentStoppingGrace, total)
 	}
 }
 
@@ -171,5 +311,131 @@ func TestTheStopRequestIsSentOnAConnectionOfItsOwn(t *testing.T) {
 		if n := conns.Load(); n != 2 {
 			t.Fatalf("token %q: %d connections for a request and the stop after it: the stop went on the kept one", tok, n)
 		}
+	}
+}
+
+// --from-container: the user's container is restored only once the agent
+// container, which holds the app's ports, has exited -- it is waited for, not
+// killed -- or once its stop killed it at once at the user's Ctrl+C
+// (run.letGo), when there is no more to wait for.
+func TestRestoreFromContainerWaitsForTheAgentContainer(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		utils.ResetInterruptedAgain()
+		t.Cleanup(utils.ResetInterruptedAgain)
+		fake := newRestoreFake(fakeContainer{running: true, hasEndpoint: true, publishedPorts: true})
+		a := restoreAgentWith(fake, demoSpec())
+		a.fromContainer = "demo-app"
+		a.fromContainerWasRunning = true
+		run := newAgentRun()
+		a.run = run
+		t.Cleanup(run.exited)
+
+		restored := make(chan struct{})
+		go func() { a.RestoreFromContainer(); close(restored) }()
+		// Only that it has NOT restored yet: too short a look under load can
+		// miss a wrong restore, never fail a right one.
+		select {
+		case <-restored:
+			t.Fatalf("interrupt=%v: restored the user's container while the agent container still ran", interrupt)
+		case <-time.After(200 * time.Millisecond):
+		}
+		if fake.callIndex("start:") >= 0 {
+			t.Fatalf("interrupt=%v: started the user's container while the agent container still ran", interrupt)
+		}
+		if interrupt {
+			run.stoppedAtOnce() // its stop killed it at once at the user's Ctrl+C
+		} else {
+			run.exited()
+		}
+		select {
+		case <-restored:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("interrupt=%v: the restore never ran", interrupt)
+		}
+		if fake.callIndex("start:") < 0 {
+			t.Fatalf("interrupt=%v: the user's container was not started again", interrupt)
+		}
+	}
+}
+
+// An interrupt that came before the stop does not force it: `sudo pkill -INT
+// -f keploy` signals sudo and keploy both, and sudo hands its signal on, so
+// one stop reaches keploy twice. The agent, asked to stop and making
+// progress, is waited for, not killed. The stop offers a press only a whole
+// period after its signal came: on the test's clock, which stands still,
+// never -- the copy comes once the stop has polled the agent a few times.
+func TestAnInterruptBeforeTheNativeStopDoesNotForceIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	theStopWasASignal(t)
+	at := time.Now()
+	defer utils.SetNoticeClockForTest(func() time.Time { return at })()
+	a := &AgentClient{logger: zap.NewNop()}
+	run := newAgentRun()
+	run.ready.Store(true)
+	var killed atomic.Bool
+	var reads atomic.Uint64
+	read := func(context.Context) (utils.TeardownProgress, bool) {
+		n := reads.Add(1)
+		return utils.TeardownProgress{Seq: n, Beat: n, Steps: true}, true
+	}
+	returned := make(chan struct{})
+	go func() {
+		a.endAgent(run, 1, func() error { return nil }, func() error { return nil },
+			func(bool) error { killed.Store(true); run.exited(); return nil }, killReach{}, read)
+		close(returned)
+	}()
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	readsTo := func(n uint64) {
+		for reads.Load() < n {
+			select {
+			case <-returned:
+				t.Fatalf("endAgent returned while the agent was still stopping (killed=%v)", killed.Load())
+			case <-hung:
+				t.Fatal("the stop never read the agent's progress")
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	readsTo(3)
+	utils.MarkInterruptedAgain() // the copy of the stop, as it waits
+	readsTo(6)
+	if killed.Load() {
+		t.Fatal("a copy of the stop forced it")
+	}
+	run.exited()
+	select {
+	case <-returned:
+	case <-time.After(time.Minute):
+		t.Fatal("endAgent did not return once the agent exited")
+	}
+	if killed.Load() {
+		t.Fatal("an interrupt from before the stop forced it")
+	}
+}
+
+// --from-container: an agent container that never exits, and whose stop does
+// not hold the drains (its agent does not record its steps, so nothing would
+// end it), does not keep keploy from restoring the user's container and
+// exiting: the restore waits as long as a drain would.
+func TestRestoreFromContainerDoesNotWaitForeverForTheAgent(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	t.Cleanup(utils.ResetInterruptedAgain)
+	defer func(d time.Duration) { agentExitBound = d }(agentExitBound)
+	agentExitBound = 10 * time.Millisecond
+	fake := newRestoreFake(fakeContainer{running: true, hasEndpoint: true, publishedPorts: true})
+	a := restoreAgentWith(fake, demoSpec())
+	a.fromContainer = "demo-app"
+	a.fromContainerWasRunning = true
+	a.run = newAgentRun() // never exits
+	restored := make(chan struct{})
+	go func() { a.RestoreFromContainer(); close(restored) }()
+	select {
+	case <-restored:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("the restore waited past its bound for an agent that never exits")
+	}
+	if fake.callIndex("start:") < 0 {
+		t.Fatal("the user's container was not started again")
 	}
 }

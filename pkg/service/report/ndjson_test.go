@@ -77,7 +77,7 @@ func TestBuildTestVerdict_Schema(t *testing.T) {
 		Result: models.Result{
 			DepResult: []models.DepResult{missingDepRow()}, DepsChecked: true, DepsConsumed: 7,
 		},
-	})
+	}, nil)
 
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestBuildTestVerdict_Schema(t *testing.T) {
 func TestBuildTestVerdict_EmptyCategoriesAreOmittedAndEffectsAlwaysPresent(t *testing.T) {
 	data, err := json.Marshal(buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "t", Status: models.TestStatusPassed,
-	}))
+	}, nil))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -300,12 +300,12 @@ func TestNDJSON_UncheckedIsDistinguishableFromCleanlyChecked(t *testing.T) {
 	checked := buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "checked", Status: models.TestStatusPassed,
 		Result: models.Result{DepsChecked: true, DepsConsumed: 2},
-	})
+	}, nil)
 	// A --base-path run, --disable-mapping, an unmapped test set, a failed
 	// consumed-mock fetch, or the deferred streaming path.
 	unchecked := buildTestVerdict("run", "set", models.TestResult{
 		Kind: models.HTTP, TestCaseID: "unchecked", Status: models.TestStatusPassed,
-	})
+	}, nil)
 
 	if !checked.DependenciesChecked {
 		t.Error("a test whose assertion ran and found nothing must report dependencies_checked=true")
@@ -348,7 +348,7 @@ func TestNDJSON_PassedWithMissingDependencyIsMachineDetectable(t *testing.T) {
 		Result: models.Result{
 			DepResult: []models.DepResult{missingDepRow()}, DepsChecked: true, DepsConsumed: 4,
 		},
-	})
+	}, nil)
 	data, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -435,5 +435,26 @@ func TestBuildEffectRows_MissingOverflowIsOnTheWire(t *testing.T) {
 	}
 	if named != 1 {
 		t.Fatalf("counted %d individually named missing dependencies, want 1", named)
+	}
+}
+
+// Each verdict of a test set whose capture was checked and found wanting
+// carries it; a set that was not checked carries nothing.
+func TestBuildTestVerdicts_CaptureVerification(t *testing.T) {
+	cv := &models.CaptureVerification{Status: models.CaptureIncompleteStatus, Reason: "capture incomplete: x"}
+	tests := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusPassed}, {TestCaseID: "b", Status: models.TestStatusPassed}}
+	got := buildTestVerdicts("run", map[string]*models.TestReport{"s": {Tests: tests, CaptureVerification: cv}})
+	if len(got) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(got))
+	}
+	for _, v := range got {
+		if v.CaptureVerification != "incomplete" || v.CaptureVerificationReason != cv.Reason {
+			t.Fatalf("verdict %+v lacks the set's capture verification", v)
+		}
+	}
+	for _, v := range buildTestVerdicts("run", map[string]*models.TestReport{"s": {Tests: tests}}) {
+		if v.CaptureVerification != "" || v.CaptureVerificationReason != "" {
+			t.Fatalf("an unchecked set's verdict %+v carries a capture verification", v)
+		}
 	}
 }

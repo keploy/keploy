@@ -244,6 +244,9 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
 	reqTimestampMock := models.CapturedReqTime(ctx)
 	var resTimestampMock time.Time
+	// exchanges counts the connection's exchanges flushed so far
+	// (exchangeLifetime).
+	exchanges := 0
 
 	flushMock := func() {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
@@ -251,6 +254,8 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 		}
 		metadata := make(map[string]string)
 		metadata["type"] = "config"
+		metadata[models.MetadataLifetimeKey] = exchangeLifetime(exchanges)
+		exchanges++
 		if connID, ok := ctx.Value(models.ClientConnectionIDKey).(string); ok {
 			metadata["connID"] = connID
 		}

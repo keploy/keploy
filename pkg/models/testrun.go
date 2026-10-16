@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,58 @@ type TestReport struct {
 	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
 	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
 	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
+	// CaptureVerification is what keploy's check that its agent tracked every
+	// process of this test set found, when it found something: the capture
+	// was incomplete (a process went untracked; the set is FAILED, and its
+	// JUnit suite carries a failed "keploy capture" case), or could not be
+	// verified (the count could not be read). Absent when nothing was lost,
+	// and when nothing was checked (an agent that does not count, a run that
+	// does not mock): a report does not tell those two apart.
+	CaptureVerification *CaptureVerification `json:"capture_verification,omitempty" yaml:"capture_verification,omitempty"`
+	// Real is what the set's run saw of mock.real beyond its test cases
+	// (proven switch): the destinations it reached, and the connections
+	// keploy could not capture outside them. RealListed are the
+	// destinations the recordings of its test cases that ran list. Absent
+	// without a mock.real list.
+	Real       *RealRun `json:"real,omitempty" yaml:"real,omitempty"`
+	RealListed []string `json:"realListed,omitempty" yaml:"real_listed,omitempty"`
+	// RealFailure is why mock.real failed the set (design v14 §8.2 rule 4):
+	// a destination the recordings list that the run never reached, or
+	// that never answered. JUnit fails a case of its own with it.
+	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// UnclaimedCalls are the calls the set's application made after its last
+	// test that no mock answered (proven switch): a pool miss no later test
+	// takes. They fail the set; JUnit fails a case of its own with them.
+	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
+	// so its results carry the proven model's evidence: a report renders it
+	// from this, not from the switch of the process rendering it. Set on
+	// every report a set run under the switch writes; absent for a set run
+	// without it.
+	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
+}
+
+// CaptureVerificationStatus is the outcome of checking that the agent tracked
+// every process of a test set.
+type CaptureVerificationStatus string
+
+const (
+	// CaptureIncomplete: a process went untracked (the kernel refused it a
+	// place in the agent's PID map), so its dependency calls may have reached
+	// the real service unmocked. The set is FAILED for it.
+	CaptureIncompleteStatus CaptureVerificationStatus = "incomplete"
+	// CaptureUnverified: the agent counts untracked processes, but keploy
+	// could not read the count, so the capture could not be confirmed. With
+	// the proven switch off the set's pass/fail is left as decided (only
+	// mock mode's --strict fails on it); with it on the set is not judged.
+	CaptureUnverifiedStatus CaptureVerificationStatus = "unverified"
+)
+
+// CaptureVerification is the capture-completeness outcome carried in a
+// TestReport (and the JUnit and json projections).
+type CaptureVerification struct {
+	Status CaptureVerificationStatus `json:"status" yaml:"status"`
+	Reason string                    `json:"reason" yaml:"reason"`
 }
 
 type TestCoverage struct {
@@ -99,6 +152,15 @@ type TestResult struct {
 	// failure without --strict-failure); the report still names the places.
 	// Absent when there is none.
 	TemplateFailures []TemplateFailure `json:"template_failures,omitempty" yaml:"template_failures,omitempty"`
+	// Real are the mock.real destinations the test case used while it ran
+	// (proven switch): its REAL rows. Absent when it used none.
+	Real []RealUse `json:"real,omitempty" yaml:"real,omitempty"`
+	// Variables are the test variables bound while the test case ran (proven
+	// switch): the values its request sent, and each value a dependency call
+	// carried where the learn step found it first, with where it was taken.
+	// A later call that sent another value failed the test case as a miss.
+	// Absent when none was bound.
+	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or
@@ -114,7 +176,10 @@ type TemplateFailure struct {
 	// refusal, why the placeholder cannot run and the edit to make.
 	Why string `json:"why" yaml:"why"`
 	// Refused marks a placeholder refused when the test set loaded: the test
-	// case was never sent, and there is no answer to accept.
+	// case was never sent, and there is no answer to accept. A refusal with
+	// no Placeholder refuses the test case's whole test set (one an
+	// interrupted keploy templatize left half-written; category
+	// TEST_SET_REFUSED), not a placeholder of it.
 	Refused bool `json:"refused,omitempty" yaml:"refused,omitempty"`
 }
 
@@ -148,6 +213,11 @@ type FailureInfo struct {
 	// unknown: it has no verdict, and its test set is not judged. Set only
 	// under the proven switch, before any hook reads the result.
 	TestMocksUnread bool `json:"test_mocks_unread,omitempty" yaml:"test_mocks_unread,omitempty"`
+	// VariablesUnchecked says why what this test captured could not be
+	// checked against what its dependency calls carried (a keploy-side
+	// fault): it has no verdict, and its test set is not judged. Set only
+	// under the proven switch.
+	VariablesUnchecked string `json:"variables_unchecked,omitempty" yaml:"variables_unchecked,omitempty"`
 	// UnconsumedMocks are, under KEPLOY_PROVEN=1, the test mocks this test
 	// did not consume: the mocks of its recorded mapping its per-test
 	// assertion owns (data-plane mocks; connection failures and
@@ -157,6 +227,68 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
+	// not capture that is charged to this test, each of which fails it:
+	//   - every kind but real_uncaptured: what the agent lost since the test
+	//     set began, as this test ended. A loss taints the test running when
+	//     it happened and every later test of the set (design v14 §3.2).
+	//   - real_uncaptured (class e, mock.real): the connections keploy could
+	//     neither capture nor relay as real that were undecided or used while
+	//     this test ran, counted for this test alone. One undecided across
+	//     several tests is charged to each; a test that never touched it is
+	//     not (§3.2 as amended for class e). keploy relays nothing of such a
+	//     connection, so no later test's calls escape capture through it.
+	// Empty with the switch off.
+	CaptureIncomplete CaptureLosses `json:"capture_incomplete,omitempty" yaml:"capture_incomplete,omitempty"`
+	// CaptureUnread says, under KEPLOY_PROVEN=1, that keploy could not read
+	// whether its agent captured every call while this test ran (the count
+	// could not be read, at the test's end or at its set's mark): the test
+	// has no verdict, and its set is not judged.
+	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
+	// all that the application did while this test or one before it ran
+	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
+	// see): the test has no verdict (NotJudged), and its set is not judged.
+	// Never a failure.
+	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
+}
+
+// NotJudged is why the test has no verdict, whatever its status says: what
+// keploy could not read or check of it (UnmatchedCallsUnread,
+// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
+// capture at all (CannotCapture, decision 20), one reason each.
+// Empty for a judged test. Each is set only under the proven switch, so a
+// result written without it is never unjudged.
+func (fi FailureInfo) NotJudged() []string {
+	var why []string
+	if fi.UnmatchedCallsUnread {
+		why = append(why, "keploy could not read every call it made that no recorded mock answered")
+	}
+	if fi.TestMocksUnread {
+		why = append(why, "keploy could not read which of its recorded calls it made")
+	}
+	if fi.VariablesUnchecked != "" {
+		why = append(why, "keploy could not check what it captured against its dependency calls: "+fi.VariablesUnchecked)
+	}
+	if fi.CaptureUnread {
+		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	if len(fi.CannotCapture) > 0 {
+		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
+	}
+	return why
+}
+
+// VerdictUnknown is why the test has no verdict although its row reads as
+// one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
+// (what could not be read can only add to why it failed) and for one keploy
+// skipped (IGNORED, which says it has no verdict). JUnit and the NDJSON mark
+// a test by this one predicate.
+func (r TestResult) VerdictUnknown() []string {
+	if r.Status == TestStatusFailed || r.Status == TestStatusIgnored {
+		return nil
+	}
+	return r.FailureInfo.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -230,9 +362,50 @@ type UnmatchedCall struct {
 	// side-by-side whole-mock diff (left = mock, right = live request).
 	ClosestMockReq string `json:"closest_mock_req,omitempty" yaml:"closest_mock_req,omitempty"`
 	ReceivedReq    string `json:"received_req,omitempty" yaml:"received_req,omitempty"`
+	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
+	// places of a test variable on this call, under the proven switch only.
+	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	// Kind is where the call was made, under the proven switch (MissInTest,
+	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
+	// extra call, how many times the test recorded that call.
+	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
+	// which the call differs from its closest recording, without values.
+	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
+	// a recording the test does not own.
+	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// RecordedIn names, under the proven switch, the other test of the set
+	// that owns the recording a NotOwned call is (ClosestMock): the call is
+	// likely one that test recorded, such as a later exchange of a connection
+	// it opened, whose handshake was recorded there.
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Reason is why the call missed, in judging's words (design v14 §5.3,
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
+	// record's full round, where the learn step runs, gives one; empty
+	// everywhere else.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
+
+// The reasons a miss of record's full round carries (UnmatchedCall.Reason),
+// as the learn step decides them (package matcher/learn).
+const (
+	// MissRequestChanged: a recorded call had the request's method,
+	// destination and shape, but the request differs from it in a way the
+	// learn step does not learn (a field added or removed, a type changed, a
+	// value several recorded calls explain equally, a value that flows from an
+	// earlier call when nothing can follow it).
+	MissRequestChanged = "request_changed"
+	// MissUnstableOrder: the closest recorded call holds an array the request
+	// sent with the recorded elements in another order (the order rule).
+	MissUnstableOrder = "unstable_order"
+	// MissUnmockedCall: no recorded call has the request's method,
+	// destination and shape.
+	MissUnmockedCall = "unmocked_call"
+)
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what
@@ -255,6 +428,18 @@ type MockOutcome struct {
 	// incomplete (ErrUnmatchedCallsUnread, under the proven switch). Missed
 	// holds what was read.
 	MissedUnread string `json:"missed_unread,omitempty"`
+	// PIDMapRefusals are the inserts into the agent's PID maps the kernel
+	// refused over its life, which under compose is the replay's: processes
+	// its hooks could not track. nil when it cannot count them, which is
+	// "unknown".
+	PIDMapRefusals *PIDMapRefusals `json:"pidMapRefusals,omitempty"`
+	// PIDMapRefusalsError is why hooks that count those refusals could not be
+	// read as the agent stopped; "" when they were read, or when the hooks do
+	// not count them at all. It is what tells the CLI "the count was lost"
+	// (completeness unproven: --strict fails it) from "this agent never
+	// counts" (an older agent, or hooks without PID maps), which a nil
+	// PIDMapRefusals alone cannot.
+	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
@@ -315,6 +500,18 @@ const (
 	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
 
+// SetEnd is how keploy test ended one run of a test set (each attempt, when
+// maxFlakyChecks or --must-pass runs it again): the status the run ended it
+// with, and why, as the set's final report's FailureReason says, or the error
+// that ended the set before such a report was written. A set can end neither PASSED nor FAILED
+// with only passing results (the app halted after some tests passed, or
+// keploy could not judge the set), and FAILED with none failing (a capture
+// loss after its last test): its results alone do not say how it ended.
+type SetEnd struct {
+	Status TestSetStatus `json:"status" yaml:"status"`
+	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+}
+
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	switch s {
 	case "RUNNING":
@@ -372,6 +569,10 @@ const (
 	// which fails it under KEPLOY_PROVEN=1. The calls are in
 	// FailureInfo.UnmatchedCalls.
 	CallUnmatched FailureCategory = "UNMATCHED_CALL"
+	// CaptureIncompleteCategory: keploy's agent could not capture every call
+	// while this test or one before it in its test set ran, which fails it
+	// under KEPLOY_PROVEN=1. The losses are in FailureInfo.CaptureIncomplete.
+	CaptureIncompleteCategory FailureCategory = "CAPTURE_INCOMPLETE"
 	// TemplateVariable means a template variable place of the expected
 	// response was not satisfied by the answer (a {{capture ...}} that found
 	// no value of its type, or a use that did not hold its key's value), or
@@ -379,6 +580,11 @@ const (
 	// placeholder it cannot run with, and never sent.
 	// TestResult.TemplateFailures names each place and why.
 	TemplateVariable FailureCategory = "TEMPLATE_VARIABLE"
+	// TestSetRefused means keploy refused the test case's whole test set and
+	// ran none of it: an interrupted keploy templatize left the set
+	// half-written. The set's failure reason, and the test case's refusal in
+	// TestResult.TemplateFailures, say which files and what to do.
+	TestSetRefused FailureCategory = "TEST_SET_REFUSED"
 )
 
 // RejectionReason classifies why a test case was marked unreplayable during autoreplay.

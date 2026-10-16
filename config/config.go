@@ -41,11 +41,22 @@ type Config struct {
 	RetryPassing   bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath     string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules    []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	// MysqlPorts pins extra destination ports to the MySQL parser,
-	// skipping auto-detection for them. Rarely needed now that ports are
-	// detected automatically (see DisableMysqlAutoDetect); keep it for
-	// deployments that want the ~250ms first-connection probe skipped,
-	// or that disable detection entirely. Built-in defaults: 3306, 4000.
+	// SessionCalls declares HTTP and HTTP/2 calls that every test may be
+	// served from any test's recording of them, such as a token the app
+	// fetches once and caches. A recording made by this keploy serves each
+	// test its own HTTP calls only (models.MetadataLifetimeKey), so a call
+	// several tests need though only one recorded it misses in the others;
+	// declaring it here serves it to every test, without recording again.
+	// Each rule names a host, and optionally a method and a path prefix.
+	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
+	// MysqlPorts pins destination ports to the MySQL parser, skipping
+	// auto-detection for them; a non-empty list replaces the built-in
+	// defaults (3306, 4000). Needed in replay for a MySQL endpoint that
+	// moved since the recording and is neither the recorded container nor
+	// the recorded host (see DisableMysqlEndpointDrift; another port of
+	// this machine (localhost, or any address of its own), or of the Docker
+	// host at the container's gateway, always needs listing), and when
+	// detection is disabled (DisableMysqlAutoDetect).
 	MysqlPorts []uint32 `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 	// DisableMysqlAutoDetect turns off automatic MySQL port detection.
 	// With detection on (the default), keploy identifies MySQL on any
@@ -56,16 +67,19 @@ type Config struct {
 	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only
-	// the inference is turned off.
+	// the moved-endpoint judgement is turned off.
 	//
-	// Leave it on (the default) unless a dependency is being misread. The
-	// inference fires when a replayed app opens a connection to an unknown
-	// port and says nothing, which is the MySQL signature — but a client that
-	// stays silent for the whole confirmation window and only then speaks
-	// looks the same, and it will be answered with a handshake it did not ask
-	// for. Pinning the real mapping with MysqlPorts is the better fix when you
-	// know it; this is the escape hatch when you do not, and unlike
-	// DisableMysqlAutoDetect it keeps record-time detection working.
+	// Leave it on (the default) unless a dependency is being misread. Replay
+	// serves MySQL on a port the recording never saw only when the
+	// connection reaches the container the recording reached MySQL in, or
+	// the host it reached it on (never this machine, nor the Docker host at
+	// the container's gateway) with the port moved, and its client has not
+	// spoken; any other moved endpoint, another localhost port among them,
+	// needs its port in MysqlPorts. A non-MySQL
+	// service on the recorded host (a client-first one that had not spoken
+	// yet) can still be answered with a handshake it did not ask for: this
+	// is the escape hatch for that, and unlike DisableMysqlAutoDetect it
+	// keeps record-time detection working.
 	DisableMysqlEndpointDrift bool     `json:"disableMysqlEndpointDrift" yaml:"disableMysqlEndpointDrift" mapstructure:"disableMysqlEndpointDrift"`
 	EnableTesting             bool     `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions     bool     `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
@@ -117,6 +131,10 @@ type Async struct {
 
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
+	// TestSetsFromCommandLine says TestSets is the command line's own
+	// (-t/--testsets), not keploy.yml's: with the proven switch off, only a
+	// name the command line gave that is not recorded is refused.
+	TestSetsFromCommandLine bool `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Record struct {
@@ -336,8 +354,11 @@ type MockCmd struct {
 	// persist), or "record" (dial the real dependency AND append the new call
 	// to the set — VCR-style new_episodes for incremental refresh).
 	OnMiss string `json:"onMiss" yaml:"onMiss" mapstructure:"onMiss"`
-	// Strict makes replay exit non-zero if any recorded mock was missed, so a
-	// drifted dependency contract fails the build even when the runner passed.
+	// Strict makes replay exit non-zero if a call missed its recorded mock, so
+	// a drifted dependency contract fails the build even when the runner
+	// passed. A miss that counts against no test by itself does not: a DNS
+	// lookup's, or one on a connection whose client sent nothing
+	// (models.UnmatchedCall.CountsAgainstTest).
 	Strict bool `json:"strict" yaml:"strict" mapstructure:"strict"`
 	// Local forces the file-backed store even when a cloud registry is
 	// configured (enterprise). Registry-first by default; --local opts out.
@@ -371,6 +392,13 @@ type MockCmd struct {
 	// runs with it); every other test's harness is told to skip it. Empty runs
 	// every test. It takes precedence over any gate a wrapping build installs.
 	RunOnly []string `json:"runOnly" yaml:"runOnly" mapstructure:"runOnly"`
+	// Real lists the destinations every run reaches for real, never recorded
+	// and never mocked, in record, in judging and in CI, for keploy mock and
+	// keploy test alike (design v14 §4): address entries (localhost:5432,
+	// 10.0.4.7:6379), name entries (auth.example.com:8443) and container
+	// entries (container:redis). Read only under the proven switch
+	// (KEPLOY_PROVEN=1); without it the key is ignored.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty" mapstructure:"real"`
 }
 
 type Contract struct {
@@ -425,6 +453,12 @@ type Test struct {
 	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
 	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
 	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
+
+	// SelectedFromCommandLine says SelectedTests is the command line's own
+	// (-t/--test-sets), not keploy.yml's: with the proven switch off, only a
+	// name the command line gave that is not recorded is refused; one
+	// keploy.yml inherited is left out with a warning (Replayer.selectTestSets).
+	SelectedFromCommandLine bool `json:"-" yaml:"-" mapstructure:"-"`
 
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
@@ -487,6 +521,25 @@ type Test struct {
 	// nondeterminism. Left false so the CLI and cloud replay keep today's
 	// behaviour; only the auto-replay caller opts in.
 	AutoReplay bool `json:"autoReplay" yaml:"autoReplay" mapstructure:"autoReplay"`
+	// Learn runs the learn step in this replay (design v14 §7.2, row L;
+	// models.OutgoingOptions.Learn), under the proven switch: the agent pairs
+	// a call no recorded mock answers exactly with the mock it drifted from,
+	// and the replay writes what it learned onto the recording. Only record's
+	// full round sets it, in memory: the round that replays the build that
+	// was just recorded. Never read from keploy.yml or a flag, so a replay in
+	// CI can never rewrite the recording it judges.
+	Learn bool `json:"-" yaml:"-" mapstructure:"-"`
+	// LearnPool lets the learn step pair the set's pool mocks too: only a
+	// full record replaces the pool (models.OutgoingOptions.LearnPool).
+	LearnPool bool `json:"-" yaml:"-" mapstructure:"-"`
+	// LearnTests, when not nil, are the tests whose recordings the record has
+	// just made: what the learn step learns is written onto their own mocks
+	// only (and onto the pool's with LearnPool). A test that keeps its
+	// previous recording keeps it as it is: the current build's drift against
+	// an older build's recording is not non-determinism. nil writes onto
+	// every mock (keploy record's auto-replay, whose sets were all just
+	// recorded).
+	LearnTests map[string]bool `json:"-" yaml:"-" mapstructure:"-"`
 	// MockNoiseDetection / MockNoiseStrict are the canonical spelling; the
 	// SchemaNoise* pair below is the previous one, kept so an existing
 	// keploy.yml keeps working. NormalizeMockNoise reconciles them — read via
@@ -502,7 +555,7 @@ type Test struct {
 	StrictMockWindow            bool          `json:"strictMockWindow" yaml:"strictMockWindow" mapstructure:"strictMockWindow"`                                                      // Strict containment: per-test (LifetimePerTest) mocks whose request timestamp falls outside the outer test window are DROPPED rather than promoted to the cross-test unfiltered pool, which eliminates cross-test mock bleed. Default TRUE now that every stateful-protocol recorder classifies mocks finely enough (session vs per-test for connection-alive commands, per-connection data mocks) that legitimate cross-test sharing is encoded as session/connection lifetime rather than implicit out-of-window reuse. Opt out by setting this to false in keploy.yaml, or export KEPLOY_STRICT_MOCK_WINDOW=0 at process start — the env var wins over config.
 	KeepAppAlive                bool          `json:"keepAppAlive" yaml:"keepAppAlive" mapstructure:"keepAppAlive"`                                                                  // Start the user app ONCE on the outer errgroup at Start() time instead of restarting it per test-set. Skips the per-test-set RunApplication spawn + NotifyGracefulShutdown (reuses the existing serveTest gating) and skips the --delay wait on every test-set after the first (the app is already warm after the boundary). Matches the production globality autoreplay shape where a single user-app process serves every test-set back-to-back; required for cross-test-set bugs that need a long-lived TCP connection (asyncpg pool, JDBC HikariCP pool, etc.) to surface — see keploy/integrations#203 for the session-tier staleness case. Works for every cmdType that manages a user application (docker-compose, docker-run, docker-start, native); cmdType == Empty (no -c) short-circuits the one-shot spawn since there's nothing to manage. Default FALSE preserves the historical per-test-set restart behaviour.
 	ConnectionPoolIdleRetention time.Duration `json:"connectionPoolIdleRetention,omitempty" yaml:"connectionPoolIdleRetention,omitempty" mapstructure:"connectionPoolIdleRetention"` // How long a per-connID connection-scoped mock pool survives without activity before the idle sweeper reclaims it. Default 5m — enough for HikariCP-style pooled connections bridging test boundaries without activity. Extend for long-running integration tests that may idle a connection between requests for more than 5 minutes; shorter values make the sweeper more aggressive at cost of potentially reclaiming active connections. Zero / negative reverts to the default.
-	DisableStatefulMocks        bool          `json:"disableStatefulMocks" yaml:"disableStatefulMocks" mapstructure:"disableStatefulMocks"`                                          // Turn OFF cursor consumption of stateful data-plane mocks. Default FALSE (stateful on): repeated identical dependency requests are served successive recorded responses in record order, then saturate on the last, so a stateful sequence (a counter, a created-then-read row) replays as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first recorded response every time" behaviour. Only affects mocks classified ConsumeCursorSaturate (untagged/lax data-plane kinds); at one recorded response it is a no-op.
+	DisableStatefulMocks        bool          `json:"disableStatefulMocks" yaml:"disableStatefulMocks" mapstructure:"disableStatefulMocks"`                                          // Turn OFF cursor consumption of stateful data-plane mocks. Default FALSE (stateful on): repeated identical dependency requests are served successive recorded responses in record order, then saturate on the last, so a stateful sequence (a counter, a created-then-read row) replays as 1,2,3 instead of 1,1,1. Set true to restore the legacy "serve the first recorded response every time" behaviour. Only affects mocks classified ConsumeCursorSaturate (untagged/lax data-plane kinds, and HTTP mocks a recorder stated perTest); at one recorded response it is a no-op. For a recording that states lifetimes, a test's own HTTP recordings are then each served once, as other per-test mocks are, so a repeat beyond them misses; recordings no open test owns are served every time.
 	DisableMockCorrelation      bool          `json:"disableMockCorrelation" yaml:"disableMockCorrelation" mapstructure:"disableMockCorrelation"`                                    // Turn OFF request→response echo correlation. Default FALSE (on): when the app mints a random value (UUID/nonce/idempotency key), sends it to a dependency, and the dependency echoes it back, replay captures the live request value and renders it into the served response instead of replaying the stale recorded value (a mismatch) or masking it as noise (which hides regressions). Set true to serve the recorded value. Only affects mocks carrying learned correlations.
 	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 	// SkipReasons is why a test the run skips is skipped: test set -> test case
@@ -626,11 +679,27 @@ func GetByPassPorts(conf *Config) []uint {
 	return ports
 }
 
+// SetSelectedTests selects the test sets testSets names for a run. A
+// comma-separated flag keeps the space after each comma (-t "test-set-1,
+// test-set-2", the help text's own example, gives " test-set-2"), so each name
+// is trimmed, and a blank one is no name.
 func SetSelectedTests(conf *Config, testSets []string) {
 	conf.Test.SelectedTests = make(map[string][]string)
-	for _, testSet := range testSets {
+	for _, testSet := range TestSetNames(testSets) {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+
+// TestSetNames is the test set names a flag's values give: each trimmed, the
+// blank ones left out.
+func TestSetNames(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func SetSelectedServices(conf *Config, services []string) {
@@ -642,9 +711,11 @@ func SetSelectedContractTests(conf *Config, tests []string) {
 	conf.Contract.Tests = tests
 }
 
+// SetSelectedTestSets selects the test sets testSets names for a report,
+// trimmed as SetSelectedTests trims them.
 func SetSelectedTestSets(conf *Config, testSets []string) {
 	conf.Report.SelectedTestSets = make(map[string][]string)
-	for _, testSet := range testSets {
+	for _, testSet := range TestSetNames(testSets) {
 		conf.Report.SelectedTestSets[testSet] = []string{}
 	}
 }

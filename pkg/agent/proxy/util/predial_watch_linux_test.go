@@ -319,3 +319,36 @@ func TestReceivedNothingCountsWhatTheProxyAlreadyRead(t *testing.T) {
 		t.Fatal("a connection it cannot inspect must not read as silent")
 	}
 }
+
+// ArrivedNothing looks through a wrapper to the socket, and counts what a
+// wrapper has already read.
+func TestArrivedNothingLooksThroughWrappers(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	app, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = app.Close() }()
+	srv, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	wrapped := &Conn{Conn: srv, Reader: srv}
+	if nothing, known := ArrivedNothing(wrapped); !known || !nothing {
+		t.Fatalf("before the peer spoke: nothing=%v known=%v, want true/true", nothing, known)
+	}
+	if _, err := app.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(wrapped, make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if nothing, known := ArrivedNothing(wrapped); !known || nothing {
+		t.Fatalf("after the peer spoke and its byte was read: nothing=%v known=%v, want false/true", nothing, known)
+	}
+}
