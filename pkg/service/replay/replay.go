@@ -1787,6 +1787,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
 	}
+	// stopAppBeforeSetEnd, under the proven switch, stops the application
+	// keploy started for this set, as the set's teardown does (gracefully: an
+	// interrupt, then the wait the app's runner gives it), and waits for it
+	// to exit (P101-b). nil when keploy started none here: a reused stack
+	// (serveTest), a base path, docker compose.
+	var stopAppBeforeSetEnd func()
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -2221,9 +2227,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if r.instrument {
 			if !serveTest {
+				// Under the proven switch the app runs under a context of its
+				// own, so the set's end can stop it, and wait for it, before
+				// it reads what the app did after its last test (P101-b). A
+				// stop of it is the app's run ending (ErrCtxCanceled), never a
+				// halt or an abort of the set.
+				appCtx := runTestSetCtx
+				var appExited chan struct{}
+				if provenswitch.On() {
+					var stopApp context.CancelFunc
+					appCtx, stopApp = context.WithCancel(runTestSetCtx)
+					appExited = make(chan struct{})
+					stopAppBeforeSetEnd = func() {
+						stopApp()
+						select {
+						case <-appExited:
+						case <-runTestSetCtx.Done():
+						}
+					}
+				}
 				runTestSetErrGrp.Go(func() error {
+					if appExited != nil {
+						defer close(appExited)
+					}
 					defer utils.Recover(r.logger)
-					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
+					appErr = r.RunApplication(appCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
 					if appErr != (models.AppError{}) {
@@ -4536,6 +4564,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// otherwise the loop's status stands. A set whose tests' consumption could
 	// not all be read has no verdict at all.
 	notJudged := ""
+	// appLogsBeforeStop is what the app logged last, read before the set's
+	// end stopped it (stopAppBeforeSetEnd), for a report that carries logs.
+	appLogsBeforeStop := ""
 	// realRun is what the set's run saw of mock.real beyond its test cases;
 	// realListed the destinations the recordings of the test cases that ran
 	// list; realWhy why they fail the set (proven switch).
@@ -4565,6 +4596,44 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		tally := tallyFromVerdicts(setTally{success, failure, obsolete, ignored, testSetStatus}, testCaseResults, resultsComplete)
 		success, failure, obsolete, ignored, testSetStatus = tally.success, tally.failure, tally.obsolete, tally.ignored, tally.status
+		// The app keploy started for this set is stopped, and waited for,
+		// before the set's end reads what it did after its last test (what
+		// it reached of mock.real, the calls no mock answered, what keploy
+		// could not capture): a call it makes only as it is stopped (a
+		// publish its shutdown flushes, a write on its way out) is then read
+		// with them, not left for no one to judge (P101-b). The agent is told
+		// first, as the teardown tells it, so the app's shutdown errors are
+		// logged as such. Its recent logs are taken before: a container
+		// docker removes once stopped has none to give.
+		if stopAppBeforeSetEnd != nil {
+			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+			notifyCancel()
+			logCtx, cancelLogs := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+			appLogsBeforeStop = r.instrumentation.GetRecentAppLogs(logCtx)
+			cancelLogs()
+			stopAppBeforeSetEnd()
+		}
+		// stoppedByUser records, once the run's user has stopped it (Ctrl+C,
+		// SIGTERM), that the set is USER_ABORT, and reports it. The app
+		// watcher records the same, but on a goroutine of its own, after the
+		// reads below may already have failed for the stop: one the stop cut
+		// short is the stop's, never a set whose calls could not be read.
+		//
+		// The run's context, not the set's: the app watcher cancels the set's
+		// once it has recorded how the app ended, and that is no user's stop.
+		stoppedByUser := func() bool {
+			if !stoppedByItsUser(ctx) {
+				return false
+			}
+			if testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed {
+				testSetStatus = models.TestSetStatusUserAbort
+			}
+			return true
+		}
+		stoppedByUser()
 		// mock.real (design v14 §4, §8.2): what the set's run reached, and
 		// what keploy could not capture outside its test cases.
 		var realErr error
@@ -4623,7 +4692,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 				}
 			}
-			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && stopped && runTestSetCtx.Err() != nil {
+			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && runTestSetCtx.Err() != nil && (stopped || stoppedByUser()) {
 				r.logger.Debug("the read of the calls made after the set's last test was cut short by the set's stop; the stop is its status",
 					zap.String("test-set", testSetID), zap.Error(unclaimedErr))
 				unclaimedErr = nil
@@ -4957,9 +5026,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// app never spoke — persisted a report whose own reason says "check
 		// application logs in the app_logs field" next to an empty app_logs field.
 		// shouldIncludeAppLogs already decides who gets logs; let it decide alone.
-		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
-		defer cancel()
-		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+		//
+		// Under the proven switch the set's end stopped the app keploy
+		// started before this, and took its logs then: docker removes the
+		// container it ran in once it stops.
+		if appLogsBeforeStop != "" {
+			appLogs = appLogsBeforeStop
+		} else {
+			logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+			defer cancel()
+			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+		}
 	}
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
