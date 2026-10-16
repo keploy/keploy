@@ -370,11 +370,15 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 //
 // keploy's own stop (ctx, the proxy's connections' context, done) closes
 // connections whatever they hold: nothing the application wrote is charged
-// then, as nothing more of the run is judged.
+// then, as nothing more of the run is judged. Nor is anything on a
+// connection the proxy serves with no session (pairedConn.noSession): it
+// captures nothing on it by design -- closed unanswered, as an agent not
+// started in record or test mode closes it, or passed through -- and no test
+// is open on it.
 func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn) {
 	pc, unread, err := p.paired.closing(conn)
 	switch {
-	case pc == nil, ctx.Err() != nil:
+	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
 		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		p.pairLost(pc, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: no test's end can be verified from now on", zap.Error(err))
@@ -469,7 +473,7 @@ const unreadLost = "keploy's proxy closed a connection with bytes the applicatio
 // that the proxy never captured, or that it cannot tell it did, saying which
 // (msg).
 func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
-	if !pc.lost.CompareAndSwap(false, true) {
+	if pc.noSession.Load() || !pc.lost.CompareAndSwap(false, true) {
 		return
 	}
 	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
