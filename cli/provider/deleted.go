@@ -2,6 +2,9 @@ package provider
 
 import (
 	"fmt"
+	"os"
+	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -26,9 +29,10 @@ type DeletedSetting struct {
 	Keys []string
 	// Instead is what to do instead.
 	Instead string
-	// ignore clears what the keys set in cfg, so nothing that still
-	// reads them sees them.
-	ignore func(cfg *config.Config)
+	// Ignore clears what the keys set in cfg, so nothing that still reads
+	// them sees them, whether keploy.yml or the environment set them. A
+	// row without one is read by nothing.
+	Ignore func(cfg *config.Config)
 }
 
 var (
@@ -41,7 +45,7 @@ var (
 		Flags:   []string{"fallBack-on-miss", "in-ci"},
 		Keys:    []string{"test.fallBackOnMiss", "inCi"},
 		Instead: "nothing reads it: remove it",
-		ignore: func(cfg *config.Config) {
+		Ignore: func(cfg *config.Config) {
 			cfg.Test.FallBackOnMiss = false
 			cfg.InCi = false
 		},
@@ -64,8 +68,10 @@ func deletedSettings() []DeletedSetting {
 
 // checkDeletedSettings refuses, under the proven switch, a deleted flag the
 // user gave, as the unknown flag it is at the flip, and ignores the deleted
-// keys keploy.yml sets, saying once which and what each row is. Nothing
-// without the switch.
+// keys keploy.yml or the environment (KEPLOY_<KEY>, viper's AutomaticEnv)
+// sets, saying once which and what each row is. A key at its zero value sets
+// nothing: an older keploy wrote its whole default config into keploy.yml,
+// these keys among it, so that one is not said. Nothing without the switch.
 func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 	if !provenswitch.On() {
 		return nil
@@ -80,21 +86,47 @@ func (c *CmdConfigurator) checkDeletedSettings(cmd *cobra.Command) error {
 	}
 	var ignored []string
 	for _, row := range rows {
-		var set bool
 		for _, key := range row.Keys {
-			if viper.InConfig(key) {
-				ignored = append(ignored, fmt.Sprintf("%s (U18: %s; %s)", key, row.Row, row.Instead))
-				set = true
+			env := "KEPLOY_" + strings.ToUpper(key)
+			_, inEnv := os.LookupEnv(env)
+			if !viper.InConfig(key) && !inEnv || zeroSetting(viper.Get(key)) {
+				continue
 			}
+			from := "keploy.yml"
+			if inEnv {
+				from = "the environment's " + env
+			}
+			ignored = append(ignored, fmt.Sprintf("%s, from %s (U18: %s; %s)", key, from, row.Row, row.Instead))
 		}
-		if set && row.ignore != nil {
-			row.ignore(c.cfg)
+		if row.Ignore != nil {
+			row.Ignore(c.cfg)
 		}
 	}
 	if len(ignored) > 0 {
-		c.logger.Warn(fmt.Sprintf("keploy.yml settings keploy deletes are ignored under %s (U18)", provenswitch.Env),
+		c.logger.Warn(fmt.Sprintf("settings keploy deletes are ignored under %s (U18)", provenswitch.Env),
 			zap.Strings("ignored", ignored),
-			zap.String("next_step", "remove them from keploy.yml"))
+			zap.String("next_step", "remove them from keploy.yml, or unset them in the environment"))
 	}
 	return nil
+}
+
+// zeroSetting reports whether v, a setting's value, is its zero value: unset,
+// false, 0, empty, or such a value as the environment spells it.
+func zeroSetting(v interface{}) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "", "false", "0":
+			return true
+		}
+		return false
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Map, reflect.Array:
+		return rv.Len() == 0
+	}
+	return rv.IsZero()
 }

@@ -258,3 +258,118 @@ func TestAReKeyThatCannotBeDoneIsSaidAndTheWriteStands(t *testing.T) {
 		})
 	}
 }
+
+// A write that fails re-keys nothing, even when it got as far as replacing
+// the recording's assets: the entry stays on what it named, and goes stale
+// if that is no longer on disk.
+func TestAFailedWriteReKeysNothing(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	ts := New(zap.NewNop(), dir)
+	big := func(c string) *models.TestCase {
+		tc := namedTC("t1", "http://api.test/upload")
+		tc.HTTPReq.Method = "POST"
+		tc.HTTPReq.Body = strings.Repeat(c, LargeBodyThreshold+1)
+		return tc
+	}
+	if err := ts.UpdateTestCase(t.Context(), big("a"), "set-1", false); err != nil {
+		t.Fatal(err)
+	}
+	r := &fakeRekeyer{}
+	useRekeyer(t, r)
+	useRename(t, renameRefusingTempFiles)
+	if err := ts.UpdateTestCase(t.Context(), big("b"), "set-1", false); !errors.Is(err, errSharingViolation) {
+		t.Fatalf("UpdateTestCase: %v, want the refused rename", err)
+	}
+	if got := r.told(); len(got) != 0 {
+		t.Fatalf("a failed write re-keyed %v", got)
+	}
+}
+
+// A file of a group that lies outside the store's keploy directory is no
+// test case of it, and is not re-keyed.
+func TestAGroupFileOutsideTheStoreIsNotReKeyed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir, other := t.TempDir(), t.TempDir()
+	ts, elsewhere := New(zap.NewNop(), dir), New(zap.NewNop(), other)
+	if err := elsewhere.UpdateTestCase(t.Context(), namedTC("t1", "http://api.test/a"), "set-1", false); err != nil {
+		t.Fatal(err)
+	}
+	f, err := elsewhere.TestCaseFile(t.Context(), namedTC("t1", "http://api.test/b"), "set-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &fakeRekeyer{}
+	useRekeyer(t, r)
+	if err := ts.ReplaceFiles(t.Context(), []yamlLib.File{f}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.told(); len(got) != 0 {
+		t.Fatalf("a file outside the store was re-keyed: %v", got)
+	}
+}
+
+// A command that rewrites a set in several writes, some outside testdb
+// (keploy sanitize; normalize of a sanitized set), names every recording
+// before the first and re-keys each once, when it is done (SetRewrite): a
+// write in between re-keys nothing, and a rewrite of the set inside it is
+// its own. Nothing without the switch.
+func TestASetRewriteReKeysEachRecordingOnceWhenItIsDone(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	ts := New(zap.NewNop(), dir)
+	for _, name := range []string{"t1", "t2", "t3"} {
+		if err := ts.UpdateTestCase(t.Context(), namedTC(name, "http://api.test/"+name), "set-1", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &fakeRekeyer{}
+	useRekeyer(t, r)
+	tests := filepath.Join(dir, "set-1", "tests")
+	p1, p2 := filepath.Join(tests, "t1.yaml"), filepath.Join(tests, "t2.yaml")
+	old1, old2 := hashOf(t, r, dir, p1), hashOf(t, r, dir, p2)
+
+	// The keploy directory as another spelling of it names the same set.
+	w := BeginSetRewrite(zap.NewNop(), dir+string(filepath.Separator)+".", "set-1")
+	if w == nil {
+		t.Fatal("no rewrite under the switch with a Rekeyer")
+	}
+	if inner := BeginSetRewrite(zap.NewNop(), dir, "set-1"); inner != nil {
+		t.Fatal("a rewrite inside another of the same set is not the outer one's")
+	}
+	for _, url := range []string{"http://api.test/t1?x=1", "http://api.test/t1?x=2"} {
+		if err := ts.UpdateTestCase(t.Context(), namedTC("t1", url), "set-1", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p2, []byte(strings.Replace(string(raw), "http://api.test/t2", "http://api.test/t2?redacted", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.told(); len(got) != 0 {
+		t.Fatalf("writes inside the rewrite re-keyed %v", got)
+	}
+	w.Done()
+	want := []string{
+		"set-1/t1 " + old1 + " -> " + hashOf(t, r, dir, p1),
+		"set-1/t2 " + old2 + " -> " + hashOf(t, r, dir, p2),
+	}
+	if got := r.told(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("re-keyed %v, want %v: once each, t3 left as it was", got, want)
+	}
+	// Once done, a write re-keys on its own again.
+	if err := ts.UpdateTestCase(t.Context(), namedTC("t3", "http://api.test/t3?y"), "set-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.told(); len(got) != 3 {
+		t.Fatalf("a write after the rewrite re-keyed %v", got)
+	}
+
+	t.Setenv(provenswitch.Env, "")
+	if w := BeginSetRewrite(zap.NewNop(), dir, "set-1"); w != nil {
+		t.Fatal("a rewrite without the switch")
+	}
+}
