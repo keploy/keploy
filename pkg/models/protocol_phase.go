@@ -41,7 +41,9 @@ func (m *Mock) IsProtocolPhase() bool {
 	}
 	// The Generic recorder states each exchange's lifetime too: a
 	// connection's first exchange, its preamble, session; every later one
-	// per-test (generic.exchangeLifetime). Its type tag stays "config", and
+	// per-test (generic.exchangeLifetime), and under the proven switch the
+	// first too when the connection lay wholly inside one test
+	// (generic.preambleHold). Its type tag stays "config", and
 	// serving does not read the statement (DeriveLifetime keeps every Generic
 	// mock session, as before the recorder made it), so a per-test exchange is
 	// a test mock here only: owned, and judged, under the proven switch.
