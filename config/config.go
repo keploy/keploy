@@ -73,7 +73,9 @@ type Config struct {
 	// serves MySQL on a port the recording never saw only when the
 	// connection reaches the container the recording reached MySQL in, or
 	// the host it reached it on (never this machine, nor the Docker host at
-	// the container's gateway) with the port moved, and its client has not
+	// the container's gateway, at the address /etc/hosts gives
+	// host.docker.internal, or at an address of its own the keploy CLI gave
+	// the agent) with the port moved, and its client has not
 	// spoken; any other moved endpoint, another localhost port among them,
 	// needs its port in MysqlPorts. A non-MySQL
 	// service on the recorded host (a client-first one that had not spoken
