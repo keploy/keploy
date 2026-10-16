@@ -897,8 +897,8 @@ func TestUnescaped(t *testing.T) {
 		{"next%3D%252Finvites%252FA7K29Q", "next=/invites/A7K29Q"},
 		{"Save 20% now: uploads%2FA7K29Q", "Save 20% now: uploads/A7K29Q"},
 		{`line\nA7K29Q`, "line A7K29Q"},
-		{`Иван`, "Иван"},
-		{`🦊`, "🦊"},
+		{esc("#u0418#u0432#u0430#u043d"), "Иван"},
+		{esc("#ud83e#udd8a"), "🦊"},
 		{`x\\nA7K29Q`, "x A7K29Q"},
 	} {
 		if got := unescaped(tc.in); got != tc.want {
