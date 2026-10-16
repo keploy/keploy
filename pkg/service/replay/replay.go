@@ -2584,6 +2584,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			noAnswerTests = append(noAnswerTests, name)
 		}
 	}
+	// drainBeforeFiling reads, under the proven switch, what a test that
+	// ends early (no answer, or one judged on its start) consumed, before its
+	// row is filed: its calls are its own, not the next test's, whose drain
+	// would read them otherwise. Without the switch an early row files as it
+	// always did.
+	drainBeforeFiling := func(ctx context.Context, name string) {
+		if !provenswitch.On() || !r.instrument {
+			return
+		}
+		early, err := r.hookImpl.GetConsumedMocks(ctx)
+		if err != nil {
+			consumptionUnread = appendOnce(consumptionUnread, name)
+			return
+		}
+		for _, m := range early {
+			totalConsumedMocks[m.Name] = m
+		}
+		noteConsumers(consumers, name, early)
+	}
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
 	if r.config.RetryPassing {
@@ -2835,7 +2854,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// first, apart from the template and capture path. A start
 				// that differs is a judged failure; only one that matches
 				// fails closed, not judged, below.
-				if testCaseResult, differs := r.startFailedRow(noAnswerView(tmplRun, &sent), resp, testSetID, started); differs {
+				if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, noAnswerView(tmplRun, &sent), resp, testSetID, started); differs {
+					sayStartJudged(r.logger, testCase.Name, loopErr)
+					noteNoAnswer(testCase.Name, loopErr)
+					drainBeforeFiling(runTestSetCtx, testCase.Name)
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
@@ -2851,6 +2873,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if loopErr != nil {
 				sayNoAnswer(r.logger, testCase.Name, loopErr, "failed to simulate request")
 				noteNoAnswer(testCase.Name, loopErr)
+				drainBeforeFiling(runTestSetCtx, testCase.Name)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, loopErr)
@@ -3874,6 +3897,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if simErr != nil {
 				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
+				drainBeforeFiling(runTestSetCtx, tc.Name)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, simErr)
@@ -3975,7 +3999,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// a judged failure; only one that matches fails
 						// closed, not judged, below.
 						start := &models.HTTPResp{StatusCode: streamResp.StatusCode, StatusMessage: streamResp.StatusMessage, Header: streamResp.Header}
-						if testCaseResult, differs := r.startFailedRow(expectedStream, start, testSetID, started); differs {
+						if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, expectedStream, start, testSetID, started); differs {
+							sayStartJudged(r.logger, tc.Name, streamErr)
+							noteNoAnswer(tc.Name, streamErr)
+							drainBeforeFiling(runTestSetCtx, tc.Name)
 							failure++
 							testSetStatus = models.TestSetStatusFailed
 							r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
@@ -4005,6 +4032,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
 						}
 						noteNoAnswer(tc.Name, streamErr)
+						drainBeforeFiling(runTestSetCtx, tc.Name)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, streamErr)

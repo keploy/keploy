@@ -1026,6 +1026,28 @@ func answerDoesNotDecode(status int, encoding string, err error) error {
 	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
 }
 
+// decodedPart is what of a body cut part-way decodes as its Content-Encoding
+// says: the bytes gzip or br gave before the cut, which may be none. A body
+// in no encoding, or in one keploy does not decode (Decompress keeps such a
+// body as it came), is kept as it came.
+func decodedPart(encoding string, data []byte) string {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return ""
+		}
+		r = zr
+	case "br":
+		r = brotli.NewReader(bytes.NewReader(data))
+	default:
+		return string(data)
+	}
+	out, _ := io.ReadAll(io.LimitReader(r, MaxDecompressedSize))
+	return string(out)
+}
+
 // SimulateHTTP sends tc's request to the app and returns its answer. It sends
 // tc as given: a test case's placeholders are rendered by the replay, on a
 // copy, before it gets here (pkg/templates), and what the app answers is
@@ -1081,12 +1103,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if errReadRespBody != nil {
 		if cfg.answer.didStall() {
 			// The answer stopped part-way: nothing whole to compare. Its
-			// status and headers came, and go with the error, for the
-			// replay to judge them first (AnswerBegan).
+			// status, headers and the part of its body that came, decoded
+			// as far as it decodes, go with the error, for the replay to
+			// judge the start first (AnswerBegan).
 			return &models.HTTPResp{
 				StatusCode:    httpResp.StatusCode,
 				StatusMessage: http.StatusText(httpResp.StatusCode),
 				Header:        ToYamlHTTPHeader(httpResp.Header),
+				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
 			}, cfg.answer.err()
 		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
