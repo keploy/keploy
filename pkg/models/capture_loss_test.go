@@ -78,12 +78,12 @@ func TestAnAbandonedHandshakeIsATestsOwnAndLeavesItNotJudged(t *testing.T) {
 		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
 	}
 	txt := at(1).NotJudgedText()
-	for _, want := range []string{"not judged: ", "hung up on 1 TLS handshake(s)", "without a word", "NODE_EXTRA_CA_CERTS", "(to a:443)"} {
+	for _, want := range []string{"not judged: ", "hung up on 1 TLS handshake(s)", "without a word", "NODE_EXTRA_CA_CERTS", "--cacert", "CURLOPT_CAINFO", "(to a:443)"} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("%q lacks %q", txt, want)
 		}
 	}
-	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || strings.Contains(r, "TCP address") {
+	if r := at(1).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || !strings.Contains(r, "NODE_EXTRA_CA_CERTS") || !strings.Contains(r, "--cacert") || !strings.Contains(r, "CURLOPT_CAINFO") || strings.Contains(r, "TCP address") {
 		t.Fatalf("remedy %q: trust keploy's CA, and nothing of a Unix socket", r)
 	}
 	if r := append(at(1), CaptureLoss{Kind: CaptureLossUnixSocket, Count: 1}).NotJudgedRemedy(); !strings.Contains(r, "trust keploy's CA") || !strings.Contains(r, "TCP address") {
