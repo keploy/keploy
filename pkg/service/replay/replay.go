@@ -6626,7 +6626,9 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID, true)
+		// The test case has failed on its own (no answer): what its
+		// assertions say of the stand-in is printed, never a pass line.
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID, true, httpMatcher.WithoutPassLine())
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
