@@ -41,7 +41,8 @@ func resetProbeOnce(t *testing.T) {
 func recordLaunch(t *testing.T, agentURI string) {
 	t.Helper()
 	token.RecordLaunch(agentURI)
-	t.Cleanup(func() { token.ForgetLaunch(agentURI) })
+	launch, _ := token.Launched(agentURI)
+	t.Cleanup(func() { token.ForgetLaunch(agentURI, launch) })
 }
 
 // TestVerifyControlPlaneGuarded is what makes a broken token handoff loud.
@@ -312,8 +313,10 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	resetProbeOnce(t)
 
 	release := make(chan struct{})
+	probed := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/agent"+token.ProbePath {
+			probed <- struct{}{}
 			<-release // hold the check open
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -334,5 +337,13 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	case <-readyCh:
 	case <-time.After(3 * time.Second):
 		t.Fatal("readiness was blocked behind the control-plane check")
+	}
+	// The check runs on after readiness. It is waited for here, held open,
+	// so that it cannot dial after this test, when a later test's server
+	// may have this one's port.
+	select {
+	case <-probed:
+	case <-ctx.Done():
+		t.Fatal("the control-plane check never probed the agent")
 	}
 }
