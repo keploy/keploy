@@ -240,7 +240,7 @@ REC_PORT=$PORT
 record 1 "http://127.0.0.1:$REC_PORT"
 
 echo "== 6. the recording carries the container's key =="
-grep -qE "containerKey: container:${IMAGE%%:*}:${DEP}@[0-9a-f]{12}" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
+grep -qE "containerKey: container:${IMAGE%%:*}:${DEP}@s[0-9a-f]{12}" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
 
 # The new container starts while the recorded one still holds its port, so
 # Docker gives it another.

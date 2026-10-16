@@ -155,6 +155,9 @@ type watchState struct {
 	// fingerprints is each container's Fingerprint, once a read of it is
 	// in; a container the first list put in waits for its read.
 	fingerprints map[string]string
+	// legacy is each container's fingerprint of the legacy form
+	// (legacyFingerprint), read with its Fingerprint.
+	legacy map[string]string
 	// imageConfigs caches each image's defaults, by image ID, for
 	// Fingerprint: an image ID names one configuration for good.
 	imageConfigs map[string]ImageConfig
@@ -695,9 +698,10 @@ type entry struct {
 	id    string
 	name  string // "/<container name>", as Docker writes it
 	image string
-	// fingerprint is the container's Fingerprint; "" from the list, which
-	// does not carry its configuration.
-	fingerprint string
+	// fingerprint is the container's Fingerprint, and legacy its legacy
+	// one (legacyFingerprint); "" from the list, which does not carry its
+	// configuration.
+	fingerprint, legacy string
 	// placed: putting it ends its placing (placeFromList, or a read that
 	// found where it is), in the same change, so no list shows it neither
 	// placing nor placed.
@@ -814,7 +818,7 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 	if got.ContainerJSONBase != nil {
 		e.name = got.Name
 	}
-	fp, err := r.fingerprintOf(ctx, api, st, got)
+	fp, legacy, err := r.fingerprintOf(ctx, api, st, got)
 	switch {
 	case err != nil && ctx.Err() != nil:
 		return nil // the watch ended
@@ -824,7 +828,7 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 		// keeps every other container's.
 		r.say(st, "could not read a container's image", zap.String("containerID", id), zap.Error(err))
 	default:
-		e.fingerprint = fp
+		e.fingerprint, e.legacy = fp, legacy
 	}
 	if ns := got.NetworkSettings; ns != nil {
 		for _, n := range ns.Networks {
@@ -893,7 +897,7 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	// container dropped that the index never held changes nothing.
 	had := st.images[e.id] != ""
 	if e.fromList && e.fingerprint == "" {
-		e.fingerprint = st.fingerprints[e.id]
+		e.fingerprint, e.legacy = st.fingerprints[e.id], st.legacy[e.id]
 	}
 	st.drop(e.id)
 	if e.image == "" {
@@ -907,6 +911,7 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	st.names[e.id] = e.name
 	if e.fingerprint != "" {
 		st.fingerprints[e.id] = e.fingerprint
+		st.legacy[e.id] = e.legacy
 	}
 	for _, a := range e.ips {
 		st.byIP[a] = e.id
@@ -954,7 +959,7 @@ func newWatchState() *watchState {
 	return &watchState{synced: make(chan struct{}), done: make(chan struct{}), stop: func() {},
 		seq: map[string]int{}, reading: map[string]bool{}, dirty: map[string]bool{}, destroyed: map[string]bool{},
 		placing: map[string]bool{}, placingRun: map[string]bool{}, placingDirty: map[string]bool{}, imageReads: map[string]*imageRead{},
-		images: map[string]string{}, names: map[string]string{}, fingerprints: map[string]string{}, imageConfigs: map[string]ImageConfig{}, readEnded: make(chan struct{}),
+		images: map[string]string{}, names: map[string]string{}, fingerprints: map[string]string{}, legacy: map[string]string{}, imageConfigs: map[string]ImageConfig{}, readEnded: make(chan struct{}),
 		byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
 		ownIPs: map[string][]netip.Addr{}, ownPorts: map[string][]uint16{}, loopbackIsHost: true}
 }
@@ -984,6 +989,7 @@ func (st *watchState) drop(id string) {
 	delete(st.images, id)
 	delete(st.names, id)
 	delete(st.fingerprints, id)
+	delete(st.legacy, id)
 }
 
 // overlap reports whether two bindings of one host port reach the same
@@ -1121,27 +1127,34 @@ func (r *dockerIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 // before its container's configuration is in. ok is false when the index
 // does not hold the container, or ctx ends first.
 func (r *dockerIndex) Fingerprint(ctx context.Context, id string) (string, bool) {
+	fp, _, ok := r.Fingerprints(ctx, id)
+	return fp, ok
+}
+
+// Fingerprints is Fingerprint with the container's legacy fingerprint
+// (legacyFingerprint), read with it (fingerprintsResolver).
+func (r *dockerIndex) Fingerprints(ctx context.Context, id string) (string, string, bool) {
 	for {
 		r.mu.Lock()
 		st := r.cur
 		if st == nil || st.err != nil {
 			r.mu.Unlock()
-			return "", false
+			return "", "", false
 		}
-		fp, held, reading, ended := st.fingerprints[id], st.images[id] != "", st.reading[id], st.readEnded
+		fp, legacy, held, reading, ended := st.fingerprints[id], st.legacy[id], st.images[id] != "", st.reading[id], st.readEnded
 		r.mu.Unlock()
 		switch {
 		case fp != "" && held:
-			return fp, true
+			return fp, legacy, true
 		case !reading:
-			return "", false
+			return "", "", false
 		}
 		select {
 		case <-ended:
 		case <-ctx.Done():
-			return "", false
+			return "", "", false
 		case <-st.ctx.Done():
-			return "", false
+			return "", "", false
 		}
 	}
 }
@@ -1221,7 +1234,7 @@ func (st *watchState) couldBeAt(a netip.Addr) bool {
 // image's defaults once per image ID. An image Docker no longer has (removed
 // while the container runs) gives no defaults to leave out: the fingerprint
 // then counts them, and the container misses rather than matches.
-func (r *dockerIndex) fingerprintOf(ctx context.Context, api dockerAPI, st *watchState, got container.InspectResponse) (string, error) {
+func (r *dockerIndex) fingerprintOf(ctx context.Context, api dockerAPI, st *watchState, got container.InspectResponse) (fp, legacy string, err error) {
 	c := Config{}
 	if got.Config != nil {
 		c.Env, c.Cmd, c.Entrypoint, c.Labels = got.Config.Env, got.Config.Cmd, got.Config.Entrypoint, got.Config.Labels
@@ -1234,11 +1247,11 @@ func (r *dockerIndex) fingerprintOf(ctx context.Context, api dockerAPI, st *watc
 	if imageID != "" {
 		var err error
 		if ic, err = r.imageConfig(ctx, api, st, imageID); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	c.Image = ic
-	return Fingerprint(c), nil
+	return Fingerprint(c), legacyFingerprint(c), nil
 }
 
 // find is the container dst reaches by st: a container's own IP, or a TCP
@@ -1247,7 +1260,7 @@ func (r *dockerIndex) fingerprintOf(ctx context.Context, api dockerAPI, st *watc
 func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	ip := dst.Addr().Unmap()
 	if id, ok := st.byIP[ip]; ok {
-		return Container{ID: id, Image: st.images[id], Port: dst.Port(), Fingerprint: st.fingerprints[id]}, true
+		return Container{ID: id, Image: st.images[id], Port: dst.Port(), Fingerprint: st.fingerprints[id], Legacy: st.legacy[id]}, true
 	}
 	// A loopback or unspecified destination is this host only where the
 	// index is read on the host. In a docker-mode agent it is the app
@@ -1259,7 +1272,7 @@ func (st *watchState) find(dst netip.AddrPort) (Container, bool) {
 	onHost := ip.IsLoopback() || st.local[ip]
 	for _, b := range st.published[dst.Port()] {
 		if b.ip == ip || (onHost && b.ip.IsUnspecified() && b.ip.Is4() == ip.Is4()) {
-			return Container{ID: b.id, Image: st.images[b.id], Port: b.port, Fingerprint: st.fingerprints[b.id]}, true
+			return Container{ID: b.id, Image: st.images[b.id], Port: b.port, Fingerprint: st.fingerprints[b.id], Legacy: st.legacy[b.id]}, true
 		}
 	}
 	return Container{}, false
