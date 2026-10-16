@@ -179,6 +179,9 @@ type Proxy struct {
 	// dockerHostAddr, when set, stands in for containerkey.HostAddr in
 	// sharedHost (tests).
 	dockerHostAddr func(netip.Addr) bool
+	// readDockerHostNames, when set, stands in for sharedHost's read of the
+	// Docker host's names in /etc/hosts (tests).
+	readDockerHostNames func() map[netip.Addr]string
 
 	// activeTestErrors accumulates mock-not-found errors during active test
 	// execution. The continuous drain goroutine routes errors here when non-nil.

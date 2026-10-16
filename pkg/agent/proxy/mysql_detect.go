@@ -280,8 +280,9 @@ func (r *mysqlPortRegistry) LearnHinted(dstAddr string) bool {
 //
 // A host never matches when shared says every service on its machine is
 // reached at it (Proxy.sharedHost): this machine, or the Docker host at the
-// container's gateway or at an address of its own the keploy CLI gave the
-// agent. A moved port there says nothing about which service it
+// container's gateway, at the address /etc/hosts gives host.docker.internal,
+// or at an address of its own the keploy CLI gave the agent. A moved port
+// there says nothing about which service it
 // is, and greeting would race a client-first client there to its first bytes.
 // A MySQL moved to another port of it is listed in mysqlPorts. shared is asked
 // only of a host the recording holds, and outside the registry's lock: it
@@ -832,8 +833,9 @@ func (p *Proxy) probeMysqlReplay(
 // apart. So the connection is MySQL only by the identity of what it reaches:
 // the container the recording reached MySQL in, or the host it reached it on
 // with the port moved — never this machine or the Docker host (at the
-// container's gateway, or at an address of its own the keploy CLI gave the
-// agent), which every service on them shares (Proxy.sharedHost,
+// container's gateway, at the address /etc/hosts gives host.docker.internal,
+// or at an address of its own the keploy CLI gave the agent), which every
+// service on them shares (Proxy.sharedHost,
 // recordedEndpointMoved). Then keploy, the server, greets at
 // once — unless the client has already spoken, which a MySQL client never
 // does. Anything else is MySQL only if mysqlPorts lists its port (the fast
@@ -923,7 +925,7 @@ func (p *Proxy) hintUnlistedEndpoint(logger *zap.Logger, dstAddr string, host ne
 	if !p.mysqlPorts.LearnHinted(dstAddr) {
 		return
 	}
-	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host the recording reached MySQL at (not this machine, nor the Docker host at the container's gateway or at an address of its own the keploy CLI gave the agent), so it served this one nothing",
+	logger.Warn("a connection to a port the recording never saw ended with nothing sent ("+what+"): if the application was waiting there for its server to speak first, it reaches MySQL at an endpoint that moved since the recording, which keploy serves only by the container or the host the recording reached MySQL at (not this machine, nor the Docker host at the container's gateway, at the address /etc/hosts gives host.docker.internal, or at an address of its own the keploy CLI gave the agent), so it served this one nothing",
 		zap.String("dstAddr", dstAddr),
 		zap.Uint32s("recordedPorts", recorded),
 		zap.String("next_step", p.unlistedNextStep(dstAddr, host, port)))
