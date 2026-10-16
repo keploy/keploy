@@ -7,15 +7,21 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -102,6 +108,7 @@ func TestOnlyAClientThatGaveUpLostNoCallInATLSHandshake(t *testing.T) {
 			dest := ipv4Dest(t, "127.0.0.1:8443")
 			app, src := acceptedConn(t)
 			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, mysqlPorts: newMysqlPortRegistry()}
+			p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 			p.setSession(&agent.Session{
 				Mode:            models.MODE_TEST,
 				OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
@@ -150,12 +157,19 @@ func TestAHandshakeAStoppingAgentCutShortIsNoLoss(t *testing.T) {
 		t.Fatalf("a stopping agent's handshakes were charged: %+v", l)
 	}
 	// Nor is a handshake keploy cut short by closing its own end, its
-	// certificate out or not.
+	// certificate out or not, in a test that would charge the client's
+	// own give-up.
+	p.BeginTestErrorCapture()
 	live := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
 	live.HandshakeBegin()
 	live.HandshakeFailed(&pTls.HandshakeError{Err: fmt.Errorf("read: %w", net.ErrClosed), CertificateSent: true})
 	if l := p.losses.Snapshot(); len(l) != 0 {
 		t.Fatalf("a handshake keploy closed was charged: %+v", l)
+	}
+	live.HandshakeBegin() // the client's own give-up, in the same test, is
+	live.HandshakeFailed(&pTls.HandshakeError{Err: io.EOF, CertificateSent: true})
+	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbandoned {
+		t.Fatalf("the client's give-up in a test: charged %+v, want one tls_handshake_abandoned", l)
 	}
 }
 
@@ -173,6 +187,7 @@ func TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn(t *testing.T) {
 		_ = app.Close()
 	}()
 	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 	_, _, err := p.clientTLSHandler("10.0.0.5:3306")(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != io.EOF {
 		t.Fatalf("the upgrader's handshake returned %v (%T), want io.EOF itself", err, err)
@@ -193,6 +208,7 @@ func TestARecordUpgradersClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) 
 		_ = app.Close() // no close_notify of its own
 	}()
 	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 	conn, _, err := p.clientTLSHandler("10.0.0.5:5432")(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -236,6 +252,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop()}
+			p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 			app, src := acceptedConn(t)
 			upstream, dst := acceptedConn(t)
 			// The relay holds nothing here (no HoldClientWrites), so the
@@ -327,6 +344,7 @@ func TestAClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
 			dest := ipv4Dest(t, "127.0.0.1:8443")
 			app, src := acceptedConn(t)
 			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, mysqlPorts: newMysqlPortRegistry()}
+			p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 			p.setSession(&agent.Session{
 				Mode:            models.MODE_TEST,
 				OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
@@ -360,6 +378,7 @@ func TestAClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
 // keploy's stop -- however silent the client was since its handshake.
 func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 	stopped, stop := context.WithCancel(context.Background())
 	stop()
 	ev := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
@@ -374,5 +393,215 @@ func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
 	ev.SilentHangUp(io.EOF)
 	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbandoned || l[0].What != "to 10.0.0.1:443" {
 		t.Fatalf("charged %+v, want one tls_handshake_abandoned to 10.0.0.1:443 for the client's own hang-up", l)
+	}
+}
+
+// A Go client's http.Transport keeps the connection it dialled for a request
+// another connection served first: a spare, its handshake done, nothing sent.
+// It goes when the application stops, closed by the kernel with no
+// close_notify -- after the test it was dialled in, or outside every test. A
+// hang-up like a rejection's, but nothing was lost: it is charged only within
+// the test scope its handshake ended in, and this one is not. It was charged
+// a tls_handshake_abandoned, leaving a test not judged for every Go
+// application that leaves a spare.
+func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	slowIn, slowOut := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(slowIn)
+			<-slowOut
+		}
+		_, _ = io.WriteString(w, r.URL.Path)
+	}))
+	t.Cleanup(upstream.Close)
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream.Listener.Addr().String())}, cfg)
+	if err := p.InitIntegrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	mocks := make(chan *models.Mock, 64)
+	go func() {
+		for range mocks {
+		}
+	}()
+	if err := p.Record(context.Background(), mocks, models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The application's connections reach the proxy's handler; each one's
+	// raw socket is kept, to close as the kernel does at the app's exit.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var served sync.WaitGroup
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			served.Add(1)
+			go func() { defer served.Done(); _ = p.handleConnection(context.Background(), &closeCountingConn{Conn: c}) }()
+		}
+	}()
+	var mu sync.Mutex
+	var raw []net.Conn
+	secondDial := make(chan struct{})
+	dials := 0
+	handshakes := make(chan struct{}, 2)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, VerifyConnection: func(tls.ConnectionState) error {
+			handshakes <- struct{}{}
+			return nil
+		}},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			mu.Lock()
+			dials++
+			second := dials == 2
+			mu.Unlock()
+			if second {
+				<-secondDial // dialled while the first connection was busy
+			}
+			c, err := net.Dial("tcp4", ln.Addr().String())
+			if err == nil {
+				mu.Lock()
+				raw = append(raw, c)
+				mu.Unlock()
+			}
+			return c, err
+		},
+	}
+	client := &http.Client{Transport: tr}
+	get := func(path string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			res, err := client.Get("https://localhost" + path) // the proxy dials the name the client sent (SNI)
+			if err == nil {
+				_, err = io.ReadAll(res.Body)
+				_ = res.Body.Close()
+			}
+			done <- err
+		}()
+		return done
+	}
+
+	ck := containerkey.Default
+	ck.Reset()
+	t.Cleanup(ck.Reset)
+	ck.BeginTest() // the test the application's calls are made in
+	slow := get("/slow")
+	awaitEvent(t, handshakes, "the first connection's handshake")
+	awaitEvent(t, slowIn, "the slow call at the dependency")
+	fast := get("/fast") // no idle connection: the Transport dials a second
+	close(slowOut)
+	if err := awaitEvent(t, slow, "the slow call"); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitEvent(t, fast, "the fast call, on the first connection now idle"); err != nil {
+		t.Fatal(err)
+	}
+	close(secondDial)
+	awaitEvent(t, handshakes, "the spare connection's handshake")
+	ck.EndTest()
+
+	// The application stops: the kernel closes its sockets, no close_notify.
+	mu.Lock()
+	for _, c := range raw {
+		_ = c.Close()
+	}
+	n := len(raw)
+	mu.Unlock()
+	if n != 2 {
+		t.Fatalf("%d connections dialled, want the first and the spare", n)
+	}
+	served.Wait()
+	for _, l := range p.losses.Snapshot() {
+		if l.Kind == models.CaptureLossTLSAbandoned || l.Kind == models.CaptureLossTLSAbort {
+			t.Fatalf("charged %+v for a spare connection the application closed after its test, having lost nothing", l)
+		}
+	}
+}
+
+// An abandon is charged only within the test it began in: a silent hang-up
+// within the test scope its handshake ended in, the handshake's own within
+// the one it began in -- the open window of a test's misses (keploy test, a
+// replay) or the Universal Mocker's open test -- never after that test, in
+// the next one, or outside every test. A rejection keploy read is charged
+// wherever it happens.
+func TestAnAbandonIsChargedOnlyWithinTheTestItBeganIn(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	abandoned := func() uint64 { return lossesOf(p, models.CaptureLossTLSAbandoned) }
+	handshake := func() *clientTLS {
+		ev := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
+		ev.HandshakeBegin()
+		ev.HandshakeDone()
+		return ev
+	}
+
+	handshake().SilentHangUp(io.EOF)
+	if n := abandoned(); n != 0 {
+		t.Fatalf("outside every test: %d abandoned, want 0", n)
+	}
+
+	p.BeginTestErrorCapture()
+	ev := handshake()
+	p.activeTestErrors.Store(nil) // the test ends: its misses are read
+	ev.SilentHangUp(io.EOF)
+	if n := abandoned(); n != 0 {
+		t.Fatalf("after its test ended: %d abandoned, want 0", n)
+	}
+
+	p.BeginTestErrorCapture()
+	ev = handshake()
+	p.ContinueTestErrorCapture() // the next test begins
+	ev.SilentHangUp(io.EOF)
+	if n := abandoned(); n != 0 {
+		t.Fatalf("in the next test: %d abandoned, want 0", n)
+	}
+
+	handshake().SilentHangUp(io.EOF)
+	if n := abandoned(); n != 1 {
+		t.Fatalf("within its test: %d abandoned, want 1", n)
+	}
+
+	// A handshake that began in one test and ended in the next: its
+	// silent hang-up is the test it ended in, which it is still in.
+	ev = &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
+	ev.HandshakeBegin()
+	p.ContinueTestErrorCapture()
+	ev.HandshakeDone()
+	ev.SilentHangUp(io.EOF)
+	if n := abandoned(); n != 2 {
+		t.Fatalf("a handshake that ended in the next test, hung up in it: %d abandoned, want 2", n)
+	}
+
+	ev = &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443"}
+	ev.HandshakeBegin()
+	p.activeTestErrors.Store(nil)
+	ev.HandshakeFailed(&pTls.HandshakeError{Err: io.EOF, CertificateSent: true})
+	if n := abandoned(); n != 2 {
+		t.Fatalf("a handshake abandoned after the test it began in: %d abandoned, want still 2", n)
+	}
+	ev.HandshakeFailed(&net.OpError{Op: "remote error", Err: errors.New("tls: bad certificate")})
+	if n := lossesOf(p, models.CaptureLossTLSAbort); n != 1 {
+		t.Fatalf("a rejection outside every test: %d failed, want 1", n)
+	}
+
+	ck := containerkey.Default
+	ck.Reset()
+	t.Cleanup(ck.Reset)
+	ck.BeginTest()
+	ev = handshake()
+	ck.EndTest()
+	ev.SilentHangUp(io.EOF)
+	ck.BeginTest()
+	handshake().SilentHangUp(io.EOF)
+	if n := abandoned(); n != 3 {
+		t.Fatalf("the Universal Mocker's tests: %d abandoned, want 3 (one after its test, none; one within it, one)", n)
 	}
 }
