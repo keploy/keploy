@@ -203,6 +203,68 @@ func (p *Proxy) serveReal(ctx context.Context, src net.Conn, dstAddr, containerR
 	return true, wrapped, p.relayReal(ctx, src, br, dec, dstAddr, connID, predialed)
 }
 
+// realLabelAt is the mock.real entry (proven switch) that a connection to
+// dstAddr reaches by its address alone (realdeps.Decider.AtAccept), and
+// whether there is one: not for an address several name entries share, which
+// only a client's bytes would name.
+func (p *Proxy) realLabelAt(dstAddr string) (string, bool) {
+	st := p.realList()
+	if st == nil {
+		return "", false
+	}
+	dst, err := containerkey.ParseAddrPort(dstAddr)
+	if err != nil {
+		return "", false
+	}
+	dec := (&realdeps.Decider{List: st.list, Book: st.book}).AtAccept(dst, "")
+	if dec.Verdict != realdeps.Real {
+		return "", false
+	}
+	return dec.Label, true
+}
+
+// treeRealConn is a caller's connection to a mock.real destination that a
+// listener of the run's own tree serves (serveTreeListener): it is relayed to
+// that listener, live, and counted as mock.real counts a relay to the
+// destination itself (relayReal). The caller's bytes use the destination
+// (Tracker.Sent), and the listener's answer to it reaches it
+// (Tracker.Answered).
+type treeRealConn struct {
+	net.Conn
+	p     *Proxy
+	label string
+	id    int64
+	// live: the live handler serves it, and may capture it as a test case
+	// (Tracker.SentLive).
+	live bool
+}
+
+func (c *treeRealConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		if c.live {
+			c.p.realTracker.SentLive(c.id, c.label)
+		} else {
+			c.p.realTracker.Sent(c.id, c.label)
+		}
+	}
+	return n, err
+}
+
+func (c *treeRealConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		c.p.realTracker.Answered(c.label)
+	}
+	return n, err
+}
+
+// CloseWrite forwards a half-close to the connection underneath, as
+// liveReader does: an embedded net.Conn does not promote it.
+func (c *treeRealConn) CloseWrite() error {
+	return util.CloseWriteIfPossible(c.Conn)
+}
+
 // relayReal dials a REAL connection's destination and relays every byte to
 // it (realdeps.Relay). A dial that fails is the app's to see, as it would be
 // without keploy: its connection is reset, and the test's REAL row counts the

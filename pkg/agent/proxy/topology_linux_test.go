@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -172,6 +173,294 @@ func TestUnderTheSwitchATreeListenerOnARecordedPortIsLive(t *testing.T) {
 	served, got, _ := callTree(t, p, port, uint32(os.Getpid()))
 	if !served || got != "pong" {
 		t.Fatalf("a listener of the run's tree must be relayed under the switch: served=%v answer=%q", served, got)
+	}
+}
+
+// Under the proven switch a mock.real destination that a listener of the
+// run's own tree serves is reached: the call is relayed to the tree's
+// listener, live, and mock.real's account of the run (RealRun) counts it, as
+// it counts a relay to the destination itself (serveReal). It was not
+// counted, so a run whose recordings list that destination failed as never
+// reaching it (mock.real's rule 4, REAL_NOT_REACHED). A tree listener that is
+// no mock.real destination is not counted.
+func TestUnderTheSwitchAMockRealDestinationTheTreeServesIsReached(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	port := pingServer(t)
+	other := pingServer(t)
+	listed := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
+		t.Fatal(err)
+	}
+	if served, got, _ := callTree(t, p, other, uint32(os.Getpid())); !served || got != "pong" {
+		t.Fatalf("precondition: a call to the tree's listener is relayed: served=%v answer=%q", served, got)
+	}
+	if run := p.RealRun(); len(run.Reached) != 0 {
+		t.Fatalf("a tree listener mock.real does not list was counted reached: %+v", run.Reached)
+	}
+	if served, got, _ := callTree(t, p, port, uint32(os.Getpid())); !served || got != "pong" {
+		t.Fatalf("a call to the tree's listener of a mock.real destination is relayed: served=%v answer=%q", served, got)
+	}
+	if run := p.RealRun(); len(run.Reached) != 1 || run.Reached[0] != listed {
+		t.Fatalf("the mock.real destination the tree served was not counted reached: %+v, want [%s]", run.Reached, listed)
+	}
+}
+
+// silentServer listens on loopback and reads each connection's four bytes,
+// then closes it without answering. This test process owns it.
+func silentServer(t *testing.T) uint32 {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.ReadFull(c, make([]byte, 4))
+			}()
+		}
+	}()
+	return uint32(l.Addr().(*net.TCPAddr).Port)
+}
+
+// sendTree sends "ping" through serveTreeListener to the loopback port as
+// the process caller and closes the caller's end at once, waiting for no
+// answer, and returns what serveTreeListener did.
+func sendTree(ctx context.Context, t *testing.T, p *Proxy, port, caller uint32) (bool, error) {
+	t.Helper()
+	cli, srv := net.Pipe()
+	type result struct {
+		served bool
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller}
+		served, _, err := p.serveTreeListener(ctx, srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "7")
+		_ = srv.Close()
+		done <- result{served, err}
+	}()
+	go func() {
+		_, _ = cli.Write([]byte("ping"))
+		_ = cli.Close()
+	}()
+	r := awaitEvent(t, done, "serveTreeListener returning")
+	return r.served, r.err
+}
+
+// A mock.real destination the tree serves is counted as relayReal counts
+// one: the open test's REAL row has each connection that sent it bytes, a
+// dial that connects reaches it whether or not the listener ever answers, a
+// dial that fails counts in the row and reaches nothing, and a call the live
+// handler serves, which dials for itself, reaches it by the listener's
+// answer.
+func TestUnderTheSwitchATreeServedMockRealDestinationIsCountedAsARelay(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	silent := silentServer(t)
+	listed := fmt.Sprintf("127.0.0.1:%d", silent)
+	live := pingServer(t)
+	liveListed := fmt.Sprintf("127.0.0.1:%d", live)
+	if err := p.SetRealDeps(context.Background(), []string{listed, liveListed}); err != nil {
+		t.Fatal(err)
+	}
+	tr := p.RealTracker()
+
+	tr.BeginTest()
+	if served, err := sendTree(context.Background(), t, p, silent, uint32(os.Getpid())); !served || err != nil {
+		t.Fatalf("precondition: a call to the tree's listener is relayed: served=%v err=%v", served, err)
+	}
+	uses, _ := tr.EndTest()
+	if want := []models.RealUse{{Dest: listed, Conns: 1}}; !slices.Equal(uses, want) {
+		t.Fatalf("the open test's REAL row: %+v, want %+v", uses, want)
+	}
+	if run := p.RealRun(); !slices.Equal(run.Reached, []string{listed}) {
+		t.Fatalf("a dial that connected to a listener that never answers did not reach %s: %+v", listed, run.Reached)
+	}
+
+	tr.BeginTest()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if served, err := sendTree(ctx, t, p, silent, uint32(os.Getpid())); !served || err == nil {
+		t.Fatalf("precondition: the dial fails: served=%v err=%v", served, err)
+	}
+	uses, _ = tr.EndTest()
+	if want := []models.RealUse{{Dest: listed, Failed: 1}}; !slices.Equal(uses, want) {
+		t.Fatalf("a dial that failed: the open test's REAL row %+v, want %+v", uses, want)
+	}
+	if run := p.RealRun(); len(run.Reached) != 0 {
+		t.Fatalf("a dial that failed reached %+v", run.Reached)
+	}
+
+	p.live = func(_ context.Context, conn net.Conn, upstream string, _ uint16) {
+		up, err := net.Dial("tcp", upstream)
+		if err != nil {
+			return
+		}
+		defer up.Close()
+		util.RelayRawPassthrough(conn, up)
+	}
+	// The listener is this process's; its caller is this process's parent,
+	// which it descends from.
+	if served, got, _ := callTree(t, p, live, uint32(os.Getppid())); !served || got != "pong" {
+		t.Fatalf("precondition: a call to an app the caller started goes to the live handler: served=%v answer=%q", served, got)
+	}
+	if run := p.RealRun(); !slices.Equal(run.Reached, []string{liveListed}) {
+		t.Fatalf("the listener's answer through the live handler did not reach %s: %+v", liveListed, run.Reached)
+	}
+}
+
+// A mock.real loopback destination nothing listens at is mock.real's:
+// serveTreeListener leaves it to serveReal, whose failed dial the open
+// test's REAL row counts, where it closed the call uncounted, so the row
+// depended on whether the host could hold handshakes (realDialFailed).
+func TestUnderTheSwitchAMockRealDestinationNothingListensAtIsCountedFailed(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close()
+	listed := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
+		t.Fatal(err)
+	}
+	if served, _, row := callTree(t, p, port, uint32(os.Getpid())); served || row != nil {
+		t.Fatalf("a mock.real destination nothing listens at must be left to serveReal: served=%v row=%+v", served, row)
+	}
+	tr := p.RealTracker()
+	tr.BeginTest()
+	cli, srv := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close(); _ = srv.Close() })
+	if handled, _, err := p.serveReal(context.Background(), srv, listed, "", 1, nil); !handled || err != nil {
+		t.Fatalf("serveReal: handled=%v err=%v", handled, err)
+	}
+	uses, _ := tr.EndTest()
+	if want := []models.RealUse{{Dest: listed, Failed: 1}}; !slices.Equal(uses, want) {
+		t.Fatalf("the open test's REAL row: %+v, want %+v", uses, want)
+	}
+}
+
+// A call the live handler serves to a mock.real destination the tree serves
+// is the open test's REAL use, and keeps no use point: keploy mock's request
+// capture records that call as a test case itself, whose REAL list
+// (UsedDuring, from its request's arrival to its response) must not name the
+// destination it is the call to.
+func TestUnderTheSwitchALiveHandlersCallNamesNoTestCaseByItsOwnBytes(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	port := pingServer(t)
+	listed := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
+		t.Fatal(err)
+	}
+	tr := p.RealTracker()
+	tr.KeepUses(true)
+	t.Cleanup(func() { tr.KeepUses(false) })
+	var from, to time.Time
+	// As the request capture reads it: the head, then the rest of the
+	// request, the arrival of the head's bytes being the test case's start.
+	p.live = func(_ context.Context, conn net.Conn, upstream string, _ uint16) {
+		head := make([]byte, 2)
+		if _, err := io.ReadFull(conn, head); err != nil {
+			return
+		}
+		from = time.Now()
+		body := make([]byte, 2)
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return
+		}
+		up, err := net.Dial("tcp", upstream)
+		if err != nil {
+			return
+		}
+		defer up.Close()
+		_, _ = up.Write(append(head, body...))
+		answer := make([]byte, 4)
+		if _, err := io.ReadFull(up, answer); err != nil {
+			return
+		}
+		_, _ = conn.Write(answer)
+		to = time.Now()
+	}
+	tr.BeginTest()
+	if served, got, _ := callTree(t, p, port, uint32(os.Getppid())); !served || got != "pong" {
+		t.Fatalf("precondition: a call to an app the caller started goes to the live handler: served=%v answer=%q", served, got)
+	}
+	uses, _ := tr.EndTest()
+	if want := []models.RealUse{{Dest: listed, Conns: 1}}; !slices.Equal(uses, want) {
+		t.Fatalf("the open test's REAL row: %+v, want %+v", uses, want)
+	}
+	if got := tr.UsedDuring(from, to); len(got) != 0 {
+		t.Fatalf("the call's own test case was named a user of %v", got)
+	}
+}
+
+// A tree listener on the other loopback family is reached through
+// DialDestination's fallback, at an address an IP-literal mock.real entry
+// does not list: the entry is not counted reached by it, as relayReal, which
+// dials exactly the app's address, never counts it. Nothing listens at the
+// listed address.
+func TestUnderTheSwitchAnIPEntryIsNotReachedThroughTheOtherLoopbackFamily(t *testing.T) {
+	p, _ := provenTreeProxy(t)
+	var l net.Listener
+	for range 10 {
+		l6, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("no IPv6 loopback here: %v", err)
+		}
+		port := l6.Addr().(*net.TCPAddr).Port
+		// Nothing may listen at the listed address, 127.0.0.1 at that port.
+		if l4, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+			_ = l4.Close()
+			l = l6
+			break
+		}
+		_ = l6.Close()
+	}
+	if l == nil {
+		t.Fatal("found no port free at 127.0.0.1 for a listener at [::1]")
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				if _, err := io.ReadFull(c, make([]byte, 4)); err == nil {
+					_, _ = c.Write([]byte("pong"))
+				}
+			}()
+		}
+	}()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	listed := fmt.Sprintf("127.0.0.1:%d", port)
+	if err := p.SetRealDeps(context.Background(), []string{listed}); err != nil {
+		t.Fatal(err)
+	}
+	if served, _, _ := callTree(t, p, port, uint32(os.Getpid())); !served {
+		t.Fatal("precondition: a call to the tree's listener is served")
+	}
+	if run := p.RealRun(); len(run.Reached) != 0 {
+		t.Fatalf("%s was counted reached by a dial that fell back to [::1]: %+v", listed, run.Reached)
+	}
+	localhost := fmt.Sprintf("localhost:%d", port)
+	if err := p.SetRealDeps(context.Background(), []string{localhost}); err != nil {
+		t.Fatal(err)
+	}
+	if served, got, _ := callTree(t, p, port, uint32(os.Getpid())); !served || got != "pong" {
+		t.Fatalf("precondition: a call to the tree's listener is relayed: served=%v answer=%q", served, got)
+	}
+	if run := p.RealRun(); !slices.Equal(run.Reached, []string{localhost}) {
+		t.Fatalf("a localhost entry, which lists both families, was not reached: %+v", run.Reached)
 	}
 }
 

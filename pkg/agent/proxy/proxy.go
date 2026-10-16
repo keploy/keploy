@@ -5472,6 +5472,13 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
+		if _, isReal := p.realLabelAt(dstAddr); isReal {
+			// A mock.real destination nothing listens at is mock.real's
+			// (serveReal): its connection fails as the app's would, and the
+			// open test's REAL row counts the failure, as it does when the
+			// handshake hold refuses the connect (realDialFailed).
+			return false, nil, nil
+		}
 		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))
 		return true, nil, nil
 	}
@@ -5512,6 +5519,15 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		return false, nil, nil
 	}
 	caller := int(dest.KernelPid)
+	// A mock.real destination (proven switch only) that the tree's listener
+	// serves is reached through it: counted as a relay to the destination
+	// would be (treeRealConn), or the run, whose recordings list it, fails
+	// as never reaching it.
+	realLabel, isReal := p.realLabelAt(dstAddr)
+	var realID int64
+	if isReal {
+		realID, _ = strconv.ParseInt(conn, 10, 64)
+	}
 	if proven {
 		// A call to a listener another process of the tree owns is LIVE,
 		// listed per test; one a process makes to its own listener (an
@@ -5543,14 +5559,37 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			zap.String("reason", models.ReasonLoopbackOutsideRun))
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
+		if isReal {
+			// The live handler dials for itself: the listener's answer
+			// reaches the destination, and the caller's bytes are the open
+			// test's use, with no use point (Tracker.SentLive).
+			srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, live: true}
+		}
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil, nil
 	}
 	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+	if isReal && err == nil {
+		// DialDestination falls back to the other loopback family when the
+		// app's address refuses: that reaches an address an IP-literal
+		// entry does not list, which relayReal, dialing exactly the app's
+		// address, never counts. A localhost entry lists both families.
+		if label, ok := p.realLabelAt(dstConn.RemoteAddr().String()); !ok || label != realLabel {
+			isReal = false
+		}
+	}
+	if isReal {
+		// A dial that fails counts in the open test's row; one that
+		// connects reaches the destination (relayReal).
+		p.realTracker.Dialed(realID, realLabel, err == nil)
+	}
 	if err != nil {
 		return true, nil, err
 	}
 	defer dstConn.Close()
+	if isReal {
+		srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID}
+	}
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil, nil
 }
