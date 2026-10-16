@@ -68,6 +68,19 @@ type captureWatch struct {
 	// first on already).
 	chargedNotJudged models.CaptureLosses
 	finalNotJudged   models.CaptureLosses
+	// agent watches which agent process answers (models.AgentInstanceWatch):
+	// the counts are the process's, from when it started, and the test cases
+	// and mocks it captured are in its memory until it hands them over. An
+	// agent started again in its place mid-recording (kubelet restarting a
+	// crashed sidecar) counts from nothing, and what the one before held went
+	// with it. nil when the instrumentation cannot tell.
+	agent models.AgentInstanceWatch
+}
+
+// agentInstanceWatcher is an Instrumentation that can tell which agent
+// process answers it (models.AgentInstanceWatch): the keploy agent client.
+type agentInstanceWatcher interface {
+	WatchAgentInstance() models.AgentInstanceWatch
 }
 
 // watchCaptureLosses marks the count the recording's test cases are checked
@@ -80,6 +93,11 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 		return w
 	}
 	w.reader = reader
+	// Begun before the count is read, so the agent that answers it is the
+	// one the recording's checks keep to.
+	if a, ok := instr.(agentInstanceWatcher); ok {
+		w.agent = a.WatchAgentInstance()
+	}
 	// No deadline of its own (rule 15): the agent's answer, or the
 	// connection's close, ends it. Not the stop: from here a stop drains what
 	// the agent captured (Start), and each test case it saves is checked
@@ -100,6 +118,10 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	case errors.Is(err, models.ErrCaptureLossesUnsupported):
 		logger.Debug("the agent cannot say whether it captured every call; capture completeness is not checked", zap.Error(err))
 		w.off = true
+		if w.agent != nil {
+			w.agent.Stop()
+			w.agent = nil
+		}
 	case err != nil:
 		w.baseErr = err
 	default:
@@ -244,6 +266,20 @@ func (w *captureWatch) finish(testSetID string) bool {
 			zap.String("testSetID", testSetID),
 			zap.Error(w.finalErr),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then re-record"))
+	}
+	// Read last, after the final read: an agent started again before it
+	// answered that read holding none of what the one before counted.
+	if w.agent != nil {
+		if rep, replaced := w.agent.Replacement(); replaced {
+			failed = true
+			w.logger.Error("the recording is not verified: keploy's agent was started again while it recorded, and what the agent before counted it could not capture, and what it captured but had not handed over, went with it ("+provenswitch.Env+"=1)",
+				zap.String("testSetID", testSetID),
+				zap.String("agentProcess", rep.First),
+				zap.String("startedAgainAs", rep.Next),
+				zap.String("next_step", "find why the agent restarted (its container's restart count, an OOM kill, its log), then re-record"))
+		}
+		w.agent.Stop()
+		w.agent = nil
 	}
 	if len(w.unverified) > 0 {
 		failed = true

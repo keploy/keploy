@@ -230,3 +230,62 @@ func TestARecordingThatCalledWhatKeployCannotCaptureWarnsAndDoesNotFail(t *testi
 		t.Fatalf("WARN lines %+v, want one naming test-2 and test-3", warns)
 	}
 }
+
+// fakeAgentWatch is a watch of which agent process answers: replaced says
+// another answered after the first.
+type fakeAgentWatch struct {
+	replaced bool
+	stopped  bool
+}
+
+func (w *fakeAgentWatch) Replacement() (models.AgentReplacement, bool) {
+	if !w.replaced {
+		return models.AgentReplacement{First: "a"}, false
+	}
+	return models.AgentReplacement{First: "a", Next: "b"}, true
+}
+func (w *fakeAgentWatch) Accept() {}
+func (w *fakeAgentWatch) Stop()   { w.stopped = true }
+
+// watchingInstr is a countingInstr whose agent client watches which agent
+// process answers it.
+type watchingInstr struct {
+	*countingInstr
+	watch   *fakeAgentWatch
+	watched int
+}
+
+func (w *watchingInstr) WatchAgentInstance() models.AgentInstanceWatch {
+	w.watched++
+	return w.watch
+}
+
+// P056: an agent started again in its place while the recording ran counts
+// from nothing, and what the one before counted it could not capture, or
+// captured but had not handed over, went with it: the recording is not
+// verified, and fails. One process answering for all of it passes, and the
+// watch is begun once and ended.
+func TestARecordingWhoseAgentWasStartedAgainIsNotVerified(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, replaced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replaced=%v", replaced), func(t *testing.T) {
+			instr := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: replaced}}
+			_, failed, logs := record3(t, instr)
+			if failed != replaced {
+				t.Fatalf("failed %v; want %v", failed, replaced)
+			}
+			if n := logs.FilterMessageSnippet("keploy's agent was started again while it recorded").Len(); (n == 1) != replaced {
+				t.Fatalf("%d 'started again' ERROR(s) with replaced=%v", n, replaced)
+			}
+			if instr.watched != 1 || !instr.watch.stopped {
+				t.Fatalf("watched %d time(s), stopped %v; want once, then stopped", instr.watched, instr.watch.stopped)
+			}
+		})
+	}
+	// With the switch off nothing is watched.
+	t.Setenv(provenswitch.Env, "")
+	off := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: true}}
+	if _, failed, _ := record3(t, off); failed || off.watched != 0 {
+		t.Fatalf("switch off: failed %v, watched %d time(s); want neither", failed, off.watched)
+	}
+}
