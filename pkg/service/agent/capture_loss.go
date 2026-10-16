@@ -103,13 +103,20 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // (unix_unseen) is kept by every mark and is in it whatever was charged.
 func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	a.provenMu.Lock()
-	mark, charged := a.proven.losses, a.proven.lossesCharged
+	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
 	a.provenMu.Unlock()
 	_, now, err := a.captureLossesSince(ctx, mark, nil)
 	if err != nil {
 		return nil, err
 	}
-	return sinceRun(now, mark).Since(charged), nil
+	uncharged := sinceRun(now, mark).Since(charged)
+	if !a.replaying() {
+		// A record charges a container read the daemon did not answer by
+		// the mocks its stamps marked (unreadMock): the run's are those of
+		// the time outside tests, whatever the count.
+		uncharged = uncharged.Without(models.CaptureLossContainerUnread).Plus(outside)
+	}
+	return uncharged, nil
 }
 
 // sinceRun is what was lost since the run began, read as now: what keploy

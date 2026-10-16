@@ -901,9 +901,9 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 
-			bindContainerKeys(ctx)
 			cfg := config.New()
 			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			p.bindContainerKeys(ctx)
 			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 			sessions := map[string]func(){
 				"Record": func() {

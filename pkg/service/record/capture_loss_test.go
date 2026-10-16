@@ -151,7 +151,7 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 	if fmt.Sprint(w.uncapturable) != "[test-2]" {
 		t.Fatalf("test cases said %v, want [test-2]", w.uncapturable)
 	}
-	during := logs.FilterMessageSnippet("abandoned its handshake: such calls are not in the mocks").All()
+	during := logs.FilterMessageSnippet("abandoned its handshake, or while the Docker daemon did not answer").All()
 	if len(during) != 1 || !strings.Contains(fmt.Sprint(during[0].ContextMap()["next_step"]), "trust keploy's CA") {
 		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
 	}
@@ -319,5 +319,53 @@ func TestARecordingWhoseAgentWasStartedAgainIsNotVerified(t *testing.T) {
 	off := &watchingInstr{countingInstr: &countingInstr{answers: []models.CaptureLosses{nil}}, watch: &fakeAgentWatch{replaced: true}}
 	if _, failed, _ := record3(t, off); failed || off.watched != 0 {
 		t.Fatalf("switch off: failed %v, watched %d time(s); want neither", failed, off.watched)
+	}
+}
+
+// A mock stamped after its test case was checked (its hold let the test case
+// go before the read of its container's configuration stalled) charges its
+// own test case, by the mapping that holds it, whenever that comes: test-1
+// is not judged, naming the container, and test-2, checked while the stall
+// was counted, is untouched. The count of the kind charges nothing (it came
+// after test-1's check), and a marked mock no test case holds is said apart.
+// Nothing fails the recording.
+func TestARecordingChargesAContainerTheDaemonDidNotAnswerToItsMocksOwnTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	unread := func(n uint64) models.CaptureLosses {
+		return models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: n, What: "container pg (postgres:16)"}}
+	}
+	// The base, test-1's check, test-2's check (the stall counted by then),
+	// and the final read.
+	instr := &countingInstr{answers: []models.CaptureLosses{nil, nil, unread(1), unread(2)}}
+	core, logs := observer.New(zapcore.WarnLevel)
+	w := watchCaptureLosses(context.Background(), zap.New(core), instr)
+	w.afterTestCase(context.Background(), "test-1")
+	w.afterTestCase(context.Background(), "test-2")
+	marked := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Spec: models.MockSpec{Metadata: map[string]string{models.ContainerUnreadMetadata: "container pg (postgres:16)"}}}
+	}
+	w.saved(marked("mock-7"))                                // stamped late, saved after both checks
+	w.saved(&models.Mock{Name: "mock-8"})                    // its container named
+	w.saved(marked("mock-9"))                                // a startup mock no test case holds
+	w.mapped("test-1", []models.MockEntry{{Name: "mock-7"}}) // test-1's delta mapping, binned by its request
+	w.mapped("test-2", []models.MockEntry{{Name: "mock-8"}})
+	w.mapped("test-1", []models.MockEntry{{Name: "mock-7"}}) // named again: charged once
+	w.afterTestCases(context.Background())
+	if w.finish("test-set-0") || w.String() != "tainted=[] unverified=[]" {
+		t.Fatalf("%s; want nothing tainted and the recording kept", w)
+	}
+	charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+	if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "(1 time(s)") ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") ||
+		!strings.Contains(fmt.Sprint(charged[0].ContextMap()["next_step"]), "docker inspect") {
+		t.Fatalf("%d WARNs for test cases, want one naming test-1 alone, once, with pg and the inspect remedy: %+v", len(charged), charged)
+	}
+	apart := logs.FilterMessageSnippet("mocks no test case holds").All()
+	if len(apart) != 1 || !strings.Contains(fmt.Sprint(apart[0].ContextMap()["reason"]), "pg (postgres:16)") {
+		t.Fatalf("%d WARNs for the mock no test case holds, want one naming pg: %+v", len(apart), apart)
+	}
+	if n := logs.FilterMessageSnippet("after the last test case").Len(); n != 0 {
+		t.Fatalf("%d lines charged the count after the last test case: the mocks charge it", n)
 	}
 }

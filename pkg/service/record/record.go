@@ -451,6 +451,14 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // the AGENT (a RevokedTests control frame this function never sees) and a
 // revoked test is deleted, not shipped with a short pool.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, revokeTest, shortPoolByTest, nil)
+}
+
+// consumeMappingsFor is consumeMappings, telling mapped, when set, each test's
+// mocks as its mapping resolves them: the capture watch charges a test with a
+// mock of its whose container the Docker daemon did not answer the read of
+// (captureWatch.mapped), whenever that mapping comes.
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -547,6 +555,9 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 
 		if len(realMockEntries) == 0 {
 			continue
+		}
+		if mapped != nil {
+			mapped(mapping.TestName, realMockEntries)
 		}
 
 		flushMu.Lock()
@@ -1846,7 +1857,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// The test cases the set keeps are final: map them (a no-op unless
 		// this recording derives its mappings from its test windows).
 		if recordingStarted && newTestSetID != "" {
-			windowMaps.write(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load())
+			windowMaps.writeFor(persistCtx, r.logger, r.mappingDb, newTestSetID, deletedSet, recordDrainedCleanly, r.mappingsStreamed.Load(), capWatch.mapped)
 		}
 
 		/*
@@ -2707,6 +2718,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()))
 				}
+				// Before the mock is published to its mappings: a mapping
+				// that resolves it finds what its stamp said.
+				capWatch.saved(mock)
 				if tempID != "" && mock.Name != "" {
 					correlationMap.Store(tempID, models.MockEntry{
 						Name:             mock.Name,
@@ -2727,7 +2741,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	})
 
 	errGrp.Go(func() error {
-		return r.consumeMappings(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs,
+		return r.consumeMappingsFor(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs,
 			func(testName string) {
 				// Reuse the deferred-orphan revoke path the agent's own
 				// capacity-drop uses: finalize deletes these test cases instead
@@ -2735,7 +2749,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedMu.Lock()
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
-			}, &shortPoolByTest)
+			}, &shortPoolByTest, capWatch.mapped)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no

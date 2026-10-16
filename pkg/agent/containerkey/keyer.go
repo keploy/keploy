@@ -30,6 +30,14 @@ type fingerprintsResolver interface {
 	Fingerprints(ctx context.Context, id string) (fp, legacy string, ok bool)
 }
 
+// stallResolver is a fingerprintsResolver that also says when it gives no
+// fingerprint because the read of the container's configuration stalled
+// (the daemon did not answer it for the stall window, in time keploy could
+// run): stalled names the container for a message, "" otherwise.
+type stallResolver interface {
+	FingerprintsOrStall(ctx context.Context, id string) (fp, legacy string, ok bool, stalled string)
+}
+
 // settler is a resolver that can catch up with the daemon (Docker's
 // index): Settle waits until it has listed the daemon since Settle was
 // called, placing the running containers it did not hold, or ctx ends, so a
@@ -161,6 +169,36 @@ type Keyer struct {
 	session    context.Context
 	endSession context.CancelFunc
 	bound      context.Context
+	// unread, when set (OnUnread), is told each use of a container whose
+	// configuration's read stalled: its identity is unknown to that use.
+	unread func(what string)
+	// unreadMock, when set (OnUnreadMock), is told each mock stamped so,
+	// with the id of the scope its request was sent in (Scope).
+	unreadMock func(scope uint64, what string)
+}
+
+// OnUnread makes fn told, with the container named, each use of a
+// connection (a call matched, a mock stamped, a probe that decides by its
+// key: KeyFromContext) whose container the keyer cannot name because the
+// daemon did not answer the read of its configuration (readStallGrace, in
+// time keploy could run): the proxy counts it as a capture loss that leaves
+// the test it is charged to not judged.
+func (k *Keyer) OnUnread(fn func(what string)) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.unread = fn
+}
+
+// OnUnreadMock makes fn told, with the id of the scope the mock's request
+// was sent in (Scope's: the test open then, or the run's outside tests) and
+// the container named, each mock stamped whose container the keyer cannot
+// name because the daemon did not answer the read of its configuration
+// (UnreadKey): a record charges that scope's test with it, whenever the read
+// stalled, its test ended or not.
+func (k *Keyer) OnUnreadMock(fn func(scope uint64, what string)) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.unreadMock = fn
 }
 
 // pendingConn is an open connection the index did not place at its accept
@@ -198,6 +236,7 @@ type scope struct {
 // is a test's scope, which wins over the run's it began in.
 type span struct {
 	token    string
+	id       uint64 // the scope's id (Scope)
 	from, to time.Time
 	test     bool
 }
@@ -218,7 +257,7 @@ func (k *Keyer) beginLocked(test bool, at time.Time) *scope {
 	k.scopes++
 	k.begun++
 	s := &scope{token: "s" + strconv.Itoa(k.scopes), id: k.begun, used: map[string]map[string]bool{}}
-	k.spans = append(k.spans, span{token: s.token, from: at, test: test})
+	k.spans = append(k.spans, span{token: s.token, id: s.id, from: at, test: test})
 	return s
 }
 
@@ -645,27 +684,42 @@ func (k *Keyer) Forget(connID string) {
 // key is the key of connection connID's container, waiting, if it must, for
 // the index's read of its configuration; ok is false for a connection that
 // is no container's, and key is "" for a container whose configuration
-// could not be read.
-func (k *Keyer) key(ctx context.Context, connID string) (c Container, key string, ok bool) {
+// could not be read. tell says the caller is a use (a call matched, a mock
+// stamped, a probe that decides by the key), which a read that stalled is
+// told for (tellUnread); a second look at the same use's key tells nothing.
+func (k *Keyer) key(ctx context.Context, connID string, tell bool) (c Container, key string, ok bool) {
+	c, key, ok, _ = k.keyOrUnread(ctx, connID, tell)
+	return c, key, ok
+}
+
+// keyOrUnread is key, with unread naming the container when its key is
+// unknown because the read of its configuration stalled.
+func (k *Keyer) keyOrUnread(ctx context.Context, connID string, tell bool) (c Container, key string, ok bool, unread string) {
 	k.mu.Lock()
 	c, ok = k.conns[connID]
 	res := k.res
 	k.mu.Unlock()
 	if !ok {
 		if c, ok = k.place(ctx, connID); !ok {
-			return Container{}, "", false
+			return Container{}, "", false, ""
 		}
 	}
 	if c.Fingerprint == "" {
-		var fp, legacy string
+		var fp, legacy, stalled string
 		var in bool
-		if fr, ok := res.(fingerprintsResolver); ok {
+		switch fr := res.(type) {
+		case stallResolver:
+			fp, legacy, in, stalled = fr.FingerprintsOrStall(ctx, c.ID)
+		case fingerprintsResolver:
 			fp, legacy, in = fr.Fingerprints(ctx, c.ID)
-		} else {
+		default:
 			fp, in = res.Fingerprint(ctx, c.ID)
 		}
 		if !in {
-			return c, "", true
+			if stalled != "" && tell {
+				k.tellUnread(stalled)
+			}
+			return c, "", true, stalled
 		}
 		c.Fingerprint, c.Legacy = fp, legacy
 		k.mu.Lock()
@@ -675,13 +729,24 @@ func (k *Keyer) key(ctx context.Context, connID string) (c Container, key string
 		k.mu.Unlock()
 	}
 	kk, _ := KeyOf(c)
-	return c, kk.String(), true
+	return c, kk.String(), true, ""
+}
+
+// tellUnread tells the hook (OnUnread), if set, of a use whose container's
+// read stalled.
+func (k *Keyer) tellUnread(what string) {
+	k.mu.Lock()
+	fn := k.unread
+	k.mu.Unlock()
+	if fn != nil {
+		fn("container " + what)
+	}
 }
 
 // use is a use of connection connID's destination in the scope open now:
 // its key, and whether the keyer gives it (Keyed) or withholds it.
 func (k *Keyer) use(ctx context.Context, connID string) (string, State) {
-	c, key, ok := k.key(ctx, connID)
+	c, key, ok := k.key(ctx, connID, true)
 	switch {
 	case !ok:
 		return "", NotContainer
@@ -741,7 +806,7 @@ func StampFromContext(ctx context.Context, m *models.Mock) {
 
 // stampConn stamps m for connection id (Stamp).
 func (k *Keyer) stampConn(id string, m *models.Mock) {
-	c, key, ok := k.key(k.sessionCtx(), id)
+	c, key, ok, unread := k.keyOrUnread(k.sessionCtx(), id, true)
 	if !ok {
 		return
 	}
@@ -750,7 +815,8 @@ func (k *Keyer) stampConn(id string, m *models.Mock) {
 		at = time.Now()
 	}
 	k.mu.Lock()
-	scopeToken := k.scopeAtLocked(at)
+	scopeToken, scopeID := k.scopeOfLocked(at)
+	tell := k.unreadMock
 	k.mu.Unlock()
 	// A copy: a parser may hand several mocks one metadata map, and the
 	// outgoing stream may be encoding an earlier one while this one is
@@ -764,13 +830,22 @@ func (k *Keyer) stampConn(id string, m *models.Mock) {
 	}
 	md[InstanceKey] = instanceToken(c.ID)
 	md[ScopeKey] = scopeToken
+	if unread != "" {
+		// The mock's own test is not judged, whenever this is: a record
+		// charges it by the mock (UnreadKey), not by when the stall came.
+		md[UnreadKey] = "container " + unread
+	}
 	m.Spec.Metadata = md
+	if unread != "" && tell != nil {
+		tell(scopeID, "container "+unread)
+	}
 }
 
-// scopeAtLocked is the token of the scope open at: the test's open then, else
-// the run's; k.mu is held. The spans are in the order they began, so it
-// reads them from the newest: a mock is stamped soon after its request.
-func (k *Keyer) scopeAtLocked(at time.Time) string {
+// scopeOfLocked is the token and the id (Scope) of the scope open at: the
+// test's open then, else the run's; k.mu is held. The spans are in the order
+// they began, so it reads them from the newest: a mock is stamped soon after
+// its request.
+func (k *Keyer) scopeOfLocked(at time.Time) (string, uint64) {
 	for i := len(k.spans) - 1; i >= 0; i-- {
 		s := k.spans[i]
 		if s.from.After(at) {
@@ -779,12 +854,12 @@ func (k *Keyer) scopeAtLocked(at time.Time) string {
 		if s.test && !s.to.IsZero() && !at.Before(s.to) {
 			continue // a test that had ended: the run's span after it, or before
 		}
-		return s.token
+		return s.token, s.id
 	}
 	if len(k.spans) > 0 {
-		return k.spans[0].token // sent before the session began
+		return k.spans[0].token, k.spans[0].id // sent before the session began
 	}
-	return ""
+	return "", 0
 }
 
 // noDaemonSaid: this agent said at Info that it found no Docker daemon.
@@ -829,7 +904,7 @@ func KeyFromContext(ctx context.Context) (key string, isContainer, keyed bool) {
 	if !ok || ref.k == nil {
 		return "", false, false
 	}
-	_, key, isContainer = ref.k.key(ctx, ref.id)
+	_, key, isContainer = ref.k.key(ctx, ref.id, true)
 	return key, isContainer, true
 }
 
@@ -842,7 +917,7 @@ func LegacyKeyFromContext(ctx context.Context) string {
 	if !ok || ref.k == nil {
 		return ""
 	}
-	c, key, isContainer := ref.k.key(ctx, ref.id)
+	c, key, isContainer := ref.k.key(ctx, ref.id, false) // KeyFromContext's use, looked at again
 	if !isContainer || key == "" {
 		return ""
 	}
