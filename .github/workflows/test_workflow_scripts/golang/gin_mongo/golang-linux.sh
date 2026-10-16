@@ -280,12 +280,14 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
-# Before the app starts, each test set is staged with the window BaseTime to
-# now. The agent must read from its on-disk store only the mocks recorded before
-# the set's first test, not the whole recording: reading it all OOM-killed the
+# Before the app starts, each test set begins on the agent (/testset/begin). The
+# agent must read from its on-disk store only the mocks recorded before the
+# set's first test, not the whole recording: reading it all OOM-killed the
 # replay agent of a long prod recording before its app started. The agent logs
-# what it staged and what its store holds, for every set. A build without that
-# change logs nothing, so the released binary is not held to it.
+# what it staged and what its store holds, for every set, and, once the set's
+# tests are over, that the set ended and it let go of the mocks stored for it
+# (/testset/end). A build without those changes logs neither, so the released
+# binary is not held to them.
 case "${REPLAY_BIN:-}" in
   */build/keploy|*/build-no-race/keploy) replay_is_build=true ;;
   *) replay_is_build=false ;;
@@ -327,6 +329,14 @@ if [ "$replay_is_build" = true ]; then
         echo "✅ ${windowed_sets} test set(s) staged only their app-startup mocks"
     else
         echo "No Mongo mocks were recorded (a build without the private parsers), so no set has per-test mocks on disk to stage"
+    fi
+    began="$(printf '%s\n' "$staged_lines" | grep -c . || true)"
+    ended="$(grep -cF "the test set ended: let go of the mocks stored for it" test_logs.txt || true)"
+    echo "${began} test set(s) began, ${ended} ended"
+    if [ "$ended" -ne "$began" ]; then
+        echo "::error::${began} test set(s) began on the agent but ${ended} ended: the agent kept a set's stored mocks after its tests"
+        cat test_logs.txt
+        exit 1
     fi
 fi
 

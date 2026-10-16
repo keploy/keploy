@@ -2895,8 +2895,8 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 
 	// Per-test: consume via DeleteFilteredMock. Fallback to
 	// UpdateUnFilteredMock if the mock has been staged into the
-	// session pool during the initial pre-first-test window (see
-	// SetMocksWithWindow's isInitialStaging branch) — the mock is
+	// session pool during the initial pre-first-test window (see the pool
+	// branch of MockManager.setMocksWithWindowLocked) — the mock is
 	// still classified as LifetimePerTest but physically lives in
 	// the session tree until the first real test's re-partition.
 	//

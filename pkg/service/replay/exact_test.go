@@ -68,14 +68,24 @@ func TestUnderTheSwitchEachTestCaseIsServedExactly(t *testing.T) {
 			}
 			h.instr.mu.Lock()
 			params := append([]models.MockFilterParams(nil), h.instr.allParams...)
+			begins := append([]models.TestSetBegin(nil), h.instr.begins...)
 			h.instr.mu.Unlock()
+			if len(begins) != 1 {
+				t.Fatalf("the set began %d times, want once", len(begins))
+			}
 			if !on {
+				if begins[0].Exact != nil {
+					t.Fatalf("switch off: the set's begin asked for exact serving: %+v", begins[0])
+				}
 				for _, p := range params {
 					if p.Exact != nil {
 						t.Fatalf("switch off: a call asked for exact serving: %+v", p)
 					}
 				}
 				return
+			}
+			if begins[0].Exact == nil || !reflect.DeepEqual(begins[0].Exact.Pool, []string{"mock-boot"}) {
+				t.Fatalf("the set began with exact serving %+v, want the pool [mock-boot]", begins[0].Exact)
 			}
 			var got []models.ExactServing
 			for _, p := range params {
@@ -85,7 +95,6 @@ func TestUnderTheSwitchEachTestCaseIsServedExactly(t *testing.T) {
 				got = append(got, *p.Exact)
 			}
 			want := []models.ExactServing{
-				{Stage: true, Pool: []string{"mock-boot"}},
 				{Test: "test-1", Owned: []string{"mock-a"}}, {},
 				{Test: "test-2"}, {},
 			}

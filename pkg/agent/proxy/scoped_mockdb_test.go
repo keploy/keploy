@@ -121,11 +121,11 @@ func TestScopedViewFollowsItsWorkerAcrossTests(t *testing.T) {
 	mgr := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	defer mgr.Close()
 	at := time.Now().Add(-time.Hour)
-	mgr.SetMocksWithWindow(nil, []*models.Mock{
+	mgr.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{
 		newMockForTest("a1", at, models.LifetimeSession),
 		newMockForTest("b1", at, models.LifetimeSession),
 		newMockForTest("shared", at, models.LifetimeSession),
-	}, models.BaseTime, time.Now())
+	})
 	self := uint32(os.Getpid())
 	sees := func(v integrations.MockMemDb) []string {
 		got, err := v.GetSessionMocks()
@@ -359,7 +359,7 @@ func TestScopedMockDb_StartupTierIsScopedToTheWorker(t *testing.T) {
 
 	a := newMockForTest("mock-A", time.Now().Add(-time.Hour), models.LifetimePerTest)
 	b := newMockForTest("mock-B", time.Now().Add(-time.Hour), models.LifetimePerTest)
-	mgr.SetMocksWithWindow([]*models.Mock{a, b}, nil, models.BaseTime, time.Now())
+	mgr.BeginTestSet(time.Time{}, nil, []*models.Mock{a, b}, nil)
 
 	workerA := workerScoped(t, mgr, []string{"mock-A"}, []string{"mock-A", "mock-B"})
 

@@ -72,11 +72,11 @@ func newScopeManager(t *testing.T) *MockManager {
 // fired, so tier-aware parsers route its calls to its per-test tier, and the
 // per-test tier holds exactly what was staged, whatever the mocks' recorded
 // times. Its end goes back to the routing before it, with the pool in the
-// startup tier, as a BaseTime staging leaves it.
+// startup tier, as a pool staging (StagePool) leaves it.
 func TestSetScopeMocksOpensAWindowWithoutTimeBounds(t *testing.T) {
 	mm := newScopeManager(t)
 	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-	mm.SetMocksWithWindow([]*models.Mock{scopeMock("a", t0), scopeMock("b", t0.Add(time.Second))}, []*models.Mock{sessionMock("cfg")}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{scopeMock("a", t0), scopeMock("b", t0.Add(time.Second))}, []*models.Mock{sessionMock("cfg")})
 	epoch := mm.StagingEpoch()
 
 	// Recorded long ago, and in the future (a recorder with a clock ahead).
@@ -126,7 +126,7 @@ func TestSetScopeMocksEndLeavesOutWhatTheTestServed(t *testing.T) {
 		return []*models.Mock{scopeMock("boot", t0.Add(-time.Minute)), scopeMock("a1", t0), scopeMock("a2", t0.Add(time.Second)), scopeMock("b", t0.Add(3*time.Second))}
 	}
 	session := func() []*models.Mock { return []*models.Mock{sessionMock("cfg")} }
-	mm.SetMocksWithWindow(pool(), session(), models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, pool(), session())
 	// Served before any test: from the startup tier, re-armed by stagings.
 	startup, _ := mm.GetStartupMocks()
 	for _, m := range startup {
@@ -166,13 +166,13 @@ func TestSetScopeMocksEndLeavesOutWhatTheTestServed(t *testing.T) {
 	sameNames(t, "a second run's tier", scopeNames(mm.GetPerTestMocksInWindow()), "a1", "a2")
 
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(pool(), session(), models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, pool(), session())
 	mm.SetScopeMocks(pool(), session(), false)
 	sameNames(t, "the next set's pool between tests", scopeNames(mm.GetStartupMocks()), "boot", "a1", "a2", "b", "cfg")
 }
 
 // The scope is window state: every other staging replaces it, the next set's
-// boundary staging, a mid-set BaseTime staging and a real test window alike,
+// begin, the pool between tests and a real test window alike,
 // and so does setting the window.
 func TestSetScopeMocksIsReplacedByTheNextWindow(t *testing.T) {
 	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
@@ -180,18 +180,18 @@ func TestSetScopeMocksIsReplacedByTheNextWindow(t *testing.T) {
 	mm := newScopeManager(t)
 	mm.SetScopeMocks([]*models.Mock{scopeMock("a", t0)}, nil, true)
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow([]*models.Mock{scopeMock("a", t0)}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{scopeMock("a", t0)}, nil)
 	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
 		t.Fatalf("the next set's staging reads %+v, want no window and no test fired", snap)
 	}
 
-	// A BaseTime staging mid-set moves the pool to the startup tier: a test
+	// The pool between tests moves the pool to the startup tier: a test
 	// left open over it would route the test's calls to an empty tier.
 	mm = newScopeManager(t)
 	mm.SetScopeMocks([]*models.Mock{scopeMock("a", t0)}, nil, true)
-	mm.SetMocksWithWindow([]*models.Mock{scopeMock("a", t0)}, nil, models.BaseTime, time.Now())
+	mm.StagePool([]*models.Mock{scopeMock("a", t0)}, nil)
 	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
-		t.Fatalf("a BaseTime staging over an open test reads %+v, want no window and no test fired", snap)
+		t.Fatalf("the pool staged over an open test reads %+v, want no window and no test fired", snap)
 	}
 
 	mm = newScopeManager(t)

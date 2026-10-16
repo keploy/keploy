@@ -29,7 +29,7 @@ func TestAScopedTestRunAgainIsServedItsMySQLRecordingsAgain(t *testing.T) {
 	}
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SetMocksWithWindow([]*models.Mock{read}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{read}, nil)
 	p := &proxy.Proxy{}
 	p.SetMappedUniverse([]string{"read-in-a"})
 	const worker = 4101

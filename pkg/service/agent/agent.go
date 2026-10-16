@@ -1305,7 +1305,7 @@ func earliestReqTimestamp(filtered, unfiltered []*models.Mock) time.Time {
 // startup-band guard downstream is switched off for test #1, which is precisely
 // the test a slow application bootstrap lands in. Deriving the cutoff from this
 // call's own window start closes that, and uses the same predicate the manager
-// applies (a zero or BaseTime start means "no window").
+// applies (a zero start means "no window").
 //
 // isWindowedProxy gates the derivation because it is only sound where the
 // manager adopts this same start as firstWindowStart in this call. A proxy with
@@ -1318,7 +1318,7 @@ func effectiveFirstWindowStart(isWindowedProxy bool, readerVal, afterTime time.T
 	if !readerVal.IsZero() || !isWindowedProxy {
 		return readerVal
 	}
-	if afterTime.IsZero() || afterTime.Equal(models.BaseTime) {
+	if afterTime.IsZero() {
 		return readerVal
 	}
 	return afterTime
@@ -1336,16 +1336,6 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
 	case loadModeStrictWindow:
-		if cutoff, ok := stagingStartupCutoff(params); ok {
-			loaded, err = disk.LoadBefore(cutoff)
-			if err == nil {
-				a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
-					zap.Int("startupMocks", len(loaded)),
-					zap.Int("onDisk", disk.Len()),
-					zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
-			}
-			break
-		}
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
@@ -1367,28 +1357,6 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	return dedupByName(resident, loaded), nil
 }
 
-// stagingStartupCutoff returns where a set's staging call stops reading the
-// on-disk store, and whether the call is one.
-//
-// The replayer stages a set before the app starts, with the window BaseTime to
-// now (replay.go's SendMockFilterParamsToAgent at set-up, on retry and for a
-// replacement agent). The proxy files everything it is staged with then as
-// app-startup traffic, and the set's first test refiles it to what was recorded
-// before that test (MockManager.setMocksWithWindowLocked). Reading the window
-// itself therefore brought the whole recording into memory only to stage it as
-// startup traffic, and a long recording OOM-killed the agent before its app
-// started. The startup traffic is what was recorded before the set's earliest
-// recorded test, which the staging call carries.
-//
-// A set whose tests carry no request time has no such test, so its staging
-// call reads the window it names.
-func stagingStartupCutoff(params models.MockFilterParams) (time.Time, bool) {
-	if !params.AfterTime.Equal(models.BaseTime) || params.FirstRecordedTestStart.IsZero() {
-		return time.Time{}, false
-	}
-	return params.FirstRecordedTestStart, true
-}
-
 const (
 	loadModeMapping      = "mapping"
 	loadModeStrictWindow = "strict-window"
@@ -1408,13 +1376,19 @@ const (
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
-	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
+	case usesMapping(params):
 		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
 	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
 	}
 	return loadModeLaxAll
+}
+
+// usesMapping reports whether params serve the mocks their mapping names
+// rather than the ones recorded in their window.
+func usesMapping(params models.MockFilterParams) bool {
+	return params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping)
 }
 
 // loadCarryOverLookahead loads the per-test mocks of RegisterCarryOver kinds
@@ -1564,50 +1538,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	return nil
 }
 
-// mocksForParams is the pool UpdateMockParams stages for params: the per-test
-// and the session tier, filtered as params ask. It also applies what the
-// staging call carries beside the pool (the startup cutoff, the recorded
-// windows, the stateful cursors' reset), as UpdateMockParams always has.
+// mocksForParams is the pool UpdateMockParams stages for a test's params: the
+// per-test and the session tier, filtered as params ask.
 func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams) ([]*models.Mock, []*models.Mock, error) {
-	// Seed the startup-init cutoff from the set's earliest RECORDED test before
-	// anything else touches the window. Without it the cutoff follows whichever
-	// test fires FIRST, so a --test-sets selection, an ignored test or the
-	// streaming deferral leaves it late and mocks belonging to a test that is
-	// never run are classified as startup-init and served as bootstrap traffic.
-	// Optional capability: a proxy that does not implement it keeps the
-	// fired-window behaviour.
-	if !params.FirstRecordedTestStart.IsZero() {
-		if seeder, ok := a.Proxy.(coreAgent.StartupCutoffSeeder); ok {
-			seeder.SeedStartupCutoff(params.FirstRecordedTestStart)
-		}
-	}
-	// Same moment, same optional-capability style: the recorded window of every
-	// test of the set, which lets the proxy release traffic the test windows do
-	// not pace by themselves (server push) at the window it belongs to.
-	if len(params.RecordedWindows) > 0 {
-		if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
-			seeder.SeedRecordedWindows(params.RecordedWindows)
-		}
-	}
-	// A staging call (recordedSetShape populated: FirstRecordedTestStart and/or
-	// RecordedWindows) marks a new test-set. Reset the stateful-dependency
-	// cursors so each test-set replays its sequences (1,2,3…) from the start
-	// rather than carrying a cursor across sets, while the per-test-case calls
-	// (empty shape) leave them alone so a sequence spans the whole set. Optional
-	// capability: a proxy without stateful cursors is a no-op.
-	//
-	// This reuses the same shape-non-empty staging heuristic as the startup
-	// cutoff / recorded-window seeders above. A degenerate test-set whose cases
-	// all carry a zero request timestamp produces an empty shape, so none of
-	// these fire — the pre-existing limitation of that heuristic. Replacing it
-	// with an explicit MockFilterParams.Staging flag (for all three) is a
-	// tracked follow-up; real recordings always carry timestamps.
-	if !params.FirstRecordedTestStart.IsZero() || len(params.RecordedWindows) > 0 {
-		if resetter, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
-			resetter.ResetStatefulCursors()
-		}
-	}
-
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),
 		zap.Time("beforeTime", params.BeforeTime),
@@ -1615,13 +1548,47 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		zap.Int("mockMappingCount", len(params.MockMapping)),
 		zap.Bool("strictMockWindow", params.StrictMockWindow))
 
+	if a.noteStrictWindow(params.StrictMockWindow) {
+		a.logger.Debug("strict mock window active for test",
+			zap.Time("windowStart", params.AfterTime),
+			zap.Time("windowEnd", params.BeforeTime))
+	}
+
+	storage, err := a.storedMocks()
+	if err != nil {
+		return nil, nil, err
+	}
+	storage.mu.RLock()
+	residentFiltered := make([]*models.Mock, len(storage.filtered))
+	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
+	copy(residentFiltered, storage.filtered)
+	copy(originalUnfiltered, storage.unfiltered)
+	disk := storage.diskMocks
+	storage.mu.RUnlock()
+	return a.filterTestMocks(ctx, params, residentFiltered, originalUnfiltered, disk)
+}
+
+// storedMocks is the storage of the mocks the client stored (StoreMocks).
+func (a *Agent) storedMocks() (*ClientMockStorage, error) {
+	storageInterface, exists := a.clientMocks.Load(uint64(0))
+	if !exists {
+		return nil, fmt.Errorf("no mocks stored for client ID")
+	}
+	return storageInterface.(*ClientMockStorage), nil
+}
+
+// noteStrictWindow reports whether the strict mock window is in effect for a
+// call that asks for it as strict says, and says once per agent process that
+// it is.
+func (a *Agent) noteStrictWindow(strict bool) bool {
 	// Strict mock-window is OPT-IN via either the per-call flag
 	// (params.StrictMockWindow) or the process-wide KEPLOY_STRICT_MOCK_WINDOW
 	// env override. Surface the EFFECTIVE state so operators searching
 	// agent logs for "strict mock window enabled" find hits regardless of
 	// which route they used — previously the log fired only on the per-call
 	// flag, making env-only opt-ins invisible.
-	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled {
+	strictEnabled := pkg.IsStrictMockWindow(strict)
+	if strictEnabled {
 		// Fire the activation message at most once per agent process
 		// (sync.Once). Info (project logging policy disallows Warn for
 		// expected-default state); the escape-hatch names are embedded
@@ -1638,31 +1605,18 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 					"mock's lifetime (spec.metadata.lifetime) serves each test its own calls in every mode: "+
 					"declare an HTTP call every test may make in keploy.yaml (sessionCalls), or record the "+
 					"test set again.",
-				zap.Bool("viaPerCallFlag", params.StrictMockWindow),
-				zap.Bool("viaEnvOverride", !params.StrictMockWindow && strictEnabled),
+				zap.Bool("viaPerCallFlag", strict),
+				zap.Bool("viaEnvOverride", !strict && strictEnabled),
 				zap.String("escape_hatch_env", "KEPLOY_STRICT_MOCK_WINDOW=0"),
 				zap.String("escape_hatch_config", "test.strictMockWindow: false"))
 		})
-		a.logger.Debug("strict mock window active for test",
-			zap.Time("windowStart", params.AfterTime),
-			zap.Time("windowEnd", params.BeforeTime))
 	}
+	return strictEnabled
+}
 
-	// Get stored mocks for the client
-	storageInterface, exists := a.clientMocks.Load(uint64(0))
-	if !exists {
-		return nil, nil, fmt.Errorf("no mocks stored for client ID")
-	}
-	storage := storageInterface.(*ClientMockStorage)
-
-	storage.mu.RLock()
-	residentFiltered := make([]*models.Mock, len(storage.filtered))
-	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
-	copy(residentFiltered, storage.filtered)
-	copy(originalUnfiltered, storage.unfiltered)
-	disk := storage.diskMocks
-	storage.mu.RUnlock()
-
+// filterTestMocks reads a test's mocks from the stored ones (resident, and
+// disk when the per-test mocks are on disk) and filters them as params ask.
+func (a *Agent) filterTestMocks(ctx context.Context, params models.MockFilterParams, residentFiltered, originalUnfiltered []*models.Mock, disk *proxyPkg.DiskMocks) ([]*models.Mock, []*models.Mock, error) {
 	// On WindowedProxy the agent filter runs non-strict (SetMocksWithWindow does
 	// the authoritative strict enforcement); env override still applies inside.
 	_, isWindowedProxy := a.Proxy.(coreAgent.WindowedProxy)
@@ -1680,8 +1634,8 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// under load misses with candidates:0 while the mock sits unread on disk.
 	//
 	// Derive it from this call's own window start instead, applying exactly the
-	// predicate mockmanager uses so the two cannot disagree: a zero or BaseTime
-	// AfterTime is "no window", anything else is a real start.
+	// predicate mockmanager uses so the two cannot disagree: a zero AfterTime
+	// is "no window", anything else is a real start.
 	var firstWindowStart time.Time
 	if reader, ok := a.Proxy.(coreAgent.FirstWindowStartReader); ok {
 		firstWindowStart = reader.FirstTestWindowStart()
@@ -1789,25 +1743,33 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// drops the ones already consumed.
 	filteredMocks = appendCarryOver(filteredMocks, carryOver)
 
-	// Filter out deleted mocks if totalConsumedMocks is provided
-	if params.AgentOwnsConsumed {
+	return a.withoutConsumed(filteredMocks, params.AgentOwnsConsumed, params.TotalConsumedMocks), unfilteredMocks, nil
+}
+
+// withoutConsumed is filtered less the per-test mocks already consumed: by the
+// agent's own history when agentOwns, else by the client's (consumed). Nothing
+// is left out when there is neither.
+func (a *Agent) withoutConsumed(filtered []*models.Mock, agentOwns bool, consumed map[string]models.MockState) []*models.Mock {
+	if agentOwns {
 		// Agent applies filterOutDeleted from its OWN persistent consumption
 		// history — the client no longer re-sends the growing TotalConsumedMocks
 		// map. Equivalent by construction: that persistent map is the exact
 		// accumulation of the flagMockAsUsed states the client used to relay.
 		if reader, ok := a.Proxy.(coreAgent.ConsumedStateReader); ok {
-			filteredMocks = a.filterOutDeleted(filteredMocks, reader.GetPersistentConsumed())
-		} else if params.TotalConsumedMocks != nil {
+			return a.filterOutDeleted(filtered, reader.GetPersistentConsumed())
+		}
+		if consumed != nil {
 			// Proxy can't expose its persistent map — never silently skip the
 			// filter; fall back to any client-sent map.
 			a.logger.Warn("AgentOwnsConsumed set but proxy has no ConsumedStateReader; falling back to client-sent TotalConsumedMocks")
-			filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+			return a.filterOutDeleted(filtered, consumed)
 		}
-	} else if params.TotalConsumedMocks != nil {
-		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		return filtered
 	}
-
-	return filteredMocks, unfilteredMocks, nil
+	if consumed != nil {
+		return a.filterOutDeleted(filtered, consumed)
+	}
+	return filtered
 }
 
 // ServedMocks reports the mocks served so far this session, keyed by mock name.

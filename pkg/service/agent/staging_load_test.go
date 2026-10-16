@@ -46,16 +46,15 @@ func loadedFromDisk(t *testing.T, logs *observer.ObservedLogs) []int64 {
 	return out
 }
 
-// The set's staging call, sent before the app starts with the window BaseTime to
-// now, reads from the on-disk store only the mocks recorded before the set's
-// first test. The proxy files whatever it is staged with as app-startup traffic,
-// so reading the whole window brought every mock of the recording into the
-// agent's memory: 81,738 of them OOM-killed a 1200Mi agent on a prod recording.
-func TestStagingReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
+// A set begins, before the app starts, with only the mocks recorded before the
+// set's first test read from the on-disk store: the app's startup traffic. A
+// set used to be staged with the window 2000-01-01 to now, and reading that
+// window brought every mock of the recording into the agent's memory only to
+// file it as startup traffic: 81,738 of them OOM-killed a 1200Mi agent on a
+// prod recording.
+func TestBeginTestSetReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
 	a, p, logs := stagingStore(t)
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:              models.BaseTime,
-		BeforeTime:             stageT0.Add(2 * time.Hour),
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		FirstRecordedTestStart: stageT0,
 		StrictMockWindow:       true,
 	})
@@ -63,13 +62,35 @@ func TestStagingReadsOnlyTheStartupMocksFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{2}) {
-		t.Fatalf("the staging call read %v mocks from disk; want the 2 recorded before the first test", got)
+		t.Fatalf("the set's begin read %v mocks from disk; want the 2 recorded before the first test", got)
 	}
-	if len(p.windowed) != 1 {
-		t.Fatalf("staged %d times, want once", len(p.windowed))
+	if len(p.begun) != 1 {
+		t.Fatalf("began %d times, want once", len(p.begun))
 	}
-	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the staging call staged %v; want the app-startup mocks %v", got, want)
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-auth", "boot-config"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the set began with %v; want the app-startup mocks %v", got, want)
+	}
+	if !p.firsts[0].Equal(stageT0) {
+		t.Fatalf("the set began with cutoff %v, want its first recorded test %v", p.firsts[0], stageT0)
+	}
+}
+
+// The mapping's startup mocks are the set's too, wherever they were recorded.
+func TestBeginTestSetReadsTheMappingsStartupMocks(t *testing.T) {
+	a, p, logs := stagingStore(t)
+	err := a.BeginTestSet(context.Background(), models.TestSetBegin{
+		FirstRecordedTestStart: stageT0,
+		StartupMockNames:       []string{"test-a", "boot-auth"},
+		StrictMockWindow:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("the set's begin read %v mocks from disk; want the 2 recorded before the first test and test-a", got)
+	}
+	if got, want := sortedNames(p.begun[0][0]), []string{"boot-auth", "boot-config", "test-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the set began with %v; want %v", got, want)
 	}
 }
 
@@ -93,22 +114,31 @@ func TestATestStillReadsItsWindowAndTheStartupMocks(t *testing.T) {
 	}
 }
 
-// A set whose tests carry no request time has no first test to cut at, so its
-// staging call reads the window it names.
-func TestStagingWithoutARecordedTestTimeReadsItsWindow(t *testing.T) {
-	a, p, logs := stagingStore(t)
-	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime:        models.BaseTime,
-		BeforeTime:       stageT0.Add(2 * time.Hour),
-		StrictMockWindow: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
-		t.Fatalf("the staging call read %v mocks from disk; want all 5 in its window", got)
-	}
-	if len(p.windowed[0][0]) != 5 {
-		t.Fatalf("the staging call staged %v; want all 5", p.windowed[0][0])
+// A set whose tests carry no request time has no first test to cut at, so it
+// begins with every mock; and so does a set replayed with the lax window, whose
+// tests may be served any mock of the recording.
+func TestBeginTestSetWithoutACutReadsEveryMock(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		begin models.TestSetBegin
+	}{
+		{"no recorded test time", models.TestSetBegin{StrictMockWindow: true}},
+		{"lax", models.TestSetBegin{FirstRecordedTestStart: stageT0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p, logs := stagingStore(t)
+			if tc.name == "lax" {
+				t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "0")
+			}
+			if err := a.BeginTestSet(context.Background(), tc.begin); err != nil {
+				t.Fatal(err)
+			}
+			if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{5}) {
+				t.Fatalf("the set's begin read %v mocks from disk; want all 5", got)
+			}
+			if len(p.begun[0][0]) != 5 {
+				t.Fatalf("the set began with %v; want all 5", p.begun[0][0])
+			}
+		})
 	}
 }

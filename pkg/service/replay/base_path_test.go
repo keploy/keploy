@@ -118,6 +118,12 @@ func (a *bpNoAgent) StoreMocks(context.Context, []*models.Mock, []*models.Mock) 
 func (a *bpNoAgent) UpdateMockParams(context.Context, models.MockFilterParams) error {
 	return a.needsAgent("updatemockparams")
 }
+func (a *bpNoAgent) BeginTestSet(context.Context, models.TestSetBegin) error {
+	return a.needsAgent("testset/begin")
+}
+func (a *bpNoAgent) EndTestSet(context.Context, string) error {
+	return a.needsAgent("testset/end")
+}
 func (a *bpNoAgent) GetMockStats(context.Context) (models.MockStats, error) {
 	return models.MockStats{}, a.needsAgent("mock/stats")
 }

@@ -83,8 +83,8 @@ func TestHitCountsFollowTheNameAcrossAnUpdate(t *testing.T) {
 
 // The agent stages fresh copies of a set's mocks for every test, so a count kept
 // on the mock object restarted at every test, and a session mock matched in
-// every test still read as matched once. The counts must span the set — a
-// BaseTime staging mid-set (keploy mock replay stages one around a
+// every test still read as matched once. The counts must span the set — the
+// pool staged between its tests (keploy mock replay stages one around a
 // single-worker test scope) is not a boundary — and restart with the next set:
 // names are only unique within a set.
 func TestHitCountsSpanTheTestSet(t *testing.T) {
@@ -95,11 +95,11 @@ func TestHitCountsSpanTheTestSet(t *testing.T) {
 	defer mm.Close()
 	count := func() uint64 { return mm.SessionMockHitCounts()["s"] }
 
-	mm.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, fresh())
 	mm.SetMocksWithWindow(nil, fresh(), base, base.Add(time.Second))
 	mm.MarkMockAsUsed(*s)
 	mm.MarkMockAsUsed(*s)
-	mm.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+	mm.StagePool(nil, fresh()) // the pool between the set's tests
 	mm.SetMocksWithWindow(nil, fresh(), base.Add(time.Second), base.Add(2*time.Second))
 	mm.MarkMockAsUsed(*s)
 	if got := count(); got != 3 {
@@ -108,14 +108,14 @@ func TestHitCountsSpanTheTestSet(t *testing.T) {
 
 	// The next set starts afresh.
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, fresh(), models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, fresh())
 	if got := count(); got != 0 {
 		t.Fatalf("count = %d after the next set's first staging, want 0", got)
 	}
 }
 
-// The index holds the names of the pool a staging serves, and no more: in
-// strict mode the BaseTime staging loads a set's whole per-test pool, and
+// The index holds the names of the pool a staging serves, and no more: a
+// set's begin can stage a set's whole per-test pool, and
 // keeping each of those names for the set would hold memory the disk-backed
 // store exists to release.
 func TestHitIndexHoldsOnlyTheStagedNames(t *testing.T) {
@@ -127,7 +127,7 @@ func TestHitIndexHoldsOnlyTheStagedNames(t *testing.T) {
 	s := newMockForTest("s", base.Add(time.Millisecond), models.LifetimeSession)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
-	mm.SetMocksWithWindow(perTest, []*models.Mock{s.DeepCopy()}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, perTest, []*models.Mock{s.DeepCopy()})
 	mm.MarkMockAsUsed(*s)
 	mm.SetMocksWithWindow(nil, []*models.Mock{s.DeepCopy()}, base.Add(time.Hour), base.Add(time.Hour+time.Second))
 

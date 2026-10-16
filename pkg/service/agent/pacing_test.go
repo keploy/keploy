@@ -1,7 +1,8 @@
 package agent
 
-// Tests for what UpdateMockParams hands the proxy for server-push pacing: the
-// recorded windows of the set (O1) and the carry-over lookahead load (C1).
+// Tests for what a set's begin and a test's filter hand the proxy for
+// server-push pacing: the recorded windows of the set (O1) and the carry-over
+// lookahead load (C1).
 
 import (
 	"context"
@@ -16,12 +17,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// pacingProxy is a WindowedProxy that records what the agent handed it.
+// pacingProxy is a WindowedProxy and TestSetStager that records what the
+// agent handed it.
 type pacingProxy struct {
 	coreAgent.Proxy // nil: any other call panics loudly
 
 	mu      sync.Mutex
 	seeded  [][]models.TestWindow
+	begins  int
 	sets    int
 	resets  int
 	lastF   []*models.Mock
@@ -43,10 +46,16 @@ func (p *pacingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock,
 	return nil
 }
 
-func (p *pacingProxy) SeedRecordedWindows(ws []models.TestWindow) {
+func (p *pacingProxy) BeginTestSet(_ context.Context, _ time.Time, ws []models.TestWindow, _, _ []*models.Mock) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.begins++
 	p.seeded = append(p.seeded, append([]models.TestWindow(nil), ws...))
+	return nil
+}
+
+func (p *pacingProxy) StagePool(context.Context, []*models.Mock, []*models.Mock) error {
+	return nil
 }
 
 // residentAgent returns an agent holding the given mocks resident (the legacy,
@@ -57,7 +66,7 @@ func residentAgent(p coreAgent.Proxy, filtered, unfiltered []*models.Mock) *Agen
 	return a
 }
 
-func TestUpdateMockParamsSeedsRecordedWindows(t *testing.T) {
+func TestBeginTestSetHandsTheProxyTheRecordedWindows(t *testing.T) {
 	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
 	ws := []models.TestWindow{
 		{TestCase: "test-1", Start: base, End: base.Add(time.Second)},
@@ -66,13 +75,11 @@ func TestUpdateMockParamsSeedsRecordedWindows(t *testing.T) {
 	p := &pacingProxy{}
 	a := residentAgent(p, nil, nil)
 
-	// The staging call carries the windows.
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime: models.BaseTime, BeforeTime: time.Now(), RecordedWindows: ws,
-	}); err != nil {
-		t.Fatalf("staging UpdateMockParams: %v", err)
+	// The set's begin carries the windows.
+	if err := a.BeginTestSet(context.Background(), models.TestSetBegin{RecordedWindows: ws}); err != nil {
+		t.Fatalf("BeginTestSet: %v", err)
 	}
-	// A per-test call carries none, and must not re-seed (or clear) them.
+	// A test's filter carries none, and must not hand them over (or clear them).
 	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
 		AfterTime: ws[0].Start, BeforeTime: ws[0].End,
 	}); err != nil {
@@ -81,68 +88,75 @@ func TestUpdateMockParamsSeedsRecordedWindows(t *testing.T) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.seeded) != 1 {
-		t.Fatalf("SeedRecordedWindows called %d times, want exactly once (the staging call)", len(p.seeded))
+	if p.begins != 1 || len(p.seeded) != 1 {
+		t.Fatalf("the set began %d times, want exactly once", p.begins)
 	}
 	if got := p.seeded[0]; len(got) != 2 || got[1].TestCase != "test-2" || !got[1].Start.Equal(ws[1].Start) {
-		t.Fatalf("seeded %+v, want the two recorded windows", got)
+		t.Fatalf("began with %+v, want the two recorded windows", got)
 	}
-	if p.sets != 2 {
-		t.Fatalf("SetMocksWithWindow called %d times, want 2", p.sets)
+	if p.sets != 1 {
+		t.Fatalf("SetMocksWithWindow called %d times, want 1 (the test)", p.sets)
 	}
 }
 
-// TestUpdateMockParamsResetsStatefulCursorsOncePerTestSet pins the stateful
-// cursor's reset boundary: the staging call (which carries recordedSetShape —
-// FirstRecordedTestStart and/or RecordedWindows) marks a new test-set and must
-// reset the cursors, while the per-test-case calls (empty shape) must NOT, so a
-// stateful sequence spans the whole test-set but does not carry across sets.
-func TestUpdateMockParamsResetsStatefulCursorsOncePerTestSet(t *testing.T) {
+// TestStatefulCursorsResetOncePerTestSet pins the stateful cursor's reset
+// boundary: a set's begin must reset the cursors, while a test's filter must
+// NOT, so a stateful sequence spans the whole test-set but does not carry
+// across sets. A set whose tests carry no request time begins as any other:
+// the reset used to be keyed on the staging call's recorded shape, which such
+// a set does not have, so its sequences went on from the previous set's.
+func TestStatefulCursorsResetOncePerTestSet(t *testing.T) {
 	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
 	p := &pacingProxy{}
 	a := residentAgent(p, nil, nil)
 
-	// Staging call for a test-set: FirstRecordedTestStart set → reset.
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime: models.BaseTime, BeforeTime: time.Now(), FirstRecordedTestStart: base,
-	}); err != nil {
-		t.Fatalf("staging UpdateMockParams: %v", err)
-	}
-	// Two per-test-case calls (empty shape) → must NOT reset.
-	for i := 0; i < 2; i++ {
-		if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-			AfterTime: base, BeforeTime: base.Add(time.Second),
-		}); err != nil {
-			t.Fatalf("per-test UpdateMockParams: %v", err)
+	for set, begin := range []models.TestSetBegin{
+		{TestSetID: "test-set-0", FirstRecordedTestStart: base},
+		{TestSetID: "test-set-1"}, // no recorded test time
+	} {
+		if err := a.BeginTestSet(context.Background(), begin); err != nil {
+			t.Fatalf("BeginTestSet: %v", err)
 		}
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.resets != 1 {
-		t.Fatalf("ResetStatefulCursors called %d times, want exactly once (the staging call) — a sequence must span the whole test-set, not reset per test case", p.resets)
+		// Two test filters → must NOT reset.
+		for i := 0; i < 2; i++ {
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: base, BeforeTime: base.Add(time.Second),
+			}); err != nil {
+				t.Fatalf("per-test UpdateMockParams: %v", err)
+			}
+		}
+		p.mu.Lock()
+		resets := p.resets
+		p.mu.Unlock()
+		if resets != set+1 {
+			t.Fatalf("after set %d: ResetStatefulCursors called %d times, want %d (once per set begun) — a sequence must span the whole test-set, and start over with the next", set, resets, set+1)
+		}
 	}
 }
 
-// A proxy without the capability keeps working: the windows are simply not
-// seeded, which is the pre-existing behaviour.
-func TestUpdateMockParamsWithoutTheSeederStillStages(t *testing.T) {
+// A proxy without the TestSetStager capability keeps working: the set's pool
+// is set as it is, with no startup tier and no windows.
+func TestBeginTestSetWithoutAStagerSetsMocks(t *testing.T) {
 	p := &plainWindowedProxy{}
 	a := residentAgent(p, nil, nil)
-	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-		AfterTime: models.BaseTime, BeforeTime: time.Now(),
+	if err := a.BeginTestSet(context.Background(), models.TestSetBegin{
 		RecordedWindows: []models.TestWindow{{TestCase: "t", Start: time.Now(), End: time.Now()}},
 	}); err != nil {
-		t.Fatalf("UpdateMockParams: %v", err)
+		t.Fatalf("BeginTestSet: %v", err)
 	}
-	if p.sets != 1 {
-		t.Fatalf("SetMocksWithWindow called %d times, want 1", p.sets)
+	if p.plain != 1 || p.sets != 0 {
+		t.Fatalf("SetMocks called %d times and SetMocksWithWindow %d, want 1 and 0", p.plain, p.sets)
 	}
 }
 
 type plainWindowedProxy struct {
 	coreAgent.Proxy
-	sets int
+	sets, plain int
+}
+
+func (p *plainWindowedProxy) SetMocks(context.Context, []*models.Mock, []*models.Mock) error {
+	p.plain++
+	return nil
 }
 
 func (p *plainWindowedProxy) SetMocksWithWindow(context.Context, []*models.Mock, []*models.Mock, time.Time, time.Time) error {
@@ -162,9 +176,15 @@ func (p *mgrProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock, st
 	p.mm.SetMocksWithWindow(f, u, start, end)
 	return nil
 }
-func (p *mgrProxy) SeedStartupCutoff(t time.Time)              { p.mm.SeedStartupCutoff(t) }
-func (p *mgrProxy) SeedRecordedWindows(ws []models.TestWindow) { p.mm.SeedRecordedWindows(ws) }
-func (p *mgrProxy) FirstTestWindowStart() time.Time            { return p.mm.FirstTestWindowStart() }
+func (p *mgrProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+func (p *mgrProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
+func (p *mgrProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *mgrProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
 }
@@ -244,9 +264,8 @@ func TestUpdateMockParamsLoadsCarryOverAhead(t *testing.T) {
 			mm.ResetForReplaySession()
 			p := &mgrProxy{mm: mm}
 			a := diskAgent(t, p, recording...)
-			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
-				AfterTime: models.BaseTime, BeforeTime: time.Now(), StrictMockWindow: strict,
-				FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws,
+			if err := a.BeginTestSet(context.Background(), models.TestSetBegin{
+				StrictMockWindow: strict, FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws,
 			}); err != nil {
 				t.Fatal(err)
 			}

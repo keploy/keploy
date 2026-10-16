@@ -312,7 +312,7 @@ func TestALearnStepReusedMockWithAnEchoAnswersAgain(t *testing.T) {
 	m.DeriveLifetime()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}}, nil, nil)
 	mm.SetMocksWithWindow(nil, []*models.Mock{m}, now.Add(-time.Hour), now.Add(time.Hour))
 	p.ContinueTestErrorCapture()
 	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
@@ -354,7 +354,7 @@ func TestALearnStepStartupTierMockKeepsWhatWasLearned(t *testing.T) {
 	perTest, promoted := pkg.FilterPerTestAndLaxPromotedTierAware(context.Background(), zap.NewNop(), []*models.Mock{boot, own}, start, end, false, start)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedStartupCutoff(start)
+	mm.BeginTestSet(start, nil, nil, nil)
 	mm.SetMocksWithWindow(perTest, promoted, start, end)
 	p.ContinueTestErrorCapture() // test 1 begins; the app's token call is lazy
 	body := `{"nonce":"n-2","ts":"t-8"}`
@@ -383,7 +383,7 @@ func TestALearnStepReusedMockKeepsEveryEchoItWasServedWith(t *testing.T) {
 	m.DeriveLifetime()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now.Add(time.Minute), End: now.Add(2 * time.Minute)}}, nil, nil)
 	mm.SetMocksWithWindow(nil, []*models.Mock{m}, now.Add(-time.Hour), now.Add(time.Hour))
 	p.ContinueTestErrorCapture()
 	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
@@ -423,10 +423,10 @@ func TestALearnStepStartupMockIsNotTheOpenTestsOwn(t *testing.T) {
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{boot, t2}, names)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
+	// keploy test begins the set with every recorded test's window: the
+	// start-up's mock is outside all of them.
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now.Add(time.Second), End: now.Add(3 * time.Second)}}, nil, nil)
 	mm.SetMocksWithWindow(nil, session, now.Add(time.Second), now.Add(3*time.Second))
-	// keploy test seeds every recorded test's window: the start-up's mock is
-	// outside all of them.
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(time.Second), End: now.Add(3 * time.Second)}})
 	p.ContinueTestErrorCapture()
 	body := `{"nonce":"n-2"}`
 	code, _ := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: false},
@@ -506,7 +506,7 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}, {Start: now.Add(2 * time.Second), End: now.Add(3 * time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}, {Start: now.Add(2 * time.Second), End: now.Add(3 * time.Second)}}, nil, nil)
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{m1, m2}, []string{"mock-t2"})
 	mm.SetMocksWithWindow(nil, session, now.Add(2*time.Second), now.Add(3*time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -546,7 +546,7 @@ func TestALearnStepATraceIdNextToAFreshSpanIsRefused(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{a, b}, []string{"mock-a", "mock-b"})
 	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -580,7 +580,7 @@ func TestALearnStepAnExtraIdenticalCallIsAMiss(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{f, pr}, []string{"mock-flags", "mock-profile"})
 	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -623,7 +623,7 @@ func TestALearnStepOwnRecordingsAnswerInRecordedOrder(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), all, names)
 	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -659,7 +659,7 @@ func TestALearnStepAConsumedPerTestMockStillCompetes(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	mm.SetMocksWithWindow([]*models.Mock{f, pr}, nil, now, now.Add(time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
 	p.ContinueTestErrorCapture()
@@ -696,7 +696,7 @@ func TestALearnStepAProtocolPhaseMockAnswersAgain(t *testing.T) {
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	session := pkg.FilterConfigMocksMapping(context.Background(), zap.NewNop(), []*models.Mock{cfg}, nil)
 	mm.SetMocksWithWindow(nil, session, now, now.Add(time.Second))
 	mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -732,7 +732,7 @@ func TestALearnStepConcurrentExtraCallsOnPerTestMocks(t *testing.T) {
 				names = append(names, m.Name)
 			}
 			mm := NewMockManager(nil, nil, zap.NewNop())
-			mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+			mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 			perTest := pkg.FilterTcsMocksMapping(context.Background(), zap.NewNop(), all, names)
 			mm.SetMocksWithWindow(perTest, nil, now, now.Add(time.Second))
 			mm.SetServedObserver(p.learnTracker.ServedMock)
@@ -774,17 +774,17 @@ func TestALearnStepConcurrentExtraCallsOnPerTestMocks(t *testing.T) {
 	}
 }
 
-// (Round-8 review.) a set seeded with no recorded windows leaves the learn
+// (Round-8 review.) a set begun with no recorded windows leaves the learn
 // step none, not the previous set's.
-func TestSeedRecordedWindowsOfASetWithNoneForgetsThePrevious(t *testing.T) {
+func TestASetBegunWithNoWindowsForgetsThePrevious(t *testing.T) {
 	now := time.Now()
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{Start: now, End: now.Add(time.Second)}})
+	mm.BeginTestSet(time.Time{}, []models.TestWindow{{Start: now, End: now.Add(time.Second)}}, nil, nil)
 	if inside, known := mm.InRecordedTestWindow(now.Add(time.Millisecond)); !inside || !known {
 		t.Fatalf("precondition: inside %v known %v", inside, known)
 	}
-	mm.SeedRecordedWindows(nil)
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if _, known := mm.InRecordedTestWindow(now.Add(time.Millisecond)); known {
 		t.Fatal("the previous set's windows outlived a set with none")
 	}
@@ -805,7 +805,7 @@ func TestALearnStepVariableRidesExactServing(t *testing.T) {
 		now := time.Now()
 		rec.Spec.ReqTimestampMock = now
 		if exact {
-			mm.SetMocksWithWindow([]*models.Mock{rec}, nil, models.BaseTime, now.Add(time.Hour))
+			mm.BeginTestSet(time.Time{}, nil, []*models.Mock{rec}, nil)
 			mm.ServeExactTest("test-1", []*models.Mock{rec})
 		} else {
 			mm.SetMocksWithWindow([]*models.Mock{rec}, nil, now.Add(-time.Hour), now.Add(time.Hour))

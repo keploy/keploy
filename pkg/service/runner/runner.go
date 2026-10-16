@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -324,8 +325,18 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	gCtx, cancel := context.WithCancel(context.WithValue(gCtx, models.ErrGroupKey, g))
 
 	cleanupOnce := sync.Once{}
+	// begun says the set began on the agent: the cleanup ends it there.
+	var begun atomic.Bool
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			if begun.Load() {
+				endCtx, endCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := r.instrumentation.EndTestSet(endCtx, testSetID); err != nil {
+					r.logger.Debug("could not end the test set on the agent; it lets go of the set's mocks when the next set stores its own",
+						zap.String("testSetID", testSetID), zap.Error(err))
+				}
+				endCancel()
+			}
 			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 			}
@@ -505,22 +516,22 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		useMappingBased = false
 	}
 
-	// Send an initial wide-window UpdateMockParams with empty
-	// MockMapping so the agent has a valid filter active for any
-	// startup-init traffic (HikariCP pool warm-up, driver handshakes)
-	// that lands before the first per-test RunTest narrows the
-	// window. Matches replay.go:1047 / 1156.
-	initialParams := models.MockFilterParams{
-		AfterTime:          models.BaseTime,
-		BeforeTime:         time.Now(),
-		MockMapping:        []string{},
+	// Begin the set on the agent so it serves any startup-init traffic
+	// (HikariCP pool warm-up, driver handshakes) that lands before the first
+	// per-test RunTest begins a test, as the replayer's RunTestSet does. The
+	// runner is handed its steps one at a time and knows no recorded test
+	// up front, so the set begins with every mock of the recording.
+	begin := models.TestSetBegin{
+		TestSetID:          testSetID,
+		StartupMockNames:   startupMockNames,
 		UseMappingBased:    useMappingBased,
 		TotalConsumedMocks: map[string]models.MockState{},
 		StrictMockWindow:   r.strictMockWindow(),
 	}
-	if err := r.instrumentation.UpdateMockParams(gCtx, initialParams); err != nil {
-		return nil, fmt.Errorf("failed to set initial mock filter params: %w", err)
+	if err := r.instrumentation.BeginTestSet(gCtx, begin); err != nil {
+		return nil, fmt.Errorf("failed to begin the test set on the agent: %w", err)
 	}
+	begun.Store(true)
 
 	r.logger.Info("mocks loaded", zap.String("testSetID", testSetID),
 		zap.Int("filtered", len(filtered)), zap.Int("unfiltered", len(unfiltered)),

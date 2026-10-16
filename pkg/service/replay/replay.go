@@ -1591,7 +1591,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// close and the send unordered once the drain had given up, and a watcher
 	// that sent after the close would have panicked.
 	exitLoopChan := make(chan bool, 2)
+	// setBegun says the set began on the agent (beginTestSet): it is ended
+	// there once everything the set reads from the agent is read, before its
+	// application goes.
+	var setBegun atomic.Bool
 	defer func() {
+		if setBegun.Load() {
+			endCtx, endCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			r.endTestSet(endCtx, testSetID)
+			endCancel()
+		}
 		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
 		if r.instrument && !serveTest {
 			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2079,11 +2088,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
-		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
+		// Begin the test set on the agent: what it serves until the first test.
+		err = r.beginTestSet(ctx, testSetID, testCases, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, startupMockNames)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		setBegun.Store(r.instrument)
 
 		// The compose agent is up and the app is still parked behind its
 		// healthcheck: this test set's refused PID map inserts are counted from
@@ -2139,7 +2149,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases); err != nil {
+			totalConsumedMocks, useMappingBased, testCases, startupMockNames); err != nil {
 			return models.TestSetStatusFailed, err
 		}
 	}
@@ -2202,11 +2212,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
+		// Begin the test set on the agent: what it serves until the first test.
+		err = r.beginTestSet(ctx, testSetID, testCases, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, startupMockNames)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		setBegun.Store(r.instrument)
 
 		if r.instrument {
 			if !serveTest {
@@ -2743,7 +2754,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, requestVariables(tmplRun, testCase)...)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, testCase)...)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, requestVariables(tmplRun, testCase)...)
 			}
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -3801,7 +3812,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, requestVariables(tmplRun, tc)...)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, requestVariables(tmplRun, tc)...)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, requestVariables(tmplRun, tc)...)
 			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
@@ -5539,23 +5550,24 @@ func (r *Replayer) consumedForAgent(total map[string]models.MockState, region ma
 }
 
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
-// in the set. testDB returns cases sorted by request timestamp, so it is the
-// first one's; a case with no request time contributes nothing rather than
-// pinning the cutoff to the zero time.
+// in the set: the earliest start of the window a test opens on the agent
+// (testWindowOf; HTTP and gRPC). A case with no request time contributes
+// nothing rather than pinning the cutoff to the zero time. Read from every
+// case rather than the first: testDB sorts HTTP cases by their request time,
+// and a gRPC case's is elsewhere.
 func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
+	var first time.Time
 	for _, tc := range testCases {
-		if tc == nil {
-			continue
-		}
-		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
-			return ts
+		start, _ := testWindowOf(tc)
+		if !start.IsZero() && (first.IsZero() || start.Before(first)) {
+			first = start
 		}
 	}
-	return time.Time{}
+	return first
 }
 
-// recordedSetShape is what the staging call tells the agent about the set's
-// recording as a whole. Per-test calls send the zero value.
+// recordedSetShape is what a set's begin tells the agent about the set's
+// recording as a whole (beginTestSet).
 //
 //   - firstTestStart is the request time of the EARLIEST RECORDED test; the
 //     agent seeds the startup-init cutoff from it instead of from whichever
@@ -5575,7 +5587,7 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 	}
 }
 
-// recordedSetShape is the shape a staging call sends for testSetID: that of its
+// recordedSetShape is the shape a set's begin sends for testSetID: that of its
 // test cases, with the first test moved back to the earliest test the set ever
 // recorded when the TestDB keeps it (RecordedStartReader). The agent stages
 // what was recorded before that test as the app's startup traffic, and every
@@ -5623,21 +5635,98 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 	return w.Start, w.End
 }
 
-// SendMockFilterParamsToAgent sends filtering parameters to agent instead of
-// sending filtered mocks. shape is only meaningful on the set's staging call
-// (see recordedSetShape); pass the zero value on per-test calls.
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape, vars ...models.VariableBinding) error {
+// beginTestSet begins testSetID on the agent (models.TestSetBegin), from the
+// mocks stored for it, before the application starts and before any of its
+// tests: the set's earliest recorded test and every recorded test's window
+// (recordedSetShape), its mapping's startup mocks, and how its mocks are
+// filtered, as each test's filter will say (SendMockFilterParamsToAgent).
+// Under the proven switch it names the set's pool for exact serving (exact.go).
+func (r *Replayer) beginTestSet(ctx context.Context, testSetID string, testCases []*models.TestCase, totalConsumedMocks map[string]models.MockState, useMappingBased bool, startupMockNames []string) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
 	}
+	shape := r.recordedSetShape(ctx, testSetID, testCases)
+	strict, agentOwnsConsumed, consumed := r.agentFilterSettings(totalConsumedMocks)
+	begin := models.TestSetBegin{
+		TestSetID:              testSetID,
+		FirstRecordedTestStart: shape.firstTestStart,
+		RecordedWindows:        shape.windows,
+		StartupMockNames:       append([]string(nil), startupMockNames...),
+		UseMappingBased:        useMappingBased,
+		StrictMockWindow:       strict,
+		AgentOwnsConsumed:      agentOwnsConsumed,
+		TotalConsumedMocks:     consumed,
+	}
+	if r.exact != nil {
+		begin.Exact = &models.ExactPool{Pool: append([]string(nil), r.exact.pool...)}
+	}
+	if err := r.instrumentation.BeginTestSet(ctx, begin); err != nil {
+		utils.LogError(r.logger, err, "failed to begin the test set on the agent", zap.String("testSetID", testSetID))
+		return err
+	}
+	r.logger.Debug("began the test set on the agent",
+		zap.String("testSetID", testSetID),
+		zap.Time("firstRecordedTest", shape.firstTestStart),
+		zap.Int("recordedWindows", len(shape.windows)),
+		zap.Int("startupMockNames", len(startupMockNames)))
+	return nil
+}
 
-	// Build filter parameters. Default to strict=true when r.config is
-	// nil (unit tests, embedders) — matches the shipped default in
-	// config.Test.StrictMockWindow. The env override applies at the
-	// agent so KEPLOY_STRICT_MOCK_WINDOW=0 still opts out without
-	// touching code.
-	strictMockWindow := true
+// endTestSet ends testSetID on the agent: its tests are over, and the agent
+// lets go of the mocks stored for it. A failure (an agent already gone with
+// the set's application) is no failure of the set: its verdict is in, and the
+// next set stores its own mocks.
+func (r *Replayer) endTestSet(ctx context.Context, testSetID string) {
+	if err := r.instrumentation.EndTestSet(ctx, testSetID); err != nil {
+		r.logger.Debug("could not end the test set on the agent; it lets go of the set's mocks when the next set stores its own",
+			zap.String("testSetID", testSetID), zap.Error(err))
+	}
+}
+
+// SendMockFilterParamsToAgent begins a test on the agent: the mocks it is
+// served are the ones recorded in [afterTime, beforeTime], or the ones
+// expectedMockMapping names.
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, vars ...models.VariableBinding) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+	strictMockWindow, agentOwnsConsumed, consumedForAgent := r.agentFilterSettings(totalConsumedMocks)
+	params := models.MockFilterParams{
+		AfterTime:          afterTime,
+		BeforeTime:         beforeTime,
+		MockMapping:        expectedMockMapping,
+		UseMappingBased:    useMappingBased,
+		AgentOwnsConsumed:  agentOwnsConsumed,
+		TotalConsumedMocks: consumedForAgent,
+		StrictMockWindow:   strictMockWindow,
+		Variables:          vars,
+	}
+
+	// Send parameters to agent for filtering and mock updates
+	err := r.instrumentation.UpdateMockParams(ctx, params)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+		return err
+	}
+
+	r.logger.Debug("Successfully sent mock filter parameters to agent",
+		zap.Bool("useMappingBased", useMappingBased),
+		zap.Int("mockMappingCount", len(expectedMockMapping)))
+
+	return nil
+}
+
+// agentFilterSettings is how the agent filters a set's or a test's mocks: the
+// strict mock window, and whose consumed history it filters by (the agent's
+// own, or totalConsumedMocks, the client's).
+func (r *Replayer) agentFilterSettings(totalConsumedMocks map[string]models.MockState) (strictMockWindow, agentOwnsConsumed bool, consumedForAgent map[string]models.MockState) {
+	// Default to strict=true when r.config is nil (unit tests, embedders) —
+	// matches the shipped default in config.Test.StrictMockWindow. The env
+	// override applies at the agent so KEPLOY_STRICT_MOCK_WINDOW=0 still opts
+	// out without touching code.
+	strictMockWindow = true
 	if r.config != nil {
 		strictMockWindow = r.config.Test.StrictMockWindow
 	}
@@ -5647,9 +5736,9 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// testcase (O(testcases^2) marshaling). We then send a nil map to eliminate
 	// that cost. Off by default so behaviour is byte-identical until proven
 	// equivalent by the golden-reference harness.
-	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
+	agentOwnsConsumed = os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
 		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
-	consumedForAgent := totalConsumedMocks
+	consumedForAgent = totalConsumedMocks
 	if agentOwnsConsumed {
 		consumedForAgent = nil
 	}
@@ -5671,37 +5760,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 			"mid-run, or a retry cycle rewound the CLI's map and nothing rewinds the agent's",
 			zap.Int("consumed", len(totalConsumedMocks)))
 	}
-	params := models.MockFilterParams{
-		AfterTime:              afterTime,
-		BeforeTime:             beforeTime,
-		FirstRecordedTestStart: shape.firstTestStart,
-		RecordedWindows:        shape.windows,
-		MockMapping:            expectedMockMapping,
-		UseMappingBased:        useMappingBased,
-		AgentOwnsConsumed:      agentOwnsConsumed,
-		TotalConsumedMocks:     consumedForAgent,
-		StrictMockWindow:       strictMockWindow,
-		Variables:              vars,
-	}
-	// Under the proven switch the set's staging call (no mapping, from
-	// BaseTime) stages the set once, and the agent then serves its pool
-	// (exact.go).
-	if r.exact != nil && afterTime.Equal(models.BaseTime) && len(expectedMockMapping) == 0 {
-		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...)}
-	}
-
-	// Send parameters to agent for filtering and mock updates
-	err := r.instrumentation.UpdateMockParams(ctx, params)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
-		return err
-	}
-
-	r.logger.Debug("Successfully sent mock filter parameters to agent",
-		zap.Bool("useMappingBased", useMappingBased),
-		zap.Int("mockMappingCount", len(expectedMockMapping)))
-
-	return nil
+	return strictMockWindow, agentOwnsConsumed, consumedForAgent
 }
 
 // mockStatsProbeTimeout bounds each /mock/stats read in the agent-replacement
@@ -5779,7 +5838,7 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
 // consumption history (see agentHistoryIncompleteForRun).
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, startupMockNames []string) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -5849,8 +5908,8 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases)); err != nil {
-		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
+	if err := r.beginTestSet(ctx, testSetID, testCases, r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, startupMockNames); err != nil {
+		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and beginning test set %q on it failed: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
 	// does not stop the run (the compose healthchecks only gate app startup).

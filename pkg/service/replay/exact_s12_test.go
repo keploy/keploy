@@ -67,9 +67,9 @@ func TestUnderTheSwitchASetWithNoMappingsOwnsWhatItsWindowsHeld(t *testing.T) {
 			}
 			h.instr.mu.Lock()
 			var pool []string
-			for _, p := range h.instr.allParams {
-				if p.Exact != nil && p.Exact.Stage {
-					pool = p.Exact.Pool
+			for _, b := range h.instr.begins {
+				if b.Exact != nil {
+					pool = b.Exact.Pool
 				}
 			}
 			h.instr.mu.Unlock()
@@ -234,9 +234,9 @@ func TestUnderTheSwitchWindowOwnershipReadsBothPoolsAndEveryTestCase(t *testing.
 	}
 	h.instr.mu.Lock()
 	var pool []string
-	for _, p := range h.instr.allParams {
-		if p.Exact != nil && p.Exact.Stage {
-			pool = p.Exact.Pool
+	for _, b := range h.instr.begins {
+		if b.Exact != nil {
+			pool = b.Exact.Pool
 		}
 	}
 	h.instr.mu.Unlock()

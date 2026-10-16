@@ -4376,24 +4376,47 @@ func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*mo
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
 		p.dnsCache.Purge()
 	}
-	if p.asyncEngine != nil && opensTestWindow(start) {
-		// Engine owns the "first window doesn't count" rule.
+	if p.asyncEngine != nil {
+		// A test's window, which is what the async lanes count; a test
+		// recorded without times (a zero start) still opens one. Engine owns
+		// the "first window doesn't count" rule.
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
 }
 
-// opensTestWindow reports whether a staging from start opens a test's window,
-// which is what the async lanes count (async.Engine.AdvanceWindow): a test
-// set's staging, from the models.BaseTime sentinel, stages its mocks before
-// any test runs and opens none, as the mock manager reads it too
-// (setMocksWithWindowLocked). Counting it served every async epoch one test
-// early: an epoch received after test k started, effective from test k+1, was
-// served to test k. A test recorded without times (a zero start) still opens
-// one.
-func opensTestWindow(start time.Time) bool {
-	return !start.Equal(models.BaseTime)
+// BeginTestSet begins a test set on the underlying MockManager
+// (MockManager.BeginTestSet) and stages filtered and unfiltered as the pool
+// the set begins with. Satisfies the agent's TestSetStager extension
+// interface. The pool opens no test window, so the async lanes do not count
+// it (async.Engine.AdvanceWindow): counting it served every async epoch one
+// test early, an epoch received after test k started, effective from test
+// k+1, served to test k.
+func (p *Proxy) BeginTestSet(_ context.Context, firstTestStart time.Time, windows []models.TestWindow, filtered, unFiltered []*models.Mock) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.BeginTestSet(firstTestStart, windows, filtered, unFiltered)
+		p.dnsCache.Purge()
+	}
+	return nil
 }
+
+// StagePool stages the pool served outside every test of the current set on
+// the underlying MockManager (MockManager.StagePool). Satisfies the agent's
+// TestSetStager extension interface. Like a set's begin, it opens no test
+// window.
+func (p *Proxy) StagePool(_ context.Context, filtered, unFiltered []*models.Mock) error {
+	p.deriveMysqlPorts(filtered, unFiltered)
+	recorded.add(filtered, unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.StagePool(filtered, unFiltered)
+		p.dnsCache.Purge()
+	}
+	return nil
+}
+
+var _ agent.TestSetStager = (*Proxy)(nil)
 
 // SetScopeMocks stages the pool of a keploy mock replay test begun (open) or
 // ended (!open) without a worker pid, with the proven switch off: see
@@ -4409,7 +4432,7 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 	}
 	if p.asyncEngine != nil && open {
 		// A test begun opens a window; one ended opens none (see
-		// opensTestWindow).
+		// BeginTestSet).
 		p.asyncEngine.AdvanceWindow()
 	}
 	return nil
@@ -4417,10 +4440,10 @@ func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.
 
 var _ agent.ScopeStager = (*Proxy)(nil)
 
-// FirstTestWindowStart returns the earliest test window start observed
-// by the underlying MockManager, or zero before any non-BaseTime
-// SetMocksWithWindow has landed. Satisfies the agent's optional
-// FirstWindowStartReader extension interface.
+// FirstTestWindowStart returns the underlying MockManager's startup-init
+// cutoff (MockManager.FirstTestWindowStart): the set's earliest recorded
+// test, or the earliest test window start observed. Satisfies the agent's
+// optional FirstWindowStartReader extension interface.
 //
 // Used by the agent's tier-aware strictMockWindow filter to preserve
 // startup-init mocks (req < firstWindowStart) while still dropping
@@ -4432,28 +4455,6 @@ func (p *Proxy) FirstTestWindowStart() time.Time {
 		return m.FirstTestWindowStart()
 	}
 	return time.Time{}
-}
-
-// SeedStartupCutoff seeds the underlying MockManager's startup-init cutoff from
-// the earliest RECORDED test of the set being staged. Satisfies the agent's
-// optional StartupCutoffSeeder extension interface.
-//
-// Without it the cutoff follows whichever test fires FIRST, so a --test-sets
-// selection, an ignored test or the streaming deferral leaves it late and mocks
-// from a test that never runs are served as bootstrap traffic.
-func (p *Proxy) SeedStartupCutoff(start time.Time) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedStartupCutoff(start)
-	}
-}
-
-// SeedRecordedWindows hands the underlying MockManager the recorded window of
-// every test of the set being staged. Satisfies the agent's optional
-// RecordedWindowsSeeder extension interface.
-func (p *Proxy) SeedRecordedWindows(ws []models.TestWindow) {
-	if m := p.getMockManager(); m != nil {
-		m.SeedRecordedWindows(ws)
-	}
 }
 
 // ResetStatefulCursors drops the mock manager's per-request stateful cursors so
