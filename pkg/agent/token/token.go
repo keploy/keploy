@@ -297,12 +297,15 @@ var (
 // image that predates the token. This process handed that agent nothing, and
 // checking it for the token this process minted can only raise a false alarm
 // about a handoff that never happened.
-func RecordLaunch(agentURI string) {
+//
+// It returns the launch's number, Launched's, which ForgetLaunch takes.
+func RecordLaunch(agentURI string) uint64 {
 	launchMu.Lock()
 	defer launchMu.Unlock()
 
 	launchSeq++
 	launches[agentURI] = launchSeq
+	return launchSeq
 }
 
 // ForgetLaunch drops the record that this process launched an agent at

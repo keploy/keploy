@@ -40,8 +40,7 @@ func resetProbeOnce(t *testing.T) {
 // about once in 20 runs of the package on a loaded machine).
 func recordLaunch(t *testing.T, agentURI string) {
 	t.Helper()
-	token.RecordLaunch(agentURI)
-	launch, _ := token.Launched(agentURI)
+	launch := token.RecordLaunch(agentURI)
 	t.Cleanup(func() { token.ForgetLaunch(agentURI, launch) })
 }
 
@@ -326,24 +325,20 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 
-	select {
-	case <-readyCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("readiness was blocked behind the control-plane check")
-	}
+	// Readiness comes while the check is held open. No clock bounds the
+	// wait: a readiness blocked behind the check never comes, and go
+	// test's own -timeout fails that run, where a budget here would fail
+	// a correct run on a starved machine.
+	<-readyCh
 	// The check runs on after readiness. It is waited for here, held open,
 	// so that it cannot dial after this test, when a later test's server
 	// may have this one's port.
-	select {
-	case <-probed:
-	case <-ctx.Done():
-		t.Fatal("the control-plane check never probed the agent")
-	}
+	<-probed
 }
