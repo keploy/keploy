@@ -132,8 +132,9 @@ type Learned struct {
 //     that drifted together with a part of the earlier value (sources). It
 //     is asserted equal to the live value at that earlier place, wherever F
 //     saw what: a value that came from somewhere is never stopped being
-//     compared. The earliest place a leaf names binds it; failing that, the
-//     first raw mock holding it.
+//     compared. The place a leaf names binds it: where the value was sent
+//     whole, the test's own call before the run's (appeared); failing that,
+//     the first raw mock holding it.
 //
 //   - Echo: the recorded answer echoes the recorded value (a scalar equal to
 //     it, or a string holding it as a token).
@@ -953,12 +954,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	v := dc.of(recorded, now)
-	// The place is where the value was sent, not where it was answered (a
-	// variable is bound where the application sent it): the test's own call
-	// that sent it first, else the run's, else another's; an answer that
-	// gave it only when no call sent it.
+	// The place is where the value was sent whole, not where it was answered
+	// or sent inside a longer value (a variable is bound where the
+	// application sent it, whole): the test's own call that sent it first,
+	// else the run's, else another's; then the same inside a longer value;
+	// an answer that gave it only when no call sent it. Earliest within each.
 	var best Place
-	rank := 4
+	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -971,7 +973,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			if !ok {
 				continue
 			}
-			r := 3
+			r := 6
 			if s.Side == Request {
 				switch {
 				case e.Own:
@@ -980,6 +982,9 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 					r = 1
 				default:
 					r = 2
+				}
+				if !whole {
+					r += 3
 				}
 			}
 			if r < rank {
@@ -991,7 +996,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			}
 		}
 	}
-	if rank < 4 {
+	if rank < 7 {
 		return best, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:

@@ -1,6 +1,9 @@
 package learn
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // isWord reports whether c continues a token: an ASCII letter or digit.
 func isWord(c byte) bool {
@@ -69,4 +72,36 @@ func ReplaceToken(s, v, with string) (string, bool) {
 	}
 	b.WriteString(s[i:])
 	return b.String(), true
+}
+
+// ReplaceTokens is s with each key of with that stands as a token (tokenAt)
+// replaced by its value, read once over s: what a replacement puts in is not
+// read again, and where two keys begin at one place the longer is taken.
+// missing are the keys that stand nowhere in s.
+func ReplaceTokens(s string, with map[string]string) (out string, missing []string) {
+	var b strings.Builder
+	found := map[string]bool{}
+	for i := 0; i < len(s); {
+		key := ""
+		for k := range with {
+			if k != "" && len(k) > len(key) && strings.HasPrefix(s[i:], k) && tokenAt(s, k, i) {
+				key = k
+			}
+		}
+		if key == "" {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		b.WriteString(with[key])
+		found[key] = true
+		i += len(key)
+	}
+	for k := range with {
+		if !found[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	return b.String(), missing
 }

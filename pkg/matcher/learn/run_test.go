@@ -271,3 +271,43 @@ func TestReplaceToken(t *testing.T) {
 		}
 	}
 }
+
+// ReplaceTokens reads s once: what one replacement puts in is not read
+// again, the longer key wins where two begin together, and a key that stands
+// nowhere is missing.
+func TestReplaceTokens(t *testing.T) {
+	out, missing := ReplaceTokens("aaaaaa:bbbbbb", map[string]string{"aaaaaa": "xx-bbbbbb-yy", "bbbbbb": "cccccc"})
+	if out != "xx-bbbbbb-yy:cccccc" || len(missing) != 0 {
+		t.Fatalf("got %q, missing %v", out, missing)
+	}
+	out, missing = ReplaceTokens("USER:42 42 42x", map[string]string{"42": "7", "USER:42": "ADMIN:7", "nowhere": "x"})
+	if out != "ADMIN:7 7 42x" || len(missing) != 1 || missing[0] != "nowhere" {
+		t.Fatalf("got %q, missing %v", out, missing)
+	}
+}
+
+// Among the places that hold a value, one that sent it whole comes before
+// one that sent it inside a longer value, whoever's call it was; within one
+// kind, the earliest.
+func TestAValueComesFromWhereItWasSentWhole(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	seen := func(path, rec, live string) []Seen {
+		return []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: rec}, Live: live, Place: path}}
+	}
+	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	ownPart := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: seen("body.cmd.filter.ref", "USER:rec-id-aaaaaa", "USER:live-id-bbbbbb")}
+	p, ok := appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{ownPart, boot}, nil)
+	if !ok || !p.Whole || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v (%v), want the start-up's whole place over the test's own part", p, ok)
+	}
+	other := Earlier{Mock: "mock-9", At: t0.Add(-time.Minute), Seen: seen("body.x", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	p, _ = appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{other, boot}, nil)
+	if !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v, want the run's place over another's that is earlier", p)
+	}
+	later := Earlier{Mock: "mock-1", At: t0.Add(time.Second), Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
+	p, _ = appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{boot, later}, nil)
+	if p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v, want the earliest of two places of one kind", p)
+	}
+}
