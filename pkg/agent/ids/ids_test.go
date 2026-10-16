@@ -120,3 +120,13 @@ func TestTheRunsPairsReachTheCLIWithTheirTimes(t *testing.T) {
 		t.Fatalf("the CLI's copy rewrites as the agent's does:\n cli %s\nagent %s", got, want)
 	}
 }
+
+func TestATimeStoredInOneSpellingIsAnsweredInAnother(t *testing.T) {
+	m := &Map{}
+	m.AddTime("audited_at", "1792055913", "1792066001")
+	m.AddTime("created_at", "1792055900", "1792065990")
+	got := m.Rewrite(`{"auditedAt":1792055913,"state":"{\"created_at\":1792055900,\"name\":\"v\"}"}`)
+	if want := `{"auditedAt":1792066001,"state":"{\"created_at\":1792065990,\"name\":\"v\"}"}`; got != want {
+		t.Fatalf("a field is the same field in snake and camel case, and inside a JSON string:\n got %s\nwant %s", got, want)
+	}
+}

@@ -107,7 +107,14 @@ func (m *Map) AddTime(field, old, cur string) {
 	}
 	t := m.times
 	m.mu.Unlock()
-	t.Add(field+"\x00"+old, field+"\x00"+cur)
+	f := fieldKey(field)
+	t.Add(f+"\x00"+old, f+"\x00"+cur)
+}
+
+// fieldKey is a field's name as a time is paired by: the same field is
+// expires_at where it is stored and expiresAt where it is answered.
+func fieldKey(field string) string {
+	return strings.ToLower(strings.ReplaceAll(field, "_", ""))
 }
 
 func (m *Map) timeMap() *Map {
@@ -116,7 +123,7 @@ func (m *Map) timeMap() *Map {
 	return m.times
 }
 
-var timeField = regexp.MustCompile(`"(\w+)"\s*:\s*(?:\{\s*"\$date"\s*:\s*)?(?:\{\s*"\$numberLong"\s*:\s*)?"?(\d{19}|\d{16}|\d{13}|\d{10}|\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d))\b`)
+var timeField = regexp.MustCompile(`\\?"(\w+)\\?"\s*:\s*(?:\{\s*\\?"\$date\\?"\s*:\s*)?(?:\{\s*\\?"\$numberLong\\?"\s*:\s*)?(?:\\?")?(\d{19}|\d{16}|\d{13}|\d{10}|\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d))\b`)
 
 func swapTimes(s string, pairs map[string]string) string {
 	if len(pairs) == 0 {
@@ -125,7 +132,7 @@ func swapTimes(s string, pairs map[string]string) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range timeField.FindAllStringSubmatchIndex(s, -1) {
-		field, value := s[loc[2]:loc[3]], s[loc[4]:loc[5]]
+		field, value := fieldKey(s[loc[2]:loc[3]]), s[loc[4]:loc[5]]
 		to, ok := pairs[field+"\x00"+value]
 		if !ok {
 			continue

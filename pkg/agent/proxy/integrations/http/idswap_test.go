@@ -68,7 +68,7 @@ func TestAWriteTeachesTheRunsIDsAndTimes(t *testing.T) {
 
 	learnIDs(put, "PUT", "/v1/secret/data/keys/"+liveKey, []byte(`{"data":{"createdAt":1792100000,"expiresAt":1792103600}}`))
 	learnIDs(read, "GET", "/v1/secret/data/keys/"+otherKey, nil)
-	if got := ids.Default.Pairs(); len(got) != 3 || got[recordedKey] != liveKey || got["createdAt\x001792054012"] != "createdAt\x001792100000" || got["expiresAt\x001792057612"] != "expiresAt\x001792103600" {
+	if got := ids.Default.Pairs(); len(got) != 3 || got[recordedKey] != liveKey || got["createdat\x001792054012"] != "createdat\x001792100000" || got["expiresat\x001792057612"] != "expiresat\x001792103600" {
 		t.Fatalf("a write pairs its id and its times by field, a read pairs nothing: %v", got)
 	}
 	db := &mockMemDb{mocks: []*models.Mock{keyMock("other", otherKey, base), read}, updateUnFilteredReturn: true}
