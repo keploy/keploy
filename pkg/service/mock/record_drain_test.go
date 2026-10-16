@@ -695,7 +695,7 @@ func gatedDrain(t *testing.T, lookErr error, frames *atomic.Uint64, whileLooking
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		lost.Store(m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load, recordDrainWords))
+		lost.Store(m.drainTrailingMocks(consumerDone, time.Now(), true, func() (uint64, bool) { return frames.Load(), false }, frames.Load, recordDrainWords, nil))
 	}()
 	wait := func(c <-chan struct{}, what string) {
 		t.Helper()
@@ -1030,7 +1030,7 @@ func TestDrainTrailingMocks_SaysWhatStoppingNowCostsItsCaller(t *testing.T) {
 			lost := make(chan bool, 1)
 			go func() {
 				lost <- m.drainTrailingMocks(make(chan struct{}), time.Now(), false,
-					func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, words)
+					func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, words, nil)
 			}()
 			offered := words.saving + "; " + words.stopNow
 			deadline := time.Now().Add(30 * time.Second) // bounds only a drain that never offers
