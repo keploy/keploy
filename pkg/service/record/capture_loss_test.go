@@ -156,7 +156,8 @@ func TestARecordingSaysAnAbandonedHandshakeAndKeepsIt(t *testing.T) {
 		t.Fatalf("%d WARNs for the test case, want 1 with the CA-trust remedy: %+v", len(during), during)
 	}
 	late := logs.FilterMessageSnippet("after the last test case was recorded").All()
-	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") {
+	if len(late) != 1 || late[0].Level != zapcore.WarnLevel || !strings.Contains(fmt.Sprint(late[0].ContextMap()["reason"]), "hung up on 1 TLS handshake(s)") ||
+		!strings.Contains(late[0].Message, "Go's http.Transport keeps such a spare") || !strings.HasPrefix(fmt.Sprint(late[0].ContextMap()["next_step"]), "if the client does not trust keploy's CA: ") {
 		t.Fatalf("%d lines for the late one, want one WARN naming 1 handshake: %+v", len(late), late)
 	}
 }

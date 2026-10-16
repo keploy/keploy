@@ -88,62 +88,50 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 // gave up before keploy answered rejected nothing, and one keploy's stop, or
 // keploy itself, cut short is no loss of a test's.
 //
-// An abandon is charged only within the test it began in: the handshake's
-// own within the test scope it began in, a silent hang-up within the one the
-// handshake ended in, and never outside every test. A Go client's
-// http.Transport keeps the connection it dialled for a request another
-// connection served first -- a spare, its handshake done, nothing sent --
-// and the application's stop closes it with no close_notify, after its test
-// or outside every test: it lost nothing, and it is not charged. A client
-// that rejects keploy's certificate does so as its call is made, in the test
-// that makes it.
+// An abandon is charged only when the handshake and the hang-up fall within
+// one scope -- a test, or the time outside tests (the run's start, the gap
+// between two tests, after the last one) -- never across a boundary: the
+// hang-up, the handshake's own or a silent one after it, in the scope the
+// handshake began in. Each scope has an id no other has had, so a hang-up in
+// it has the handshake's beginning, its end, and everything between in it.
+// A Go client's http.Transport keeps the connection it dialled for a request
+// another connection served first -- a spare, its handshake done, nothing
+// sent -- and the application's stop closes it with no close_notify, after
+// the test it was dialled in: it lost nothing, and it is not charged. A
+// client that rejects keploy's certificate does so as its call is made, in
+// the scope that makes it, wherever that is. The limit: a spare dialled in
+// the scope the application's stop closes it in -- after the last test, or
+// in keploy record, whose tests the proxy does not see -- is charged, and
+// reads as not verified (or, in keploy record, a WARN), the safe direction.
 type clientTLS struct {
 	p   *Proxy
 	ctx context.Context
 	dst string
 
 	mu sync.Mutex
-	// at is the test scope the handshake began in, then, once done, the one
-	// it ended in.
-	at testScope
+	// began is the scope the handshake began in.
+	began testScope
 }
 
-// testScope is the test the proxy sees running: the Universal Mocker's open
-// test (containerkey's), and the open window of the running test's misses
-// (keploy test's, a replay's), each by an identity no other test shares. The
-// zero scope is outside every test.
+// testScope is the scope the proxy sees in effect: the Universal Mocker's
+// (containerkey's: its open test, or the run's outside tests) and keploy
+// test's or a replay's (the running test's misses window, or the gap after
+// one), each by an id no other scope has had.
 type testScope struct {
-	test   uint64
-	window *testErrorAccumulator
+	keyer, windows uint64
 }
 
-func (s testScope) inTest() bool { return s.test != 0 || s.window != nil }
-
-// testScopeNow is the test scope running now.
+// testScopeNow is the scope in effect now.
 func (p *Proxy) testScopeNow() testScope {
-	s := testScope{test: containerkey.Default.OpenTest()}
-	p.captureMu.Lock()
-	if w := p.activeTestErrors.Load(); w != nil && !w.read {
-		s.window = w
-	}
-	p.captureMu.Unlock()
-	return s
+	return testScope{keyer: containerkey.Default.Scope(), windows: p.testWindows.Load()}
 }
 
-// inScope says the test scope running now is the one c's handshake began in,
-// or ended in once done, and a test's.
+// inScope says the scope in effect now is the one c's handshake began in.
 func (c *clientTLS) inScope() bool {
 	c.mu.Lock()
-	at := c.at
+	began := c.began
 	c.mu.Unlock()
-	return at.inTest() && c.p.testScopeNow() == at
-}
-
-func (c *clientTLS) mark() {
-	at := c.p.testScopeNow()
-	c.mu.Lock()
-	c.at = at
-	c.mu.Unlock()
+	return c.p.testScopeNow() == began
 }
 
 // withClientTLS is ctx carrying the events of the client-side handshakes made
@@ -152,7 +140,12 @@ func (p *Proxy) withClientTLS(ctx context.Context, dst string) context.Context {
 	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst})
 }
 
-func (c *clientTLS) HandshakeBegin() { c.mark() }
+func (c *clientTLS) HandshakeBegin() {
+	now := c.p.testScopeNow()
+	c.mu.Lock()
+	c.began = now
+	c.mu.Unlock()
+}
 
 func (c *clientTLS) HandshakeFailed(err error) {
 	switch {
@@ -165,8 +158,6 @@ func (c *clientTLS) HandshakeFailed(err error) {
 		c.p.losses.Add(models.CaptureLossTLSAbandoned, "to "+c.dst)
 	}
 }
-
-func (c *clientTLS) HandshakeDone() { c.mark() }
 
 func (c *clientTLS) SilentHangUp(err error) {
 	if c.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || !pTls.IsClientGiveUp(err) || !c.inScope() {

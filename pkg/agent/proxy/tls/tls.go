@@ -175,17 +175,16 @@ func HandshakeCause(err error) error {
 // ClientEvents is told what a client-side TLS handshake keploy's TLS server
 // (HandleTLSConnection) makes under a context carrying it (WithClientEvents)
 // comes to: its beginning (HandshakeBegin); its failure (HandshakeFailed,
-// with HandleTLSConnection's error), or its end (HandshakeDone); and, the
-// handshake done, the client's hang-up having sent nothing since
-// (SilentHangUp, with the read's error: under the proven switch, which reads
-// the client a record at a time until then). Every path that makes such a
+// with HandleTLSConnection's error); and, the handshake done, the client's
+// hang-up having sent nothing since (SilentHangUp, with the read's error:
+// under the proven switch, which reads the client a record at a time until
+// then). Every path that makes such a
 // handshake -- handleConnection, the opportunistic upgrade, the relay's, the
 // MySQL replayer's, a record upgrader's -- hands its context one, so what a
 // handshake loses is charged one way.
 type ClientEvents interface {
 	HandshakeBegin()
 	HandshakeFailed(err error)
-	HandshakeDone()
 	SilentHangUp(err error)
 }
 
@@ -276,9 +275,6 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			ev.HandshakeFailed(herr)
 		}
 		return nil, false, herr
-	}
-	if ev != nil {
-		ev.HandshakeDone()
 	}
 	if records != nil {
 		if ev != nil {
