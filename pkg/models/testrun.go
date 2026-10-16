@@ -252,10 +252,12 @@ type FailureInfo struct {
 	// Never a failure.
 	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
 	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
-	// not read to its end: every recorded frame (or message) came, and the
-	// app then kept the stream open past its recording, sending keepalives
-	// beyond the recorded ones (row W1). The test has no verdict, and its
-	// set is not judged. Never a failure, never a pass.
+	// not read to its end: the app kept it open on keepalives, past its
+	// recording (every recorded frame, or message, came, then a keepalive
+	// beyond the recorded ones), or short of it (two keepalives in a row
+	// and nothing of the rest between them) (row W1). The test has no
+	// verdict, and its set is not judged. Never a pass, and a failure only
+	// on what came.
 	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
 }
 

@@ -25,18 +25,27 @@ import (
 var heldOpenLines = []string{`{"id":1}`, `{"id":2}`}
 
 // heldOpenApps is an app with a streamed HTTP answer and a gRPC side that,
-// once hold is set, keep their streams open past their recorded answers,
-// sending keepalives: NDJSON blank lines, and gRPC PINGs (grpc-go sends one
-// after a second without activity). Each sends at most a bounded number of
-// keepalives, and exhausted counts the streams that sent them all and were
-// still read: what a replay that waits for the end does.
+// in mode holdPast, keep their streams open past their recorded answers, and
+// in mode stallShort, short of them, sending keepalives: NDJSON blank lines,
+// and gRPC PINGs (grpc-go sends one after a second without activity). Each
+// sends at most a bounded number of keepalives, and exhausted counts the
+// streams that sent them all and were still read: what a replay that waits
+// for the end does.
 type heldOpenApps struct {
 	http      *tmplApp
 	grpcAddr  string
 	grpcPort  uint16
-	hold      atomic.Bool
+	mode      atomic.Int32
 	exhausted atomic.Int32
 }
+
+// The apps' modes: ending as recorded, holding the stream open past the
+// recorded answer, and stalling short of it.
+const (
+	asRecorded int32 = iota
+	holdPast
+	stallShort
+)
 
 func newHeldOpenApps(t *testing.T) *heldOpenApps {
 	t.Helper()
@@ -45,11 +54,15 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 		mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 			a.record(r)
 			w.Header().Set("Content-Type", "application/x-ndjson")
-			for _, line := range heldOpenLines {
+			mode := apps.mode.Load()
+			for i, line := range heldOpenLines {
+				if mode == stallShort && i > 0 {
+					break
+				}
 				_, _ = w.Write([]byte(line + "\n"))
 				w.(http.Flusher).Flush()
 			}
-			if !apps.hold.Load() {
+			if mode == asRecorded {
 				return
 			}
 			// The app's own pace between keepalives, as a heartbeat has.
@@ -82,11 +95,14 @@ func newHeldOpenApps(t *testing.T) *heldOpenApps {
 			var in []byte
 			for stream.RecvMsg(&in) == nil {
 			}
+			mode := apps.mode.Load()
 			out := []byte{0x0a, 0x02, 'o', 'k'}
-			if err := stream.SendMsg(&out); err != nil {
-				return err
+			if mode != stallShort {
+				if err := stream.SendMsg(&out); err != nil {
+					return err
+				}
 			}
-			if apps.hold.Load() {
+			if mode != asRecorded {
 				// grpc-go's keepalives go on while it waits.
 				select {
 				case <-stream.Context().Done():
@@ -137,9 +153,9 @@ func (a *heldOpenApps) cases(t *testing.T) []*models.TestCase {
 }
 
 // Under the proven switch, with no clock on the app's answer (row W1), a test
-// whose app keeps its stream open past the recording, sending keepalives,
-// ends on them instead of waiting for an end that never comes: it has no
-// verdict (FailureInfo.StreamHeldOpen), and neither has its set, never a
+// whose app keeps its stream open on keepalives, past the recording or short
+// of it, ends on them instead of waiting for an end that never comes: it has
+// no verdict (FailureInfo.StreamHeldOpen), and neither has its set, never a
 // pass. The same app ending its streams passes, its flow-control pings
 // notwithstanding.
 func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) {
@@ -152,25 +168,37 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 		t.Fatalf("control: the apps ending their streams gave a set %s, want PASSED (%s, %s)", status, why(h.result(t, "test-1")), why(h.result(t, "test-2")))
 	}
 
-	apps.hold.Store(true)
-	h = newTmplHarness(t, &tmplConf{}, cases, nil)
-	status := h.run(t)
-	if n := apps.exhausted.Load(); n != 0 {
-		t.Fatalf("%d stream(s) sent every keepalive they had and were still read: the replay waits for an end that never comes", n)
-	}
-	for _, name := range []string{"test-1", "test-2"} {
-		r := h.result(t, name)
-		if r.FailureInfo.StreamHeldOpen == "" || len(r.VerdictUnknown()) == 0 {
-			t.Fatalf("%s: %s, %+v; want no verdict: the app kept its stream open past the recording", name, r.Status, r.FailureInfo)
-		}
-	}
-	if status != models.TestSetStatusInternalErr {
-		t.Fatalf("the set is %s, want INTERNAL_ERR: not judged", status)
-	}
-	reason := h.report.report.FailureReason
-	for _, want := range []string{"kept its stream open past the recording", "test-1", "test-2"} {
-		if !strings.Contains(reason, want) {
-			t.Fatalf("failure reason %q does not say %q", reason, want)
-		}
+	for _, mode := range []struct {
+		name string
+		mode int32
+		says string
+	}{
+		{"past its recording", holdPast, "past its recording"},
+		{"short of its recording", stallShort, "sent no more of its recording"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			apps.mode.Store(mode.mode)
+			t.Cleanup(func() { apps.mode.Store(asRecorded) })
+			h := newTmplHarness(t, &tmplConf{}, cases, nil)
+			status := h.run(t)
+			if n := apps.exhausted.Load(); n != 0 {
+				t.Fatalf("%d stream(s) sent every keepalive they had and were still read: the replay waits for an end that never comes", n)
+			}
+			for _, name := range []string{"test-1", "test-2"} {
+				r := h.result(t, name)
+				if !strings.Contains(r.FailureInfo.StreamHeldOpen, mode.says) || len(r.VerdictUnknown()) == 0 {
+					t.Fatalf("%s: %s, %+v; want no verdict: the app kept its stream open %s", name, r.Status, r.FailureInfo, mode.name)
+				}
+			}
+			if status != models.TestSetStatusInternalErr {
+				t.Fatalf("the set is %s, want INTERNAL_ERR: not judged", status)
+			}
+			reason := h.report.report.FailureReason
+			for _, want := range []string{"kept its stream open on keepalives", "test-1", "test-2"} {
+				if !strings.Contains(reason, want) {
+					t.Fatalf("failure reason %q does not say %q", reason, want)
+				}
+			}
+		})
 	}
 }

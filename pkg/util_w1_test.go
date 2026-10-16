@@ -183,6 +183,26 @@ func TestAStreamHeldOpenPastItsRecordingEndsOnItsKeepalives(t *testing.T) {
 		})
 	}
 
+	// Short of its recording: two keepalives in a row with no line between
+	// them, and the app stalled (ErrStreamStalled, an ErrStreamHeldOpen):
+	// no verdict, the lines that came having matched. One keepalive between
+	// two lines is none.
+	t.Run("NDJSON short of its recording", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		expected := models.HTTPResp{StreamBody: frames("raw", `{"id":1}`, `{"id":2}`)}
+		got := readHeldOpen(t, expected, ndjson, "{\"id\":1}\n", "\n", 50)
+		if !errors.Is(got.err, ErrStreamStalled) || !errors.Is(got.err, ErrStreamHeldOpen) || !got.ok {
+			t.Fatalf("a stream stalled short of its recording gave %+v, want ErrStreamStalled", got)
+		}
+		if got.read != 2 {
+			t.Fatalf("the read ended on keepalive %d, want the second", got.read)
+		}
+		ok, _, info, err := CompareHTTPStream(expected, strings.NewReader("{\"id\":1}\n\n{\"id\":2}\n"), ndjson, map[string]struct{}{}, zap.NewNop())
+		if !ok || err != nil {
+			t.Fatalf("one keepalive between two lines gave %v, %v (%+v)", ok, err, info)
+		}
+	})
+
 	t.Run("binary", func(t *testing.T) {
 		t.Setenv(provenswitch.Env, "1")
 		got := readHeldOpen(t, models.HTTPResp{StreamBody: frames("raw", "abcd")}, HTTPStreamConfig{Mode: HTTPStreamModeBinary}, "abcd", "ef", 50)
