@@ -100,10 +100,9 @@ type Keyer struct {
 	run, test *scope
 	// scopes counts the scopes this session began, for their tokens.
 	scopes int
-	// tests counts the test scopes this keyer ever began, never reset (a
-	// session's Reset restarts scopes); openTest is the open test's number,
-	// 0 while none is open (OpenTest).
-	tests, openTest uint64
+	// begun counts the scopes this keyer ever began, never reset (a
+	// session's Reset restarts scopes): each scope's id (Scope).
+	begun uint64
 	// spans are the session's scopes, in the order they began, with when
 	// they began and ended: Stamp files a recorded mock under the scope its
 	// request was sent in, which may have ended by the time it is stamped.
@@ -156,9 +155,11 @@ type pendingConn struct {
 // stamped after their connection closed.
 const keptClosed = 4096
 
-// scope is one scope: its token, and the containers used in it, by key.
+// scope is one scope: its token, its id (Scope), and the containers used in
+// it, by key.
 type scope struct {
 	token string
+	id    uint64
 	used  map[string]map[string]bool
 }
 
@@ -184,7 +185,8 @@ func NewKeyer(res resolver) *Keyer {
 // beginLocked starts a scope at, as a test's when test; k.mu is held.
 func (k *Keyer) beginLocked(test bool, at time.Time) *scope {
 	k.scopes++
-	s := &scope{token: "s" + strconv.Itoa(k.scopes), used: map[string]map[string]bool{}}
+	k.begun++
+	s := &scope{token: "s" + strconv.Itoa(k.scopes), id: k.begun, used: map[string]map[string]bool{}}
 	k.spans = append(k.spans, span{token: s.token, from: at, test: test})
 	return s
 }
@@ -266,7 +268,7 @@ func (k *Keyer) Bind(ctx context.Context) {
 func (k *Keyer) Reset() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.scopes, k.spans, k.test, k.openTest = 0, nil, nil, 0
+	k.scopes, k.spans, k.test = 0, nil, nil
 	k.run = k.beginLocked(false, time.Now())
 	k.conns, k.closed, k.unplaced, k.warned = map[string]Container{}, nil, map[string]*pendingConn{}, false
 	k.endSessionLocked()
@@ -280,7 +282,7 @@ func (k *Keyer) BeginInstance() {
 	now := time.Now()
 	k.endLocked(k.test, now)
 	k.endLocked(k.run, now)
-	k.run, k.test, k.openTest = k.beginLocked(false, now), nil, 0
+	k.run, k.test = k.beginLocked(false, now), nil
 }
 
 // BeginTest opens a test's scope; a scope already open is replaced, since a
@@ -291,8 +293,6 @@ func (k *Keyer) BeginTest() {
 	now := time.Now()
 	k.endLocked(k.test, now)
 	k.test = k.beginLocked(true, now)
-	k.tests++
-	k.openTest = k.tests
 }
 
 // EndTest closes the open test's scope: connections from here on are the
@@ -305,18 +305,23 @@ func (k *Keyer) EndTest() {
 	defer k.mu.Unlock()
 	now := time.Now()
 	k.endLocked(k.test, now)
-	k.test, k.openTest = nil, 0
+	k.test = nil
 	k.endLocked(k.run, now)
 	k.run = k.beginLocked(false, now)
 }
 
-// OpenTest is the open test's scope, a number no other test scope of this
-// keyer's has had, or 0 while no test is open: what a connection's events
-// compare to tell whether they happened within one test.
-func (k *Keyer) OpenTest() uint64 {
+// Scope is the scope in effect now -- the open test's, or the run's outside
+// tests (the run's start, the setup between two tests, after the last
+// test) -- by an id no other scope of this keyer's has had, a session's Reset
+// included: what a connection's events compare to tell whether they happened
+// within one scope.
+func (k *Keyer) Scope() uint64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.openTest
+	if k.test != nil {
+		return k.test.id
+	}
+	return k.run.id
 }
 
 // Name names the connection connID, accepted for the address the proxy dials

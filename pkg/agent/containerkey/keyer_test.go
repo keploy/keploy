@@ -1045,40 +1045,38 @@ func TestRecordingNamesContainersFollowsTheTestSet(t *testing.T) {
 	}
 }
 
-// OpenTest names the open test's scope by a number no other test scope of
-// the keyer's has had, a session's Reset included, and is 0 while no test is
-// open: before the first, between two, after one ends, after a claim.
-func TestOpenTestNamesEachTestScopeOnce(t *testing.T) {
+// Scope names the scope in effect -- the open test's, or the run's outside
+// tests -- by an id no other scope of the keyer's has had, a session's Reset
+// included: a new one at a test's begin, at its end (the gap until the
+// next), at a claim and at a reset, and the same one in between.
+func TestScopeNamesEachScopeOnce(t *testing.T) {
 	k := NewKeyer(newFake())
-	if k.OpenTest() != 0 {
-		t.Fatal("a test is open before any began")
-	}
 	seen := map[uint64]bool{}
-	next := func() uint64 {
+	fresh := func(what string) uint64 {
 		t.Helper()
-		k.BeginTest()
-		n := k.OpenTest()
-		if n == 0 || seen[n] {
-			t.Fatalf("test scope %d: zero, or one an earlier test had", n)
+		n := k.Scope()
+		if seen[n] {
+			t.Fatalf("%s: scope %d, one an earlier scope had", what, n)
 		}
 		seen[n] = true
+		if k.Scope() != n {
+			t.Fatalf("%s: the scope changed with nothing begun or ended", what)
+		}
 		return n
 	}
-	next()
-	next() // a test begun over an open one replaces it
+	fresh("the run's start")
+	k.BeginTest()
+	fresh("a test")
+	k.BeginTest() // a test begun over an open one replaces it
+	fresh("the next test")
 	k.EndTest()
-	if k.OpenTest() != 0 {
-		t.Fatal("a test is open after it ended")
-	}
-	next()
+	fresh("the gap after a test")
 	k.BeginInstance()
-	if k.OpenTest() != 0 {
-		t.Fatal("a test is open after a claim")
-	}
-	next()
+	fresh("a claim")
+	k.BeginTest()
+	fresh("a test after the claim")
 	k.Reset()
-	if k.OpenTest() != 0 {
-		t.Fatal("a test is open after a session's reset")
-	}
-	next() // not a number the last session's tests had
+	fresh("a session's reset")
+	k.BeginTest()
+	fresh("the next session's test")
 }
