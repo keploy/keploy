@@ -73,7 +73,9 @@ func (t *Table) Lookup(name string) (Binding, bool) {
 }
 
 // Bind records b unless its name is already bound. It returns the binding in
-// force afterwards and whether it is b.
+// force afterwards and whether it is b. It is for a value of no call (a
+// start-up's, a given one): a call checked in a scope binds with BindAll or
+// BindEach, which refuse a call of a scope that ended since.
 func (t *Table) Bind(b Binding) (Binding, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

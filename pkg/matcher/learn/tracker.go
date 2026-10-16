@@ -46,7 +46,10 @@ type Tracker struct {
 	// drifts keeps what each value drifted, for the running test's
 	// requests.
 	drifts *DriftCache
-	open   bool
+	// open is whether a test is running (Begin, until End), and began
+	// whether one has begun in this set (Begin, until NewSet).
+	open  bool
+	began bool
 	// names are the running test's variables, by where each is bound (its
 	// mock and place), and taken the names given.
 	names map[string]string
@@ -83,7 +86,7 @@ func (t *Tracker) NewSet() {
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
-	t.open = false
+	t.open, t.began = false, false
 	t.mu.Unlock()
 }
 
@@ -106,7 +109,7 @@ func (t *Tracker) Begin() {
 	t.answered = nil
 	t.drifts = NewDriftCache()
 	t.names, t.taken = nil, nil
-	t.open = true
+	t.open, t.began = true, true
 	t.mu.Unlock()
 }
 
@@ -260,18 +263,20 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // Served adds a mock F served to test number n's history, until the next test
 // begins: a request of that test answered after it ended, or between it and
 // the next, lands there too, and the next Begin forgets it. Served before the
-// first test began (the start-up's), it is the run's when it carried a value
-// the run made (Earlier.Run): an earlier place of every test of the set.
+// set's first test began (the start-up's), it is the run's when it carried a
+// value the run made (Earlier.Run): an earlier place of every test of the
+// set.
 func (t *Tracker) Served(n uint64, e Earlier) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	switch {
-	case !t.open && t.epoch == 0 && drifted(e):
+	case t.epoch != n:
+	case !t.open && !t.began && drifted(e):
 		e.Run = true
 		t.run = append(t.run, e)
-	case t.epoch == n:
+	default:
 		t.served = append(t.served, e)
 	}
 	t.mu.Unlock()
@@ -319,17 +324,26 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	if t.setTaken == nil {
 		t.setTaken = map[string]bool{}
 	}
-	name = t.free(place, reserved, t.taken)
+	name = t.free(varName(place), reserved, t.taken)
 	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
 	return name, true
 }
+
+// runPrefix begins the name of a run's variable: "run-session". A test's
+// variable is named by its place alone, and a test case's template keys are
+// its own, so a run's name, given once for the whole set when a test first
+// uses the value, collides with neither in any later test.
+const runPrefix = "run-"
 
 // RunName names the variable bound at place of mock, an exchange of the run
 // (Earlier.Run): one name for the whole set, which no test's variable takes,
 // and none a test of the set took before it.
 func (t *Tracker) RunName(mock, place string, reserved map[string]bool) string {
 	if t == nil {
-		name, _ := t.Name(0, mock, place, reserved)
+		name := runPrefix + varName(place)
+		for i := 2; reserved[name]; i++ {
+			name = runPrefix + varName(place) + "-" + strconv.Itoa(i)
+		}
 		return name
 	}
 	t.mu.Lock()
@@ -341,15 +355,14 @@ func (t *Tracker) RunName(mock, place string, reserved map[string]bool) string {
 	if t.runNames == nil {
 		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
 	}
-	name := t.free(place, reserved, t.setTaken)
+	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name
 }
 
-// free is a name for a variable at place that none of reserved, the run's
-// names and taken holds. t.mu is held.
-func (t *Tracker) free(place string, reserved, taken map[string]bool) string {
-	base := varName(place)
+// free is a name beginning with base that none of reserved, the run's names
+// and taken holds. t.mu is held.
+func (t *Tracker) free(base string, reserved, taken map[string]bool) string {
 	name := base
 	for i := 2; taken[name] || t.runTaken[name] || reserved[name]; i++ {
 		name = base + "-" + strconv.Itoa(i)
