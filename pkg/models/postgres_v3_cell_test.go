@@ -898,3 +898,67 @@ func TestPostgresV3Cell_AnInvalidUTF8TextElementReadsBackAsItsBytes(t *testing.T
 		t.Fatalf("a top-level one loaded as %#v (%v), want its bytes", top, err)
 	}
 }
+
+// pgUUIDArrayCells are a uuid[], a macaddr[] and a bit[] cell as pgx scans
+// them (each element a [16]uint8, a net.HardwareAddr, a pgtype.Bits), and
+// documents with a "uuid" key holding text, at the top and inside an
+// array.
+func pgUUIDArrayCells() PostgresV3Cells {
+	u1 := [16]uint8{0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x11}
+	u2 := [16]uint8{0xb0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x12}
+	return PostgresV3Cells{
+		NewValueCell([]any{u1, nil, u2}),
+		NewValueCell([]any{net.HardwareAddr{0x08, 0x00, 0x2b, 0x01, 0x02, 0x03}, nil}),
+		NewValueCell([]any{pgtype.Bits{Bytes: []byte{0xa0}, Len: 3, Valid: true}, nil}),
+		NewValueCell(map[string]any{"uuid": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}),
+		NewValueCell([]any{map[string]any{"uuid": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}}),
+	}
+}
+
+// A document in an array with the keys of a macaddr or a bit element's
+// mapping, its values text (an application's jsonb can hold such keys),
+// reads back as that document: only a !!binary value makes it the element.
+// And a document with a uuid's 16 bytes under "uuid" and other keys is the
+// document, not the uuid: an element's mapping holds no other key.
+func TestPostgresV3Cell_YAMLDocumentsWithAnElementsKeysStayDocuments(t *testing.T) {
+	doc := []any{
+		map[string]any{"macaddr": "CAArAQID"},
+		map[string]any{"bytes": "oA==", "len": 3, "valid": true},
+		map[string]any{"uuid": make([]byte, 16), "name": "x"},
+	}
+	body, err := yaml.Marshal(PostgresV3Cells{NewValueCell(doc)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back[0].Value, doc) {
+		t.Errorf("it came back as %#v, want %#v\n%s", back[0].Value, doc, body)
+	}
+}
+
+// A uuid[], macaddr[] and bit[] cell's elements round-trip through YAML as
+// the values pgx scanned, not as sequences of ints (or mappings) no codec
+// encodes back for the client, and a document's "uuid" text stays the
+// document's.
+func TestPostgresV3Cell_YAMLKeepsAUUIDArraysElements(t *testing.T) {
+	in := pgUUIDArrayCells()
+	body, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("the cells came back as %#v, want %#v\n%s", back, in, body)
+	}
+	for i, c := range back {
+		if _, err := c.GobEncode(); err != nil {
+			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
+		}
+	}
+}
