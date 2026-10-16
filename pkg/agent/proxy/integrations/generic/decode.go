@@ -31,8 +31,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	}
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
-		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
+		defer pUtil.RecoverInto(logger, clientConn, nil, errCh)
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
