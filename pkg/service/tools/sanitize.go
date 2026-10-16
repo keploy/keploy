@@ -21,6 +21,7 @@ import (
 	"github.com/zricethezav/gitleaks/v8/detect"
 	"github.com/zricethezav/gitleaks/v8/report"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -168,6 +169,14 @@ func isDir(p string) bool {
 }
 
 func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error {
+	// The set's recordings are rewritten where they lie, outside testdb:
+	// each is re-keyed once, after (testdb.SetRewrite).
+	rw := testdb.BeginSetRewrite(t.logger, filepath.Dir(testSetDir), filepath.Base(testSetDir))
+	defer rw.Done()
+	return t.sanitizeTestSetDir(ctx, testSetDir)
+}
+
+func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error {
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
@@ -1117,6 +1126,14 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 // It reads secret.yaml, desanitizes all test files, and removes the secret.yaml file.
 // Returns true if desanitization was performed, false if no secret.yaml was found.
 func (t *Tools) DesanitizeTestSet(testSetID string, path string) (bool, error) {
+	// The set's recordings are rewritten where they lie, outside testdb:
+	// each is re-keyed once, after (testdb.SetRewrite).
+	rw := testdb.BeginSetRewrite(t.logger, path, testSetID)
+	defer rw.Done()
+	return t.desanitizeTestSet(testSetID, path)
+}
+
+func (t *Tools) desanitizeTestSet(testSetID string, path string) (bool, error) {
 	t.logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", path))
 
 	testSetDir := filepath.Join(path, testSetID)

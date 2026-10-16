@@ -1039,6 +1039,14 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// The test case file is rewritten where it lies, outside upsert: it is
+	// re-keyed once, after (SetRewrite).
+	rw := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	defer rw.Done()
+	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
+}
+
+func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
 	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
