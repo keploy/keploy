@@ -509,11 +509,12 @@ func isUnassertedMockEntry(m models.MockEntry, mockKindByName map[string]models.
 //
 // Historically a divergence meant "re-record", so the diff was suppressed as
 // noise and the test was quietly demoted to OBSOLETE. Under
-// --assert-dependencies that same test is about to be marked FAILED, and
-// suppressing its diffs would hand the user a red test with no explanation.
-// Knob off (the default) is byte-identical to before.
-func shouldEmitFailureLogs(mockSetMismatch, assertDependencies bool) bool {
-	return !mockSetMismatch || assertDependencies
+// --assert-dependencies or --strict-failure (failsOnMismatch) a failed answer
+// of that test is marked FAILED instead, and suppressing its diffs, or what
+// its failed assertions say, would hand the user a red test with no
+// explanation. Both knobs off (the default) is byte-identical to before.
+func shouldEmitFailureLogs(mockSetMismatch, failsOnMismatch bool) bool {
+	return !mockSetMismatch || failsOnMismatch
 }
 
 // dependencyAssertionRejects reports whether the opt-in dependency assertion

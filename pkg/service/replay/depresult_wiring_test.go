@@ -185,9 +185,9 @@ func TestRunTestSetWiring(t *testing.T) {
 			// assertTestMocks, not AssertDependencies: the knob is read through
 			// r.assertTestMocks(), which answers for --assert-dependencies AND
 			// for the proven switch that turns the assertion on for everyone.
-			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks"},
+			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks", "strictFailure"},
 			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
-				"just marked FAILED with its response diff suppressed as 're-record noise'.",
+				"or --strict-failure just marked FAILED with its response diff suppressed as 're-record noise'.",
 		},
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",
