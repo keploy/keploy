@@ -1,6 +1,7 @@
 // A test application whose /a-publish answers 200 ms after it starts a
 // publish to a broker that it does not wait for (fire and forget), with SUFFIX
 // appended to the message; /b-other takes 3 s; /c-ping answers at once.
+// With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped.
 //
 // PROTO says how it publishes:
 //   - http: an HTTP POST on a connection of its own (no keep-alive);
@@ -25,8 +26,10 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -204,5 +207,24 @@ func main() {
 	http.HandleFunc("/c-ping", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "pong")
 	})
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// SHUTDOWN_PUBLISH: as it is stopped (SIGINT, SIGTERM), after its last
+	// answer, the app publishes "shutdown" (with SUFFIX), waits for the
+	// broker's reply and exits 0, as an app whose shutdown flushes a queue
+	// does. The call is made only once keploy stops the app.
+	if os.Getenv("SHUTDOWN_PUBLISH") == "" {
+		log.Fatal(http.ListenAndServe(":8080", nil))
+	}
+	stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	srv := &http.Server{Addr: ":8080"}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+	<-stop.Done()
+	_ = srv.Shutdown(context.Background())
+	done := make(chan struct{})
+	publish(broker, "shutdown"+os.Getenv("SUFFIX"), done)
+	log.Printf("shutdown published")
 }

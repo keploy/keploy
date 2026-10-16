@@ -23,12 +23,20 @@
 #      exchange, opened and closed inside e-wait-1: the test's whole, its
 #      first exchange included.
 #
-# Not here, a known limit: a call made after the set's LAST test is judged by
-# a read of the set's misses at its end (unit tests: unclaimed_calls_test.go),
-# but only if the app makes it before that read; keploy reads without waiting
-# on the app's clock and stops the app right after, so whether a delayed
-# publish lands before the read is load-dependent, and no case here asserts on
-# it (P101-b: stop the app, then read).
+# A call made after the set's LAST test is judged by a read of the set's
+# misses at its end, which keploy makes once it has stopped the app it started
+# for the set and the app has exited (P101-b): a call the app makes only as it
+# is stopped is read with them. With SHUTDOWN_PUBLISH set the app publishes
+# "shutdown" as it is stopped, after its last answer; its recording is /c-ping:
+#
+#   6. HTTP, the recorded shutdown publish: every test passes.
+#   7. HTTP, a changed shutdown publish: the set fails, keploy test exits
+#      non-zero, the report names the call among those made after the set's
+#      last test, and c-ping, whose answer it followed, passes.
+#
+# A delayed publish the app starts on its own after its last answer, and
+# that lands before it is stopped, is the same read's; whether it lands
+# before the stop is the app's clock, and no case here asserts on it.
 #
 # Env: RECORD_BIN, REPLAY_BIN. Ports: 8080 (app), 9099 (broker, HTTP), 9098
 # (broker, TCP), 16789 (keploy's proxy).
@@ -81,6 +89,8 @@ set_status() { grep -m1 '^status:' "$(REPORT)" 2>/dev/null | awk '{print $2}'; }
 # test_status <id>: the status the report gives test case id.
 test_status() { ID="$1" yq -r '.tests[] | select(.test_case_id == strenv(ID)) | .status' "$(REPORT)" 2>/dev/null; }
 
+# APP_ENV is more of the app's environment, for every run of it.
+APP_ENV=""
 BROKER_PID=""
 REC_PID=""
 cleanup() {
@@ -103,7 +113,7 @@ record() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker ../ff-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -123,6 +133,31 @@ record() {
     cd "$WORK" || exit 1
 }
 
+# record_shutdown <dir>: a recording of /c-ping by the app that publishes
+# "shutdown" as it is stopped (SHUTDOWN_PUBLISH), over HTTP.
+record_shutdown() {
+    local dir="$1"
+    mkdir -p "$dir" && cd "$dir" || exit 1
+    ../ff-broker >broker.log 2>&1 &
+    BROKER_PID=$!
+    wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+        --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+    REC_PID=$!
+    wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
+    curl -s "http://127.0.0.1:$APP/c-ping" >/dev/null
+    wait_tests 1 "$REC_PID" || fail "$dir: keploy record wrote $(test_files) test cases, want 1"
+    stop_pid "$REC_PID"
+    REC_PID=""
+    kill "$BROKER_PID" 2>/dev/null
+    wait "$BROKER_PID" 2>/dev/null
+    BROKER_PID=""
+    own
+    grep -q "shutdown published" record.log || fail "$dir: the app did not publish as keploy record stopped it"
+    grep -q "shutdown" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the shutdown publish was not recorded"
+    cd "$WORK" || exit 1
+}
+
 # replay <dir> <name> <proto> [suffix] [nopublish]: keploy test of dir's
 # recording, the broker down; RC is its exit code.
 replay() {
@@ -131,7 +166,7 @@ replay() {
     REPLAY_DIR="$WORK/$dir"
     cd "$REPLAY_DIR" || exit 1
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish ../ff-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -179,6 +214,21 @@ expect_after_fails "4 (HTTP, changed)"
 echo "== 5. TCP, the app no longer publishes =="
 replay tcp unmade tcp "" 1
 expect_after_fails "5 (TCP, no publish)"
+
+APP_ENV="SHUTDOWN_PUBLISH=1"
+record_shutdown shutdown
+echo "== 6. HTTP, the recorded shutdown publish =="
+replay shutdown as-recorded http
+expect_pass "6 (HTTP, shutdown publish as recorded)"
+echo "== 7. HTTP, a changed shutdown publish =="
+replay shutdown changed http "-changed"
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
+    fail "7 (HTTP, changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+    fail "7 (HTTP, changed shutdown publish): the report does not name the publish among the calls made after the set's last test: $(grep -n -A3 'unclaimed' "$(REPORT)" | head -12)"
+[ "$(test_status get-c-ping-1)" = PASSED ] ||
+    fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"
