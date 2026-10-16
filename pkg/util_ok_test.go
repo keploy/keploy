@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -108,25 +109,24 @@ func TestCompareHTTPStream_ProvenSwitchReadsTheStreamToItsEnd(t *testing.T) {
 }
 
 // Under the proven switch a keepalive after the recorded frames (an SSE frame
-// of comments alone) is not a difference: it carries no event, and how many
-// arrive depends on how long the stream took. An event after them still is.
-func TestCompareHTTPStream_ProvenSwitchSkipsATrailingSSEKeepalive(t *testing.T) {
+// of comments alone) is not a difference: it carries no event. It is one
+// beyond the recording, so the read ends on it (row W1): the app kept the
+// stream open, and the test has no verdict (ErrStreamHeldOpen), never a pass,
+// whatever the app would have sent after it. An event after the recorded
+// frames still is a difference, a comment beside it or not.
+func TestCompareHTTPStream_ProvenSwitchEndsOnATrailingSSEKeepalive(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	expected := models.HTTPResp{StreamBody: frames("data", "a", "b")}
-	compare := func(body string) (bool, *StreamMismatchInfo) {
+	compare := func(body string) (bool, *StreamMismatchInfo, error) {
 		ok, _, info, err := CompareHTTPStream(expected, strings.NewReader(body), HTTPStreamConfig{Mode: HTTPStreamModeSSE}, map[string]struct{}{}, zap.NewNop())
-		if err != nil {
-			t.Fatalf("compare: %v", err)
+		return ok, info, err
+	}
+	for _, body := range []string{"data: a\n\ndata: b\n\n: ping\n\n", "data: a\n\ndata: b\n\n: ping\n\nevent: error\ndata: boom\n\n"} {
+		if ok, info, err := compare(body); !ok || info != nil || !errors.Is(err, ErrStreamHeldOpen) {
+			t.Fatalf("%q: %v, %+v, %v; want the recorded frames matched and ErrStreamHeldOpen", body, ok, info, err)
 		}
-		return ok, info
 	}
-	if ok, info := compare("data: a\n\ndata: b\n\n: ping\n\n"); !ok {
-		t.Fatalf("a trailing keepalive failed the stream: %+v", info)
-	}
-	if ok, _ := compare("data: a\n\ndata: b\n\n: ping\n\nevent: error\ndata: boom\n\n"); ok {
-		t.Fatal("an event after a trailing keepalive passed")
-	}
-	if ok, _ := compare("data: a\n\ndata: b\n\n: ping\ndata: boom\n\n"); ok {
-		t.Fatal("a frame with a comment and an event after the recorded frames passed")
+	if ok, _, err := compare("data: a\n\ndata: b\n\n: ping\ndata: boom\n\n"); ok || err != nil {
+		t.Fatalf("a frame with a comment and an event after the recorded frames gave %v, %v; want a difference", ok, err)
 	}
 }

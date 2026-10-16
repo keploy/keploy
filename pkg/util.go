@@ -1262,10 +1262,16 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 // Without the proven switch the comparison stops at the last recorded frame
 // (part, or byte), so a stream that goes on is not waited for. Under the
 // switch every response is compared whole (O-K): the stream is read to its
-// end, and a frame after the recorded ones is a difference (trailingFrame).
-// The read is bounded as the request is: the user's --api-timeout, or the
-// recorded duration plus 10 s (ComputeStreamingTimeoutSeconds), which fails
-// the test if the stream does not end by then.
+// end, and a frame after the recorded ones is a difference (trailingFrame),
+// as are bytes beyond a recorded binary stream. A keepalive beyond the
+// recorded ones (an SSE frame of comments alone, an NDJSON blank line) once
+// every recorded frame has come ends the read: the app kept the stream open
+// past its recording, and the test has no verdict (ErrStreamHeldOpen, row
+// W1). The read is bounded as the request is: the --api-timeout or the
+// recorded duration plus 10 s, whichever is longer
+// (ComputeStreamingTimeoutSeconds); under the
+// switch only when the user set an apiTimeout of their own, and otherwise by
+// no clock (SimulationConfig.Unbounded).
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
@@ -1282,6 +1288,15 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
 }
+
+// ErrStreamHeldOpen ends the read of a stream, under the proven switch, that
+// the app kept open past its recording (row W1): every recorded frame (gRPC:
+// message) came, and then a keepalive beyond the recorded ones. A stream is
+// read to its end and no clock ends it, so the app's keepalives do: the test
+// has no verdict (models.FailureInfo.StreamHeldOpen), never a pass, and the
+// wait does not outlast the app's next keepalive. A frame beyond the
+// recording that is no keepalive fails the test, as before.
+var ErrStreamHeldOpen = errors.New("the app kept the stream open past its recording")
 
 // trailingFrame is the mismatch of a frame the answer streamed after the
 // recorded ones (index of them): under the proven switch a stream is read to
@@ -1468,11 +1483,13 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		if nextExpected >= len(expectedQueue) {
 			if readToEnd {
 				// A frame of comments alone (": ping") is a keepalive: it
-				// carries no event, and how many arrive depends on how long
-				// the stream took, so one after the recorded frames is not
-				// a difference.
+				// carries no event, so one after the recorded frames is no
+				// difference. It is one beyond the recorded keepalives,
+				// which are among the recorded frames: the app kept the
+				// stream open past its recording, and the read ends there
+				// (ErrStreamHeldOpen).
 				if sseCommentsOnly(parseSSEFrame(frame)) {
-					continue
+					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
 				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
@@ -1545,6 +1562,13 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	for scanner.Scan() {
 		line := canonicalizeNDJSONLine(scanner.Text())
 		if line == "" {
+			// A blank line is NDJSON's keepalive. One after the recorded
+			// lines is beyond the recorded keepalives (a recording keeps
+			// none: it drops blank lines): the app kept the stream open
+			// past its recording (ErrStreamHeldOpen).
+			if readToEnd && nextExpected >= len(expectedQueue) {
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
+			}
 			continue
 		}
 
@@ -1697,6 +1721,11 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 			}
 			actualSize += n
+			if readToEnd && actualSize > expectedSize {
+				// Bytes beyond the recording: the stream differs, whether
+				// or not it goes on, so it is not read further.
+				break
+			}
 			if actualSize >= expectedSize && !readToEnd {
 				if actualSize > expectedSize {
 					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
