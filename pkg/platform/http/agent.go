@@ -1704,7 +1704,7 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -1716,16 +1716,23 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
+	// stopKilled is why the stop at a test set's end had to kill the app
+	// (models.AppError.StopKilled), known once the app's run has returned.
+	var stopKilled string
 	defer func() {
 		err := runAppErrGrp.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to stop the app")
+		}
+		if ret.AppErrorType == models.ErrCtxCanceled && stopKilled != "" {
+			ret.StopKilled = stopKilled
 		}
 	}()
 
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
 		appErr := app.Run(runAppCtx)
+		stopKilled = appErr.StopKilled
 		// The daemons the app left are part of its run, and end with it
 		// (adopt_linux.go): none is judged in the next test set, and the app
 		// started again can bind their ports.

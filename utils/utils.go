@@ -919,6 +919,24 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
+	_, err := interruptProcessTree(logger, ppid, sig)
+	return err
+}
+
+// InterruptProcessTreeKilled is InterruptProcessTree, and says whether it had
+// to kill: a process group's leader had not exited TreeInterruptGrace after
+// sig, and the group was sent SIGKILL (on Windows: the forced taskkill). As
+// InterruptProcessTree, it waits for each group's leader, not for the rest of
+// the group.
+func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed bool, err error) {
+	return interruptProcessTree(logger, ppid, sig)
+}
+
+// TreeInterruptGrace is how long InterruptProcessTree waits for each process
+// group of the tree to exit after its signal before it sends SIGKILL.
+const TreeInterruptGrace = 3 * time.Second
+
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) (killed bool, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -948,7 +966,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 				}
 				if running, err := isProcessRunning(ppid); err == nil && !running {
-					return nil
+					return false, nil
 				}
 			} else {
 				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
@@ -972,6 +990,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
 			} else {
 				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
+				killed = true
 			}
 		}
 
@@ -995,7 +1014,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 		}
-		return nil
+		return false, nil
 	}
 
 	// Non-windows (existing logic)
@@ -1003,7 +1022,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	children, groupOf, err := findChildPIDs(ppid)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	children = append(children, ppid)
@@ -1026,7 +1045,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, 3*time.Second, logger)
+		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
 		if err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
@@ -1038,6 +1057,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
+			killed = true
 			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
@@ -1045,7 +1065,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 		}
 	}
-	return nil
+	return killed, nil
 }
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
