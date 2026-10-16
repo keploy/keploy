@@ -122,6 +122,16 @@ type Config struct {
 	// as for models.CaptureLoss. Nil is safe.
 	OnCaptureLoss func(kind models.CaptureLossKind, what string)
 
+	// OnClientHandshakeFailed, when set, is handed the error of a
+	// client-side TLS upgrade that failed in its handshake (TLSUpgradeFn
+	// with isClient=false), in place of the STARTTLS loss OnCaptureLoss is
+	// told of: it is a client-side handshake with keploy's proxy like any
+	// other, which the proxy tells apart -- a client that hung up, one that
+	// abandoned it once keploy's certificate was out, one that rejected
+	// the certificate -- rather than an upgrade keploy could not make. Not
+	// called once ctx is done. Nil keeps the STARTTLS loss.
+	OnClientHandshakeFailed func(ctx context.Context, err error)
+
 	// PerConnCap is the soft cap on parser-owned buffered bytes.
 	// When the number of bytes currently sitting in the tee channel
 	// (i.e. read from the socket but not yet consumed by the parser)

@@ -226,6 +226,9 @@ func (p *Proxy) recordViaSupervisor(
 	relayCfg := relay.Config{
 		Logger:        logger,
 		OnCaptureLoss: p.losses.Add,
+		// A client-side upgrade's failed handshake is charged as any
+		// client-side handshake with the proxy, not as starttls_failed.
+		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
 		// captured once per connection: the relay calls the returned fn with
 		// no options in hand. With the flag unset this is the historic

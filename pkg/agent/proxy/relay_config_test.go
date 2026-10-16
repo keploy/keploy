@@ -159,6 +159,21 @@ func TestRelayConfig_TLSUpgradeFnVerifiesOnTheSameFlag(t *testing.T) {
 	}
 }
 
+// A client-side upgrade's failed handshake is charged as any client-side
+// handshake with the proxy (relayClientHandshake), to this connection's
+// destination, never as starttls_failed: unbound, every client that cancels a
+// STARTTLS or Postgres SSLRequest handshake fails its test and every later
+// one. The behaviour is TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake
+// and the relay's TestAFailedClientSideUpgradeGoesToTheClientHandshakeHook.
+func TestRelayConfig_AClientUpgradesHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
+	t.Parallel()
+
+	fields, _ := relayConfigLiteral(t)
+	if got, want := fields["OnClientHandshakeFailed"], "p.relayClientHandshake(dstConn)"; got != want {
+		t.Fatalf("OnClientHandshakeFailed is %q, want %q", got, want)
+	}
+}
+
 // The half-close grace is an operator knob whose whole point is being
 // reachable without a rebuild, so the one line binding it into the relay
 // is worth pinning: delete it and the field silently reverts to the
