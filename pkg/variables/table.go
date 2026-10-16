@@ -15,12 +15,43 @@ type Binding = models.VariableBinding
 // Table holds the variables one scope has bound: one test case in keploy
 // test, one test in keploy mock replay. A variable is bound once; a later binding of
 // the same name does not take (Bind). Safe for concurrent use.
+//
+// With KeepRun, a value bound while no scope is open (the run's start-up,
+// before its first test, or between two tests once a scope was closed) is
+// the run's: every later scope sees it.
 type Table struct {
 	mu   sync.Mutex
 	vals map[string]Binding
+	run  map[string]Binding
+	// open is whether a scope is open (Reset, Start; until Close).
+	open bool
+	// keepRun: what is bound while no scope is open is the run's (KeepRun).
+	keepRun bool
 	// gen counts the scopes the table has begun (Reset): a call checked in
 	// one scope never binds in the next (BindAll).
 	gen uint64
+}
+
+// lookup is the binding of name in force: the scope's, else the run's.
+// t.mu is held.
+func (t *Table) lookup(name string) (Binding, bool) {
+	if b, ok := t.vals[name]; ok {
+		return b, true
+	}
+	b, ok := t.run[name]
+	return b, ok
+}
+
+// all is every binding in force, the scope's over the run's. t.mu is held.
+func (t *Table) all() map[string]Binding {
+	out := make(map[string]Binding, len(t.vals)+len(t.run))
+	for n, b := range t.run {
+		out[n] = b
+	}
+	for n, b := range t.vals {
+		out[n] = b
+	}
+	return out
 }
 
 // Gen is the scope the table is in now: what a call that is about to bind
@@ -35,8 +66,7 @@ func (t *Table) Gen() uint64 {
 func (t *Table) Lookup(name string) (Binding, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	b, ok := t.vals[name]
-	return b, ok
+	return t.lookup(name)
 }
 
 // Bind records b unless its name is already bound. It returns the binding in
@@ -44,14 +74,35 @@ func (t *Table) Lookup(name string) (Binding, bool) {
 func (t *Table) Bind(b Binding) (Binding, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if have, ok := t.vals[b.Name]; ok {
+	if have, ok := t.lookup(b.Name); ok {
 		return have, false
+	}
+	t.put(b)
+	return b, true
+}
+
+// KeepRun makes what is bound while no scope is open the run's, which every
+// later scope sees, instead of the next scope's to forget.
+func (t *Table) KeepRun() {
+	t.mu.Lock()
+	t.keepRun = true
+	t.mu.Unlock()
+}
+
+// put binds b in the open scope, or the run's when none is open and the
+// table keeps the run's (KeepRun). t.mu is held.
+func (t *Table) put(b Binding) {
+	if !t.open && t.keepRun {
+		if t.run == nil {
+			t.run = make(map[string]Binding)
+		}
+		t.run[b.Name] = b
+		return
 	}
 	if t.vals == nil {
 		t.vals = make(map[string]Binding)
 	}
 	t.vals[b.Name] = b
-	return b, true
 }
 
 // BindAll binds bs together, all or none, under one lock, for a call checked
@@ -67,11 +118,12 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 	if gen != t.gen {
 		return Binding{}, Binding{}, true, false
 	}
+	inForce := t.all()
 	for i, b := range bs {
-		if have, bound := t.vals[b.Name]; bound && have.Value != b.Value {
+		if have, bound := inForce[b.Name]; bound && have.Value != b.Value {
 			return b, have, false, false
 		}
-		for _, other := range t.vals {
+		for _, other := range inForce {
 			if !other.Given && other.Name != b.Name && other.Value == b.Value && other.Recorded != b.Recorded {
 				return b, other, false, false
 			}
@@ -85,15 +137,36 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 			}
 		}
 	}
-	if t.vals == nil {
-		t.vals = make(map[string]Binding, len(bs))
-	}
 	for _, b := range bs {
-		if _, bound := t.vals[b.Name]; !bound {
-			t.vals[b.Name] = b
+		if _, bound := t.lookup(b.Name); !bound {
+			t.put(b)
 		}
 	}
 	return Binding{}, Binding{}, false, true
+}
+
+// BindEach binds each of bs on its own, under one lock, for a call checked in
+// scope gen: a name already bound must hold the same value, and nothing else
+// is required of it (two variables may share a live value: two clock reads
+// of one millisecond). stale is true when a new scope began since gen;
+// nothing is bound unless ok.
+func (t *Table) BindEach(gen uint64, bs []Binding) (stale, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if gen != t.gen {
+		return true, false
+	}
+	for _, b := range bs {
+		if have, bound := t.lookup(b.Name); bound && have.Value != b.Value {
+			return false, false
+		}
+	}
+	for _, b := range bs {
+		if _, bound := t.lookup(b.Name); !bound {
+			t.put(b)
+		}
+	}
+	return false, true
 }
 
 // Start begins a new scope (as Reset) with the values its test case gave
@@ -104,6 +177,7 @@ func (t *Table) Start(given []Binding) {
 	defer t.mu.Unlock()
 	t.gen++
 	t.vals = nil
+	t.open = true
 	if len(given) == 0 {
 		return
 	}
@@ -116,10 +190,22 @@ func (t *Table) Start(given []Binding) {
 	}
 }
 
-// Reset forgets every binding: a new scope begins.
+// Reset forgets every binding of the scope: a new scope begins. The run's
+// stay.
 func (t *Table) Reset() {
 	t.mu.Lock()
 	t.vals = nil
+	t.open = true
+	t.gen++
+	t.mu.Unlock()
+}
+
+// Close ends the open scope: what is bound until the next one begins is the
+// run's.
+func (t *Table) Close() {
+	t.mu.Lock()
+	t.vals = nil
+	t.open = false
 	t.gen++
 	t.mu.Unlock()
 }
@@ -129,11 +215,17 @@ func (t *Table) Reset() {
 func (t *Table) Clone() *Table {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	c := &Table{gen: t.gen}
+	c := &Table{gen: t.gen, open: t.open, keepRun: t.keepRun}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {
 			c.vals[k] = v
+		}
+	}
+	if t.run != nil {
+		c.run = make(map[string]Binding, len(t.run))
+		for k, v := range t.run {
+			c.run[k] = v
 		}
 	}
 	return c
@@ -142,8 +234,9 @@ func (t *Table) Clone() *Table {
 // Snapshot returns the bindings in force, by name.
 func (t *Table) Snapshot() []Binding {
 	t.mu.Lock()
-	out := make([]Binding, 0, len(t.vals))
-	for _, b := range t.vals {
+	in := t.all()
+	out := make([]Binding, 0, len(in))
+	for _, b := range in {
 		out = append(out, b)
 	}
 	t.mu.Unlock()
