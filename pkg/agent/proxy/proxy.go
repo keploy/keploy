@@ -4183,6 +4183,11 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// explicit reset a long-lived connection could match
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
+	if provenswitch.On() {
+		// A new test set: what the previous set served is no earlier place
+		// of this one's, whose mocks reuse its names (package matcher/learn).
+		p.learnTracker.NewSet()
+	}
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {

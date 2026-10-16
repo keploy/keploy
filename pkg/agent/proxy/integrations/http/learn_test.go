@@ -34,6 +34,13 @@ type learnDb struct {
 	pooled   []*models.Mock // the pool's mocks as UpdateUnFilteredMock left them
 	// otherTest are the moments recorded in another test's window.
 	otherTest map[time.Time]bool
+	// pool are moments recorded outside every recorded test's window by
+	// mocks the fake does not show (a data-plane mock of the pool, which
+	// the exact view hides while a test is open).
+	pool map[time.Time]bool
+	// staged are the mocks the fake stages but does not show
+	// (integrations.StagedReader).
+	staged []*models.Mock
 	// observe, when set, is told of every mock a claim takes, as the mock
 	// manager tells its served observer (the learn step's tracker).
 	observe func(*models.Mock)
@@ -41,11 +48,16 @@ type learnDb struct {
 
 func (d *learnDb) GetPerTestMocksInWindow() ([]*models.Mock, error) { return d.perTest, nil }
 
+func (d *learnDb) StagedMocks() []*models.Mock { return d.staged }
+
 // The fake's session mocks were recorded outside every recorded test's
 // window (the start-up): the pool's; every other moment is inside one, the
 // open test's (otherTest names moments of another recorded test).
 func (d *learnDb) InTestWindow(time.Time) bool { return false }
 func (d *learnDb) InRecordedTestWindow(t time.Time) (bool, bool) {
+	if d.pool[t] {
+		return false, true
+	}
 	for _, m := range d.mocks {
 		if m.Spec.ReqTimestampMock.Equal(t) {
 			return false, true

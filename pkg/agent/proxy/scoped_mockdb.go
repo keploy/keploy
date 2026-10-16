@@ -332,6 +332,18 @@ var (
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
 )
 
+// StagedMocks forwards the store's staged mocks (integrations.StagedReader),
+// none when it keeps none: the learn step's earlier places are the
+// recording's, whatever this view's allowlist shows.
+func (s *scopedMockDb) StagedMocks() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.StagedReader); ok {
+		return sr.StagedMocks()
+	}
+	return nil
+}
+
+var _ integrations.StagedReader = (*scopedMockDb)(nil)
+
 // OwnedByTest implements integrations.TestOwnership: a mock is the open
 // test's own when its worker's current allowlist (the test's mapping) names
 // it.

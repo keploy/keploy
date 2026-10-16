@@ -24,7 +24,18 @@ type Tracker struct {
 	// move at one moment, so a call near it may be either test's, and its
 	// earlier places may be there.
 	before []*models.Mock
-	// kept are the names in mocks: a mock served again is kept once.
+	// outside are the mocks served while no test was open (the start-up,
+	// between tests), by every later test: each is an earlier place of every
+	// test that follows, not of the next one alone. The exact view shows a
+	// data-plane mock of the pool only while no test is open, so a value the
+	// app sent in a start-up call is found here in the second test on, and
+	// refused there as in the first (only a test's own calls carry its
+	// variables), never learned as noise. outsideKept are their identities
+	// (mockID). They are the running set's: NewSet forgets them.
+	outside     []*models.Mock
+	outsideKept map[string]bool
+	// kept are the identities (mockID) in mocks: a mock served again is kept
+	// once.
 	kept map[string]bool
 	// answered are the test's own mocks that answered a request of the
 	// running test, by name: each answers one (design §5.2), whatever
@@ -45,6 +56,29 @@ type Tracker struct {
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
 	return &Tracker{}
+}
+
+// NewSet starts the next test set's replay on the same agent: what was served
+// before it (the previous set's tests, its start-up, between its tests) is no
+// earlier place of the new set's, and no test is open until the next Begin.
+// Mock names restart in every set (mock-0 again), so a mock served in one set
+// must not stand for, or hide, another set's mock of its name.
+func (t *Tracker) NewSet() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.mocks, t.kept, t.before = nil, nil, nil
+	t.outside, t.outsideKept = nil, nil
+	t.open = false
+	t.mu.Unlock()
+}
+
+// mockID is a served mock's identity: its name, which is unique within one
+// set's recording only, with its kind and recorded times.
+func mockID(m *models.Mock) string {
+	return m.Name + "\x00" + string(m.Kind) + "\x00" + strconv.FormatInt(m.Spec.ReqTimestampMock.UnixNano(), 10) +
+		"\x00" + strconv.FormatInt(m.Spec.ResTimestampMock.UnixNano(), 10)
 }
 
 // Begin starts the next test: nothing is earlier than its first call.
@@ -87,16 +121,27 @@ func (t *Tracker) Open() bool {
 
 // Test is the running test's number, what the learn step served in it so
 // far, leaf by leaf, every mock any parser served in it so far
-// (ServedMock), and the mocks served before it began (see Tracker.before).
-// A request reads it once its scope is read, and hands the number back to
-// Served.
+// (ServedMock), and the mocks served before it began: those served since the
+// previous test began (see Tracker.before), and every one served while no
+// test was open (see Tracker.outside), each once. A request reads it once
+// its scope is read, and hands the number back to Served.
 func (t *Tracker) Test() (uint64, []Earlier, []*models.Mock, []*models.Mock) {
 	if t == nil {
 		return 0, nil, nil, nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.epoch, append([]Earlier(nil), t.served...), append([]*models.Mock(nil), t.mocks...), append([]*models.Mock(nil), t.before...)
+	before := append(make([]*models.Mock, 0, len(t.before)+len(t.outside)), t.before...)
+	seen := make(map[string]bool, len(t.before))
+	for _, m := range t.before {
+		seen[mockID(m)] = true
+	}
+	for _, m := range t.outside {
+		if !seen[mockID(m)] {
+			before = append(before, m)
+		}
+	}
+	return t.epoch, append([]Earlier(nil), t.served...), append([]*models.Mock(nil), t.mocks...), before
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -106,13 +151,23 @@ func (t *Tracker) ServedMock(m *models.Mock) {
 		return
 	}
 	t.mu.Lock()
+	id := mockID(m)
 	// Kept between tests too: the next Begin moves it to before.
-	if !t.kept[m.Name] {
+	if !t.kept[id] {
 		if t.kept == nil {
 			t.kept = map[string]bool{}
 		}
-		t.kept[m.Name] = true
+		t.kept[id] = true
 		t.mocks = append(t.mocks, m)
+	}
+	// Served while no test is open: an earlier place of every later test of
+	// the set.
+	if !t.open && !t.outsideKept[id] {
+		if t.outsideKept == nil {
+			t.outsideKept = map[string]bool{}
+		}
+		t.outsideKept[id] = true
+		t.outside = append(t.outside, m)
 	}
 	t.mu.Unlock()
 }

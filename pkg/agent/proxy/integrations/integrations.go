@@ -324,6 +324,16 @@ type StagedFinder interface {
 	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
 }
 
+// StagedReader is an optional MockMemDb capability: every mock staged in the
+// store (its per-test, session and start-up tiers), whatever the open view
+// shows and whether or not it was served. For the learn step's earlier places
+// only (design v14 §7.2 step 6: a value the recording held before a call is
+// one the call's value may have flowed from, served or not): such a mock is
+// never handed out, nor served.
+type StagedReader interface {
+	StagedMocks() []*models.Mock
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where
