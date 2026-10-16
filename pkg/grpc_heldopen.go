@@ -49,7 +49,6 @@ type pingWatch struct {
 	r        frameWalk
 	afterEnd int  // the app's PINGs since the request ended
 	appEnded bool // the app ended the stream (END_STREAM, RST_STREAM)
-	begun    bool // the app sent its response headers, and not its end
 	// lastKeepalive is how many messages had come at the app's last
 	// keepalive, -1 before its first.
 	lastKeepalive int
@@ -194,8 +193,6 @@ func (w *pingWatch) scanRead(b []byte) {
 			w.ping()
 		case w.r.typ == http2.FrameRSTStream:
 			w.appEnded = true
-		case w.r.typ == http2.FrameHeaders && !w.r.flags.Has(http2.FlagHeadersEndStream):
-			w.begun = true
 		}
 		if endsStream(w.r.typ, w.r.flags) {
 			// Its payload, the stream's last messages, still counts.
@@ -244,10 +241,11 @@ func (w *pingWatch) data(p []byte) {
 // ping is a PING of the app's: after the request's end, the first may be the
 // app's last flow-control ping, and a later one is a keepalive. On a stream
 // the app has not ended, a keepalive holds it open when every recorded
-// message has come and the app began its answer (its headers, for a
-// recording of none), or when the keepalive before it saw the same messages:
-// the app stalled short of its recording. What the app sends after it is not
-// waited for, and does not count.
+// message has come, and one at least (a recording of none is held past only
+// by a message beyond it), or when the keepalive before it saw the same
+// messages: the app stalled. So an answer slow to come, its headers sent or
+// not, is judged until two keepalives pass with nothing. What the app sends
+// after the keepalive that holds it is not waited for, and does not count.
 func (w *pingWatch) ping() {
 	if !w.ended.Load() {
 		return
@@ -262,7 +260,7 @@ func (w *pingWatch) ping() {
 		return
 	}
 	switch {
-	case w.came >= w.complete && (w.begun || w.came > 0):
+	case w.came >= w.complete && w.came > 0:
 	case prev == w.came:
 		w.stalled = true
 	default:
