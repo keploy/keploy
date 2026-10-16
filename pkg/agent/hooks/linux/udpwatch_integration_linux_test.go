@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -33,6 +34,41 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
+// runUDPServerHelper is the UDP helper as an application's server: bound on
+// 127.0.0.1, it says its port, then at each line on stdin receives one
+// request and answers it ("ready served"), until stdin closes.
+func runUDPServerHelper() int {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err == nil {
+		err = unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}})
+	}
+	var sa unix.Sockaddr
+	if err == nil {
+		sa, err = unix.Getsockname(fd)
+	}
+	if err != nil {
+		fmt.Println("helper:", err)
+		return 3
+	}
+	fmt.Println("ready", sa.(*unix.SockaddrInet4).Port)
+	in := bufio.NewReader(os.Stdin)
+	buf := make([]byte, 16)
+	for {
+		if _, err := in.ReadString('\n'); err != nil {
+			return 0
+		}
+		_, from, err := unix.Recvfrom(fd, buf, 0)
+		if err == nil {
+			err = unix.Sendto(fd, []byte("pong"), 0, from)
+		}
+		if err != nil {
+			fmt.Println("helper:", err)
+			return 3
+		}
+		fmt.Println("ready served")
+	}
+}
+
 // udpHelperEnv makes a re-executed test binary a UDP client: it connects a
 // UDP socket to 127.0.0.1:PORT, sends, waits for the reply, tries UDP 443
 // (a connect(), a datagram on it, an unconnected send), says what each did;
@@ -41,6 +77,9 @@ import (
 const udpHelperEnv = "KEPLOY_UDP_TEST_HELPER"
 
 func runUDPHelper(port string) int {
+	if port == "server" {
+		return runUDPServerHelper()
+	}
 	p, _ := strconv.Atoi(port)
 	in := bufio.NewReader(os.Stdin)
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
@@ -89,81 +128,7 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 	if !inOwnPIDNamespace(t) {
 		return
 	}
-	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Fatal(err)
-	}
-	spec, err := loadBpf()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p := spec.Programs["k_sockops"]; p != nil {
-		p.Type = ebpf.SockOps
-		p.AttachType = ebpf.AttachCGroupSockOps
-	}
-	h := NewHooks(zap.NewNop(), &config.Config{})
-	if err := spec.LoadAndAssign(&h.objects, nil); err != nil {
-		t.Fatalf("load keploy's BPF object: %v", err)
-	}
-	t.Cleanup(func() { _ = h.objects.Close() })
-	h.agentRegistrationMap = h.objects.KeployAgentRegistrationMap
-	sock, err := link.Tracepoint("syscalls", "sys_enter_socket", h.objects.SyscallProbeEntrySocket, nil)
-	if err != nil {
-		t.Fatalf("attach sys_enter_socket: %v", err)
-	}
-	t.Cleanup(func() { _ = sock.Close() })
-
-	// A cgroup of the test's own, where the helper runs and the programs
-	// keploy attaches at the root are attached instead.
-	root := cgroupV2Root(t)
-	cg, err := os.MkdirTemp(root, "keploy-udp-test-")
-	if err != nil {
-		t.Fatalf("create a cgroup: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Remove(cg) })
-	for _, p := range []struct {
-		prog   *ebpf.Program
-		attach ebpf.AttachType
-	}{
-		{h.objects.K_connect4, ebpf.AttachCGroupInet4Connect},
-		{h.objects.K_udp4Sendmsg, ebpf.AttachCGroupUDP4Sendmsg},
-	} {
-		l, err := link.AttachCgroup(link.CgroupOptions{Path: cg, Attach: p.attach, Program: p.prog})
-		if err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-		t.Cleanup(func() { _ = l.Close() })
-	}
-	// As the hooks' load does: the watch, then the flag it returns.
-	t.Setenv(provenswitch.Env, "1")
-	flags, err := h.startProvenUDP(cg)
-	if err != nil || flags&structs.FlagProvenUDP == 0 {
-		t.Fatalf("startProvenUDP under the switch = %#x, %v; want FlagProvenUDP", flags, err)
-	}
-	t.Cleanup(func() { h.udp.close() })
-
-	var info structs.AgentInfo
-	info.KeployAgentNsPid = uint32(os.Getpid())
-	if info.KeployAgentInode, info.KeployAgentDev, err = GetSelfInodeNumber(); err != nil {
-		t.Fatal(err)
-	}
-	info.IsDocker = 1
-	info.DNSPort = -1
-	info.Flags = flags
-	if err := h.SendAgentInfo(info); err != nil {
-		t.Fatal(err)
-	}
-	client := structs.ClientInfo{Mode: 1, ClientNSPID: 0x7ffffff0}
-	for i := range client.PassThroughPorts {
-		client.PassThroughPorts[i] = -1
-	}
-	if err := h.objects.KeployClientRegistrationMap.Update(uint64(0), client, ebpf.UpdateAny); err != nil {
-		t.Fatal(err)
-	}
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0) // registers this process as the agent
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = unix.Close(fd)
+	h, cg := provenUDPHooks(t)
 
 	echo, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -431,5 +396,193 @@ func TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest(t *testing.T) 
 	t.Logf("mark %+v; test 1's end %+v; charged to test 1: %+v", mark, now, lost)
 	if udp(lost) == 0 {
 		t.Fatalf("FALSE PASS: the socket was answered live during test 1, and test 1 has no udp_reply loss")
+	}
+}
+
+// provenUDPHooks loads keploy's main object as the agent does, starts the UDP
+// watch under the proven switch on a cgroup of the test's own (where the
+// helpers run, and the programs keploy attaches at the root are attached
+// instead), and registers this process as the agent: in a PID namespace of
+// its own, every process there that calls socket() is a member.
+func provenUDPHooks(t *testing.T) (*Hooks, string) {
+	t.Helper()
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := loadBpf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := spec.Programs["k_sockops"]; p != nil {
+		p.Type = ebpf.SockOps
+		p.AttachType = ebpf.AttachCGroupSockOps
+	}
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	if err := spec.LoadAndAssign(&h.objects, nil); err != nil {
+		t.Fatalf("load keploy's BPF object: %v", err)
+	}
+	t.Cleanup(func() { _ = h.objects.Close() })
+	h.agentRegistrationMap = h.objects.KeployAgentRegistrationMap
+	sock, err := link.Tracepoint("syscalls", "sys_enter_socket", h.objects.SyscallProbeEntrySocket, nil)
+	if err != nil {
+		t.Fatalf("attach sys_enter_socket: %v", err)
+	}
+	t.Cleanup(func() { _ = sock.Close() })
+
+	// A cgroup of the test's own, where the helper runs and the programs
+	// keploy attaches at the root are attached instead.
+	root := cgroupV2Root(t)
+	cg, err := os.MkdirTemp(root, "keploy-udp-test-")
+	if err != nil {
+		t.Fatalf("create a cgroup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cg) })
+	for _, p := range []struct {
+		prog   *ebpf.Program
+		attach ebpf.AttachType
+	}{
+		{h.objects.K_connect4, ebpf.AttachCGroupInet4Connect},
+		{h.objects.K_udp4Sendmsg, ebpf.AttachCGroupUDP4Sendmsg},
+	} {
+		l, err := link.AttachCgroup(link.CgroupOptions{Path: cg, Attach: p.attach, Program: p.prog})
+		if err != nil {
+			t.Fatalf("attach: %v", err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+	}
+	// As the hooks' load does: the watch, then the flag it returns.
+	t.Setenv(provenswitch.Env, "1")
+	flags, err := h.startProvenUDP(cg)
+	if err != nil || flags&structs.FlagProvenUDP == 0 {
+		t.Fatalf("startProvenUDP under the switch = %#x, %v; want FlagProvenUDP", flags, err)
+	}
+	t.Cleanup(func() { h.udp.close() })
+
+	var info structs.AgentInfo
+	info.KeployAgentNsPid = uint32(os.Getpid())
+	if info.KeployAgentInode, info.KeployAgentDev, err = GetSelfInodeNumber(); err != nil {
+		t.Fatal(err)
+	}
+	info.IsDocker = 1
+	info.DNSPort = -1
+	info.Flags = flags
+	if err := h.SendAgentInfo(info); err != nil {
+		t.Fatal(err)
+	}
+	client := structs.ClientInfo{Mode: 1, ClientNSPID: 0x7ffffff0}
+	for i := range client.PassThroughPorts {
+		client.PassThroughPorts[i] = -1
+	}
+	if err := h.objects.KeployClientRegistrationMap.Update(uint64(0), client, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0) // registers this process as the agent
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(fd)
+	return h, cg
+}
+
+// startUDPHelper runs the UDP helper (runUDPHelper) with arg, in cg, and
+// returns its stdin and its stdout's reader.
+func startUDPHelper(t *testing.T, cg, arg string) (io.Writer, *bufio.Reader) {
+	t.Helper()
+	cgf, err := os.Open(cg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cgf.Close()
+	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd.Env = append(os.Environ(), udpHelperEnv+"="+arg)
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Wait() })
+	return stdin, bufio.NewReader(stdout)
+}
+
+// udpLoss is the hooks' udp_reply count, read once every report the kernel
+// made before the read is in.
+func udpLoss(t *testing.T, h *Hooks) uint64 {
+	t.Helper()
+	if err := h.DrainCaptureLosses(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.CaptureLossesErr(); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range h.CaptureLosses() {
+		if l.Kind == models.CaptureLossUDPReply {
+			return l.Count
+		}
+	}
+	return 0
+}
+
+// Under the switch an application's own UDP server (bound, asked by a client
+// that is no member, answering each request) is answered live by nothing:
+// its clients' requests are no answers. The watch is live all the same: a
+// member's client answered by a real server is counted.
+func TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive(t *testing.T) {
+	if !inOwnPIDNamespace(t) {
+		return
+	}
+	h, cg := provenUDPHooks(t)
+	in, out := startUDPHelper(t, cg, "server")
+	line, _ := out.ReadString('\n')
+	port, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(line), "ready "))
+	if err != nil {
+		t.Fatalf("server helper: %q", line)
+	}
+	cl, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	buf := make([]byte, 16)
+	for i := 0; i < 2; i++ {
+		if _, err := in.Write([]byte("serve\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cl.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		if line, _ := out.ReadString('\n'); strings.TrimSpace(line) != "ready served" {
+			t.Fatalf("server helper: %q", line)
+		}
+		if n, err := cl.Read(buf); err != nil || string(buf[:n]) != "pong" {
+			t.Fatalf("the client's answer %d: %q, %v", i, buf[:n], err)
+		}
+	}
+	if n := udpLoss(t, h); n != 0 {
+		t.Fatalf("%d udp_reply losses, want none: the server's clients' requests were counted as live answers", n)
+	}
+
+	echo, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echo.Close() })
+	go func() {
+		b := make([]byte, 16)
+		for {
+			_, from, err := echo.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			_, _ = echo.WriteTo([]byte("pong"), from)
+		}
+	}()
+	_, cout := startUDPHelper(t, cg, strconv.Itoa(echo.LocalAddr().(*net.UDPAddr).Port))
+	if line, _ := cout.ReadString('\n'); !strings.HasPrefix(line, "ready connect443=") {
+		t.Fatalf("client helper: %q", line)
+	}
+	if n := udpLoss(t, h); n != 1 {
+		t.Fatalf("%d udp_reply losses, want 1: a member's client answered by a real server", n)
 	}
 }
