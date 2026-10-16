@@ -54,12 +54,14 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
+    # Keploy's own lines, the CLI's ("Keploy:") and the agent's and its other
+    # modes' ("Keploy(agent):"). Matching "Keploy:" alone let every agent ERROR by.
     # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    if grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"
       echo "----------------------"
       exit 1
     fi
@@ -298,6 +300,9 @@ cd $GO_FUZZERS_PATH
 TEST_PID=$!
 echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID
+# The replay is where a mock the agent cannot answer shows: its log is checked
+# too, as the record's are.
+check_for_errors "test.txt"
 check_test_report
 endsec
 
@@ -306,6 +311,7 @@ if json_pass_supported; then
     "$REPLAY_KEPLOY_BIN" test --storage-format json -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test_json.txt &
     TEST_PID=$!
     wait $TEST_PID
+    check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt
         exit 1
