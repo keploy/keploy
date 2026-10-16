@@ -758,6 +758,145 @@ func TestUnderTheSwitchATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
 	}
 }
 
+// Under the proven switch a test that lost a call fails in the cycle it ran
+// in, as a test with a miss does: --retry-passing-test does not run it again
+// as a passing test, so a later cycle that loses nothing cannot pass it. It
+// was counted a pass in its cycle and only failed once the set's results
+// were in; test-1's wrong answer started a second cycle, test-2 ran in it
+// with its handshake captured, and that row, PASSED, was its verdict.
+func TestUnderTheSwitchACaptureLossFailsItsTestInTheCycleItRanIn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.Test.Mocking = true
+	h.replayer.config.RetryPassing = true
+	h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-1": true}}
+	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.9:443"}}
+	// The mark, then a read as each test ends: rejected while test-2 ran.
+	// The count stays, so a test that ran after it lost nothing.
+	instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, tls}}
+	h.replayer.instrumentation = instr
+	h.replayer.markPIDMaps(context.Background())
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("test set status %q, want FAILED", status)
+	}
+	rows := 0
+	for _, r := range h.report.report.Tests {
+		if r.TestCaseID != "test-2" {
+			continue
+		}
+		rows++
+		if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 {
+			t.Fatalf("test-2: %s %+v, want FAILED with %+v: it lost a call in the only cycle it should have run in", r.Status, r.FailureInfo.CaptureIncomplete, tls)
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("test-2 has %d rows in the set's report, want 1", rows)
+	}
+	if instr.reads != 4 {
+		t.Fatalf("%d reads; want the mark, test-1, test-2 and the end's re-mark: a failed test is not run again", instr.reads)
+	}
+}
+
+// Under the proven switch a --retry-passing-test cycle does not run a set again
+// once a loss has tainted it: every test it ran again would be charged the
+// loss, a test that ran clean before it too, and that row would be its
+// verdict. A loss that fails the tests it taints is a failed test of its
+// cycle, so on its own it started a retry cycle that failed test-1 with a loss
+// that happened after it; with a wrong answer as well it always did.
+func TestUnderTheSwitchARetryCycleDoesNotRunATaintedSetAgain(t *testing.T) {
+	for _, wrongAnswer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a wrong answer too=%v", wrongAnswer), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			h := newPartialRunHarness(t, 3, 0)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.config.RetryPassing = true
+			if wrongAnswer {
+				h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-3": true}}
+			}
+			stall := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 2, What: "to 10.0.0.9:5432"}}
+			// The mark, then a read as each test ends: the parser stalled
+			// while test-2 ran.
+			instr := &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, stall}}
+			h.replayer.instrumentation = instr
+			h.replayer.markPIDMaps(context.Background())
+
+			if status := h.run(t); status != models.TestSetStatusFailed {
+				t.Fatalf("test set status %q, want FAILED", status)
+			}
+			byID := map[string]models.TestResult{}
+			for _, r := range h.report.report.Tests {
+				byID[r.TestCaseID] = r
+			}
+			if r, ok := byID["test-1"]; !ok || r.Status != models.TestStatusPassed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+				t.Fatalf("test-1: %s %+v, want PASSED with no capture evidence: it ran before the loss, and was not run again", r.Status, r.FailureInfo.CaptureIncomplete)
+			}
+			for _, id := range []string{"test-2", "test-3"} {
+				if r, ok := byID[id]; !ok || r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 {
+					t.Fatalf("%s: %s %+v, want FAILED with %+v", id, r.Status, r.FailureInfo.CaptureIncomplete, stall)
+				}
+			}
+			if instr.reads != 5 {
+				t.Fatalf("%d reads; want the mark, three tests and the end's re-mark: a tainted set is not run again", instr.reads)
+			}
+		})
+	}
+}
+
+// Under the proven switch the result line of a test that lost a call says it
+// failed, on the request-response path and the streamed one alike. It said
+// passed: the capture loss failed the test only once the set's results were in.
+func TestUnderTheSwitchACaptureLossTestsResultLineSaysItFailed(t *testing.T) {
+	for _, streamed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streamed=%v", streamed), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Mocking = true
+			if streamed {
+				h.streaming("test-2")
+			}
+			core, logs := observer.New(zapcore.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.9:443"}}
+			h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, tls}}
+			h.replayer.markPIDMaps(context.Background())
+
+			if status := h.run(t); status != models.TestSetStatusFailed {
+				t.Fatalf("test set status %q, want FAILED", status)
+			}
+			// The fields are highlighted (ANSI), so each is matched by what it holds.
+			said := map[string]bool{}
+			for _, e := range logs.FilterMessage("result").All() {
+				m := e.ContextMap()
+				id, _ := m["testcase id"].(string)
+				passed, _ := m["passed"].(string)
+				for _, name := range []string{"test-1", "test-2"} {
+					if strings.Contains(id, name) {
+						said[name] = strings.Contains(passed, "true")
+					}
+				}
+			}
+			if pass1, ok1 := said["test-1"]; !ok1 || !pass1 {
+				t.Fatalf("result lines %v; want test-1 passed", said)
+			}
+			if pass2, ok2 := said["test-2"]; !ok2 || pass2 {
+				t.Fatalf("result lines %v; want test-2, which lost a call, failed", said)
+			}
+			// And the loop says why, once, of test-2 alone.
+			var why []string
+			for _, e := range logs.FilterMessageSnippet("keploy's agent could not capture every call while this").All() {
+				if e.Level == zapcore.ErrorLevel {
+					tc, _ := e.ContextMap()["testcase"].(string)
+					why = append(why, tc)
+				}
+			}
+			if len(why) != 1 || why[0] != "test-2" {
+				t.Fatalf("capture-loss lines for %v; want one, for test-2", why)
+			}
+		})
+	}
+}
+
 // Under the proven switch a per-test read that fails leaves that test without
 // a verdict, and its set unjudged, like a miss list not read whole; an agent
 // that cannot count leaves the tests as they were.

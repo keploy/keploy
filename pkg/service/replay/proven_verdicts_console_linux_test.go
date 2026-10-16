@@ -19,16 +19,16 @@ import (
 // test it fails on a miss or on an unconsumed test mock prints no "Testrun
 // passed" line, though its answer matched, for a plain HTTP test, one under
 // --schema-match, a gRPC test and a streamed test; nor does a test that
-// --assert-dependencies fails on an unconsumed test mock with the switch off
-// (a streamed test asserts its dependencies only under the switch), nor one
-// the switch fails on a capture loss once the set's results are in. The rows
-// where nothing stands against the test are the controls: the line is
-// printed, and captured, where it is due. Under the switch --schema-match is
-// ignored (TestSchemaMatchIsIgnoredUnderTheProvenSwitch), so there its rows
-// are plain HTTP tests; with the switch off they take the schema comparison.
-// A passing plain HTTP test printed none at all: compareHTTPRespForReplay
-// matched it quietly first (#3987) and returned the pass before the
-// comparison that prints the line ran.
+// --assert-dependencies fails on an unconsumed test mock with the switch off (a
+// streamed test asserts its dependencies only under the switch), nor one the
+// switch fails on a capture loss. The rows where nothing stands against the
+// test are the controls: the line is printed, and captured, where it is due.
+// Under the switch --schema-match is ignored
+// (TestSchemaMatchIsIgnoredUnderTheProvenSwitch), so there its rows are plain
+// HTTP tests; with the switch off they take the schema comparison. A passing
+// plain HTTP test printed none at all: compareHTTPRespForReplay matched it
+// quietly first (#3987) and returned the pass before the comparison that prints
+// the line ran.
 func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 	const body = `{"orders":[{"id":"ord_LIT","status":"paid"}]}`
 	miss := func() ([]models.UnmatchedCall, error) {
@@ -48,7 +48,7 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 			{"an unconsumed test mock", true, false, true, false, false, false},
 			// --assert-dependencies fails it as the switch does.
 			{"an unconsumed test mock, --assert-dependencies, the switch off", false, false, true, false, true, false},
-			// The switch fails it after the loop (failTestsWithCaptureLoss).
+			// The switch fails a test keploy's agent lost a call of.
 			{"a capture loss", true, false, false, false, false, true},
 		} {
 			if c.assertDeps && path == "streamed" {
@@ -126,8 +126,8 @@ func TestRunTestSet_AProvenFailurePrintsNoPassLine(t *testing.T) {
 				if !c.passLine {
 					want = models.TestStatusFailed
 				}
-				// The verdict the set's report holds: a capture loss fails its
-				// test only once the set's results are in.
+				// The verdict the set's report holds, after every pass over
+				// the set's results (failTestsWithCaptureLoss among them).
 				if h.report.report == nil {
 					t.Fatal("the set wrote no report")
 				}

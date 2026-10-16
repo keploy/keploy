@@ -289,6 +289,24 @@ func (r *Replayer) testCaptureLosses(ctx context.Context) (models.CaptureLosses,
 	return now.Charged(r.lossMark.at, r.lossRunBase, from), nil
 }
 
+// captureTaintsTheSet reports whether, under the proven switch, the agent's
+// counts as the set's last test ended carry a loss that taints every later
+// test of the set (a kind that is not a test's own, PerTest), judged or not.
+// The counts only grow and each test is charged them from the set's mark
+// (testCaptureLosses), so every test a --retry-passing-test cycle ran again
+// would be charged that loss, the tests that ran clean before it included.
+func (r *Replayer) captureTaintsTheSet() bool {
+	if !provenswitch.On() || !r.lossMark.known || !r.lossLastRead {
+		return false
+	}
+	for _, c := range r.lossLast.SinceWithin(r.lossMark.at, r.lossRunBase) {
+		if !c.Kind.PerTest() {
+			return true
+		}
+	}
+	return false
+}
+
 // endCaptureLosses reads, at a test set's end under the proven switch, what
 // the agent lost after the set's last per-test read (after its mark, when no
 // test read), and moves the mark to now for the next test set. Nothing for
