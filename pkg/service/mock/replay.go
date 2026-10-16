@@ -284,7 +284,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 4. Load the whole set and push it into the proxy.
 	watchCtx, stopWatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopWatch()
-	actual := m.watchIncoming(watchCtx, requests)
+	// The watch's stream ends by the agent's marker when it can
+	// (round_end.go): its token names it to the agent.
+	watchRound := newRoundEnd(m.instrumentation)
+	actual := m.watchIncoming(watchRound.on(watchCtx), requests)
 	empty := map[string]bool{}
 	filtered, unfiltered, failedPool, err := m.loadMocks(ctx, name, empty)
 	if err != nil {
@@ -438,12 +441,39 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		*ran = -1
 	}
 	stoppedNow := false
-	if actual != nil && m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
-		func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords) {
-		select {
-		case <-utils.StopNow():
-			stoppedNow = true
-		default: // the agent ended the drain: failed at ERROR, by the drain
+	// requestsShort says why the requests this run compares are short of
+	// what the agent captured, the user not having stopped it: keploy's own
+	// failure, said at ERROR where it was found, and the run's (below).
+	requestsShort := ""
+	if actual != nil {
+		lost := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords, watchRound)
+		if !lost && watchRound.endsByMarkers() {
+			// The agent said it holds nothing more from before the run
+			// ended: the watch ends on its marker, every request the agent
+			// had put on the stream read, not when the stream is ended here
+			// (round_end.go). An agent this client started is there until
+			// keploy stops it, so its stream closing before its marker
+			// leaves the run short of requests; one compose or the user
+			// stops is said at WARN, as before markers.
+			// Not once the user stopped the run, by the time a stream is
+			// judged: a stop that reached the agent too ends its stream (a
+			// replay's agent does not hold its stop for the watch), and the
+			// run ends unjudged, 128+N.
+			ownAgent := !m.isDockerCompose() && startedAgent(m.instrumentation)
+			strict := func() bool { return ownAgent && !utils.Interrupted() }
+			lost = m.endRound(watchRound, strict, []roundStream{{kind: models.TestCaseStream, done: actual.done}}, replayDrainWords)
+		}
+		if lost {
+			select {
+			case <-utils.StopNow():
+				stoppedNow = true
+			default:
+				// The drain gave up on an agent that made no progress, or
+				// the agent left the watch before its marker: said at
+				// ERROR, by the drain or endRound.
+				requestsShort = "keploy could not read every request the app served from its agent"
+			}
 		}
 	}
 	stopWatch()
@@ -499,6 +529,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
+
+		actualShort: requestsShort,
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missesKnown := counts.missed >= 0
@@ -530,6 +562,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// before it exited, or stopped it -- and a 0 here read as a suite
 		// that passed.
 		runnerExit, failedBy = -1, FailedByKeploy
+	}
+	// What the run compares is short of requests the agent captured: keploy
+	// did not complete it, whatever the test command did (its exit is kept),
+	// and a verdict on part of it is not one on the run.
+	requestsOnly := requestsShort != "" && failedBy != FailedByKeploy
+	if requestsOnly {
+		failedBy = FailedByKeploy
 	}
 	// A process the agent could not track -- the kernel refused it a place in
 	// its PID map -- made calls the agent never saw: not mocked, not
@@ -722,7 +761,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		isolated, isolationNote = false, captureUnverified
 	}
 	var keployErr string
-	if failedBy == FailedByKeploy {
+	if failedBy == FailedByKeploy && requestsOnly {
+		isolated, isolationNote = false, "keploy did not complete the run: "+requestsShort
+		keployFailure, keployErr = errors.New(isolationNote), requestsShort
+	} else if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
 		keployFailure = errors.New(isolationNote)
 		if appErr.Err != nil {
@@ -867,9 +909,17 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-	defer cancel()
-	captured, err := drainer.DrainCapturedMocks(drainCtx)
+	// An epilogue read: no deadline under the proven switch (epilogueRead),
+	// should --on-miss record ever run under it (it is refused there today).
+	var captured []*models.Mock
+	err := epilogueRead(ctx, m.logger,
+		"waiting for keploy's agent to hand over the calls it captured on miss",
+		"press Ctrl+C again to stop now: they are then not added to the mock set",
+		func(ctx context.Context) error {
+			var err error
+			captured, err = drainer.DrainCapturedMocks(ctx)
+			return err
+		})
 	if err != nil {
 		m.logger.Debug("failed to drain captured-on-miss mocks", zap.Error(err))
 		return
@@ -1676,18 +1726,26 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			missesErr = fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, outcome.MissedUnread)
 		}
 	} else {
-		outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-		defer cancel()
-		consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
-		misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
-		if reader, ok := m.instrumentation.(idPairReader); ok {
-			if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
-				m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
-				m.ids = ids.New(pairs)
-			} else {
-				m.logger.Debug("failed to read the ids this run made", zap.Error(err))
-			}
-		}
+		// Epilogue reads: no deadline under the proven switch, where they are
+		// what keploy's verdict rests on (epilogueRead). Each read's error is
+		// its own; the user's interrupt that gives them up is the run's
+		// (stopped).
+		_ = epilogueRead(ctx, m.logger,
+			"waiting for keploy's agent to report what it served and missed",
+			replayDrainWords.stopNow,
+			func(outcomeCtx context.Context) error {
+				consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
+				if reader, ok := m.instrumentation.(idPairReader); ok {
+					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
+						m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
+						m.ids = ids.New(pairs)
+					} else {
+						m.logger.Debug("failed to read the ids this run made", zap.Error(err))
+					}
+				}
+				return nil
+			})
 	}
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
@@ -1784,6 +1842,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if replayOutcomeReporter != nil && !m.config.Mock.Local {
 		if consumedErr != nil || missesErr != nil {
 			m.logger.Info("not metering this replay: the agent did not report the whole outcome, and a run counted as zero is worse than one left uncounted")
+		} else if detail.actualShort != "" {
+			m.logger.Info("not metering this replay: " + detail.actualShort + ", and a request it lost would be reported as one the app did not make")
 		} else {
 			replayOutcomeReporter(ctx, ReplayOutcome{
 				SetName:  m.setName(),

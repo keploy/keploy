@@ -210,7 +210,7 @@ start_suite() {
 CMD="python3 -m pytest -q -p no:cacheprovider test_containers.py"
 # A key: the image's repository (no tag), the port, the configuration's
 # fingerprint.
-KEY_RE="^container:${IMAGE%%:*}:8000@[0-9a-f]{12}$"
+KEY_RE="^container:${IMAGE%%:*}:8000@s[0-9a-f]{12}$"
 
 # keys_of NAME: "<path> <containerKey or ->" for each HTTP mock of the set.
 keys_of() {

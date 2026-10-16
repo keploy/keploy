@@ -58,7 +58,11 @@ type SnapshotContainer struct {
 	// configuration is in; Reading says that read is in flight, and a later
 	// list will carry it.
 	Fingerprint string `json:"fingerprint,omitempty"`
-	Reading     bool   `json:"reading,omitempty"`
+	// LegacyFingerprint is its fingerprint of the legacy form
+	// (legacyFingerprint), with Fingerprint, for a replay of a recording
+	// made before secrets were left out of it.
+	LegacyFingerprint string `json:"legacyFingerprint,omitempty"`
+	Reading           bool   `json:"reading,omitempty"`
 	// Name is the container's name, for messages.
 	Name  string         `json:"name,omitempty"`
 	IPs   []string       `json:"ips,omitempty"`
@@ -111,7 +115,7 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 		}
 		at[id] = len(s.Containers)
 		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/"),
-			Fingerprint: st.fingerprints[id], Reading: st.fingerprints[id] == "" && st.reading[id]})
+			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id]})
 	}
 	// Each IP goes to the container the index names at it (byIP): a
 	// container that took an IP whose old holder's die never arrived holds
@@ -180,6 +184,7 @@ func (p *pushedIndex) apply(s Snapshot) {
 		st.images[e.id] = e.image
 		if c.Fingerprint != "" {
 			st.fingerprints[e.id] = c.Fingerprint
+			st.legacy[e.id] = c.LegacyFingerprint
 		} else if c.Reading {
 			st.reading[e.id] = true
 		}
@@ -222,25 +227,32 @@ func (p *pushedIndex) Lookup(dst netip.AddrPort) (Container, bool, error) {
 // Fingerprint is container id's fingerprint in the list held, waiting, while
 // the CLI is reading it, for a list that carries it.
 func (p *pushedIndex) Fingerprint(ctx context.Context, id string) (string, bool) {
+	fp, _, ok := p.Fingerprints(ctx, id)
+	return fp, ok
+}
+
+// Fingerprints is Fingerprint with the container's legacy fingerprint in the
+// list held (fingerprintsResolver).
+func (p *pushedIndex) Fingerprints(ctx context.Context, id string) (string, string, bool) {
 	for {
 		p.mu.Lock()
 		st, applied := p.st, p.applied
-		var fp string
+		var fp, legacy string
 		held, reading := false, false
 		if st != nil && st.err == nil {
-			fp, held, reading = st.fingerprints[id], st.images[id] != "", st.reading[id]
+			fp, legacy, held, reading = st.fingerprints[id], st.legacy[id], st.images[id] != "", st.reading[id]
 		}
 		p.mu.Unlock()
 		switch {
 		case fp != "" && held:
-			return fp, true
+			return fp, legacy, true
 		case !reading:
-			return "", false
+			return "", "", false
 		}
 		select {
 		case <-applied:
 		case <-ctx.Done():
-			return "", false
+			return "", "", false
 		}
 	}
 }

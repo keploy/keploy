@@ -51,6 +51,10 @@ type replayDetail struct {
 	expected map[string][]models.MockEntry
 	recorded map[string][]*models.TestCase
 	actual   []*models.TestCase
+	// actualShort says why actual is short of the requests the agent
+	// captured ("": it is not): a request it lost would read as one the app
+	// did not make.
+	actualShort string
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.
@@ -85,15 +89,15 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	return c
 }
 
-// wait blocks until the incoming stream has been drained, or grace has passed.
+// wait blocks until the incoming stream has been drained, or it has taken
+// nothing for grace of the time this process could run (utils/stall), as the
+// record side's caseCapture.wait does: a reader still taking requests is
+// waited for however long that takes.
 func (c *actualCapture) wait(grace time.Duration) {
 	if c == nil {
 		return
 	}
-	select {
-	case <-c.done:
-	case <-time.After(grace):
-	}
+	utils.WaitWhileProgressing(c.done, grace, func() uint64 { return uint64(c.seen.Load()) })
 }
 
 func (c *actualCapture) list() []*models.TestCase {

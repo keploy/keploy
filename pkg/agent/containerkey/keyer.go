@@ -21,6 +21,14 @@ import (
 // which recorded keys are ambiguous.
 var Default = NewKeyer(newDockerIndex())
 
+// fingerprintsResolver is a resolver that also reads a container's legacy
+// fingerprint (legacyFingerprint), with its current one: Docker's index, and
+// the list a docker-mode agent is given. One that does not reads no legacy
+// recording's keys.
+type fingerprintsResolver interface {
+	Fingerprints(ctx context.Context, id string) (fp, legacy string, ok bool)
+}
+
 // resolver finds the container behind a destination from its index, without
 // waiting on anything. err says the daemon cannot be read.
 type resolver interface {
@@ -539,11 +547,17 @@ func (k *Keyer) key(ctx context.Context, connID string) (c Container, key string
 		}
 	}
 	if c.Fingerprint == "" {
-		fp, in := res.Fingerprint(ctx, c.ID)
+		var fp, legacy string
+		var in bool
+		if fr, ok := res.(fingerprintsResolver); ok {
+			fp, legacy, in = fr.Fingerprints(ctx, c.ID)
+		} else {
+			fp, in = res.Fingerprint(ctx, c.ID)
+		}
 		if !in {
 			return c, "", true
 		}
-		c.Fingerprint = fp
+		c.Fingerprint, c.Legacy = fp, legacy
 		k.mu.Lock()
 		if held, still := k.conns[connID]; still && held.ID == c.ID {
 			k.conns[connID] = c
@@ -707,6 +721,44 @@ func KeyFromContext(ctx context.Context) (key string, isContainer, keyed bool) {
 	}
 	_, key, isContainer = ref.k.key(ctx, ref.id)
 	return key, isContainer, true
+}
+
+// LegacyKeyFromContext is the legacy-form key (legacyFingerprint) of the
+// container of the connection ctx carries, as KeyFromContext reads its key,
+// without counting a use: what a mock recorded before secrets were left out
+// of fingerprints names it by (SameKey). "" where there is none.
+func LegacyKeyFromContext(ctx context.Context) string {
+	ref, ok := ctx.Value(ctxKey{}).(connRef)
+	if !ok || ref.k == nil {
+		return ""
+	}
+	c, key, isContainer := ref.k.key(ctx, ref.id)
+	if !isContainer || key == "" {
+		return ""
+	}
+	lk, ok := legacyKeyOf(c)
+	if !ok {
+		return ""
+	}
+	return lk.String()
+}
+
+// SameKey reports whether a recorded key names the live container whose
+// key is live and whose legacy-form key is legacy (LegacyKeyFromContext): a
+// key of the current form is compared with live, one of the legacy form, a
+// recording made before secrets were left out of fingerprints, with legacy.
+// Each mock is compared in its own form, so a test set recorded across
+// keploy versions (a recording refreshed with what a replay captured)
+// compares each as it was written.
+func SameKey(recorded, live, legacy string) bool {
+	if recorded == "" {
+		return false
+	}
+	if recorded == live {
+		return true
+	}
+	k, err := Parse(recorded)
+	return err == nil && isLegacyFingerprint(k.Fingerprint) && legacy != "" && recorded == legacy
 }
 
 // PlacedFromContext is KeyFromContext without the key: whether the connection

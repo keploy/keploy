@@ -56,6 +56,11 @@ type destination struct {
 	// recording: withheld live, ambiguous or unreadable in the recording.
 	container bool
 	key       string
+	// legacy is, live, the container's key of the legacy form
+	// (containerkey.LegacyKeyFromContext), which a mock recorded before
+	// secrets were left out of fingerprints names it by: compared with
+	// (containerkey.SameKey), never shown.
+	legacy string
 }
 
 // liveDestKey carries, on a request's context, its destination as decode
@@ -81,7 +86,7 @@ func liveDestination(ctx context.Context, input *req) destination {
 	d := destination{}
 	switch key, st := containerkey.StateFromContext(ctx); st {
 	case containerkey.Keyed:
-		d.container, d.key = true, key
+		d.container, d.key, d.legacy = true, key, containerkey.LegacyKeyFromContext(ctx)
 	case containerkey.Withheld:
 		d.container = true
 	}
@@ -129,7 +134,7 @@ func sameDestination(live, rec destination) bool {
 	case rec.container && rec.key == "":
 		return false
 	case live.container && rec.container:
-		return live.key != "" && live.key == rec.key && sameVirtualHost(live.host, rec.host)
+		return live.key != "" && containerkey.SameKey(rec.key, live.key, live.legacy) && sameVirtualHost(live.host, rec.host)
 	}
 	return live.host == rec.host
 }
@@ -169,7 +174,7 @@ func destinationDiff(live destination, m *models.Mock) []models.MockFieldDiff {
 	}
 	// The container differs: the recording's names none by its key, or both
 	// reached one and their keys differ (or the live one's names none).
-	if rec.container && (rec.key == "" || live.container && live.key != rec.key) {
+	if rec.container && (rec.key == "" || live.container && !containerkey.SameKey(rec.key, live.key, live.legacy)) {
 		expected, actual := rec.key, live.key
 		if expected == "" {
 			expected = "a container the recording does not name by its configuration (another configured the same answered its scope, or its configuration was not read)"

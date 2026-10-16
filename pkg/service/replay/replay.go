@@ -2811,6 +2811,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// A gRPC stream the app kept open on keepalives
+			// (pkg.ErrStreamHeldOpen): past its recording, every recorded
+			// message having come, or short of it (pkg.ErrStreamStalled,
+			// whose rest SimulateGRPC took from the recording). What came is
+			// compared, with the recorded trailers the app never sent, and
+			// the test has no verdict (FailureInfo.StreamHeldOpen, row W1).
+			var heldOpen string
+			if loopErr != nil && errors.Is(loopErr, pkg.ErrStreamHeldOpen) {
+				if g, ok := resp.(*models.GrpcResp); ok && g != nil {
+					g.Trailers = sent.GrpcResp.Trailers
+					heldOpen, loopErr = loopErr.Error(), nil
+				}
+			}
+
 			// The test case has its answer, or none: it ends here. Under exact
 			// serving the agent serves the pool from now, so what is read next
 			// is final, and a call the application makes from here, a late
@@ -3019,8 +3033,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under the proven switch strict failure is always on, so a test
 			// whose mock set diverged is never demoted: its response diff is the
 			// explanation of its FAILED verdict and must be printed
-			// (assertTestMocks is on under the switch).
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
+			// (assertTestMocks is on under the switch). --strict-failure keeps
+			// it FAILED too (resolveTestOutcome), so its diff is printed.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks() || r.strictFailure())
 
 			// This test's misses are read now, once, with its response in, so
 			// the verdict can hold a miss. Every result written for this test
@@ -3502,6 +3517,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// No verdict either: what it captured was not checked.
 						testCaseResult.FailureInfo.VariablesUnchecked = variablesUnchecked
 					}
+					if heldOpen != "" {
+						// No verdict: the app kept its stream open past the
+						// recording.
+						testCaseResult.FailureInfo.StreamHeldOpen = heldOpen
+					}
 					attachMisses(testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
@@ -3814,6 +3834,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What the stream delivered, kept only when a recorded frame
 			// holds a use (streamTemplateFailures).
 			var received *bytes.Buffer
+			// Why the stream was not read to its end, when the app kept it
+			// open on keepalives, past its recording or short of it
+			// (pkg.ErrStreamHeldOpen, row W1).
+			var streamHeldOpen string
 
 			// Mirror the non-streaming reset-resend: a docker userland-proxy reset on
 			// a freshly-accepted host-port conn under CI load never reached the app
@@ -3898,9 +3922,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// written (attachStreamDepResults), from the filtered list the
 			// streamed test's own verdict reads.
 			//
-			// Under the switch a diverged mock set demotes nothing, so the
-			// diff of a failed answer is printed as the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+			// Under the switch, or --strict-failure, a diverged mock set
+			// demotes nothing, so the diff of a failed answer is printed as
+			// the main loop prints it.
+			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
 
 			if !ok {
 				// Handle streaming response type
@@ -3928,6 +3953,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(expectedStream.HTTPResp, streamReader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
+					}
+					if errors.Is(streamErr, pkg.ErrStreamHeldOpen) {
+						// The app kept the stream open on keepalives, past
+						// its recording or short of it: compared as far as
+						// it came, and the test has no verdict (row W1).
+						streamHeldOpen, streamErr = streamErr.Error(), nil
 					}
 
 					if streamErr != nil {
@@ -4033,7 +4064,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
 				}
 			}
 
@@ -4209,14 +4240,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if provenswitch.On() {
-					// Under the switch a failed answer is FAILED whatever the
-					// mock set did: the set's other consumption (a session-tier
-					// mock it shares) is no reason to re-record it.
+				} else if r.strictFailure() {
+					// Under the switch, or --strict-failure, a failed answer is
+					// FAILED whatever the mock set did (the verdict below): the
+					// set's other consumption (a session-tier mock it shares) is
+					// no reason to re-record it.
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", provenswitch.Env+"=1"),
+						zap.String("reason", vetoFlagName(false, true)),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
@@ -4317,6 +4349,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// category, and the unconsumed test mocks by name. The inputs
 				// are the ones that verdict read.
 				testCaseResult.FailureInfo.TestMocksUnread = streamTestMocksUnread
+				testCaseResult.FailureInfo.StreamHeldOpen = streamHeldOpen
 				if provenswitch.On() {
 					attachStreamDepResults(testCaseResult, testStatus, expectedTestMockMappings[tc.Name], consumedMocks, streamArmed && streamConsumedErr == nil, reusableMockNames, mockKindByName, mockLookup)
 				}
@@ -4630,6 +4663,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", unreadCapture),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
+	if heldOpen := testsWithStreamsHeldOpen(testCaseResults); len(heldOpen) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		// A test whose app kept its stream open on keepalives, past the
+		// recording or short of it, has no verdict, so neither has its
+		// set (row W1).
+		notJudged = alsoNotJudged(notJudged, streamsHeldOpenReason(heldOpen))
+		r.logger.Error("test-set is not judged: the app kept its stream open on keepalives in some of its tests, past the end of its recording or with the rest of it not coming; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", heldOpen),
+			zap.String("next_step", streamsHeldOpenRemedy+", then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
 	}
@@ -6706,7 +6751,9 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID, true)
+		// The test case has failed on its own (no answer): what its
+		// assertions say of the stand-in is printed, never a pass line.
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID, true, httpMatcher.WithoutPassLine())
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // cancelAfterHello is a client's connection that the client gives up on once
@@ -197,11 +199,25 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop()}
 			app, src := acceptedConn(t)
 			upstream, dst := acceptedConn(t)
+			// The relay holds nothing here (no HoldClientWrites), so the
+			// client speaks once the relay terminates its TLS: a
+			// ClientHello written before the relay holds its forwarders
+			// would be forwarded upstream, and the handshake would wait for
+			// it for ever. MySQL, the only sender of this directive in
+			// production, writes its ClientHello at once and is protected
+			// by the client-write hold instead.
+			upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
+			upgrading := make(chan struct{})
 			r := relay.New(relay.Config{
 				Logger:                  zap.NewNop(),
 				OnCaptureLoss:           p.losses.Add,
 				OnClientHandshakeFailed: p.relayClientHandshake(dst),
-				TLSUpgradeFn:            newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil),
+				TLSUpgradeFn: func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
+					if !isClient {
+						close(upgrading)
+					}
+					return upgrade(ctx, conn, isClient, cfg)
+				},
 			}, src, connseq.NewUpstream(dst))
 			ctx, cancel := context.WithCancel(context.Background())
 			ran := make(chan struct{})
@@ -212,6 +228,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
+				<-upgrading
 				tc.client(t, app)
 				_ = app.Close()
 			}()
@@ -222,10 +239,100 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			got := map[models.CaptureLossKind]uint64{}
 			for _, l := range p.losses.Snapshot() {
 				got[l.Kind] = l.Count
+				if l.What != "to "+dst.RemoteAddr().String() {
+					t.Fatalf("%s: a loss names %q, want the connection's destination %s", l.Kind, l.What, dst.RemoteAddr())
+				}
 			}
 			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || got[models.CaptureLossSTARTTLS] != tc.starttls || len(got) > 3 {
 				t.Fatalf("%s: charged %v, want %d tls_handshake_failed, %d tls_handshake_abandoned and %d starttls_failed", tc.name, got, tc.failed, tc.abandoned, tc.starttls)
 			}
 		})
+	}
+}
+
+// A client that hangs up on its TLS connection with keploy's proxy as soon as
+// the handshake is done, having sent nothing since -- no call, no
+// close_notify -- abandoned it, as a client that rejects keploy's certificate
+// once the handshake is done does: curl and libcurl (TLS 1.2 and 1.3) and
+// Node.js under TLS 1.2. Its test is not judged (tls_handshake_abandoned). A
+// client that sends its close_notify, or a call, and then hangs up, is not
+// charged: a pooled connection it used and leaves idle until it closes has
+// sent bytes. These were all charged nothing.
+func TestAClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name      string
+		max       uint16
+		client    func(t *testing.T, c *tls.Conn, raw net.Conn)
+		abandoned uint64
+	}{
+		{"TLS 1.2, it hangs up once the handshake is done (curl's, libcurl's and Node.js's rejection)", tls.VersionTLS12, func(_ *testing.T, _ *tls.Conn, raw net.Conn) {}, 1},
+		{"TLS 1.3, it hangs up once the handshake is done (curl's and libcurl's rejection)", tls.VersionTLS13, func(_ *testing.T, _ *tls.Conn, raw net.Conn) {}, 1},
+		{"it sends its close_notify, then hangs up", tls.VersionTLS13, func(_ *testing.T, c *tls.Conn, _ net.Conn) { _ = c.CloseWrite() }, 0},
+		{"it sends a call, waits for its answer, then hangs up idle", tls.VersionTLS13, func(t *testing.T, c *tls.Conn, _ net.Conn) {
+			if _, err := c.Write([]byte("GET /health HTTP/1.1\r\nHost: dep.example\r\n\r\n")); err != nil {
+				t.Error(err)
+				return
+			}
+			_, _ = c.Read(make([]byte, 1<<14)) // an answer, or the proxy's close: the call was read
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := ipv4Dest(t, "127.0.0.1:8443")
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, mysqlPorts: newMysqlPortRegistry()}
+			p.setSession(&agent.Session{
+				Mode:            models.MODE_TEST,
+				OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
+			})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				c := tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example", MaxVersion: tc.max})
+				if err := c.Handshake(); err != nil {
+					t.Errorf("the client's handshake: %v", err)
+				} else {
+					tc.client(t, c, app)
+				}
+				_ = app.Close() // no close_notify of its own
+			}()
+			_ = p.handleConnection(context.Background(), src)
+			<-done
+			got := map[models.CaptureLossKind]uint64{}
+			for _, l := range p.losses.Snapshot() {
+				got[l.Kind] = l.Count
+			}
+			if got[models.CaptureLossTLSAbandoned] != tc.abandoned || got[models.CaptureLossTLSAbort] != 0 {
+				t.Fatalf("%s: charged %v, want %d tls_handshake_abandoned and no tls_handshake_failed", tc.name, got, tc.abandoned)
+			}
+		})
+	}
+}
+
+// A silent client is charged only for its own hang-up: not for a read keploy
+// ended itself -- a parser's cancel, keploy's own close of the connection,
+// keploy's stop -- however silent the client was since its handshake.
+func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	app, src := acceptedConn(t)
+	go func() {
+		_ = tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example"}).Handshake()
+	}()
+	conn, _, err := pTls.HandleTLSConnection(context.Background(), zap.NewNop(), src, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{logger: zap.NewNop()}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	p.chargeSilentClient(context.Background(), context.Canceled, conn, "10.0.0.1:443")
+	p.chargeSilentClient(context.Background(), fmt.Errorf("read: %w", net.ErrClosed), conn, "10.0.0.1:443")
+	p.chargeSilentClient(stopped, io.EOF, conn, "10.0.0.1:443")
+	if l := p.losses.Snapshot(); len(l) != 0 {
+		t.Fatalf("charged %+v for reads the client did not end", l)
+	}
+	p.chargeSilentClient(context.Background(), io.EOF, conn, "10.0.0.1:443")
+	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbandoned || l[0].What != "to 10.0.0.1:443" {
+		t.Fatalf("charged %+v, want one tls_handshake_abandoned to 10.0.0.1:443 for the client's own hang-up", l)
 	}
 }

@@ -97,7 +97,7 @@ func TestMatchCommand_AQueryAttributeCountsOnlyForAStatementThatReadsIt(t *testi
 		}
 		found := false
 		for _, d := range miss.fieldDiffs {
-			if d.Path == "body.parameters.0.value" && d.Expected == recordedTraceparent && d.Actual == replayTraceparent {
+			if d.Path == "body.parameters.0.value" && d.Expected == maskedAttributeValue && d.Actual == maskedAttributeValue {
 				found = true
 			}
 		}

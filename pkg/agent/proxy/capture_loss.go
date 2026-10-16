@@ -93,6 +93,22 @@ func (p *Proxy) chargeClientHandshake(ctx context.Context, err error, dstAddr st
 	return pTls.HandshakeCause(err)
 }
 
+// chargeSilentClient charges a client that hung up (err, pTls.IsClientGiveUp)
+// on its TLS connection with keploy's proxy as soon as its handshake was done,
+// having sent nothing since (pTls.SilentSinceHandshake: no data, no
+// close_notify), as a handshake it abandoned (tls_handshake_abandoned): curl,
+// libcurl and Node.js under TLS 1.2 reject a certificate they do not trust
+// so, once the handshake is done, and a client that gave up looks the same.
+// A client that sent anything after its handshake -- a call, or its
+// close_notify -- is not charged, nor is one keploy's own stop cut short, nor
+// a read keploy ended itself (a cancel, its own close of the connection).
+func (p *Proxy) chargeSilentClient(ctx context.Context, err error, clientTLS net.Conn, dstAddr string) {
+	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) || !pTls.IsClientGiveUp(err) || !pTls.SilentSinceHandshake(clientTLS) {
+		return
+	}
+	p.losses.Add(models.CaptureLossTLSAbandoned, "to "+dstAddr)
+}
+
 // clientTLSHandler is pTls.HandleTLSConnection for a parser's TLS upgrader
 // on the record path (util.ConnTLSUpgrader: MySQL's SSLRequest, Postgres's)
 // on a connection to dstAddr: a handshake that failed is charged as the

@@ -10,11 +10,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// streamEndedLog is what a drain says (at debug) when it has read its stream
+// StreamEndedLog is what a drain says (at debug) when it has read its stream
 // to the agent's end marker: the CLI's own record of it, which lanes check (an
 // agent docker compose runs logs through compose, which can drop its last
-// lines as the stack stops).
-const streamEndedLog = "read the stream to the keploy agent's end marker"
+// lines as the stack stops). keploy mock's rounds say it too.
+const StreamEndedLog = "read the stream to the keploy agent's end marker"
 
 // streamEnder is an agent client whose agent ends a recording client's frame
 // streams on request, each with a marker once it has put on the stream all it

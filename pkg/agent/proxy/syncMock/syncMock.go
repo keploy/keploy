@@ -268,6 +268,26 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
+	// testSpans is, under the proven switch, the spans of the last
+	// maxRecentWindows windows whose request became a test case, as its test
+	// case states them (noteTestSpanLocked); testSpansNext is the one the next
+	// replaces once it is full. spanWatch is the channels TestSpanAt handed
+	// out for open windows, each closed and dropped as its window leaves the
+	// open ones (windowLeftLocked). Guarded by mu.
+	testSpans     []testSpan
+	testSpansNext int
+	spanWatch     map[*Window]chan struct{}
+	// exchangeHolds is the exchanges parsers hold while they cannot yet tell
+	// what they are (HoldExchanges), each by its earliest request time in
+	// Unix nanoseconds; exchangeHoldsNext numbers them. holdsStopping is
+	// closed (holdsStopped) as a recording's stop first asks what is pending
+	// (BacklogBefore), and a new one made for the next recording
+	// (SetOutputChannel). Guarded by holdsMu, a leaf.
+	holdsMu           sync.Mutex
+	exchangeHolds     map[uint64]int64
+	exchangeHoldsNext uint64
+	holdsStopping     chan struct{}
+	holdsStopped      bool
 	// held is the per-test mocks a reaper would have dropped (past the stale
 	// horizon, or a duplicate's leftovers) while a window still open may own
 	// them: no resolved window owns them, and every one is requested at or
@@ -721,6 +741,9 @@ func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
 	m.pendingRevokes = nil
 	m.revokeEpoch.Store(epoch)
 	m.droppedMu.Unlock()
+	// The new session's holds are told of its own stop, not the last one's
+	// (HoldExchanges): a hold from before keeps the channel it took.
+	m.newHoldsSession()
 	m.outChanMu.Unlock()
 }
 
@@ -2456,6 +2479,7 @@ func (m *SyncMockManager) endWindowLocked(w *Window, t *dropTally, givenUp bool)
 	if w.idx >= 0 {
 		heap.Remove(&m.open, w.idx)
 		m.noteOldestLocked()
+		m.windowLeftLocked(w)
 	}
 	m.releaseHeldLocked(t, givenUp, w.start)
 }
@@ -2973,6 +2997,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped int, gaveUp []*Wind
 	for _, w := range gaveUp {
 		w.givenUp, w.cause = true, LostToMemoryPressure
 		heap.Remove(&m.open, w.idx)
+		m.windowLeftLocked(w)
 	}
 	m.noteOldestLocked()
 	return m.dropHeldLocked(n, nil, true), gaveUp
@@ -4117,8 +4142,12 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			m.buffer = append(m.buffer, taken...)
 		}
 		// The request is decided and has what it owns: its window ends here,
-		// not after the sends below.
+		// not after the sends below. It is a test case: its span is noted
+		// before its window leaves the open ones (TestSpanAt).
 		if w != nil && w.m == m {
+			if w.idx >= 0 {
+				m.noteTestSpanLocked(start, end)
+			}
 			m.endWindowLocked(w, &tally, false)
 		}
 	}

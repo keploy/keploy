@@ -381,3 +381,36 @@ func TestStrictContainersFromRecordToReplayNeverSwap(t *testing.T) {
 		}
 	}
 }
+
+// A recording made before secrets were left out of fingerprints names its
+// container by the legacy key, and a live container whose legacy key that is
+// matches it; one whose legacy key is another (its password changed since)
+// misses, and the miss shows the live container by its current key, never
+// by the legacy one, which a secret's value moves.
+func TestStrictMatchesALegacyRecordingByTheLegacyKey(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	live := containerkey.Container{ID: "live", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: "s" + fpQueue, Legacy: "cccccccccccc"}
+	s := newSession(containerIndex{"127.0.0.1:50001": live})
+	legacy := func(name, legacyFP string) *models.Mock {
+		m := onHost(name, "/queue", "localhost:49153")
+		m.Spec.Metadata = map[string]string{
+			containerkey.MetadataKey: "container:localstack/localstack:4566@" + legacyFP,
+			containerkey.InstanceKey: "inst-" + name,
+			containerkey.ScopeKey:    "s1",
+		}
+		return m
+	}
+	same, changed := legacy("same", "cccccccccccc"), legacy("changed", "dddddddddddd")
+	useDefaultKeyer(t, s.k, same, changed)
+	ctx := s.conn("c1", "127.0.0.1:50001")
+	if got, _ := matchOnce(t, ctx, getTo("/queue", "localhost:50001"), changed, same); got == nil || got.Name != "same" {
+		t.Fatalf("served %v, want the legacy recording of this container", got)
+	}
+	if got, _ := matchOnce(t, ctx, getTo("/queue", "localhost:50001"), changed); got != nil {
+		t.Fatalf("a legacy recording of a container configured otherwise was served: %s", got.Name)
+	}
+	d := destinationDiff(liveDestination(ctx, getTo("/queue", "localhost:50001")), changed)
+	if len(d) != 1 || d[0].Path != "container" || d[0].Actual != keyOfContainer(live) {
+		t.Fatalf("the miss shows %+v, want the live container by its current key %s", d, keyOfContainer(live))
+	}
+}

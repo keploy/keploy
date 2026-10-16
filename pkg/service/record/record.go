@@ -358,7 +358,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				// taking the request to end it): every frame it had for this
 				// drain is through.
 				if marker {
-					r.logger.Debug(streamEndedLog, zap.String("frames", o.kind))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", o.kind))
 				}
 				return
 			}
@@ -642,6 +642,20 @@ type Recorder struct {
 // hand over something captured before a time (AgentClient.BacklogBefore).
 type backlogReader interface {
 	BacklogBefore(ctx context.Context, before time.Time) (models.AgentBacklog, error)
+}
+
+// agentStopWatcher is an agent client that can be told when a stop signal has
+// reached an agent something else stops, and the agent waits for this
+// recording to drain its streams (AgentClient.WatchAgentStop).
+type agentStopWatcher interface {
+	WatchAgentStop(ctx context.Context) <-chan struct{}
+}
+
+// composeAgentEnder sees an agent docker compose stops to its end once this
+// recording has drained it: its exit waited for while its teardown makes
+// progress, and a wedged one killed and said (AgentClient.EndComposeAgent).
+type composeAgentEnder interface {
+	EndComposeAgent(release bool)
 }
 
 // drainStallLooks is how many looks in a row a drain makes at a backlog the
@@ -1566,6 +1580,65 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
 
+	// Bounded drains: a goroutine wedged under contention that ignores its
+	// cancel() must not hang teardown forever (which would swallow SIGINT and
+	// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
+	//
+	// The frame streams drain through the stop until what the agent held at
+	// it is through (forwardUntilDrained): wait for them while they make
+	// progress, however long that takes, and give up only on a stall.
+	// It reports whether it joined every frame drain: one it gave up on, a
+	// stall, may still hold its stream to the agent open.
+	drainFrames := func() (joined bool) {
+		reqCtxCancel()
+		defer r.reportDrainProgress(drainProgressEvery)()
+		err, timedOut := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop request processing")
+		}
+		return !timedOut
+	}
+	// Under docker compose the agent is a service of the app's own stack
+	// (keploy injects it), so taking the stack down takes the agent, and
+	// everything it has not handed over yet, with it: at 110 req/s for 30 s
+	// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
+	// first, once (composeDrain): by the stop, before it takes the stack down
+	// (the app keeps running meanwhile, but what it serves after the stop is
+	// not recorded: forwardUntilDrained), or earlier, when the agent says
+	// compose is stopping it (agentGoing: the app exited on its own, or a
+	// container of its project did, and compose stops the project). The agent
+	// then waits for the drain, and goes once its streams close: what it
+	// could not capture (mock.real), and what it lost after the last test
+	// case, are read first, while it is still up, as of an agent this client
+	// started. Its exit is then seen to (composeAgentEnder): it goes once the
+	// streams close, and one wedged in its stop is killed, rather than held
+	// for compose's grace, which waits on it. After a drain the stop began,
+	// the reads come with the stack still up.
+	var composeDrain sync.Once
+	drainComposeAgent := func(agentGoing bool) {
+		composeDrain.Do(func() {
+			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
+			if agentGoing {
+				if recordingStarted {
+					r.reportRealRun(ctx)
+					capWatch.afterTestCases(ctx)
+				}
+				joined := drainFrames()
+				if e, ok := r.instrumentation.(composeAgentEnder); ok {
+					// A drain given up on a stall may hold its stream open,
+					// and the agent waits for that stream: it is told to go.
+					e.EndComposeAgent(!joined)
+				}
+				return
+			}
+			drainFrames()
+			if recordingStarted {
+				r.reportRealRun(ctx)
+				capWatch.afterTestCases(ctx)
+			}
+		})
+	}
+
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
@@ -1616,37 +1689,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// response or the recorder context is cancelled — there is
 		// no on-disk file on the agent and no fetch step here.
 
-		// Bounded drains: a goroutine wedged under contention that ignores its
-		// cancel() must not hang teardown forever (which would swallow SIGINT and
-		// keep the process alive until an external SIGKILL). See utils.DrainErrGroup.
-		//
-		// The frame streams drain through the stop until what the agent held at
-		// it is through (forwardUntilDrained): wait for them while they make
-		// progress, however long that takes, and give up only on a stall.
-		drainFrames := func() {
-			reqCtxCancel()
-			defer r.reportDrainProgress(drainProgressEvery)()
-			if err, _ := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress); err != nil {
-				utils.LogError(r.logger, err, "failed to stop request processing")
-			}
-		}
-		// Under docker compose the agent is a service of the app's own stack
-		// (keploy injects it), so taking the stack down takes the agent, and
-		// everything it has not handed over yet, with it: at 110 req/s for 30 s
-		// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
-		// first. The app keeps running meanwhile, but what it serves after the
-		// stop is not recorded (forwardUntilDrained).
+		// Under docker compose the agent is drained first (drainComposeAgent),
+		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
-			r.logger.Info("Waiting for the keploy agent to hand over what it captured before the stop...")
-			drainFrames()
-			// Read while the agent, which the app's stack carries, still
-			// runs: what it could not capture (mock.real), and what it
-			// lost after the last test case.
-			if recordingStarted {
-				r.reportRealRun(ctx)
-				capWatch.afterTestCases(ctx)
-			}
+			drainComposeAgent(false)
 		}
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
@@ -2232,8 +2279,18 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// Under docker compose the agent is stopped with the app's project, and
+	// this client learns of that only from the agent: its streams ask the
+	// agent to say so (models.WithAgentStopNotice), and agentStopping closes
+	// when it does.
+	streamCtx := reqCtx
+	var agentStopping <-chan struct{}
+	if w, ok := r.instrumentation.(agentStopWatcher); ok && r.config.CommandType == string(utils.DockerCompose) {
+		streamCtx = models.WithAgentStopNotice(reqCtx)
+		agentStopping = w.WatchAgentStop(reqCtx)
+	}
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx)
+	frames, err := r.GetTestAndMockChans(streamCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -2249,6 +2306,20 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
+	if agentStopping != nil {
+		// Compose is stopping the agent (the app exited on its own, or a
+		// container of its project did), and the agent waits for this drain
+		// before it goes: drain it now, not once compose has taken it down
+		// with the project, which it waits on the agent to do.
+		go func() {
+			select {
+			case <-agentStopping:
+				r.logger.Info("docker compose is stopping the keploy agent with the app's project; saving what it captured before it goes")
+				drainComposeAgent(true)
+			case <-reqCtx.Done():
+			}
+		}()
+	}
 
 	/*
 	 * THE FORWARDERS NOW OUTLIVE THIS FUNCTION, so every path out of it has
@@ -3224,7 +3295,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok && ender != nil && ender.StreamEnded(models.MappingStream) {
 					// The agent ended it at its marker, every mapping it owed
 					// from before the stop on it.
-					r.logger.Debug(streamEndedLog, zap.String("frames", "mappings"))
+					r.logger.Debug(StreamEndedLog, zap.String("frames", "mappings"))
 					return nil
 				}
 				if !ok {

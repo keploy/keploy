@@ -36,6 +36,12 @@
 #  10. Switch off, the same: the set passes, as on main.
 #  11. No data race in any log.
 #
+# LEGACY_KEYS=1: the container is recorded by a keploy release that wrote
+# container keys in the legacy form (v3.6.126 to v3.6.130, its fingerprint a
+# hash of the configuration's values, secrets included), and replayed by this
+# build, which compares each recorded key in its own form: steps 6 to 11
+# only, the key of step 6 of the legacy form.
+#
 # Readiness is the app's listening port while recording, a container's own
 # "ready" line, and keploy's own probe of the app (--health-path, any HTTP
 # answer) while replaying. The script stops only the processes and
@@ -45,8 +51,16 @@ set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
 
+if [ "${LEGACY_KEYS:-}" = 1 ] && [ -z "${RECORD_BIN:-}" ]; then
+    echo "::error::LEGACY_KEYS=1 needs RECORD_BIN: the release that recorded container keys in the legacy form"
+    exit 1
+fi
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
+if [ "${LEGACY_KEYS:-}" = 1 ] && [ "$REPLAY_BIN" = "$RECORD_BIN" ]; then
+    echo "::error::LEGACY_KEYS=1 needs REPLAY_BIN, the build under test, apart from RECORD_BIN: a release replaying its own recording tests nothing"
+    exit 1
+fi
 IMAGE="${DEP_IMAGE:-python:3.11-slim}"
 OTHER_IMAGE="busybox:1.36"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -202,6 +216,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The container key's form a recording made by RECORD_BIN carries.
+KEY_RE="containerKey: container:${IMAGE%%:*}:${DEP}@s[0-9a-f]{12}\$"
+if [ "${LEGACY_KEYS:-}" = 1 ]; then
+    KEY_RE="containerKey: container:${IMAGE%%:*}:${DEP}@[0-9a-f]{12}\$"
+fi
+
+if [ "${LEGACY_KEYS:-}" != 1 ]; then
 echo "== record by host (no switch) =="
 ./payments-svc >payments.log 2>&1 &
 DEP_PID=$!
@@ -231,6 +252,7 @@ yq -e '[.tests[].failure_info.unmatched_calls[]?.differs[]?] | any_c(test("250")
 echo "== 5. switch off, AMOUNT=250: passes, as on main =="
 replay driftoff 250 "http://127.0.0.1:$DEP"
 expect_pass "step 5"
+fi
 
 echo "== record a container on a random port (KEPLOY_PROVEN=1, $IMAGE) =="
 docker pull -q "$IMAGE" >/dev/null || { echo "::error::cannot pull $IMAGE"; exit 1; }
@@ -240,7 +262,7 @@ REC_PORT=$PORT
 record 1 "http://127.0.0.1:$REC_PORT"
 
 echo "== 6. the recording carries the container's key =="
-grep -qE "containerKey: container:${IMAGE%%:*}:${DEP}@[0-9a-f]{12}" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key"
+grep -qE "$KEY_RE" keploy/test-set-0/mocks.yaml || fail "step 6: the charge calls were not recorded with their container's key ($KEY_RE)"
 
 # The new container starts while the recorded one still holds its port, so
 # Docker gives it another.

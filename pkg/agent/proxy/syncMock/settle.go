@@ -482,15 +482,20 @@ type PendingExplainer interface {
 // verdict that ended by then, one the ingress is still building or has queued
 // for the stream, a mock requested by then that the manager has yet to hand on
 // (handOnPendingBefore), a mapping of a test from before it that the manager
-// has decided and not yet put on the mapping stream (mappingOwedBefore), or, as
-// each Backlog watermark tells, a capture reader or parser that has not got
-// past it. Known only when a Backlog watermark is set:
-// without one nothing can tell whether a parser is behind.
+// has decided and not yet put on the mapping stream (mappingOwedBefore),
+// exchanges from before it a parser holds (holdsPendingBefore), or, as each
+// Backlog watermark tells, a capture reader or parser that has not got past
+// it. Known only when a Backlog watermark is set: without one nothing can
+// tell whether a parser is behind. It is the recording's stop that asks: from
+// the first ask on, a parser holding exchanges decides them (HoldExchanges).
 func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	var st BacklogState
 	if m == nil {
 		return st
 	}
+	// Asked, the recording is stopping: a parser holding exchanges decides
+	// them now (HoldExchanges), and they are pending until it has.
+	m.stopHolds()
 	var backlogs []Backlog
 	for _, w := range m.watermarks() {
 		if b, ok := w.(Backlog); ok {
@@ -520,6 +525,11 @@ func (m *SyncMockManager) BacklogBefore(before time.Time) BacklogState {
 	}
 	if !st.Pending {
 		if why := m.handOnPendingBefore(before); why != "" {
+			pending(why)
+		}
+	}
+	if !st.Pending {
+		if why := m.holdsPendingBefore(before); why != "" {
 			pending(why)
 		}
 	}

@@ -376,8 +376,12 @@ func TestAProxysCloseWithBytesUnreadIsALoss(t *testing.T) {
 // it. The close of the unanswered one was charged app_bytes_lost (the hooks
 // lane's TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt).
 func TestAConnectionServedWithoutASessionIsNoCaptureLoss(t *testing.T) {
-	for _, mode := range []models.Mode{"", models.MODE_RECORD} {
-		t.Run("agent mode "+string(mode), func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+	}{{"no mode", ""}, {"record mode", models.MODE_RECORD}} {
+		mode := tc.mode
+		t.Run(tc.name, func(t *testing.T) {
 			up, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -406,6 +410,19 @@ func TestAConnectionServedWithoutASessionIsNoCaptureLoss(t *testing.T) {
 			t.Cleanup(func() { cancel(); <-done })
 			if err := <-ready; err != nil {
 				t.Fatal(err)
+			}
+			// The application's bytes are in the proxy's socket when it
+			// accepts the connection, as the hooks lane holds them, so the
+			// close of an unanswered connection finds them unread whatever
+			// the scheduler does (30 s is only the kernel's cap with no data,
+			// which is never waited on).
+			rc, err := p.Listener.(*net.TCPListener).SyscallConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var serr error
+			if err := rc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_DEFER_ACCEPT, 30) }); err != nil || serr != nil {
+				t.Fatalf("TCP_DEFER_ACCEPT: %v %v", err, serr)
 			}
 			c, err := net.Dial("tcp4", p.Listener.Addr().String())
 			if err != nil {

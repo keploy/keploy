@@ -201,7 +201,9 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			// holds open hangs the whole test set instead of failing one case.
 			APITimeout: h.cfg.Test.APITimeout,
 			// Under the switch only the user's own apiTimeout bounds the
-			// app's answer (rule 15, row W1).
+			// app's answer (rule 15, row W1); a stream the app holds open
+			// past its recording ends on its keepalives, not judged
+			// (pkg.ErrStreamHeldOpen).
 			Unbounded:       provenswitch.On() && !h.cfg.Test.APITimeoutSet,
 			ConfigPort:      configPort,
 			ConfigHost:      hostToUse,
