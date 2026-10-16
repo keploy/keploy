@@ -91,6 +91,7 @@ func (t *Tracker) NewSet() {
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
+	t.answered, t.drifts = nil, nil
 	t.open, t.began = false, false
 	t.mu.Unlock()
 }
@@ -229,16 +230,16 @@ func (t *Tracker) Answered(name string) bool {
 }
 
 // Answer takes the test's own mock m to answer a request of test number n:
-// false when it answered one already, or that test has ended, and the
-// request looks again. Two requests never take one mock. A nil tracker takes
-// every mock.
+// false when it answered one already, or that test has ended, or no test is
+// open, and the request looks again. Two requests never take one mock. A nil
+// tracker takes every mock.
 func (t *Tracker) Answer(n uint64, m *models.Mock) bool {
 	if t == nil {
 		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.epoch != n || t.answered[m.Name] != nil {
+	if !t.open || t.epoch != n || t.answered[m.Name] != nil {
 		return false
 	}
 	if t.answered == nil {
@@ -281,7 +282,8 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // the next, lands there too, and the next Begin forgets it. Served before the
 // set's first test began (the start-up's), it is the run's when it carried a
 // value the run made (Earlier.Run): an earlier place of every test of the
-// set.
+// set. A set has no test's own exchange (Own) before its first test: one
+// served then took its scope from the previous set, and is nobody's.
 func (t *Tracker) Served(n uint64, e Earlier) {
 	if t == nil {
 		return
@@ -289,6 +291,7 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 	t.mu.Lock()
 	switch {
 	case t.epoch != n:
+	case !t.open && !t.began && e.Own:
 	case !t.open && !t.began && drifted(e):
 		e.Run = true
 		t.run = append(t.run, e)
