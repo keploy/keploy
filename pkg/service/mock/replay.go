@@ -262,6 +262,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,
+		DisablePgTimeSliceCohort:  m.config.DisablePgTimeSliceCohort,
 		PassThroughPorts:          m.config.Record.PassThroughPorts,
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
 		DisableStatefulMocks:      m.statefulMocksDisabled(),
