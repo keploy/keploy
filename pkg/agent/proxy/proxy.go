@@ -1661,6 +1661,13 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 	p.isGracefulShutdown.Store(true)
+	// A recording's stop: the requests in flight that began by now are the
+	// ones it found, which are no requests of the next recording
+	// (syncMock.NoteStop). keploy record's client sends this at its stop,
+	// also one that never asks what the agent still holds; keploy mock's
+	// once its drain is done; keploy test's and the runner's per test set,
+	// where no recording is stopping and nothing a recording needs is noted.
+	syncMock.Get().NoteStop(time.Now())
 	// Surface the async-egress verdict at replay wind-down. This fires per
 	// test-set on the native path and once per run on every path (replay.go's
 	// run-level defer is ungated), so it is what covers the FINAL test-set.
