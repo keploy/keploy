@@ -188,6 +188,9 @@ type Agent struct {
 	// noteEndOfGated said so this session.
 	gatedScopes    map[scopeKey]struct{}
 	gatedEndWarned bool
+	// replay, without the proven switch: the tests open now, whose begin
+	// succeeded and whose end has not come (TestScoper).
+	openTests int
 
 	// provenMu guards proven, the single-worker integration wire's state
 	// (scope_proven.go), served under the proven switch. Never held while

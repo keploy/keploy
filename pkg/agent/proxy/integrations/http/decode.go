@@ -328,17 +328,29 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 			)
+			proven := provenswitch.On()
 			switch {
-			case provenswitch.On() && opts.Learn:
-				// Record's full round: the learn step decides every request
-				// (design v14 §7.2).
+			case opts.Learn:
+				// Record's full round, or a record's check replay: the learn
+				// step decides every request (design v14 §7.2). Without the
+				// switch a request it cannot pair goes on to the matcher as
+				// before.
 				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 				ok = stub != nil
+				if !ok && err == nil && !proven {
+					if lmiss != nil {
+						h.Logger.Debug("the learn step did not pair the request; the matcher answers it", zap.String("reason", lmiss.res.Reason), zap.String("why", lmiss.res.Why), zap.String("url", input.url.String()))
+					}
+					ok, stub, diag, err = h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation)
+					if ok {
+						lmiss = nil
+					}
+				}
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
-				// matcher as before.
-				proven := provenswitch.On()
+				// matcher as before, which follows learned noise and
+				// variables without it.
 				if proven {
 					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil

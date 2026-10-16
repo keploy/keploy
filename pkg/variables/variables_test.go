@@ -264,3 +264,64 @@ func TestTable_Start(t *testing.T) {
 		t.Fatal("a given value blocked another variable from taking it")
 	}
 }
+
+// A value bound before the first scope began is the run's: every scope sees
+// it, and a scope's own bindings go with the scope. A value bound between
+// two scopes is not the run's, and a new set forgets the run's.
+func TestTable_RunBindingsOutliveScopes(t *testing.T) {
+	var tb Table
+	tb.KeepRun()
+	tb.Bind(Binding{Name: "session", Value: "live-1", Recorded: "rec-1"})
+	tb.Reset()
+	tb.Bind(Binding{Name: "order", Value: "o-1", Recorded: "o-r"})
+	if b, ok := tb.Lookup("session"); !ok || b.Value != "live-1" {
+		t.Fatalf("a test does not see the start-up's binding: %+v %v", b, ok)
+	}
+	tb.Close()
+	if _, ok := tb.Lookup("order"); ok {
+		t.Fatal("a test's binding outlived the test")
+	}
+	tb.Bind(Binding{Name: "job", Value: "j-1", Recorded: "j-r"})
+	tb.Reset()
+	if _, ok := tb.Lookup("session"); !ok {
+		t.Fatal("session, bound before the first test, is gone in the next test")
+	}
+	if _, ok := tb.Lookup("job"); ok {
+		t.Fatal("job, bound between two tests, became the run's")
+	}
+	if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{{Name: "other", Value: "live-1", Recorded: "x"}}); ok {
+		t.Fatal("a test bound the run's value to another variable")
+	}
+	tb.NewSet()
+	if _, ok := tb.Lookup("session"); ok {
+		t.Fatal("the run's binding outlived its set")
+	}
+	if _, took := tb.Bind(Binding{Name: "session", Value: "live-2", Recorded: "rec-2"}); !took {
+		t.Fatal("the next set's start-up could not bind the run's variable anew")
+	}
+	tb.Reset()
+	if b, _ := tb.Lookup("session"); b.Value != "live-2" {
+		t.Fatalf("the next set's test sees %q, want the new set's start-up value", b.Value)
+	}
+}
+
+// BindEach binds variables that share a live value, and refuses only a name
+// bound to another value, or a call of a previous scope.
+func TestTable_BindEach(t *testing.T) {
+	var tb Table
+	tb.Reset()
+	gen := tb.Gen()
+	if stale, ok := tb.BindEach(gen, []Binding{{Name: "created", Value: "1792000000000", Recorded: "1"}, {Name: "polled", Value: "1792000000000", Recorded: "2"}}); stale || !ok {
+		t.Fatal("two clock reads of one millisecond did not both bind")
+	}
+	if _, ok := tb.BindEach(gen, []Binding{{Name: "created", Value: "1792000000001", Recorded: "1"}}); ok {
+		t.Fatal("a bound name took another value")
+	}
+	if _, ok := tb.BindEach(gen, []Binding{{Name: "a", Value: "1"}, {Name: "a", Value: "2"}}); ok {
+		t.Fatal("a name given twice with two values bound")
+	}
+	tb.Reset()
+	if stale, _ := tb.BindEach(gen, []Binding{{Name: "x", Value: "1"}}); !stale {
+		t.Fatal("a call of the previous scope bound in this one")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -32,6 +33,13 @@ type Seen struct {
 	Leaf  Leaf
 	Live  string
 	Place string
+	// Written: the request stores the value at Place (a body it creates or
+	// updates a record with), rather than only naming or comparing with it
+	// (ReadBack).
+	Written bool
+	// Name is the variable the learn step put at Place (bound or used
+	// there), "" for none (Named).
+	Name string
 }
 
 // Earlier is an HTTP mock the learn step served earlier in the same test,
@@ -42,7 +50,10 @@ type Earlier struct {
 	At time.Time
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
-	Own  bool
+	Own bool
+	// Run: served while no test was open (Tracker.Served): a variable bound
+	// at it is the run's, which every later test uses (Tracker.RunName).
+	Run  bool
 	Seen []Seen
 }
 
@@ -90,6 +101,10 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
+	// Run: the mock was served while no test was open (Earlier.Run).
+	Run bool
+	// Name is the variable already at Var (Seen.Name), "" for none.
+	Name string
 }
 
 // Learned is what L learned about one drifted leaf of the paired mock.
@@ -117,8 +132,9 @@ type Learned struct {
 //     that drifted together with a part of the earlier value (sources). It
 //     is asserted equal to the live value at that earlier place, wherever F
 //     saw what: a value that came from somewhere is never stopped being
-//     compared. The earliest place a leaf names binds it; failing that, the
-//     first raw mock holding it.
+//     compared. The place a leaf names binds it: where the value was sent
+//     whole, the test's own call before the run's (appeared); failing that,
+//     the first raw mock holding it.
 //
 //   - Echo: the recorded answer echoes the recorded value (a scalar equal to
 //     it, or a string holding it as a token).
@@ -888,6 +904,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	v := dc.of(recorded, now)
+	// The place is where the value was sent whole, not where it was answered
+	// or sent inside a longer value (a variable is bound where the
+	// application sent it, whole): the test's own call that sent it first,
+	// else the run's, else another's; then the same inside a longer value;
+	// an answer that gave it only when no call sent it. Earliest within each.
+	var best Place
+	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -896,11 +919,35 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 			if s.Live == s.Leaf.Value {
 				continue
 			}
-			if found, whole := sources(dc.of(s.Leaf.Value, s.Live), v); found {
-				return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own}, true
+			ok, whole := sources(dc.of(s.Leaf.Value, s.Live), v)
+			if !ok {
+				continue
+			}
+			r := 6
+			if s.Side == Request {
+				switch {
+				case e.Own:
+					r = 0
+				case e.Run:
+					r = 1
+				default:
+					r = 2
+				}
+				if !whole {
+					r += 3
+				}
+			}
+			if r < rank {
+				best, rank = Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+					Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Name: s.Name}, r
+			}
+			if rank == 0 {
+				return best, true
 			}
 		}
+	}
+	if rank < 7 {
+		return best, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
 	// the recorded value, or what of it drifted (a changed word, a piece),
@@ -1157,4 +1204,75 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 		return false
 	}
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
+}
+
+// minReadBack is the length, in characters, below which a value is not read
+// back: a short value equal by chance to one the run made is not that value.
+const minReadBack = 6
+
+// ReadBack is where a value of a recorded answer was written earlier with
+// another value in this run: the request place, held whole, of the earliest
+// exchange served before whose recorded value is r's and whose live value
+// differs from it. That is where the value was first stored, so every read of
+// it, and every later write that carries it on, follows one variable. A call
+// that answers with what an earlier call wrote (a time, a code the
+// application made and stored) is then answered with what this run wrote
+// there: r's place is an answer place of the variable bound at that earlier
+// place. Only a place the adapter marked Written is read (it knows which of a
+// request's places store a value, and which only compare with one). The
+// request place's type is not compared with r's: an id stored as a number is
+// read back as text.
+func ReadBack(r Leaf, earlier []Earlier) (Place, bool) {
+	if r.Unnamed || r.Type != String || utf8.RuneCountInString(r.Value) < minReadBack {
+		return Place{}, false
+	}
+	served := append([]Earlier(nil), earlier...)
+	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	for _, e := range served {
+		for _, s := range e.Seen {
+			if s.Side != Request || !s.Written || s.Place == "" || s.Leaf.Value != r.Value || s.Live == s.Leaf.Value || s.Live == "" {
+				continue
+			}
+			return Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}, true
+		}
+	}
+	return Place{}, false
+}
+
+// Named is e with each request place that holds one of vars (as its bind or
+// a use) naming that variable (Seen.Name), the first by name when two hold
+// one place. An echo is not named: it is its call's alone, and a later call
+// that reads its value back binds it there as a variable of the test
+// (ReadBack). e's own Seen is left as it was: the result holds a copy, with
+// no name at any other place.
+func Named(e Earlier, vars models.MockVariables) Earlier {
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	at := map[string]string{}
+	for _, name := range names {
+		v := vars[name]
+		if v.Echo {
+			continue
+		}
+		if v.Bind != "" && at[v.Bind] == "" {
+			at[v.Bind] = name
+		}
+		for _, u := range v.Use {
+			if at[u] == "" {
+				at[u] = name
+			}
+		}
+	}
+	e.Seen = append([]Seen(nil), e.Seen...)
+	for i, s := range e.Seen {
+		e.Seen[i].Name = ""
+		if s.Side == Request && s.Place != "" {
+			e.Seen[i].Name = at[s.Place]
+		}
+	}
+	return e
 }

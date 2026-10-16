@@ -7,15 +7,14 @@ import (
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
 // learning reports whether this replay runs the learn step (design v14 §7.2,
-// row L; package matcher/learn): `keploy mock record`'s full round, which the
-// record marks in memory (config.Test.Learn), under the proven switch.
+// row L; package matcher/learn): `keploy mock record`'s full round, or its
+// check replay, which the record marks in memory (config.Test.Learn).
 func (m *mockService) learning() bool {
-	return provenswitch.On() && m.config.Test.Learn
+	return m.config.Test.Learn
 }
 
 // learningPool reports whether the learn step may pair pool mocks too: only

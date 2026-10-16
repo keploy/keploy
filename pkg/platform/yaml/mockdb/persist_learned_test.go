@@ -102,10 +102,10 @@ func TestMergeVariable(t *testing.T) {
 	}
 }
 
-// With the switch off the noise writers are what they were: a mock that
-// carries a variables block keeps every noise path learned, and the noise it
-// had (the round-3 reviewer's repro).
-func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
+// With the switch off the noise writers follow the variables too: a place
+// that is a variable's is never noise, and every other noise path learned is
+// kept.
+func TestPersistMockNoiseSwitchOffDropsNoiseAtAVariablePlace(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	dir := t.TempDir()
 	ys := New(zap.NewNop(), dir, "")
@@ -140,7 +140,7 @@ func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
 			got = mk.Spec.ReqBodyNoise
 		}
 	}
-	if want := map[string][]string{"body.key": {}, "body.other": {}}; !reflect.DeepEqual(got, want) {
+	if want := map[string][]string{"body.other": {}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch off: noise written %v, want %v", got, want)
 	}
 }

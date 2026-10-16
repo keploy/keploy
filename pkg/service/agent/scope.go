@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
@@ -93,7 +94,9 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		beginVariables := func() {
 			if provenswitch.On() {
 				a.ResetVariables()
+				return
 			}
+			a.beginOpenTest(name, pid)
 		}
 		if pid == 0 && provenswitch.On() {
 			// The proven wire serves a test exactly its own mocks
@@ -261,7 +264,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
 		meta := a.scopeMeta[k]
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence, Real: meta.real})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: meta.evidence, Real: meta.real, Variables: meta.vars})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -284,7 +287,14 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.noteEndOfGated(name, pid)
+		suite := a.isSuite(name, pid)
+		if !suite && !provenswitch.On() {
+			a.noteScopeVariables(name, pid)
+		}
 		closed := a.closeWindow(name, pid, at)
+		if closed && !suite && !provenswitch.On() {
+			a.endOpenTest()
+		}
 		// Under the switch, only the end of a begin that opened a window gives
 		// the pool back: a test keploy refused or withdrew at its begin, or an
 		// end sent twice, narrowed nothing, and giving the pool back would
@@ -436,6 +446,8 @@ type scopeMeta struct {
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
+	// vars are the test variables in force when the test ended.
+	vars []models.VariableBinding
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
@@ -575,4 +587,66 @@ func (a *Agent) ScopeRun(name string) (bool, string) {
 		n = n[:i]
 	}
 	return false, a.gateReason
+}
+
+// beginOpenTest begins a test for the learn step and the test variables when
+// it is the only test open (TestScoper). A suite (a package's TestMain) is
+// the run's, not a test: what it does is every test's.
+func (a *Agent) beginOpenTest(name string, pid int) {
+	if a.isSuite(name, pid) {
+		return
+	}
+	a.scopeMu.Lock()
+	a.openTests++
+	first := a.openTests == 1
+	a.scopeMu.Unlock()
+	if s, ok := a.Proxy.(coreAgent.TestScoper); ok && first {
+		s.BeginTest()
+	}
+}
+
+// endOpenTest ends the test beginOpenTest began once no test is open.
+func (a *Agent) endOpenTest() {
+	a.scopeMu.Lock()
+	last := false
+	if a.openTests > 0 {
+		a.openTests--
+		last = a.openTests == 0
+	}
+	a.scopeMu.Unlock()
+	if s, ok := a.Proxy.(coreAgent.TestScoper); ok && last {
+		s.EndTest()
+	}
+}
+
+// isSuite reports whether the open scope name of worker pid is a suite
+// (NoteScope).
+func (a *Agent) isSuite(name string, pid int) bool {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.scopeMeta[scopeKey{pid: uint32(pid), name: name}].suite
+}
+
+// noteScopeVariables keeps on the open scope name of worker pid the test
+// variables in force now, as it ends (ScopeWindow.Variables).
+func (a *Agent) noteScopeVariables(name string, pid int) {
+	b, ok := a.Proxy.(coreAgent.VariableBinder)
+	if !ok {
+		return
+	}
+	bound, kept := b.BoundVariables()
+	if !kept || len(bound) == 0 {
+		return
+	}
+	k := scopeKey{pid: uint32(pid), name: name}
+	a.scopeMu.Lock()
+	if _, open := a.workerOpen[k]; open {
+		if a.scopeMeta == nil {
+			a.scopeMeta = make(map[scopeKey]scopeMeta)
+		}
+		meta := a.scopeMeta[k]
+		meta.vars = bound
+		a.scopeMeta[k] = meta
+	}
+	a.scopeMu.Unlock()
 }

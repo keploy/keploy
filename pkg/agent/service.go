@@ -432,6 +432,16 @@ type VariableResetter interface {
 	ResetVariables()
 }
 
+// TestScoper is the optional extension implemented by proxies that follow
+// tests for the learn step and the test variables (BeginTest, EndTest).
+// Without the proven switch the agent calls it as the tests of keploy mock
+// replay begin and end: one test is open from the first begin to the last
+// end of the tests open at once.
+type TestScoper interface {
+	BeginTest()
+	EndTest()
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

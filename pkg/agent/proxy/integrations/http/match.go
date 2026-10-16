@@ -183,7 +183,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// test (variables.Table.BindAll).
 		var varGen uint64
 		varTable := variableTable(mockDb)
-		if varTable != nil && provenswitch.On() {
+		if varTable != nil {
 			varGen = varTable.Gen()
 		}
 
@@ -242,13 +242,25 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
 		}
 
-		// Under the proven switch a mock that declares variable places is
-		// served by the variable pass alone (variables.go): no later pass
-		// sees it, so it is never served on a call whose variables do not
-		// hold. With the switch off nothing here runs.
+		// A mock that declares variable places is served by the variable
+		// pass (variables.go). Under the proven switch no later pass sees
+		// it, so it is never served on a call whose variables do not hold;
+		// without it, a call the pass cannot answer goes on to the matcher
+		// below, which still sees every mock.
 		comparedPool := unfilteredMocks
 		var vp *varProblem
-		if provenswitch.On() {
+		if !provenswitch.On() {
+			served, done, retry, err := h.serveVariablesFirst(ctx, input, unfilteredMocks, mockDb, varTable, varGen, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if retry {
+				continue
+			}
+			if done {
+				return true, served, nil, nil
+			}
+		} else {
 			withVars, rest := splitVariableMocks(unfilteredMocks)
 			if len(withVars) > 0 {
 				table := varTable

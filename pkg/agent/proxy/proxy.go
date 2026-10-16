@@ -1882,7 +1882,10 @@ func hostPortFromAuthority(authority, scheme string) (string, int) {
 // goroutine since MockManager owns a per-instance ticker that only
 // stops on Close().
 func (p *Proxy) setMockManager(m *MockManager) {
-	if provenswitch.On() && m != nil {
+	if m != nil && !provenswitch.On() {
+		m.Variables().KeepRun()
+	}
+	if m != nil {
 		// Every mock served in a test is an earlier place of its recording
 		// for the learn step (package matcher/learn).
 		m.SetServedObserver(p.learnTracker.ServedMock)
@@ -2732,8 +2735,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
-		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
 	}
+	parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 
 	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
@@ -4268,11 +4271,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// explicit reset a long-lived connection could match
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
-	if provenswitch.On() {
-		// A new test set: what the previous set served is no earlier place
-		// of this one's, whose mocks reuse its names (package matcher/learn).
-		p.learnTracker.NewSet()
-	}
+	// A new test set: what the previous set served is no earlier place of
+	// this one's, whose mocks reuse its names (package matcher/learn).
+	p.learnTracker.NewSet()
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {
@@ -4480,6 +4481,22 @@ func (p *Proxy) ResetStatefulCursors() {
 func (p *Proxy) ResetVariables() {
 	if m := p.getMockManager(); m != nil {
 		m.Variables().Reset()
+	}
+}
+
+// BeginTest begins a test of keploy mock replay without the proven switch:
+// the learn step's earlier places and the variables bound are the test's from
+// now on. Satisfies the agent's optional TestScoper extension interface.
+func (p *Proxy) BeginTest() {
+	p.learnTracker.Begin()
+	p.ResetVariables()
+}
+
+// EndTest ends the test BeginTest began: until the next one, no test is open.
+func (p *Proxy) EndTest() {
+	p.learnTracker.End()
+	if m := p.getMockManager(); m != nil {
+		m.Variables().Close()
 	}
 }
 
@@ -4776,10 +4793,8 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false) }
 func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true) }
 
 func (p *Proxy) openTestErrorCapture(carry bool) {
-	if provenswitch.On() {
-		// The learn step's earlier places are the running test's.
-		p.learnTracker.Begin()
-	}
+	// The learn step's earlier places are the running test's.
+	p.learnTracker.Begin()
 	acc := &testErrorAccumulator{}
 	p.captureMu.Lock()
 	// Misses made with no test's window open — or into a window its test's
@@ -4862,9 +4877,7 @@ func missSummaries(errs []error) []string {
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
 func (p *Proxy) EndTestErrorCapture() []error {
-	if provenswitch.On() {
-		p.learnTracker.End()
-	}
+	p.learnTracker.End()
 	if acc := p.activeTestErrors.Swap(nil); acc != nil {
 		return acc.drain()
 	}
@@ -4971,10 +4984,8 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		if acc := p.activeTestErrors.Swap(nil); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
 		}
-		if provenswitch.On() {
-			// The test is over: no test is open until the next one begins.
-			p.learnTracker.End()
-		}
+		// The test is over: no test is open until the next one begins.
+		p.learnTracker.End()
 	} else {
 		// Rendezvous could not complete (errChannel full or the drain stalled
 		// past the deadline). Take what the window holds now but DON'T close it,
