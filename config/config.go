@@ -460,6 +460,13 @@ type Test struct {
 	// keploy.yml inherited is left out with a warning (Replayer.selectTestSets).
 	SelectedFromCommandLine bool `json:"-" yaml:"-" mapstructure:"-"`
 
+	// APITimeoutSet says APITimeout is the user's own: --api-timeout, or
+	// test.apiTimeout in keploy.yml. Under the proven switch it is the only
+	// bound on the app's answer to a test case. keploy sets none of its
+	// own (design v14 rule 15, row W1): without it a test waits for the
+	// app's answer however long a loaded machine takes.
+	APITimeoutSet bool `json:"-" yaml:"-" mapstructure:"-"`
+
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
 	// published-port gates, AppReadyProbeAddr, and the resolved
