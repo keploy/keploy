@@ -532,11 +532,33 @@ type DriftCache struct {
 	m      map[run]*valueDrift
 	raw    map[string]string
 	rawTok map[string][]map[string]bool
+	// mockText is each mock's text as Classify reads it (RawOf), by mock:
+	// the store's mocks are read once per test, not once per request.
+	mockText map[*models.Mock]string
 }
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}}
+	return &DriftCache{m: map[run]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]string{}}
+}
+
+// RawOf is RawOf(m, served), m's text read once for the test (a nil cache
+// reads it now).
+func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
+	if dc == nil {
+		return RawOf(m, served)
+	}
+	dc.mu.Lock()
+	text, ok := dc.mockText[m]
+	dc.mu.Unlock()
+	if ok {
+		return Raw{Mock: m.Name, At: m.Spec.ReqTimestampMock, Served: served, Text: text}
+	}
+	r := RawOf(m, served)
+	dc.mu.Lock()
+	dc.mockText[m] = r.Text
+	dc.mu.Unlock()
+	return r
 }
 
 // rawTokens are every word of a payload's text in every declared form, by

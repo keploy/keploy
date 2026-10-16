@@ -261,6 +261,24 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 	return found
 }
 
+// StagedMocks is every mock staged in the manager's trees (per-test, session,
+// startup, in that order), whatever the open view shows: exact serving spends
+// a served mock without taking it out of its tree, so a recording served or
+// not is here (integrations.StagedReader). For the learn step's earlier
+// places only: the mocks are never handed out, nor served.
+func (m *MockManager) StagedMocks() []*models.Mock {
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	var out []*models.Mock
+	for _, t := range trees {
+		out = append(out, m.treeValues(t, "")...)
+	}
+	return out
+}
+
+var _ integrations.StagedReader = (*MockManager)(nil)
+
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer
 // at most one request, and the pool answers only protocol-phase requests.

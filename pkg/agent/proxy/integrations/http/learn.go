@@ -56,8 +56,8 @@ type learnNoise struct {
 	// headers are the header names never compared: keploy.yml's, and the
 	// static list's (models.FlakyHeaders) but the credentials.
 	headers map[string]bool
-	// body is keploy.yml's request-body noise, with the request matcher's
-	// semantics (matcher.NoiseLookup).
+	// body is keploy.yml's request-body noise, read by matcher.NoiseLookup:
+	// a path names whole fields, as the strict matcher reads it.
 	body matcher.NoiseLookup
 	// url is keploy.yml's url noise: what a pattern matches in a path or a
 	// query value is not compared.
@@ -603,28 +603,48 @@ func ofPairedTest(mocks []*models.Mock, paired *models.Mock, windows integration
 	return out
 }
 
+// stagedOf is every mock the store stages, served or not and whatever its
+// view shows (integrations.StagedReader); none for a store that keeps none.
+func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
+	if sr, ok := mockDb.(integrations.StagedReader); ok {
+		return sr.StagedMocks()
+	}
+	return nil
+}
+
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
 // values: every mock any parser served earlier in the test, and every mock
-// recorded before it that the scope shows or that was served before the test
-// began (visible). The paired mock is not one,
-// and neither is an exchange the learn step served (earlier): its leaves and
-// fixed parts, with what F saw at each, are read instead (earlierOf).
-func earlierRaw(paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) []learn.Raw {
+// recorded before it that the scope shows, that was served before the test
+// began, or that the store stages, served or not (visible: a start-up call
+// a kept-alive app never makes again in F is one). Each is read once. The
+// paired mock is not one, and neither is an exchange the learn step served
+// (earlier): its leaves and fixed parts, with what F saw at each, are read
+// instead (earlierOf). dc keeps each mock's text for the test.
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, earlier []learn.Earlier) []learn.Raw {
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
 		leafed[e.Mock] = true
 	}
+	read := map[string]bool{}
+	once := func(m *models.Mock) bool {
+		id := m.Name + "\x00" + string(m.Kind) + "\x00" + m.Spec.ReqTimestampMock.String()
+		if read[id] {
+			return false
+		}
+		read[id] = true
+		return true
+	}
 	var out []learn.Raw
 	for _, m := range served {
-		if m != nil && !leafed[m.Name] {
-			out = append(out, learn.RawOf(m, true))
+		if m != nil && !leafed[m.Name] && once(m) {
+			out = append(out, dc.RawOf(m, true))
 		}
 	}
 	for _, m := range visible {
-		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
-			out = append(out, learn.RawOf(m, false))
+		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
+			out = append(out, dc.RawOf(m, false))
 		}
 	}
 	return out
@@ -724,7 +744,7 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
 			earlier := earlierThan(earlier, m)
 			learned := learn.Classify(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier,
-				earlierRaw(m, served, append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), earlier), respLeaves(m.Spec.HTTPResp))
+				earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows), ofPairedTest(sc.visible, m, windows)...), ofPairedTest(stagedOf(mockDb), m, windows)...), earlier), respLeaves(m.Spec.HTTPResp))
 			plan, why := learnPlan(tracker, test, m, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
