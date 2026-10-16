@@ -1573,7 +1573,14 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if params.Exact != nil && provenswitch.On() {
 		return a.serveKeployTestExactly(ctx, params)
 	}
-	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params)
+	return a.stageMocks(ctx, params, nil)
+}
+
+// stageMocks stages on the proxy what UpdateMockParams stages for params, and
+// with it the per-test mocks named alsoLoad that the on-disk store holds,
+// whatever params' own load reads (mocksForParams).
+func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string) error {
+	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params, alsoLoad...)
 	if err != nil {
 		return err
 	}
@@ -1601,7 +1608,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 // and the session tier, filtered as params ask. It also applies what the
 // staging call carries beside the pool (the startup cutoff, the recorded
 // windows, the stateful cursors' reset), as UpdateMockParams always has.
-func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams) ([]*models.Mock, []*models.Mock, error) {
+// alsoLoad names per-test mocks the on-disk store holds to read as well,
+// beside what params' own load reads.
+func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams, alsoLoad ...string) ([]*models.Mock, []*models.Mock, error) {
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
 	// test fires FIRST, so a --test-sets selection, an ignored test or the
@@ -1736,6 +1745,14 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
+	}
+	if len(alsoLoad) > 0 && disk != nil {
+		also, err := disk.LoadByNames(alsoLoad)
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to load the named per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
+			return nil, nil, err
+		}
+		originalFiltered = dedupByName(originalFiltered, also)
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {

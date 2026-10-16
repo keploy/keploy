@@ -232,7 +232,15 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
 			r.ResetStatefulCursors()
 		}
-		if err := a.UpdateMockParams(ctx, staging); err != nil {
+		// The pool's per-test mocks are staged with the set's startup
+		// traffic: the staging call reads, of the on-disk store, only what
+		// was recorded before the set's first test (stagingStartupCutoff),
+		// and each test reads its own as it opens (ServeExactTest). A call
+		// recorded while no test was open, between tests or after the last
+		// one, is the pool's, served by name from the staged mocks; were it
+		// not staged, its replay would find no mock. The pool is what no
+		// test owns, never the whole recording.
+		if err := a.stageMocks(ctx, staging, ex.Pool); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
 		a.scopeMu.Lock()

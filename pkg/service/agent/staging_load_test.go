@@ -210,3 +210,38 @@ func TestStoringASetSeedsItsStatementCatalogOnce(t *testing.T) {
 		t.Fatalf("the next set's store left the catalog %v; want it replaced with none", p.catalogs)
 	}
 }
+
+// Under the proven switch the set's exact staging stages, with the app's
+// startup traffic, the per-test mocks of its pool that the on-disk store
+// holds: calls recorded while no test was open (a poll between tests, a
+// publish after the last test), which no test owns and the pool serves by
+// name between tests from what is staged. Reading only the startup band left
+// them unstaged, and every such call missed. What tests own is still read
+// only as each test opens.
+func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &exactProxy{}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		stageMock("boot-auth", "/auth", stageT0.Add(-5*time.Second)),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
+		stageMock("poll-later", "/poll", stageT0.Add(time.Hour)))
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+		Exact:                  &models.ExactServing{Stage: true, Pool: []string{"boot-config", "boot-auth", "poll-later"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.windowed) != 1 {
+		t.Fatalf("staged %d times, want once", len(p.windowed))
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config", "poll-later"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact staging staged %v; want the startup mocks and the pool's poll %v, and no test's own", got, want)
+	}
+}
