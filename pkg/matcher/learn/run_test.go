@@ -7,8 +7,10 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+// sent is an exchange served while no test is open (the start-up's): a test's
+// own exchange sets Own.
 func sent(mock string, at time.Time, path, place, rec, live string) Earlier {
-	return Earlier{Mock: mock, At: at, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: rec}, Live: live, Place: place, Written: true}}}
+	return Earlier{Mock: mock, At: at, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: rec}, Live: live, Place: place, Written: true}}}
 }
 
 // What the start-up sends, while no test is open, is an earlier place of
@@ -113,7 +115,9 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 		t.Fatalf("the first test sees a start-up exchange that carried nothing the run made: %+v", earlier)
 	}
 	tr.End()
-	tr.Served(n, sent("mock-4", t0.Add(time.Second), "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	late := sent("mock-4", t0.Add(time.Second), "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	late.Own = true
+	tr.Served(n, late)
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || earlier[0].Run {
 		t.Fatalf("a late exchange of the ended test is not its own: %+v", earlier)
 	}
@@ -132,11 +136,24 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 	}
 	tr.Served(last, sent("mock-2", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
 	tr.Served(last+9, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	next, _, _, _ := tr.Test()
+	straggler := sent("mock-7", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	straggler.Own = true
+	tr.Served(next, straggler)
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
-		t.Fatalf("a request of the previous set, or of a test that never ran, is kept as the new set's: %+v", earlier)
+		t.Fatalf("a request of the previous set, of a test that never ran, or one that took its scope from the previous set, is kept as the new set's: %+v", earlier)
 	}
 	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil); ok {
 		t.Fatalf("a request of the previous set named a variable %q in the new set", name)
+	}
+	if tr.Answer(next, &models.Mock{Name: "mock-7"}) || tr.Answered("mock-7") || len(tr.AnsweredMocks()) != 0 || tr.Drifts() != nil {
+		t.Fatal("with no test open, a request took a mock as a test's own, or the new set reads the previous set's answers or drifts")
+	}
+	boot := sent("mock-0", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id")
+	boot.Own = false
+	tr.Served(next, boot)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
+		t.Fatalf("the new set's start-up is not the run's: %+v", earlier)
 	}
 }
 
