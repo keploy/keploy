@@ -203,13 +203,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			// client, whose drain then ends and closes the streams; a client
 			// that must stop the agent regardless asks it over its API, or
 			// escalates (utils.DieOnEscalation), and either ends this wait.
-			utils.SetSignalHold(func() {
-				if routes.RecordingClients() == 0 {
-					return
-				}
-				logger.Info("a recording's client is still saving what this agent captured before the stop; the agent stops once it has finished")
-				routes.WaitForRecordingClients()
-			})
+			//
+			// An agent something else stops (docker compose, with the app's
+			// project, also when the app exits on its own) is not stopped by
+			// its client, and the client learns of the stop only from the
+			// agent: its streams ask for that (models.DrainsOnAgentStopHeader).
+			// While such a client holds a stream and this agent has something
+			// for it to save, the stop says so to it (routes.AnnounceStop:
+			// the client then drains the streams, and closes them) and waits
+			// for it, as for a client that stops the agent itself.
+			utils.SetSignalHold(routes.HoldStop(logger))
 			go func() {
 				select {
 				case <-ctx.Done():
