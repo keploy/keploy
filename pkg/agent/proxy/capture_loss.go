@@ -1,8 +1,13 @@
 package proxy
 
 import (
+	"errors"
+	"fmt"
+
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -52,5 +57,25 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 		if kind, ok := teeDropLoss(reason); ok {
 			p.losses.Add(kind, reason+" on a connection to "+dst())
 		}
+	}
+}
+
+// countParserPanic counts, as a capture loss, a parser that panicked while it
+// served a connection to dst (util.ErrParserPanicked, which the parser's
+// goroutine returns through util.RecoverInto): the call it was serving was
+// neither answered from a mock nor recorded. That is keploy's failure, not a
+// call the application made that has no recording (a miss), so it is not
+// filed as one: the read of the run's misses leaves out a parser's error
+// that is no miss. As a parser that stalled, it fails, under the proven
+// switch, the test open when it happened and every later one
+// (CAPTURE_INCOMPLETE). Before, the panicked goroutine sent nothing, its
+// caller read its result channel's close as a clean end, and a test whose
+// call was never answered could pass.
+//
+// dst is the destination's address, as a string or a net.Addr, read only for
+// a panic.
+func (p *Proxy) countParserPanic(err error, parser integrations.IntegrationType, dst any) {
+	if errors.Is(err, util.ErrParserPanicked) {
+		p.losses.Add(models.CaptureLossParserPanic, "the "+string(parser)+" parser, on a connection to "+fmt.Sprint(dst))
 	}
 }

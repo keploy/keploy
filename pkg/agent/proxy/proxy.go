@@ -1338,6 +1338,7 @@ func (p *Proxy) recordMySQLOutgoing(
 	}
 
 	if err := mysqlParser.RecordOutgoing(parserCtx, mysqlSession); err != nil {
+		p.countParserPanic(err, integrations.MYSQL, dstConn.RemoteAddr())
 		// A decline is not a failure: relay rather than letting the caller's
 		// deferred close drop a connection keploy merely chose not to parse.
 		if errors.Is(err, integrations.ErrParserDeclined) {
@@ -1379,6 +1380,12 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 
 	err := mysqlMocker.MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	p.countParserPanic(err, integrations.MYSQL, dstAddr)
+	if errors.Is(err, util.ErrParserPanicked) {
+		// Counted as a capture loss just above; no miss (mockFailed).
+		utils.LogError(p.logger, err, "failed to mock the outgoing message")
+		return err
+	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 		p.sendMockNotFoundError(err)
@@ -2455,8 +2462,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				// is stopping: the CLI that stopped it reads them as it drains
 				// (utils.TeardownStep). Before, it counts nothing anyone reads.
 				defer utils.TeardownStep()
+				// What follows the handler (its error's logging) is
+				// recovered here, as the handler is in handleRecovered.
 				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleConnection(clientConnCtx, clientConn)
+				err := p.handleRecovered(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					// Network closed errors are expected when client closes connection (e.g., app shutdown)
 					// Only log as error if it's not a shutdown/network closed error
@@ -2482,6 +2491,20 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
 	p.clientClose <- true
 	return nil
+}
+
+// handleRecovered is handleConnection with a panic in it recovered, as the
+// accept loop serves every connection: the connection is closed and the panic
+// logged, and it is counted as a capture loss of kind parser_panicked, as a
+// parser goroutine's panic is (countParserPanic). A panic there (a parser that
+// serves in the handler's own goroutine, as MockOutgoing's setup does, or the
+// proxy around it) left the connection unserved, and nothing counted it: the
+// test that made the call could pass.
+func (p *Proxy) handleRecovered(ctx context.Context, conn net.Conn) error {
+	defer util.RecoverWith(p.logger, conn, nil, func() {
+		p.losses.Add(models.CaptureLossParserPanic, "the proxy's connection handler, on a connection from "+fmt.Sprint(conn.RemoteAddr()))
+	})
+	return p.handleConnection(ctx, conn)
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
@@ -3647,6 +3670,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
+			p.countParserPanic(err, parserType, dstAddr)
 			if errors.Is(err, integrations.ErrParserDeclined) {
 				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
 			}
@@ -3675,6 +3699,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				tracked.servedBy(parserType, matchedParser)
 			}
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+			p.countParserPanic(err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
 				return p.mockFailed(logger, err)
@@ -3749,6 +3774,7 @@ func (p *Proxy) recordGenericOutgoing(
 
 	genericSession := p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 	err := genericParser.RecordOutgoing(parserCtx, genericSession)
+	p.countParserPanic(err, integrations.GENERIC, dstConn.RemoteAddr())
 	if errors.Is(err, integrations.ErrParserDeclined) {
 		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
 	}
@@ -3784,6 +3810,7 @@ func (p *Proxy) mockGenericOutgoing(
 		return p.mockFailed(logger, err)
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
 		return p.mockFailed(logger, err)
@@ -4992,6 +5019,13 @@ func isMockMiss(err error) bool {
 // and returned as reportedMiss; anything else, and every run with the switch
 // off, keeps the error log it always had.
 func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
+	if errors.Is(err, util.ErrParserPanicked) {
+		// keploy's failure, counted as a capture loss where the parser
+		// returned it (countParserPanic): no miss, so neither the mismatch
+		// line nor a slot among the misses kept for the test's read.
+		utils.LogError(logger, err, "failed to mock the outgoing message")
+		return err
+	}
 	quiet := provenswitch.On() && isMockMiss(err)
 	if quiet {
 		logger.Debug("failed to mock the outgoing message", zap.Error(err))

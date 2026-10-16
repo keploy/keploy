@@ -36,6 +36,10 @@ const (
 	// the process could run, not wall time): what they carried was neither
 	// recorded nor mocked.
 	CaptureLossParserStall CaptureLossKind = "parser_stalled"
+	// CaptureLossParserPanic: keploy panicked while it served a connection
+	// (a bug in keploy: its parser, or the proxy's handler around it), so the
+	// call it was serving was neither answered from a mock nor recorded.
+	CaptureLossParserPanic CaptureLossKind = "parser_panicked"
 	// CaptureLossDropped: the relay dropped captured bytes for want of room
 	// (the per-connection cap, memory pressure), so the call they belong to
 	// was not recorded whole.
@@ -251,6 +255,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy could not make %d STARTTLS upgrade(s), so what followed on those connections was not parsed", c.Count)
 	case CaptureLossParserStall:
 		return fmt.Sprintf("%d connection(s)' parser stopped taking what keploy captured, and what was still queued for it was abandoned, neither recorded nor mocked", c.Count)
+	case CaptureLossParserPanic:
+		return fmt.Sprintf("keploy's parser panicked %d time(s) while it served a connection (or its proxy did around it), so the calls it was serving were neither answered from a mock nor recorded; this is a bug in keploy, and its agent's log has the panic and where it happened", c.Count)
 	case CaptureLossDropped:
 		return fmt.Sprintf("keploy dropped captured bytes %d time(s) for want of room, so the calls they belong to were not recorded whole", c.Count)
 	case CaptureLossUnpairedConn:
