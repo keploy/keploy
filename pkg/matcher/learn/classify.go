@@ -772,8 +772,9 @@ func unescaped(s string) string {
 			return string(b)
 		})
 		d = escapedSurrogates.ReplaceAllStringFunc(d, func(m string) string {
-			hi, _ := strconv.ParseUint(m[2:6], 16, 32)
-			lo, _ := strconv.ParseUint(m[8:12], 16, 32)
+			// Four hex digits each (escapedSurrogates): 16 bits.
+			hi, _ := strconv.ParseUint(m[2:6], 16, 16)
+			lo, _ := strconv.ParseUint(m[8:12], 16, 16)
 			return string(utf16.DecodeRune(rune(hi), rune(lo)))
 		})
 		d = backslashEscape.ReplaceAllStringFunc(d, func(m string) string {
@@ -783,7 +784,8 @@ func unescaped(s string) string {
 			case m[1] == 'u':
 				// The character it names (a JSON writer's escape of what
 				// is beyond ASCII).
-				if r, err := strconv.ParseUint(m[2:], 16, 32); err == nil {
+				// Four hex digits (backslashEscape): 16 bits.
+				if r, err := strconv.ParseUint(m[2:], 16, 16); err == nil {
 					return string(rune(r))
 				}
 			}
