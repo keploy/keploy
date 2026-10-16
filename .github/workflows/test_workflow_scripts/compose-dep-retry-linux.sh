@@ -184,7 +184,7 @@ setup_again recreated-proven || fail "recreated-proven: the agent compose recrea
 mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
 # The dependency's key: its repository (no tag), its port and its
 # configuration's fingerprint; one key on every mock.
-keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@[0-9a-f]{12}$')
+keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@s[0-9a-f]{12}$')
 keyed=$(grep -c . <<<"$keys")
 if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | wc -l)" -ne 1 ]; then
   fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
