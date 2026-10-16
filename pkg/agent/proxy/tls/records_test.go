@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // chunkConn is a connection whose reads return as much of data as the
@@ -72,8 +74,10 @@ func TestARecordConnHandsOverARecordAtATime(t *testing.T) {
 // it hangs up then (curl, libcurl and Node.js under TLS 1.2 reject keploy's
 // certificate so); something, when it sends its close_notify -- however soon
 // after its Finished -- or a call. A connection keploy's TLS server did not
-// serve says nothing.
+// serve says nothing, nor does one it served with the proven switch off,
+// which it serves as before, reading nothing of its own.
 func TestSilentSinceHandshake(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
 		name   string
 		max    uint16
@@ -112,6 +116,27 @@ func TestSilentSinceHandshake(t *testing.T) {
 	if SilentSinceHandshake(&chunkConn{}) {
 		t.Fatal("a connection keploy's TLS server did not serve is never silent since a handshake")
 	}
+
+	t.Run("the switch off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		app, srv := tcpPair(t)
+		go func() {
+			c := tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example"})
+			_ = c.Handshake()
+			_ = app.Close()
+		}()
+		conn, _, err := HandleTLSConnection(context.Background(), zap.NewNop(), srv, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.ReadAll(conn)
+		if SilentSinceHandshake(conn) {
+			t.Fatal("with the switch off, keploy's TLS server reads the client as before, and says nothing of what it sent")
+		}
+		if _, ok := conn.(*tls.Conn).NetConn().(*recordConn); ok {
+			t.Fatal("with the switch off, the client's connection is wrapped")
+		}
+	})
 }
 
 // tcpPair is both ends of a loopback TCP connection: crypto/tls's server
