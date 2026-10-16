@@ -440,7 +440,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, said at ERROR where it was found, and the run's (below).
 	requestsShort := ""
 	if actual != nil {
-		lost := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+		// Unconfirmed (the stream closed on its own) is not said: under
+		// compose this stream closes so on every run, and what it carries
+		// feeds the run's report, not a recording.
+		lost, _ := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
 			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords, watchRound)
 		if !lost && watchRound.endsByMarkers() {
 			// The agent said it holds nothing more from before the run

@@ -452,9 +452,19 @@ func (m *mockService) Record(ctx context.Context) error {
 	// be a race. This returns as soon as the agent stops sending.
 	drainStart := time.Now()
 	drainFrom.Store(drainStart.UnixNano())
-	lost := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
+	lost, unconfirmed := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
 		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
 	}, func() uint64 { return uint64(heldSeen.Load()) }, recordDrainWords, round)
+	// sayUnconfirmed is said once the recording is saved, and only then: a
+	// recording that is not kept (the tests failed, nothing was captured,
+	// the agent died) promotes nothing, and "the recording is saved" would
+	// not be true of it.
+	sayUnconfirmed := func() {
+		if unconfirmed {
+			m.logger.Warn(composeTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
+				zap.String("next_step", composeTailUnconfirmedNext))
+		}
+	}
 	// 8a's count, read while the recording's stream is still open: an agent
 	// that is being stopped too (a stop sent to it, a container stop) holds
 	// its HTTP server only while a recording's streams are open, and once
@@ -607,6 +617,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			return nil
 		}
 		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		sayUnconfirmed()
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -734,6 +745,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
 			return fmt.Errorf("%s: %w", stopReason, err)
 		}
+		sayUnconfirmed()
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
@@ -1274,7 +1286,11 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // keploy reaches keploy a second time from sudo, as the first does. A drain
 // the user ends so did not get what the agent still held: it is lost (said
 // with words.gaveUp).
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost bool) {
+//
+// unconfirmed is true when it ended because an agent that does not hold its
+// stream for the drain (docker compose stops it with the project) closed it:
+// nothing then says the caller has all it captured, nor that it does not.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost, unconfirmed bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 	notice := utils.NewStopNowNotice(mockDrainNotice)
@@ -1301,14 +1317,17 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// stream as it gives the drain up: the user's stop.
 				select {
 				case <-utils.StopNow():
-					return m.stoppedNow(words)
+					return m.stoppedNow(words), false
 				default:
-					return m.agentEndedDrain(&looks, arrived() == lookedAt)
+					return m.agentEndedDrain(&looks, arrived() == lookedAt), false
 				}
 			}
-			return false
+			// The agent gave no word that it had handed over all it had:
+			// its stream just closed. What this caller saves cannot be
+			// confirmed whole: the caller says so if it saves it.
+			return false, true
 		case <-utils.StopNow():
-			return m.stoppedNow(words)
+			return m.stoppedNow(words), false
 		case <-notices.C:
 			msg := words.saving
 			if notice.Next() {
@@ -1341,7 +1360,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
-			return gaveUp
+			return gaveUp, false
 		}
 	}
 }
@@ -1382,6 +1401,15 @@ var recordDrainWords = drainWords{
 	stalled:     "stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
 	stalledNext: "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more",
 }
+
+// composeTailUnconfirmed, with its next step, is said at WARN once keploy mock
+// record has saved a recording whose drain was unconfirmed
+// (drainTrailingMocks): under docker compose the agent goes with the project,
+// and nothing says the recording holds every mock it captured.
+const (
+	composeTailUnconfirmed     = "the keploy agent closed its mock stream as docker compose stopped it with the project, without saying it had handed over every mock it captured: keploy cannot confirm this recording holds them all"
+	composeTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or record the test command natively (keploy mock record -c \"<test command>\"), where keploy confirms it"
+)
 
 // replayDrainWords are keploy mock replay's: it collects the requests the
 // agent captured, for the run's report. A run short of them is not judged
