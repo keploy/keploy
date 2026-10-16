@@ -5,17 +5,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -423,6 +428,143 @@ func TestTheSessionResetsWhatWasPassedThroughBeforeIt(t *testing.T) {
 		t.Fatalf("the first mock recorded after the session started is for %q, want the reconnection's /after", url)
 	}
 	awaitEvent(t, done2, "the reconnection's handleConnection returning")
+}
+
+// Record sets up what a connection under the session needs -- the packet
+// capture, and a mock manager (the first session's had none, so a
+// connection under it was dropped) -- before the session takes effect; and,
+// before the first session takes effect, resets what was passed through
+// while there was none: in between, a passthrough still open carried the
+// application's calls unrecorded while the session recorded (an attached or
+// Kubernetes application, already running, whose test case was then left
+// without a mock). A later session resets what it does not pass through once
+// it is in effect, so the reconnections are its own.
+// TestTheSessionResetsWhatWasPassedThroughBeforeIt is the reset itself, and
+// TestTheFirstSessionResetsWhatWasPassedThroughBeforeItTakesEffect and
+// TestALaterSessionResetsAGlobalSurvivorOnceItIsInEffect are which session
+// each reset sees; this pins where the set-up goes, which no event of a test
+// tells apart.
+func TestRecordSetsUpAndResetsThePassthroughsBeforeTheSessionTakesEffect(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy.go: %v", err)
+	}
+	var record *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "Record" && fd.Recv != nil {
+			record = fd
+		}
+	}
+	if record == nil {
+		t.Fatal("Proxy.Record not found in proxy.go")
+	}
+	at := map[string][]token.Pos{}
+	ast.Inspect(record.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				at[sel.Sel.Name] = append(at[sel.Sel.Name], call.Pos())
+			}
+		}
+		return true
+	})
+	sets := at["setSession"]
+	if len(sets) != 1 {
+		t.Fatalf("Record calls setSession %d time(s), want once", len(sets))
+	}
+	set := sets[0]
+	for _, name := range []string{"setMockManager", "startPacketCapture", "stopPacketCapture"} {
+		if len(at[name]) != 1 || at[name][0] > set {
+			t.Fatalf("Record calls %s %d time(s), or after setSession: want once, before the session takes effect", name, len(at[name]))
+		}
+	}
+	ends := at["endNoSessionPassthroughs"]
+	if len(ends) != 2 || ends[0] > set || ends[1] < set {
+		t.Fatal("Record must reset what was passed through without a session before the first session takes effect, and a later session's once it is in effect")
+	}
+}
+
+// sessionAtClose records the proxy's session at the connection's first
+// close: a passthrough's reset (noSessionPassthrough.end) closes it from
+// inside Record, so the session it sees is the one in effect at the reset.
+type sessionAtClose struct {
+	net.Conn
+	p    *Proxy
+	once sync.Once
+	at   chan *agent.Session
+}
+
+func (c *sessionAtClose) Close() error {
+	c.once.Do(func() { c.at <- c.p.getSession() })
+	return c.Conn.Close()
+}
+
+func (c *sessionAtClose) CloseWrite() error { return util.CloseWriteIfPossible(c.Conn) }
+
+func (c *sessionAtClose) NetConn() net.Conn { return c.Conn }
+
+// passedThroughWithoutASession is a connection an agent started in record
+// mode (with global passthrough, or not) passes through before it has a
+// session, used once: its close says which session was in effect when it
+// was reset.
+func passedThroughWithoutASession(t *testing.T, global bool) (*Proxy, *sessionAtClose) {
+	t.Helper()
+	upstream, _, _ := echoUpstream(t)
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	cfg.Agent.GlobalPassthrough = global
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+	p.nsswitchData = []byte("preseeded-by-test")
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	app, src := acceptedConn(t)
+	w := &sessionAtClose{Conn: src, p: p, at: make(chan *agent.Session, 1)}
+	predialedTo(t, p, w, upstream)
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), w) }()
+	if _, err := app.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("handleConnection returned (%v) without passing the connection through", err)
+	case <-readN(app, 4):
+	}
+	return p, w
+}
+
+// The first session resets what was passed through without a session before
+// it takes effect: reset after, the passthrough carried the application's
+// calls unrecorded while the session recorded.
+func TestTheFirstSessionResetsWhatWasPassedThroughBeforeItTakesEffect(t *testing.T) {
+	p, w := passedThroughWithoutASession(t, false)
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+	if at := awaitEvent(t, w.at, "the passthrough's reset"); at != nil {
+		t.Fatal("the first session was already in effect when its passthrough was reset: in between, the passthrough carried calls unrecorded")
+	}
+}
+
+// A later session that does not pass through what global passthrough kept
+// (it intercepts TLS) resets it once it is in effect: reset before, the
+// application's reconnection was the old session's, a passthrough the new
+// session never resets.
+func TestALaterSessionResetsAGlobalSurvivorOnceItIsInEffect(t *testing.T) {
+	p, w := passedThroughWithoutASession(t, true)
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.at: // the reset runs inside Record, so it is in by now
+		t.Fatal("a session that passes through reset the global passthrough")
+	default:
+	}
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true, OpportunisticTLSIntercept: true}); err != nil {
+		t.Fatal(err)
+	}
+	if at, now := awaitEvent(t, w.at, "the survivor's reset"), p.getSession(); at != now {
+		t.Fatalf("the survivor was reset under session %p, want the new session %p: its reconnection would be the old session's", at, now)
+	}
 }
 
 // An agent started to record whose first session is a replay resets what it
