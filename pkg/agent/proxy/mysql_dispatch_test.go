@@ -889,6 +889,7 @@ func TestAMySQLLoginRefusedThenRetriedIsLetInOnEveryConnection(t *testing.T) {
 // lost nothing. The replayer's handshake was charged nothing: a test whose
 // database connection keploy's certificate failed had no capture loss.
 func TestAMySQLClientsTLSHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1") // the client is read a record at a time after its handshake
 	sslRequest := func(app net.Conn) error {
 		if _, err := readOneMySQLPacket(app); err != nil {
 			return fmt.Errorf("reading the greeting: %w", err)
@@ -915,6 +916,9 @@ func TestAMySQLClientsTLSHandshakeIsChargedAsAnyClientHandshake(t *testing.T) {
 		{"a Go client that rejects keploy's certificate", func(t *testing.T, app net.Conn) {
 			_ = tls.Client(app, &tls.Config{ServerName: "db.example"}).Handshake()
 		}, 1, 0},
+		{"a client that hangs up once the handshake is done, having sent nothing", func(t *testing.T, app net.Conn) {
+			_ = tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "db.example", MaxVersion: tls.VersionTLS12}).Handshake()
+		}, 0, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}

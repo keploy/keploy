@@ -1392,9 +1392,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := pTls.WithClientHandshakeReport(parserCtx, func(err error) {
-		_ = p.chargeClientHandshake(parserCtx, err, dstAddr)
-	})
+	reportCtx := p.withClientTLS(parserCtx, dstAddr)
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
@@ -3138,10 +3136,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
-	// clientTLS is the TLS layer keploy serves the client over, once its
-	// handshake is done: whether the client sent anything after it is read
-	// from it (pTls.SilentSinceHandshake).
-	var clientTLS net.Conn
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 
 	// Speculative upstream TLS dial — kicked off in parallel with the
@@ -3265,6 +3259,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// nil conn, and assigning that over srcConn would hide the
 		// connection from the deferred close.
 		var tlsSrcConn net.Conn
+		// What the handshake, and the client just after it, lose is charged
+		// to the destination (clientTLS).
+		hsCtx = p.withClientTLS(hsCtx, dstAddr)
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3280,12 +3277,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				speculativeDial.abandon()
 				speculativeDial = nil
 			}
-			err = p.chargeClientHandshake(ctx, err, dstAddr)
+			err = pTls.HandshakeCause(err)
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
 		srcConn = tlsSrcConn
-		clientTLS = tlsSrcConn
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3327,9 +3323,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// attempt to read conn until buffer is either filled or conn is closed
 	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
-		if clientTLS != nil {
-			p.chargeSilentClient(ctx, err, clientTLS, dstAddr)
-		}
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
 	}
