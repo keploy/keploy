@@ -3,7 +3,9 @@ package record
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -531,5 +533,64 @@ func TestWindowMappingsATestWithoutANameKeepsItsWindow(t *testing.T) {
 	}
 	if later, ok := got["later"]; len(got) != 1 || !ok || len(later) != 0 {
 		t.Fatalf("mapped %v; want later with no mock: the call was recorded inside the unnamed test case's window", got)
+	}
+}
+
+// lossInstr is the fake agent of startWinRecording that counts what it could
+// not capture: nothing (models.CaptureLosses), so the recording's capture
+// watch runs.
+type lossInstr struct{ *blockingInstr }
+
+func (lossInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) { return nil, nil }
+
+// A mock whose stamp says the Docker daemon did not answer keploy's read of
+// its container charges the test case that holds it, and is not said to be
+// no test case's: without --sync (the default), the test case whose window
+// holds it, as the mappings are derived at the end; with --sync, the test
+// case whose streamed mapping names it.
+func TestStart_ProvenRecordChargesAnUnreadMockToItsTestCase(t *testing.T) {
+	for _, sync := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sync=%v", sync), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			keepExitCode(t)
+			core, logs := observer.New(zap.WarnLevel)
+			f := &fakeInstr{
+				mappings: make(chan models.TestMockMapping),
+				incoming: make(chan *models.TestCase),
+				outgoing: make(chan *models.Mock),
+			}
+			cfg := &config.Config{}
+			cfg.Record.Synchronous = sync
+			w := &winRecording{f: f, testDB: &recTestDB{}, mockDB: &recMockDB{unencodable: map[string]bool{}}, mapping: &recMappingDB{}, done: make(chan error, 1)}
+			w.r = &Recorder{
+				logger: zap.New(core), testDB: w.testDB, mockDB: w.mockDB, mappingDb: w.mapping,
+				telemetry: &recTelemetry{}, instrumentation: lossInstr{&blockingInstr{f}}, testSetConf: recTestSetConf{},
+				hooks: BaseRecordHooks{}, config: cfg,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			w.cancel = cancel
+			go func() { w.done <- w.r.Start(ctx) }()
+
+			unread := winMock("insert-1", models.Postgres, "mocks", 1040)
+			unread.Spec.Metadata[models.ContainerUnreadMetadata] = "container pg (postgres:16)"
+			w.mock(t, winMock("rates-1", models.HTTP, "", 1030))
+			w.mock(t, unread)
+			w.test(t, winTest("test-1", 1000, 1100))
+			w.test(t, winTest("test-2", 2000, 2100))
+			if sync {
+				w.streamed(t, models.TestMockMapping{TestName: "test-1", MockIDs: []string{"rates-1", "insert-1"}})
+				require.Eventually(t, func() bool { return len(w.batches()) == 1 }, 10*time.Second, 10*time.Millisecond)
+			}
+			w.stop(t, 2, 2)
+
+			if apart := logs.FilterMessageSnippet("mocks no test case holds").All(); len(apart) != 0 {
+				t.Fatalf("a mock test-1 holds was said to be no test case's: %+v", apart)
+			}
+			charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+			if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
+				!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") {
+				t.Fatalf("%d WARNs for test cases, want one naming test-1, which holds the mock: %+v", len(charged), charged)
+			}
+		})
 	}
 }

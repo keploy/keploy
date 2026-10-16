@@ -351,8 +351,9 @@ func testsKeployCannotCapture(results []models.TestResult) ([]string, models.Cap
 }
 
 // notCapturableReason is the test-set report's reason for a set left unjudged
-// by tests whose calls keploy cannot capture.
+// by tests whose calls keploy cannot capture, or cannot tell it captured (an
+// abandoned TLS handshake), or cannot tell which container they reached.
 func notCapturableReason(tests []string, what string) string {
-	return fmt.Sprintf("not judged: %d test(s) ran while the application called what keploy cannot capture (%s): %s",
+	return fmt.Sprintf("not judged: %d test(s) ran while keploy could not capture, or could not tell it captured, every call the application made (%s): %s",
 		len(tests), strings.Join(tests, ", "), strings.TrimPrefix(what, "not judged: "))
 }

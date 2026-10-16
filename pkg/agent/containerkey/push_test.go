@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/go-connections/nat"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1149,5 +1150,93 @@ func TestTheNextSessionAsksForTheSettlesSinceTheLastAnswered(t *testing.T) {
 	}
 	if got := <-told; got != (SettleAsk{Asked: 1, Boot: agent.boot}) {
 		t.Fatalf("the next session's first ask was told of %+v, want the settle answered before", got)
+	}
+}
+
+// A container whose read the CLI's daemon holds past the stall window (in
+// time the CLI could run) is listed as stalled: the docker-mode agent stops
+// waiting for its fingerprint, and its use is withheld and told, naming it.
+func TestADockerModeAgentIsToldOfAContainerTheCLIsReadStalledOn(t *testing.T) {
+	f := newFakeDocker()
+	agent := newPushedIndex()
+	p, took := settlingPusher(t, f, agent, true)
+	<-took
+	p.idx.mu.Lock()
+	p.idx.stallClock = &stall.ManualClock{Step: stall.OnTime}
+	p.idx.mu.Unlock()
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	for s := range took {
+		if i := slices.IndexFunc(s.Containers, func(c SnapshotContainer) bool { return c.ID == "tc" }); i >= 0 && s.Containers[i].Stalled {
+			break
+		}
+	}
+	k := NewKeyer(agent)
+	var told []string
+	k.OnUnread(func(what string) { told = append(told, what) })
+	_ = name(t, k, "c1", "172.17.0.7:5432")
+	if key, st := use(k, "c1"); st != Withheld || key != "" {
+		t.Fatalf("a use of the stalled container = %q, %v; want Withheld", key, st)
+	}
+	if len(told) != 1 || !strings.Contains(told[0], "postgres:16") {
+		t.Fatalf("told %q", told)
+	}
+}
+
+// A container whose read stalled, read once more when that read ends (an
+// event came meanwhile), is listed as being read and no longer stalled: the
+// docker-mode agent waits for the next read, as the CLI's index does, until
+// that read's own watch says it stalled.
+func TestADockerModeAgentIsToldAStalledReadEndedThoughItsContainerIsReadAgain(t *testing.T) {
+	f := newFakeDocker()
+	agent := newPushedIndex()
+	p, took := settlingPusher(t, f, agent, true)
+	<-took
+	clk := &stall.ManualClock{}
+	p.idx.mu.Lock()
+	p.idx.stallClock = clk
+	p.idx.mu.Unlock()
+	held := make(chan struct{})
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	waitStallLook(t, clk)
+	clk.Advance(readStallGrace)
+	listed := func(want func(SnapshotContainer) bool) <-chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			for s := range took {
+				if i := slices.IndexFunc(s.Containers, func(c SnapshotContainer) bool { return c.ID == "tc" }); i >= 0 && want(s.Containers[i]) {
+					close(done)
+					return
+				}
+			}
+		}()
+		return done
+	}
+	<-listed(func(c SnapshotContainer) bool { return c.Stalled })
+	connect(f, "tc") // tc is to be read once more when this read ends
+	fence(f)
+	p.idx.AwaitReadsOf(t.Context(), []string{"tc"})
+	second := make(chan struct{})
+	defer close(second)
+	f.mu.Lock()
+	f.block["tc"] = second // the next read is held too
+	f.mu.Unlock()
+	readAgain := listed(func(c SnapshotContainer) bool { return c.Reading && !c.Stalled })
+	close(held)
+	<-f.entered // the next read of tc is in flight
+	select {
+	case <-readAgain:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("no list says tc's stalled read ended: the docker-mode agent takes the next read for stalled")
 	}
 }

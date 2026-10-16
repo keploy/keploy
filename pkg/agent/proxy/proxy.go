@@ -1939,11 +1939,14 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 }
 
 // bindContainerKeys makes ctx, the agent's, the bound of its reading of
-// Docker for container keys (containerkey), so it stops with the agent. Only
-// under the proven switch: without it the agent never reads Docker.
-func bindContainerKeys(ctx context.Context) {
+// Docker for container keys (containerkey), so it stops with the agent, and
+// has p count each use of a container whose read the daemon did not answer
+// (countUnreadContainers). Only under the proven switch: without it the
+// agent never reads Docker.
+func (p *Proxy) bindContainerKeys(ctx context.Context) {
 	if provenswitch.On() {
 		containerkey.Default.Bind(ctx)
+		p.countUnreadContainers()
 	}
 }
 
@@ -1959,7 +1962,7 @@ func (p *Proxy) startContainerKeys(ctx context.Context) {
 
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
-	bindContainerKeys(ctx)
+	p.bindContainerKeys(ctx)
 
 	// Skip the TCP listener if configured. DNS + parsers + session still run.
 	if agent.SkipProxyListener {

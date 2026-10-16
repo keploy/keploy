@@ -90,6 +90,10 @@ type SnapshotContainer struct {
 	// made before secrets were left out of it.
 	LegacyFingerprint string `json:"legacyFingerprint,omitempty"`
 	Reading           bool   `json:"reading,omitempty"`
+	// Stalled says that read has made no progress for the stall window, in
+	// time the CLI could run: the agent stops waiting for it, the
+	// container's identity unknown, until a list says the read ended.
+	Stalled bool `json:"stalled,omitempty"`
 	// Name is the container's name, for messages.
 	Name  string         `json:"name,omitempty"`
 	IPs   []string       `json:"ips,omitempty"`
@@ -142,7 +146,8 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 		}
 		at[id] = len(s.Containers)
 		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/"),
-			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id]})
+			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id],
+			Stalled: st.fingerprints[id] == "" && st.reading[id] && st.stalled[id]})
 	}
 	// Each IP goes to the container the index names at it (byIP): a
 	// container that took an IP whose old holder's die never arrived holds
@@ -224,11 +229,15 @@ func (p *pushedIndex) apply(s Snapshot) {
 			e.publish(port.HostIP, port.HostPort, port.Port)
 		}
 		st.images[e.id] = e.image
+		if c.Name != "" {
+			st.names[e.id] = "/" + c.Name
+		}
 		if c.Fingerprint != "" {
 			st.fingerprints[e.id] = c.Fingerprint
 			st.legacy[e.id] = c.LegacyFingerprint
 		} else if c.Reading {
 			st.reading[e.id] = true
+			st.stalled[e.id] = c.Stalled
 		}
 		for _, a := range e.ips {
 			st.byIP[a] = e.id
@@ -354,25 +363,38 @@ func (p *pushedIndex) Fingerprint(ctx context.Context, id string) (string, bool)
 // Fingerprints is Fingerprint with the container's legacy fingerprint in the
 // list held (fingerprintsResolver).
 func (p *pushedIndex) Fingerprints(ctx context.Context, id string) (string, string, bool) {
+	fp, legacy, ok, _ := p.FingerprintsOrStall(ctx, id)
+	return fp, legacy, ok
+}
+
+// FingerprintsOrStall is Fingerprints, and, when the list held says the
+// CLI's read of the container's configuration stalled (Stalled), the
+// container named for a message (stallResolver).
+func (p *pushedIndex) FingerprintsOrStall(ctx context.Context, id string) (string, string, bool, string) {
 	for {
 		p.mu.Lock()
 		st, applied := p.st, p.applied
-		var fp, legacy string
+		var fp, legacy, stalled string
 		held, reading := false, false
 		if st != nil && st.err == nil {
 			fp, legacy, held, reading = st.fingerprints[id], st.legacy[id], st.images[id] != "", st.reading[id]
+			if st.stalled[id] {
+				stalled = st.describeLocked(id)
+			}
 		}
 		p.mu.Unlock()
 		switch {
 		case fp != "" && held:
-			return fp, legacy, true
+			return fp, legacy, true, ""
 		case !reading:
-			return "", "", false
+			return "", "", false, ""
+		case stalled != "":
+			return "", "", false, stalled
 		}
 		select {
 		case <-applied:
 		case <-ctx.Done():
-			return "", "", false
+			return "", "", false, ""
 		}
 	}
 }
