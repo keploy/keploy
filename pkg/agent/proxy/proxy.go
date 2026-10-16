@@ -3350,14 +3350,31 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// preface and SETTINGS frames. Protocol matchers (gRPC vs h2c) need to
 	// inspect the HEADERS frame's content-type to decide.
 	//
-	// We use a short timeout read instead of a blocking read because:
+	// Without the proven switch a short timeout read is used instead of a
+	// blocking read because:
 	//  - h2c clients typically send preface+SETTINGS+HEADERS in quick succession
 	//  - gRPC clients send preface+SETTINGS, then WAIT for server SETTINGS_ACK
 	//    before sending HEADERS — a blocking read would deadlock.
 	//
 	// If HEADERS arrives within the timeout → matchers can inspect content-type.
 	// If it doesn't (gRPC pattern) → matchers treat missing HEADERS as gRPC.
-	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+	//
+	// Under the proven switch nothing is decided from a silence (row W3).
+	// On replay keploy is the server: it answers the client preface with
+	// its own, and reads until the HEADERS arrive, however long the client
+	// takes (readHTTP2UntilHeaders). On record the HTTP/2 parser claims
+	// every HTTP/2 connection whatever its HEADERS say, and the real server
+	// answers the preface, so nothing is waited for.
+	if provenswitch.On() && util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+		if rule.Mode == models.MODE_TEST {
+			logger.Debug("HTTP/2 preface detected but no HEADERS frame yet; answering the preface and reading until HEADERS")
+			initialBuf, srcConn, err = readHTTP2UntilHeaders(parserCtx, srcConn, initialBuf)
+			if err != nil {
+				utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
+				return err
+			}
+		}
+	} else if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
 
 		const http2HeadersReadTimeout = 150 * time.Millisecond
