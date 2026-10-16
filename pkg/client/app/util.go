@@ -177,10 +177,11 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 	}
 
-	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"
-	upIdx := strings.Index(appCmd, " up")
-	if upIdx != -1 {
-		modifiedCmd = fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
+	// If the pattern doesn't exist, inject the new Compose file right before
+	// the `up` subcommand: after compose's global flags, whose values (a -p
+	// project named "upload", say) are not the subcommand.
+	if upAt, ok := composeUpOffset(appCmd, true); ok {
+		modifiedCmd = fmt.Sprintf("%s-f %s %s", appCmd[:upAt], newComposeFile, appCmd[upAt:])
 		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
 	}
 
@@ -239,20 +240,91 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 		}
 	}
 
-	parts := strings.Fields(appCmd)
-	for i, p := range parts {
-		if p == "up" {
-			// Insert flags immediately after "up"
-			newParts := make([]string, 0, len(parts)+len(args))
-			newParts = append(newParts, parts[:i+1]...)
-			newParts = append(newParts, args...)
-			newParts = append(newParts, parts[i+1:]...)
-			return strings.Join(newParts, " ")
-		}
+	// Insert the flags immediately after the `up` subcommand, where it
+	// stands, its spacing and quoting kept. Not into a wrapper's quoted
+	// script (`bash -c "docker compose up"`): keploy reads these flags back
+	// off the command's words (composeUpSemantics), where a flag inside
+	// the quotes would end in the quote.
+	if upAt, ok := composeUpOffset(appCmd, false); ok {
+		end := upAt + len("up")
+		return appCmd[:end] + " " + strings.Join(args, " ") + appCmd[end:]
 	}
 
 	// Fallback: no explicit "up" token detected — do not append flags.
 	return appCmd
+}
+
+// composeGlobalValueFlags are compose's global flags whose value is the next
+// word: that word is the flag's (a project, a file, a profile), never the
+// subcommand, whatever it spells.
+var composeGlobalValueFlags = map[string]bool{
+	"-f": true, "--file": true, "-p": true, "--project-name": true, "--profile": true,
+	"--env-file": true, "--project-directory": true, "--ansi": true, "--parallel": true, "--progress": true,
+}
+
+// composeUpField is the index in parts, a compose command's words, of its
+// `up` subcommand: the first word "up" that is not the value of a global
+// flag, so `docker compose -p up up` and `-p upload up` find the second
+// word. It is -1 when there is none.
+func composeUpField(parts []string) int {
+	value := false
+	for i, p := range parts {
+		switch {
+		case value:
+			value = false
+		case composeGlobalValueFlags[p]:
+			value = true
+		case p == "up":
+			return i
+		}
+	}
+	return -1
+}
+
+// composeUpOffset is the byte offset in cmd of its `up` subcommand
+// (composeUpField), so the command can be spliced where it stands, its
+// spacing and quoting kept. A quoted word ("my file.yaml") is one word. A
+// command with no `up` of its own may run compose inside a quoted word, as
+// `bash -c "docker compose up"` does: with intoQuoted, the `up` is then
+// found inside that word, so a splice lands in the script the wrapper runs.
+func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
+	var starts []int
+	var words []string
+	for i := 0; i < len(cmd); {
+		for i < len(cmd) && (cmd[i] == ' ' || cmd[i] == '\t') {
+			i++
+		}
+		if i >= len(cmd) {
+			break
+		}
+		start := i
+		var quote byte
+		for i < len(cmd) && (quote != 0 || (cmd[i] != ' ' && cmd[i] != '\t')) {
+			switch {
+			case quote == 0 && (cmd[i] == '"' || cmd[i] == '\''):
+				quote = cmd[i]
+			case quote != 0 && cmd[i] == quote:
+				quote = 0
+			}
+			i++
+		}
+		starts = append(starts, start)
+		words = append(words, cmd[start:i])
+	}
+	if i := composeUpField(words); i >= 0 {
+		return starts[i], true
+	}
+	for i, w := range words {
+		if !intoQuoted {
+			break
+		}
+		if len(w) >= 2 && (w[0] == '"' || w[0] == '\'') && w[len(w)-1] == w[0] {
+			if at, ok := composeUpOffset(w[1:len(w)-1], true); ok {
+				return starts[i] + 1 + at, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // composeUpSemantics reads the `up` flags that change what the run MEANS out of

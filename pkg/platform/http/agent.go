@@ -2779,6 +2779,25 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 	return certPEM, nil
 }
 
+// runFlagsOf takes the app's published ports, networks and host entries out
+// of its `docker run` (or `docker start`) command: the agent container
+// publishes and joins them on the app's behalf, and the app joins the
+// agent's network namespace. A `docker compose` command has none of these
+// flags, and its -p is its project name (--project-name), not a port: its
+// ports, networks and hosts are its compose file's, which App.SetupCompose
+// reads. Taking -p out of it ran the user's stack as the working
+// directory's project instead of the one they named, and every tool that
+// resolved the project from the command, the user's own `docker compose -p`
+// included, then missed the stack keploy started.
+func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string) {
+	if kind == utils.DockerCompose {
+		return cmd, nil, nil, nil
+	}
+	cmd, ports, networks = agentUtils.ExtractDockerFlags(cmd)
+	cmd, hosts = agentUtils.ExtractAddHosts(cmd)
+	return cmd, ports, networks, hosts
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -2902,8 +2921,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}()
 		} else {
-			cmd, appPorts, appNetworks = agentUtils.ExtractDockerFlags(cmd)
-			cmd, appHosts = agentUtils.ExtractAddHosts(cmd)
+			cmd, appPorts, appNetworks, appHosts = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
 		}
 		opts.AppExtraHosts = appHosts
 
