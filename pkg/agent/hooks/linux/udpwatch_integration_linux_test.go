@@ -80,6 +80,9 @@ func runUDPHelper(port string) int {
 	if port == "server" {
 		return runUDPServerHelper()
 	}
+	if strings.HasPrefix(port, "bound4:") || strings.HasPrefix(port, "bound6:") {
+		return runBoundClientHelper(port)
+	}
 	p, _ := strconv.Atoi(port)
 	in := bufio.NewReader(os.Stdin)
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
@@ -584,5 +587,112 @@ func TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive(t *testing.T) {
 	}
 	if n := udpLoss(t, h); n != 1 {
 		t.Fatalf("%d udp_reply losses, want 1: a member's client answered by a real server", n)
+	}
+}
+
+// runBoundClientHelper is the UDP helper as a client that bind()s first (as
+// Node's dgram, Java's DatagramSocket and Go's ListenPacket do), on IPv4
+// ("bound4:PORT") or a dual-stack IPv6 socket ("bound6:PORT"), then sends
+// unconnected to 127.0.0.1:PORT and waits for the answer.
+func runBoundClientHelper(arg string) int {
+	p, _ := strconv.Atoi(arg[len("bound4:"):])
+	var fd int
+	var err error
+	var to unix.Sockaddr
+	if strings.HasPrefix(arg, "bound6:") {
+		fd, err = unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM, 0)
+		if err == nil {
+			err = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0)
+		}
+		if err == nil {
+			err = unix.Bind(fd, &unix.SockaddrInet6{})
+		}
+		to = &unix.SockaddrInet6{Port: p, Addr: [16]byte{10: 0xff, 11: 0xff, 12: 127, 15: 1}}
+	} else {
+		fd, err = unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+		if err == nil {
+			err = unix.Bind(fd, &unix.SockaddrInet4{})
+		}
+		to = &unix.SockaddrInet4{Port: p, Addr: [4]byte{127, 0, 0, 1}}
+	}
+	if err == nil {
+		err = unix.Sendto(fd, []byte("ping"), 0, to)
+	}
+	if err == nil {
+		_, _, err = unix.Recvfrom(fd, make([]byte, 16), 0)
+	}
+	if err != nil {
+		fmt.Println("helper:", err)
+		return 3
+	}
+	fmt.Println("ready bound")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	return 0
+}
+
+// Under the switch a client that bind()s before it sends (the commonest
+// shape: Node's dgram, Java's DatagramSocket, Go's ListenPacket) is a client,
+// never read as a server: the real server's answer counts, on IPv4 and on a
+// dual-stack IPv6 socket (bind6), and the loss names where it sent.
+func TestUnderTheSwitchABoundClientsAnswerIsCounted(t *testing.T) {
+	if !inOwnPIDNamespace(t) {
+		return
+	}
+	h, cg := provenUDPHooks(t)
+	echo, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echo.Close() })
+	go func() {
+		b := make([]byte, 16)
+		for {
+			_, from, err := echo.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			_, _ = echo.WriteTo([]byte("pong"), from)
+		}
+	}()
+	port := echo.LocalAddr().(*net.UDPAddr).Port
+	for i, mode := range []string{"bound4:", "bound6:"} {
+		_, out := startUDPHelper(t, cg, mode+strconv.Itoa(port))
+		if line, _ := out.ReadString('\n'); strings.TrimSpace(line) != "ready bound" {
+			t.Fatalf("helper %s: %q", mode, line)
+		}
+		if n := udpLoss(t, h); n != uint64(i+1) {
+			t.Fatalf("%s: %d udp_reply losses, want %d: a bound client's answer was not counted", mode, n, i+1)
+		}
+		want := fmt.Sprintf("UDP to 127.0.0.1:%d answered from port %d", port, port)
+		for _, l := range h.CaptureLosses() {
+			if l.Kind == models.CaptureLossUDPReply && l.What != want {
+				t.Fatalf("%s: the loss says %q, want %q", mode, l.What, want)
+			}
+		}
+	}
+}
+
+// The hooks' object loads with the switch off as the agent loads it
+// (hookSpec), the UDP watch's maps at their smallest, and with it on at their
+// full size.
+func TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []string{"0", "1"} {
+		t.Setenv(provenswitch.Env, on)
+		spec, err := hookSpec()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var objs bpfObjects
+		if err := spec.LoadAndAssign(&objs, nil); err != nil {
+			t.Fatalf("switch %s: load keploy's BPF object: %v", on, err)
+		}
+		n := objs.UdpPeerFirst.MaxEntries()
+		_ = objs.Close()
+		if on == "0" && n > 1024 || on == "1" && n < 1024 {
+			t.Fatalf("switch %s: udp_peer_first holds %d entries", on, n)
+		}
 	}
 }
