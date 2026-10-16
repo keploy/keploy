@@ -39,6 +39,41 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
 		t.Fatalf("a new set reads the previous set's start-up: %+v", earlier)
 	}
+	tr.End()
+	tr.NewSet()
+	n, _, _, _ := tr.Test()
+	tr.Served(n, sent("mock-1", t0, "body.auth_time", "body.auth_time", "1792000000", "1792000999"))
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
+		t.Fatalf("the next set's start-up is not the run's: %+v", earlier)
+	}
+	if again := tr.RunName("mock-1", "body.auth_time", nil); again != run {
+		t.Fatalf("the next set's run's variable is named %q, want %q again", again, run)
+	}
+}
+
+// A run's variable is named apart from a test case's template keys: a test
+// that reserves the key the run's value sits under uses the run's name as it
+// is.
+func TestTheRunsVariableTakesNoTemplateKey(t *testing.T) {
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
+	tr.Begin()
+	run := tr.RunName("mock-1", "body._id", nil)
+	tr.End()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	reserved := map[string]bool{"_id": true}
+	if again := tr.RunName("mock-1", "body._id", reserved); again != run || reserved[run] {
+		t.Fatalf("the run's variable is %q in a test that reserves _id, %q before", again, run)
+	}
+	if own, _ := tr.Name(n, "mock-5", "body._id", reserved); own == run || reserved[own] {
+		t.Fatalf("the test's own variable is %q, next to the run's %q and its reserved _id", own, run)
+	}
+	if name := (*Tracker)(nil).RunName("mock-1", "body._id", map[string]bool{"run-_id": true}); name != "run-_id-2" {
+		t.Fatalf("a nil tracker names the run's variable %q, want run-_id-2", name)
+	}
 }
 
 // A run's variable is named when a test first uses it, after earlier tests
@@ -86,6 +121,12 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
 		t.Fatalf("the next test sees the previous test's late exchange: %+v", earlier)
 	}
+	tr.End()
+	tr.NewSet()
+	tr.Served(7, sent("mock-8", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("an exchange of a test that never ran is kept: %+v", earlier)
+	}
 }
 
 // A request place that holds no variable, or whose live value is unknown,
@@ -113,6 +154,11 @@ func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
 	}
 	if named.Seen[0].Name != "first" {
 		t.Fatalf("the place two variables hold is named %q, want the first by name", named.Seen[0].Name)
+	}
+	named.Seen = append(named.Seen, Seen{Side: Response, Name: "stale"})
+	again := Named(named, nil)
+	if again.Seen[0].Name != "" || again.Seen[1].Name != "" || &again.Seen[0] == &named.Seen[0] {
+		t.Fatalf("Named with no variables keeps a stale name or the exchange's own Seen: %+v", again.Seen)
 	}
 }
 
