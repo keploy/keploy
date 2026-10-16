@@ -679,11 +679,15 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 	// An agent predating test-mock mapping (keploy #3715, Feb 2026) has no
 	// /mappings route and answers 404. That is version skew, not a failure, and
 	// it must NOT be reported as one: this call sits inside the record errgroup
-	// (pkg/service/record/record.go), so an error here aborts the entire
+	// (pkg/service/record/record.go), so any other error here aborts the entire
 	// RECORDING. Before this status check existed the decoder goroutine simply
 	// logged "failed to decode mapping from stream" and returned nil, and
 	// recording completed without mappings — that degraded-but-working
-	// behaviour is what a missing endpoint should still produce.
+	// behaviour is what a missing endpoint should still produce. It is said
+	// here, and returned as models.ErrNoMappingStream, which the recorder takes
+	// for a recording without mappings. Not as a channel closed at once: the
+	// recorder reads a mapping stream that closes without the agent's marker
+	// as the agent going away with mappings unsaved.
 	//
 	// Same tolerance BeginTestErrorCapture, GetScopeWindows, GetScopeTable and
 	// DrainCapturedMocks already apply, and for the same reason StoreMocks
@@ -699,9 +703,7 @@ func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptio
 		a.logger.Warn("agent has no /mappings endpoint — recording without test-mock mappings",
 			zap.String("consequence", "replay falls back to timestamp-based mock filtering for this recording"),
 			zap.String("remedy", "upgrade the agent image to one built from keploy #3715 or later"))
-		noMappings := make(chan models.TestMockMapping)
-		close(noMappings)
-		return noMappings, nil
+		return nil, models.ErrNoMappingStream
 	}
 	if err := agentStreamStatus("get mappings", res); err != nil {
 		stream.close()
