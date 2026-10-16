@@ -106,16 +106,23 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	ignoreOrdering = matcherUtils.ResponseIgnoreOrdering(ignoreOrdering)
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
+	// receivedBody is the body as it came, which the test case's assertions,
+	// when they judge it, read (below).
 	var bodySizeResult models.IntResult
+	receivedBody := actualResponse.Body
 	if tc.HTTPResp.BodySkipped {
 		actualBodySize := int64(len(actualResponse.Body))
 		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
 
-		logger.Info("response body was greater than 1MB during recording, comparing body size",
-			zap.String("testcase", tc.Name),
-			zap.Int64("expected_size", tc.HTTPResp.BodySize),
-			zap.Int64("actual_size", actualBodySize),
-			zap.Bool("size_match", bodySizeMatch))
+		// Said only by a comparison that emits its logs and judges by the
+		// size: assertions that judge in its place do not read it.
+		if emitFailureLogs && !AssertionsReplaceComparison(tc) {
+			logger.Info("response body was greater than 1MB during recording, comparing body size",
+				zap.String("testcase", tc.Name),
+				zap.Int64("expected_size", tc.HTTPResp.BodySize),
+				zap.Int64("actual_size", actualBodySize),
+				zap.Bool("size_match", bodySizeMatch))
+		}
 
 		// Log actual response body as debug before clearing
 		logger.Debug("actual response body (skipped during recording)",
@@ -632,15 +639,28 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// quietly (emitFailureLogs false), nothing is said, an assertion's
 		// failure included: a caller that compares again with its logs on
 		// (compareHTTPRespForReplay) says it then, once.
-		pass, res := AssertionMatch(tc, actualResponse, zap.NewNop())
+		//
+		// They judge the answer in place of the whole comparison, the body
+		// size of a recording that kept no body (BodySkipped) included, and
+		// read its body as it came, not the one cleared above for that
+		// comparison; the result keeps no more of it than the comparison's
+		// does.
+		judged := actualResponse
+		if tc.HTTPResp.BodySkipped {
+			received := *actualResponse
+			received.Body = receivedBody
+			judged = &received
+		}
+		pass, res := AssertionMatch(tc, judged, zap.NewNop())
 		if emitFailureLogs {
 			if pass {
 				PrintPassLine(tc, logger, opts...)
 			} else {
 				printFailLine(tc, logger)
-				AssertionMatch(tc, actualResponse, logger)
+				AssertionMatch(tc, judged, logger)
 			}
 		}
+		res.BodyResult[0].Actual = actualResponse.Body
 		return pass, res
 	}
 
@@ -667,9 +687,15 @@ func printFailLine(tc *models.TestCase, logger *zap.Logger) {
 // AssertionsReplaceComparison reports whether tc's assertions judge its
 // answer in place of the comparison above: Match then returns what
 // AssertionMatch says, which reads only what each assertion names. It holds
-// whenever tc has an assertion other than its noise.
+// whenever tc has an assertion other than its noise. Noise, an empty one
+// included, judges nothing: a test case with nothing else is compared.
 func AssertionsReplaceComparison(tc *models.TestCase) bool {
-	return len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil)
+	for name := range tc.Assertions {
+		if name != models.NoiseAssertion {
+			return true
+		}
+	}
+	return false
 }
 
 // AssertionsUntieBody names the assertions that judge tc's answer in place of
@@ -692,11 +718,6 @@ func AssertionsUntieBody(tc *models.TestCase) string {
 		if name != models.NoiseAssertion {
 			names = append(names, string(name))
 		}
-	}
-	if len(names) == 0 {
-		// A noise assertion with no value judges the answer alone, and
-		// AssertionMatch passes it whatever it holds.
-		return string(models.NoiseAssertion) + " (empty)"
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
@@ -763,6 +784,11 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					ints = append(ints, i)
 				}
 			}
+			if len(ints) == 0 {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a list of status codes")
+				continue
+			}
 			found := false
 			for _, c := range ints {
 				if c == actualResponse.StatusCode {
@@ -777,7 +803,12 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.HeaderEqual:
 			// value should be a map[string]interface{} → we convert to map[string]string
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to values")
+				continue
+			}
 			for header, exp := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok || act != exp {
@@ -788,15 +819,15 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 						zap.String("actual", act),
 					)
 				}
-				logger.Info("header_equal assertion failed",
-					zap.String("header", header),
-					zap.String("expected", exp),
-					zap.String("actual", act),
-				)
 			}
 
 		case models.HeaderContains:
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to substrings")
+				continue
+			}
 			for header, exp := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok || !strings.Contains(act, exp) {
@@ -847,7 +878,12 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.HeaderMatches:
 			// value should be a map[string]interface{} → convert to map[string]string
-			hm := toStringMap(value)
+			hm, ok := toStringMap(value)
+			if !ok {
+				pass = false
+				logUnreadableAssertion(logger, assertionName, value, "a map of header names to patterns")
+				continue
+			}
 			for header, pattern := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok {
@@ -867,6 +903,14 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.JsonEqual:
+			if tc.HTTPResp.BodySkipped {
+				// The recording kept no body to compare the answer's with: an
+				// unread body never passes.
+				pass = false
+				logger.Error("json_equal assertion cannot be judged: the recording kept no body to compare with (it was over 1 MB, so only its size was recorded)",
+					zap.Int64("recordedBodySize", tc.HTTPResp.BodySize))
+				continue
+			}
 			expJSON := tc.HTTPResp.Body
 			actJSON := actualResponse.Body
 			if expJSON != actJSON {
@@ -875,15 +919,10 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.JsonContains:
-			var expectedMap map[string]interface{}
-			switch v := value.(type) {
-			case map[string]interface{}:
-				expectedMap = v
-			case string:
-				_ = jsonUnmarshal234([]byte(v), &expectedMap)
-			default:
+			expectedMap, ok := toJSONObject(value)
+			if !ok {
 				pass = false
-				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				logUnreadableAssertion(logger, assertionName, value, "a JSON object, as a map or a string")
 				continue
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
@@ -891,10 +930,18 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
 			}
 
+		case models.NoiseAssertion:
+			// Noise is not a judgement of the answer: the comparison reads it.
+
 		default:
-			if assertionName != models.NoiseAssertion {
-				logger.Debug("unhandled assertion type", zap.String("name", string(assertionName)))
+			// An assertion this keploy does not implement judges nothing, so
+			// it fails the test case rather than pass any answer.
+			pass = false
+			fields := []zap.Field{zap.String("assertion", string(assertionName)), zap.String("supported", supportedAssertions)}
+			if testSuiteAssertions[strings.ToLower(string(assertionName))] {
+				fields = append(fields, zap.String("note", "it is an assertion type of keploy's test suites (keploy/tests, steps[].assert), which a recorded test case's assertions do not take"))
 			}
+			logger.Error("this keploy does not support the test case's assertion "+strconv.Quote(string(assertionName))+", so it fails the test case", fields...)
 		}
 	}
 
@@ -904,6 +951,25 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 	}
 
 	return pass, res
+}
+
+// supportedAssertions names the assertions AssertionMatch judges.
+const supportedAssertions = "status_code, status_code_class, status_code_in, header_equal, header_contains, header_exists, header_matches, json_equal, json_contains (and noise)"
+
+// testSuiteAssertions are the assertion types of keploy's test suites
+// (keploy/tests YAML, a step's assert list of {type, key, expected}), which
+// api-server and the test-suite runner judge. A recorded test case's
+// assertions ({name: value}) have no shape for them.
+var testSuiteAssertions = map[string]bool{
+	"json_strict_equal": true, "json_path": true, "schema": true, "selected_fields": true, "custom_functions": true,
+	"graphql_no_errors": true, "graphql_has_error_code": true, "graphql_error_path_eq": true,
+	"graphql_error_message_contains": true, "graphql_data_not_null": true,
+}
+
+// logUnreadableAssertion says that an assertion's value is not of the shape it
+// takes, so it fails the test case rather than judge against nothing.
+func logUnreadableAssertion(logger *zap.Logger, name models.AssertionType, value interface{}, want string) {
+	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, zap.Any("value", value))
 }
 
 func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {
