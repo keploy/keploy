@@ -36,6 +36,14 @@ type Clock interface {
 // Tick is how often the process clock samples the process (sampler).
 const Tick = 10 * time.Millisecond
 
+// HangBudget is how long, in time the process could run, something keploy
+// waits on may make no progress before keploy holds it stopped: a parser
+// that stopped reading (the agent's parser supervisor), and a read of a
+// container's configuration the Docker daemon did not answer (containerkey).
+// One bound, so the two stop the same way: a stamp waiting on such a read on
+// a parser's path is let go when the parser would be.
+const HangBudget = 60 * time.Second
+
 // Process returns the process's own runnable clock, and the func that says
 // the caller no longer reads it. The clock is sampled (every Tick) only while
 // someone holds it: hold it for as long as a stall is being measured on it.

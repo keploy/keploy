@@ -32,6 +32,18 @@ func (p *Proxy) CaptureLosses() models.CaptureLosses {
 // losses would go unreported.
 var _ agent.CaptureLossReporter = (*Proxy)(nil)
 
+// countUnreadContainers counts each use of a connection whose container the
+// keyer cannot name, the Docker daemon not having answered the read of its
+// configuration (containerkey's Keyer.OnUnread), as a capture loss, which
+// leaves the test it is charged to not judged
+// (models.CaptureLossContainerUnread). bindContainerKeys calls it, under the
+// proven switch only: without it nothing reads containers.
+func (p *Proxy) countUnreadContainers() {
+	containerkey.Default.OnUnread(func(what string) {
+		p.losses.Add(models.CaptureLossContainerUnread, what)
+	})
+}
+
 // teeDropLoss is the capture loss a relay tee's drop reason is, if any. A
 // parser that stopped taking what was captured for it, whose queue was then
 // abandoned (W8), and bytes dropped for want of room lose what they carried.

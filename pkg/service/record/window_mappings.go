@@ -115,6 +115,14 @@ func (w *windowMappings) addMock(m *models.Mock) {
 // A mapping that is not written, or whose write fails, fails the recording, as
 // a failed mappings write refuses under the proven model (design v14 §5.2).
 func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool, streamed uint64) {
+	w.writeFor(ctx, logger, db, testSetID, deleted, drained, streamed, nil)
+}
+
+// writeFor is write, telling mapped, when set, each kept test case's mocks as
+// its window derives them, as consumeMappingsFor tells a streamed mapping's:
+// the capture watch charges a test case with a mock of its whose container
+// the Docker daemon did not answer the read of (captureWatch.mapped).
+func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db MappingDb, testSetID string, deleted map[string]struct{}, drained bool, streamed uint64, mapped func(test string, entries []models.MockEntry)) {
 	if w == nil {
 		return
 	}
@@ -141,13 +149,16 @@ func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db Mappi
 		return !gone && !strings.HasPrefix(id, lostTestPrefix)
 	}
 	byTest := make(map[string][]models.MockEntry, len(derived.Tests))
-	mapped := 0
+	mappedMocks := 0
 	for _, tc := range derived.Tests {
 		if !kept(tc.ID) {
 			continue
 		}
 		byTest[tc.ID] = tc.Mocks
-		mapped += len(tc.Mocks)
+		mappedMocks += len(tc.Mocks)
+		if mapped != nil && len(tc.Mocks) > 0 {
+			mapped(tc.ID, tc.Mocks)
+		}
 	}
 	var concurrent []string
 	for _, id := range derived.Concurrent {
@@ -169,7 +180,7 @@ func (w *windowMappings) write(ctx context.Context, logger *zap.Logger, db Mappi
 	logger.Info("Saved the test-mock mappings derived from the test windows",
 		zap.String("testSetID", testSetID),
 		zap.Int("numTests", len(byTest)),
-		zap.Int("mappedMocks", mapped))
+		zap.Int("mappedMocks", mappedMocks))
 	if n := len(concurrent); n > 0 {
 		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while two tests were open is mapped to the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),

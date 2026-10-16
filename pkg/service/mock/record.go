@@ -585,7 +585,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//      recording lacks those calls, and a replay of it would make them
 	//      for real. Kept, not vouched for in silence.
 	if t := lostNotJudged.NotJudgedText(); t != "" {
-		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, or a TLS client abandoned its handshake: such calls are not in it ("+provenswitch.Env+"=1)",
+		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
 	}
