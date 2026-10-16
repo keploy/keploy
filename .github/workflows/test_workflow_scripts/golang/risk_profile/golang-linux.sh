@@ -62,7 +62,9 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for critical errors in $logfile..."
   if [ -f "$logfile" ]; then
-    if grep "ERROR" "$logfile" | grep "Keploy:"; then
+    # Keploy's own lines, the CLI's ("Keploy:") and the agent's and its other
+    # modes' ("Keploy(agent):"). Matching "Keploy:" alone let every agent ERROR by.
+    if grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:'; then
       echo "::error::Critical error found in $logfile. Failing the build."
       exit 1
     fi
