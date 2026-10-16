@@ -1348,12 +1348,31 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	case loadModeStrictWindow:
 		if cutoff, ok := stagingStartupCutoff(params); ok {
 			loaded, err = disk.LoadBefore(cutoff)
-			if err == nil {
-				a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
-					zap.Int("startupMocks", len(loaded)),
-					zap.Int("onDisk", disk.Len()),
-					zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
+			if err != nil {
+				break
 			}
+			startup := len(loaded)
+			// Beside the startup band, the mocks a parser declares it
+			// needs staged whatever their recorded time
+			// (models.StagingWithStartup): a server push it files when
+			// the set is staged and releases at its own test window. They
+			// are read from the band's cutoff to the end of the
+			// staging's window, so the two never overlap.
+			declared := 0
+			if models.StagedAtStagingRegistered() {
+				var staged []*models.Mock
+				staged, err = disk.LoadStaged(cutoff, params.BeforeTime)
+				if err != nil {
+					break
+				}
+				loaded = append(loaded, staged...)
+				declared = len(staged)
+			}
+			a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
+				zap.Int("startupMocks", startup),
+				zap.Int("declaredMocks", declared),
+				zap.Int("onDisk", disk.Len()),
+				zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
 			break
 		}
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
@@ -1411,7 +1430,10 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 // itself therefore brought the whole recording into memory only to stage it as
 // startup traffic, and a long recording OOM-killed the agent before its app
 // started. The startup traffic is what was recorded before the set's earliest
-// recorded test, which the staging call carries.
+// recorded test, which the staging call carries. Beside it the call stages
+// the mocks a parser declares it needs staged whatever their recorded time
+// (models.StagingWithStartup, DiskMocks.LoadStaged), and only those, from the
+// cutoff to the end of the call's window.
 //
 // A set whose tests carry no request time has no such test, so its staging
 // call reads the window it names.
