@@ -225,7 +225,8 @@ func (prTelemetry) MockTestRun(int)                                            {
 // how a replaced agent behaves: it refuses the per-test filter params for the
 // rest of the set (#4614 → #4618).
 type prInstr struct {
-	mu                sync.Mutex
+	mu sync.Mutex
+	// updateCalls counts the sends: the set's begin and each test's filter.
 	updateCalls       int
 	failUpdateFromNth int // 0 = never fail
 	recentAppLogs     string
@@ -244,8 +245,11 @@ type prInstr struct {
 	// send that serves the pool between test cases leaves it.
 	windowAfter time.Time
 	cases       []*models.TestCase
-	// allParams is every send, in order.
+	// allParams is every test's filter, in order; begins every set's begin,
+	// and ends every set ended.
 	allParams []models.MockFilterParams
+	begins    []models.TestSetBegin
+	ends      []string
 	// perTestScope makes the stand-in agent answer each send the way an agent
 	// that reads the consumed history only for its per-test mocks does
 	// (models.ConsumedScopeHeader); scopeSaid is what the client has taken from
@@ -330,12 +334,27 @@ func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfilte
 	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
 	return nil
 }
+func (f *prInstr) BeginTestSet(ctx context.Context, begin models.TestSetBegin) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.begins = append(f.begins, begin)
+	f.windowAfter = time.Time{}
+	return f.sentLocked(ctx)
+}
+
+func (f *prInstr) EndTestSet(_ context.Context, testSetID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ends = append(f.ends, testSetID)
+	return nil
+}
+
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
 	switch ex := params.Exact; {
-	case ex == nil || ex.Stage:
+	case ex == nil:
 		f.windowAfter = params.AfterTime
 	case ex.Test != "":
 		for _, tc := range f.cases {
@@ -345,6 +364,12 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 		}
 	}
 	f.allParams = append(f.allParams, params)
+	return f.sentLocked(ctx)
+}
+
+// sentLocked counts a send, with f.mu held, and answers it: the stand-in
+// application may stop at it, and the agent may refuse it.
+func (f *prInstr) sentLocked(ctx context.Context) error {
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
@@ -1413,7 +1438,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		time.Now().Add(-time.Second), time.Now(), consumed, false); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1425,7 +1450,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		time.Now().Add(-time.Second), time.Now(), consumed, false); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

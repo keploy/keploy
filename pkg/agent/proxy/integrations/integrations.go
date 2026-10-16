@@ -564,8 +564,8 @@ type MockConsumer interface {
 //	start, _ := db.CurrentTestWindow()
 //	due := sched.Released(msg.Spec.ReqTimestampMock, start)
 //
-// The schedule is immutable; it is replaced (never mutated) at each set's
-// staging call, which also changes WindowPacer.StagingEpoch.
+// The schedule is immutable; it is replaced (never mutated) as each set begins,
+// which also changes WindowPacer.StagingEpoch.
 //
 // The agent keeps the windows only while some kind has registered a carry-over
 // predicate (models.RegisterCarryOver); otherwise RecordedWindows is nil. A
@@ -584,8 +584,9 @@ type RecordedWindowsReader interface {
 //     after the new window and trees are visible. Take it BEFORE reading the
 //     state it guards; each change hands out a fresh channel. It is also closed
 //     once when the manager is closed.
-//   - StagingEpoch changes at every staging call (a new set, or the set staged
-//     again for a replacement agent). State built from one staging snapshot,
+//   - StagingEpoch changes at every staging of a pool (a new set, the set begun
+//     again for a replacement agent, or the pool between tests of keploy mock
+//     replay). State built from one staging snapshot,
 //     such as per-set delivery queues, is rebuilt when it changes.
 //
 // A MockMemDb without it gives no signal: serve held work at the connection's
@@ -644,12 +645,9 @@ type WindowAware interface {
 
 	// HasFirstTestFired reports whether at least one real test window
 	// has been set on the underlying MockManager via SetMocksWithWindow
-	// (non-zero start that is not the BaseTime staging sentinel).
-	// Sticky within a test-set; ResetForReplaySession clears it at each
-	// set boundary, so a set being staged reads false again. This is the
-	// same underlying value FirstTestWindowStart below exposes as a
-	// timestamp — "has this set's first test fired" and "when did it fire"
-	// are one field, so they share that per-set lifetime.
+	// (a non-zero start) since the test set began. Sticky within a
+	// test-set; the set's begin (MockManager.BeginTestSet) clears it, so a
+	// set that has just begun reads false again.
 	//
 	// One exception: while a test of keploy mock replay begun without a
 	// worker pid is open (SetScopeMocks), this reports true with
@@ -675,11 +673,11 @@ type WindowAware interface {
 	// TierIndex.orderForCurrentState) MUST use WindowSnapshot instead.
 	HasFirstTestFired() bool
 
-	// FirstTestWindowStart returns the earliest test window start observed
-	// by the MockManager FOR THE TEST SET BEING REPLAYED, or zero if no real
-	// test has fired in it yet (i.e. every SetMocksWithWindow call so far was
-	// either absent or fired with the models.BaseTime staging sentinel).
-	// ResetForReplaySession clears it at each set boundary, so each set
+	// FirstTestWindowStart returns the startup-init cutoff of the test set
+	// being replayed: the request time of its earliest recorded test, which
+	// the set began with (MockManager.BeginTestSet), or the earliest test
+	// window start observed when that is earlier or the set began with none;
+	// zero before either. Each set's begin replaces it, so each set
 	// classifies against its own first test. Used by filter / strict-gate
 	// callers to distinguish startup-init mocks (req_ts < firstWindowStart)
 	// from stale previous-test mocks (firstWindowStart <= req_ts <

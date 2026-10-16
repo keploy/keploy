@@ -147,11 +147,9 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			params = models.MockFilterParams{
 				MockMapping:     names,
 				UseMappingBased: true,
-				AfterTime:       models.BaseTime,
-				BeforeTime:      time.Now(),
 			}
 		}
-		stage := func() error { return a.UpdateMockParams(ctx, params) }
+		stage := func() error { return a.stagePool(ctx, params) }
 		if asScope {
 			stage = func() error { return a.stageScope(ctx, names, true) }
 		}
@@ -339,10 +337,7 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
 	// Only a negative pid under the switch, from an in-process caller,
 	// reaches here: pid 0 under the switch served its pool slice exactly
 	// above.
-	return a.UpdateMockParams(ctx, models.MockFilterParams{
-		AfterTime:  models.BaseTime,
-		BeforeTime: time.Now(),
-	})
+	return a.stagePool(ctx, models.MockFilterParams{})
 }
 
 // EndScope is EndScopeAt stamped with the agent's clock.

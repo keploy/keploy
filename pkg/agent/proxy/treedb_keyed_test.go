@@ -127,7 +127,7 @@ func keyedNames(ms []*models.Mock) []string {
 
 // RangeSessionMocksWithKey must give GetSessionMocks filtered by the key, in its
 // order: the startup tier first, then the session tier, a pointer only once
-// when the startup tier holds anything (BaseTime staging puts session mocks in
+// when the startup tier holds anything (a set's begin puts session mocks in
 // both), and duplicates kept when it does not.
 func TestRangeSessionMocksWithKeyIsGetSessionMocksFilteredByKey(t *testing.T) {
 	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
@@ -149,13 +149,13 @@ func TestRangeSessionMocksWithKeyIsGetSessionMocksFilteredByKey(t *testing.T) {
 		session = append(session, session[3]) // listed twice
 		mm := NewMockManager(nil, nil, zap.NewNop())
 		for _, staging := range []struct {
-			name       string
-			start, end time.Time
+			name  string
+			stage func()
 		}{
-			{"BaseTime staging", models.BaseTime, time.Now()},
-			{"first window", base.Add(50 * time.Millisecond), base.Add(60 * time.Millisecond)},
+			{"the set's begin", func() { mm.BeginTestSet(time.Time{}, nil, perTest, session) }},
+			{"first window", func() { mm.SetMocksWithWindow(perTest, session, base.Add(50*time.Millisecond), base.Add(60*time.Millisecond)) }},
 		} {
-			mm.SetMocksWithWindow(perTest, session, staging.start, staging.end)
+			staging.stage()
 			all, _ := mm.GetSessionMocks()
 			var want []*models.Mock
 			for _, mk := range all {

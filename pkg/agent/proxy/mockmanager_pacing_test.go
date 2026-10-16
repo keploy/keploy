@@ -37,10 +37,11 @@ func scheduleNames(s *models.WindowSchedule) []string {
 	return out
 }
 
-// The seed follows SeedStartupCutoff's lifecycle: parked at a set boundary until
-// that set's staging call, applied at once mid-set, and never inherited by a set
-// that did not send one.
-func TestSeedRecordedWindowsLifecycle(t *testing.T) {
+// A set's recorded windows are the ones it began with: installed by its begin,
+// kept through its tests and through the reset before the next set (until the
+// next set begins, the manager is the previous set's), and replaced by the
+// next set's begin, which installs none when it has none.
+func TestRecordedWindowsFollowTheSetsBegin(t *testing.T) {
 	registerSends(t)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
@@ -49,58 +50,38 @@ func TestSeedRecordedWindowsLifecycle(t *testing.T) {
 		t.Fatal("a fresh manager has no recorded windows")
 	}
 
-	// Set A: reset, seed, stage.
+	// Set A begins with its windows; its tests leave them as they are.
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("a-1", "a-2"))
-	if mm.RecordedWindows() != nil {
-		t.Fatal("set A's windows were installed before its staging call; they must be parked " +
-			"until the trees they describe are swapped in")
-	}
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("a-1", "a-2"), nil, nil)
 	if got := scheduleNames(mm.RecordedWindows()); len(got) != 2 || got[0] != "a-1" {
-		t.Fatalf("after staging set A: %v, want [a-1 a-2]", got)
+		t.Fatalf("after set A began: %v, want [a-1 a-2]", got)
+	}
+	mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100))
+	if got := scheduleNames(mm.RecordedWindows()); len(got) != 2 {
+		t.Fatalf("a test of set A changed its windows: %v", got)
 	}
 
-	// Mid-set seed (no boundary pending): applied at once.
-	mm.SeedRecordedWindows(windowsOf("a-1", "a-2", "a-3"))
-	if got := scheduleNames(mm.RecordedWindows()); len(got) != 3 {
-		t.Fatalf("mid-set seed not applied: %v", got)
-	}
-
-	// Set B: reset and seed; set A's windows stay until B's staging call.
+	// Set B: set A's windows stay until B begins.
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("b-1"))
-	if got := scheduleNames(mm.RecordedWindows()); len(got) != 3 {
-		t.Fatalf("set B's seed replaced set A's before B was staged: %v", got)
+	if got := scheduleNames(mm.RecordedWindows()); len(got) != 2 {
+		t.Fatalf("set A's windows went before set B began: %v", got)
 	}
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("b-1"), nil, nil)
 	if got := scheduleNames(mm.RecordedWindows()); len(got) != 1 || got[0] != "b-1" {
-		t.Fatalf("after staging set B: %v, want [b-1]", got)
+		t.Fatalf("after set B began: %v, want [b-1]", got)
 	}
 
-	// Set C sends no windows (an older CLI): it must not inherit B's.
+	// Set C begins with no windows: it must not inherit B's.
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if mm.RecordedWindows() != nil {
 		t.Fatalf("set C inherited set B's windows: %v", scheduleNames(mm.RecordedWindows()))
-	}
-
-	// A park whose staging never came is dropped by the next reset.
-	mm.SeedRecordedWindows(windowsOf("c-1")) // mid-set: applied
-	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("d-1"))
-	mm.ResetForReplaySession() // d's staging was aborted
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	if mm.RecordedWindows() != nil {
-		t.Fatalf("an aborted set's parked windows were installed for the next set: %v",
-			scheduleNames(mm.RecordedWindows()))
 	}
 }
 
 // With no kind registered for carry-over nothing reads the windows, so the
-// manager keeps none: a replay that stages them (every replay from a current
-// CLI, Pulsar or not) holds no schedule for its sets, whether the seed is
-// parked at a boundary or applied mid-set.
+// manager keeps none: a set that begins with them (every replay from a current
+// CLI, Pulsar or not) holds no schedule.
 func TestRecordedWindowsNotKeptWithoutACarryOverKind(t *testing.T) {
 	if models.CarryOverRegistered() {
 		t.Fatal("precondition: a registration leaked from another test")
@@ -109,14 +90,9 @@ func TestRecordedWindowsNotKeptWithoutACarryOverKind(t *testing.T) {
 	defer mm.Close()
 
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("a-1", "a-2"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("a-1", "a-2"), nil, nil)
 	if got := mm.RecordedWindows(); got != nil {
-		t.Fatalf("staged set kept %v with no carry-over kind registered", scheduleNames(got))
-	}
-	mm.SeedRecordedWindows(windowsOf("a-1", "a-2", "a-3")) // mid-set
-	if got := mm.RecordedWindows(); got != nil {
-		t.Fatalf("a mid-set seed kept %v with no carry-over kind registered", scheduleNames(got))
+		t.Fatalf("a set began keeping %v with no carry-over kind registered", scheduleNames(got))
 	}
 
 	// The gate follows the registry: a kind registered, the next set keeps them.
@@ -125,24 +101,17 @@ func TestRecordedWindowsNotKeptWithoutACarryOverKind(t *testing.T) {
 	})
 	t.Cleanup(unregister)
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("b-1"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("b-1"), nil, nil)
 	if got := scheduleNames(mm.RecordedWindows()); len(got) != 1 || got[0] != "b-1" {
 		t.Fatalf("with a carry-over kind registered: %v, want [b-1]", got)
 	}
 
-	// And back: with the registration gone, a seed leaves no schedule behind,
-	// neither the installed one (mid-set) nor a parked one (at a boundary).
+	// And back: with the registration gone, the next set keeps none.
 	unregister()
-	mm.SeedRecordedWindows(windowsOf("b-1", "b-2"))
-	if got := mm.RecordedWindows(); got != nil {
-		t.Fatalf("a mid-set seed with nothing registered left %v installed", scheduleNames(got))
-	}
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(windowsOf("c-1"))
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, windowsOf("c-1"), nil, nil)
 	if got := mm.RecordedWindows(); got != nil {
-		t.Fatalf("a staged set with nothing registered kept %v", scheduleNames(got))
+		t.Fatalf("a set began keeping %v with nothing registered", scheduleNames(got))
 	}
 }
 
@@ -152,7 +121,7 @@ func TestRecordedWindowsSurvivesTheWorkerScopeWrap(t *testing.T) {
 	registerSends(t)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
-	mm.SeedRecordedWindows(windowsOf("t-1", "t-2"))
+	mm.BeginTestSet(time.Time{}, windowsOf("t-1", "t-2"), nil, nil)
 
 	var db interface{} = &scopedMockDb{MockMemDb: mm}
 	r, ok := db.(integrations.RecordedWindowsReader)
@@ -193,7 +162,7 @@ func TestWindowChangedFiresOnEveryWindowSwitch(t *testing.T) {
 		do   func()
 		want time.Time // CurrentTestWindow start once woken; zero = no window
 	}{
-		{"staging", func() { mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) }, time.Time{}},
+		{"staging", func() { mm.BeginTestSet(time.Time{}, nil, nil, nil) }, time.Time{}},
 		{"test-1", func() { mm.SetMocksWithWindow(nil, nil, pms(1000), pms(1100)) }, pms(1000)},
 		{"test-2", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, pms(2000)},
 		{"the same window again", func() { mm.SetMocksWithWindow(nil, nil, pms(2000), pms(2100)) }, pms(2000)},
@@ -236,7 +205,7 @@ func TestStagingEpochChangesAtEachStagingCall(t *testing.T) {
 
 	e0 := mm.StagingEpoch()
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	e1 := mm.StagingEpoch()
 	if e1 == e0 {
 		t.Fatal("the set's staging call did not change the epoch")
@@ -251,13 +220,13 @@ func TestStagingEpochChangesAtEachStagingCall(t *testing.T) {
 	if mm.StagingEpoch() != e1 {
 		t.Fatal("ResetForReplaySession moved the epoch; the staging call is the boundary")
 	}
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	e2 := mm.StagingEpoch()
 	if e2 == e1 {
 		t.Fatal("the next set's staging call did not change the epoch")
 	}
 	// A mid-set restage (no reset before it) is a new staging snapshot too.
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if mm.StagingEpoch() == e2 {
 		t.Fatal("a mid-set staging call did not change the epoch")
 	}
@@ -292,7 +261,7 @@ func TestWindowPacerSurvivesTheWorkerScopeWrap(t *testing.T) {
 	}
 	ch := p.WindowChanged()
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if !fired(ch) || p.StagingEpoch() != mm.StagingEpoch() || p.StagingEpoch() == 0 {
 		t.Fatal("the wrapped WindowPacer does not follow the manager")
 	}
@@ -326,7 +295,7 @@ func TestWindowChangedConcurrentWaiters(t *testing.T) {
 	}
 	for i := 1; i <= switches; i++ {
 		if i%50 == 0 {
-			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+			mm.BeginTestSet(time.Time{}, nil, nil, nil)
 		}
 		mm.SetMocksWithWindow(nil, nil, pms(i*10), pms(i*10+5))
 	}
@@ -388,8 +357,6 @@ func newCarryRig(t *testing.T, recording ...*models.Mock) *carryRig {
 	t.Cleanup(mm.Close)
 	r := &carryRig{t: t, mm: mm, recording: recording, consumed: map[string]models.MockState{}}
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
-	mm.SeedRecordedWindows(carryWindows())
 	r.stage()
 	return r
 }
@@ -409,8 +376,9 @@ func (r *carryRig) fresh(filter func(*models.Mock) bool) []*models.Mock {
 	return out
 }
 
+// stage begins the set: its first test at W1, its tests' windows W1..W5.
 func (r *carryRig) stage() {
-	r.mm.SetMocksWithWindow(r.fresh(func(*models.Mock) bool { return true }), nil, models.BaseTime, time.Now())
+	r.mm.BeginTestSet(winStart(1), carryWindows(), r.fresh(func(*models.Mock) bool { return true }), nil)
 }
 
 func (r *carryRig) window(i int) {
@@ -627,8 +595,7 @@ func TestCarryOverCapWarnsOnceWithTheCount(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.New(core))
 	defer mm.Close()
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(carryWindows())
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, carryWindows(), nil, nil)
 
 	offer := func(win int, ms ...*models.Mock) {
 		mm.SetMocksWithWindow(ms, nil, winStart(win), winEnd(win))
@@ -668,7 +635,7 @@ func TestCarryOverCapWarnsOnceWithTheCount(t *testing.T) {
 	if n, _ := mm.carry.size(); n != 1 {
 		t.Fatalf("held %d after consuming one, want 1", n)
 	}
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if n, b := mm.carry.size(); n != 0 || b != 0 {
 		t.Fatalf("staging did not empty the tier: %d mocks, %d bytes", n, b)
 	}
@@ -681,8 +648,7 @@ func TestCarryOverDoesNotDuplicateLaxSessionMocks(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.ResetForReplaySession()
-	mm.SeedRecordedWindows(carryWindows())
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, carryWindows(), nil, nil)
 
 	s := brokerMockAt("s", pulsarKind, "SEND", 2050)
 	mm.SetMocksWithWindow([]*models.Mock{s.DeepCopy()}, nil, winStart(2), winEnd(2))
@@ -754,8 +720,6 @@ func TestCarryOverLeavesUnregisteredKindsAlone(t *testing.T) {
 		mm := NewMockManager(nil, nil, zap.NewNop())
 		defer mm.Close()
 		mm.ResetForReplaySession()
-		mm.SeedStartupCutoff(winStart(1))
-		mm.SeedRecordedWindows(carryWindows())
 		rec := []*models.Mock{
 			brokerMockAt("boot", models.HTTP, "", 500),
 			brokerMockAt("h2", models.HTTP, "", 2050),
@@ -780,7 +744,7 @@ func TestCarryOverLeavesUnregisteredKindsAlone(t *testing.T) {
 			u, _ := mm.GetUnFilteredMocks()
 			trace = append(trace, fmt.Sprintf("%s f=%v s=%v u=%v dropped=%d", step, pacedNames(f), pacedNames(s), pacedNames(u), mm.DroppedOutOfWindow()))
 		}
-		mm.SetMocksWithWindow(cp(), nil, models.BaseTime, time.Now())
+		mm.BeginTestSet(winStart(1), carryWindows(), cp(), nil)
 		snap("staging")
 		for i := 1; i <= 4; i++ {
 			mm.SetMocksWithWindow(cp(), nil, winStart(i), winEnd(i))
@@ -948,9 +912,7 @@ func BenchmarkCarryOverSetPass(b *testing.B) {
 			for n := 0; n < b.N; n++ {
 				mm := NewMockManager(nil, nil, zap.NewNop())
 				mm.ResetForReplaySession()
-				mm.SeedStartupCutoff(ws[0].Start)
-				mm.SeedRecordedWindows(ws)
-				mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+				mm.BeginTestSet(ws[0].Start, ws, nil, nil)
 				lo := 0
 				for _, w := range ws {
 					for lo < len(rec) && rec[lo].Spec.ReqTimestampMock.Before(w.Start) {
@@ -1001,12 +963,10 @@ func TestDeleteStartupMockFlagsALateRegisteredConsume(t *testing.T) {
 		mm := NewMockManager(nil, nil, zap.NewNop())
 		defer mm.Close()
 		mm.ResetForReplaySession()
-		mm.SeedStartupCutoff(winStart(1))
-		mm.SeedRecordedWindows(carryWindows())
 		msg := brokerMockAt("startup-msg", kind, "MESSAGE", 500)
 		msg.Spec.Metadata["serverPush"] = "true"
 		msg.TestModeInfo.Lifetime = models.LifetimePerTest
-		mm.SetMocksWithWindow([]*models.Mock{msg.DeepCopy()}, nil, models.BaseTime, time.Now())
+		mm.BeginTestSet(winStart(1), carryWindows(), []*models.Mock{msg.DeepCopy()}, nil)
 		for i := 1; i <= window; i++ {
 			// The agent's strict load: the window's own mocks plus the startup band.
 			mm.SetMocksWithWindow([]*models.Mock{msg.DeepCopy()}, nil, winStart(i), winEnd(i))
@@ -1042,9 +1002,8 @@ func TestCarryOverNeedsSeededWindows(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(winStart(1))
 	s1 := brokerMockAt("s1", pulsarKind, "SEND", 1050)
-	mm.SetMocksWithWindow([]*models.Mock{s1.DeepCopy()}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(winStart(1), nil, []*models.Mock{s1.DeepCopy()}, nil)
 	mm.SetMocksWithWindow([]*models.Mock{s1.DeepCopy()}, nil, winStart(1), winEnd(1))
 	mm.SetMocksWithWindow(nil, nil, winStart(2), winEnd(2))
 	if carry, _ := mm.GetCarryOverMocks(); len(carry) != 0 {

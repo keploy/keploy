@@ -46,6 +46,14 @@ func (p *servingProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Mock
 	p.mm.SetMocksWithWindow(f, u, s, e)
 	return nil
 }
+func (p *servingProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+func (p *servingProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
 func (p *servingProxy) SetMocks(_ context.Context, f, u []*models.Mock) error {
 	p.mm.SetFilteredMocks(f)
 	p.mm.SetUnFilteredMocks(u)
@@ -428,8 +436,8 @@ func TestANewStagingAnswersOutsideTestCallsAfresh(t *testing.T) {
 	require.Equal(t, "2 messages", p.poll(t, "/receive"))
 	require.Equal(t, "empty", p.poll(t, "/receive"))
 	require.Equal(t, sqsEmpty, p.poll(t, "/receive"), "spent for the staging")
-	require.NoError(t, a.UpdateMockParams(context.Background(), models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}))
-	require.Equal(t, "2 messages", p.poll(t, "/receive"), "a new staging starts the sequence afresh")
+	require.NoError(t, a.BeginTestSet(context.Background(), models.TestSetBegin{}))
+	require.Equal(t, "2 messages", p.poll(t, "/receive"), "a set begun again starts the sequence afresh")
 }
 
 // A test process that claims its key again in the session (a retried
@@ -612,9 +620,8 @@ func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	require.Equal(t, "between", body)
 }
 
-// keploy #4761's isInitialStaging finding, under exact serving. On main a
-// test's begin re-staged its mocks from BaseTime, and SetMocksWithWindow,
-// keying initial staging on the time alone, filed them in the startup tier:
+// keploy #4761's isInitialStaging finding, under exact serving. A test's
+// begin used to re-stage the pool, which filed its mocks in the startup tier:
 // the per-test tier was empty, no window was active and no test had fired,
 // so a tier-routing parser (Postgres v3, Mongo v2) served the test from its
 // startup engine. Under exact serving a begin re-stages nothing: the test's
@@ -647,8 +654,8 @@ func TestAMidSetStagingLeavesTheOpenTestItsPerTestMocks(t *testing.T) {
 	require.Equal(t, 200, code)
 	require.Equal(t, "a", body)
 
-	// The mid-set staging main's per-test begin made, from BaseTime.
-	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}))
+	// A pool staged mid-set, as that per-test begin staged it.
+	require.NoError(t, a.stagePool(ctx, models.MockFilterParams{}))
 	pt, err := p.mm.GetPerTestMocksInWindow()
 	require.NoError(t, err)
 	require.Empty(t, servedNames(pt), "after the staging, TestA's consumed mock is back in the per-test tier")
@@ -681,8 +688,7 @@ func TestAMidSetStagingLeavesTheOpenTestItsPerTestMocks(t *testing.T) {
 }
 
 // keployTestAgent is a keploy test replay's agent on a real mock manager,
-// holding mocks, staged by the set's staging filter with pool as the set's
-// pool (models.ExactServing).
+// holding mocks, the set begun with pool as its pool (models.ExactPool).
 func keployTestAgent(t *testing.T, mocks []*models.Mock, pool []string) (*Agent, *servingProxy) {
 	t.Helper()
 	a, _ := wireAgent(t, models.MODE_TEST)
@@ -690,10 +696,7 @@ func keployTestAgent(t *testing.T, mocks []*models.Mock, pool []string) (*Agent,
 	a.Proxy = p
 	ctx := context.Background()
 	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
-	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
-		AfterTime: models.BaseTime, BeforeTime: time.Now(),
-		Exact: &models.ExactServing{Stage: true, Pool: pool},
-	}))
+	require.NoError(t, a.BeginTestSet(ctx, models.TestSetBegin{Exact: &models.ExactPool{Pool: pool}}))
 	return a, p
 }
 
@@ -973,24 +976,23 @@ func TestAnExtraCallFiledAsTheTestEndsStaysAnExtraCall(t *testing.T) {
 	require.NotContains(t, e.Reason, "before this one began")
 }
 
-// stageSpy notes what the session tier shows as the next set's staging
-// lands.
+// stageSpy notes what the session tier shows as the next set's begin lands.
 type stageSpy struct {
 	*servingProxy
 	seen []string
 }
 
-func (p *stageSpy) SetMocksWithWindow(ctx context.Context, f, u []*models.Mock, s, e time.Time) error {
+func (p *stageSpy) BeginTestSet(ctx context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
 	if p.mm.ExactServing() {
 		sess, _ := p.mm.GetSessionMocks()
 		for _, m := range sess {
 			p.seen = append(p.seen, m.Name+"="+m.Spec.HTTPResp.Body)
 		}
 	}
-	return p.servingProxy.SetMocksWithWindow(ctx, f, u, s, e)
+	return p.servingProxy.BeginTestSet(ctx, first, ws, f, u)
 }
 
-// keploy test's next set is staged before its pool is served: until it is,
+// keploy test's next set begins before its pool is served: until it does,
 // no mock still staged from the previous set answers under one of the new
 // set's pool names (names are unique only within a set; round-4 review).
 func TestTheNextSetsPoolIsServedOnlyOnceItIsStaged(t *testing.T) {
@@ -1000,15 +1002,15 @@ func TestTheNextSetsPoolIsServedOnlyOnceItIsStaged(t *testing.T) {
 	a.Proxy = spy
 	ctx := context.Background()
 	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{pingMock("mock-1", "/x", "set-1 test-1's", t0)}))
-	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), Exact: &models.ExactServing{Stage: true}}))
+	require.NoError(t, a.BeginTestSet(ctx, models.TestSetBegin{Exact: &models.ExactPool{}}))
 	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}))
 	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
 
 	rp.mm.ResetForReplaySession()
 	spy.seen = nil
 	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{pingMock("mock-1", "/x", "set-2 pool's", t0)}))
-	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-1"}}}))
-	require.Empty(t, spy.seen, "served before set 2 was staged")
+	require.NoError(t, a.BeginTestSet(ctx, models.TestSetBegin{Exact: &models.ExactPool{Pool: []string{"mock-1"}}}))
+	require.Empty(t, spy.seen, "served before set 2 began")
 	code, body := rp.call(t, "/x")
 	require.Equal(t, 200, code)
 	require.Equal(t, "set-2 pool's", body)

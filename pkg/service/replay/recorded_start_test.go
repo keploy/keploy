@@ -35,23 +35,23 @@ func heldTestCases() []*models.TestCase {
 	return []*models.TestCase{testCaseAt(recordedT0.Add(9 * time.Minute)), testCaseAt(recordedT0.Add(10 * time.Minute))}
 }
 
-// A staging call's startup cutoff is the earliest test the set ever recorded,
+// A set's startup cutoff is the earliest test the set ever recorded,
 // not the earliest of the test cases this run holds.
-func TestStagingShapeStartsAtTheSetsFirstRecordedTest(t *testing.T) {
+func TestSetShapeStartsAtTheSetsFirstRecordedTest(t *testing.T) {
 	held := heldTestCases()
 	r := &Replayer{logger: zap.NewNop(), testDB: &recordedStartDB{prTestDB: prTestDB{cases: held}, at: recordedT0}}
 	got := r.recordedSetShape(context.Background(), "test-set-0", held)
 	if !got.firstTestStart.Equal(recordedT0) {
-		t.Fatalf("the staging cutoff is %v; want the set's first recorded test %v", got.firstTestStart, recordedT0)
+		t.Fatalf("the set's cutoff is %v; want the set's first recorded test %v", got.firstTestStart, recordedT0)
 	}
 	if want := recordedSetShapeOf(held).windows; len(got.windows) != len(want) {
-		t.Fatalf("the staging call sends %d recorded windows; want the held tests' %d", len(got.windows), len(want))
+		t.Fatalf("the set's begin sends %d recorded windows; want the held tests' %d", len(got.windows), len(want))
 	}
 }
 
 // Without a recorded start earlier than the held tests, the first held test is
 // the cutoff, as before.
-func TestStagingShapeKeepsTheFirstHeldTestOtherwise(t *testing.T) {
+func TestSetShapeKeepsTheFirstHeldTestOtherwise(t *testing.T) {
 	held := heldTestCases()
 	first := held[0].HTTPReq.Timestamp
 	for name, db := range map[string]TestDB{
@@ -63,7 +63,7 @@ func TestStagingShapeKeepsTheFirstHeldTestOtherwise(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := &Replayer{logger: zap.NewNop(), testDB: db}
 			if got := r.recordedSetShape(context.Background(), "test-set-0", held).firstTestStart; !got.Equal(first) {
-				t.Fatalf("the staging cutoff is %v; want the first held test %v", got, first)
+				t.Fatalf("the set's cutoff is %v; want the first held test %v", got, first)
 			}
 		})
 	}
@@ -71,8 +71,8 @@ func TestStagingShapeKeepsTheFirstHeldTestOtherwise(t *testing.T) {
 
 // A set's first recorded test is the earliest window any of its tests opens,
 // gRPC tests' included. It was read from the HTTP request alone, so a gRPC set
-// was staged with no first test: the agent read every mock of the recording
-// back from disk to stage it.
+// began with no first test: the agent read every mock of the recording back
+// from disk to begin it.
 func TestASetsFirstRecordedTestIsItsEarliestWindowOfAnyKind(t *testing.T) {
 	grpcAt := func(name string, at time.Time) *models.TestCase {
 		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT, GrpcReq: models.GrpcReq{Timestamp: at}, GrpcResp: models.GrpcResp{Timestamp: at.Add(time.Second)}}

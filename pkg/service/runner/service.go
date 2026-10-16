@@ -78,6 +78,8 @@ type Instrumentation interface {
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	BeginTestSet(ctx context.Context, begin models.TestSetBegin) error
+	EndTestSet(ctx context.Context, testSetID string) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	NotifyGracefulShutdown(ctx context.Context) error
 	MakeAgentReadyForDockerCompose(ctx context.Context) error

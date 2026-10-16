@@ -14,11 +14,11 @@ import (
 )
 
 // The async lanes count the windows of tests (async.Engine.AdvanceWindow):
-// keploy test stages a test set's mocks from models.BaseTime before any test
-// runs, which opens no window, and then opens one per test. An epoch received
-// after test k started is effective from test k+1. Counting the set's staging
-// as the first window served it to test k (test 8, GET /value 7, of a
-// recording answered with the value the config flipped to after it).
+// keploy test begins a test set before any test runs, which opens no window,
+// and then opens one per test. An epoch received after test k started is
+// effective from test k+1. Counting the set's begin as the first window served
+// it to test k (test 8, GET /value 7, of a recording answered with the value
+// the config flipped to after it).
 func TestSetMocksWithWindowCountsTestWindowsOnly(t *testing.T) {
 	lane := models.AsyncLane{Name: "L", Type: "fake"}
 	eng := async.NewEngine(zap.NewNop(), []models.AsyncLane{lane}, map[string]async.AsyncParser{"fake": fakeAsyncParser{}})
@@ -38,10 +38,11 @@ func TestSetMocksWithWindowCountsTestWindowsOnly(t *testing.T) {
 
 	// getMockManager() returns nil for this bare Proxy, so the MockManager
 	// path is skipped; only the async advance runs.
-	_ = p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now())
-	_ = p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()) // staged again (an agent replaced)
+	_ = p.BeginTestSet(ctx, time.Time{}, nil, nil, nil)
+	_ = p.BeginTestSet(ctx, time.Time{}, nil, nil, nil) // begun again (an agent replaced)
+	_ = p.StagePool(ctx, nil, nil)
 	if got := eng.CompletedForTest(); got != 0 {
-		t.Fatalf("the test set's stagings completed %d tests, want 0", got)
+		t.Fatalf("the test set's begins and pool completed %d tests, want 0", got)
 	}
 	_ = p.SetMocksWithWindow(ctx, nil, nil, t0, t0.Add(time.Second))
 	if got, body := eng.CompletedForTest(), served(); got != 0 || body != "boot" {
@@ -202,7 +203,7 @@ func TestExactServingAdvancesTheAsyncLanesAsPerTestWindowsDid(t *testing.T) {
 		if exact {
 			require.NoError(t, p.ServeExactPool(models.PoolKeyNone, nil))
 		}
-		require.NoError(t, p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()))
+		require.NoError(t, p.BeginTestSet(ctx, time.Time{}, nil, nil, nil))
 		for i, tc := range []string{"test-1", "test-2", "test-3"} {
 			if exact {
 				require.NoError(t, p.ServeExactTest(tc, nil))

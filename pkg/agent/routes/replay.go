@@ -207,6 +207,66 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 }
 
+// BeginTestSet begins a test set (models.TestSetBegin): before the
+// application starts and before any of the set's tests.
+func (a *Agent) BeginTestSet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req models.BeginTestSetReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondAgent(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.svc.BeginTestSet(r.Context(), req.TestSet); err != nil {
+		utils.LogError(a.logger, err, "failed to begin the test set", zap.String("testSetID", req.TestSet.TestSetID))
+		respondAgent(w, r, http.StatusInternalServerError, err)
+		return
+	}
+	// Under the proven switch a set begins with no test variable bound:
+	// its first test case's filter binds what its request gives.
+	if provenswitch.On() {
+		switch s := a.svc.(type) {
+		case variableStarter:
+			if err := s.StartTestVariables(nil); err != nil {
+				utils.LogError(a.logger, err, "failed to begin the test set's variables")
+				respondAgent(w, r, http.StatusInternalServerError, err)
+				return
+			}
+		case interface{ ResetVariables() }:
+			s.ResetVariables()
+		}
+	}
+	a.setConsumedScope(w)
+	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// EndTestSet ends a test set: its tests are over.
+func (a *Agent) EndTestSet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req models.EndTestSetReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondAgent(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.svc.EndTestSet(r.Context(), req.TestSetID); err != nil {
+		utils.LogError(a.logger, err, "failed to end the test set", zap.String("testSetID", req.TestSetID))
+		respondAgent(w, r, http.StatusInternalServerError, err)
+		return
+	}
+	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// setConsumedScope says, in models.ConsumedScopeHeader, how the agent reads
+// the consumed history a filter carries. A header, not a body field: a client
+// that predates it never looks at headers, so its handling of this response
+// cannot change.
+func (a *Agent) setConsumedScope(w http.ResponseWriter) {
+	if s, ok := a.svc.(interface {
+		ReadsConsumedForPerTestOnly(agent.Service) bool
+	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
+		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
+	}
+}
+
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
@@ -268,13 +328,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
 
-	// A header, not a body field: a client that predates it never looks at
-	// headers, so its handling of this response cannot change.
-	if s, ok := a.svc.(interface {
-		ReadsConsumedForPerTestOnly(agent.Service) bool
-	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
-		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
-	}
+	a.setConsumedScope(w)
 	respondAgent(w, r, http.StatusOK, nil)
 }
 

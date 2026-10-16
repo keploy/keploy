@@ -49,7 +49,7 @@ func containsMockNamed(list []*models.Mock, name string) bool {
 // TestMockManager_Wave2_StrictTierPartition verifies the startup /
 // session / per-test three-way split is strictly disjoint, that the
 // legacy GetSessionMocks union returns startup+session (no per-test),
-// HasFirstTestFired flips true after the first non-BaseTime call, and
+// HasFirstTestFired flips true after the first test window, and
 // the recorder-emitted Lifetime tag is NOT mutated by the manager.
 func TestMockManager_Wave2_StrictTierPartition(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -91,7 +91,7 @@ func TestMockManager_Wave2_StrictTierPartition(t *testing.T) {
 	// HasFirstTestFired must now be true, sticky for the rest of the
 	// manager's lifetime.
 	if !mm.HasFirstTestFired() {
-		t.Fatalf("HasFirstTestFired: want true after first non-BaseTime SetMocksWithWindow, got false")
+		t.Fatalf("HasFirstTestFired: want true after the first test window, got false")
 	}
 
 	// Startup tier: exactly m_startup.
@@ -160,26 +160,26 @@ func TestMockManager_Wave2_StrictTierPartition(t *testing.T) {
 	}
 }
 
-// TestMockManager_Wave2_BaseTimeStagingDoesNotFireFirstTest ensures the
-// Runner/Replayer initial staging call (SetMocksWithWindow with
-// start=models.BaseTime) does NOT flip HasFirstTestFired to true.
+// TestMockManager_Wave2_BeginTestSetDoesNotFireFirstTest ensures a set's
+// begin (BeginTestSet, before any test runs) does NOT flip
+// HasFirstTestFired to true.
 // Parsers rely on this to distinguish bootstrap (before any test) from
 // between-tests gaps.
-func TestMockManager_Wave2_BaseTimeStagingDoesNotFireFirstTest(t *testing.T) {
+func TestMockManager_Wave2_BeginTestSetDoesNotFireFirstTest(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	// Initial staging fire from the Runner/Replayer: start == BaseTime.
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// The set begins, before any test.
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 
 	if mm.HasFirstTestFired() {
-		t.Fatalf("HasFirstTestFired: BaseTime staging must not register as first test, got true")
+		t.Fatalf("HasFirstTestFired: a set's begin must not register as first test, got true")
 	}
 }
 
 // TestSetMocksWithWindow_InitialStaging_SeedsStartupTree covers the
-// Wave-3 C1/C3/H3 composite behaviour during Runner/Replayer's initial
-// BaseTime staging call. Pre-first-test fire, tier-aware parsers (the
+// Wave-3 C1/C3/H3 composite behaviour of a set's begin (BeginTestSet).
+// Pre-first-test fire, tier-aware parsers (the
 // v3 dispatcher) route every live query to the startup engine with no
 // fallback — so EVERY mock visible to the app during bootstrap must be
 // reachable via GetStartupMocks. Both per-test and session-tagged
@@ -196,17 +196,16 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	// Two per-test mocks seen during the BaseTime staging sweep, plus
+	// Two per-test mocks the set begins with, plus
 	// one session mock in the unfiltered slice.
 	ptReq := time.Date(2024, 1, 1, 11, 59, 0, 0, time.UTC)
 	pt1 := newMockForTest("pt1", ptReq, models.LifetimePerTest)
 	pt2 := newMockForTest("pt2", ptReq.Add(time.Second), models.LifetimePerTest)
 	sess := newMockForTest("sess", ptReq.Add(2*time.Second), models.LifetimeSession)
 
-	mm.SetMocksWithWindow(
+	mm.BeginTestSet(time.Time{}, nil,
 		[]*models.Mock{pt1, pt2},
 		[]*models.Mock{sess},
-		models.BaseTime, time.Now(),
 	)
 
 	// GetStartupMocks returns ALL bootstrap-reachable mocks — pt1, pt2,
@@ -274,9 +273,9 @@ func TestSetMocksWithWindow_InitialStaging_SeedsStartupTree(t *testing.T) {
 		}
 	}
 
-	// HasFirstTestFired must still be false — BaseTime doesn't count.
+	// HasFirstTestFired must still be false — a set's begin is no test.
 	if mm.HasFirstTestFired() {
-		t.Fatalf("HasFirstTestFired: BaseTime staging must not register as first test")
+		t.Fatalf("HasFirstTestFired: a set's begin must not register as first test")
 	}
 }
 
@@ -293,7 +292,7 @@ func TestSetMocksWithWindow_FirstRealWindow_RepartitionsStartup(t *testing.T) {
 
 	// Initial staging to seed firstWindowStart later. Leave the startup
 	// tree empty so we can see it populate from the real-window call.
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 
 	// Build three per-test mocks spanning the three partitions:
 	//   bootstrap: req = start - 1s    → routed to startup
@@ -374,41 +373,40 @@ func TestSetMocksWithWindow_StartupTreeRebuildsOnNewTestSet(t *testing.T) {
 	}
 }
 
-// TestIsTestWindowActive_BaseTimeStagingIsInactive is a regression pin
-// for the Wave-3 H3 fix. During Runner/Replayer's initial staging call
-// (start=models.BaseTime), SetMocksWithWindow must NOT publish BaseTime
-// into m.windowStart — otherwise IsTestWindowActive (which only rejects
-// zero-time) would flip true while no real test has fired, mis-routing
-// tier-aware parsers (Postgres v3 dispatcher) to the per-test engine.
-// The per-test tree is empty during initial staging (all filtered input
-// goes to startup), so PerTest routing yields `candidates=0` KP001
-// misses for legitimate startup-tier mocks (e.g. listmonk install
+// TestIsTestWindowActive_APoolOpensNoWindow is a regression pin for the
+// Wave-3 H3 fix. A set's begin stages its pool before any test has run: it
+// must NOT open a window — IsTestWindowActive would flip true while no real
+// test has fired, mis-routing tier-aware parsers (Postgres v3 dispatcher) to
+// the per-test engine. The per-test tree is empty after a pool staging (all
+// filtered input goes to startup), so PerTest routing yields `candidates=0`
+// KP001 misses for legitimate startup-tier mocks (e.g. listmonk install
 // `select count(*) from settings`).
 //
 // Invariants asserted:
-//  1. IsTestWindowActive stays false after a BaseTime staging call.
-//  2. HasFirstTestFired stays false after a BaseTime staging call.
-//  3. The first real-window call flips IsTestWindowActive to true, and
-//     a second BaseTime call (exotic but defensible) does NOT regress
-//     the window back to an inactive state.
-func TestIsTestWindowActive_BaseTimeStagingIsInactive(t *testing.T) {
+//  1. IsTestWindowActive and HasFirstTestFired stay false after a set's begin.
+//  2. The first real-window call flips both to true.
+//  3. A pool staged between the set's tests (StagePool) closes the window —
+//     no test is open, and its per-test tree is empty — and the set still
+//     reads as having fired a test (between tests, not bootstrap).
+//  4. The next set's begin reads as nothing having fired.
+func TestIsTestWindowActive_APoolOpensNoWindow(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	// Before any SetMocksWithWindow call, the window is inactive.
+	// Before any staging, the window is inactive.
 	if mm.IsTestWindowActive() {
 		t.Fatalf("IsTestWindowActive: want false on a fresh manager, got true")
 	}
 
-	// Initial staging with BaseTime must NOT activate the window. This
-	// is the exact case the Runner/Replayer fires before any test runs.
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// A set's begin must NOT activate the window. This is the call the
+	// replayer makes before any test runs.
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if mm.IsTestWindowActive() {
-		t.Fatalf("IsTestWindowActive: want false after BaseTime staging, got true " +
+		t.Fatalf("IsTestWindowActive: want false after a set's begin, got true " +
 			"(dispatcher would mis-route startup traffic to PerTest engine)")
 	}
 	if mm.HasFirstTestFired() {
-		t.Fatalf("HasFirstTestFired: want false after BaseTime staging, got true")
+		t.Fatalf("HasFirstTestFired: want false after a set's begin, got true")
 	}
 
 	// First real-window call flips the active flag.
@@ -422,19 +420,23 @@ func TestIsTestWindowActive_BaseTimeStagingIsInactive(t *testing.T) {
 		t.Fatalf("HasFirstTestFired: want true after first real-window call, got false")
 	}
 
-	// A subsequent BaseTime call must NOT regress the window back to
-	// inactive. Staging re-fires have no legitimate reason to undo the
-	// real window, and the fix must be targeted at "don't set it in
-	// the first place" rather than "unset it to BaseTime".
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	if !mm.IsTestWindowActive() {
-		t.Fatalf("IsTestWindowActive: want true (unchanged) after a re-staging BaseTime call, got false")
+	// The pool between tests: no test is open, and a test has fired.
+	mm.StagePool(nil, nil)
+	if snap := mm.WindowSnapshot(); snap.Active || !snap.FirstTestFired {
+		t.Fatalf("after the pool between tests: %+v, want no window open and a test fired", snap)
+	}
+
+	// The next set begins with nothing fired.
+	mm.ResetForReplaySession()
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
+	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
+		t.Fatalf("after the next set's begin: %+v, want no window open and nothing fired", snap)
 	}
 }
 
 // TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging
-// pins the N-R1 (round 2) fix: during Runner/Replayer's BaseTime
-// staging call, SetMocksWithWindow deliberately over-populates the
+// pins the N-R1 (round 2) fix: a set's begin (BeginTestSet)
+// deliberately over-populates the
 // startup tree with both filtered AND unfiltered input (so the v3
 // dispatcher's StartupTransactional engine can serve session-tagged
 // bootstrap DDL — listmonk's `DROP TYPE IF EXISTS` is the canonical
@@ -448,7 +450,7 @@ func TestIsTestWindowActive_BaseTimeStagingIsInactive(t *testing.T) {
 // pointer.
 //
 // Invariants pinned:
-//  1. During initial staging (BaseTime), a session mock and a perTest
+//  1. After a set's begin, a session mock and a perTest
 //     mock each appear in the startup tree AND the session tree (the
 //     session one via the real session tree, the perTest one via
 //     initial-staging's copy into startup).
@@ -462,18 +464,16 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	// Stage a LifetimeSession mock and a LifetimePerTest mock at
-	// BaseTime. Both fire during Runner/Replayer's pre-first-test
-	// sweep; the session mock is the listmonk-style DDL, the perTest
+	// Begin a set with a LifetimeSession mock and a LifetimePerTest
+	// mock. Both are served before the set's first test; the session mock is the listmonk-style DDL, the perTest
 	// mock is any filtered-tier bootstrap query.
 	bootTs := time.Date(2023, 12, 31, 23, 59, 0, 0, time.UTC)
 	mSession := newMockForTest("boot-session", bootTs, models.LifetimeSession)
 	mPerTest := newMockForTest("boot-pertest", bootTs.Add(time.Millisecond), models.LifetimePerTest)
 
-	mm.SetMocksWithWindow(
+	mm.BeginTestSet(time.Time{}, nil,
 		[]*models.Mock{mPerTest},
 		[]*models.Mock{mSession},
-		models.BaseTime, time.Now(),
 	)
 
 	// GetStartupMocks returns both — the initial-staging branch copies
@@ -540,7 +540,7 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 	// perTest mock has req == bootTs (well before firstStart), so it
 	// moves back into startup; our session mock stays in the session
 	// tree AND is NOT re-copied into startup (that copy is unique to
-	// the BaseTime staging branch). The union should now be cleanly
+	// the pool branch). The union should now be cleanly
 	// disjoint. Both mocks are pooled already, so the pools serve copies of
 	// them from here on (see mockOwner) and the union is checked by name.
 	firstStart := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -580,7 +580,7 @@ func TestGetSessionMocks_DedupsStartupSessionOverlap_DuringInitialStaging(t *tes
 // sequential observer can catch the intermediate. WindowSnapshot takes
 // both locks under swapMu and returns a tear-free snapshot.
 //
-// Strategy: cycle a fresh MockManager through BaseTime staging ->
+// Strategy: cycle a fresh MockManager through a set's begin ->
 // real-window transitions in a writer goroutine while N reader
 // goroutines call WindowSnapshot and assert the forbidden pair is
 // never observed. Between iterations we reset to a fresh manager so
@@ -601,8 +601,8 @@ func TestWindowSnapshot_CoherentPair(t *testing.T) {
 		done := make(chan struct{}, readers)
 		fail := make(chan string, readers)
 
-		// Writer: alternate BaseTime staging with real-window calls.
-		// Each BaseTime -> real-window edge is the one under race-
+		// Writer: alternate a set's begin with real-window calls.
+		// Each begin -> real-window edge is the one under race-
 		// risk: windowMu updates first, firstWindowStart is written
 		// first but both release windowMu's critical section at
 		// different times. WindowSnapshot must sample both bits
@@ -615,7 +615,7 @@ func TestWindowSnapshot_CoherentPair(t *testing.T) {
 				default:
 				}
 				if i%2 == 0 {
-					mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+					mm.BeginTestSet(time.Time{}, nil, nil, nil)
 				} else {
 					mm.SetMocksWithWindow(nil, nil, realStart, realEnd)
 				}
@@ -676,9 +676,8 @@ func mockNames(list []*models.Mock) []string {
 // strictMockWindow filter depends on:
 //
 //   - Zero on a fresh manager (no SetMocksWithWindow yet).
-//   - Zero after a BaseTime staging call (BaseTime doesn't count).
-//   - Equal to the first real-window start after the first non-BaseTime
-//     call.
+//   - Zero after a set's begin with no recorded first test.
+//   - Equal to the first real-window start after the first test window.
 //   - Does NOT advance when a later-starting test fires (only moves
 //     earlier to protect genuine startup-mock classification).
 func TestMockManager_FirstTestWindowStart_AccessorBehavior(t *testing.T) {
@@ -690,10 +689,10 @@ func TestMockManager_FirstTestWindowStart_AccessorBehavior(t *testing.T) {
 		t.Fatalf("FirstTestWindowStart: fresh manager want zero, got %v", got)
 	}
 
-	// BaseTime staging: still zero.
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	// A set begun with no recorded first test: still zero.
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if got := mm.FirstTestWindowStart(); !got.IsZero() {
-		t.Fatalf("FirstTestWindowStart: after BaseTime staging want zero, got %v", got)
+		t.Fatalf("FirstTestWindowStart: after a set's begin with no first test want zero, got %v", got)
 	}
 
 	// First real window sets the cutoff.
@@ -827,7 +826,7 @@ func TestGetStartupMocksByKind(t *testing.T) {
 	dnsMock := newMockForTest("dns-boot", req.Add(2*time.Second), models.LifetimeSession)
 	dnsMock.Kind = models.DNS
 
-	mm.SetMocksWithWindow(nil, []*models.Mock{httpMock, pgMock, dnsMock}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{httpMock, pgMock, dnsMock})
 
 	all, err := mm.GetStartupMocks()
 	if err != nil {
@@ -877,7 +876,7 @@ func TestGetStartupMocksByKind(t *testing.T) {
 }
 
 // TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID pins
-// the H4 round-2 fix: during Runner/Replayer's initial BaseTime staging,
+// the H4 round-2 fix: after a set's begin,
 // a session mock appears in BOTH the startup tree AND the unfiltered
 // tree. Pre-fix, the startup-tree loop stamped
 // `mk.TestModeInfo.ID = idx` on the shared *models.Mock pointer, then
@@ -911,7 +910,7 @@ func TestSetMocksWithWindow_StartupRebuild_DoesNotClobberUnfilteredID(t *testing
 
 	// Initial staging seeds BOTH the startup tree (via startupInit ∪
 	// unfiltered copy) AND the unfiltered tree (via its tier build).
-	mm.SetMocksWithWindow(nil, []*models.Mock{sess}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{sess})
 
 	// The shared mock pointer's .ID now reflects the session tier's
 	// stamping (index 0 in the 1-element unfiltered slice). The startup
@@ -973,7 +972,7 @@ func TestResetForReplaySession_PutsTierRoutingBackToPreTestState(t *testing.T) {
 
 	// Set 1 ends, set 2 begins and is staged with the "no test yet" sentinel.
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 
 	snap := mm.WindowSnapshot()
 	if snap.Active {
@@ -1020,7 +1019,7 @@ func TestResetForReplaySession_SecondTestSetKeepsItsOwnBootstrapMocks(t *testing
 	s2 := s1.Add(time.Hour)
 	boot := newMockForTest("s2boot", s2.Add(-5*time.Second), models.LifetimePerTest)
 	test := newMockForTest("s2test", s2.Add(time.Second), models.LifetimePerTest)
-	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{boot, test}, nil)
 
 	startup, err := mm.GetStartupMocks()
 	if err != nil {
@@ -1068,9 +1067,9 @@ func TestResetForReplaySession_SecondTestSetKeepsItsOwnBootstrapMocks(t *testing
 // classified as startup-init instead of dropped as previous-test bleed, and are
 // served as bootstrap traffic.
 //
-// SeedStartupCutoff closes that: the replayer already loads test cases sorted by
-// request timestamp, so it supplies testCases[0]'s time before any test runs.
-func TestSeedStartupCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) {
+// The set's begin closes that: the replayer knows the set's earliest recorded
+// test before any test runs, and the set begins with it (BeginTestSet).
+func TestBeginTestSetCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) {
 	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Hour)
 
@@ -1084,10 +1083,11 @@ func TestSeedStartupCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) 
 		}
 	}
 
-	// Without the seed the cutoff follows the fired window (t2), so t1's mock —
-	// belonging to a test that never runs — reads as bootstrap.
+	// Begun without its first test, the set's cutoff follows the fired window
+	// (t2), so t1's mock — belonging to a test that never runs — reads as
+	// bootstrap.
 	unseeded, all := build()
-	unseeded.SetMocksWithWindow(all, nil, models.BaseTime, time.Now())
+	unseeded.BeginTestSet(time.Time{}, nil, all, nil)
 	unseeded.SetMocksWithWindow(all, nil, t2, t2.Add(10*time.Second))
 	before, err := unseeded.GetStartupMocks()
 	if err != nil {
@@ -1097,11 +1097,10 @@ func TestSeedStartupCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) 
 		t.Skip("baseline no longer reproduces; the cutoff is derived differently now")
 	}
 
-	// With the seed it is classified against t1, so only genuine bootstrap
-	// traffic survives in the startup tier.
+	// Begun with its first recorded test, it is classified against t1, so
+	// only genuine bootstrap traffic survives in the startup tier.
 	seeded, all := build()
-	seeded.SetMocksWithWindow(all, nil, models.BaseTime, time.Now())
-	seeded.SeedStartupCutoff(t1) // what the replayer supplies: testCases[0]
+	seeded.BeginTestSet(t1, nil, all, nil)
 	seeded.SetMocksWithWindow(all, nil, t2, t2.Add(10*time.Second))
 
 	after, err := seeded.GetStartupMocks()
@@ -1117,23 +1116,21 @@ func TestSeedStartupCutoff_SkippedFirstTestDoesNotLeakAsBootstrap(t *testing.T) 
 	}
 }
 
-// Seeding the cutoff must NOT make routing think a test has fired. If it did,
-// staging would look like a live test and the set's bootstrap traffic would be
-// routed to the per-test engine over a tree staging had just emptied — the
-// exact outage the per-test-set reset exists to prevent.
-func TestSeedStartupCutoff_DoesNotMarkATestAsFired(t *testing.T) {
+// A set begun with its cutoff must NOT make routing think a test has fired. If
+// it did, the begin would look like a live test and the set's bootstrap traffic
+// would be routed to the per-test engine over a tree the begin left empty.
+func TestBeginTestSetCutoff_DoesNotMarkATestAsFired(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	defer mm.Close()
 
 	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	mm.SeedStartupCutoff(start)
+	mm.BeginTestSet(start, nil, nil, nil)
 
 	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
-		t.Fatalf("seeding the cutoff must leave routing at 'nothing has fired', got %+v", snap)
+		t.Fatalf("a set's begin must leave routing at 'nothing has fired', got %+v", snap)
 	}
-	if mm.FirstTestWindowStart().IsZero() {
-		t.Fatal("the cutoff was not seeded")
+	if !mm.FirstTestWindowStart().Equal(start) {
+		t.Fatal("the set did not begin with its cutoff")
 	}
 
 	// A real window still flips routing.
@@ -1208,7 +1205,7 @@ func tierFixture(t *testing.T) (*MockManager, models.Mock) {
 		return []*models.Mock{&a, &b}, []*models.Mock{&c}
 	}
 	f, u := fresh()
-	mm.SetMocksWithWindow(f, u, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, f, u)
 	f, u = fresh()
 	mm.SetMocksWithWindow(f, u, start, start.Add(10*time.Second))
 
@@ -1327,7 +1324,7 @@ func TestResetForReplaySession_WindowBitsAndTreesChangeTogether(t *testing.T) {
 	s1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	boot := newMockForTest("s1boot", s1.Add(-time.Minute), models.LifetimePerTest)
 	test := newMockForTest("s1test", s1.Add(time.Second), models.LifetimePerTest)
-	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{boot, test}, nil)
 	mm.SetMocksWithWindow([]*models.Mock{boot, test}, nil, s1, s1.Add(10*time.Second))
 
 	mm.ResetForReplaySession()
@@ -1342,7 +1339,7 @@ func TestResetForReplaySession_WindowBitsAndTreesChangeTogether(t *testing.T) {
 			"the startup engine and answered from the previous set")
 	}
 
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if snap := mm.WindowSnapshot(); snap.Active || snap.FirstTestFired {
 		t.Fatalf("staging must put routing back to 'nothing has fired', got %+v", snap)
 	}
@@ -1442,7 +1439,7 @@ func TestSetMocks_BumpsAKindThatLeavesThePool(t *testing.T) {
 
 // The startup fallback in DeleteFilteredMock must not destroy a REUSABLE mock.
 //
-// During BaseTime staging the startup tree also holds the session mocks, so the
+// After a pool staging the startup tree also holds the session mocks, so the
 // fallback can reach one. Consuming its startup-tier view is fine — that view
 // exists to make bootstrap traffic matchable — but the session tier is the
 // durable home and must still serve it, or a handshake/auth recording every
@@ -1452,7 +1449,7 @@ func TestDeleteFilteredMock_StartupFallbackLeavesTheSessionTierIntact(t *testing
 	defer mm.Close()
 
 	sess := newMockForTest("sess", time.Now(), models.LifetimeSession)
-	mm.SetMocksWithWindow(nil, []*models.Mock{sess}, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, nil, []*models.Mock{sess})
 
 	startup, err := mm.GetStartupMocks()
 	if err != nil {
@@ -1481,14 +1478,12 @@ func TestDeleteFilteredMock_StartupFallbackLeavesTheSessionTierIntact(t *testing
 	}
 }
 
-// The replayer seeds the set's startup-init cutoff and then stages its mocks in
-// ONE UpdateMockParams call — SeedStartupCutoff (agent.go) followed by
-// SetMocksWithWindow. Staging is also where the set boundary clears the window
-// bits, so a seed written straight into firstWindowStart was wiped microseconds
-// after it was written, for EVERY set: the feature was inert in production
-// while its unit tests passed, because they used a fresh manager where the
-// clear had nothing to remove.
-func TestSeedStartupCutoff_SurvivesTheStagingThatFollowsIt(t *testing.T) {
+// A set begins with its startup-init cutoff and its pool in one call, after
+// the reset of the previous set (ResetForReplaySession): the begin is also
+// where the previous set's window bits go, and a cutoff installed apart from it
+// used to be wiped by it, for EVERY set, while unit tests on a fresh manager
+// passed.
+func TestBeginTestSetCutoff_SurvivesTheSetBoundary(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	t.Cleanup(func() { mm.Close() })
 
@@ -1496,8 +1491,7 @@ func TestSeedStartupCutoff_SurvivesTheStagingThatFollowsIt(t *testing.T) {
 
 	// Exactly the production order for one test set.
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(first)
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(first, nil, nil, nil)
 
 	if got := mm.FirstTestWindowStart(); !got.Equal(first) {
 		t.Fatalf("cutoff after staging = %v, want %v: the boundary clear wiped the "+
@@ -1521,7 +1515,7 @@ func TestSeedStartupCutoff_SurvivesTheStagingThatFollowsIt(t *testing.T) {
 // REFUSES it, and set N+1 runs the whole set on set N's cutoff — every mock
 // recorded between the two sets reads as previous-test bleed and is dropped
 // rather than served as that set's bootstrap traffic.
-func TestSeedStartupCutoff_SecondSetDoesNotInheritTheFirstsCutoff(t *testing.T) {
+func TestBeginTestSetCutoff_SecondSetDoesNotInheritTheFirstsCutoff(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	t.Cleanup(func() { mm.Close() })
 
@@ -1529,13 +1523,11 @@ func TestSeedStartupCutoff_SecondSetDoesNotInheritTheFirstsCutoff(t *testing.T) 
 	setB := setA.Add(time.Hour)
 
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(setA)
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(setA, nil, nil, nil)
 	mm.SetMocksWithWindow(nil, nil, setA, setA.Add(time.Second)) // a test fires in set A
 
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(setB)
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(setB, nil, nil, nil)
 
 	if got := mm.FirstTestWindowStart(); !got.Equal(setB) {
 		t.Fatalf("set B cutoff = %v, want %v: set B is running on set A's cutoff", got, setB)
@@ -1564,12 +1556,12 @@ func TestSeedStartupCutoff_SecondSetDoesNotInheritTheFirstsCutoff(t *testing.T) 
 // The walk used to read filteredByKind/unfilteredByKind AFTER the tier swap, so
 // it read the NEW maps — exactly redundant with walking the new input slices,
 // and departing kinds were published nowhere. A kind living only in the startup
-// tier was missed in both directions, because during BaseTime staging
+// tier was missed in both directions, because during a pool staging
 // filteredForTree is nil and such a kind never enters filteredByKind at all.
 func TestSetMocksWithWindow_BumpsRevisionForDepartingKinds(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		startup bool // seed via the startup tier (BaseTime staging) instead of a live window
+		startup bool // seed via the startup tier (a set's begin) instead of a live window
 	}{
 		{name: "per-test tier"},
 		{name: "startup tier", startup: true},
@@ -1583,7 +1575,7 @@ func TestSetMocksWithWindow_BumpsRevisionForDepartingKinds(t *testing.T) {
 			redis.Kind = models.REDIS
 
 			if tc.startup {
-				mm.SetMocksWithWindow([]*models.Mock{redis}, nil, models.BaseTime, time.Now())
+				mm.BeginTestSet(time.Time{}, nil, []*models.Mock{redis}, nil)
 			} else {
 				mm.SetMocksWithWindow([]*models.Mock{redis}, nil, at, at.Add(time.Second))
 			}
@@ -1603,48 +1595,30 @@ func TestSetMocksWithWindow_BumpsRevisionForDepartingKinds(t *testing.T) {
 	}
 }
 
-// A parked cutoff must not outlive the set that seeded it.
-//
-// UpdateMockParams can abort between SeedStartupCutoff and SetMocksWithWindow
-// — the "no mocks stored for client ID" bail and the loadPerTestMocks error
-// path both return in that gap — leaving a park with no staging call to consume
-// it. Sets are recorded chronologically, so the orphan is always the EARLIER
-// value: it would win any running-minimum guard and the next set would replay
-// on the aborted set's cutoff, dropping its bootstrap traffic as bleed.
-func TestSeedStartupCutoff_AbortedSetDoesNotLeakItsCutoffToTheNext(t *testing.T) {
+// A set's cutoff is the one it begins with: a set begun without one has none,
+// whatever the set before it had, and a set that never began (its replay
+// stopped after the reset) leaves the previous set's in place until the next
+// begins.
+func TestBeginTestSetCutoff_ASetBegunWithoutOneHasNone(t *testing.T) {
 	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
 	t.Cleanup(func() { mm.Close() })
 
 	setA := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	setB := setA.Add(time.Hour)
 
-	// Set A seeds and then aborts before staging.
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(setA)
+	mm.BeginTestSet(setA, nil, nil, nil)
 
-	// Set B runs normally.
+	// The next set stops before it begins: the manager is still set A.
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(setB)
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-
-	if got := mm.FirstTestWindowStart(); !got.Equal(setB) {
-		t.Fatalf("set B cutoff = %v, want %v: the aborted set's parked cutoff survived "+
-			"its own set and was installed here", got, setB)
+	if got := mm.FirstTestWindowStart(); !got.Equal(setA) {
+		t.Fatalf("cutoff = %v before the next set began, want set A's %v", got, setA)
 	}
 
-	// The set after an abort need not seed at all — the replayer supplies a
-	// cutoff only when it knows the set's first recorded test. Then nothing
-	// overwrites the orphan, so the reset is the only thing that can clear it.
+	// The set after begins with no cutoff (its tests carry no request time).
 	mm.ResetForReplaySession()
-	mm.SeedStartupCutoff(setB.Add(time.Hour))
-	mm.ResetForReplaySession() // that set aborts before staging
-
-	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now()) // no seed for this one
-
+	mm.BeginTestSet(time.Time{}, nil, nil, nil)
 	if got := mm.FirstTestWindowStart(); !got.IsZero() {
-		t.Fatalf("cutoff = %v, want zero: an unseeded set inherited a parked cutoff "+
-			"from an aborted earlier set", got)
+		t.Fatalf("cutoff = %v, want zero: a set begun without one inherited set A's", got)
 	}
 }
 
@@ -1664,7 +1638,7 @@ func TestMarkMockAsUsed_CountsStartupTierMocks(t *testing.T) {
 	boot := newMockForTest("boot-mock", first.Add(-time.Minute), models.LifetimePerTest)
 
 	// Stage, then open a window so the boot mock is classified startup-init.
-	mm.SetMocksWithWindow([]*models.Mock{boot}, nil, models.BaseTime, time.Now())
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{boot}, nil)
 	mm.SetMocksWithWindow([]*models.Mock{boot}, nil, first, first.Add(time.Second))
 
 	startup, err := mm.GetStartupMocks()

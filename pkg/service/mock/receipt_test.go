@@ -733,12 +733,12 @@ func (f *failsGroup) StoreMocks(ctx context.Context, a []*models.Mock, b []*mode
 	return f.composeInstr.StoreMocks(ctx, a, b)
 }
 
-func (f *failsGroup) UpdateMockParams(ctx context.Context, p models.MockFilterParams) error {
+func (f *failsGroup) BeginTestSet(ctx context.Context, b models.TestSetBegin) error {
 	if f.stage == "arm" {
 		killGroup(ctx)
 		return errors.New("could not arm the mock pool")
 	}
-	return f.composeInstr.UpdateMockParams(ctx, p)
+	return f.composeInstr.BeginTestSet(ctx, b)
 }
 
 // keploy's own failure is not the user pressing Ctrl+C. The errgroup cancels

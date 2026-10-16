@@ -43,7 +43,7 @@ func TestStatesLifetimesIsTheSetsRecording(t *testing.T) {
 	call := mock("token", models.HTTP, at.Add(time.Second), true)
 	query := mock("query", models.MySQL, at.Add(3*time.Second), false)
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow([]*models.Mock{call, query}, nil, models.BaseTime, at.Add(time.Hour))
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{call, query}, nil)
 	check("the set's staging", models.HTTP, true)
 	check("the set's staging", models.MySQL, false)
 
@@ -58,6 +58,6 @@ func TestStatesLifetimesIsTheSetsRecording(t *testing.T) {
 
 	// The next set was recorded before lifetimes were stated.
 	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow([]*models.Mock{mock("legacy", models.HTTP, at.Add(time.Second), false)}, nil, models.BaseTime, at.Add(time.Hour))
+	mm.BeginTestSet(time.Time{}, nil, []*models.Mock{mock("legacy", models.HTTP, at.Add(time.Second), false)}, nil)
 	check("the next set's staging", models.HTTP, false)
 }

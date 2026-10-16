@@ -29,6 +29,16 @@ func (p *windowedProxy) SetMocksWithWindow(_ context.Context, f, u []*models.Moc
 	return nil
 }
 
+func (p *windowedProxy) BeginTestSet(_ context.Context, first time.Time, ws []models.TestWindow, f, u []*models.Mock) error {
+	p.mm.BeginTestSet(first, ws, f, u)
+	return nil
+}
+
+func (p *windowedProxy) StagePool(_ context.Context, f, u []*models.Mock) error {
+	p.mm.StagePool(f, u)
+	return nil
+}
+
 func (p *windowedProxy) FirstTestWindowStart() time.Time { return p.mm.FirstTestWindowStart() }
 func (p *windowedProxy) GetPersistentConsumed() map[string]models.MockState {
 	return p.mm.GetPersistentConsumed()
@@ -94,7 +104,10 @@ func TestStatedExecuteIsServedOnlyToItsOwnTest(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stage(models.BaseTime, time.Now())
+			// The set begins, as keploy test begins it.
+			if err := a.BeginTestSet(ctx, models.TestSetBegin{StrictMockWindow: true, AgentOwnsConsumed: true}); err != nil {
+				t.Fatal(err)
+			}
 
 			dctx := &wire.DecodeContext{
 				PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{},

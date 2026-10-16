@@ -316,6 +316,15 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		utils.LogError(m.logger, err, "failed to store mocks on the agent")
 		return err
 	}
+	// The set ends on the agent once everything this replay reads from it is
+	// read: the agent lets go of the mocks stored for it.
+	defer func() {
+		endCtx, endCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer endCancel()
+		if err := m.instrumentation.EndTestSet(endCtx, name); err != nil {
+			m.logger.Debug("could not end the mock set on the agent", zap.String("mock-set", name), zap.Error(err))
+		}
+	}()
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
 	//    calls can narrow the served pool per test (best-effort / optional;
@@ -340,16 +349,14 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return err
 	}
 
-	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
-	//    mapping) — same call RunTestSet makes before the first test. Under
-	//    the proven switch the table push (step 5) already armed the pool
-	//    slice of calls made before any claim; arming the whole pool would
-	//    let any test's mock answer them.
+	// 6. Begin the set on the agent: it serves the whole pool, no test's
+	//    window open — as RunTestSet begins a set before its first test.
+	//    Under the proven switch the table push (step 5) already armed the
+	//    pool slice of calls made before any claim; arming the whole pool
+	//    would let any test's mock answer them, so the agent begins the set
+	//    itself as it first serves that slice.
 	if !provenswitch.On() {
-		if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
-			AfterTime:  models.BaseTime,
-			BeforeTime: time.Now(),
-		}); err != nil {
+		if err := m.instrumentation.BeginTestSet(ctx, models.TestSetBegin{TestSetID: name}); err != nil {
 			utils.LogError(m.logger, err, "failed to arm the mock pool")
 			return err
 		}

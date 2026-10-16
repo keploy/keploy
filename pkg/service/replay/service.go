@@ -28,6 +28,12 @@ type Instrumentation interface {
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	// BeginTestSet begins a test set on the agent, from the mocks stored for
+	// it, before its application starts and before any of its tests;
+	// EndTestSet ends it once its tests are over.
+	BeginTestSet(ctx context.Context, begin models.TestSetBegin) error
+	EndTestSet(ctx context.Context, testSetID string) error
+	// UpdateMockParams begins a test of the current set.
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	// GetMockStats returns the agent's non-draining mock-session snapshot (the
 	// loaded count plus consumed/missed totals). The compose setup uses it to

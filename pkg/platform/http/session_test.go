@@ -100,13 +100,31 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 	params := models.MockFilterParams{
 		TotalConsumedMocks: map[string]models.MockState{"a": {}},
 		MockMapping:        []string{"m1"},
-		RecordedWindows:    []models.TestWindow{{}},
+		Exact:              &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}},
 	}
 	c := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
-	params.RecordedWindows[0].Start = time.Now()
-	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || !c.RecordedWindows[0].Start.IsZero() {
+	params.Exact.Owned[0] = "changed"
+	if len(c.TotalConsumedMocks) != 1 || c.MockMapping[0] != "m1" || c.Exact.Owned[0] != "mock-1" {
+		t.Fatalf("the copy changed with the original: %+v", c)
+	}
+}
+
+// The set's begin recorded is the begin as it was made.
+func TestCopyTestSetBeginSharesNothing(t *testing.T) {
+	begin := models.TestSetBegin{
+		TotalConsumedMocks: map[string]models.MockState{"a": {}},
+		RecordedWindows:    []models.TestWindow{{}},
+		StartupMockNames:   []string{"boot"},
+		Exact:              &models.ExactPool{Pool: []string{"mock-9"}},
+	}
+	c := copyTestSetBegin(begin)
+	begin.TotalConsumedMocks["b"] = models.MockState{}
+	begin.RecordedWindows[0].Start = time.Now()
+	begin.StartupMockNames[0] = "changed"
+	begin.Exact.Pool[0] = "changed"
+	if len(c.TotalConsumedMocks) != 1 || !c.RecordedWindows[0].Start.IsZero() || c.StartupMockNames[0] != "boot" || c.Exact.Pool[0] != "mock-9" {
 		t.Fatalf("the copy changed with the original: %+v", c)
 	}
 }
@@ -684,34 +702,31 @@ func TestStreamCaughtUpOnlyToTheAgentItReached(t *testing.T) {
 	}
 }
 
-// Under exact serving a set's staging is a step of its own: the filters that
-// open a test case or serve the pool after it replace each other, never the
-// staging, and a restarted agent is staged before it is told what to serve.
-func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
-	stage := models.MockFilterParams{Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-9"}}}
-	open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}
-	pool := models.MockFilterParams{Exact: &models.ExactServing{}}
-	if mockParamsStep(stage) != stepExactStage || mockParamsStep(open) != stepMockParams || mockParamsStep(pool) != stepMockParams || mockParamsStep(models.MockFilterParams{}) != stepMockParams {
-		t.Fatal("a filter is recorded under the wrong step")
-	}
+// A set's begin is a step of its own: the test filters after it replace each
+// other, never the begin, so a restarted agent is begun before it is told
+// which test runs. A new set's begin forgets the previous set's last test.
+func TestSessionKeepsTheSetsBeginBeforeItsLatestTest(t *testing.T) {
 	s := newSession(t, true)
 	var mu sync.Mutex
 	var got []string
 	s.record(stepStoreMocks, noteStep(&got, &mu, "store"))
-	s.record(mockParamsStep(stage), noteStep(&got, &mu, "stage"))
-	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-1"))
-	s.record(mockParamsStep(pool), noteStep(&got, &mu, "pool"))
-	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-2"))
+	s.record(stepBeginTestSet, noteStep(&got, &mu, "begin set-1"))
+	s.record(stepMockParams, noteStep(&got, &mu, "test-1"))
+	s.record(stepMockParams, noteStep(&got, &mu, "test-2"))
 	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
-	if want := "store stage open test-2"; strings.Join(got, " ") != want {
+	if want := "store begin set-1 test-2"; strings.Join(got, " ") != want {
 		t.Fatalf("set up again with %v, want %s", got, want)
 	}
-	// The copy recorded shares nothing with the call's exact serving.
-	c := copyMockParams(stage)
-	stage.Exact.Pool[0] = "changed"
-	if c.Exact.Pool[0] != "mock-9" {
-		t.Fatalf("the copy changed with the original: %+v", c.Exact)
+
+	got = nil
+	s.forget(stepMockParams)
+	s.record(stepBeginTestSet, noteStep(&got, &mu, "begin set-2"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "store begin set-2"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s: the previous set's last test is no test of this one", got, want)
 	}
 }
