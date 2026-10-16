@@ -14,12 +14,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	cli "github.com/docker/cli/cli"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	mobyclient "github.com/moby/moby/client"
 	"go.keploy.io/server/v3/pkg/agent/token"
@@ -70,7 +72,10 @@ func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.Se
 type App struct {
 	// onAgentRestart, when set, sets keploy's agent up again after the
 	// compose retry's `up` started it again; see SetOnAgentRestart.
-	onAgentRestart  func(ctx context.Context) error
+	onAgentRestart func(ctx context.Context) error
+	// setEndKill is why the latest stop at a test set's end had to kill the
+	// app (setend_stop.go), until run reports it; nil when it did not.
+	setEndKill      atomic.Pointer[string]
 	logger          *zap.Logger
 	docker          docker.Client
 	cmd             string
@@ -1814,6 +1819,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Define the function to cancel the command
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
+			// keploy's stop at a test set's end (setend_stop.go) is the
+			// teardown's stop, which says whether it had to kill the app.
+			setEnd := a.kind != utils.DockerCompose && stopsForSetEnd(ctx)
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
@@ -1870,47 +1878,17 @@ func (a *App) run(ctx context.Context) models.AppError {
 					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				}
 
-				graceDeadline := time.Now().Add(graceBudget)
-				for time.Now().Before(graceDeadline) {
-					time.Sleep(1 * time.Second)
-
-					// Check if the 'docker run' command has exited
-					if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-						a.logger.Debug("docker client process exited")
-						return nil
-					}
-
-					// Check the actual container status via Docker API
-					// This handles cases where 'docker run' is dead but container is alive.
-					// Bound the inspect so a saturated daemon can't stall the grace loop.
-					ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-					info, err := a.docker.ContainerInspect(ictx, a.container)
-					icancel()
-					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
-						a.logger.Debug("container stopped gracefully")
-						return nil
-					}
+				killed, err := a.stopDockerRun(cmd, setEnd)
+				if killed && setEnd {
+					a.noteSetEndKill(fmt.Sprintf("keploy interrupted the application at the set's end and its container had not stopped %s later (the grace keploy's stop gives a docker run app), so keploy killed it", graceBudget))
 				}
-
-				// Force Kill using Docker API
-				// We tell the Docker Daemon explicitly to kill this container.
-				a.logger.Debug("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
-
-				// "SIGKILL" string is standard for Docker API to force kill.
-				// Bounded so a saturated daemon can't wedge the teardown past the
-				// record/replay drain budget.
-				killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				err = a.docker.ContainerKill(killCtx, a.container, "SIGKILL")
-				killCancel()
-				if err != nil {
-					warning := fmt.Sprintf("error killing container: %s", err)
-					a.logger.Debug(warning)
-				}
-				// Clean up the CLI process as well
-				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				return err
 			}
-			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+			killed, err := utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
+			if killed && setEnd {
+				a.noteSetEndKill(fmt.Sprintf("keploy interrupted the application at the set's end and a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", utils.TreeInterruptGrace))
+			}
+			return err
 		}
 	}
 
@@ -2050,7 +2028,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err(), StopKilled: a.takeSetEndKill()}
 	default:
 		appLogs := a.recentAppLogs(ctx)
 
@@ -2109,4 +2087,83 @@ func exitCodeFromErr(err error) int {
 func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
 	compose := engine.Active().Compose
 	return exec.CommandContext(ctx, compose[0], append(append([]string{}, compose[1:]...), args...)...)
+}
+
+// stopDockerRun is the teardown's stop of a `docker run` app the SIGINT was
+// sent to: it gives it graceBudget to exit, then kills its container and the
+// docker client. killed says it came to that.
+//
+// setEnd (the stop at a test set's end, under the proven switch) also takes a
+// container docker is removing, or has removed, for one that exited, once
+// this stop has seen it: the docker client of a --rm container waits for the
+// removal before it exits, so on a loaded daemon the grace can run out with
+// the app long gone. It looks at the container once more as the grace runs
+// out. A container it never saw (keploy did not name the app's container, or
+// named another) says nothing, and its kill is taken for one that reached the
+// app; so is a kill that failed other than for a container it saw gone or
+// stopped.
+func (a *App) stopDockerRun(cmd *exec.Cmd, setEnd bool) (killed bool, err error) {
+	// seen: an inspect in this stop found the container.
+	seen := false
+	gone := func() bool {
+		ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
+		info, err := a.docker.ContainerInspect(ictx, a.container)
+		icancel()
+		if err != nil {
+			return setEnd && seen && errdefs.IsNotFound(err)
+		}
+		if info.ContainerJSONBase == nil || info.State == nil {
+			return false
+		}
+		seen = true
+		switch info.State.Status {
+		case "exited", "dead":
+			return true
+		case "removing":
+			return setEnd
+		}
+		return false
+	}
+	graceDeadline := time.Now().Add(graceBudget)
+	for time.Now().Before(graceDeadline) {
+		time.Sleep(1 * time.Second)
+
+		// Check if the 'docker run' command has exited
+		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+			a.logger.Debug("docker client process exited")
+			return false, nil
+		}
+
+		// Check the actual container status via Docker API
+		// This handles cases where 'docker run' is dead but container is alive.
+		// Bound the inspect so a saturated daemon can't stall the grace loop.
+		if gone() {
+			a.logger.Debug("container stopped gracefully")
+			return false, nil
+		}
+	}
+	if setEnd && gone() {
+		a.logger.Debug("container stopped gracefully")
+		return false, nil
+	}
+
+	// Force Kill using Docker API
+	// We tell the Docker Daemon explicitly to kill this container.
+	a.logger.Debug("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
+
+	// "SIGKILL" string is standard for Docker API to force kill.
+	// Bounded so a saturated daemon can't wedge the teardown past the
+	// record/replay drain budget.
+	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = a.docker.ContainerKill(killCtx, a.container, "SIGKILL")
+	killCancel()
+	if err != nil {
+		warning := fmt.Sprintf("error killing container: %s", err)
+		a.logger.Debug(warning)
+	}
+	// The kill did not reach the app only when the container this stop saw
+	// was gone, or no longer running, by then.
+	unreached := err != nil && seen && (errdefs.IsNotFound(err) || errdefs.IsConflict(err))
+	// Clean up the CLI process as well
+	return !unreached, utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 }

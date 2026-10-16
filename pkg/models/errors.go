@@ -18,7 +18,19 @@ type AppError struct {
 	// The mock record/replay flows propagate this as keploy's own exit code
 	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
 	ExitCode int
+	// StopKilled, under the proven switch, says why keploy had to kill the
+	// application it stopped at its test set's end (ErrAppStoppedForSetEnd):
+	// it had not exited when the stop's grace ran out. "" when it exited
+	// within it, or when the stop was another's.
+	StopKilled string
 }
+
+// ErrAppStoppedForSetEnd is the cause keploy cancels an application's run
+// with when, under the proven switch, it stops the app at its test set's end
+// to read what the app did after the set's last test once it has exited
+// (P101-b). The app's runner stops it as its teardown does, and says in
+// AppError.StopKilled whether that had to kill it.
+var ErrAppStoppedForSetEnd = errors.New("keploy stopped the application at its test set's end")
 
 type AppErrorType string
 
