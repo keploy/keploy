@@ -394,12 +394,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			utils.LogError(logger, err, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+		dockerContext := currentDockerContext(out)
 		if len(dockerContext) == 0 {
 			utils.LogError(logger, nil, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
@@ -541,12 +540,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			utils.LogError(logger, err, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+		dockerContext := currentDockerContext(out)
 		if len(dockerContext) == 0 {
 			utils.LogError(logger, nil, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
@@ -741,4 +739,17 @@ func mockModeSuffix(opts models.SetupOptions) string {
 		return " --mock-mode --record-requests"
 	}
 	return " --mock-mode"
+}
+
+// currentDockerContext returns the name of the active context from the output of
+// `docker context ls --format "{{.Name}}\t{{.Current}}"`. The active context is not
+// guaranteed to be listed first, so the line whose Current column is "true" is used.
+func currentDockerContext(out []byte) string {
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name, current, found := strings.Cut(strings.TrimSpace(line), "\t")
+		if found && strings.TrimSpace(current) == "true" {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
