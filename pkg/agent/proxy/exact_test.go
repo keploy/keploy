@@ -622,6 +622,67 @@ func TestOutsideEveryTestTwoCallsNeverShareARecording(t *testing.T) {
 	}
 }
 
+// Calls that consume one recording at once, outside every test, each
+// having read it unconsumed: exactly one is answered with it.
+func TestOutsideEveryTestConcurrentConsumesOfARecordingServeOnce(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		mm := stagedManager(t, nil, []*models.Mock{httpCall("r1", 0, "/receive")})
+		mm.ServeExactPool("k", []string{"r1"})
+		read, _ := mm.GetSessionScopedMocks()
+		mk := *read[0]
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if mm.DeleteUnFilteredMock(mk) {
+					wins.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if w := wins.Load(); w != 1 {
+			t.Fatalf("round %d: %d calls answered with one recording", round, w)
+		}
+	}
+}
+
+// A key started afresh (RestartExactKey: its test process claimed it again)
+// answers again what its calls outside every test consumed, and its stateful
+// cursors start over; another key's consumption and cursors are its own.
+func TestRestartingAKeyLeavesTheOtherKeysAlone(t *testing.T) {
+	mm := stagedManager(t, nil, []*models.Mock{httpCall("a1", 0, "/a"), httpCall("b1", time.Second, "/b")})
+	consume := func(key, name string) {
+		t.Helper()
+		mm.ServeExactPool(key, []string{name})
+		if got := pollFirst(t, mm, name); got != name {
+			t.Fatalf("%s answered %s", key, got)
+		}
+		mm.AdvanceMockCursor(name+"-seq", 0, 3)
+	}
+	consume("k1", "a1")
+	consume("k2", "b1")
+	mm.RestartExactKey("k1", []string{"a1"})
+	mm.ServeExactPool("k1", []string{"a1"})
+	if got := pollFirst(t, mm, "a1"); got != "a1" {
+		t.Fatalf("k1 started afresh answered %s; want a1 again", got)
+	}
+	if idx := mm.MockCursorIndex("a1-seq", 3); idx != 0 {
+		t.Fatalf("k1's cursor is at %d; want it started over", idx)
+	}
+	mm.ServeExactPool("k2", []string{"b1"})
+	if got := pollFirst(t, mm, "b1"); got != "a miss" {
+		t.Fatalf("k2 answered %s; its consumption is its own", got)
+	}
+	if idx := mm.MockCursorIndex("b1-seq", 3); idx != 1 {
+		t.Fatalf("k2's cursor is at %d; want it where k2 left it", idx)
+	}
+}
+
 // What a call outside every test consumed is the staging's: the next staging
 // answers it afresh, and a recording read from the previous staging, under a
 // name the next one stages too, is refused when consumed after it landed.

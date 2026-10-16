@@ -303,6 +303,16 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		containerkey.Default.BeginInstance()
 	}
 	if a.replaying() {
+		// A new claim of the key (a test process run again: a retried
+		// package, --rerun-fails) is a new scope: its calls outside every
+		// test start afresh, as a test begun again does (decision 31's
+		// ruling on re-runs). A first claim has consumed nothing yet.
+		if newClaim {
+			if err := a.restartKey(key); err != nil {
+				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+					"keploy could not start the calls of "+key+" made outside its tests afresh: "+err.Error(), "check the agent's log")
+			}
+		}
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,

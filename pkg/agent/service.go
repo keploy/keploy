@@ -462,6 +462,15 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ExactKeyRestarter is an optional ExactServer capability: it starts a claim
+// key's calls outside every test afresh, for a test process that claims the
+// key again (a re-run is a new scope): the recordings of names, the key's
+// pool slice, consumed outside every test answer again, and the key's
+// stateful cursors start over.
+type ExactKeyRestarter interface {
+	RestartExactKey(key string, names []string) error
+}
+
 // ScopeStager is an optional Proxy capability: it stages the pool of a test
 // of keploy mock replay that its harness began (open) or ended (!open) without
 // a worker pid, with the proven switch off. Such a test is served the mocks
