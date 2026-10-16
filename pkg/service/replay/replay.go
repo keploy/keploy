@@ -1575,6 +1575,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
 
+	// Under the proven switch the set is judged only if one agent process
+	// answered for all of it (watchAgent): the watch begins before anything
+	// of the set is staged on the agent, and is read after the set's last
+	// read of it.
+	agentWatch := r.watchAgent()
+	if agentWatch != nil {
+		defer agentWatch.Stop()
+	}
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -2140,7 +2149,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases); err != nil {
+			totalConsumedMocks, useMappingBased, testCases, agentWatch); err != nil {
 			return models.TestSetStatusFailed, err
 		}
 	}
@@ -4869,6 +4878,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
 	}
+	// Under the proven switch the set is judged only if one agent process
+	// answered for all of it (watchAgent). Read here, after the set's last
+	// read of its agent (the losses after its last test, above): an agent
+	// started again in its place answered those reads holding none of what
+	// the one before saw, so the set has no verdict, as one whose evidence
+	// could not be read. Before the capture check below, which then does not
+	// take the set for unjudged on its capture count alone.
+	if agentWatch != nil && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		if rep, replaced := agentWatch.Replacement(); replaced {
+			notJudged = alsoNotJudged(notJudged, agentReplacedReason(rep))
+			r.logger.Error("test-set is not judged: keploy's agent was started again while the test-set ran, and what the agent before saw is lost; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID),
+				zap.String("agentProcess", rep.First),
+				zap.String("startedAgainAs", rep.Next),
+				zap.String("next_step", "find why the agent restarted (its container's restart count, an OOM kill, its log), then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		}
+	}
 	// Under the proven switch a set whose capture could not be verified has
 	// no verdict, as one whose evidence could not be read: neither PASSED nor
 	// FAILED. With the switch off it keeps its status (no flag of keploy test
@@ -5840,7 +5868,13 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
 // consumption history (see agentHistoryIncompleteForRun).
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
+//
+// agentWatch, under the proven switch, is the set's watch of the agent's
+// process (watchAgent). Once the replacement is set up again it keeps to the
+// replacement: the app never ran against the agent it replaced (compose's
+// retry runs only while the app's container was never started), so none of
+// the set's evidence was on that one.
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, agentWatch models.AgentInstanceWatch) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -5921,6 +5955,9 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 			return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and the new one cannot be run against: %w", err)
 		}
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+	}
+	if agentWatch != nil {
+		agentWatch.Accept()
 	}
 
 	confirmed, err := r.probeMockStats(ctx)
