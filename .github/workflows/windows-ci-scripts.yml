@@ -11,6 +11,8 @@ name: Windows CI scripts
 # cases pin the self-hosted Windows jobs' timeouts, the go-dedup script's
 # compose-project hand-off, and the text of every "Recover stale runner state"
 # step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
+# So do the download-image action's Windows checks of the image tarball: only
+# 5.1 there shows a check that lets tar's stderr end the step.
 
 on:
   push:
@@ -19,10 +21,12 @@ on:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/actions/download-image/**'
   pull_request:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/actions/download-image/**'
 
 permissions:
   contents: read
