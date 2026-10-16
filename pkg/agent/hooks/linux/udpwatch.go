@@ -221,9 +221,16 @@ func (w *udpWatch) watch(logger *zap.Logger) {
 // handle counts a report by the epoch it came in: one of the epoch the
 // kernel is in waits for the snapshot that moves it on.
 func (w *udpWatch) handle(e udpReplyEvent) string {
-	what := fmt.Sprintf("UDP to %s answered from port %d", e.Dst, e.SrcPort)
+	on := "UDP to " + e.Dst.String()
+	if e.Dst.IPVersion == 0 {
+		// A socket registered at bind() that has asked no one yet (a
+		// server's unreadable first datagram): the kernel has no
+		// destination for it (k_udp.h).
+		on = "UDP on a socket the application bound"
+	}
+	what := fmt.Sprintf("%s answered from port %d", on, e.SrcPort)
 	if e.Flags&udpSrcUnread != 0 {
-		what = fmt.Sprintf("UDP to %s got a datagram keploy could not read the source of", e.Dst)
+		what = on + " got a datagram from a source keploy could not read"
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
