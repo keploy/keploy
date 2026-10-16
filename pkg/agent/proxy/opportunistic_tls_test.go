@@ -598,6 +598,7 @@ func TestAnOpportunisticClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Proxy{logger: zap.NewNop()}
+	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
 	_ = p.hijackAndMITM(context.Background(), srcConn, dstConn, nil, upstream.Addr().String(), time.Time{}, models.OutgoingOptions{})
 	if got := p.losses.Snapshot(); len(got) != 1 || got[0].Kind != models.CaptureLossTLSAbandoned || got[0].What != "to "+upstream.Addr().String() {
 		t.Fatalf("charged %+v, want one tls_handshake_abandoned to the destination", got)
