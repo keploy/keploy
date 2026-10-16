@@ -97,3 +97,20 @@ func handleClientTLS(ctx context.Context, logger *zap.Logger, conn net.Conn, bac
 	c, isMTLS, err := pTls.HandleTLSConnection(ctx, logger, conn, backdate)
 	return c, isMTLS, pTls.HandshakeCause(err)
 }
+
+// relayClientHandshake is the relay's OnClientHandshakeFailed for a
+// connection to dst: a client-side TLS upgrade a parser asked for (STARTTLS,
+// Postgres's SSLRequest) that failed in its handshake is charged as any
+// client-side handshake with the proxy (chargeClientHandshake) -- nothing for
+// a client that hung up before keploy answered, abandoned once keploy's
+// certificate was out, a loss for a rejection -- not as an upgrade keploy
+// could not make (starttls_failed, a taint of every later test).
+func (p *Proxy) relayClientHandshake(dst net.Conn) func(context.Context, error) {
+	return func(ctx context.Context, err error) {
+		addr := ""
+		if dst != nil && dst.RemoteAddr() != nil {
+			addr = dst.RemoteAddr().String()
+		}
+		_ = p.chargeClientHandshake(ctx, err, addr)
+	}
+}
