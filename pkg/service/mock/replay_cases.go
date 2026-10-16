@@ -161,6 +161,60 @@ func flowAt[V any](windows []models.ScopeWindow, at time.Time, known map[string]
 	return windows[best].Name, true
 }
 
+// minVariable is the length below which a recorded value is not written as
+// its variable's: a short value equal by chance is not that value.
+const minVariable = 6
+
+// inRunTerms is a copy of tc whose recorded answer holds, where it held a
+// test variable's recorded value, the value the variable has in this run
+// (models.ScopeWindow.Variables): the app built its answer from what its
+// dependencies gave it in this run, as it built the recorded one from the
+// recorded values. tc itself is never changed.
+func inRunTerms(tc *models.TestCase, bound []models.VariableBinding) *models.TestCase {
+	if tc == nil || len(bound) == 0 {
+		return tc
+	}
+	swap := func(s string) string {
+		for _, b := range bound {
+			if b.Value != b.Recorded && len(b.Recorded) >= minVariable {
+				s = replaceWord(s, b.Recorded, b.Value)
+			}
+		}
+		return s
+	}
+	out := *tc
+	out.HTTPResp.Body = swap(tc.HTTPResp.Body)
+	if len(tc.HTTPResp.Header) > 0 {
+		out.HTTPResp.Header = make(map[string]string, len(tc.HTTPResp.Header))
+		for k, v := range tc.HTTPResp.Header {
+			out.HTTPResp.Header[k] = swap(v)
+		}
+	}
+	return &out
+}
+
+// replaceWord replaces each occurrence of old in s that is not part of a
+// longer word.
+func replaceWord(s, old, repl string) string {
+	word := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+	var b strings.Builder
+	for i := 0; ; {
+		j := strings.Index(s[i:], old)
+		if j < 0 {
+			b.WriteString(s[i:])
+			return b.String()
+		}
+		at, end := i+j, i+j+len(old)
+		b.WriteString(s[i:at])
+		if at > 0 && word(s[at-1]) && word(old[0]) || end < len(s) && word(s[end]) && word(old[len(old)-1]) {
+			b.WriteString(old)
+		} else {
+			b.WriteString(repl)
+		}
+		i = end
+	}
+}
+
 // pairCases matches the requests the runner made this run with the cases each flow recorded, in order within the flow.
 func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestCase, actual []*models.TestCase, compare func(*models.TestCase, *models.HTTPResp) (bool, *models.Result)) []CaseOutcome {
 	if len(windows) == 0 {
@@ -180,6 +234,12 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 		flows = append(flows, flow)
 	}
 	sort.Strings(flows)
+	bound := map[string][]models.VariableBinding{}
+	for _, w := range windows {
+		if len(w.Variables) > 0 {
+			bound[w.Name] = w.Variables
+		}
+	}
 	var out []CaseOutcome
 	for _, flow := range flows {
 		seen := byFlow[flow]
@@ -203,7 +263,7 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 					used[j] = true
 					resp := a.HTTPResp
 					outs[i].Actual = &resp
-					outs[i].Passed, outs[i].Result = compare(rc, &resp)
+					outs[i].Passed, outs[i].Result = compare(inRunTerms(rc, bound[flow]), &resp)
 					break
 				}
 			}
