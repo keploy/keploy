@@ -28,6 +28,13 @@
 # must read the live packet as that keploy did for such a recording: the
 # replay, plain and strict, must pass.
 #
+# COM_STMT_EXECUTEs with a query attribute (GET /pattr: a server-prepared
+# statement executed with a traceparent that differs on every call, as
+# Connector/J 8.1+ sends OpenTelemetry's): they must replay, plain and strict.
+# keploy compared an EXECUTE's attributes as its statement's parameters, so
+# no EXECUTE of a traced statement matched its recording: the strict replay
+# refused every one, and a plain one was answered by recorded order.
+#
 # COM_QUERYs with query attributes, from Connector/J 8.4 (GET /attr: a
 # traceparent that differs on every call, as OpenTelemetry's does; /attrs: a
 # second attribute; /trace: one fixed traceparent; /attrread: a statement
@@ -109,9 +116,10 @@ check_executes() {
         bad=$(execute_rows | awk -F'\t' '$1 == 0 && $2 != "254,254"')
     else
         # Every EXECUTE, sent with or without its types: an INT and a
-        # string, or two strings.
+        # string, or two strings; or (GET /pattr) an INT and its traceparent.
         bad=$(execute_rows | awk -F'\t' '$2 == "3,253" && $3 ~ /^[0-9]+\|(item|again|small)-[0-9]+$/ { next }
-            $2 == "253,253" && $3 ~ /^s[0-9]+\|item-[0-9]+$/ { next } { print }')
+            $2 == "253,253" && $3 ~ /^s[0-9]+\|item-[0-9]+$/ { next }
+            $2 == "3,254" && $3 ~ /^[0-9]+\|00-[0-9a-f]+-[0-9a-f]+-01$/ { next } { print }')
     fi
     [ -z "$bad" ] || fail "$CELL: EXECUTEs recorded with the wrong types or values: $(echo "$bad" | head -3 | tr '\n' ' ')"
     echo "$CELL: $unbound EXECUTEs sent without types"
@@ -237,7 +245,7 @@ run() {
         *) executes=1 ;;
         esac
     done
-    tests=$(tests_of '/(loop|again|strings|small|attr|attrs|trace|attrread)/[0-9]+$')
+    tests=$(tests_of '/(loop|again|strings|small|attr|attrs|trace|attrread|pattr)/[0-9]+$')
     [ "$tests" -eq "$#" ] || fail "$CELL: recorded $tests test cases of the $# requests: the rest were left out"
     if grep -q 'a captured exchange was not recorded as a mock' record.log; then
         fail "$CELL: keploy record left MySQL exchanges out: $(grep -m1 'a captured exchange was not recorded as a mock' record.log | cut -c1-300)"
@@ -252,7 +260,7 @@ run() {
     cd "$WORK" || exit 1
 }
 
-run cj8.4 pom.xml "$RECORD_BIN" current /loop/3 /again/3 /again/4 /attr/3 /attrs/2 /trace/2 /attrread/2
+run cj8.4 pom.xml "$RECORD_BIN" current /loop/3 /again/3 /again/4 /attr/3 /attrs/2 /trace/2 /attrread/2 /pattr/3
 run cj5.1 pom51.xml "$RECORD_BIN" current /loop/1 /loop/3 /loop/5 /again/3 /strings/3 /small/3
 run cj5.1-legacy-recording pom51.xml "$LEGACY_RECORD_BIN" legacy /strings/3 /strings/2 /small/3
 run cj8.4-legacy-recording pom.xml "$LEGACY_RECORD_BIN" legacy /trace/3
