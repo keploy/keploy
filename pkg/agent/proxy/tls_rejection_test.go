@@ -199,11 +199,25 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			p := &Proxy{logger: zap.NewNop()}
 			app, src := acceptedConn(t)
 			upstream, dst := acceptedConn(t)
+			// The relay holds nothing here (no HoldClientWrites), so the
+			// client speaks once the relay terminates its TLS: a
+			// ClientHello written before the relay holds its forwarders
+			// would be forwarded upstream, and the handshake would wait for
+			// it for ever. MySQL, the only sender of this directive in
+			// production, writes its ClientHello at once and is protected
+			// by the client-write hold instead.
+			upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
+			upgrading := make(chan struct{})
 			r := relay.New(relay.Config{
 				Logger:                  zap.NewNop(),
 				OnCaptureLoss:           p.losses.Add,
 				OnClientHandshakeFailed: p.relayClientHandshake(dst),
-				TLSUpgradeFn:            newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil),
+				TLSUpgradeFn: func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
+					if !isClient {
+						close(upgrading)
+					}
+					return upgrade(ctx, conn, isClient, cfg)
+				},
 			}, src, connseq.NewUpstream(dst))
 			ctx, cancel := context.WithCancel(context.Background())
 			ran := make(chan struct{})
@@ -214,6 +228,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
+				<-upgrading
 				tc.client(t, app)
 				_ = app.Close()
 			}()
