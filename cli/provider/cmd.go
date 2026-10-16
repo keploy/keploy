@@ -1469,6 +1469,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		// The selection is -t's alone: keploy.yml's test.selectedTests does
+		// not reach keploy sanitize, which refuses every name -t gives that
+		// is not recorded (Tools.refuseUnrecorded).
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
