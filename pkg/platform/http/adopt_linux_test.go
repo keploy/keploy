@@ -4,8 +4,12 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/client/app"
+	"go.keploy.io/server/v3/pkg/models"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,7 +266,7 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	}
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	stopAdopted(zap.New(core))
+	why := stopAdopted(zap.New(core))
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("polite %d, deaf %d, busy %d, churn %d, slow %d", polite, deaf, busy, churn, slow)
@@ -286,6 +290,12 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	killed := logs.FilterMessageSnippet("killing it").All()
 	if len(killed) != 1 {
 		t.Fatalf("%d kills, want one, of the daemons that ignored the request", len(killed))
+	}
+	// The kill for want of progress is said, for a stop at a set's end to
+	// leave its set not judged: what those daemons would have done is not
+	// known.
+	if !strings.Contains(why, "made no progress on its way out") || !strings.Contains(why, "so keploy killed it") {
+		t.Fatalf("stopAdopted says %q; want the kill for want of progress said", why)
 	}
 	if !parentIs(own.Process.Pid, os.Getpid()) {
 		t.Fatal("the CLI's own child was stopped with what it adopted")
@@ -325,7 +335,7 @@ func TestAPressKillsTheDaemonsAStopWaitsFor(t *testing.T) {
 		late, lateErr = startDaemon("exec sleep 120")
 		utils.MarkInterruptedAgain()
 	}()
-	stopAdopted(zap.New(core))
+	why := stopAdopted(zap.New(core))
 	if lateErr != nil {
 		t.Fatal(lateErr)
 	}
@@ -339,7 +349,54 @@ func TestAPressKillsTheDaemonsAStopWaitsFor(t *testing.T) {
 	if logs.FilterMessageSnippet("at the press of Ctrl+C").Len() != 1 {
 		t.Fatalf("the daemon was not killed at the press: %v", logs.All())
 	}
+	if why != "" {
+		t.Fatalf("a kill at the user's press is said as a kill for want of progress: %q", why)
+	}
 	if !parentIs(late, os.Getpid()) {
 		t.Fatal("the stop ended a daemon adopted after it began")
+	}
+}
+
+// The stop at a set's end interrupts the app, and a shell that waits on the
+// app it started in the background (`app & wait`) dies on it at once: the
+// app, orphaned, is one of the daemons the run adopted, and the stop of
+// those ends it. When it makes no progress on its way out and is killed, the
+// app's run says so (models.AppError.StopKilled), and the set's end is not
+// judged. The teardown's stop says nothing.
+func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		killed bool
+	}{
+		{"the stop at a set's end", models.ErrAppStoppedForSetEnd, true},
+		{"the teardown's stop", context.Canceled, false},
+	} {
+		dir := t.TempDir()
+		ready := filepath.Join(dir, "ready")
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
+		client := New(zap.NewNop(), nil, cfg)
+		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
+			`sh -c 'trap "" INT TERM; touch `+ready+`; exec sleep 600' & wait`, nil,
+			models.SetupOptions{CommandType: string(utils.Native)}))
+		ctx, cancel := context.WithCancelCause(context.Background())
+		done := make(chan models.AppError, 1)
+		go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+		await(t, tc.name+": the app ready", func() bool { _, err := os.Stat(ready); return err == nil })
+		cancel(tc.cause)
+		appErr := <-done
+		if killed := strings.Contains(appErr.StopKilled, "made no progress on its way out"); killed != tc.killed {
+			t.Fatalf("%s: run ended %+v; want a kill said %v", tc.name, appErr, tc.killed)
+		}
 	}
 }
