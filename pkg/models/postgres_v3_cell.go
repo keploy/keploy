@@ -277,13 +277,16 @@ func (c PostgresV3Cell) MarshalYAML() (any, error) {
 // each []byte in it at any depth replaced by its !!binary node, and each
 // [16]uint8, net.HardwareAddr and pgtype.Bits by its mapping (as a cell of
 // its type is written: marshalUUIDBytesYAML, marshalHardwareAddrYAML,
-// marshalPgBitsYAML), and everything else as it is: a container that
-// holds none of them is itself.
+// marshalPgBitsYAML), and each string yaml.v3 cannot write as the block
+// scalar it picks for it as a double-quoted one (yamlBlockBreaks), and
+// everything else as it is: a container that holds none of them is itself.
 func yamlBinaryElems(v any) any {
 	if !holdsBytes(v) {
 		return v
 	}
 	switch x := v.(type) {
+	case string:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: x}
 	case []byte:
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!binary", Value: base64.StdEncoding.EncodeToString(x)}
 	case [16]uint8:
@@ -308,12 +311,34 @@ func yamlBinaryElems(v any) any {
 	return v
 }
 
+// yamlBlockBreaks reports whether yaml.v3 writes s, an element of an array
+// or a document's value, as a block scalar that does not load: a string of
+// lines that begins with white space. It writes such a string as a literal
+// block with an indentation indicator it then does not indent to ("- - |4-"
+// then the text at another indentation), or with a tab where indentation
+// spaces must be, and the whole mock file fails to load ("did not find
+// expected '-' indicator"). A jsonb document's value or a text[] element
+// beginning with a line break or a space and holding one is such a string.
+func yamlBlockBreaks(s string) bool {
+	if s == "" || !strings.Contains(s, "\n") {
+		return false
+	}
+	switch s[0] {
+	case ' ', '\t', '\n':
+		return true
+	}
+	return false
+}
+
 // holdsBytes reports whether v is a []byte, [16]uint8, net.HardwareAddr or
-// pgtype.Bits, or an array or document holding one at any depth.
+// pgtype.Bits, or a string yaml.v3 writes unloadable (yamlBlockBreaks), or
+// an array or document holding one at any depth.
 func holdsBytes(v any) bool {
 	switch x := v.(type) {
 	case []byte, [16]uint8, net.HardwareAddr, pgtype.Bits:
 		return true
+	case string:
+		return yamlBlockBreaks(x)
 	case []any:
 		for _, e := range x {
 			if holdsBytes(e) {

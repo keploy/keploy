@@ -1020,3 +1020,38 @@ func yamlInts(v any) any {
 	}
 	return v
 }
+
+// A string in an array or a document that yaml.v3 writes as a block it
+// cannot read back (lines that begin with white space: a jsonb document's
+// value or a text[] or json[] element beginning with a line break) is
+// written double-quoted, and the cell reads back as it was: written as a
+// block, the whole mock file failed to load. Any other string is written
+// as yaml.v3 writes it, as before.
+func TestPostgresV3Cell_YAMLStringsAYAMLBlockCannotHoldStillLoad(t *testing.T) {
+	for _, s := range []string{"\nx", "\n", "\n\nx", " x\ny", "\tx\ny", " \nx", "\n[1]"} {
+		for _, v := range []any{[]any{s}, []any{[]any{"a", s}}, map[string]any{"k": s}, []any{map[string]any{"k": []any{s}}}} {
+			in := PostgresV3Cells{NewValueCell(v)}
+			body, err := yaml.Marshal(in)
+			if err != nil {
+				t.Fatalf("%q in %#v: marshal: %v", s, v, err)
+			}
+			var back PostgresV3Cells
+			if err := yaml.Unmarshal(body, &back); err != nil {
+				t.Errorf("%q in %#v does not load: %v\n%s", s, v, err, body)
+				continue
+			}
+			if !reflect.DeepEqual(back, in) {
+				t.Errorf("%q in %#v came back as %#v\n%s", s, v, back[0].Value, body)
+			}
+		}
+	}
+	for _, v := range []any{[]any{"a\nb", "x y", "  x"}, map[string]any{"k": "a\nb"}} {
+		want, err := yaml.Marshal([]any{v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := yaml.Marshal(PostgresV3Cells{NewValueCell(v)}); string(got) != string(want) {
+			t.Errorf("%#v written as\n%s\nwant, as before,\n%s", v, got, want)
+		}
+	}
+}
