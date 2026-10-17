@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1068,14 +1069,26 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	if e.fromList && e.fingerprint == "" {
 		e.fingerprint, e.legacy = st.fingerprints[e.id], st.legacy[e.id]
 	}
-	st.drop(e.id)
 	if e.image == "" {
+		st.drop(e.id)
 		if had {
 			r.notify()
 		}
 		return true
 	}
-	defer r.notify()
+	// What the put can change: the container, and every address and host
+	// port it holds or is given (another container may lose one to it).
+	ips, ports := unionIPs(st.ownIPs[e.id], e.ips), unionPorts(st.ownPorts[e.id], e.hostPort)
+	before := st.viewLocked(e.id, ips, ports)
+	st.drop(e.id)
+	defer func() {
+		// A put the index already holds byte for byte (a placing's list
+		// landing after the read that placed the container) changes
+		// nothing a list shows: a docker-mode agent is not given it again.
+		if st.viewLocked(e.id, ips, ports) != before {
+			r.notify()
+		}
+	}()
 	st.images[e.id] = e.image
 	st.names[e.id] = e.name
 	if e.fingerprint != "" {
@@ -1101,6 +1114,51 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 		r.endPlacingLocked(st, e.id)
 	}
 	return true
+}
+
+// viewLocked is what the index shows of container id, and of addresses ips
+// and host ports ports (which container is at each, and what binds each),
+// in one string to compare: whatever differs between two lists of them (or
+// two lookups at them) differs between the two strings too. The index's lock
+// is held.
+func (st *watchState) viewLocked(id string, ips []netip.Addr, ports []uint16) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%q %q %q %q;", st.images[id], st.names[id], st.fingerprints[id], st.legacy[id])
+	for _, a := range ips {
+		fmt.Fprintf(&b, "%s=%q;", a, st.byIP[a])
+	}
+	for _, p := range ports {
+		bs := slices.Clone(st.published[p])
+		sort.Slice(bs, func(i, j int) bool {
+			if bs[i].id != bs[j].id {
+				return bs[i].id < bs[j].id
+			}
+			if bs[i].port != bs[j].port {
+				return bs[i].port < bs[j].port
+			}
+			return bs[i].ip.Less(bs[j].ip)
+		})
+		fmt.Fprintf(&b, "%d:", p)
+		for _, x := range bs {
+			fmt.Fprintf(&b, "%s/%q/%d,", x.ip, x.id, x.port)
+		}
+		b.WriteString(";")
+	}
+	return b.String()
+}
+
+// unionIPs is the addresses of a and b, sorted, each once.
+func unionIPs(a, b []netip.Addr) []netip.Addr {
+	out := append(slices.Clone(a), b...)
+	slices.SortFunc(out, func(x, y netip.Addr) int { return x.Compare(y) })
+	return slices.Compact(out)
+}
+
+// unionPorts is the ports of a and b, sorted, each once.
+func unionPorts(a, b []uint16) []uint16 {
+	out := append(slices.Clone(a), b...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // setChanged makes changed the signal notify tells: the keploy CLI's pusher
