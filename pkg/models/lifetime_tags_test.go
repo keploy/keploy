@@ -234,6 +234,18 @@ func TestALegacyPreparedStatementLifecycleIsItsConnections(t *testing.T) {
 			}
 		})
 	}
+	// An untagged one counts in the legacy-fallback telemetry, as the kind
+	// fallback it replaces did; a tagged one does not.
+	before := LegacyKindFallbackFires()
+	mysqlMock("", "COM_STMT_PREPARE", "c1", "").DeriveLifetime()
+	if got := LegacyKindFallbackFires() - before; got != 1 {
+		t.Errorf("an untagged legacy PREPARE counted %d legacy-fallback fires, want 1", got)
+	}
+	before = LegacyKindFallbackFires()
+	mysqlMock("mocks", "COM_STMT_PREPARE", "c1", "").DeriveLifetime()
+	if got := LegacyKindFallbackFires() - before; got != 0 {
+		t.Errorf("a tagged legacy PREPARE counted %d legacy-fallback fires, want 0", got)
+	}
 	if !mysqlMock("mocks", "COM_STMT_CLOSE", "c1", "").IsProtocolPhase() {
 		t.Error("a legacy CLOSE is no protocol-phase mock, though a stated one is")
 	}
