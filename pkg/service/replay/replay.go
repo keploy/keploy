@@ -2490,10 +2490,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// That absence is invisible on the timestamp path, which reloads them via
 	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
 	// loads strictly by name. Writing them here is what lets the reader hand
-	// them back for every test. The reusable tier is written, and the
-	// carry-over mocks consumed as the app started; a per-test mock re-armed
-	// above belongs to its own test's section, not to startup.
-	setStartupMocks(actualTestMockMappings, startupConsumed)
+	// them back for every test. The reusable tier is written, the carry-over
+	// mocks consumed as the app started, and the re-armed per-test mocks
+	// requested before the first test (a boot consumer's fetches: the app's
+	// startup traffic, whatever their lifetime; bootBandOf), wherever their
+	// answer came at record: a replay serves such a fetch as the app starts,
+	// as this one was.
+	// A per-test mock re-armed above that was recorded in a test's window (a
+	// readiness gate's) belongs to its own test's section, not to startup.
+	setupBoot := bootBandOf(rearmedConsumed, models.NewWindowSchedule(recordedTestWindows(testCases)), firstRecordedTestStart(testCases), "")
+	setStartupMocks(actualTestMockMappings, append(append([]models.MockState(nil), startupConsumed...), setupBoot...))
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -2635,6 +2641,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// push, a carry-over publish) are kept and mapped by their own window, not
 	// by the running test; see carryOverAttribution.
 	carryAttr := newCarryOverAttribution(testCases)
+	carryAttr.bootListed = len(setupBoot) > 0
 	// stoppedEarly records that a cycle exited before every test it intended to
 	// run had produced a verdict. The counters cannot express this on their own:
 	// `success` is ASSIGNED per cycle while `failure`/`obsolete` accumulate, and
@@ -4009,7 +4016,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mockSetMismatch := false
 			hasExpectedMocks := len(expectedMocks) > 0
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
 			}
 			// NOTE: with the proven switch off models.Result.DepResult is
 			// deliberately NOT populated on the deferred streaming path, for
@@ -4194,7 +4201,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// mismatch, keep it suppressed — don't un-suppress just because
 			// the mock set still looks like a subset.
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
 				if !hadStreamingMismatch {
 					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
 				}
@@ -5381,6 +5388,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
 	markWrittenByKeployTest(mappingDoc)
+	// Whether a boot consumer's fetch was caught by the set's setup drain or
+	// by a test's drain is timing: a startup section holding the app's
+	// startup traffic is written in recorded order, so two runs write it
+	// alike. One with none is written as before.
+	if carryAttr.bootListed {
+		sortByRecordedTime(mappingDoc.Startup)
+	}
 	if len(passing) == 0 {
 		// The boot traffic belongs to no test, and a run where no test passed
 		// vouches for it no more than for the tests: the section on disk stays.
