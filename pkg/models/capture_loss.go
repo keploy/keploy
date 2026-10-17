@@ -202,17 +202,28 @@ func (l CaptureLosses) NotJudgedText() string {
 // pycurl) sets CURLOPT_CAINFO itself, or its library's own option for it.
 const trustKeployCA = "Node.js: set NODE_EXTRA_CA_CERTS to keploy's CA certificate; the curl command line: --cacert, CURL_CA_BUNDLE or SSL_CERT_FILE; libcurl clients such as PHP's Guzzle and pycurl: CURLOPT_CAINFO (Guzzle's verify, pycurl's CAINFO), which libcurl does not take from those variables"
 
+// UnixUnseenRemedy is what to do when keploy cannot see the application's
+// calls over Unix sockets at all (CaptureLossUnixUnseen): its report of them
+// failed to load on this host (both ways: BPF trampolines, then the syscall
+// tracepoints, which keploy's other hooks already use outside DaemonSet and
+// target-container mode), or stopped while running. A state of keploy's, not
+// of the application's dependencies, so nothing done to them (reaching them
+// over TCP included) ends it. What says what failed.
+const UnixUnseenRemedy = "report the reason to keploy (its report of the application's Unix-socket calls failed to load here, or stopped; nothing done to the application or its dependencies changes that)"
+
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
-// dependency over TCP; make a TLS client that abandoned its handshake trust
-// keploy's CA; list a server-first destination in mock.real. Empty for
-// none.
+// dependency over TCP; report to keploy why it cannot see those calls at
+// all; make a TLS client that abandoned its handshake trust keploy's CA; list
+// a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, tls, serverFirst, refused bool
+	var unix, unseen, tls, serverFirst, refused bool
 	for _, c := range l {
 		switch c.Kind {
-		case CaptureLossUnixSocket, CaptureLossUnixUnseen:
+		case CaptureLossUnixSocket:
 			unix = true
+		case CaptureLossUnixUnseen:
+			unseen = true
 		case CaptureLossTLSAbandoned:
 			tls = true
 		case CaptureLossServerFirst:
@@ -224,6 +235,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	var do []string
 	if unix {
 		do = append(do, "reach that dependency over a TCP address (mocked, or listed in mock.real)")
+	}
+	if unseen {
+		do = append(do, UnixUnseenRemedy)
 	}
 	if tls {
 		do = append(do, "make the TLS client trust keploy's CA ("+trustKeployCA+")")
