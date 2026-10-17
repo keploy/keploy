@@ -150,6 +150,16 @@ func SetRedactor(r Redactor) {
 	globalRedactor.Store(redactorHolder{r: r})
 }
 
+// RedactText is text as a log line carries it: through the active redactor's
+// pass over encoded text (Redactor.RedactEncoded), or as it is with none. For
+// text that leaves the process outside a log line, as a log line would.
+func RedactText(text string) string {
+	if r := loadRedactor(); r != nil {
+		return r.RedactEncoded(text)
+	}
+	return text
+}
+
 func loadRedactor() Redactor {
 	v := globalRedactor.Load()
 	if v == nil {
@@ -205,7 +215,49 @@ func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 			r.RedactField(&fields[i])
 		}
 	}
+	if ent.Level >= zapcore.ErrorLevel {
+		observeError(ent)
+	}
 	return c.Core.Write(ent, fields)
+}
+
+// errorObserver is what ObserveErrors set: told of each entry logged at ERROR
+// or above.
+var errorObserver atomic.Pointer[func(msg string)]
+
+// lastObserved is the entry errorObserver was last told of: an entry a logger
+// writes to two of its cores (the console and the debug file) is one entry.
+var lastObserved struct {
+	sync.Mutex
+	at  time.Time
+	msg string
+}
+
+// ObserveErrors has fn told the message of every entry logged at ERROR or above
+// from now on, by any logger this package builds (each writes through a
+// redacting core), once per entry, as redacted: the agent counts the
+// ERRORs of its start for the CLI that waits for it (utils.NoteBootError). A
+// nil fn stops it.
+func ObserveErrors(fn func(msg string)) {
+	if fn == nil {
+		errorObserver.Store(nil)
+		return
+	}
+	errorObserver.Store(&fn)
+}
+
+func observeError(ent zapcore.Entry) {
+	fn := errorObserver.Load()
+	if fn == nil {
+		return
+	}
+	lastObserved.Lock()
+	same := ent.Time.Equal(lastObserved.at) && ent.Message == lastObserved.msg
+	lastObserved.at, lastObserved.msg = ent.Time, ent.Message
+	lastObserved.Unlock()
+	if !same {
+		(*fn)(ent.Message)
+	}
 }
 
 // redactingWriter wraps a zapcore.WriteSyncer and runs the active Redactor's

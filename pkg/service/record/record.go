@@ -2185,12 +2185,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Instrument will setup the environment and start the hooks and proxy
 	setupOpts := models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, CapturePackets: r.config.Record.CapturePackets, OpportunisticTLSIntercept: r.config.Record.OpportunisticTLSIntercept, ChannelBindingShim: r.config.Record.ChannelBindingShim, UpstreamTLSVerify: r.config.Record.UpstreamTLS.Verify, UpstreamTLSCACert: r.config.Record.UpstreamTLS.CACert, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, MemoryLimit: memoryLimit, ConfigPath: r.config.ConfigPath, EnableSampling: r.config.Record.EnableSampling, RecordBufferMaxMemoryPerConn: r.config.Record.RecordBuffer.MaxMemoryPerConnection, RecordBufferQueueSize: r.config.Record.RecordBuffer.QueueSize, RecordBufferConsumerStallGrace: r.config.Record.RecordBuffer.ConsumerStallGrace, RecordBufferHalfCloseGrace: r.config.Record.RecordBuffer.HalfCloseGrace}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh agent.
-	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, attempt int) error {
-		o := setupOpts
-		if attempt > 1 {
-			o.AgentReadyTimeout = 120 * time.Second
-		}
-		return r.instrumentation.Setup(c, r.config.Command, o)
+	err = pkg.RetryAgentSetup(setupCtx, r.logger, func(c context.Context, _ int) error {
+		return r.instrumentation.Setup(c, r.config.Command, setupOpts)
 	})
 	if err == nil && !setupGate.Up() {
 		// The interrupt came first, as the setup finished, and stopped the
