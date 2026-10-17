@@ -1826,6 +1826,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 			// keploy's stop at a test set's end (setend_stop.go) is the
 			// teardown's stop, which says whether it had to kill the app.
 			setEnd := a.kind != utils.DockerCompose && stopsForSetEnd(ctx)
+			// keploy record's stop of the app, under the switch, says
+			// when it had to kill too: what the app would have done as it
+			// stopped is then not in the recording (P101-b-k).
+			recordEnd := a.kind != utils.DockerCompose && !setEnd && a.StopsARecording()
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
@@ -1882,9 +1886,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				}
 
-				killed, err := a.stopDockerRun(cmd, setEnd)
-				if killed && setEnd {
-					a.noteSetEndKill(fmt.Sprintf("keploy interrupted the application at the set's end and its container had not stopped %s later (the grace keploy's stop gives a docker run app), so keploy killed it", graceBudget))
+				killed, err := a.stopDockerRun(cmd, setEnd || recordEnd)
+				if killed {
+					a.noteStopKill(setEnd, recordEnd, fmt.Sprintf("its container had not stopped %s later (the grace keploy's stop gives a docker run app), so keploy killed it", graceBudget))
 				}
 				return err
 			}
@@ -1900,9 +1904,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			} else {
 				killed, err = utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
 			}
-			if killed != "" && setEnd {
-				a.noteSetEndKill("keploy interrupted the application at the set's end and " + killed)
-			}
+			a.noteStopKill(setEnd, recordEnd, killed)
 			return err
 		}
 	}

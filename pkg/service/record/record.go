@@ -1505,6 +1505,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var stopReason string
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
+	// stopKilled is why keploy's stop of the app at the recording's end had
+	// to kill it, under the proven switch (models.AppError.StopKilled): set
+	// by the app's runner, read by the stop once the runner is drained.
+	var stopKilled atomic.Pointer[string]
 	var appErrChan = make(chan models.AppError, 1)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
@@ -1698,6 +1702,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
+		}
+		// The stop had to kill the app: what it would have done as it
+		// stopped is not in this recording, and the recording says so.
+		if why := stopKilled.Load(); why != nil && recordingStarted && newTestSetID != "" {
+			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 		if !composeAgent {
 			// Read before the frames drain: the agent stays up while this
@@ -2200,6 +2209,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
+			noteStopKilled(&stopKilled, runAppError)
 			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
 				return nil
 			}
@@ -2738,6 +2748,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
+			noteStopKilled(&stopKilled, runAppError)
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}

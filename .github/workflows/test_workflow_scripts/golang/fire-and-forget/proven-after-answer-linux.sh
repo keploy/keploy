@@ -52,6 +52,14 @@
 #      set is not judged: keploy test exits non-zero, and the report names
 #      the kill.
 #
+#  11. A recording whose stop had to kill the app (its shutdown takes 5 s,
+#      past the stop's 3 s grace, so its shutdown publish is not recorded):
+#      keploy record says so in the test-set's config (recordStopKilled).
+#      A replay whose app publishes on its way out at once makes a call the
+#      recording lacks: the set is not judged, keploy test exits non-zero,
+#      and the report names the recording's kill. It is not failed for a
+#      call that record's grace cut (P101-b-k).
+#
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
 # before the stop is the app's clock, and no case here asserts on it.
@@ -303,6 +311,43 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
 fi
 grep -m1 '^failure_reason:' "$(REPORT)" | grep -q 'so keploy killed it' ||
     fail "8 (an app that ignores SIGINT): the report does not name the kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
+
+APP_ENV="SHUTDOWN_PUBLISH=1 SHUTDOWN_DELAY=5s"
+# record_cut <dir>: a recording of /c-ping by that app, whose stop keploy
+# record has to cut.
+record_cut() {
+    local dir="$1"
+    mkdir -p "$dir" && cd "$dir" || exit 1
+    ../ff-broker >broker.log 2>&1 &
+    BROKER_PID=$!
+    wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+        --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+    REC_PID=$!
+    wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
+    curl -s "http://127.0.0.1:$APP/c-ping" >/dev/null
+    wait_tests 1 "$REC_PID" || fail "$dir: keploy record wrote $(test_files) test cases, want 1"
+    stop_pid "$REC_PID"
+    REC_PID=""
+    kill "$BROKER_PID" 2>/dev/null
+    wait "$BROKER_PID" 2>/dev/null
+    BROKER_PID=""
+    own
+    grep -q "shutdown published" record.log && fail "$dir: the app published as keploy record stopped it; its stop was to be cut"
+    grep -q "recordStopKilled" keploy/test-set-0/config.yaml 2>/dev/null ||
+        fail "$dir: the test-set's config does not say its recording's stop killed the app: $(cat keploy/test-set-0/config.yaml 2>/dev/null)"
+    cd "$WORK" || exit 1
+}
+record_cut cut
+echo "== 11. a recording whose stop killed the app, replayed by an app that finishes its shutdown =="
+APP_ENV="SHUTDOWN_PUBLISH=1"
+replay cut finishes http
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
+    fail "11 (a recording cut by its stop): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+# The report's YAML doubles an apostrophe, so the check reads past one.
+grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "stop had to kill the application (keploy stopped the application at the recording" ||
+    fail "11 (a recording cut by its stop): the report does not name the recording's kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"

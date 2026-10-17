@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -29,16 +30,18 @@ import (
 // makes progress on its way out. It does not ask again a process that acts on
 // the interrupt (TakeStopReached), and says when it had to kill one that made
 // no progress, as this stop does (P101-b-m). Two gaps remain, both pre-flip:
-// a kill the tree interrupt could not make (it could not read the process
-// table) is not said (P101-b-n); and where keploy cannot adopt (no pidfds:
-// adoptDaemons says so) such a member is not waited for.
+// where keploy cannot adopt (no pidfds: adoptDaemons says so) such a member
+// is not waited for; and on Windows the stop waits for the tree's root only
+// (P101-b-o-2).
 //
 // The grace is still a clock. A shutdown near it is killed on a loaded host
 // and not on an idle one, so its set can be judged in one run and not in the
-// next; and a recording whose stop killed the app lacks the calls the kill
-// cut, which a replay that finishes its shutdown then makes, unanswered. A
-// stop for both that waits on the app's exit, and a recording that says its
-// stop killed, are pre-flip (P101-b-k).
+// next. keploy record's stop says when it had to kill too (noteRecordKill),
+// and the recording says so in its test-set's config
+// (models.TestSet.RecordStopKilled): a replay does not judge a call its app
+// makes after the set's last test, which the cut recording may lack
+// (P101-b-k). A stop for both that waits on the app's exit, with no grace
+// clock, is pre-flip.
 
 // stopsForSetEnd reports whether ctx was cancelled to stop the app at its
 // test set's end (models.ErrAppStoppedForSetEnd).
@@ -53,8 +56,36 @@ func (a *App) noteSetEndKill(why string) {
 		zap.String("app", a.container))
 }
 
-// takeSetEndKill is why the latest stop at a set's end had to kill the app,
-// once: "" when it did not.
+// StopsARecording reports whether keploy's stop of the app ends a recording
+// under the proven switch: such a stop says when it had to kill the app, as
+// the stop at a test set's end does (P101-b-k).
+func (a *App) StopsARecording() bool {
+	return provenswitch.On() && a.opts.Mode == models.MODE_RECORD
+}
+
+// noteStopKill records why keploy's stop of the app had to kill it (killed,
+// "" when it did not), for the stop at a set's end or at a recording's end;
+// another stop's kill is not said.
+func (a *App) noteStopKill(setEnd, recordEnd bool, killed string) {
+	switch {
+	case killed == "":
+	case setEnd:
+		a.noteSetEndKill("keploy interrupted the application at the set's end and " + killed)
+	case recordEnd:
+		a.noteRecordKill("keploy stopped the application at the recording's end and " + killed)
+	}
+}
+
+// noteRecordKill records why keploy record's stop of the app had to kill it.
+func (a *App) noteRecordKill(why string) {
+	a.setEndKill.Store(&why)
+	a.logger.Warn(why+"; what it would have done as it stopped is not in the recording, so a replay of this test-set cannot judge a call its application makes after the set's last test ("+provenswitch.Env+"=1)",
+		zap.String("app", a.container),
+		zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
+}
+
+// takeSetEndKill is why the latest stop at a set's end, or at a recording's
+// end (noteRecordKill), had to kill the app, once: "" when it did not.
 func (a *App) takeSetEndKill() string {
 	if why := a.setEndKill.Swap(nil); why != nil {
 		return *why
