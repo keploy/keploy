@@ -1222,10 +1222,12 @@ func TestTheNextSessionAsksForTheSettlesSinceTheLastAnswered(t *testing.T) {
 }
 
 // settle counts the agent's lists once the pusher is quiet: a placing still
-// in flight after the read that ended it (a loaded host lands it late)
-// changes the index once more, and the list it makes is counted, never given
+// in flight after the read that ended it (a loaded host lands it late) may
+// change the index once more, and any list it makes is counted, never given
 // after. The old helper took an empty queue of posts for quiet, and a test
-// counting lists after it saw one too many (TestPushGivesTheListNowAndEveryChange).
+// counting lists after it saw one too many (TestPushGivesTheListNowAndEveryChange)
+// while the index counted an identical put as a change; it waits for the
+// placing loop to end whether or not its put changes anything.
 func TestSettleWaitsForAPlacingStillInFlight(t *testing.T) {
 	f := testcontainers()
 	ps := newPosts()
