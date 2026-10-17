@@ -1673,10 +1673,12 @@ func (r *mockRouter) pruned(mock *models.Mock) bool {
 // shared (sessionCalls). A replay's mapping names it under the test that
 // consumed it, but it is not that test's alone: a run of other tests needs it
 // too (a connection's setup, a token another test fetched). A mock recorded
-// before lifetimes were stated is pruned by the mapping as it always was.
+// before lifetimes were stated is pruned by the mapping as it always was, but
+// for a MySQL prepared statement's lifecycle (PREPARE, CLOSE, RESET), which
+// is its connection's whenever it was recorded (models.DeriveLifetime).
 func sharedByStatement(mock *models.Mock) bool {
 	if !mock.StatesLifetime() {
-		return false
+		return mock.IsMySQLStatementLifecycle()
 	}
 	mock.DeriveLifetime()
 	lt := mock.TestModeInfo.Lifetime
