@@ -1353,7 +1353,7 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 			}
 			startup := len(loaded)
 			// Beside the startup band, the mocks a parser declares it
-			// needs staged whatever their recorded time
+			// needs staged within the staging's window
 			// (models.StagingWithStartup): a server push it files when
 			// the set is staged and releases at its own test window. They
 			// are read from the band's cutoff to the end of the
@@ -1431,7 +1431,7 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 // startup traffic, and a long recording OOM-killed the agent before its app
 // started. The startup traffic is what was recorded before the set's earliest
 // recorded test, which the staging call carries. Beside it the call stages
-// the mocks a parser declares it needs staged whatever their recorded time
+// the mocks a parser declares it needs staged within the call's window
 // (models.StagingWithStartup, DiskMocks.LoadStaged), and only those, from the
 // cutoff to the end of the call's window.
 //

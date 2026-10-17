@@ -312,7 +312,7 @@ if [ "$replay_is_build" = true ]; then
         fi
         if [ "$on_disk" -gt 0 ]; then
             if [ "$staged" -ge "$on_disk" ]; then
-                echo "::error::A set's staging read all ${on_disk} on-disk mocks; it must read only those recorded before its first test"
+                echo "::error::A set's staging read all ${on_disk} on-disk mocks; it must read only those recorded before its first test and those a parser declares"
                 exit 1
             fi
             windowed_sets=$((windowed_sets + 1))
