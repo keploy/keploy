@@ -1349,3 +1349,42 @@ func TestADockerModeAgentIsToldAStalledReadEndedThoughItsContainerIsReadAgain(t 
 		t.Fatal("no list says tc's stalled read ended: the docker-mode agent takes the next read for stalled")
 	}
 }
+
+// An identical put (a placing's list landing after the read that placed the
+// container) sends the agent no list: nothing a list shows changed.
+func TestAnIdenticalPutSendsNoList(t *testing.T) {
+	f := testcontainers()
+	ps := newPosts()
+	p := testPusher(f, ps)
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The listed containers' reads are in, and no event came: nothing else
+	// changes the index. Under the pusher's lock its change loop sends
+	// nothing, and the send below gives the agent every change counted
+	// before the put, so the count after it is the put's alone.
+	waitPost(ps, settled)
+	st := current(p.idx)
+	f.mu.Lock()
+	e := summaryEntry(summaryOf("pg", f.containers["pg"]))
+	f.mu.Unlock()
+	e.placed, e.fromList = true, true
+	p.idx.mu.Lock()
+	seq := st.seq["pg"]
+	p.idx.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.send(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	n := ps.count()
+	if !p.idx.put(st, e, seq) {
+		t.Fatal("the put was refused")
+	}
+	if err := p.send(t.Context(), false); err != nil { // as the change loop sends: only what changed
+		t.Fatal(err)
+	}
+	if got := ps.count(); got != n {
+		t.Fatalf("%d lists after %d: an identical put sent one", got, n)
+	}
+}
