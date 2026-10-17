@@ -2,8 +2,8 @@
 // publish to a broker that it does not wait for (fire and forget), with SUFFIX
 // appended to the message; /b-other takes 3 s; /c-ping answers at once.
 // With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped; with
-// IGNORE_INT set it ignores SIGINT; ONE_SIGNAL and HANG_ON_STOP shape how it
-// stops (below).
+// IGNORE_INT set it ignores SIGINT; ONE_SIGNAL, HANG_ON_STOP and
+// SHUTDOWN_CPU shape how it stops (below).
 //
 // PROTO says how it publishes:
 //   - http: an HTTP POST on a connection of its own (no keep-alive);
@@ -218,6 +218,18 @@ func main() {
 	if os.Getenv("IGNORE_INT") != "" {
 		signal.Ignore(syscall.SIGINT)
 	}
+	// SHUTDOWN_CPU: as it is stopped (SIGINT, SIGTERM), the app works this
+	// much CPU time and exits 0, as one whose shutdown flushes what it holds
+	// in memory does: starved of CPU, that takes many times as long.
+	if work, err := time.ParseDuration(os.Getenv("SHUTDOWN_CPU")); err == nil && os.Getenv("SHUTDOWN_PUBLISH") == "" {
+		stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		go func() { log.Fatal(http.ListenAndServe(":8080", nil)) }()
+		<-stop.Done()
+		burnCPU(work)
+		log.Printf("shutdown worked %s of CPU", work)
+		return
+	}
 	if os.Getenv("SHUTDOWN_PUBLISH") == "" {
 		log.Fatal(http.ListenAndServe(":8080", nil))
 	}
@@ -249,4 +261,21 @@ func main() {
 	done := make(chan struct{})
 	publish(broker, "shutdown"+os.Getenv("SUFFIX"), done)
 	log.Printf("shutdown published")
+}
+
+// burnCPU works until this process has used work more CPU time.
+func burnCPU(work time.Duration) {
+	used := func() time.Duration {
+		var ru syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+		return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
+	}
+	for start, x := used(), uint64(1); used()-start < work; {
+		for i := 0; i < 1<<16; i++ {
+			x = x*6364136223846793005 + 1442695040888963407
+		}
+		if x == 0 {
+			log.Print("unreachable")
+		}
+	}
 }
