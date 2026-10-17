@@ -78,9 +78,9 @@ var (
 func adoptDaemons(logger *zap.Logger) {
 	adoptOnce.Do(func() {
 		if _, err := startAdopting(logger); err != nil {
-			logger.Warn("keploy cannot keep a daemon the application starts in this run: a process the application starts and leaves behind (pg_ctl start, redis-server --daemonize) is reparented away from keploy, and its calls are neither intercepted nor judged",
+			logger.Warn("keploy cannot keep a daemon the application starts in this run: a process the application starts and leaves behind (pg_ctl start, redis-server --daemonize) is reparented away from keploy, and its calls are neither intercepted nor judged; nor does keploy's stop of the application wait for a process of it that outlives the shell that started it (`app & wait`), so what that process does as it stops can come after its test set's end is read",
 				zap.Error(err),
-				zap.String("next_step", "start such a dependency before keploy, where it is an outside dependency, recorded and mocked; or run it in the foreground of the command keploy runs (postgres -D <dir> &, redis-server --daemonize no &), where it stays the command's child"))
+				zap.String("next_step", "start such a dependency before keploy, where it is an outside dependency, recorded and mocked; or run it in the foreground of the command keploy runs (postgres -D <dir> &, redis-server --daemonize no &), where it stays the command's child; and start the application itself in the foreground of its shell (exec app)"))
 		}
 	})
 }
@@ -366,7 +366,12 @@ type member struct {
 // stopAdopted ends what this process adopted from the application's tree,
 // once the application has ended or keploy has stopped it for its test set.
 // The daemons and what they run, as they are now, are asked to stop
-// (SIGTERM, each daemon's group with it), killed only once they make no
+// (SIGTERM, each daemon's group with it), but for those keploy's stop of the
+// application asked already: a process its interrupt reached (reached, from
+// utils.InterruptProcessTreeReached) that does not ignore SIGINT is acting
+// on it, and is not asked again, as a second signal ends many an application
+// mid-shutdown (Go's signal.NotifyContext once its stop is called). They are
+// killed only once they make no
 // progress on their way out across stopStallChecks reads -- a process or
 // thread of theirs ending, a file or socket closed, storage read or written;
 // being scheduled is not, a daemon that ignores the request runs on -- and
@@ -383,7 +388,7 @@ type member struct {
 // It returns why it had to kill a daemon that made no progress on its way
 // out, "" when it did not, or when the kill was the user's (Ctrl+C): a
 // shutdown that kill cut is not known.
-func stopAdopted(logger *zap.Logger) string {
+func stopAdopted(logger *zap.Logger, reached []utils.Reached) string {
 	if !adopting.Load() {
 		return ""
 	}
@@ -399,7 +404,19 @@ func stopAdopted(logger *zap.Logger) string {
 			closePidfd(m.fd)
 		}
 	}()
-	return stopMembers(logger, ms)
+	return stopMembers(logger, ms, actingOn(reached))
+}
+
+// actingOn is whether a member is acting on keploy's interrupt: reached by
+// it, the same process (its start time) as when it was, and not ignoring it.
+func actingOn(reached []utils.Reached) func(member) bool {
+	acting := make(map[[2]uint64]bool, len(reached))
+	for _, r := range reached {
+		if !r.Ignores {
+			acting[[2]uint64{uint64(r.PID), r.Start}] = true
+		}
+	}
+	return func(m member) bool { return acting[[2]uint64{uint64(m.pid), m.start}] }
 }
 
 // adoptedRunning is this process's children that it adopted (no pidfd of its
@@ -474,18 +491,24 @@ func members(pids []int) []member {
 	return ms
 }
 
-// stopMembers asks ms to stop, kills them once they make no progress on
-// their way out (or at once, at the press of Ctrl+C the stop offers), and
-// waits until each has exited, or is held by the kernel without progress.
-// stallKill says why it killed for want of progress; "" when it did not.
-func stopMembers(logger *zap.Logger, ms []member) (stallKill string) {
+// stopMembers asks ms to stop, but those acting on keploy's interrupt
+// already, kills them once they make no progress on their way out (or at
+// once, at the press of Ctrl+C the stop offers), and waits until each has
+// exited, or is held by the kernel without progress. stallKill says why it
+// killed for want of progress; "" when it did not.
+func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (stallKill string) {
 	pids := make([]int, 0, len(ms))
+	var stopping []int
 	for _, m := range ms {
 		pids = append(pids, m.pid)
+		if acting(m) {
+			stopping = append(stopping, m.pid)
+		}
 	}
-	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it", zap.Ints("pids", pids))
-	signalAll(ms, syscall.SIGTERM, false)
-	signalAll(ms, syscall.SIGCONT, false) // a stopped one handles it now
+	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it",
+		zap.Ints("pids", pids), zap.Ints("acting_on_the_interrupt", stopping))
+	signalAll(ms, syscall.SIGTERM, false, acting)
+	signalAll(ms, syscall.SIGCONT, false, nil) // a stopped one handles it now
 	notice := utils.NewStopNowNotice(stopOffer)
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
@@ -496,7 +519,7 @@ func stopMembers(logger *zap.Logger, ms []member) (stallKill string) {
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
-		signalAll(ms, syscall.SIGKILL, true)
+		signalAll(ms, syscall.SIGKILL, true, nil)
 		killed, quiet = true, 0
 		// What is left the kill ends, or the kernel holds: no press
 		// does more, and a closed channel read again would spin.
@@ -537,8 +560,9 @@ func stopMembers(logger *zap.Logger, ms []member) (stallKill string) {
 			}
 			return
 		}
+		stalled := describe(ms)
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
-		stallKill = fmt.Sprintf("a process the application left running made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it", stopStallChecks)
+		stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, stopStallChecks)
 	}
 }
 
@@ -550,19 +574,50 @@ func stopMembers(logger *zap.Logger, ms []member) (stallKill string) {
 // to each member outside those groups; with every, to each member as well.
 // The daemon is the process its pidfd names while that pidfd shows it alive:
 // its pid, and so its group's id, cannot have been given to another.
-func signalAll(ms []member, sig syscall.Signal, every bool) {
+//
+// A member skip holds for is not sent sig, nor is its group as a whole: a
+// daemon's group is then signalled member by member.
+func signalAll(ms []member, sig syscall.Signal, every bool, skip func(member) bool) {
+	if skip == nil {
+		skip = func(member) bool { return false }
+	}
 	groups := map[int]bool{}
 	for _, m := range ms {
-		if m.leads && unix.PidfdSendSignal(m.fd, 0, nil, 0) == nil {
+		if m.leads && !skip(m) && unix.PidfdSendSignal(m.fd, 0, nil, 0) == nil {
 			groups[m.pgrp] = true
 			_ = syscall.Kill(-m.pid, sig)
 		}
 	}
 	for _, m := range ms {
-		if every || !groups[m.pgrp] {
+		if (every || !groups[m.pgrp]) && !skip(m) {
 			_ = unix.PidfdSendSignal(m.fd, sig, nil, 0)
 		}
 	}
+}
+
+// describe names each member of ms still running: its pid, command and
+// state ("process 4242 (sleep, state S)").
+func describe(ms []member) string {
+	var names []string
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		name := "process " + strconv.Itoa(m.pid)
+		comm, err := os.ReadFile("/proc/" + strconv.Itoa(m.pid) + "/comm")
+		st, ok := utils.ReadProcStat(m.pid)
+		switch {
+		case err == nil && ok:
+			name += fmt.Sprintf(" (%s, state %c)", strings.TrimSpace(string(comm)), st.State)
+		case err == nil:
+			name += " (" + strings.TrimSpace(string(comm)) + ")"
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "a process"
+	}
+	return strings.Join(names, ", ")
 }
 
 // exited reports whether m has exited: its pidfd is readable then.

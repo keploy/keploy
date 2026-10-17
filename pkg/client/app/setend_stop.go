@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -21,12 +22,16 @@ import (
 // when it had to kill (AppError.StopKilled), and the set's end is not judged,
 // naming the stop and its grace.
 //
-// Two gaps remain, both pre-flip: the stop waits for each of a native app's
-// process groups by its leader, so a group member that outlives its leader (a
-// pipeline under a shell that died on the interrupt) is not waited for
-// (P101-b-m); and a kill the tree interrupt could not make (it could not read
-// the process table) or that stopAdopted makes of the app's daemons is not
-// said (P101-b-n).
+// The stop waits for each of a native app's process groups by its leader. A
+// member that outlives its leader (the app of `app & wait`, whose shell dies
+// on the interrupt at once) is adopted under the switch, and the stop of what
+// the app left behind (stopAdopted, adopt_linux.go) waits for it while it
+// makes progress on its way out. It does not ask again a process that acts on
+// the interrupt (TakeStopReached), and says when it had to kill one that made
+// no progress, as this stop does (P101-b-m). Two gaps remain, both pre-flip:
+// a kill the tree interrupt could not make (it could not read the process
+// table) is not said (P101-b-n); and where keploy cannot adopt (no pidfds:
+// adoptDaemons says so) such a member is not waited for.
 //
 // The grace is still a clock. A shutdown near it is killed on a loaded host
 // and not on an idle one, so its set can be judged in one run and not in the
@@ -55,4 +60,16 @@ func (a *App) takeSetEndKill() string {
 		return *why
 	}
 	return ""
+}
+
+// TakeStopReached is what the latest stop of a native app reached with its
+// interrupt, under the proven switch (utils.InterruptProcessTreeReached),
+// once: nil when no such stop read it since it was last taken. Each of its
+// processes was asked to stop by that interrupt, and one that does not
+// ignore it is acting on it.
+func (a *App) TakeStopReached() []utils.Reached {
+	if reached := a.stopReached.Swap(nil); reached != nil {
+		return *reached
+	}
+	return nil
 }
