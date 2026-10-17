@@ -812,6 +812,12 @@ jobs:
     # publish is named at record time and fails at replay saying so.
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/unpublished-port-docker.yml
+  run_proven_setend_docker:
+    # Guard: under KEPLOY_PROVEN=1 the stop at a set's end and a recording's
+    # end waits for a starved Docker's container to stop, and kills only on
+    # the stall rule.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/proven-setend-docker.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
