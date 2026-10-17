@@ -65,8 +65,10 @@ type dockerIndex struct {
 	// what was read and the read's bookkeeping is done (tests wait on it).
 	applied func(id string)
 	// placeDone, when set, is told each container whose placing loop ended
-	// (tests wait on it).
-	placeDone func(id string)
+	// (tests wait on it); placeStart, each whose placing loop starts, before
+	// it reads the container's event count (tests hold it, as a loaded host
+	// schedules the loop late).
+	placeDone, placeStart func(id string)
 	// settleWaits, when set, is told each time a Settle waits for a list,
 	// and each time a list waits for the placings of containers an event
 	// spoke for while it was out (tests wait on it).
@@ -555,14 +557,26 @@ func (r *dockerIndex) claimPlace(st *watchState, id string) bool {
 // placeLoop places container id from the daemon's list (placeFromList), once
 // more for each event that came meanwhile. It takes no read slot and never
 // waits for a read: held configuration reads, in every slot, never keep a
-// container from being placed.
+// container from being placed. A placing its container's die ended before
+// its list is asked (the index holds the container no more) asks none: Docker
+// before 23.0 sends a die before it records the stop, and lists the dead
+// container running, with its ports and IPs, until it has.
 func (r *dockerIndex) placeLoop(ctx context.Context, api dockerAPI, st *watchState, id string) {
+	r.mu.Lock()
+	start := r.placeStart
+	r.mu.Unlock()
+	if start != nil {
+		start(id)
+	}
 	for {
 		r.mu.Lock()
+		ended := !st.placing[id] && st.images[id] == ""
 		seq := st.seq[id]
 		delete(st.placingDirty, id)
 		r.mu.Unlock()
-		r.placeFromList(ctx, api, st, id, seq)
+		if !ended {
+			r.placeFromList(ctx, api, st, id, seq)
+		}
 		r.mu.Lock()
 		// Once more for an event that came meanwhile, unless its placing
 		// ended since (a die).
