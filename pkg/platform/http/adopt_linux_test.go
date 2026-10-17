@@ -266,7 +266,7 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	}
 
 	core, logs := observer.New(zapcore.DebugLevel)
-	why := stopAdopted(zap.New(core))
+	why := stopAdopted(zap.New(core), nil)
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("polite %d, deaf %d, busy %d, churn %d, slow %d", polite, deaf, busy, churn, slow)
@@ -335,7 +335,7 @@ func TestAPressKillsTheDaemonsAStopWaitsFor(t *testing.T) {
 		late, lateErr = startDaemon("exec sleep 120")
 		utils.MarkInterruptedAgain()
 	}()
-	why := stopAdopted(zap.New(core))
+	why := stopAdopted(zap.New(core), nil)
 	if lateErr != nil {
 		t.Fatal(lateErr)
 	}
@@ -397,6 +397,10 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		appErr := <-done
 		if killed := strings.Contains(appErr.StopKilled, "made no progress on its way out"); killed != tc.killed {
 			t.Fatalf("%s: run ended %+v; want a kill said %v", tc.name, appErr, tc.killed)
+		}
+		// The kill names what it killed, and what to do about it.
+		if tc.killed && (!strings.Contains(appErr.StopKilled, "(sleep, state ") || !strings.Contains(appErr.StopKilled, "make it exit once it is asked to stop")) {
+			t.Fatalf("%s: the kill is said as %q; want the process named, with its state, and the next step", tc.name, appErr.StopKilled)
 		}
 	}
 }

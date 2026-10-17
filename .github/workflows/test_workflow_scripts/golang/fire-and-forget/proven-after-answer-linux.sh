@@ -40,10 +40,17 @@
 #      non-zero, and the report names the kill and the grace.
 #
 #   9. The app of 6 and 7, started in the background by its shell
-#      (`app & wait`), its shutdown taking 300 ms before it publishes: the
-#      shell dies on keploy's interrupt at once, and keploy still waits for
-#      the app, a member of the shell's process group that acts on the
-#      interrupt. A changed shutdown publish fails the set, as in 7.
+#      (`app & wait`), its shutdown taking 5 s before it publishes, and a
+#      second signal ending it once it is stopping (ONE_SIGNAL, as Go's
+#      signal.NotifyContext documents): the shell dies on keploy's interrupt
+#      at once, and keploy waits for the app, a member of the shell's process
+#      group that acts on the interrupt, without signalling it again. The
+#      recorded shutdown publish passes, as in 6; a changed one fails the
+#      set, as in 7.
+#  10. That app, started so, never ending once it is stopping (HANG_ON_STOP):
+#      keploy kills it once it has made no progress on its way out, and the
+#      set is not judged: keploy test exits non-zero, and the report names
+#      the kill.
 #
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
@@ -253,7 +260,7 @@ yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | gr
     fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
 
 echo "== 9. the app of 7 in the background of its shell =="
-APP_ENV="SHUTDOWN_PUBLISH=1 SHUTDOWN_DELAY=300ms"
+APP_ENV="SHUTDOWN_PUBLISH=1 SHUTDOWN_DELAY=5s ONE_SIGNAL=1"
 APP_WRAP=bg
 replay shutdown bg-as-recorded http
 expect_pass "9 (in the background, the recorded shutdown publish)"
@@ -263,6 +270,14 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
 fi
 yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
     fail "9 (in the background, a changed shutdown publish): the report does not name the publish"
+echo "== 10. that app never ending once it is stopping =="
+APP_ENV="SHUTDOWN_PUBLISH=1 HANG_ON_STOP=1"
+replay shutdown bg-hangs http
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
+    fail "10 (in the background, never ending): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+grep -m1 '^failure_reason:' "$(REPORT)" | grep -q 'made no progress on its way out' ||
+    fail "10 (in the background, never ending): the report does not name the kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 APP_WRAP=""
 
 APP_ENV="IGNORE_INT=1"

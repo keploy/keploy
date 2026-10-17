@@ -1737,9 +1737,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// (adopt_linux.go): none is judged in the next test set, and the app
 		// started again can bind their ports. An app whose shell died on
 		// keploy's interrupt at once (`app & wait`) is one of them, still
-		// stopping. When the stop at a set's end had to kill one that made no
+		// stopping, and is not asked again when it acts on the interrupt.
+		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger); why != "" && stopKilled == "" && errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd) {
+		if why := stopAdopted(a.logger, app.TakeStopReached()); why != "" && stopKilled == "" && errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd) {
 			stopKilled = "keploy interrupted the application at the set's end, and " + why
 		}
 		if appErr.Err != nil {
