@@ -367,6 +367,24 @@ type TestWindows interface {
 	SameRecordedTestWindow(a, b time.Time) (same, known bool)
 }
 
+// InFlightOwner is an optional MockMemDb capability: whether a mock was in
+// flight when the test the replay runs now began, sent in the gap before that
+// test's recorded window and answered inside it (models.SentInGapAnsweredBy),
+// which the store serves as that test's own (GetPerTestMocksInWindow). Its
+// request was recorded outside every recorded test's window, and it is still
+// no start-up or between-tests call of the pool's: the learn step counts it
+// the open test's (TestWindows alone, by its request time, cannot).
+type InFlightOwner interface {
+	InFlightIntoOpenTest(m *models.Mock) bool
+}
+
+// InFlightIntoOpenTest reports whether db says m was in flight when the open
+// test began (InFlightOwner); false for a db that cannot tell.
+func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
+	o, ok := db.(InFlightOwner)
+	return ok && o.InFlightIntoOpenTest(m)
+}
+
 // TestOwnership is an optional MockMemDb capability: whether a mock is one of
 // the open test's own, which its mapping lists, rather than the pool's. A view
 // that scopes the pool to a test (`keploy mock replay`'s) knows; known is

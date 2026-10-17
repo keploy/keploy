@@ -1037,7 +1037,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		switch {
 		case !req.Before(start) && !req.After(end):
 			out = append(out, mock)
-		case hasGap && models.InFlightEligible(mock) && models.SentInGapAnsweredBy(req, res, gapFrom, start):
+		case inFlightAtStart(mock, req, res, gapFrom, start, hasGap):
 			// In flight when the window's test began: its own.
 			out = append(out, mock)
 		default:
@@ -1493,7 +1493,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// answer it carries is what the test waits for. Not a carry-over
 			// mock, which the carry-over tier below keeps reachable from the
 			// window it belongs to (models.InFlightEligible).
-			if hasGap && models.InFlightEligible(mock) && models.SentInGapAnsweredBy(req, res, gapFrom, start) {
+			if inFlightAtStart(mock, req, res, gapFrom, start, hasGap) {
 				out = append(out, mock)
 				continue
 			}
@@ -2070,8 +2070,10 @@ func (m *MockManager) KeptForRepeats() func(key string) bool {
 // (integrations.TestOwner): a test is open (IsTestWindowActive) and mk is in
 // the per-test pool served for it: under exact serving, the test's mapping
 // (ServeExactTest); else the per-test tier, by the test's recorded window when
-// it has one, as GetPerTestMocksInWindow serves it. With no test open (the staging before the
-// first test, between tests, or a replay that opens none) no mock is.
+// it has one, as GetPerTestMocksInWindow serves it: a call of the window, or
+// one in flight when the test began (inFlightAtStart). With no test open (the
+// staging before the first test, between tests, or a replay that opens none)
+// no mock is.
 func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
 	if mk == nil {
 		return false
@@ -2098,15 +2100,42 @@ func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
 	if start.IsZero() || end.IsZero() {
 		return true
 	}
-	return inRecordedWindow(mk, start, end)
+	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+	return inRecordedWindow(mk, start, end, gapFrom, hasGap)
+}
+
+// InFlightIntoOpenTest reports whether mk was in flight when the open test
+// began: its request recorded outside the test's window, in the gap before it,
+// and answered inside it (inFlightAtStart), which the windowed read serves as
+// the test's own (integrations.InFlightOwner). Under exact serving the test's
+// mapping says what it owns and the manager holds no window: none is, by time.
+func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
+	if mk == nil || m.exactView() != nil {
+		return false
+	}
+	m.windowMu.RLock()
+	active := m.windowActiveLocked()
+	start, end := m.windowStart, m.windowEnd
+	m.windowMu.RUnlock()
+	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
+	if !active || start.IsZero() || end.IsZero() || req.IsZero() || res.IsZero() {
+		return false
+	}
+	if !req.Before(start) && !req.After(end) {
+		return false
+	}
+	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
 }
 
 // inRecordedWindow is GetFilteredMocksInWindow's test of one mock against a
-// test's recorded window: its request inside it, or no recorded times. A mock
-// whose response is stamped before its request is in no window, as that read
-// leaves it out, but under the proven switch, where the read keeps it
+// test's recorded window [start, end]: its request inside it, in flight when
+// the test began (inFlightAtStart, with gapFrom and hasGap the window's
+// models.WindowSchedule.GapBefore), or no recorded times. A mock whose
+// response is stamped before its request is in no window, as that read leaves
+// it out, but under the proven switch, where the read keeps it
 // (pkg.LeaveOutAnsweredBeforeAsked).
-func inRecordedWindow(mk *models.Mock, start, end time.Time) bool {
+func inRecordedWindow(mk *models.Mock, start, end, gapFrom time.Time, hasGap bool) bool {
 	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
 	if req.IsZero() || res.IsZero() {
 		return true
@@ -2114,7 +2143,10 @@ func inRecordedWindow(mk *models.Mock, start, end time.Time) bool {
 	if res.Before(req) && !provenswitch.On() {
 		return false
 	}
-	return !req.Before(start) && !req.After(end)
+	if !req.Before(start) && !req.After(end) {
+		return true
+	}
+	return inFlightAtStart(mk, req, res, gapFrom, start, hasGap)
 }
 
 // clampCursor bounds a stored cursor to the last valid index [0, n-1].
@@ -4502,9 +4534,22 @@ func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if !req.Before(start) && !req.After(end) {
 		return false
 	}
-	if from, ok := m.testWindows.Load().GapBefore(start); ok && models.InFlightEligible(&mock) &&
-		models.SentInGapAnsweredBy(req, mock.Spec.ResTimestampMock, from, start) {
-		return false
-	}
-	return true
+	from, ok := m.testWindows.Load().GapBefore(start)
+	return !inFlightAtStart(&mock, req, mock.Spec.ResTimestampMock, from, start, ok)
+}
+
+// inFlightAtStart reports whether mk, its request recorded at req and its
+// response at res, was in flight when the test whose window starts at start
+// began: a per-test call the in-flight rule is for (models.InFlightEligible),
+// sent in the gap before the window (gapFrom, hasGap: the recorded windows'
+// models.WindowSchedule.GapBefore(start)) and answered at or after its start
+// (models.SentInGapAnsweredBy). It is that test's own. One rule for what the
+// staging files in the window's tier (setMocksWithWindowLocked), what the
+// windowed read serves (GetFilteredMocksInWindow), what the open test owns
+// (OwnedByOpenTest) and what consumes out of no window (consumedOutOfWindow).
+//
+// The times are looked at first: a reader asks of every mock it holds, and
+// InFlightEligible may derive a copy's lifetime.
+func inFlightAtStart(mk *models.Mock, req, res, gapFrom, start time.Time, hasGap bool) bool {
+	return hasGap && models.SentInGapAnsweredBy(req, res, gapFrom, start) && models.InFlightEligible(mk)
 }

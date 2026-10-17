@@ -444,6 +444,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		owner = nil
 	}
 	windows, _ := mockDb.(integrations.TestWindows)
+	inFlight, _ := mockDb.(integrations.InFlightOwner)
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -459,7 +460,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -523,12 +524,15 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 //     mapping names are the test's, every other mock it shows is the pool's;
 //     with no test open in it, none is paired.
 //   - Otherwise a mock recorded outside every recorded test's window (the
-//     start-up, between tests) is the pool's. The open test's own are, of
+//     start-up, between tests) is the pool's, but for one in flight when the
+//     open test began (inFlight: sent in the gap before its window, answered
+//     inside it), which the store serves as the test's own and is. The open
+//     test's own are, of
 //     the rest, its per-test tier, the session mocks its mapping names
 //     (IsFiltered, set from the test's mapping when the replay stages it),
 //     and the session mocks recorded inside its window. With no recorded
 //     windows any other session mock is no one's to pair.
-func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows) (own, pool bool) {
+func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnership, windows integrations.TestWindows, inFlight integrations.InFlightOwner) (own, pool bool) {
 	if owner != nil {
 		// A view with no test open in it cannot say whose a mock is: none
 		// is paired.
@@ -541,6 +545,9 @@ func ownership(m *models.Mock, perTestTier bool, owner integrations.TestOwnershi
 		// between tests): the pool's, whatever tier or mapping holds it (a
 		// replay arms the start-up's names with every test's mapping).
 		if inside, known := windows.InRecordedTestWindow(at); known && !inside {
+			if inFlight != nil && inFlight.InFlightIntoOpenTest(m) {
+				return true, false
+			}
 			return false, true
 		}
 	}
