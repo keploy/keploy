@@ -229,6 +229,8 @@ func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
 		stageMock("test-a", "/q", stageT0.Add(time.Second)),
 		stageMock("test-b", "/q", stageT0.Add(time.Minute)),
 		stageMock("poll-later", "/poll", stageT0.Add(time.Hour)))
+	core, logs := observer.New(zap.DebugLevel)
+	a.logger = zap.New(core)
 	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
 		AfterTime:              models.BaseTime,
 		BeforeTime:             stageT0.Add(2 * time.Hour),
@@ -244,6 +246,18 @@ func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
 	}
 	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-auth", "boot-config", "poll-later"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the exact staging staged %v; want the startup mocks and the pool's poll %v, and no test's own", got, want)
+	}
+	// The pool's mocks the startup band read already are not read again: the
+	// staging reads three mocks from disk, and says one came for the pool.
+	if got := loadedFromDisk(t, logs); !reflect.DeepEqual(got, []int64{3}) {
+		t.Fatalf("the exact staging read %v mocks from disk; want 3, each once", got)
+	}
+	staged := logs.FilterMessageSnippet("staged the set's app-startup mocks from the on-disk store").All()
+	if len(staged) != 1 {
+		t.Fatalf("%d staging lines, want one", len(staged))
+	}
+	if n, _ := staged[0].ContextMap()["poolMocks"].(int64); n != 1 {
+		t.Fatalf("the staging line says %v pool mocks; want 1, the poll the startup band did not read", staged[0].ContextMap()["poolMocks"])
 	}
 }
 

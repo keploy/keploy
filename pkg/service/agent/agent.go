@@ -1335,13 +1335,44 @@ func effectiveFirstWindowStart(isWindowedProxy bool, readerVal, afterTime time.T
 	return afterTime
 }
 
-func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time) ([]*models.Mock, error) {
+// loadPerTestMocks reads, from the on-disk store disk, the per-test mocks
+// params' load mode (perTestLoadMode) asks for, beside resident. pool names
+// per-test mocks to read as well (the exact staging's pool, stageMocks):
+// those the mode's own load has not read already, nor holds resident, so
+// none is decoded twice. The staging call says how many it read (poolMocks).
+func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time, pool ...string) ([]*models.Mock, error) {
 	if disk == nil {
 		return resident, nil
 	}
 
 	var loaded []*models.Mock
 	var err error
+	// readPool reads the pool's mocks that neither resident nor loaded holds.
+	poolRead := false
+	readPool := func() ([]*models.Mock, error) {
+		poolRead = true
+		if len(pool) == 0 {
+			return nil, nil
+		}
+		have := make(map[string]struct{}, len(resident)+len(loaded))
+		for _, list := range [][]*models.Mock{resident, loaded} {
+			for _, m := range list {
+				if m != nil {
+					have[m.Name] = struct{}{}
+				}
+			}
+		}
+		want := make([]string, 0, len(pool))
+		for _, n := range pool {
+			if _, ok := have[n]; !ok {
+				want = append(want, n)
+			}
+		}
+		if len(want) == 0 {
+			return nil, nil
+		}
+		return disk.LoadByNames(want)
+	}
 	mode := perTestLoadMode(params)
 	switch mode {
 	case loadModeMapping:
@@ -1369,9 +1400,18 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 				loaded = append(loaded, staged...)
 				declared = len(staged)
 			}
+			// And the exact staging's pool (stageMocks), what the band and
+			// the declared mocks have not read already.
+			var poolMocks []*models.Mock
+			poolMocks, err = readPool()
+			if err != nil {
+				break
+			}
+			loaded = append(loaded, poolMocks...)
 			a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
 				zap.Int("startupMocks", startup),
 				zap.Int("declaredMocks", declared),
+				zap.Int("poolMocks", len(poolMocks)),
 				zap.Int("onDisk", disk.Len()),
 				zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
 			break
@@ -1386,6 +1426,12 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		}
 	default:
 		loaded, err = disk.LoadAll()
+	}
+	if err == nil && !poolRead {
+		var poolMocks []*models.Mock
+		if poolMocks, err = readPool(); err == nil {
+			loaded = append(loaded, poolMocks...)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -1797,18 +1843,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	firstWindowStart = effectiveFirstWindowStart(isWindowedProxy, firstWindowStart, params.AfterTime)
 
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
-	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
+	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart, alsoLoad...)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
-	}
-	if len(alsoLoad) > 0 && disk != nil {
-		also, err := disk.LoadByNames(alsoLoad)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to load the named per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
-			return nil, nil, err
-		}
-		originalFiltered = dedupByName(originalFiltered, also)
 	}
 	carryOver, err := a.loadCarryOverLookahead(disk, params)
 	if err != nil {
