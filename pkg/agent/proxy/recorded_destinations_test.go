@@ -154,38 +154,119 @@ func TestSeededDestinationsAreKnownAtEveryStaging(t *testing.T) {
 
 // A destination recorded speaking HTTP/2 is offered h2 while the app starts,
 // before any of its mocks is staged, and only then: from the set's first test
-// on, the live trees decide, per window, as they always did. The next store's
-// seed replaces it.
+// on, the live trees decide, per window, as they always did. Through the
+// replay's own calls, per set: Mock (the session, which reuses the manager
+// and resets it for the set) and the store's seed, in either order, then the
+// staging and a test. The next store's seed replaces the previous one.
 func TestASeededHTTP2DestinationIsOfferedH2WhileTheAppStarts(t *testing.T) {
-	p := testProxy(t)
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	p.mockManager = mm
-	p.SeedRecordedDestinations([]*models.Mock{
-		{Kind: models.HTTP2, Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Scheme: "https", Authority: "api.example:8443"}, ReqTimestampMock: time.Unix(100, 0)}},
+	h2At := func(authority string, at int64) []*models.Mock {
+		return []*models.Mock{{Kind: models.HTTP2, Spec: models.MockSpec{
+			HTTP2Req: &models.HTTP2Req{Scheme: "https", Authority: authority}, ReqTimestampMock: time.Unix(at, 0)}}}
+	}
+	ctx := context.Background()
+	for name, seededFirst := range map[string]bool{"seeded, then the session starts": true, "the session starts, then seeded": false} {
+		t.Run(name, func(t *testing.T) {
+			p := testProxy(t)
+			for i, set := range []struct {
+				seed       []*models.Mock
+				host, prev string
+				test       time.Time
+			}{
+				{h2At("api.example:8443", 100), "api.example", "", time.Unix(200, 0)},
+				{h2At("next.example:8443", 300), "next.example", "api.example", time.Unix(400, 0)},
+			} {
+				session := func() {
+					t.Helper()
+					if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
+						t.Fatalf("Mock: %v", err)
+					}
+				}
+				if seededFirst {
+					p.SeedRecordedDestinations(set.seed)
+					session()
+				} else {
+					session()
+					p.SeedRecordedDestinations(set.seed)
+				}
+				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				if !p.replayTargetHasHTTP2Mock(set.host, 8443) {
+					t.Fatalf("set %d: while the app starts, a destination recorded speaking HTTP/2 is not offered h2", i+1)
+				}
+				if p.replayTargetHasHTTP2Mock("other.example", 8443) || p.replayTargetHasHTTP2Mock(set.host, 9443) {
+					t.Fatalf("set %d: another destination is offered h2", i+1)
+				}
+				if set.prev != "" && p.replayTargetHasHTTP2Mock(set.prev, 8443) {
+					t.Fatalf("set %d: the previous store's HTTP/2 destination outlived the next store", i+1)
+				}
+				if err := p.SetMocksWithWindow(ctx, nil, nil, set.test, set.test.Add(time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if p.replayTargetHasHTTP2Mock(set.host, 8443) {
+					t.Fatalf("set %d: in a test whose window holds no HTTP/2 mock of the destination, the seed still offered h2", i+1)
+				}
+			}
+		})
+	}
+}
+
+// Under exact serving (KEPLOY_PROVEN) a test's own mocks live only in the open
+// view, never in the staged trees. A TLS destination whose HTTP/2 mocks all
+// belong to tests, connected lazily during test-1, is offered h2 from the
+// view: the seed decides while the app starts, test-1's view once it opens.
+// A test whose view owns none of the destination's HTTP/2 mocks is not
+// offered h2, and a staged one the open view hides (the pool's, recorded
+// between tests) offers h2 only while the view shows it.
+func TestUnderExactServingTheOpenTestsHTTP2MocksOfferH2(t *testing.T) {
+	ctx := context.Background()
+	h2 := func(name string, at int64) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP2, Spec: models.MockSpec{
+			HTTP2Req: &models.HTTP2Req{Scheme: "https", Authority: "api.example:8443"}, ReqTimestampMock: time.Unix(at, 0)}}
+	}
+	plain := &models.Mock{Name: "plain", Kind: models.HTTP}
+	start := func(t *testing.T, seed, staged []*models.Mock) (*Proxy, *MockManager) {
+		t.Helper()
+		p := testProxy(t)
+		p.SeedRecordedDestinations(seed)
+		if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
+			t.Fatalf("Mock: %v", err)
+		}
+		if err := p.SetMocksWithWindow(ctx, staged, nil, models.BaseTime, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return p, p.getMockManager()
+	}
+
+	t.Run("the open test's own", func(t *testing.T) {
+		own1 := h2("h2-test-1", 200)
+		p, mm := start(t, []*models.Mock{own1}, nil)
+		mm.ServeExactPool("-", nil)
+		if !p.replayTargetHasHTTP2Mock("api.example", 8443) {
+			t.Fatal("while the app starts, a destination recorded speaking HTTP/2 is not offered h2")
+		}
+		mm.ServeExactTest("test-1", []*models.Mock{own1})
+		if !p.replayTargetHasHTTP2Mock("api.example", 8443) {
+			t.Fatal("test-1 owns an HTTP/2 mock of the destination, and a connection it opens is offered http/1.1")
+		}
+		if p.replayTargetHasHTTP2Mock("api.example", 9443) {
+			t.Fatal("another destination is offered h2")
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{plain})
+		if p.replayTargetHasHTTP2Mock("api.example", 8443) {
+			t.Fatal("test-2 owns no HTTP/2 mock of the destination, and is offered h2")
+		}
 	})
-	if !p.replayTargetHasHTTP2Mock("api.example", 8443) {
-		t.Fatal("while the app starts, a destination recorded speaking HTTP/2 is not offered h2")
-	}
-	if p.replayTargetHasHTTP2Mock("other.example", 8443) || p.replayTargetHasHTTP2Mock("api.example", 9443) {
-		t.Fatal("another destination is offered h2")
-	}
-	start := time.Unix(200, 0)
-	mm.SetMocksWithWindow(nil, nil, start, start.Add(time.Second))
-	if p.replayTargetHasHTTP2Mock("api.example", 8443) {
-		t.Fatal("in a test whose window holds no HTTP/2 mock of the destination, the seed still offered h2")
-	}
-	// The next set: its store's seed replaces the first's, and its staging
-	// (a set boundary) starts its app again, before any of its tests.
-	p.SeedRecordedDestinations([]*models.Mock{
-		{Kind: models.HTTP2, Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Scheme: "https", Authority: "next.example:8443"}, ReqTimestampMock: time.Unix(300, 0)}},
+	t.Run("a staged one the view hides", func(t *testing.T) {
+		pool := h2("h2-pool", 400)
+		p, mm := start(t, nil, []*models.Mock{pool})
+		mm.ServeExactPool("k", []string{pool.Name})
+		if !p.replayTargetHasHTTP2Mock("api.example", 8443) {
+			t.Fatal("between tests the view serves the pool's HTTP/2 mock, and its destination is not offered h2")
+		}
+		mm.ServeExactTest("test-2", []*models.Mock{plain})
+		if p.replayTargetHasHTTP2Mock("api.example", 8443) {
+			t.Fatal("test-2's view hides the pool's HTTP/2 mock, and its destination is offered h2 from the staged trees")
+		}
 	})
-	mm.ResetForReplaySession()
-	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	if !p.replayTargetHasHTTP2Mock("next.example", 8443) {
-		t.Fatal("while the next set's app starts, its destination recorded speaking HTTP/2 is not offered h2")
-	}
-	if p.replayTargetHasHTTP2Mock("api.example", 8443) {
-		t.Fatal("the previous store's HTTP/2 destination outlived the next store")
-	}
 }
