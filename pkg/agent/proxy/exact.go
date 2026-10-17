@@ -178,6 +178,9 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 			st.spent.Delete(n)
 		}
 	}
+	// A carry-over mock of the pool the app consumed as it started is the
+	// retried package's to consume again.
+	m.forgetBootTaken(names)
 	prefix := key + "\x00"
 	m.cursorMu.Lock()
 	for k := range m.cursors {
@@ -681,7 +684,7 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
 		Variables:        variablesOf(mk.Spec),
 		Binds:            bindsOf(mk.Spec),
-	}); err != nil && m.logger != nil {
+	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
 	m.bumpRevisionKind(mk.Kind)
@@ -709,7 +712,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
 		Variables:        variablesOf(served.Spec),
 		Binds:            bindsOf(served.Spec),
-	}); err != nil && m.logger != nil {
+	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
 	m.bumpRevisionKind(owned.Kind)

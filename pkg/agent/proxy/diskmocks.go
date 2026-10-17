@@ -27,9 +27,10 @@ type DiskMocks struct {
 	logger   *zap.Logger
 	closed   bool
 
-	// carry indexes the entries of RegisterCarryOver kinds (models.IsCarryOver
-	// at Add), sorted with entries, so the lookahead load reads only them.
-	// Empty while no kind is registered.
+	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted with
+	// entries, so the lookahead load reads only them. Empty while nothing is
+	// registered.
 	carry []diskEntry
 
 	// staged indexes the entries a models.StagingWithStartup need declares
@@ -302,7 +303,7 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadCarryOver returns the mocks of RegisterCarryOver kinds with request
+// LoadCarryOver returns the carry-over mocks (models.IsCarryOver) with request
 // timestamp in [from, to] (inclusive), for the agent's lookahead load of the
 // carry-over tier. It reads only those entries, whatever else the range holds.
 func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
