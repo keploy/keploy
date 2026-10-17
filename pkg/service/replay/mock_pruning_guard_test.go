@@ -228,6 +228,13 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 				"else keeps their mocks out of the delete",
 		},
 		{
+			name: "a run with a test not judged for a stale mapping never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.mappingStale = true; r.internalErr = true }),
+			reason: "mapping_stale",
+			why: "a wrong answer whose calls diverged from its mapping is no verdict: the mapped mock it left " +
+				"unconsumed may be what a re-record shows it still needs",
+		},
+		{
 			name: "an INTERNAL_ERR run never prunes", removeUnusedMocks: true, instrument: true,
 			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.internalErr = true }),
 			reason: "internal_error",

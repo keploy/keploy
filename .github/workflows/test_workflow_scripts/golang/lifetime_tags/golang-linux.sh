@@ -43,8 +43,9 @@
 #      mapping names the mocks it is served. It FAILS, and keploy test exits
 #      non-zero, on either recording. On one that states lifetimes its mapped
 #      /profile call (per-test) also went unconsumed; keploy would demote a
-#      test whose per-test mocks diverged from its mapping to OBSOLETE (exit
-#      0), but not one a call of which got no recorded answer.
+#      test whose per-test mocks diverged from its mapping to OBSOLETE (not
+#      judged, exit non-zero), but not one a call of which got no recorded
+#      answer.
 #   7. get-profile-1 alone by its mapping, with the token call declared in
 #      keploy.yaml, on a recording that states lifetimes: it passes. The
 #      mapping names the token call under post-orders-1, which this run does

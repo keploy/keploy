@@ -29,8 +29,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #                           whose mappings each list a twin of the test's
 #                           call, which no call consumes, so that nothing
 #                           misses: the assertion RUNS (checked bit, MISSING
-#                           row), and the knob's OBSOLETE -> FAILED / exit 0 ->
-#                           non-zero delta.
+#                           row), and the knob's delta: a demoted wrong
+#                           answer (OBSOLETE, not judged, its set INTERNAL_ERR)
+#                           -> FAILED (its set FAILED). Both runs exit
+#                           non-zero: a demoted wrong answer is never a pass.
 #
 # Neither phase is sufficient alone — a writer stuck at "checked" passes phase 3
 # and a writer stuck at "not checked" passes phase 1-2. Read the long comment
@@ -672,6 +674,16 @@ if [ ! -s ndjson_strict.txt ]; then
     cat ndjson_strict_err.txt
     exit 1
 fi
+# The baseline's set verdicts, read now: step 10 removes its reports.
+shopt -s nullglob
+strict_reports=( ./knob-run/keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+if [ ${#strict_reports[@]} -eq 0 ]; then
+    echo "::error::the per-test-tier run wrote no report"
+    exit 1
+fi
+strict_set_statuses=$(yq -N '.status' "${strict_reports[@]}" | sort -u | tr '\n' ' ')
+strict_set_reasons=$(yq -N '.failure_reason // ""' "${strict_reports[@]}")
 
 # 9pre. THE PRECONDITION FOR `all(...)`, diagnosed separately so 9a's failure
 #       can only mean one thing.
@@ -800,12 +812,14 @@ echo "✓ the persisted report carries deps_checked: true and the MISSING depend
 #         (OBSOLETE, failsTestSet=false) and to mismatchLogVetoedFailure when it
 #         is on (FAILED, failsTestSet=true). That is a deterministic branch on
 #         the flag, not a timing-dependent outcome.
-#       * THE EXIT CODE, as a two-sided delta. The baseline strict_rc must be 0
-#         AND the knob run must be non-zero, so the knob is provably the ONLY
-#         reason the run went red. Asserting only `strict_assert_rc != 0` would
-#         pass for the wrong reason the day a pokeapi drift flips the baseline
-#         red too — and this suite mutates mocks on purpose, so that is a live
-#         possibility rather than a hypothetical.
+#       * THE SET VERDICT, as a two-sided delta. A demoted wrong answer is not
+#         judged, so the baseline's sets are INTERNAL_ERR for the stale mapping
+#         alone (their reason says so) and the run exits non-zero; the knob
+#         run's sets are FAILED. The exit code no longer tells the two apart
+#         (neither run is a pass), so the delta is read from the set reports:
+#         a baseline that is red for any other reason (a pokeapi drift; this
+#         suite mutates mocks on purpose) has another status or reason, and
+#         fails here.
 rm -rf ./knob-run/keploy/reports
 KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./knob-run --delay 7 --assert-dependencies --generateGithubActions=false 2>&1 | tee strict_assert_logs.txt
 strict_assert_rc=${PIPESTATUS[0]}
@@ -846,11 +860,12 @@ if [ ! -s ndjson_strict_assert.txt ]; then
     exit 1
 fi
 
-# 11a. THE STATUS DELTA. Knob off -> OBSOLETE (demoted, test set survives);
-#      knob on -> FAILED. Same recording, same mocks, same environment.
-if ! jq -es 'length > 0 and all(.status == "OBSOLETE")' ndjson_strict.txt > /dev/null; then
-    echo "::error::the BASELINE run (step 9, per-test tier, NO --assert-dependencies) did not demote its tests to OBSOLETE, so there is no delta for --assert-dependencies to be measured against. A mock-set mismatch with a failing response is supposed to be demoted, not failed, until a veto flag says otherwise."
-    jq -s 'map({test_case_id, status, dependencies_checked, failure_categories})' ndjson_strict.txt
+# 11a. THE STATUS DELTA. Knob off -> OBSOLETE and not judged (a demoted wrong
+#      answer: verdict_unknown, never a pass); knob on -> FAILED. Same
+#      recording, same mocks, same environment.
+if ! jq -es 'length > 0 and all(.status == "OBSOLETE" and .verdict_unknown == true)' ndjson_strict.txt > /dev/null; then
+    echo "::error::the BASELINE run (step 9, per-test tier, NO --assert-dependencies) did not demote its tests to OBSOLETE and leave them not judged (verdict_unknown), so there is no delta for --assert-dependencies to be measured against. A mock-set mismatch with a failing response is demoted, not failed, until a veto flag says otherwise, and a demoted wrong answer has no verdict."
+    jq -s 'map({test_case_id, status, verdict_unknown, verdict_unknown_reason, dependencies_checked, failure_categories})' ndjson_strict.txt
     exit 1
 fi
 if ! jq -es 'length > 0 and all(.status == "FAILED")' ndjson_strict_assert.txt > /dev/null; then
@@ -859,17 +874,24 @@ if ! jq -es 'length > 0 and all(.status == "FAILED")' ndjson_strict_assert.txt >
     exit 1
 fi
 
-# 11b. THE EXIT-CODE DELTA, two-sided: the knob must be the ONLY reason this
-#      run is red.
-if [ "$strict_rc" -ne 0 ] || [ "$strict_assert_rc" -eq 0 ]; then
-    echo "::error::--assert-dependencies must be the ONLY reason this run is red: the baseline (step 9, same recording, same env, no knob) exited $strict_rc and must be 0, and the knob run exited $strict_assert_rc and must be non-zero. A baseline that is already red means this step could pass with the flag doing nothing."
+# 11b. THE SET-VERDICT DELTA, two-sided. The baseline's sets are not judged,
+#      for the stale mapping alone, and its run is red (a demoted wrong answer
+#      is never a pass); the knob run's sets are FAILED, and it is red.
+strict_assert_set_statuses=$(yq -N '.status' "${strict_assert_reports[@]}" | sort -u | tr '\n' ' ')
+if [ "$strict_set_statuses" != "INTERNAL_ERR " ] || ! grep -q 'stale mapping' <<<"$strict_set_reasons" || [ "$strict_rc" -eq 0 ]; then
+    echo "::error::the baseline (step 9, same recording, same env, no knob) must leave every set not judged for the stale mapping alone (INTERNAL_ERR, its reason naming the stale mapping and the remedy) and exit non-zero: its sets are '$strict_set_statuses', it exited $strict_rc. A baseline that is red for another reason means this step could pass with the flag doing nothing."
+    printf '%s\n' "$strict_set_reasons"
     echo "--- tail of baseline (strict_logs.txt) ---"
     tail -20 strict_logs.txt
+    exit 1
+fi
+if [ "$strict_assert_set_statuses" != "FAILED " ] || [ "$strict_assert_rc" -eq 0 ]; then
+    echo "::error::--assert-dependencies must turn the not-judged sets into FAILED ones: its sets are '$strict_assert_set_statuses' and it exited $strict_assert_rc (must be non-zero)."
     echo "--- tail of knob run (strict_assert_logs.txt) ---"
     tail -40 strict_assert_logs.txt
     exit 1
 fi
-echo "✓ --assert-dependencies vetoed the OBSOLETE demotion into a FAILED test set (baseline exit $strict_rc -> knob exit $strict_assert_rc)"
+echo "✓ --assert-dependencies vetoed the OBSOLETE demotion: not judged (INTERNAL_ERR, exit $strict_rc) -> FAILED (exit $strict_assert_rc)"
 
 # 11c. And the flag still did not invent the assertion: it changed the STATUS a
 #      missing dependency produces, not whether the check ran. Step 8 asserts
@@ -1019,7 +1041,7 @@ echo "✓ KEPLOY_PROVEN=1: a test that no longer makes a recorded call fails, wi
 # 13. STRICT FAILURE UNDER THE PROVEN SWITCH (KEPLOY_PROVEN=1, the proven
 #     model's staging gate). Step 9's run, unchanged except for the switch: no
 #     --assert-dependencies and no --strict-failure. Step 11a/11b proved that
-#     baseline demotes every test to OBSOLETE and exits 0. Under the switch
+#     baseline demotes every test to OBSOLETE, not judged. Under the switch
 #     strict failure is on for everyone, so a test whose response differs is
 #     FAILED whatever its mocks did, and the run is red: the switch is the only
 #     difference, so it is the only reason.
@@ -1041,7 +1063,7 @@ if [ "$proven_strict_rc" -eq 0 ]; then
     tail -40 proven_strict_logs.txt
     exit 1
 fi
-echo "✓ KEPLOY_PROVEN=1 vetoed the OBSOLETE demotion: every test FAILED and the run exited $proven_strict_rc (step 9 without the switch: OBSOLETE, exit $strict_rc)"
+echo "✓ KEPLOY_PROVEN=1 vetoed the OBSOLETE demotion: every test FAILED and the run exited $proven_strict_rc (step 9 without the switch: OBSOLETE and not judged, exit $strict_rc)"
 
 # 14. STRICT HTTP MATCHING UNDER THE PROVEN SWITCH (design v14 row S1). Step
 #     12b is the control: the recording as recorded replays green under the
@@ -1157,8 +1179,10 @@ echo "    and --assert-dependencies failed nothing it could not assert;"
 echo "  - with the per-test tier in force (KEPLOY_STRICT_MOCK_WINDOW=1) the same"
 echo "    recording drove the other branch: the assertion RAN and reported the"
 echo "    vanished dependency as MISSING, the inert warning stayed silent, and"
-echo "    --assert-dependencies moved those verdicts OBSOLETE -> FAILED and the"
-echo "    exit code 0 -> non-zero, which no knob-independent label can fake;"
+echo "    the demoted wrong answers were not judged (OBSOLETE, verdict_unknown, set"
+echo "    INTERNAL_ERR for the stale mapping, run red), and --assert-dependencies"
+echo "    moved them to FAILED (set FAILED), which no knob-independent label can"
+echo "    fake;"
 echo "  - under KEPLOY_PROVEN=1 a test owns every data-plane mock its mapping"
 echo "    lists: the unmutated recording replays green, and a test fails when it"
 echo "    does not make a call it recorded or a call got no recorded answer."

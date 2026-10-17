@@ -208,6 +208,11 @@ type runShape struct {
 	// last test that no mock answered fail it (unclaimedCalls). Empty
 	// otherwise.
 	unclaimedWhy string
+	// staleWhy names the tests of a set with a verdict of its own (FAILED,
+	// a partial run's APP_FAULT) that are not judged for a stale mapping
+	// (FailureInfo.MappingStale). Empty otherwise: a set not judged says it
+	// in notJudged.
+	staleWhy string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -224,6 +229,19 @@ func withUnverifiedNote(base string, shape runShape) string {
 }
 
 func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
+	reason := describeTestSetVerdict(status, testCaseResults, shape)
+	switch {
+	case shape.staleWhy == "":
+		return reason
+	case reason == "":
+		return shape.staleWhy
+	}
+	return reason + "; " + shape.staleWhy
+}
+
+// describeTestSetVerdict is describeTestSetFailure less the tests a set with a
+// verdict of its own does not judge for a stale mapping (runShape.staleWhy).
+func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 		// A run that stopped part-way gets its own wording, but ONLY when this
@@ -3198,7 +3216,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// explanation of its FAILED verdict and must be printed
 			// (assertTestMocks is on under the switch). --strict-failure keeps
 			// it FAILED too (resolveTestOutcome), so its diff is printed.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks() || r.strictFailure())
+			// Every failed answer's diff is printed: a wrong answer demoted to
+			// OBSOLETE is not judged and fails the run (FailureInfo.MappingStale),
+			// so what differed is what its user reads before re-recording.
+			emitFailureLogs := true
 
 			// This test's misses are read now, once, with its response in, so
 			// the verdict can hold a miss. Every result written for this test
@@ -3392,9 +3413,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     making an outgoing call the recording says it makes. The
 			//     response can still match — a deterministic dependency, a
 			//     cached value, a swallowed error — so the response check
-			//     alone cannot catch it, and today the test is silently
-			//     demoted to OBSOLETE with the run still exiting 0
-			//     (keploy-consumer-design-v2.md §5, false-pass row 0).
+			//     alone cannot catch it, and today such a test passes. (One
+			//     whose response failed too is demoted to OBSOLETE, which
+			//     leaves it and its set not judged: false-pass row 0 of
+			//     keploy-consumer-design-v2.md §5, closed.)
 			//     DEFAULT OFF: every existing suite with a drifting mock pool
 			//     would flip red on upgrade otherwise. The DepResult rows are
 			//     written and rendered either way, so with the knob off the
@@ -3788,6 +3810,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							ActualMocks:   actualMockInfos,
 						}
 					}
+					// A wrong answer demoted to OBSOLETE has no verdict
+					// (FailureInfo.MappingStale), and its set has none.
+					if testStatus == models.TestStatusObsolete {
+						testCaseResult.FailureInfo.MappingStale = mappingStaleReason
+					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
 				} else {
 					utils.LogError(r.logger, nil, "test case result is nil")
@@ -4090,7 +4117,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under the switch, or --strict-failure, a diverged mock set
 			// demotes nothing, so the diff of a failed answer is printed as
 			// the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
+			// Every failed answer's diff is printed, as on the regular path.
+			emitFailureLogs := true
 
 			if !ok {
 				// Handle streaming response type
@@ -4255,13 +4283,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Re-evaluate mismatch now that consumedMocks covers the full
 			// test case (pre-stream + in-stream). If CompareHTTPStream
 			// already forced emitFailureLogs=false on a streaming body
-			// mismatch, keep it suppressed — don't un-suppress just because
-			// the mock set still looks like a subset.
+			// mismatch, it stays suppressed: that mismatch was logged.
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
-				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, r.strictFailure())
-				}
 			}
 
 			// Each use place is asserted on its own: the headers', and each
@@ -4546,6 +4570,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// are the ones that verdict read.
 				testCaseResult.FailureInfo.TestMocksUnread = streamTestMocksUnread
 				testCaseResult.FailureInfo.StreamHeldOpen = streamHeldOpen
+				if testStatus == models.TestStatusObsolete {
+					testCaseResult.FailureInfo.MappingStale = mappingStaleReason
+				}
 				if provenswitch.On() {
 					attachStreamDepResults(testCaseResult, testStatus, expectedTestMockMappings[tc.Name], consumedMocks, streamArmed && streamConsumedErr == nil, reusableMockNames, mockKindByName, mockLookup)
 				}
@@ -5163,6 +5190,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
 	}
+
+	// A wrong answer demoted to OBSOLETE (switch off) has no verdict
+	// (FailureInfo.MappingStale). A set that would read PASSED for it has
+	// none either: never the silent pass it was (false-pass row 0). One that
+	// has a verdict of its own keeps it, and its reason names the tests not
+	// judged: a FAILED test failed whatever another's mapping says, a set that
+	// stopped part-way (APP_FAULT, above) says so first, and so does one whose
+	// calls reached a real dependency (captureIncomplete, just above). Placed
+	// after those, so none is replaced by a remedy that re-records over it.
+	staleMapping := testsWithStaleMapping(testCaseResults)
+	staleWhy, staleOnly := "", ""
+	if len(staleMapping) > 0 {
+		if testSetStatus == models.TestSetStatusPassed || notJudged != "" {
+			why := staleMappingReason(staleMapping)
+			if notJudged == "" {
+				staleOnly = why
+			}
+			notJudged = alsoNotJudged(notJudged, why)
+			r.logger.Error("test-set is not judged: some of its tests answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", staleMapping),
+				zap.String("next_step", models.MappingStaleRemedy))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		} else {
+			staleWhy = staleMappingNote(staleMapping)
+			r.logger.Error("some tests of the test-set are not judged: they answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; the set keeps its own status",
+				zap.String("test-set", testSetID),
+				zap.String("status", string(testSetStatus)),
+				zap.Strings("tests", staleMapping),
+				zap.String("next_step", models.MappingStaleRemedy))
+		}
+	}
 	// Under the proven switch the set is judged only if one agent process
 	// answered for all of it (watchAgent). Read here, after the set's last
 	// read of its agent (the losses after its last test, above): an agent
@@ -5232,7 +5292,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusIgnored
 	}
 
-	if !shouldIncludeAppLogs(testSetStatus) {
+	// A set not judged only for a stale mapping is no application's fault:
+	// its report carries no application logs.
+	if !shouldIncludeAppLogs(testSetStatus) || (staleOnly != "" && notJudged == staleOnly) {
 		appLogs = ""
 	} else if appLogs == "" {
 		// Was gated on APP_HALTED, which made the fallback unreachable for every
@@ -5265,7 +5327,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason})),
+		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy})),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -5330,8 +5392,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	pruneEnabled := r.removeUnusedMocks() && r.instrument
 	// INTERNAL_ERR: keploy lost part of the run, e.g. a result insert. Not
 	// a set that is INTERNAL_ERR only for a capture count that could not be
-	// read (under the proven switch, above): that is capture_unverified.
-	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged
+	// read (under the proven switch, above): that is capture_unverified. Nor
+	// one not judged only for a stale mapping: that is mapping_stale.
+	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged && (staleOnly == "" || notJudged != staleOnly)
 	// Read once: the prune and the mappings hold below decide on the same value.
 	appUnreachable := anyAppConnectionError(testCaseResults)
 	prune, pruneRefusal := shouldPrune(r.removeUnusedMocks(), r.instrument, pruneRun{
@@ -5342,6 +5405,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		appUnreachable:      appUnreachable,
 		captureIncomplete:   captureIncomplete != "" || testsLostCapture,
 		captureUnverified:   captureUnverified != "",
+		mappingStale:        len(staleMapping) > 0,
 		success:             success,
 		failure:             failure,
 		obsolete:            obsolete,
@@ -7004,6 +7068,10 @@ func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
 //     stall): the mock recorded for it was consumed by nobody either.
 //   - not_every_test_got_a_verdict: a subset or stopped run. The tests it did
 //     not score consumed nothing, and only mappings.yaml protects their mocks.
+//   - mapping_stale: a test answered wrong while its calls diverged from its
+//     recorded mapping (FailureInfo.MappingStale). What it consumed is no
+//     verdict's, and the mapped mock it left unconsumed may be what a
+//     re-record shows it still needs.
 //   - internal_error: keploy lost part of the run, such as a result insert.
 //   - results_unreadable: the results the rules below read are missing or short.
 //   - no_answer: a request consumed nothing for want of an answer.
@@ -7027,6 +7095,8 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 		return false, "capture_incomplete"
 	case !run.allTestsGotAVerdict:
 		return false, "not_every_test_got_a_verdict"
+	case run.mappingStale:
+		return false, "mapping_stale"
 	case run.internalErr:
 		return false, "internal_error"
 	case !run.resultsComplete:
@@ -7054,6 +7124,7 @@ type pruneRun struct {
 	appUnreachable             bool // anyAppConnectionError over the results read back
 	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete), or lost a call (proven switch)
 	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
+	mappingStale               bool // a test is not judged for a stale mapping (FailureInfo.MappingStale)
 	success, failure, obsolete int
 	preserveFailedMocks        bool
 }
