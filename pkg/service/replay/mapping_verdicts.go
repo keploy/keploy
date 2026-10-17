@@ -31,10 +31,11 @@ import (
 // A passing test's entry is what the window attribution gives it, not only
 // what it consumed itself: a flagged mock (a carry-over send, a pushed
 // message) recorded in its window is its own wherever it was consumed, so one
-// that a failing test consumed can be in a passing test's entry, and one from
-// before every window in the startup section, which a run where some test
-// passed writes. That is where record put the mock, not the failing test's
-// replay.
+// that a failing test consumed can be in a passing test's entry. The startup
+// section, which a run where some test passed writes, takes a flagged mock
+// from before every window and the app's startup traffic (bootBand), whichever
+// test's drain caught it, a failing one's included.
+// That is where record put the mock, not the failing test's replay.
 //
 // This is the mapping only. The mocks themselves are the prune's: with
 // --remove-unused-mocks and PreserveFailedMocks off, the prune still deletes
