@@ -117,6 +117,40 @@ func testsWithStreamsHeldOpen(results []models.TestResult) []string {
 	return out
 }
 
+// mappingStaleReason is an OBSOLETE test's FailureInfo.MappingStale: why a
+// wrong answer whose dependency calls diverged from its recorded mapping has
+// no verdict.
+const mappingStaleReason = "not judged: it answered differently from its recording, and the dependency calls it made diverged from its recorded mapping (it left a recorded mock of the mapping unconsumed, or consumed one outside it), so keploy cannot tell a regression from a stale mapping; " + models.MappingStaleRemedy
+
+// testsWithStaleMapping is the tests of results demoted to OBSOLETE for a wrong
+// answer (FailureInfo.MappingStale), which have no verdict, nor has their
+// set. Switch off: the only place a wrong answer is demoted.
+func testsWithStaleMapping(results []models.TestResult) []string {
+	var out []string
+	for _, r := range results {
+		if r.Status == models.TestStatusObsolete && r.FailureInfo.MappingStale != "" {
+			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// staleMappingReason is the test-set report's reason for a set left unjudged
+// by tests demoted to OBSOLETE (testsWithStaleMapping).
+func staleMappingReason(tests []string) string {
+	return fmt.Sprintf("not judged: %d test(s) (%s) answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; %s",
+		len(tests), strings.Join(tests, ", "), models.MappingStaleRemedy)
+}
+
+// staleMappingNote is, for a set with a verdict of its own (FAILED, a partial
+// run's APP_FAULT), its report's note on the tests of it not judged for a
+// stale mapping: the set's own result comes first, since re-recording would
+// write over it.
+func staleMappingNote(tests []string) string {
+	return fmt.Sprintf("%d test(s) (%s) were not judged: they answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; deal with the set's own result first, and only then %s",
+		len(tests), strings.Join(tests, ", "), models.MappingStaleRemedy)
+}
+
 // streamsHeldOpenReason is the test-set report's reason for a set left
 // unjudged by tests whose app kept its stream open on keepalives, past the
 // recording or short of it (pkg.ErrStreamStalled).

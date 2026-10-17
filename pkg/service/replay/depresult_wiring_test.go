@@ -19,7 +19,7 @@ import (
 //
 // The BEHAVIOUR of every extracted seam is table-tested above
 // (resolveTestOutcome, resolveTestStatus, attachDepResults, buildDepResults,
-// shouldEmitFailureLogs, recordUnexercised). What is still unpinned is the
+// recordUnexercised). What is still unpinned is the
 // WIRING: that RunTestSet actually calls them, with the arguments that make
 // them mean what the tests say they mean.
 //
@@ -180,14 +180,12 @@ func TestRunTestSetWiring(t *testing.T) {
 			why:        "The verdict signal and the rows that explain it must come from identical inputs.",
 		},
 		{
-			name:       "the response diff is un-suppressed through the tested predicate",
+			name:       "the response diff is printed for every failed answer",
 			assignment: "emitFailureLogs",
-			// assertTestMocks, not AssertDependencies: the knob is read through
-			// r.assertTestMocks(), which answers for --assert-dependencies AND
-			// for the proven switch that turns the assertion on for everyone.
-			want: []string{"shouldEmitFailureLogs", "mockSetMismatch", "assertTestMocks", "strictFailure"},
-			why: "Reverting this to `!mockSetMismatch` hands the user a test that --assert-dependencies " +
-				"or --strict-failure just marked FAILED with its response diff suppressed as 're-record noise'.",
+			want:       []string{"true"},
+			why: "Reverting this to `!mockSetMismatch` hides the diff of a wrong answer demoted to OBSOLETE, " +
+				"which now fails the run as not judged, and of one --assert-dependencies or --strict-failure " +
+				"marked FAILED: a red run with nothing to look at before re-recording over it.",
 		},
 		{
 			name:       "the verdict goes through the single seam, carrying the raw response result and all three knobs",

@@ -277,14 +277,28 @@ type FailureInfo struct {
 	// built as a test with no answer is (FAILED), and the test has no
 	// verdict all the same (VerdictUnknown), nor has its set.
 	AnswerStalled string `json:"answer_stalled,omitempty" yaml:"answer_stalled,omitempty"`
+	// MappingStale says why an OBSOLETE test has no verdict: it answered
+	// differently from its recording while the dependency calls it made
+	// diverged from what its recorded mapping lists (a recorded mock of its
+	// mapping left unconsumed, or a mock outside it consumed). keploy cannot
+	// tell a regression from a stale mapping then, so the test is not
+	// judged, and neither is its set: never the silent pass an OBSOLETE once
+	// was (false-pass row 0). Set with the proven switch off, the only place
+	// a wrong answer is demoted.
+	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
 }
+
+// MappingStaleRemedy is what to do about a test whose recorded mapping
+// diverged from what it consumed (FailureInfo.MappingStale).
+const MappingStaleRemedy = "re-record the test-set, or run keploy test with --disable-mapping --update-test-mapping to replay it by recorded time and write its mapping afresh"
 
 // NotJudged is why the test has no verdict, whatever its status says: what
 // keploy could not read or check of it (UnmatchedCallsUnread,
 // TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
 // capture at all (CannotCapture, decision 20), one reason each.
 // Empty for a judged test. Each is set only under the proven switch, so a
-// result written without it is never unjudged.
+// result written without it is never unjudged, but for MappingStale, which is
+// set with it off, the only place a wrong answer is demoted to OBSOLETE.
 func (fi FailureInfo) NotJudged() []string {
 	var why []string
 	if fi.UnmatchedCallsUnread {
@@ -308,6 +322,9 @@ func (fi FailureInfo) NotJudged() []string {
 	if fi.AnswerStalled != "" {
 		why = append(why, fi.AnswerStalled)
 	}
+	if fi.MappingStale != "" {
+		why = append(why, fi.MappingStale)
+	}
 	return why
 }
 
@@ -315,8 +332,9 @@ func (fi FailureInfo) NotJudged() []string {
 // one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
 // (what could not be read can only add to why it failed) unless nothing was
 // compared because the stall rule ended its answer (AnswerStalled), and for
-// one keploy skipped (IGNORED, which says it has no verdict). JUnit and the
-// NDJSON mark a test by this one predicate.
+// one keploy skipped (IGNORED, which says it has no verdict). MappingStale
+// counts on an OBSOLETE row only. JUnit and the NDJSON mark a test by this one
+// predicate.
 func (r TestResult) VerdictUnknown() []string {
 	if r.Status == TestStatusIgnored {
 		return nil
@@ -327,7 +345,13 @@ func (r TestResult) VerdictUnknown() []string {
 	// A FAILED row whose answer the stall rule ended (AnswerStalled) was
 	// compared with nothing: its FAILED says no answer came, not that one
 	// differed.
-	return r.FailureInfo.NotJudged()
+	fi := r.FailureInfo
+	if r.Status != TestStatusObsolete {
+		// MappingStale is a demoted wrong answer's: a row a hook relabelled
+		// since says its own verdict.
+		fi.MappingStale = ""
+	}
+	return fi.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume
