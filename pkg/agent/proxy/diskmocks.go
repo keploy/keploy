@@ -38,6 +38,11 @@ type DiskMocks struct {
 	// Empty while no kind declares one.
 	staged []diskEntry
 
+	// destinations is, for each recorded destination a mock on disk reached
+	// (destinationKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination, resident.
+	destinations map[string]diskEntry
+
 	// statements is the statement catalog: for each statement a mock on disk
 	// records (its kind and models.StatementKey), the entry of the first one
 	// recorded (LoadStatements). One entry per statement, resident.
@@ -170,6 +175,14 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	}
 	if models.IsStagedAtStaging(m) {
 		d.staged = append(d.staged, e)
+	}
+	if k := destinationKey(m); k != "" {
+		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.destinations == nil {
+				d.destinations = make(map[string]diskEntry)
+			}
+			d.destinations[k] = e
+		}
 	}
 	if k := models.StatementKey(m); k != "" {
 		key := string(m.Kind) + "\x00" + k
@@ -373,6 +386,30 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 	}
 	sel := make([]diskEntry, 0, len(d.statements))
 	for _, e := range d.statements {
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	sort.Slice(sel, func(i, j int) bool {
+		if sel[i].reqTsNano != sel[j].reqTsNano {
+			return sel[i].reqTsNano < sel[j].reqTsNano
+		}
+		return sel[i].off < sel[j].off
+	})
+	return d.decodeAll(sel)
+}
+
+// LoadDestinations returns, in recorded order, the first mock on disk of
+// each recorded destination (destinationKey): what the recording says of its
+// destinations, bounded by how many it reached, for the proxy's destination
+// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.destinations))
+	for _, e := range d.destinations {
 		sel = append(sel, e)
 	}
 	d.mu.Unlock()
