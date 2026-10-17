@@ -1182,40 +1182,51 @@ func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 		return nil, false, nil
 	}
 	switch {
-	case keysEqual(keys, []string{"int", "exp", "nan", "infinitymodifier", "valid"}):
+	case keysEqual(keys, []string{"int", "exp", "nan", "infinitymodifier", "valid"}) && yamlFieldsAre(node, yamlNumericFields):
 		v, err := decodePgNumericMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"microseconds", "days", "months", "valid"}):
+	case keysEqual(keys, []string{"microseconds", "days", "months", "valid"}) && yamlFieldsAre(node, yamlIntervalFields):
 		v, err := decodePgIntervalMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"microseconds", "valid"}):
+	case keysEqual(keys, []string{"microseconds", "valid"}) && yamlFieldsAre(node, yamlTimeFields):
 		v, err := decodePgTimeMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"bytes", "len", "valid"}):
+	case keysEqual(keys, []string{"bytes", "len", "valid"}) && yamlFieldsAre(node, yamlBitsFields):
 		v, err := decodePgBitsMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"a", "b", "c", "valid"}):
+	case keysEqual(keys, []string{"a", "b", "c", "valid"}) && yamlFieldsAre(node, yamlLineFields):
 		v, err := decodePgLineMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"p", "closed", "valid"}):
+	case keysEqual(keys, []string{"p", "closed", "valid"}) && yamlFieldsAre(node, yamlPathFields):
 		v, err := decodePgPathMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"p", "r", "valid"}):
+	case keysEqual(keys, []string{"p", "r", "valid"}) && yamlFieldsAre(node, yamlCircleFields):
 		v, err := decodePgCircleMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"blocknumber", "offsetnumber", "valid"}):
+	case keysEqual(keys, []string{"blocknumber", "offsetnumber", "valid"}) && yamlFieldsAre(node, yamlTIDFields):
 		v, err := decodePgTIDMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"lexemes", "valid"}):
+	case keysEqual(keys, []string{"lexemes", "valid"}) && yamlFieldsAre(node, yamlTSVectorFields):
 		v, err := decodePgTSVectorMapping(node)
 		return v, true, err
-	case keysEqual(keys, []string{"lower", "upper", "lowertype", "uppertype", "valid"}):
+	case keysEqual(keys, []string{"lower", "upper", "lowertype", "uppertype", "valid"}) && yamlFieldsAre(node, yamlRangeFields):
 		v, err := decodePgRangeMapping(node)
 		return v, true, err
 	case keysEqual(keys, []string{"prefix"}):
+		// A {prefix} or {macaddr} mapping is the cell's only with the
+		// value its marshaller writes, a prefix's text or !!binary: an
+		// application's jsonb document can have the key too (a
+		// {"prefix": "img_"}, a {"macaddr": "08:00:2b:01:02:03"}), and is
+		// the document, where it used to fail the mock's load.
+		if !isNetipPrefixMapping(node) {
+			return nil, false, nil
+		}
 		v, err := decodeNetipPrefixMapping(node)
 		return v, true, err
 	case keysEqual(keys, []string{"macaddr"}):
+		if !binaryFieldMapping(node, "macaddr") {
+			return nil, false, nil
+		}
 		v, err := decodeHardwareAddrMapping(node)
 		return v, true, err
 	case keysEqual(keys, []string{"uuid"}):
@@ -1237,6 +1248,90 @@ func decodePgUntaggedMapping(node *yaml.Node) (any, bool, error) {
 		return v, true, err
 	}
 	return nil, false, nil
+}
+
+// yamlKind is a set of the kinds of YAML node a pgtype shape's field is
+// written as, for decodePgUntaggedMapping's yamlFieldsAre.
+type yamlKind uint16
+
+const (
+	yamlInt yamlKind = 1 << iota
+	yamlFloat
+	yamlBool
+	yamlStr
+	yamlBinary
+	yamlNull
+	yamlSeq
+	yamlMap
+	yamlAny = yamlInt | yamlFloat | yamlBool | yamlStr | yamlBinary | yamlNull | yamlSeq | yamlMap
+)
+
+// The kinds each shape's marshaller writes its fields as (a float field
+// also an int, as a hand-edited fixture can hold; a bit string's bytes
+// also a sequence of ints, as decodePgBitsMapping reads one; a numeric's
+// int also a bare integer). An application's jsonb document with a
+// shape's keys and other kinds of value (a {"bytes": 2048, "len": 1,
+// "valid": true}, a {"microseconds": "x", "valid": "y"}) is the
+// document's, where it used to fail the mock's load; a value of the right
+// kind that the decoder rejects (an out-of-range field) still fails it.
+var (
+	yamlNumericFields  = map[string]yamlKind{"int": yamlStr | yamlInt, "exp": yamlInt, "nan": yamlBool, "infinitymodifier": yamlInt, "valid": yamlBool}
+	yamlIntervalFields = map[string]yamlKind{"microseconds": yamlInt, "days": yamlInt, "months": yamlInt, "valid": yamlBool}
+	yamlTimeFields     = map[string]yamlKind{"microseconds": yamlInt, "valid": yamlBool}
+	yamlBitsFields     = map[string]yamlKind{"bytes": yamlBinary | yamlSeq, "len": yamlInt, "valid": yamlBool}
+	yamlLineFields     = map[string]yamlKind{"a": yamlFloat | yamlInt, "b": yamlFloat | yamlInt, "c": yamlFloat | yamlInt, "valid": yamlBool}
+	yamlPathFields     = map[string]yamlKind{"p": yamlSeq, "closed": yamlBool, "valid": yamlBool}
+	yamlCircleFields   = map[string]yamlKind{"p": yamlMap, "r": yamlFloat | yamlInt, "valid": yamlBool}
+	yamlTIDFields      = map[string]yamlKind{"blocknumber": yamlInt, "offsetnumber": yamlInt, "valid": yamlBool}
+	yamlTSVectorFields = map[string]yamlKind{"lexemes": yamlSeq, "valid": yamlBool}
+	yamlRangeFields    = map[string]yamlKind{"lower": yamlAny, "upper": yamlAny, "lowertype": yamlInt, "uppertype": yamlInt, "valid": yamlBool}
+)
+
+// yamlFieldsAre reports whether each field of node, a mapping, that kinds
+// names holds a node of one of its kinds (any node at all, for yamlAny: a
+// range's bound is whatever its value's marshaller writes, a !!timestamp
+// among them).
+func yamlFieldsAre(node *yaml.Node, kinds map[string]yamlKind) bool {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return false
+	}
+	for k, want := range kinds {
+		n := fields[k]
+		for depth := 0; n != nil && n.Kind == yaml.AliasNode && depth < 16; depth++ {
+			n = n.Alias
+		}
+		if n == nil || want != yamlAny && want&yamlKindOf(n) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlKindOf is the kind of node n.
+func yamlKindOf(n *yaml.Node) yamlKind {
+	switch n.Kind {
+	case yaml.SequenceNode:
+		return yamlSeq
+	case yaml.MappingNode:
+		return yamlMap
+	case yaml.ScalarNode:
+		switch n.ShortTag() {
+		case "!!int":
+			return yamlInt
+		case "!!float":
+			return yamlFloat
+		case "!!bool":
+			return yamlBool
+		case "!!str":
+			return yamlStr
+		case "!!binary":
+			return yamlBinary
+		case "!!null":
+			return yamlNull
+		}
+	}
+	return 0
 }
 
 // pgMappingKeySet returns the lowercased keys of a mapping node, or nil
@@ -1805,6 +1900,21 @@ func decodePgMultirangeNode(node *yaml.Node) (pgtype.Multirange[pgtype.Range[any
 	return out, nil
 }
 
+// isNetipPrefixMapping reports whether node, a {prefix} mapping, holds a
+// prefix's text, as marshalNetipPrefixYAML writes it.
+func isNetipPrefixMapping(node *yaml.Node) bool {
+	fields, err := pgMappingFields(node)
+	if err != nil {
+		return false
+	}
+	pn := fields["prefix"]
+	if pn == nil || pn.Kind != yaml.ScalarNode {
+		return false
+	}
+	_, err = netip.ParsePrefix(pn.Value)
+	return err == nil
+}
+
 // decodeNetipPrefixMapping reconstructs a netip.Prefix from the
 // `{prefix: "<canonical>"}` mapping shape emitted by
 // marshalNetipPrefixYAML. The string body is parsed with
@@ -1944,25 +2054,33 @@ func decodeUUIDBytesMapping(node *yaml.Node) ([16]uint8, error) {
 
 // isPostgresV3CellRawNode reports whether a YAML mapping node has
 // exactly the `format` and `bytes` keys that `PostgresV3CellRaw`
-// marshals to. A mapping with only these two keys is the unambiguous
-// signature of a raw-OID fallback cell; any other shape (e.g. future
-// composite types, ad-hoc maps from custom recorders) is left to the
-// generic any-decode path.
+// marshals to, with values of the kinds it writes and decodes: an integer
+// format, and bytes as a sequence (yaml.v3 writes a []byte as one of
+// ints, `[]` when empty) or null. Such a mapping is the signature of a
+// raw-OID fallback cell; any other shape (e.g. future composite types,
+// ad-hoc maps from custom recorders, an application's jsonb document like
+// {"format": "png", "bytes": 2048}, or one holding bytes, which yaml.v3
+// writes as !!binary and the raw cell's []byte does not decode, and
+// which used to fail the mock's load) is left to the generic any-decode
+// path. An integer format out of int16's range still fails the decode.
 func isPostgresV3CellRawNode(node *yaml.Node) bool {
 	if node == nil || node.Kind != yaml.MappingNode || len(node.Content) != 4 {
 		return false
 	}
 	seenFormat, seenBytes := false, false
 	for i := 0; i < len(node.Content); i += 2 {
-		key := node.Content[i]
+		key, val := node.Content[i], node.Content[i+1]
+		for depth := 0; val.Kind == yaml.AliasNode && val.Alias != nil && depth < 16; depth++ {
+			val = val.Alias
+		}
 		if key.Kind != yaml.ScalarNode {
 			return false
 		}
 		switch key.Value {
 		case "format":
-			seenFormat = true
+			seenFormat = val.Kind == yaml.ScalarNode && val.ShortTag() == "!!int"
 		case "bytes":
-			seenBytes = true
+			seenBytes = val.Kind == yaml.SequenceNode || val.Kind == yaml.ScalarNode && val.ShortTag() == "!!null"
 		}
 	}
 	return seenFormat && seenBytes

@@ -939,6 +939,18 @@ func TestPostgresV3Cell_YAMLDocumentsWithAnElementsKeysStayDocuments(t *testing.
 	}
 }
 
+// A raw cell whose format is an alias of an anchored integer, as a
+// hand-edited mock can hold, reads back as the raw cell.
+func TestPostgresV3Cell_YAMLAliasedRawCellFormatIsTheRawCell(t *testing.T) {
+	var back PostgresV3Cells
+	if err := yaml.Unmarshal([]byte("- &fmt 1\n- {format: *fmt, bytes: [1, 2]}\n"), &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := (PostgresV3CellRaw{Format: 1, Bytes: []byte{1, 2}}); len(back) != 2 || !reflect.DeepEqual(back[1].Value, want) {
+		t.Fatalf("it read back as %#v, want %#v", back, want)
+	}
+}
+
 // A uuid[], macaddr[] and bit[] cell's elements round-trip through YAML as
 // the values pgx scanned, not as sequences of ints (or mappings) no codec
 // encodes back for the client, and a document's "uuid" text stays the
@@ -961,4 +973,50 @@ func TestPostgresV3Cell_YAMLKeepsAUUIDArraysElements(t *testing.T) {
 			t.Errorf("cell %d does not gob-encode for the agent after its reload: %v", i, err)
 		}
 	}
+}
+
+// The documents pgDocumentCells holds read back from YAML as they are: a
+// top-level document with a prefix's, a macaddr's, a raw cell's, a bit
+// string's, a time's or an interval's keys and other kinds of value (a
+// {"prefix": "img_"}, a {"format": "png", "bytes": 2048}, a document
+// holding bytes under a raw cell's keys) failed the mock's load, taken
+// for that type.
+func TestPostgresV3Cell_YAMLDocumentsKeepTheirObjects(t *testing.T) {
+	for i, c := range pgDocumentCells() {
+		c = NewValueCell(yamlInts(c.Value))
+		body, err := yaml.Marshal(PostgresV3Cells{c})
+		if err != nil {
+			t.Fatalf("cell %d: marshal: %v", i, err)
+		}
+		var back PostgresV3Cells
+		if err := yaml.Unmarshal(body, &back); err != nil {
+			t.Errorf("cell %d: unmarshal: %v\n%s", i, err, body)
+			continue
+		}
+		if !reflect.DeepEqual(back, PostgresV3Cells{c}) {
+			t.Errorf("cell %d came back as %#v, want %#v\n%s", i, back[0].Value, c.Value, body)
+		}
+	}
+}
+
+// yamlInts is v with each int64 in it an int, as yaml.v3's generic decode
+// reads an integer.
+func yamlInts(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return int(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = yamlInts(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = yamlInts(e)
+		}
+		return out
+	}
+	return v
 }
