@@ -39,32 +39,32 @@ func (u *updatingStore) ReadForUpdate(context.Context, string) (*models.TestSet,
 
 // A recording whose stop had to kill the app says so in its test-set's
 // config, under the proven switch: the rest of the config is kept, and no
-// secret is written into it. With the switch off nothing is written.
+// secret is written into it. A store that cannot read a config for update
+// is not written (its Read cannot tell a config it could not parse from none,
+// and would have it replaced). With the switch off nothing is written.
 func TestARecordingWhoseStopKilledSaysSoInItsConfig(t *testing.T) {
 	const why = "keploy stopped the application at the recording's end and a process of it had not exited 3s later (the grace keploy's stop gives each of its process groups), so keploy killed it"
 	recorded := func() *models.TestSet {
 		return &models.TestSet{PostScript: "make check", Metadata: map[string]interface{}{"join": "ui"}}
 	}
 	t.Setenv(provenswitch.Env, "1")
-	for _, store := range []interface {
-		TestSetConfig
-		got() *models.TestSet
-	}{
-		&updatingConf{&updatingStore{confStore{conf: recorded()}}},
-		&plainConf{&confStore{conf: recorded()}},
-	} {
-		r := &Recorder{logger: zap.NewNop(), testSetConf: store}
-		r.markStopKilled(context.Background(), "test-set-0", why)
-		got := store.got()
-		if got == nil || got.RecordStopKilled != why {
-			t.Fatalf("%T: the config written is %+v; want the stop's kill in it", store, got)
-		}
-		if got.PostScript != "make check" || got.Metadata["join"] != "ui" {
-			t.Errorf("%T: the config's other fields were not kept: %+v", store, got)
-		}
-		if got.Secret != nil {
-			t.Errorf("%T: a secret was written into the config: %v", store, got.Secret)
-		}
+	store := &updatingConf{&updatingStore{confStore{conf: recorded()}}}
+	r := &Recorder{logger: zap.NewNop(), testSetConf: store}
+	r.markStopKilled(context.Background(), "test-set-0", why)
+	got := store.got()
+	if got == nil || got.RecordStopKilled != why {
+		t.Fatalf("the config written is %+v; want the stop's kill in it", got)
+	}
+	if got.PostScript != "make check" || got.Metadata["join"] != "ui" {
+		t.Errorf("the config's other fields were not kept: %+v", got)
+	}
+	if got.Secret != nil {
+		t.Errorf("a secret was written into the config: %v", got.Secret)
+	}
+	plain := &plainConf{&confStore{conf: recorded()}}
+	(&Recorder{logger: zap.NewNop(), testSetConf: plain}).markStopKilled(context.Background(), "test-set-0", why)
+	if plain.got() != nil {
+		t.Fatalf("a store with no read for update was written: %+v", plain.got())
 	}
 	t.Setenv(provenswitch.Env, "")
 	off := &confStore{conf: recorded()}
