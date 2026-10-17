@@ -2845,8 +2845,10 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // shorter CLI wait gives up while the container is still booting, tearing down
 // a bring-up that would have succeeded.
 //
-// ErrAgentNotReady is returned by an agent Setup whose agent never reported
-// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
+// ErrAgentNotReady is returned by an agent Setup whose agent's start stopped
+// making progress before it reported healthy (pkg/platform/http,
+// agent_boot_watch.go), or, for a docker compose agent, did not report healthy
+// within AgentReadyTimeout. It is a distinct sentinel so callers can
 // retry a fresh bring-up on this — a nondeterministic container-runtime stall,
 // observed intermittently on macOS Docker Desktop — WITHOUT retrying
 // deterministic failures like missing kernel privileges or a bad config.

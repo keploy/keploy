@@ -99,6 +99,13 @@ func (d *dirSink) close() {
 // and checks it: not a symlink, written to by no one but its owner, owned by
 // root, by this user, or by the user sudo ran this agent for (SUDO_UID).
 func openCommandLineSink(path string) (progressSink, error) {
+	return openCommandLineSinkNamed(path, filepath.Base(path))
+}
+
+// openCommandLineSinkNamed is openCommandLineSink writing the file name, in the
+// command-line path's directory: an agent reports its start there too
+// (BootProgressFileName), next to its teardown.
+func openCommandLineSinkNamed(path, name string) (progressSink, error) {
 	if err := checkCommandLinePath(path); err != nil {
 		return nil, err
 	}
@@ -120,7 +127,7 @@ func openCommandLineSink(path string) (progressSink, error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("the teardown progress file's directory %q belongs to uid %d, not to this agent's user", dir, st.Uid)
 	}
-	return &dirSink{dir: fd, name: filepath.Base(path)}, nil
+	return &dirSink{dir: fd, name: name}, nil
 }
 
 // ownerMayAsk reports whether a directory uid owns may hold this agent's

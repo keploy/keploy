@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newConsoleLogger builds a logger whose only sink is the provided writer,
@@ -940,5 +941,51 @@ func TestAddDebugFileSink_CappedSinkSkipsEncoding(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "after-swap") {
 		t.Errorf("Debug record missing from the swapped-in file: %q", contents)
+	}
+}
+
+// ObserveErrors is told each entry logged at ERROR or above once, also when
+// the logger writes it to two of its cores (the console and the debug file),
+// and nothing of a lower level; a nil observer stops it.
+func TestObserveErrorsSeesEachErrorOnce(t *testing.T) {
+	var got []string
+	ObserveErrors(func(msg string) { got = append(got, msg) })
+	t.Cleanup(func() { ObserveErrors(nil) })
+	console, _ := observer.New(zapcore.DebugLevel)
+	file, _ := observer.New(zapcore.DebugLevel)
+	logger := zap.New(zapcore.NewTee(newRedactingCore(console), newRedactingCore(file)))
+	logger.Warn("a warning")
+	logger.Error("failed to load hooks")
+	logger.Error("failed to start proxy")
+	if len(got) != 2 || got[0] != "failed to load hooks" || got[1] != "failed to start proxy" {
+		t.Fatalf("observed %q, want each ERROR once", got)
+	}
+	ObserveErrors(nil)
+	logger.Error("after the observer stopped")
+	if len(got) != 2 {
+		t.Fatalf("observed %q after the observer stopped", got)
+	}
+}
+
+// replacingRedactor replaces "hunter2" in encoded text.
+type replacingRedactor struct{}
+
+func (replacingRedactor) RedactEntry(*zapcore.Entry) {}
+func (replacingRedactor) RedactField(*zapcore.Field) {}
+func (replacingRedactor) RedactEncoded(text string) string {
+	return strings.ReplaceAll(text, "hunter2", "[REDACTED]")
+}
+
+// Text that leaves the process outside a log line is redacted as a log line
+// is, by the active redactor; with none it is as it was.
+func TestRedactText(t *testing.T) {
+	SetRedactor(nil)
+	if got := RedactText("password hunter2"); got != "password hunter2" {
+		t.Fatalf("with no redactor: %q", got)
+	}
+	SetRedactor(replacingRedactor{})
+	t.Cleanup(func() { SetRedactor(nil) })
+	if got := RedactText("password hunter2"); got != "password [REDACTED]" {
+		t.Fatalf("with a redactor: %q", got)
 	}
 }

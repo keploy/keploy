@@ -54,6 +54,13 @@ const (
 	// from one that has stopped making progress, which alone it kills.
 	AgentTeardownProgressFile = "/tmp/keploy-agent-teardown.json"
 
+	// AgentBootProgressFile is where a containerised agent reports its
+	// start's progress until its control-plane server listens
+	// (utils.ReportBootProgress): keploy reads it out of the container to
+	// tell an agent still starting from one that has stopped making
+	// progress, which alone it gives up on.
+	AgentBootProgressFile = "/tmp/keploy-agent-boot.json"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
