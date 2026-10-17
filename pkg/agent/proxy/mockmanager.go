@@ -2693,24 +2693,44 @@ func (m *MockManager) SessionMockHitCounts() map[string]uint64 {
 
 // NEW: kind-scoped getters used by Redis matcher
 // HasMocksByKind reports whether any loaded mock of the given kind satisfies
-// match, across all tiers (unfiltered, filtered, startup). It reads the live
-// trees on every call — no caching — and returns on the first match, so it
-// stays correct as the mock set is replaced between test-sets and allocates
-// nothing on the hot path. A nil per-kind tree means no such mocks were set.
+// match, across all tiers (unfiltered, filtered, startup, carry-over). It
+// reads the live trees on every call — no caching — so it stays correct as
+// the mock set is replaced between test-sets. Without exact serving it
+// returns on the first match and allocates nothing. A nil per-kind tree means
+// no such mocks were set.
+//
+// Under exact serving (KEPLOY_PROVEN) it answers from what the open view
+// shows, as every read does: the open test's own mocks that have not
+// answered, which the view alone serves, then the staged and carry-over
+// mocks the view shows; a staged mock the view hides (another test's) does
+// not count. It then collects a tree's matches and narrows them once the
+// tree's lock is released.
 func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) bool) bool {
 	m.treesMu.RLock()
 	flt := m.filteredByKind[kind]
 	unf := m.unfilteredByKind[kind]
 	startup := m.startup
 	m.treesMu.RUnlock()
+	v := m.exactView()
+	if v != nil {
+		for _, mk := range v.unanswered(kind) {
+			if match(mk) {
+				return true
+			}
+		}
+	}
 
 	anyMatch := func(tree *TreeDb, requireKind bool) bool {
 		if tree == nil {
 			return false
 		}
 		found := false
-		tree.rangeValues(func(v interface{}) bool {
-			mock, ok := v.(*models.Mock)
+		// Under exact serving the matches are collected and narrowed to what
+		// the view shows once the tree's lock is released, as every exact
+		// read narrows.
+		var matched []*models.Mock
+		tree.rangeValues(func(val interface{}) bool {
+			mock, ok := val.(*models.Mock)
 			if !ok || mock == nil {
 				return true
 			}
@@ -2718,12 +2738,16 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 				return true
 			}
 			if match(mock) {
+				if v != nil {
+					matched = append(matched, mock)
+					return true
+				}
 				found = true
 				return false // stop ranging
 			}
 			return true
 		})
-		return found
+		return found || (v != nil && len(v.keep(matched)) > 0)
 	}
 
 	// Per-kind trees already hold only this kind; the startup tree is mixed.
@@ -2731,7 +2755,11 @@ func (m *MockManager) HasMocksByKind(kind models.Kind, match func(*models.Mock) 
 		return true
 	}
 	if models.CarryOverKind(kind) {
-		for _, mk := range m.carry.snapshot(kind) {
+		carried := m.carry.snapshot(kind)
+		if v != nil {
+			carried = v.keep(carried)
+		}
+		for _, mk := range carried {
 			if match(mk) {
 				return true
 			}
