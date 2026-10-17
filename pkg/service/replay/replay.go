@@ -434,6 +434,15 @@ type Replayer struct {
 	realPushed     atomic.Bool
 	isLastTestSet  bool
 	isLastTestCase bool
+	// finalAttempt: the set's attempt now running is the last one the run
+	// can give it (MaxFlakyChecks); no attempt of it comes after.
+	finalAttempt bool
+	// keepAliveStop, under the proven switch, stops the application
+	// --keep-app-alive started once for the run (natively, or with docker
+	// run), waits for it, and says why it had to kill it, "" when it did not
+	// (P101-c). The last set's final attempt calls it before its end's read.
+	// nil otherwise.
+	keepAliveStop func() string
 
 	// exact is the set being replayed's exact serving, under the proven
 	// switch (exact.go); nil otherwise.
@@ -896,10 +905,19 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// code is carried by utils.ErrCode rather than by Start's return value.
 	var keepAliveAppErr atomic.Pointer[models.AppError]
 
+	// This run's last set, and its final attempt, are this run's alone.
+	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
 	if effectiveKeepAlive {
+		// Under the proven switch the app runs under a context of its own,
+		// so the last set's end can stop it, and wait for it, before its
+		// read (P101-c), as a set stops the app it started (P101-b).
+		kaCtx, stopKeepAlive, keepAliveRan := keepAliveStopper(ctx, cmdType)
+		r.keepAliveStop = stopKeepAlive
 		g.Go(func() error {
+			var appErr models.AppError
+			defer func() { keepAliveRan(appErr) }()
 			defer utils.Recover(r.logger)
-			appErr := r.RunApplication(ctx, models.RunOptions{
+			appErr = r.RunApplication(kaCtx, models.RunOptions{
 				AppCommand: r.config.Command,
 			})
 			// Two outcomes that are NOT failures from the replay's
@@ -1043,6 +1061,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
 			r.setEnd = nil
+			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
 			if err != nil {
@@ -4623,6 +4642,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// they fail the set (unclaimed_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
+	// appNotStopped is why the set's end was read with its app still running
+	// (P101-c), "" when keploy stopped it first.
+	appNotStopped := ""
 	if provenswitch.On() {
 		var held []string
 		scored := len(testCaseResults)
@@ -4650,6 +4672,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// first, as the teardown tells it, so the app's shutdown errors are
 		// logged as such. Its recent logs are taken before: a container
 		// docker removes once stopped has none to give.
+		// The final attempt of a run's last set stops the app --keep-app-alive
+		// keeps across sets before its end's read, as a set stops its own
+		// (P101-c): the run ends after it, and no attempt of it follows.
+		if stopAppBeforeSetEnd == nil && serveTest && r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil {
+			stopAppBeforeSetEnd = r.keepAliveStop
+		}
 		if stopAppBeforeSetEnd != nil {
 			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
@@ -4752,6 +4780,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// the run going (abortAfterTestSet) past an app that exited.
 		_, stoppedBefore := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil)
 		if captureOpened && !stoppedBefore && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+			if stopAppBeforeSetEnd == nil {
+				appNotStopped = whyAppNotStopped(cmdType, serveTest)
+				r.logger.Warn("keploy reads the set's end with its application still running: a call it makes after this read is not judged ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
+			}
 			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
 			if len(calls) > 0 {
 				unclaimed = calls
@@ -5165,6 +5198,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealListed:          realListed,
 		RealFailure:         realWhy,
 		UnclaimedCalls:      unclaimed,
+		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 	}
 	r.noteSetEnd(testReport)
