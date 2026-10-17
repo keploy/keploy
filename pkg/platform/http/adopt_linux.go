@@ -507,6 +507,10 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (sta
 	}
 	logger.Info("stopping the daemons the application left running: they are part of its run, and end with it",
 		zap.Ints("pids", pids), zap.Ints("acting_on_the_interrupt", stopping))
+	// Whether each ignores SIGTERM as it is asked to stop with it: one that
+	// does has no way out of its own for a kill to cut. Read now, not at the
+	// kill: a handler may ignore further TERMs while it shuts down.
+	ignored := ignoresSigtermNow(ms)
 	signalAll(ms, syscall.SIGTERM, false, acting)
 	signalAll(ms, syscall.SIGCONT, false, nil) // a stopped one handles it now
 	notice := utils.NewStopNowNotice(stopOffer)
@@ -560,9 +564,21 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (sta
 			}
 			return
 		}
-		stalled := describe(ms)
+		// A kill cuts the way out of a process that was on one: one acting
+		// on keploy's interrupt, or one that does not ignore the SIGTERM it
+		// was asked to stop with. One that ignores it has no way out to
+		// cut (a server daemon with no stop of its own): its kill is said,
+		// and leaves the set judged.
+		cut, uncut := cutBy(ms, acting, ignored)
+		stalled := describe(cut)
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
-		stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, stopStallChecks)
+		if len(cut) > 0 {
+			stallKill = fmt.Sprintf("%s, which the application left running, made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it; make it exit once it is asked to stop (SIGINT, or SIGTERM where it ignores SIGINT), or end it in the application's own shutdown", stalled, stopStallChecks)
+		} else {
+			logger.Info("the daemons keploy killed ignored SIGTERM when it asked them to stop with it: they had no way out of their own to cut, so the set's end is judged",
+				zap.String("killed", describe(uncut)),
+				zap.String("next_step", "give such a daemon a stop of its own (a SIGTERM handler), or end it in the application's own shutdown"))
+		}
 	}
 }
 
@@ -593,6 +609,53 @@ func signalAll(ms []member, sig syscall.Signal, every bool, skip func(member) bo
 			_ = unix.PidfdSendSignal(m.fd, sig, nil, 0)
 		}
 	}
+}
+
+// cutBy splits the members of ms still running by whether a kill now cuts
+// their way out: cut, those acting on keploy's interrupt and those that did
+// not ignore SIGTERM when the stop asked them to stop with it (ignored);
+// uncut, the rest.
+func cutBy(ms []member, acting func(member) bool, ignored map[[2]uint64]bool) (cut, uncut []member) {
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		if acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}] {
+			cut = append(cut, m)
+		} else {
+			uncut = append(uncut, m)
+		}
+	}
+	return cut, uncut
+}
+
+// ignoresSigtermNow is which members of ms ignore SIGTERM now, by pid and
+// start time; one whose status cannot be read is taken for one that does not.
+func ignoresSigtermNow(ms []member) map[[2]uint64]bool {
+	ignored := make(map[[2]uint64]bool, len(ms))
+	for _, m := range ms {
+		if ignoresSigterm(m.pid) {
+			ignored[[2]uint64{uint64(m.pid), m.start}] = true
+		}
+	}
+	return ignored
+}
+
+// ignoresSigterm reports whether process pid ignores SIGTERM: the SIGTERM bit
+// (15, bit 14) of its status's SigIgn mask. A process whose status cannot be
+// read is taken for one that does not.
+func ignoresSigterm(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "SigIgn:"); ok {
+			mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			return err == nil && mask&(1<<(uint(syscall.SIGTERM)-1)) != 0
+		}
+	}
+	return false
 }
 
 // describe names each member of ms still running: its pid, command and

@@ -69,6 +69,15 @@ func TestStopHelperProcess(t *testing.T) {
 		note(name + ".ready")
 		<-terms
 		note(name + ".term")
+	case "hangs":
+		// Acts on SIGINT, ignores SIGTERM, and never gets out.
+		signal.Ignore(syscall.SIGTERM)
+		ints := make(chan os.Signal, 1)
+		signal.Notify(ints, syscall.SIGINT)
+		note(name + ".ready")
+		<-ints
+		note(name + ".int")
+		select {}
 	case "daemon":
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -227,5 +236,69 @@ func TestTheAppsKillIsSaidBeforeADaemonsStallKill(t *testing.T) {
 	}
 	if parentIs(pid, os.Getpid()) {
 		t.Errorf("the daemon (%d) outlived the stop", pid)
+	}
+}
+
+// A process acting on keploy's interrupt that then never gets out is killed
+// for want of progress, and the kill is said, though it ignores SIGTERM: it
+// was on its way out, and the kill cut it.
+func TestAKillOfOneActingOnTheInterruptIsSaid(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	dir := t.TempDir()
+	bin := stopHelperBinary(t, t.TempDir())
+	client := newRunClient(fmt.Sprintf("%s & wait", helperCommand(bin, "hangs", dir)))
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan models.AppError, 1)
+	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+	pid := helperPid(t, dir, "hangs")
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel(models.ErrAppStoppedForSetEnd)
+	appErr := <-done
+	if !strings.Contains(appErr.StopKilled, "made no progress on its way out") {
+		t.Fatalf("the run said %q; want the kill of the process acting on the interrupt said", appErr.StopKilled)
+	}
+}
+
+// Whether a daemon ignores SIGTERM is read as keploy asks it to stop with it:
+// one whose handler then ignores further TERMs while it shuts down, and that
+// stalls on its way out, had a way out, and its kill is said.
+func TestAKillOfOneThatIgnoredTermOnlyOnItsWayOutIsSaid(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	dir := t.TempDir()
+	script := filepath.Join(dir, "daemon.sh")
+	if err := os.WriteFile(script, []byte(`trap 'trap "" TERM; while :; do sleep 1; done' TERM
+touch "$1"
+while :; do sleep 1; done
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(dir, "ready")
+	client := newRunClient(fmt.Sprintf("sh %s %s & wait", script, ready))
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan models.AppError, 1)
+	go func() { done <- client.Run(ctx, models.RunOptions{}) }()
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	cancel(models.ErrAppStoppedForSetEnd)
+	appErr := <-done
+	if !strings.Contains(appErr.StopKilled, "made no progress on its way out") {
+		t.Fatalf("the run said %q; want the kill of a daemon that was on its way out said", appErr.StopKilled)
 	}
 }
