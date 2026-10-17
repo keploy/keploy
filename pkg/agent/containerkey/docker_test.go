@@ -1615,7 +1615,7 @@ func TestAContainerListedByImageIDIsNotPlacedFromTheList(t *testing.T) {
 // read put in: the list carries no configuration.
 func TestAListAfterTheReadKeepsTheFingerprint(t *testing.T) {
 	f := newFakeDocker()
-	r, applied := watching(t, f)
+	r, applied, placed := watchingPlaced(t, f)
 	g := make(chan struct{})
 	defer close(g)
 	f.mu.Lock()
@@ -1634,10 +1634,18 @@ func TestAListAfterTheReadKeepsTheFingerprint(t *testing.T) {
 		t.Fatalf("the read did not index it with a fingerprint: %+v %v", c, ok)
 	}
 	fp := c.Fingerprint
-	changed := make(chan struct{}, 1)
-	r.setChanged(changed)
+	r.mu.Lock()
+	gen := r.changeGen
+	r.mu.Unlock()
 	g <- struct{}{} // the list answers after the read, at the same event
-	<-changed
+	for id := <-placed; id != "svc"; id = <-placed {
+	}
+	r.mu.Lock()
+	again := r.changeGen - gen
+	r.mu.Unlock()
+	if again != 0 {
+		t.Fatalf("the list, the same as the read's entry, counted %d change(s): a docker-mode agent is given the same list again", again)
+	}
 	if c, ok := lookup(t, r, "172.17.0.90:6379"); !ok || c.Fingerprint != fp {
 		t.Fatalf("the list dropped the read's fingerprint: %+v %v (want %s)", c, ok, fp)
 	}
@@ -1996,5 +2004,153 @@ func TestSettleNeverGivesADestroyedContainerALiveOnesAddress(t *testing.T) {
 	r.Settle(t.Context())
 	if c, ok := lookup(t, r, "172.17.0.98:5432"); !ok || c.ID != "next" {
 		t.Fatalf("the live container's address after Settle = %+v, %v; want next", c, ok)
+	}
+}
+
+// A put the index already holds byte for byte (a placing's list landing
+// after the read that placed its container) counts no change; one that
+// changes what a list shows does: the container's own addresses, or a host
+// port another container held, which the put takes from it.
+func TestAnIdenticalPutCountsNoChange(t *testing.T) {
+	f := testcontainers()
+	r, _ := watching(t, f, "10.0.0.5")
+	st := current(r)
+	gen := func() uint64 {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.changeGen
+	}
+	listed := func(id string) entry {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		e := summaryEntry(summaryOf(id, f.containers[id]))
+		e.placed, e.fromList = true, true
+		return e
+	}
+	seqOf := func(id string) int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return st.seq[id]
+	}
+	g0 := gen()
+	if !r.put(st, listed("pg"), seqOf("pg")) {
+		t.Fatal("the put was refused")
+	}
+	if g := gen(); g != g0 {
+		t.Fatalf("an identical put counted %d change(s)", g-g0)
+	}
+	renamed := listed("pg")
+	renamed.name = "/pg-renamed" // docker rename: a list names it anew
+	r.put(st, renamed, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that renamed the container counted no change")
+	}
+	g0 = gen()
+	moved := renamed // its name as it is now: only its address changes
+	moved.ips = []netip.Addr{netip.MustParseAddr("172.17.0.99")}
+	r.put(st, moved, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that moved the container counted no change")
+	}
+	if c, ok := lookup(t, r, "172.17.0.99:5432"); !ok || c.ID != "pg" {
+		t.Fatalf("after the move = %+v, %v", c, ok)
+	}
+	// docker network connect, then disconnect: an address given, or one
+	// taken away, and nothing else.
+	g0 = gen()
+	connected := moved
+	connected.ips = []netip.Addr{netip.MustParseAddr("172.17.0.99"), netip.MustParseAddr("172.18.0.7")}
+	r.put(st, connected, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave the container another address counted no change")
+	}
+	g0 = gen()
+	r.put(st, moved, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that took an address from the container counted no change")
+	}
+	if c, ok := lookup(t, r, "172.18.0.7:5432"); ok {
+		t.Fatalf("the address it lost = %+v", c)
+	}
+	// A host port published, then no longer: a port given, or one taken
+	// away, and nothing else.
+	g0 = gen()
+	more := listed("ls")
+	more.publish("127.0.0.1", 49201, 4567)
+	r.put(st, more, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that published another host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49201"); !ok || c.ID != "ls" || c.Port != 4567 {
+		t.Fatalf("the host port published = %+v, %v", c, ok)
+	}
+	g0 = gen()
+	r.put(st, listed("ls"), seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that unpublished a host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49201"); ok {
+		t.Fatalf("the host port unpublished = %+v", c)
+	}
+	// A binding's address alone, then its container's port alone.
+	g0 = gen()
+	rebound := listed("ls")
+	rebound.bindings, rebound.hostPort = nil, nil
+	rebound.publish("10.0.0.5", 49200, 4566)
+	r.put(st, rebound, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that bound a host port at another address counted no change")
+	}
+	g0 = gen()
+	repointed := listed("ls")
+	repointed.bindings, repointed.hostPort = nil, nil
+	repointed.publish("10.0.0.5", 49200, 4567)
+	r.put(st, repointed, seqOf("ls"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave a host port to another of the container's ports counted no change")
+	}
+	if c, ok := lookup(t, r, "10.0.0.5:49200"); !ok || c.ID != "ls" || c.Port != 4567 {
+		t.Fatalf("the host port repointed = %+v, %v", c, ok)
+	}
+	r.put(st, listed("ls"), seqOf("ls"))
+	// A read that could not read its image leaves it no fingerprint, and
+	// the next read gives it one again.
+	g0 = gen()
+	unread := moved
+	unread.fromList = false
+	r.put(st, unread, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that took the container's fingerprint away counted no change")
+	}
+	g0 = gen()
+	reread := unread
+	reread.fingerprint, reread.legacy = fpEmpty, lfpEmpty
+	r.put(st, reread, seqOf("pg"))
+	if g := gen(); g == g0 {
+		t.Fatal("a put that gave the container its fingerprint counted no change")
+	}
+	if c, ok := lookup(t, r, "172.17.0.99:5432"); !ok || c.Fingerprint != fpEmpty {
+		t.Fatalf("after the read = %+v, %v", c, ok)
+	}
+	g1 := gen()
+	took := listed("ls")
+	took.publish("0.0.0.0", 49153, 5432) // pg's host port, which ls now holds: only its holder changes
+	r.put(st, took, seqOf("ls"))
+	if g := gen(); g == g1 {
+		t.Fatal("a put that took another container's host port counted no change")
+	}
+	if c, ok := lookup(t, r, "127.0.0.1:49153"); !ok || c.ID != "ls" {
+		t.Fatalf("pg's old host port = %+v, %v; want ls", c, ok)
+	}
+	// Two containers that publish one host port at two addresses: putting
+	// the first again as it is changes nothing, wherever it lands among
+	// the port's bindings.
+	shared := took
+	shared.publish("127.0.0.1", 49300, 4566) // beside redis's 10.0.0.5:49300
+	r.put(st, shared, seqOf("ls"))
+	g0 = gen()
+	r.put(st, listed("redis"), seqOf("redis"))
+	if g := gen(); g != g0 {
+		t.Fatalf("an identical put of a container that shares its host port counted %d change(s)", g-g0)
 	}
 }
