@@ -449,17 +449,19 @@ var laxKindFallbackDisabledCache = func() bool {
 
 // legacyKindFallbackFires counts how many times DeriveLifetime has fallen
 // back to kind-based inference because a recording lacked an explicit
-// Metadata["type"] tag: rule 4's session inference, and rule 3a's connection
-// inference for an untagged MySQL statement's lifecycle. Exposed via LegacyKindFallbackFires() for
-// telemetry — when this stays at zero for a full release cycle, the kind
-// fallback (and the compat branch that reads it) can be deleted.
+// Metadata["type"] tag: rule 4's session inference, and rule 3a's
+// connection inference for an untagged MySQL statement's lifecycle. Exposed
+// via LegacyKindFallbackFires() for telemetry — when this stays at zero for
+// a full release cycle, the kind fallback (and the compat branch that reads
+// it) can be deleted.
 var legacyKindFallbackFires uint64
 
 // LegacyKindFallbackFires returns the number of times DeriveLifetime
-// inferred LifetimeSession from mock.Kind because Spec.Metadata["type"]
-// was missing/empty, not because an explicit tag resolved to session.
-// Non-zero values mean untagged mocks reached the kind-based
-// inference branch. Interpretation:
+// inferred a lifetime from mock.Kind because Spec.Metadata["type"] was
+// missing/empty, not because an explicit tag resolved it: LifetimeSession
+// by kind (rule 4), or LifetimeConnection for an untagged MySQL statement's
+// lifecycle (rule 3a). Non-zero values mean untagged mocks reached the
+// kind-based inference branch. Interpretation:
 //   - For Kinds whose recorder does NOT yet classify lifetime at
 //     record time (currently HTTP and Generic), non-zero is EXPECTED
 //     even for newly recorded sessions — those recorders do not emit
