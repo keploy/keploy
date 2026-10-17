@@ -291,11 +291,11 @@ trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done
 	if len(killed) != 1 {
 		t.Fatalf("%d kills, want one, of the daemons that ignored the request", len(killed))
 	}
-	// The kill for want of progress is said, for a stop at a set's end to
-	// leave its set not judged: what those daemons would have done is not
-	// known.
-	if !strings.Contains(why, "made no progress on its way out") || !strings.Contains(why, "so keploy killed it") {
-		t.Fatalf("stopAdopted says %q; want the kill for want of progress said", why)
+	// The daemons killed ignore SIGTERM, which the stop asked them to stop
+	// with: they had no way out of their own to cut, so the kill is not said
+	// as one that cut it, and a set's end is judged.
+	if why != "" {
+		t.Fatalf("stopAdopted says %q; want no cut way out said for daemons that ignore SIGTERM", why)
 	}
 	if !parentIs(own.Process.Pid, os.Getpid()) {
 		t.Fatal("the CLI's own child was stopped with what it adopted")
@@ -387,7 +387,7 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
 		client := New(zap.NewNop(), nil, cfg)
 		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-			`sh -c 'trap "" INT TERM; touch `+ready+`; exec sleep 600' & wait`, nil,
+			`sh -c 'trap "while :; do sleep 1; done" TERM; touch `+ready+`; while :; do sleep 1; done' & wait`, nil,
 			models.SetupOptions{CommandType: string(utils.Native)}))
 		ctx, cancel := context.WithCancelCause(context.Background())
 		done := make(chan models.AppError, 1)
@@ -399,7 +399,7 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 			t.Fatalf("%s: run ended %+v; want a kill said %v", tc.name, appErr, tc.killed)
 		}
 		// The kill names what it killed, and what to do about it.
-		if tc.killed && (!strings.Contains(appErr.StopKilled, "(sleep, state ") || !strings.Contains(appErr.StopKilled, "make it exit once it is asked to stop")) {
+		if tc.killed && (!strings.Contains(appErr.StopKilled, "(sh, state ") || !strings.Contains(appErr.StopKilled, "make it exit once it is asked to stop")) {
 			t.Fatalf("%s: the kill is said as %q; want the process named, with its state, and the next step", tc.name, appErr.StopKilled)
 		}
 	}
