@@ -81,11 +81,16 @@ jobs:
           # A released version, not latest: a fuzzer release changes this lane only
           # through a reviewed bump here (keploy/go-fuzzers tags v<version>-mysql).
           VERSION="1.0.4"
+          # The sha256 of that tarball when this version was pinned. Anything else at that path fails here.
+          SHA256="13a10bf5599ad64cc22cdd8462a7651f8fa20315b049c920b067a4cba471dff0"
           KEY="releases/mysql-fuzzer/${VERSION}/mysql-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o mysql-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
-          echo "mysql fuzzer ${VERSION}: $(sha256sum mysql-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
+          if ! echo "${SHA256}  mysql-fuzzer-linux-amd64.tar.gz" | sha256sum -c --quiet -; then
+            echo "::error::mysql fuzzer ${VERSION} has sha256 $(sha256sum mysql-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1), not the pinned ${SHA256}"
+            exit 1
+          fi
           tar -xzf mysql-fuzzer-linux-amd64.tar.gz
           chmod +x ./mysql-fuzzer
           echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
@@ -153,12 +158,17 @@ jobs:
           # A released version, not latest: a fuzzer release changes this lane only
           # through a reviewed bump here (keploy/go-fuzzers tags v<version>-grpc).
           VERSION="1.0.2"
+          # The sha256 of that tarball when this version was pinned. Anything else at that path fails here.
+          SHA256="18e8ccd28eb6a5645a6838db98a3bbe3fdca8e3a07fcd24728cdd027f5efa125"
           KEY="releases/grpc-fuzzer/${VERSION}/grpc-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           echo "Downloading fuzzer from ${URL}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o grpc-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
-          echo "grpc fuzzer ${VERSION}: $(sha256sum grpc-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
+          if ! echo "${SHA256}  grpc-fuzzer-linux-amd64.tar.gz" | sha256sum -c --quiet -; then
+            echo "::error::grpc fuzzer ${VERSION} has sha256 $(sha256sum grpc-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1), not the pinned ${SHA256}"
+            exit 1
+          fi
           tar -xzf grpc-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
           echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
@@ -229,11 +239,16 @@ jobs:
           # A released version, not latest: a fuzzer release changes this lane only
           # through a reviewed bump here (keploy/go-fuzzers tags v<version>-postgres).
           VERSION="1.0.9"
+          # The sha256 of that tarball when this version was pinned. Anything else at that path fails here.
+          SHA256="cdd9db7c92f78c46f54bbc842b4fb5739a897f9720139f6fc88883694009ec35"
           KEY="releases/postgres-fuzzer/${VERSION}/postgres-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o postgres-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
-          echo "postgres fuzzer ${VERSION}: $(sha256sum postgres-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
+          if ! echo "${SHA256}  postgres-fuzzer-linux-amd64.tar.gz" | sha256sum -c --quiet -; then
+            echo "::error::postgres fuzzer ${VERSION} has sha256 $(sha256sum postgres-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1), not the pinned ${SHA256}"
+            exit 1
+          fi
           tar -xzf postgres-fuzzer-linux-amd64.tar.gz
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
@@ -315,11 +330,16 @@ jobs:
           # A released version, not latest: a fuzzer release changes this lane only
           # through a reviewed bump here (keploy/go-fuzzers tags v<version>-mongo).
           VERSION="1.0.4"
+          # The sha256 of that tarball when this version was pinned. Anything else at that path fails here.
+          SHA256="9a5f4d1fd58dd4f3172ef3e91a9ddb62886208306ff370a8db7bc5098c9e2705"
           KEY="releases/mongo-fuzzer/${VERSION}/mongo-fuzzer-linux-amd64.tar.gz"
           URL="https://keployfuzzer.blob.core.windows.net/binaries/${KEY}"
           # SAS is appended at fetch time only — never logged.
           curl -fsSL -o mongo-fuzzer-linux-amd64.tar.gz "${URL}?${AZURE_SAS_RO}"
-          echo "mongo fuzzer ${VERSION}: $(sha256sum mongo-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1)"
+          if ! echo "${SHA256}  mongo-fuzzer-linux-amd64.tar.gz" | sha256sum -c --quiet -; then
+            echo "::error::mongo fuzzer ${VERSION} has sha256 $(sha256sum mongo-fuzzer-linux-amd64.tar.gz | cut -d' ' -f1), not the pinned ${SHA256}"
+            exit 1
+          fi
           tar -xzf mongo-fuzzer-linux-amd64.tar.gz
           chmod +x ./mongo-fuzzer
           echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT
