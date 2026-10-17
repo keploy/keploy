@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -401,19 +402,72 @@ func recoverCellFromJSON(raw any) (any, error) {
 		}
 		return x, nil
 	case []any:
-		out := make([]any, len(x))
-		for i, e := range x {
-			r, err := recoverCellFromJSON(e)
-			if err != nil {
-				return nil, fmt.Errorf("PostgresV3Cell: array[%d]: %w", i, err)
-			}
-			out[i] = r
-		}
-		return out, nil
+		return recoverJSONArray(x)
 	case map[string]any:
 		return recoverPgMappingFromJSON(x)
 	}
 	return nil, fmt.Errorf("PostgresV3Cell: unexpected JSON type %T", raw)
+}
+
+// recoverJSONArray is x, an array cell (a pgtype array, a multi-dim one, a
+// record, or a json/jsonb array), read back element by element. The
+// encoder writes an element as a value JSON carries, or, for one it cannot
+// (jsonBinaryElems), as a []byte's, a uuid's or a macaddr's binary wrapper
+// or a bit string's object; no other pgtype shape: a range, a numeric, an
+// interval or an inet element is written as encoding/json writes it. So
+// an element object is read as a document's (recoverJSONDocumentValue),
+// which takes the three wrappers, but for exactly a bit string's object;
+// a {"prefix": "10.0.0.0/8"} in a jsonb array is the application's.
+func recoverJSONArray(x []any) ([]any, error) {
+	out := make([]any, len(x))
+	for i, e := range x {
+		var (
+			r   any
+			err error
+		)
+		switch y := e.(type) {
+		case []any:
+			r, err = recoverJSONArray(y)
+		case map[string]any:
+			if isJSONBitsElement(y) {
+				r, err = bitsFromJSON(y)
+			} else {
+				r, err = recoverJSONDocumentValue(y)
+			}
+		default:
+			r, err = recoverCellFromJSON(e)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("PostgresV3Cell: array[%d]: %w", i, err)
+		}
+		out[i] = r
+	}
+	return out, nil
+}
+
+// isJSONBitsElement reports whether m is exactly the object the encoder
+// writes for a pgtype.Bits element: its bytes as base64 text, its length
+// an integer, and valid a bool.
+func isJSONBitsElement(m map[string]any) bool {
+	if len(m) != 3 {
+		return false
+	}
+	s, ok := m["bytes"].(string)
+	if !ok {
+		return false
+	}
+	if _, err := base64.StdEncoding.DecodeString(s); err != nil {
+		return false
+	}
+	if _, ok := m["valid"].(bool); !ok {
+		return false
+	}
+	n, ok := m["len"].(json.Number)
+	if !ok {
+		return false
+	}
+	_, err := n.Int64()
+	return err == nil
 }
 
 // recoverPgMappingFromJSON probes a parsed JSON object for the
@@ -421,9 +475,31 @@ func recoverCellFromJSON(raw any) (any, error) {
 // to canonical-key-set probing for unambiguous shapes. Unknown shapes
 // pass through as a generic map[string]any so jsonb-shaped payloads
 // keep their structure.
+//
+// An object is taken for a shape only when its values are of the kinds
+// the encoder writes for it, as an application's document can have any
+// shape's keys: a {"prefix": "img_"}, a {"macaddr": "08:00:2b:01:02:03"},
+// a {"format": "png", "bytes": 2048}, a {"$pgtype": "x"}, a {"bytes":
+// 2048, "len": 1, "valid": true} or a {"microseconds": "x", "valid": "y"}
+// is a document (jsonDocumentFromJSON), where it used to fail the mock's
+// load. A value of the right kind that the shape's decoder rejects (an
+// out-of-range field) still fails it.
 func recoverPgMappingFromJSON(m map[string]any) (any, error) {
-	if disc, ok := m[jsonPgTypeKey].(string); ok {
-		return decodeJSONByDiscriminator(disc, m)
+	if v, ok, err := pgShapeFromJSON(m); ok {
+		return v, err
+	}
+	return jsonDocumentFromJSON(m)
+}
+
+// pgShapeFromJSON is the value m holds when it is a pgtype shape's object
+// (ok), or the error that shape's decoder gives its values.
+func pgShapeFromJSON(m map[string]any) (v any, ok bool, err error) {
+	if disc, isDisc := m[jsonPgTypeKey].(string); isDisc {
+		v, err = decodeJSONByDiscriminator(disc, m)
+		if errors.Is(err, errUnknownJSONPgType) {
+			return nil, false, nil
+		}
+		return v, true, err
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -431,51 +507,219 @@ func recoverPgMappingFromJSON(m map[string]any) (any, error) {
 	}
 	sort.Strings(keys)
 	switch {
-	case len(keys) == 1 && keys[0] == "prefix":
-		return decodeJSONPrefix(m["prefix"])
-	case len(keys) == 1 && keys[0] == "macaddr":
-		return decodeJSONHWAddr(m["macaddr"])
+	case len(keys) == 1 && keys[0] == "prefix" && isJSONPrefix(m["prefix"]):
+		v, err = decodeJSONPrefix(m["prefix"])
+	case len(keys) == 1 && keys[0] == "macaddr" && isJSONBinaryWrapper(m["macaddr"]):
+		v, err = decodeJSONHWAddr(m["macaddr"])
 	case len(keys) == 1 && keys[0] == "uuid" && isJSONUUIDBytes(m["uuid"]):
-		return decodeJSONUUIDBytes(m["uuid"])
-	case keysEq(keys, []string{"exp", "infinitymodifier", "int", "nan", "valid"}):
-		return numericFromJSON(m)
-	case keysEq(keys, []string{"days", "microseconds", "months", "valid"}):
-		return intervalFromJSON(m)
-	case keysEq(keys, []string{"microseconds", "valid"}):
-		return timeFromJSON(m)
-	case keysEq(keys, []string{"bytes", "len", "valid"}):
-		return bitsFromJSON(m)
-	case keysEq(keys, []string{"a", "b", "c", "valid"}):
-		return lineFromJSON(m)
-	case keysEq(keys, []string{"closed", "p", "valid"}):
-		return pathFromJSON(m)
-	case keysEq(keys, []string{"p", "r", "valid"}):
-		return circleFromJSON(m)
-	case keysEq(keys, []string{"blocknumber", "offsetnumber", "valid"}):
-		return tidFromJSON(m)
-	case keysEq(keys, []string{"lexemes", "valid"}):
-		return tsvectorFromJSON(m)
-	case keysEq(keys, []string{"lower", "lowertype", "upper", "uppertype", "valid"}):
-		return rangeFromJSON(m)
-	case keysEq(keys, []string{"bytes", "format"}):
-		return rawCellFromJSON(m)
+		v, err = decodeJSONUUIDBytes(m["uuid"])
+	case keysEq(keys, []string{"exp", "infinitymodifier", "int", "nan", "valid"}) && jsonFieldsAre(m, jsonNumericFields):
+		v, err = numericFromJSON(m)
+	case keysEq(keys, []string{"days", "microseconds", "months", "valid"}) && jsonFieldsAre(m, jsonIntervalFields):
+		v, err = intervalFromJSON(m)
+	case keysEq(keys, []string{"microseconds", "valid"}) && jsonFieldsAre(m, jsonTimeFields):
+		v, err = timeFromJSON(m)
+	case keysEq(keys, []string{"bytes", "len", "valid"}) && jsonFieldsAre(m, jsonBitsFields):
+		v, err = bitsFromJSON(m)
+	case keysEq(keys, []string{"a", "b", "c", "valid"}) && jsonFieldsAre(m, jsonLineFields):
+		v, err = lineFromJSON(m)
+	case keysEq(keys, []string{"closed", "p", "valid"}) && jsonFieldsAre(m, jsonPathFields):
+		v, err = pathFromJSON(m)
+	case keysEq(keys, []string{"p", "r", "valid"}) && jsonFieldsAre(m, jsonCircleFields):
+		v, err = circleFromJSON(m)
+	case keysEq(keys, []string{"blocknumber", "offsetnumber", "valid"}) && jsonFieldsAre(m, jsonTIDFields):
+		v, err = tidFromJSON(m)
+	case keysEq(keys, []string{"lexemes", "valid"}) && jsonFieldsAre(m, jsonTSVectorFields):
+		v, err = tsvectorFromJSON(m)
+	case keysEq(keys, []string{"lower", "lowertype", "upper", "uppertype", "valid"}) && jsonFieldsAre(m, jsonRangeFields):
+		v, err = rangeFromJSON(m)
+	case keysEq(keys, []string{"bytes", "format"}) && isJSONRawCell(m):
+		v, err = rawCellFromJSON(m)
+	default:
+		return nil, false, nil
 	}
-	// Fall through: generic JSON object (jsonb top-level, ad-hoc map).
-	// Walk the values recursively so nested numbers convert from
-	// json.Number to int64/float64 — without this, downstream gob
-	// transport (PostgresV3Cell.GobEncode) errors out on the
-	// json.Number type with `unsupported Value type json.Number` for
-	// any jsonb cell that contains an integer leaf. Mirrors the array
-	// recursion in recoverCellFromJSON.
+	return v, true, err
+}
+
+// jsonKind is a set of the kinds of JSON value a pgtype shape's field is
+// written as, for pgShapeFromJSON's jsonFieldsAre.
+type jsonKind uint8
+
+const (
+	jsonNum jsonKind = 1 << iota
+	jsonBool
+	jsonStr
+	jsonNull
+	jsonArr
+	jsonObj
+	jsonAny = jsonNum | jsonBool | jsonStr | jsonNull | jsonArr | jsonObj
+	// jsonFloat is floatToJSON's: a number, or the $pgtype: float wrapper
+	// of a non-finite one.
+	jsonFloat = jsonNum | jsonObj
+)
+
+// The kinds each shape's encoder (cellValueToJSON) writes its fields as,
+// a bit string's bytes also an array of ints as bitsFromJSON reads one.
+var (
+	jsonNumericFields  = map[string]jsonKind{"int": jsonStr, "exp": jsonNum, "nan": jsonBool, "infinitymodifier": jsonNum, "valid": jsonBool}
+	jsonIntervalFields = map[string]jsonKind{"microseconds": jsonNum, "days": jsonNum, "months": jsonNum, "valid": jsonBool}
+	jsonTimeFields     = map[string]jsonKind{"microseconds": jsonNum, "valid": jsonBool}
+	jsonBitsFields     = map[string]jsonKind{"bytes": jsonStr | jsonArr, "len": jsonNum, "valid": jsonBool}
+	jsonLineFields     = map[string]jsonKind{"a": jsonFloat, "b": jsonFloat, "c": jsonFloat, "valid": jsonBool}
+	jsonPathFields     = map[string]jsonKind{"p": jsonArr, "closed": jsonBool, "valid": jsonBool}
+	jsonCircleFields   = map[string]jsonKind{"p": jsonObj, "r": jsonFloat, "valid": jsonBool}
+	jsonTIDFields      = map[string]jsonKind{"blocknumber": jsonNum, "offsetnumber": jsonNum, "valid": jsonBool}
+	jsonTSVectorFields = map[string]jsonKind{"lexemes": jsonArr, "valid": jsonBool}
+	jsonRangeFields    = map[string]jsonKind{"lower": jsonAny, "upper": jsonAny, "lowertype": jsonNum, "uppertype": jsonNum, "valid": jsonBool}
+)
+
+// jsonFieldsAre reports whether each field of m that kinds names holds a
+// value of one of its kinds.
+func jsonFieldsAre(m map[string]any, kinds map[string]jsonKind) bool {
+	for k, want := range kinds {
+		v, ok := m[k]
+		if !ok || want&jsonKindOf(v) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonKindOf is the kind of v, a parsed JSON value (or a Go fixture's).
+func jsonKindOf(v any) jsonKind {
+	switch v.(type) {
+	case nil:
+		return jsonNull
+	case json.Number, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return jsonNum
+	case bool:
+		return jsonBool
+	case string:
+		return jsonStr
+	case []any:
+		return jsonArr
+	case map[string]any:
+		return jsonObj
+	}
+	return 0
+}
+
+// jsonDocumentFromJSON is m, a generic JSON object (a jsonb top-level
+// value, an ad-hoc map), read back as a document: each value through
+// recoverJSONDocumentValue. Walking the values converts nested numbers
+// from json.Number to int64/float64 — without this, downstream gob
+// transport (PostgresV3Cell.GobEncode) errors out on the json.Number type
+// with `unsupported Value type json.Number` for any jsonb cell that
+// contains an integer leaf.
+func jsonDocumentFromJSON(m map[string]any) (any, error) {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
-		r, err := recoverCellFromJSON(v)
+		r, err := recoverJSONDocumentValue(v)
 		if err != nil {
 			return nil, fmt.Errorf("jsonb[%q]: %w", k, err)
 		}
 		out[k] = r
 	}
 	return out, nil
+}
+
+// recoverJSONDocumentValue is raw, a value inside a document
+// (jsonDocumentFromJSON), read back as the document's own. A document's
+// content is the application's, so an object in it is the application's
+// object whatever its keys ({"prefix": "10.0.0.0/8"} is not a
+// netip.Prefix, a {"$pgtype": "timestamp", ...} not a time.Time), but for
+// the three objects the encoder writes in a document in place of a value
+// JSON cannot carry (jsonBinaryElems): the $pgtype: binary wrapper of a
+// []byte, a {"uuid": wrapper} of 16 bytes and a {"macaddr": wrapper},
+// each exactly as written. A bit string's object, whose bytes are bare
+// base64, is not told apart from an application's: pgx scans a json or
+// jsonb value into JSON's own types, so a document never holds one.
+// Scalars read as they do anywhere (recoverCellFromJSON).
+func recoverJSONDocumentValue(raw any) (any, error) {
+	switch x := raw.(type) {
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			r, err := recoverJSONDocumentValue(e)
+			if err != nil {
+				return nil, fmt.Errorf("PostgresV3Cell: array[%d]: %w", i, err)
+			}
+			out[i] = r
+		}
+		return out, nil
+	case map[string]any:
+		if b, ok := jsonBinaryWrapper(x); ok {
+			return b, nil
+		}
+		if len(x) == 1 {
+			if w, ok := x["uuid"]; ok && isJSONUUIDBytes(w) {
+				return decodeJSONUUIDBytes(w)
+			}
+			if w, ok := x["macaddr"].(map[string]any); ok {
+				if b, ok := jsonBinaryWrapper(w); ok {
+					return net.HardwareAddr(b), nil
+				}
+			}
+		}
+		return jsonDocumentFromJSON(x)
+	}
+	return recoverCellFromJSON(raw)
+}
+
+// isJSONBinaryWrapper reports whether v is exactly a $pgtype: binary
+// wrapper (jsonBinaryWrapper).
+func isJSONBinaryWrapper(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = jsonBinaryWrapper(m)
+	return ok
+}
+
+// isJSONPrefix reports whether v is a netip.Prefix cell's text, as the
+// encoder writes it in {"prefix": v}.
+func isJSONPrefix(v any) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	_, err := netip.ParsePrefix(s)
+	return err == nil
+}
+
+// isJSONRawCell reports whether m, an object with the keys "bytes" and
+// "format", holds what the encoder writes for a PostgresV3CellRaw: its
+// bytes as base64 text and its format as an integer (whose range
+// rawCellFromJSON checks).
+func isJSONRawCell(m map[string]any) bool {
+	s, ok := m["bytes"].(string)
+	if !ok {
+		return false
+	}
+	if _, err := base64.StdEncoding.DecodeString(s); err != nil {
+		return false
+	}
+	n, ok := m["format"].(json.Number)
+	if !ok {
+		return false
+	}
+	_, err := n.Int64()
+	return err == nil
+}
+
+// jsonBinaryWrapper is the bytes m holds when it is exactly a $pgtype:
+// binary wrapper, {"$pgtype": "binary", "data": <base64>}.
+func jsonBinaryWrapper(m map[string]any) ([]byte, bool) {
+	if len(m) != 2 || m[jsonPgTypeKey] != jsonPgTypeBinary {
+		return nil, false
+	}
+	data, ok := m["data"].(string)
+	if !ok {
+		return nil, false
+	}
+	b, err := base64.StdEncoding.DecodeString(data)
+	return b, err == nil
 }
 
 func decodeJSONByDiscriminator(disc string, m map[string]any) (any, error) {
@@ -499,8 +743,12 @@ func decodeJSONByDiscriminator(disc string, m map[string]any) (any, error) {
 	case jsonPgTypeFloat:
 		return decodeJSONFloat(m["value"])
 	}
-	return nil, fmt.Errorf("PostgresV3Cell: unknown $pgtype %q", disc)
+	return nil, fmt.Errorf("PostgresV3Cell: %w %q", errUnknownJSONPgType, disc)
 }
+
+// errUnknownJSONPgType is decodeJSONByDiscriminator's error for a
+// "$pgtype" value no encoder writes: the object is a document's.
+var errUnknownJSONPgType = errors.New("unknown $pgtype")
 
 // decodeJSONFloat parses the string token produced by floatToJSON back
 // into a float64. The encoder only emits this wrapper for non-finite
@@ -1147,23 +1395,18 @@ func decodeJSONPrefix(v any) (netip.Prefix, error) {
 	return p, nil
 }
 
+// decodeJSONHWAddr is the net.HardwareAddr a {"macaddr": v} object holds:
+// v the $pgtype: binary wrapper of its bytes, as the encoder has always
+// written it. Any other v (a MAC address's text, a base64 string) is not a
+// macaddr cell's but a document's, and its object is read back as the
+// document (recoverPgMappingFromJSON).
 func decodeJSONHWAddr(v any) (net.HardwareAddr, error) {
-	switch t := v.(type) {
-	case map[string]any:
-		// Discriminator-wrapped: {$pgtype: binary, data: <base64>}.
-		if disc, ok := t[jsonPgTypeKey].(string); ok && disc == jsonPgTypeBinary {
-			return decodeJSONBinary(t["data"])
+	if w, ok := v.(map[string]any); ok {
+		if b, ok := jsonBinaryWrapper(w); ok {
+			return net.HardwareAddr(b), nil
 		}
-		return nil, fmt.Errorf("pg/macaddr: expected {$pgtype: binary, data: ...} envelope")
-	case string:
-		// Bare base64 string — accepted for hand-edited fixtures.
-		b, err := base64.StdEncoding.DecodeString(t)
-		if err != nil {
-			return nil, fmt.Errorf("pg/macaddr: %w", err)
-		}
-		return net.HardwareAddr(b), nil
 	}
-	return nil, fmt.Errorf("pg/macaddr: unexpected JSON type %T", v)
+	return nil, fmt.Errorf("pg/macaddr: expected {$pgtype: binary, data: ...} envelope, got %T", v)
 }
 
 func rawCellFromJSON(m map[string]any) (PostgresV3CellRaw, error) {
