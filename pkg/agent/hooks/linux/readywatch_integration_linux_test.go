@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -209,6 +210,64 @@ func provenReadyHooks(t *testing.T, docker bool) (*Hooks, string) {
 	return h, cg
 }
 
+// ownNetNSEnv marks the run inOwnNetNamespace started.
+const ownNetNSEnv = "KEPLOY_READY_TEST_NETNS"
+
+// inOwnNetNamespace runs the calling test again, alone, in a network
+// namespace of its own with its loopback up, and reports whether the caller
+// is that run. The agent refuses to watch a network namespace that a
+// process of another mount namespace already runs in (strangerInNetns,
+// read from its /proc), and the host's always holds some: the kdevtmpfs
+// kernel thread on any kernel, and services with mounts of their own. A
+// Docker-mode agent never meets them: its container has a PID namespace of
+// its own, so its /proc lists none of the host's processes (even with
+// --network host, pre-flip W6-u). The test's agent, the test process, runs
+// in the host's PID namespace, so it gets a network namespace of its own,
+// which none of them share.
+func inOwnNetNamespace(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(ownNetNSEnv) == "1" {
+		if err := loopbackUp(); err != nil {
+			t.Fatalf("bring the namespace's loopback up: %v", err)
+		}
+		return true
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("this test needs root (it loads BPF programs and creates a network namespace); run the test binary with sudo")
+	}
+	cmd := exec.Command("/proc/self/exe", "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), ownNetNSEnv+"=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNET, Pdeathsig: syscall.SIGKILL}
+	out, err := cmd.CombinedOutput()
+	t.Logf("the run in a network namespace of its own:\n%s", out)
+	if err != nil {
+		t.Fatalf("failed in a network namespace of its own: %v", err)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("the run in a network namespace of its own did not report %s as passed", t.Name())
+	}
+	return false
+}
+
+// loopbackUp sets this network namespace's lo up (a new namespace's is down,
+// with no address to bind).
+func loopbackUp() error {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	ifr, err := unix.NewIfreq("lo")
+	if err != nil {
+		return err
+	}
+	if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+		return err
+	}
+	ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
+	return unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr)
+}
+
 func startReadyHelper(t *testing.T, cg, mode string) (io.Writer, *bufio.Reader, int) {
 	t.Helper()
 	cgf, err := os.Open(cg)
@@ -252,6 +311,9 @@ func readiness(t *testing.T, h *Hooks, done func(models.AppReadiness) bool) mode
 // Under the switch the agent sees the application listen, in its own network
 // namespace, and the listen is its progress.
 func TestUnderTheSwitchTheAgentSeesTheApplicationListen(t *testing.T) {
+	if !inOwnNetNamespace(t) {
+		return
+	}
 	h, cg := provenReadyHooks(t, true)
 	in, out, _ := startReadyHelper(t, cg, "listen-after:100")
 	line, _ := out.ReadString('\n')
