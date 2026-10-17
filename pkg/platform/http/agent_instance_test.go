@@ -80,7 +80,6 @@ func TestAWatchSaysWhenAnotherAgentProcessAnswers(t *testing.T) {
 	w := client.WatchAgentInstance()
 	defer w.Stop()
 	answer(t, client.client, uri)
-	answer(t, client.hookClient, uri)
 	if rep, replaced := w.Replacement(); replaced {
 		t.Fatalf("replaced %+v; one process answered since the watch began", rep)
 	}

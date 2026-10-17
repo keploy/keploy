@@ -3,15 +3,10 @@ package http
 import (
 	"net/http"
 	"regexp"
-	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.uber.org/zap"
 )
-
-// agentHookTimeout is the deadline the /hooks/* calls run under. It was
-// spelled out at each of those call sites before they shared a client.
-const agentHookTimeout = 50 * time.Second
 
 // bearerTransport attaches the session's control-plane token to every request
 // made through a client built here.
@@ -73,15 +68,7 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 // agentHTTPClient returns the client the AgentClient uses to reach its agent,
 // carrying the token when one is in play for this session.
 func agentHTTPClient(token string) http.Client {
-	return agentHTTPClientWithTimeout(token, 0)
-}
-
-// agentHTTPClientWithTimeout is agentHTTPClient with a per-request deadline,
-// for the /hooks/* calls that want one. Same transport: the timeout is the only
-// thing that differs, and building a bare client to get it is what left those
-// calls unauthenticated.
-func agentHTTPClientWithTimeout(token string, timeout time.Duration) http.Client {
-	c := http.Client{Timeout: timeout}
+	var c http.Client
 	var base http.RoundTripper
 	if token != "" {
 		base = &bearerTransport{token: token}
