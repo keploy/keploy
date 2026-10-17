@@ -1807,7 +1807,8 @@ func (p *Proxy) getMockManager() *MockManager {
 // any HTTP/2 target, and its recorded http/1.1 mock would never match.
 //
 // The check reads the live mock set on every call (via HasMocksByKind, which
-// short-circuits on the first match and allocates nothing). It is intentionally
+// without exact serving short-circuits on the first match and allocates
+// nothing). It is intentionally
 // NOT cached: the mock set is replaced between test-sets on the SAME manager,
 // so a cache keyed on manager identity would both miss Http2 mocks that first
 // load after it was built and carry a destination's h2 preference into a later
@@ -1818,8 +1819,10 @@ func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 	// recording, read whole when it was stored: a destination whose HTTP/2
 	// mocks are all inside tests is known then, before any of them is
 	// staged, as when a staging held the whole recording until the first
-	// test (before keploy #4819). From the first test on, the live trees
-	// decide, per window.
+	// test (before keploy #4819). From the first test on, what the manager
+	// serves decides, per window: its live trees, or under exact serving
+	// the open view, which holds the open test's own mocks
+	// (HasMocksByKind).
 	if (m == nil || !m.HasFirstTestFired()) && p.recordedH2.has(sniHost, port) {
 		return true
 	}
