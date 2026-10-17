@@ -517,8 +517,8 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (sta
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
 	defer t.Stop()
-	var mark exitRatchet
-	mark.advance(markExit(ms))
+	var mark utils.ExitRatchet
+	mark.Advance(markExit(ms))
 	var quiet uint64
 	killed, offering := false, false
 	kill := func(why string) {
@@ -547,7 +547,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool) (sta
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
-		if mark.advance(markExit(ms)) {
+		if mark.Advance(markExit(ms)) {
 			quiet = 0
 			continue
 		}
@@ -701,93 +701,16 @@ func running(ms []member) []int {
 	return pids
 }
 
-// exitMark is how far a stop's members are on their way out: how many still
-// run, with how many threads and open files, how much storage they have read
-// and written, and whether one waits on storage (an uninterruptible sleep,
-// D) as it is read.
-type exitMark struct {
-	running, threads, fds int
-	io                    uint64
-	onStorage             bool
-}
-
-func markExit(ms []member) exitMark {
-	var m exitMark
+// markExit reads how far a stop's members are on their way out
+// (utils.ExitMark): those whose pidfd shows them exited are not read.
+func markExit(ms []member) utils.ExitMark {
+	procs := make([]utils.Reached, 0, len(ms))
 	for _, mb := range ms {
-		if mb.exited() {
-			continue
-		}
-		m.running++
-		dir := "/proc/" + strconv.Itoa(mb.pid)
-		if st, ok := utils.ReadProcStat(mb.pid); ok && st.State == 'D' {
-			m.onStorage = true
-		}
-		if tasks, err := os.ReadDir(dir + "/task"); err == nil {
-			m.threads += len(tasks)
-		}
-		if fds, err := os.ReadDir(dir + "/fd"); err == nil {
-			m.fds += len(fds)
-		}
-		m.io += storageIO(dir + "/io")
-	}
-	return m
-}
-
-// exitRatchet is the furthest a stop's members have come on their way out:
-// the fewest of them running, threads and open files seen, and the most
-// storage I/O. A reading is progress only where it passes that mark, so a
-// count that rises and falls back (a socket opened and closed, a thread
-// started and ended: a retry loop, a DNS lookup, a pool) is none; and
-// storage I/O counts only while a member waits on it: a daemon that logs as
-// it waits on its own makes none.
-type exitRatchet struct {
-	best exitMark
-	set  bool
-}
-
-// advance takes reading m and reports whether it passed the mark.
-func (r *exitRatchet) advance(m exitMark) bool {
-	if !r.set {
-		r.best, r.set = m, true
-		return false
-	}
-	moved := false
-	if m.running < r.best.running {
-		r.best.running, moved = m.running, true
-	}
-	if m.threads < r.best.threads {
-		r.best.threads, moved = m.threads, true
-	}
-	if m.fds < r.best.fds {
-		r.best.fds, moved = m.fds, true
-	}
-	if m.io > r.best.io {
-		if m.onStorage {
-			moved = true
-		}
-		r.best.io = m.io
-	}
-	return moved
-}
-
-// storageIO is the bytes a process has read from and written to storage
-// (read_bytes and write_bytes of /proc/<pid>/io), 0 where it cannot be read.
-func storageIO(path string) uint64 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var n uint64
-	for _, line := range strings.Split(string(b), "\n") {
-		for _, key := range []string{"read_bytes:", "write_bytes:"} {
-			if v, ok := strings.CutPrefix(line, key); ok {
-				if x, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64); err == nil {
-					n += x
-				}
-			}
+		if !mb.exited() {
+			procs = append(procs, utils.Reached{PID: mb.pid, Start: mb.start})
 		}
 	}
-	return n
+	return utils.MarkExit(procs)
 }
 
 // processChildren is the processes pid runs: its threads' children lists, or,

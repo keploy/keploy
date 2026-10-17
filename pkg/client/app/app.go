@@ -1886,6 +1886,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				}
 
+				if stopsByEvents(setEnd || recordEnd) {
+					killed, err := a.stopDockerRunByEvents(cmd)
+					a.noteStopKill(setEnd, recordEnd, killed)
+					return err
+				}
 				killed, err := a.stopDockerRun(cmd, setEnd || recordEnd)
 				if killed {
 					a.noteStopKill(setEnd, recordEnd, fmt.Sprintf("its container had not stopped %s later (the grace keploy's stop gives a docker run app), so keploy killed it", graceBudget))
@@ -1899,7 +1904,17 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// the stop of what the app leaves behind waits for it
 				// rather than ask it again (TakeStopReached).
 				var reached []utils.Reached
-				killed, reached, err = utils.InterruptProcessTreeReached(a.logger, cmd.Process.Pid, syscall.SIGINT)
+				if setEnd || recordEnd {
+					// The stop waits on the app's exit, and kills only
+					// on the stall rule, or at the user's Ctrl+C
+					// (setend_stop.go); the drains wait for it.
+					killed, reached, err = func() (string, []utils.Reached, error) {
+						defer utils.BeginAppStop()()
+						return utils.InterruptProcessTreeStop(a.logger, cmd.Process.Pid, syscall.SIGINT)
+					}()
+				} else {
+					killed, reached, err = utils.InterruptProcessTreeReached(a.logger, cmd.Process.Pid, syscall.SIGINT)
+				}
 				a.stopReached.Store(&reached)
 			} else {
 				killed, err = utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
