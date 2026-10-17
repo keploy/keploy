@@ -67,11 +67,39 @@ func (r *Replayer) notJudged(testSetID string) bool {
 	return r.notJudgedSets[testSetID]
 }
 
-// forgetNotJudged clears testSetID's mark, as a run of the set starts.
+// markNeverReady records that testSetID was not judged because its
+// application never got ready (proven switch): it ran no test.
+func (r *Replayer) markNeverReady(testSetID string) {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	if r.neverReadySets == nil {
+		r.neverReadySets = map[string]bool{}
+	}
+	r.neverReadySets[testSetID] = true
+}
+
+// neverReady reports whether testSetID was not judged in this run because
+// its application never got ready.
+func (r *Replayer) neverReady(testSetID string) bool {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	return r.neverReadySets[testSetID]
+}
+
+// saysResultsUnread says whether a set's results that could not be read are
+// an error to say: not for a set with no tests to run, nor for one whose
+// application never got ready (it said why already, and ran no test); for
+// any other, one not judged for another reason too.
+func (r *Replayer) saysResultsUnread(status models.TestSetStatus, testSetID string) bool {
+	return status != models.TestSetStatusNoTestsToRun && !r.neverReady(testSetID)
+}
+
+// forgetNotJudged clears testSetID's marks, as a run of the set starts.
 func (r *Replayer) forgetNotJudged(testSetID string) {
 	r.notJudgedMu.Lock()
 	defer r.notJudgedMu.Unlock()
 	delete(r.notJudgedSets, testSetID)
+	delete(r.neverReadySets, testSetID)
 }
 
 // testsWithUnreadCapture names the tests of a set whose capture could not be

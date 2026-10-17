@@ -33,6 +33,17 @@ const (
 	bpfMapPidMapInsertFailures        = "pid_map_insert_failures"
 	bpfMapProxyConnsEstablished       = "proxy_conns_established"
 	bpfMapProxyListenerMark           = "proxy_listener_mark"
+	bpfMapReadyAgentMntns             = "ready_agent_mntns"
+	bpfMapReadyCfg                    = "ready_cfg"
+	bpfMapReadyIdentBuf               = "ready_ident_buf"
+	bpfMapReadyLastRestart            = "ready_last_restart"
+	bpfMapReadyListenEvents           = "ready_listen_events"
+	bpfMapReadyListenEventsLost       = "ready_listen_events_lost"
+	bpfMapReadyLive                   = "ready_live"
+	bpfMapReadyMains                  = "ready_mains"
+	bpfMapReadyProgress               = "ready_progress"
+	bpfMapReadySeen                   = "ready_seen"
+	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfMapUdpMemberAddrs              = "udp_member_addrs"
@@ -51,6 +62,13 @@ const (
 	bpfProgK_postBind4                = "k_post_bind4"
 	bpfProgK_postBind6                = "k_post_bind6"
 	bpfProgK_processExit              = "k_process_exit"
+	bpfProgK_readyBind4               = "k_ready_bind4"
+	bpfProgK_readyBind6               = "k_ready_bind6"
+	bpfProgK_readyConnect4            = "k_ready_connect4"
+	bpfProgK_readyConnect6            = "k_ready_connect6"
+	bpfProgK_readyExec                = "k_ready_exec"
+	bpfProgK_readyExit                = "k_ready_exit"
+	bpfProgK_readyFork                = "k_ready_fork"
 	bpfProgK_sockops                  = "k_sockops"
 	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
@@ -115,6 +133,13 @@ type bpfProgramSpecs struct {
 	K_postBind4             *ebpf.ProgramSpec `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.ProgramSpec `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.ProgramSpec `ebpf:"k_process_exit"`
+	K_readyBind4            *ebpf.ProgramSpec `ebpf:"k_ready_bind4"`
+	K_readyBind6            *ebpf.ProgramSpec `ebpf:"k_ready_bind6"`
+	K_readyConnect4         *ebpf.ProgramSpec `ebpf:"k_ready_connect4"`
+	K_readyConnect6         *ebpf.ProgramSpec `ebpf:"k_ready_connect6"`
+	K_readyExec             *ebpf.ProgramSpec `ebpf:"k_ready_exec"`
+	K_readyExit             *ebpf.ProgramSpec `ebpf:"k_ready_exit"`
+	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
@@ -149,6 +174,17 @@ type bpfMapSpecs struct {
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
 	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
+	ReadyAgentMntns             *ebpf.MapSpec `ebpf:"ready_agent_mntns"`
+	ReadyCfg                    *ebpf.MapSpec `ebpf:"ready_cfg"`
+	ReadyIdentBuf               *ebpf.MapSpec `ebpf:"ready_ident_buf"`
+	ReadyLastRestart            *ebpf.MapSpec `ebpf:"ready_last_restart"`
+	ReadyListenEvents           *ebpf.MapSpec `ebpf:"ready_listen_events"`
+	ReadyListenEventsLost       *ebpf.MapSpec `ebpf:"ready_listen_events_lost"`
+	ReadyLive                   *ebpf.MapSpec `ebpf:"ready_live"`
+	ReadyMains                  *ebpf.MapSpec `ebpf:"ready_mains"`
+	ReadyProgress               *ebpf.MapSpec `ebpf:"ready_progress"`
+	ReadySeen                   *ebpf.MapSpec `ebpf:"ready_seen"`
+	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
@@ -203,6 +239,17 @@ type bpfMaps struct {
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
 	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
+	ReadyAgentMntns             *ebpf.Map `ebpf:"ready_agent_mntns"`
+	ReadyCfg                    *ebpf.Map `ebpf:"ready_cfg"`
+	ReadyIdentBuf               *ebpf.Map `ebpf:"ready_ident_buf"`
+	ReadyLastRestart            *ebpf.Map `ebpf:"ready_last_restart"`
+	ReadyListenEvents           *ebpf.Map `ebpf:"ready_listen_events"`
+	ReadyListenEventsLost       *ebpf.Map `ebpf:"ready_listen_events_lost"`
+	ReadyLive                   *ebpf.Map `ebpf:"ready_live"`
+	ReadyMains                  *ebpf.Map `ebpf:"ready_mains"`
+	ReadyProgress               *ebpf.Map `ebpf:"ready_progress"`
+	ReadySeen                   *ebpf.Map `ebpf:"ready_seen"`
+	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
@@ -233,6 +280,17 @@ func (m *bpfMaps) Close() error {
 		m.PidMapInsertFailures,
 		m.ProxyConnsEstablished,
 		m.ProxyListenerMark,
+		m.ReadyAgentMntns,
+		m.ReadyCfg,
+		m.ReadyIdentBuf,
+		m.ReadyLastRestart,
+		m.ReadyListenEvents,
+		m.ReadyListenEventsLost,
+		m.ReadyLive,
+		m.ReadyMains,
+		m.ReadyProgress,
+		m.ReadySeen,
+		m.ReadySocks,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 		m.UdpMemberAddrs,
@@ -264,6 +322,13 @@ type bpfPrograms struct {
 	K_postBind4             *ebpf.Program `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.Program `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.Program `ebpf:"k_process_exit"`
+	K_readyBind4            *ebpf.Program `ebpf:"k_ready_bind4"`
+	K_readyBind6            *ebpf.Program `ebpf:"k_ready_bind6"`
+	K_readyConnect4         *ebpf.Program `ebpf:"k_ready_connect4"`
+	K_readyConnect6         *ebpf.Program `ebpf:"k_ready_connect6"`
+	K_readyExec             *ebpf.Program `ebpf:"k_ready_exec"`
+	K_readyExit             *ebpf.Program `ebpf:"k_ready_exit"`
+	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
@@ -288,6 +353,13 @@ func (p *bpfPrograms) Close() error {
 		p.K_postBind4,
 		p.K_postBind6,
 		p.K_processExit,
+		p.K_readyBind4,
+		p.K_readyBind6,
+		p.K_readyConnect4,
+		p.K_readyConnect6,
+		p.K_readyExec,
+		p.K_readyExit,
+		p.K_readyFork,
 		p.K_sockops,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,

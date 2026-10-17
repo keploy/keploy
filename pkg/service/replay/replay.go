@@ -418,6 +418,9 @@ type Replayer struct {
 	// (markNotJudged): INTERNAL_ERR that does not end the round.
 	notJudgedMu   sync.Mutex
 	notJudgedSets map[string]bool
+	// neverReadySets are those of them not judged because their application
+	// never got ready (proven switch): they ran no test, and have no results.
+	neverReadySets map[string]bool
 
 	logger          *zap.Logger
 	testDB          TestDB
@@ -441,6 +444,19 @@ type Replayer struct {
 	// ignoredSaid holds the settings said ignored under the switch
 	// (noteIgnored), each once per run.
 	ignoredSaid sync.Map
+
+	// readySince is the agent's count of listens read before this set's
+	// application was started anew (markReadiness), under the proven switch;
+	// nil when none was read, readySinceErr when it could not be.
+	readySince    *readyMark
+	readySinceErr string
+	// readyStalledAt is where the last set's wait called the application
+	// stalled; nil once it got ready.
+	readyStalledAt *progressMark
+	// badHealthURLSaid says an invalid --health-url once a run.
+	badHealthURLSaid sync.Once
+	// readyTally is provenReadiness.tally for the sets' waits: tests only.
+	readyTally *readTally
 
 	// isFirstTestSet mirrors isLastTestSet — true while the test-set
 	// about to run is the first one of the current replay run. Read
@@ -1122,7 +1138,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
 			if err != nil {
-				if testSetStatus != models.TestSetStatusNoTestsToRun {
+				if r.saysResultsUnread(testSetStatus, testSet) {
 					utils.LogError(r.logger, err, "failed to get testcase results")
 				}
 				break
@@ -1591,6 +1607,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
+	// notReady is why the set's application never got ready, under the
+	// proven switch (readiness_proven.go): the set runs no test and is not
+	// judged.
+	notReady := ""
 
 	// exitLoopChan is never closed. The test loops below are its only readers,
 	// and they have finished by the time the deferred drain runs; its writers
@@ -2143,10 +2163,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// one-shot spawn was suppressed (cmdType == Empty / instrument
 		// off), serveTest will be false here and the readiness wait
 		// runs every test-set, matching the historical lifecycle.
-		if serveTest && !r.isFirstTestSet {
+		// Under the proven switch every set waits for its application's
+		// readiness: a warm one is ready at the first read, and one that
+		// never got ready for the first set is not fired at for the next.
+		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
+		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
 			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
 		}
 
 		// The compose bring-up retry (pkg/client/app) can leave keploy's agent
@@ -2256,6 +2281,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						}
 					}
 				}
+				// Under the proven switch: the listens the agent saw before
+				// this set's application starts are not this one's.
+				r.markReadiness(runTestSetCtx)
 				runTestSetErrGrp.Go(func() error {
 					if appExited != nil {
 						defer close(appExited)
@@ -2310,12 +2338,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// effectiveKeepAlive predicate) — identical to the compose
 			// branch above — so the readiness skip arms only when the
 			// one-shot spawn actually fired.
-			if serveTest && !r.isFirstTestSet {
+			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
+			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
 				return models.TestSetStatusUserAbort, context.Canceled
+			} else if !ready {
+				notReady = why
 			}
 
+		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, false, false); !ready && why == "" {
+			// An application keploy did not start (no command): under the
+			// proven switch the first test's address must take a connect.
+			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
+		}
+	}
+	// A base path replays against an application already running: under the
+	// proven switch, the first test's address must take a connect first.
+	if r.noAgent {
+		if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, false, false); !ready && why == "" {
+			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
 		}
 	}
 
@@ -2351,6 +2396,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// var to exit the loop
 	var exitLoop bool
+	// An application that never got ready runs no test (proven switch): the
+	// set is not judged, below.
+	if notReady != "" {
+		exitLoop = true
+		testSetStatus = models.TestSetStatusInternalErr
+	}
 	// endedPartWay reports whether the context of a run with no agent has
 	// ended before its tests did, and the status the set ends with if so:
 	// USER_ABORT when its user stopped it, INTERNAL_ERR for anything else (a
@@ -4908,6 +4959,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("next_step", "check the agent's log for why the read was incomplete, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
+	}
+
+	// An application that never got ready ran no test: the set is not judged,
+	// saying why first (proven switch, readiness_proven.go).
+	if notReady != "" {
+		if notJudged == "" {
+			notJudged = "not judged: " + notReady
+		} else {
+			notJudged = "not judged: " + notReady + "; " + notJudged
+		}
+		r.logger.Error("test-set is not judged: its application never got ready, so keploy fired none of its tests; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.String("reason", notReady),
+			zap.String("next_step", "start the application so that it listens where the set's first test dials (or answers its --health-url), see its logs in this report for why it did not, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+		r.markNeverReady(testSetID)
 	}
 
 	appFailure := getLastAppErr()
