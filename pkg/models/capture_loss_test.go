@@ -217,6 +217,14 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 	if text := notJudged.NotJudgedText(); !strings.Contains(text, "cannot see the application's calls over Unix sockets") || !strings.Contains(text, "no trampoline") {
 		t.Fatalf("NotJudgedText = %q", text)
 	}
+	// Its remedy is keploy's report's: reaching the dependencies over TCP
+	// leaves every test not judged all the same.
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, "report the reason to keploy") || strings.Contains(r, "TCP") {
+		t.Fatalf("remedy %q, want the report's own, never a move to TCP", r)
+	}
+	if r := append(notJudged, CaptureLoss{Kind: CaptureLossUnixSocket, Count: 1}).NotJudgedRemedy(); !strings.Contains(r, "reach that dependency over a TCP address") || !strings.Contains(r, UnixUnseenRemedy) {
+		t.Fatalf("remedy %q, want both: a Unix socket's call seen, and the report's", r)
+	}
 }
 
 // A server-first connection keploy passed through (P250) leaves the test it
