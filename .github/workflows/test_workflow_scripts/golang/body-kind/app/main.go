@@ -33,6 +33,20 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write(body)
 	})
+	// GET /upgrade: a 101 (Switching Protocols), then the protocol it switched
+	// to on the connection (HTTP/2's client preface, as an h2c tunnel's server
+	// sends it); a peer that does not speak it is given up on, and the
+	// connection closed, as api-server's tunnel does.
+	http.HandleFunc("/upgrade", func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: keploy-e2e\r\n\r\n")
+		_, _ = rw.WriteString("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+		_ = rw.Flush()
+	})
 	if err := http.ListenAndServe(":8092", nil); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

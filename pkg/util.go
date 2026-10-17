@@ -795,6 +795,24 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 // a thread of its own holds those threads, and one that waits for its open
 // connections as it stops (Python's ThreadingTCPServer joins each one's
 // thread on its way out) cannot stop while keploy runs.
+// endAtHeaders gives a 101 (Switching Protocols) answer no body. A 101's
+// response ends at its header section, and what follows on the connection
+// belongs to the protocol it switched to (RFC 9110 §15.2.2); for a 101,
+// net/http hands back the connection itself as the body. keploy test speaks
+// no protocol a request switches to, so it closes the connection unread, as a
+// client that will not go on does. Read as the body, the next protocol's
+// bytes (an h2c tunnel's preface, a WebSocket's frames) made a replayed
+// upgrade differ from its recording, which has none, once a body of another
+// kind than the recorded one was compared (pkg/matcher/http, cfea2520e); and
+// the read waited until the app gave up on its peer.
+func endAtHeaders(resp *http.Response) {
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols || resp.Body == nil {
+		return
+	}
+	_ = resp.Body.Close()
+	resp.Body = http.NoBody
+}
+
 type connClosingBody struct {
 	io.ReadCloser
 	client *http.Client
@@ -1105,6 +1123,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	endAtHeaders(httpResp)
 	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()
@@ -1215,6 +1234,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	endAtHeaders(httpResp)
 	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()

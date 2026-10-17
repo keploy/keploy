@@ -19,6 +19,15 @@
 # test fails in 3, its length not excused, and the recording as it is
 # passes (4).
 #
+# GET /upgrade answers a 101 (Switching Protocols) and then speaks the
+# protocol it switched to (an h2c preface), as a WebSocket or tunnel endpoint
+# does. Its test, a 101 with no body as keploy's k8s-proxy records one, passes
+# with the switch off (1) and on (4): a 101's response ends at its headers.
+# keploy test once read the next protocol's bytes as its body, and so failed
+# every replayed upgrade once a body of another kind was compared (v3.6.130).
+# keploy record does not make a test of an upgrade (its connection becomes a
+# raw byte pump), so the case is the recorded GET /t's, rewritten.
+#
 # Readiness is the dependency's own "ready" line, the app's port while
 # recording, and keploy's own probe of the app (--health-path) while
 # replaying. The script stops only the processes it started. Ports: 8092
@@ -114,6 +123,19 @@ stop_pid "$REC_PID"
 REC_PID=""
 own
 grep -q '"n":7' keploy/test-set-0/mocks.yaml || { echo "::error::the dependency call was not recorded"; exit 1; }
+t_case="$(grep -l 'url: .*/t$' keploy/test-set-0/tests/*.yaml | head -n1)"
+[ -n "$t_case" ] || { echo "::error::no recorded test case of GET /t to make the upgrade case from"; exit 1; }
+# Its window comes after every recorded call (the GET /t case's answer, the
+# last recorded, plus 10 s): under the switch a test owns the calls its
+# window holds, and the upgrade makes none.
+up_at="$(date -u -d "$(yq -r '.spec.resp.timestamp' "$t_case") + 10 seconds" +%Y-%m-%dT%H:%M:%S.%NZ)" ||
+    { echo "::error::could not read the GET /t case's answer time"; exit 1; }
+UP_AT="$up_at" yq '.name = "test-upgrade" | .spec.req.url |= sub("/t$"; "/upgrade")
+    | .spec.req.timestamp = strenv(UP_AT) | .spec.resp.timestamp = strenv(UP_AT)
+    | .spec.req.header.Connection = "Upgrade" | .spec.req.header.Upgrade = "keploy-e2e"
+    | .spec.resp.status_code = 101 | .spec.resp.status_message = "Switching Protocols"
+    | .spec.resp.header = {"Connection": "Upgrade", "Upgrade": "keploy-e2e"} | .spec.resp.body = ""' \
+    "$t_case" >keploy/test-set-0/tests/test-upgrade.yaml || { echo "::error::could not write the upgrade case"; exit 1; }
 kill "$DEP_PID" 2>/dev/null
 wait "$DEP_PID" 2>/dev/null
 DEP_PID=""
@@ -138,6 +160,14 @@ expect_pass() {
         fail "$1: the set must pass (exit $RC, status $(set_status))"
     fi
 }
+# upgrade_test <field>: GET /upgrade's test's field in the report.
+upgrade_test() { yq -r "[.tests[] | select(.req.url | test(\"/upgrade\$\"))][0] | $1" "$(REPORT)"; }
+expect_upgrade_pass() {
+    [ "$(upgrade_test .status)" = PASSED ] && return 0
+    fail "$1: GET /upgrade's 101 must pass, its response ending at its headers (status $(upgrade_test .status))"
+    yq -o=json -I=0 "[.tests[] | select(.req.url | test(\"/upgrade\$\"))][0] | {\"result\": .result, \"reason\": (.failure_info // .failureInfo // \"\")}" "$(REPORT)" | head -c 4000
+    echo
+}
 # text_test <field>: GET /t's test's field in the report.
 text_test() { yq -r "[.tests[] | select(.req.url | test(\"/t\$\"))][0] | $1" "$(REPORT)"; }
 # expect_body_fail <step>: the set failed, and on a body the report says
@@ -154,6 +184,7 @@ expect_body_fail() {
 
 PROVEN="" replay off-recorded
 expect_pass "1 (switch off, the recording as it is)"
+expect_upgrade_pass "1"
 
 cp keploy/test-set-0/mocks.yaml mocks.yaml.saved
 : >keploy/test-set-0/mocks.yaml
@@ -170,6 +201,7 @@ expect_body_fail "3 (KEPLOY_PROVEN=1, no mocks)"
 cp mocks.yaml.saved keploy/test-set-0/mocks.yaml
 PROVEN=1 replay proven-recorded
 expect_pass "4 (KEPLOY_PROVEN=1, the recording as it is: a text body compared byte for byte)"
+expect_upgrade_pass "4"
 
 if [ "$FAIL" -eq 0 ]; then
     echo "body-kind e2e passed"
