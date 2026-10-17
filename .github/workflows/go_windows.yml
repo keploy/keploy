@@ -81,3 +81,12 @@ jobs:
       - name: Test amd64
         run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/...
         shell: cmd
+
+      # The Windows stop of a native app (utils.interruptProcessTree): one that
+      # had to force-kill the app says so, so a test set's end it cut is not
+      # judged (P101-b-o). Only this test of ./utils/ runs here: the package
+      # as a whole has not been shown to pass on Windows. It takes ~30 s, most
+      # of it the stop's own 10 s grace and its PowerShell process checks.
+      - name: Test the Windows stop (amd64)
+        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled" ./utils/
+        shell: cmd
