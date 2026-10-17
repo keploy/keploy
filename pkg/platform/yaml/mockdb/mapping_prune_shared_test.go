@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
@@ -67,5 +68,27 @@ func TestMappingPruneKeepsWhatIsEveryTestsByStatement(t *testing.T) {
 	models.SetSessionCalls([]models.SessionCallRule{{Host: "auth.example.com", Method: "POST", PathPrefix: "/oauth/token"}})
 	if got := served(); len(got) != 2 || got[0] != "mock-0" || got[1] != "mock-2" {
 		t.Fatalf("with the token call declared, session pool %v, want mock-0 (declared) and mock-2; mock-3, recorded before, left out as always", got)
+	}
+}
+
+// A MySQL prepared statement's lifecycle (PREPARE, CLOSE, RESET) is every
+// test's whenever it was recorded: one recorded before lifetimes were stated
+// is its connection's (models.DeriveLifetime), so a run of other tests keeps
+// it, as it keeps a stated one. The statement's data (EXECUTE) recorded
+// before is left out, as always.
+func TestMappingPruneKeepsALegacyPreparedStatementsLifecycle(t *testing.T) {
+	legacy := func(command string) *models.Mock {
+		return &models.Mock{Kind: models.MySQL, Spec: models.MockSpec{
+			Metadata:      map[string]string{"type": "mocks", "connID": "c1"},
+			MySQLRequests: []mysql.Request{{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Type: command}}}},
+		}}
+	}
+	for _, command := range []string{"COM_STMT_PREPARE", "COM_STMT_CLOSE", "COM_STMT_RESET"} {
+		if !sharedByStatement(legacy(command)) {
+			t.Errorf("a legacy %s is not kept for a run of other tests", command)
+		}
+	}
+	if sharedByStatement(legacy("COM_STMT_EXECUTE")) {
+		t.Error("a legacy EXECUTE, the statement's data, is kept for a run of other tests")
 	}
 }
