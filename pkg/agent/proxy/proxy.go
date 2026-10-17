@@ -129,6 +129,14 @@ type Proxy struct {
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
 
+	// recordedH2 is the stored set's recorded HTTP/2 destinations, seeded
+	// from the whole recording (SeedRecordedDestinations), for the ALPN a
+	// TLS client is offered while the app starts (replayTargetHasHTTP2Mock).
+	recordedH2 recordedHTTP2
+	// seededDests is the stored set's seeded recorded destinations, which
+	// every staging derives the MySQL ports from beside what it stages.
+	seededDests atomic.Pointer[[]*models.Mock]
+
 	IP4               string
 	IP6               string
 	Port              uint32
@@ -1806,6 +1814,15 @@ func (p *Proxy) getMockManager() *MockManager {
 // test-set where that destination is HTTP/1.1-only.
 func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 	m := p.getMockManager()
+	// While the app starts, before the set's first test, the stored set's
+	// recording, read whole when it was stored: a destination whose HTTP/2
+	// mocks are all inside tests is known then, before any of them is
+	// staged, as when a staging held the whole recording until the first
+	// test (before keploy #4819). From the first test on, the live trees
+	// decide, per window.
+	if (m == nil || !m.HasFirstTestFired()) && p.recordedH2.has(sniHost, port) {
+		return true
+	}
 	if m == nil {
 		return false
 	}
@@ -4396,7 +4413,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	// destAddr every MySQL mock records. Must happen before the mocks
 	// are published, so a connection that wakes on SetFilteredMocks
 	// already sees the derived ports.
-	p.deriveMysqlPorts(filtered, unFiltered)
+	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetFilteredMocks(filtered)
@@ -4417,7 +4434,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 // single call so concurrent readers cannot observe a torn (newMocks,
 // oldWindow) view. Used to satisfy the WindowedProxy extension interface.
 func (p *Proxy) SetMocksWithWindow(_ context.Context, filtered, unFiltered []*models.Mock, start, end time.Time) error {
-	p.deriveMysqlPorts(filtered, unFiltered)
+	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetMocksWithWindow(filtered, unFiltered, start, end)
@@ -4448,7 +4465,7 @@ func opensTestWindow(start time.Time) bool {
 // extension interface. Everything else a staging does, it does as
 // SetMocksWithWindow does.
 func (p *Proxy) SetScopeMocks(_ context.Context, filtered, unFiltered []*models.Mock, open bool) error {
-	p.deriveMysqlPorts(filtered, unFiltered)
+	p.deriveMysqlPorts(filtered, unFiltered, p.seededDestinations())
 	recorded.add(filtered, unFiltered)
 	if m := p.getMockManager(); m != nil {
 		m.SetScopeMocks(filtered, unFiltered, open)
