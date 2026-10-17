@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -50,8 +52,10 @@ func runNative(t *testing.T, script string, cause error) models.AppError {
 }
 
 // The stop at a set's end is the teardown's, and says when it had to kill the
-// app, with the grace it gave it; an app that exits on the interrupt is no
-// kill. Another stop (the teardown's own, the user's) says nothing.
+// app, with the grace it gave it (the switch off; under it, the stall rule,
+// TestTheSwitchedSetEndStopKillsANativeAppOnlyOnTheStallRule); an app that
+// exits on the interrupt is no kill. Another stop (the teardown's own, the
+// user's) says nothing.
 func TestTheStopAtASetsEndSaysWhenItKilledANativeApp(t *testing.T) {
 	ignores := `trap "" INT; touch started; exec sleep 600`
 	if appErr := runNative(t, ignores, models.ErrAppStoppedForSetEnd); appErr.AppErrorType != models.ErrCtxCanceled ||
@@ -63,6 +67,39 @@ func TestTheStopAtASetsEndSaysWhenItKilledANativeApp(t *testing.T) {
 	}
 	if appErr := runNative(t, ignores, context.Canceled); appErr.StopKilled != "" {
 		t.Fatalf("the teardown's stop: run says %q", appErr.StopKilled)
+	}
+}
+
+// Under the switch the stop at a set's end waits for the app's exit, not a
+// number of seconds: a shutdown longer than the old grace is no kill; one that
+// made no progress on its way out for the stall bound of keploy's runnable
+// time (here shortened) is, and the stop says so. Another stop (the
+// teardown's own, the user's) keeps its grace, and says nothing.
+func TestTheSwitchedSetEndStopKillsANativeAppOnlyOnTheStallRule(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	budget := utils.StopStallBudget
+	utils.StopStallBudget = 300 * time.Millisecond
+	t.Cleanup(func() { utils.StopStallBudget = budget })
+	slow := fmt.Sprintf(`trap 'sleep %d; exit 0' INT; touch started; while :; do sleep 0.2; done`, int(utils.TreeInterruptGrace/time.Second)+1)
+	utils.StopStallBudget = utils.TreeInterruptGrace + 3*time.Second
+	if appErr := runNative(t, slow, models.ErrAppStoppedForSetEnd); appErr.StopKilled != "" {
+		t.Fatalf("a shutdown longer than the old grace: run says %q; want it waited for", appErr.StopKilled)
+	}
+	utils.StopStallBudget = 300 * time.Millisecond
+	ignores := `trap "" INT; touch started; exec sleep 600`
+	if appErr := runNative(t, ignores, models.ErrAppStoppedForSetEnd); appErr.AppErrorType != models.ErrCtxCanceled ||
+		!strings.Contains(appErr.StopKilled, "made no progress on its way out for 300ms of keploy's runnable time after keploy interrupted it, so keploy killed it") {
+		t.Fatalf("an app that ignores the interrupt: run ended %+v, says %q; want a kill named with the stall", appErr, appErr.StopKilled)
+	}
+	// The teardown's stop keeps its grace: with a stall bound of ten
+	// minutes, it is over in seconds.
+	utils.StopStallBudget = 10 * time.Minute
+	start := time.Now()
+	if appErr := runNative(t, ignores, context.Canceled); appErr.StopKilled != "" {
+		t.Fatalf("the teardown's stop: run says %q", appErr.StopKilled)
+	}
+	if took := time.Since(start); took > time.Minute {
+		t.Fatalf("the teardown's stop took %s: it waited on the app's exit, not its grace", took)
 	}
 }
 

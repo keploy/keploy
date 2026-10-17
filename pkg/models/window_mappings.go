@@ -39,6 +39,10 @@ type WindowedMock struct {
 	// no async lane serves. An async lane's mocks are served in their lane's
 	// recorded order whichever test is open, so no test owns one.
 	TestMock bool
+	// InFlight says the in-flight rule applies to it (InFlightEligible): sent
+	// in the gap before a test and answered at or after its start, it is that
+	// test's.
+	InFlight bool
 }
 
 // NewWindowedMock is m as the window derivation reads it.
@@ -49,6 +53,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		At:       m.Spec.ReqTimestampMock,
 		Res:      m.Spec.ResTimestampMock,
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
+		InFlight: InFlightEligible(m),
 	}
 }
 
@@ -76,11 +81,17 @@ type WindowMappings struct {
 
 // DeriveWindowMappings gives each test the test mocks recorded inside its
 // window: those whose request time is in the window's [Start, End]. A mock
-// recorded while no window was open (start-up traffic, the gaps between
-// tests) belongs to no test. A mock recorded while two windows were open goes
-// to the one that opened first: the earliest-started window that contains it,
-// the window models.WindowSchedule releases it at, and the one the sync-mode
-// mock manager gives it when it has nothing else to go by.
+// recorded while no window was open belongs to no test (start-up traffic, a
+// call sent and answered between two tests), except one the in-flight rule
+// applies to (WindowedMock.InFlight) that was sent in the gap before a test
+// and answered at or after its start: it was in flight when that test began,
+// and is that test's (WindowSchedule.InFlightInto, which gives it to neither
+// of two tests that start together). A mock recorded while two windows were
+// open goes to the one that opened first: the earliest-started window that
+// contains it, the window models.WindowSchedule releases it at, and the one
+// the sync-mode mock manager gives it when it has nothing else to go by. A
+// --sync recording's mock manager attributes by request time only, so it gives
+// an in-flight call to no test.
 //
 // A window with no Start is left out; one whose End is missing or before its
 // Start ends at its Start. Mocks that are not test mocks are skipped.
@@ -105,6 +116,7 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 	}
 	sort.SliceStable(ms, func(i, j int) bool { return ms[i].At.Before(ms[j].At) })
 
+	sched := NewWindowSchedule(ws)
 	out := WindowMappings{Tests: make([]MappedTestCase, len(ws))}
 	for i, w := range ws {
 		out.Tests[i] = MappedTestCase{ID: w.TestCase, Mocks: []MockEntry{}}
@@ -133,6 +145,14 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			heap.Pop(ending)
 		}
 		if len(open) == 0 {
+			// The gap between two tests. A call sent here and answered at or
+			// after the next test's start was in flight when that test began
+			// (a consumer's long poll): that test's, as
+			// WindowSchedule.InFlightInto has it. Before the first test it
+			// is start-up traffic.
+			if m.InFlight && next < len(ws) && sched.InFlightInto(m.At, m.Res, ws[next].Start) {
+				out.Tests[next].Mocks = append(out.Tests[next].Mocks, m.entry())
+			}
 			continue
 		}
 		owner := open[0]

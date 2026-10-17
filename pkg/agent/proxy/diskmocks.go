@@ -50,10 +50,14 @@ type DiskMocks struct {
 	statements map[string]diskEntry
 }
 
-// diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
-// mocks the response is a separate blob at respOff/respLen; respOff -1 = inline.
+// diskEntry locates one on-disk mock: 48 B, held in entries and byName and in
+// each index that lists the mock (carry, staged, destinations, statements).
+// For spilled HTTP/Mongo mocks the response is a separate blob at
+// respOff/respLen; respOff -1 = inline.
 type diskEntry struct {
 	reqTsNano int64
+	// resTsNano is the response time, for the in-flight load (LoadInFlight).
+	resTsNano int64
 	off       int64
 	length    int
 	respOff   int64
@@ -168,7 +172,8 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if err != nil {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
-	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
+	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
+		off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
 	if models.IsCarryOver(m) {
@@ -301,6 +306,47 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	}
 	d.mu.Unlock()
 	return d.decodeAll(sel)
+}
+
+// LoadInFlight returns the mocks in flight at at that were sent after from:
+// request time in (from, at), response time at or after at
+// (models.SentInGapAnsweredBy), that the in-flight rule applies to
+// (models.InFlightEligible). For a test window starting at at, with from the
+// end of the gap before it (models.WindowSchedule.GapBefore), they are the
+// calls in flight when the test began. A mock with no response time is not
+// one. It scans the entries by request time, from from to at, and decodes
+// only those answered at or after at.
+func (d *DiskMocks) LoadInFlight(from, at time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), at.UnixNano()
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano > lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.entries) && d.entries[i].reqTsNano < hi; i++ {
+		if e := d.entries[i]; e.resTsNano >= hi && e.resTsNano > 0 {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	decoded, err := d.decodeAll(sel)
+	if err != nil {
+		return nil, err
+	}
+	out := decoded[:0]
+	for _, m := range decoded {
+		if models.InFlightEligible(m) && models.SentInGapAnsweredBy(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, from, at) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 // LoadCarryOver returns the carry-over mocks (models.IsCarryOver) with request

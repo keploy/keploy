@@ -53,9 +53,14 @@ func runNativeAs(t *testing.T, mode models.Mode, script string) models.AppError 
 func TestTheRecordingsStopSaysWhenItKilledTheApp(t *testing.T) {
 	ignores := `trap "" INT; touch started; exec sleep 600`
 	t.Setenv(provenswitch.Env, "1")
+	// The stop under the switch waits on the exit event, and kills on the
+	// stall rule: a short one here.
+	budget := utils.StopStallBudget
+	utils.StopStallBudget = 300 * time.Millisecond
+	t.Cleanup(func() { utils.StopStallBudget = budget })
 	if appErr := runNativeAs(t, models.MODE_RECORD, ignores); appErr.AppErrorType != models.ErrCtxCanceled ||
-		!strings.Contains(appErr.StopKilled, "keploy stopped the application at the recording's end and a process of it had not exited "+utils.TreeInterruptGrace.String()+" later") {
-		t.Fatalf("an app that ignores the interrupt: run ended %+v; want the recording's kill named with its grace", appErr)
+		!strings.Contains(appErr.StopKilled, "keploy stopped the application at the recording's end and a process of it made no progress on its way out for 300ms of keploy's runnable time") {
+		t.Fatalf("an app that ignores the interrupt: run ended %+v; want the recording's kill named with the stall", appErr)
 	}
 	if appErr := runNativeAs(t, models.MODE_RECORD, `touch started; exec sleep 600`); appErr.StopKilled != "" {
 		t.Fatalf("an app that exits on the interrupt: run says %q", appErr.StopKilled)

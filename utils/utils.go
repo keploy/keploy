@@ -919,7 +919,7 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	_, _, err := interruptProcessTree(logger, ppid, sig, nil)
+	_, _, err := interruptProcessTree(logger, ppid, sig, nil, false)
 	return err
 }
 
@@ -933,7 +933,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // InterruptProcessTree, it waits for each group's leader, not for the rest of
 // the group.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
-	killed, _, err = interruptProcessTree(logger, ppid, sig, nil)
+	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false)
 	return killed, err
 }
 
@@ -953,8 +953,25 @@ type Reached struct {
 // ignored the signal then. A process the group gained as /proc was read is
 // not among them. Off Linux it says none.
 func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
-	return interruptProcessTree(logger, ppid, sig, groupReached)
+	return interruptProcessTree(logger, ppid, sig, groupReached, false)
 }
+
+// InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
+// waits on the app's exit, not for a number of seconds (a test set's end, a
+// recording's end, under the proven switch): it waits for each group's
+// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// a group only when it made no progress on its way out for StopStallBudget
+// of keploy's runnable time. A starved group takes as long as it takes.
+// Elsewhere it is InterruptProcessTreeReached, with its grace.
+func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, true)
+}
+
+// groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
+// waits for a group it signalled: until its leader exits, while its members
+// (as the signal reached them) make progress. It kills the group on a stall,
+// or at the user's Ctrl+C, and says why ("" when it did not kill).
+var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached) (killed string)
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
 // group of the tree to exit after its signal before it sends SIGKILL.
@@ -964,9 +981,11 @@ const TreeInterruptGrace = 3 * time.Second
 // the tree to exit after its CTRL_BREAK before it ends it with taskkill.
 const windowsInterruptGrace = 10 * time.Second
 
-// interruptProcessTree is the work of the three above. snapshot, when set,
-// reads which processes a group's signal is about to reach.
-func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached) (killed string, reached []Reached, err error) {
+// interruptProcessTree is the work of the four above. snapshot, when set,
+// reads which processes a group's signal is about to reach; byEvents (with
+// snapshot) has it wait for each group on its exit event, under the stall
+// rule, rather than for TreeInterruptGrace.
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached, byEvents bool) (killed string, reached []Reached, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -1105,6 +1124,14 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			continue
 		}
 		reached = append(reached, members...)
+		// A stop that waits on the app's exit kills only a group that
+		// stopped making progress on its way out.
+		if byEvents && snapshot != nil && groupStopByEvents != nil {
+			if why := groupStopByEvents(logger, pid, members); why != "" && killed == "" {
+				killed = why
+			}
+			continue
+		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
 		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
 		if err != nil {

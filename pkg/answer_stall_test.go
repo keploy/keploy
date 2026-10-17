@@ -62,7 +62,13 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWaitedWithNoProgress(t *t
 	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	var cuts atomic.Int32
-	w.onCut(func() { cuts.Add(1) })
+	var cutBeforeFlag atomic.Bool
+	w.onCut(func() {
+		if !w.didStall() {
+			cutBeforeFlag.Store(true)
+		}
+		cuts.Add(1)
+	})
 	keploy, app := net.Pipe()
 	defer app.Close()
 	w.closeOnCut(keploy)
@@ -122,17 +128,21 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWaitedWithNoProgress(t *t
 	}
 
 	clk.Advance(time.Second)
-	for !w.didStall() {
-		time.Sleep(time.Millisecond)
+	// The exchange's connections close after every cut ran: wait for that.
+	if _, err := keploy.Read(make([]byte, 1)); err == nil {
+		t.Fatal("the cut left the connection open")
+	}
+	if !w.didStall() {
+		t.Fatal("the connection closed with no stall")
+	}
+	if cutBeforeFlag.Load() {
+		t.Fatal("the cut ran before the watch said it stalled")
 	}
 	if n := cuts.Load(); n != 1 {
 		t.Fatalf("cut %d times, want once", n)
 	}
 	if ctx.Err() == nil {
 		t.Fatal("the cut left the request's context live")
-	}
-	if _, err := keploy.Read(make([]byte, 1)); err == nil {
-		t.Fatal("the cut left the connection open")
 	}
 	// A connection of the exchange that comes after the cut (dialled
 	// late) is closed at once.

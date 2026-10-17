@@ -4600,6 +4600,14 @@ func (p *Proxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool)
 	return time.Time{}, time.Time{}, false
 }
 
+// InFlightFrom implements agent.InFlightPlanner (MockManager.InFlightFrom).
+func (p *Proxy) InFlightFrom(start time.Time) (time.Time, bool) {
+	if m := p.getMockManager(); m != nil {
+		return m.InFlightFrom(start)
+	}
+	return time.Time{}, false
+}
+
 // errNoMockManager: a call that needs the mock manager came before the proxy
 // served any replay.
 var errNoMockManager = errors.New("the proxy serves no replay: no mock manager")
