@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"slices"
@@ -1891,5 +1892,41 @@ func TestVariables_RecordingsOfOneInstantTakeTurnsInRecordedOrder(t *testing.T) 
 	// Without stateful mocks the first recorded answers, by the same order.
 	if g := charge(newHTTP(), &varDb{session: staged()}, 0, false); g != "t-c" {
 		t.Fatalf("stateful mocks off: answered by %s, want t-c", g)
+	}
+}
+
+// A DIGEST HEADER A VARIABLE SETS holds the variable's value: the serializer
+// recomputes the response's noted digests over the body it sends
+// (bodydigest.Apply), and a header whose value is the variable's is not one of
+// them. Its note is dropped from the served copy, not from the pooled mock.
+func TestVariables_ADigestHeaderAVariableSetsIsNotRecomputed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	recBody := `{"id":"r1"}`
+	sum := md5.Sum([]byte(recBody))
+	recTag := `"` + hex.EncodeToString(sum[:]) + `"`
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"tag":`+strconv.Quote(recTag)+`}`, 201, recBody,
+		models.MockVariables{"tag": bindV(recTag, "body.tag", "header.ETag")}), 1)
+	m.Spec.HTTPResp.Header["ETag"] = recTag
+	m.Spec.HTTPResp.Header["Content-MD5"] = base64.StdEncoding.EncodeToString(sum[:])
+	m.Spec.Metadata = map[string]string{models.MetadataBodyDigestsKey: "content-md5=content-md5;etag=etag/md5/s"}
+	db := &varDb{perTest: []*models.Mock{m}}
+	const liveTag = `"live-tag-7"`
+	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"tag":`+strconv.Quote(liveTag)+`}`))
+	if !ok {
+		t.Fatal("should match")
+	}
+	if got := stub.Spec.Metadata[models.MetadataBodyDigestsKey]; got != "content-md5=content-md5" {
+		t.Fatalf("the served copy's note is %q; want the ETag the variable set dropped from it", got)
+	}
+	if got := m.Spec.Metadata[models.MetadataBodyDigestsKey]; got != "content-md5=content-md5;etag=etag/md5/s" {
+		t.Fatalf("the pooled mock's note was written: %q", got)
+	}
+	raw, err := h.buildMockResponseBytes(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Etag: "+liveTag+"\r\n") && !strings.Contains(string(raw), "ETag: "+liveTag+"\r\n") {
+		t.Fatalf("the served ETag is not the variable's value %s:\n%s", liveTag, raw)
 	}
 }

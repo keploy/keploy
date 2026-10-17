@@ -783,6 +783,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 	if !ok {
 		return nil, &varProblem{mock: served.Name, why: "two of its answer places overlap", next: "re-record the test"}
 	}
+	note := served.Spec.Metadata[models.MetadataBodyDigestsKey]
 	if body != resp.Body {
 		for k, v := range resp.Header {
 			lk := strings.ToLower(k)
@@ -791,6 +792,12 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 			}
 			if of, ok := bodydigest.Form(lk, v, resp.Body); ok {
 				header[k] = of(body)
+				continue
+			}
+			if bodydigest.Noted(note, lk) {
+				// Recorded over the body as its server sent it (encoded): the
+				// serializer recomputes it over the bytes sent
+				// (buildMockResponseBytes).
 				continue
 			}
 			h.Logger.Warn("a variable changed the body of a recorded answer, and keploy serves this header as recorded: it cannot tell how the value was computed",
@@ -802,6 +809,20 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 	rc.Body = body
 	rc.Header = header
 	out.Spec.HTTPResp = &rc
+	// A digest header a variable set holds the variable's value, which the
+	// serializer must not recompute over the body.
+	if trimmed := bodydigest.Without(note, changed); trimmed != note {
+		meta := make(map[string]string, len(served.Spec.Metadata))
+		for k, v := range served.Spec.Metadata {
+			meta[k] = v
+		}
+		if trimmed == "" {
+			delete(meta, models.MetadataBodyDigestsKey)
+		} else {
+			meta[models.MetadataBodyDigestsKey] = trimmed
+		}
+		out.Spec.Metadata = meta
+	}
 	return out, nil
 }
 

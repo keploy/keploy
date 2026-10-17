@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -567,6 +568,11 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	} else {
 		respBody = body
 	}
+	// The digests the recorded body matched as its server sent it, over the
+	// bytes sent now (models.MetadataBodyDigestsKey): obfuscation, encryption
+	// and a variable rewrite a body, and keploy's compressor is not the
+	// server's. Those it did not match are sent as recorded.
+	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
 	var headers string
 	for key, values := range header {
 		if key == "Content-Length" {
