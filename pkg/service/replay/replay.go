@@ -370,6 +370,10 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 		}
 		r.realPushed.Store(true)
 	}
+	// A set boundary, unlike the repair's re-registration: what the agent
+	// recorded consumed and nobody drained is the previous set's, which the
+	// set's staging drops (models.OutgoingOptions.StartsTestSet).
+	opts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
 	}
@@ -2439,7 +2443,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// never-rewound consumedPersistent, which the CLI does not touch, so the
 	// gate-consumption bug is not yet fixed there (that path is OFF by default;
 	// closing it needs an agent-side "un-flag consumed" primitive).
-	startupConsumed, rearmedConsumed := partitionInitialConsumed(consumedMocks)
+	// A carry-over mock consumed before the first test (the agent flags it
+	// CarryOver: a registered kind's, or a StagingRelease need's, such as a
+	// message the app received as it started, or a publish it made then) is
+	// consumed once. It is not re-armed below as a readiness gate's consume
+	// is, which would serve it again in every test: it is kept, and recorded
+	// in the startup section, whatever window its recorded time is released
+	// in. The app consumed it before any test; a mapping-mode replay names
+	// the startup section in every test's call (MergeStartupMockNames), and
+	// a fetch of the mapped mocks brings the agent only what a section
+	// lists. (The set's staging reaches it by its recorded time.)
+	carried, initialConsumed := splitCarriedConsumed(consumedMocks)
+	startupConsumed, rearmedConsumed := partitionInitialConsumed(initialConsumed)
+	startupConsumed = append(startupConsumed, carried...)
 	for _, m := range startupConsumed {
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
@@ -2474,8 +2490,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// That absence is invisible on the timestamp path, which reloads them via
 	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
 	// loads strictly by name. Writing them here is what lets the reader hand
-	// them back for every test. Only the reusable tier is written — a per-test
-	// mock re-armed above belongs to its own test's section, not to startup.
+	// them back for every test. The reusable tier is written, and the
+	// carry-over mocks consumed as the app started; a per-test mock re-armed
+	// above belongs to its own test's section, not to startup.
 	setStartupMocks(actualTestMockMappings, startupConsumed)
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
@@ -7836,6 +7853,8 @@ func isReusableTierState(s models.MockState) bool {
 // The tier is decided by isReusableTierState on the recorder-derived
 // Lifetime/type carried through GetConsumedMocks.
 func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []models.MockState) {
+	// The carry-over mocks the agent flagged are split off before
+	// (splitCarriedConsumed): consumed once, never re-armed.
 	for _, m := range consumed {
 		if isReusableTierState(m) {
 			startup = append(startup, m)
@@ -7844,6 +7863,20 @@ func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []mod
 		}
 	}
 	return startup, rearm
+}
+
+// splitCarriedConsumed splits the mocks consumed before a set's first test into
+// those the agent flagged CarryOver (a carry-over mock, consumed once) and the
+// rest, which partitionInitialConsumed sorts.
+func splitCarriedConsumed(consumed []models.MockState) (carried, rest []models.MockState) {
+	for _, m := range consumed {
+		if m.CarryOver {
+			carried = append(carried, m)
+			continue
+		}
+		rest = append(rest, m)
+	}
+	return carried, rest
 }
 
 func isMockSubset(actual []string, expected []string) bool {

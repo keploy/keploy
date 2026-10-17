@@ -62,3 +62,47 @@ func TestAStagingNeedItsUseCannotTakePanics(t *testing.T) {
 		t.Fatal("a refused need was registered")
 	}
 }
+
+// A StagingRelease need's Match alone decides which of its kind's per-test
+// mocks are carry-over (IsCarryOver: what the carry-over tier keeps) and which
+// mark an out-of-window consume (MarksOutOfWindow): the kind's other mocks are
+// untouched, unlike a RegisterCarryOver kind, whose every per-test mock
+// marks one. Without a Match it panics.
+func TestAStagingReleaseNeedScopesCarryOverByItsMatch(t *testing.T) {
+	const wide, pushKind Kind = "ReleaseTestWideKind", "ReleaseTestPushKind"
+	mock := func(kind Kind, cmd string, life Lifetime) *Mock {
+		return &Mock{Kind: kind, Spec: MockSpec{Metadata: map[string]string{"cmd": cmd}}, TestModeInfo: TestModeInfo{Lifetime: life}}
+	}
+	t.Cleanup(RegisterStagingNeed(wide, StagingNeed{Use: StagingRelease, Match: func(m *Mock) bool { return m.Spec.Metadata["cmd"] == "receive" }}))
+	t.Cleanup(RegisterCarryOver(pushKind, func(m *Mock) bool { return m.Spec.Metadata["cmd"] == "send" }))
+	for _, c := range []struct {
+		name         string
+		m            *Mock
+		carry, marks bool
+	}{
+		{"a declared per-test mock", mock(wide, "receive", LifetimePerTest), true, true},
+		{"another mock of the kind", mock(wide, "get", LifetimePerTest), false, false},
+		{"a declared session mock", mock(wide, "receive", LifetimeSession), false, false},
+		{"a RegisterCarryOver kind's carry-over mock", mock(pushKind, "send", LifetimePerTest), true, true},
+		{"a RegisterCarryOver kind's other per-test mock", mock(pushKind, "message", LifetimePerTest), false, true},
+	} {
+		if got := IsCarryOver(c.m); got != c.carry {
+			t.Errorf("%s: IsCarryOver = %v, want %v", c.name, got, c.carry)
+		}
+		if got := MarksOutOfWindow(c.m); got != c.marks {
+			t.Errorf("%s: MarksOutOfWindow = %v, want %v", c.name, got, c.marks)
+		}
+	}
+	if !CarryOverKind(wide) || !CarryOverRegistered() {
+		t.Error("a kind with a StagingRelease need is no carry-over kind")
+	}
+	if IsStagedAtStaging(mock(wide, "receive", LifetimePerTest)) {
+		t.Error("a released mock is staged whole")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("a StagingRelease need with no Match registered without a panic")
+		}
+	}()
+	RegisterStagingNeed(wide, StagingNeed{Use: StagingRelease})
+}

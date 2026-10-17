@@ -28,6 +28,10 @@ import (
 //     before every window, to the startup section. The window filter that
 //     drops out-of-window mocks from the running test's list would otherwise
 //     leave it mapped nowhere.
+//
+// A flagged mock consumed before the set's first test is not attributed
+// here: RunTestSet keeps it and maps it to the startup section, whatever its
+// window (splitCarriedConsumed).
 type carryOverAttribution struct {
 	sched *models.WindowSchedule
 	// mapped holds the tests whose consumed mocks this run has already put in

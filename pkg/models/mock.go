@@ -288,6 +288,13 @@ type TestModeInfo struct {
 	// consume of a copy an earlier view served (a previous attempt of the
 	// same test) is refused. Runtime-only, like the fields above.
 	ServedIn uint64 `json:"-" bson:"-"`
+
+	// StagedSet is the agent's test-set generation whose staging pooled the
+	// mock (MockManager.ArmSetFence); zero on a mock no staging pooled. A
+	// consume of a mock pooled for an earlier set (a consume racing the next
+	// set's staging) is refused: it was of that set's pool, under that set's
+	// mock names. Runtime-only, like the fields above.
+	StagedSet uint64 `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {

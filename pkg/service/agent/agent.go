@@ -1552,17 +1552,19 @@ func perTestLoadMode(params models.MockFilterParams) string {
 	return loadModeLaxAll
 }
 
-// loadCarryOverLookahead loads the per-test mocks of RegisterCarryOver kinds
-// that the proxy's carry-over tier needs for this window beyond the window's
-// own mocks: the range CarryOverLoadRange names, which starts where the previous
-// window's load ended and reaches models.CarryOverLookahead past what this
-// window releases. They go to the proxy in the filtered slice, and the manager
-// files the out-of-window ones into the carry-over tier.
+// loadCarryOverLookahead loads the carry-over mocks (models.IsCarryOver: a
+// RegisterCarryOver kind's, a StagingRelease need's) that the proxy's
+// carry-over tier needs for this window beyond the window's own mocks: the
+// range CarryOverLoadRange names, which starts where the previous window's
+// load ended and reaches models.CarryOverLookahead past what this window
+// releases, or, for the set's staging, what the app's startup reaches. They go
+// to the proxy in the filtered slice, and the manager files the out-of-window
+// ones into the carry-over tier.
 //
 // Only for the windowed disk loads (strict-window, mapping). The lax load
 // already holds every mock, and its filter makes the out-of-window ones session
-// mocks; nothing loads when no kind registered a carry-over predicate, the
-// proxy has no planner, or there is no disk store.
+// mocks; nothing loads when no kind registered a carry-over predicate or a
+// StagingRelease need, the proxy has no planner, or there is no disk store.
 func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.MockFilterParams) ([]*models.Mock, error) {
 	if disk == nil || !models.CarryOverRegistered() || perTestLoadMode(params) == loadModeLaxAll {
 		return nil, nil

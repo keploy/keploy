@@ -5,6 +5,8 @@ package agent
 
 import (
 	"context"
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -275,6 +277,198 @@ func TestUpdateMockParamsLoadsCarryOverAhead(t *testing.T) {
 			}
 			if len(got) != 0 {
 				t.Fatalf("lax mode loaded a lookahead: %v", got)
+			}
+		})
+	}
+}
+
+// The SQS shape: an async consumer's poll that returned messages (an HTTP
+// ReceiveMessage the recorder stated per-test), declared a StagingRelease
+// need, is delivered at its place in the recording, once:
+//   - one recorded before the first test (the app's bootstrap poll) is in
+//     the startup tier from the set's staging on, and once consumed is not
+//     staged again for the next test, though no drain has told the agent
+//     yet (the replay's map is sent with each call, as by default);
+//   - one recorded in the gap after test-1 is reachable from test-1 on (its
+//     release window), until consumed;
+//   - an HTTP mock the need does not declare is neither carried nor, consumed
+//     outside its window, marked CarryOver.
+func TestAReleaseNeedDeliversEachRecordedPollOnceAtItsPlace(t *testing.T) {
+	isPoll := func(m *models.Mock) bool { return m.Spec.Metadata["sqs_messages"] == "1" }
+	defer models.RegisterStagingNeed(models.HTTP, models.StagingNeed{Use: models.StagingRelease, Match: isPoll})()
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
+	ws := []models.TestWindow{
+		{TestCase: "test-1", Start: ms(1000), End: ms(1100)},
+		{TestCase: "test-2", Start: ms(3000), End: ms(3100)},
+		{TestCase: "test-3", Start: ms(5000), End: ms(5100)},
+	}
+	poll := func(name string, at time.Time) *models.Mock {
+		m := stageMock(name, "/receive", at)
+		m.Spec.Metadata["sqs_messages"] = "1"
+		return m
+	}
+	pollBoot, pollGap := poll("poll-boot", ms(500)), poll("poll-gap", ms(2000))
+	plainGap := stageMock("plain-gap", "/other", ms(2100))
+	recording := []*models.Mock{pollBoot, pollGap, plainGap, stageMock("own-1", "/q", ms(1050)), stageMock("own-3", "/q", ms(5050))}
+
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	a := diskAgent(t, &mgrProxy{mm: mm}, recording...)
+	call := func(after, before time.Time, shape bool) {
+		t.Helper()
+		// No consumed history at all: the replay's map, sent with each call
+		// by default, holds a consume only once a drain after it took it.
+		params := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: true}
+		if shape {
+			params.FirstRecordedTestStart, params.RecordedWindows = ws[0].Start, ws
+		}
+		if err := a.UpdateMockParams(context.Background(), params); err != nil {
+			t.Fatal(err)
+		}
+	}
+	startupNames := func() []string {
+		t.Helper()
+		ms, err := mm.GetStartupMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	call(models.BaseTime, time.Now(), true)
+	if got := startupNames(); !reflect.DeepEqual(got, []string{"poll-boot"}) {
+		t.Fatalf("the app's startup is served %v; want its bootstrap poll [poll-boot]", got)
+	}
+	if !mm.DeleteFilteredMock(*pollBoot) {
+		t.Fatal("the bootstrap poll was not consumed")
+	}
+	if st := mm.GetPersistentConsumed()["poll-boot"]; st.Usage != models.Deleted || !st.CarryOver {
+		t.Fatalf("the consumed bootstrap poll is %+v; want Deleted and CarryOver, consumed once", st)
+	}
+
+	carriedHTTP := func(step string) []*models.Mock {
+		t.Helper()
+		carried, err := mm.GetCarryOverMocksByKind(models.HTTP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(carried) != 1 || carried[0].Name != "poll-gap" {
+			t.Fatalf("%s's carry-over tier holds %v; want the gap poll after test-1, and no undeclared HTTP mock", step, namesOf(carried))
+		}
+		return carried
+	}
+	call(ws[0].Start, ws[0].End, false)
+	if got := startupNames(); len(got) != 0 {
+		t.Fatalf("test-1's startup tier holds %v; the bootstrap poll was consumed, and is not staged again", got)
+	}
+	carriedHTTP("test-1") // its release window
+	call(ws[1].Start, ws[1].End, false)
+	carriedHTTP("test-2") // until consumed
+	if !mm.DeleteFilteredMock(*pollGap) {
+		t.Fatal("the gap poll was not consumed from the carry-over tier")
+	}
+	if st := mm.GetPersistentConsumed()["poll-gap"]; st.Usage != models.Deleted || !st.CarryOver {
+		t.Fatalf("the consumed gap poll is %+v; want Deleted and CarryOver", st)
+	}
+	mm.MarkMockAsUsed(*plainGap)
+	if st := mm.GetPersistentConsumed()["plain-gap"]; st.CarryOver {
+		t.Fatalf("an undeclared HTTP mock consumed outside its window was marked CarryOver: %+v", st)
+	}
+
+	call(ws[2].Start, ws[2].End, false)
+	if carried, _ := mm.GetCarryOverMocksByKind(models.HTTP); len(carried) != 0 {
+		t.Fatalf("test-3's carry-over tier holds %v; the gap poll was consumed once", namesOf(carried))
+	}
+}
+
+// A set's strict-window staging, before its app starts, also loads the
+// registered mocks the app's startup reaches: those recorded within
+// models.CarryOverLookahead after the set's first test began (a publish the
+// app makes as it starts, recorded after the first test began), the
+// lookahead's end excluded. They are startup traffic while the app starts,
+// and the first test refiles them: out of the startup tier, into its window
+// or the carry-over tier. A registered mock at or past the lookahead's end,
+// another command of the kind, and lax mode load none.
+func TestStagingLoadsTheCarryOverMocksTheStartupReaches(t *testing.T) {
+	unregister := models.RegisterCarryOver(agentPulsar, func(m *models.Mock) bool {
+		return m.Spec.Metadata["commandType"] == "SEND"
+	})
+	t.Cleanup(unregister)
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
+	ws := []models.TestWindow{
+		{TestCase: "test-1", Start: ms(1000), End: ms(1100)},
+		{TestCase: "test-2", Start: ms(3000), End: ms(3100)},
+	}
+	recording := []*models.Mock{
+		agentBroker("s-boot", agentPulsar, "SEND", ms(500)),        // the startup band
+		agentBroker("s-crossed", agentPulsar, "SEND", ms(1600)),    // within 1 s of test-1's start
+		agentBroker("s-edge", agentPulsar, "SEND", ms(2000)),       // at the lookahead's end
+		agentBroker("s-later", agentPulsar, "SEND", ms(2100)),      // past it
+		agentBroker("flow-crossed", agentPulsar, "FLOW", ms(1500)), // not carry-over
+	}
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict", false: "lax"}[strict], func(t *testing.T) {
+			mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.ResetForReplaySession()
+			p := &mgrProxy{mm: mm}
+			a := diskAgent(t, p, recording...)
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: models.BaseTime, BeforeTime: time.Now(), StrictMockWindow: strict,
+				FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			startup, err := mm.GetStartupMocks()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, m := range startup {
+				if m.Kind == agentPulsar {
+					names = append(names, m.Name)
+				}
+			}
+			sort.Strings(names)
+			want := []string{"s-boot", "s-crossed"}
+			if !pkg.IsStrictMockWindow(strict) {
+				// Lax mode stages the whole recording, as it always did.
+				want = []string{"flow-crossed", "s-boot", "s-crossed", "s-edge", "s-later"}
+			}
+			if !reflect.DeepEqual(names, want) {
+				t.Fatalf("the staging filed %v as startup traffic; want %v", names, want)
+			}
+			if !pkg.IsStrictMockWindow(strict) {
+				return
+			}
+			// The first test refiles them: s-crossed is outside test-1's
+			// window, so it goes to the carry-over tier, out of the startup
+			// tier, which keeps only what was recorded before the first test.
+			if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime: ws[0].Start, BeforeTime: ws[0].End, StrictMockWindow: strict,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			startup, _ = mm.GetStartupMocks()
+			names = names[:0]
+			for _, m := range startup {
+				if m.Kind == agentPulsar {
+					names = append(names, m.Name)
+				}
+			}
+			if !reflect.DeepEqual(names, []string{"s-boot"}) {
+				t.Fatalf("after the first test the startup tier holds %v; want [s-boot]", names)
+			}
+			if got := carryNamesOf(mm); !reflect.DeepEqual(got, []string{"s-crossed", "s-edge", "s-later"}) {
+				t.Fatalf("after the first test the carry-over tier holds %v; want [s-crossed s-edge s-later], each reachable from test-1", got)
 			}
 		})
 	}

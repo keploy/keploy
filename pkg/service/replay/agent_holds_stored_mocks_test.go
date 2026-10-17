@@ -73,6 +73,9 @@ type rearmInstr struct {
 	// at that moment rather than after the repair finished.
 	onOutgoing func()
 
+	// outgoingOpts is what the last MockOutgoing was sent.
+	outgoingOpts models.OutgoingOptions
+
 	statsCalls        int
 	mockOutgoingCalls int
 	storeMocksCalls   int
@@ -113,9 +116,10 @@ func (f *rearmInstr) GetMockStats(ctx context.Context) (models.MockStats, error)
 	return out, nil
 }
 
-func (f *rearmInstr) MockOutgoing(ctx context.Context, _ models.OutgoingOptions) error {
+func (f *rearmInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	f.mu.Lock()
 	block := f.outgoingBlock
+	f.outgoingOpts = opts
 	f.mu.Unlock()
 	if block != nil {
 		select {
@@ -257,6 +261,14 @@ func TestEnsureAgentHoldsStoredMocks_ReRegistersReplacementAgent(t *testing.T) {
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
 		t.Fatalf("re-registration against the replacement agent should succeed, got: %v", err)
+	}
+	// A re-registration of the set, not a set boundary: what the app
+	// consumed as it started is the set's own, and the agent keeps it.
+	f.mu.Lock()
+	starts := f.outgoingOpts.StartsTestSet
+	f.mu.Unlock()
+	if starts {
+		t.Fatal("the repair's MockOutgoing said it starts a test set; the agent would drop the set's own bootstrap consumes")
 	}
 
 	stats, outgoing, stores, updates, ready := f.counts()
