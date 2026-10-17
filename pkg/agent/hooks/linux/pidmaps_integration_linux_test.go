@@ -47,6 +47,9 @@ func TestMain(m *testing.M) {
 	if step := os.Getenv(unixHelperEnv); step != "" {
 		os.Exit(runUnixHelper(step))
 	}
+	if mode := os.Getenv(readyHelperEnv); mode != "" {
+		os.Exit(runReadyHelper(mode))
+	}
 	if os.Getenv(socketHelperEnv) == "1" {
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 		if err != nil {
