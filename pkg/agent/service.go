@@ -403,6 +403,17 @@ type StatementCatalogSeeder interface {
 	SeedStatementCatalog(mocks []*models.Mock)
 }
 
+// RecordedDestinationsSeeder is the optional extension implemented by proxies
+// whose destination rules (the MySQL ports, the loopback ports a recording
+// reached, the destinations recorded speaking HTTP/2) can be told the stored
+// set's recorded destinations: the first mock of each that the agent keeps
+// on disk. Optional in the same style as StatementCatalogSeeder: an agent
+// whose proxy lacks it does not seed, and those rules then read only what is
+// staged, as before.
+type RecordedDestinationsSeeder interface {
+	SeedRecordedDestinations(mocks []*models.Mock)
+}
+
 // RecordedWindowsSeeder is the optional extension implemented by proxies whose
 // mock manager can be told the recorded window of every test of the set being
 // staged (models.MockFilterParams.RecordedWindows). Optional in the same style
