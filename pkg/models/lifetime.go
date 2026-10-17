@@ -592,6 +592,15 @@ const (
 	MetadataLifetimeConnection = "connection"
 )
 
+// MetadataBodyDigestsKey is the Spec.Metadata key under which the HTTP
+// recorder notes which of a response's digest headers (an ETag, Content-MD5,
+// a Digest, an AWS checksum) its body matched as the server sent it
+// (bodydigest.Note). A replay recomputes exactly those over the body it sends
+// (bodydigest.Apply): a body obfuscation or encryption rewrote, or keploy
+// compresses again, is not the one the server computed them over, and a
+// client that checks one refuses the response.
+const MetadataBodyDigestsKey = "bodyDigests"
+
 // StatesLifetime reports whether m's recorder stated its lifetime
 // (MetadataLifetimeKey) with a value DeriveLifetime takes as given.
 func (m *Mock) StatesLifetime() bool {
