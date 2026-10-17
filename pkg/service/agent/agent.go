@@ -1355,6 +1355,22 @@ func effectiveFirstWindowStart(isWindowedProxy bool, readerVal, afterTime time.T
 	return afterTime
 }
 
+// inFlightFrom is, for a test window's call, the exclusive start of the gap
+// before the window, from the proxy's recorded windows
+// (coreAgent.InFlightPlanner): the calls sent after it and answered at or
+// after the window's start are the window's test's. ok is false for a
+// staging call, with no planner, or with no such gap.
+func (a *Agent) inFlightFrom(params models.MockFilterParams) (time.Time, bool) {
+	if params.AfterTime.IsZero() || params.AfterTime.Equal(models.BaseTime) || params.BeforeTime.IsZero() {
+		return time.Time{}, false
+	}
+	planner, ok := a.Proxy.(coreAgent.InFlightPlanner)
+	if !ok {
+		return time.Time{}, false
+	}
+	return planner.InFlightFrom(params.AfterTime)
+}
+
 // loadPerTestMocks reads, from the on-disk store disk, the per-test mocks
 // params' load mode (perTestLoadMode) asks for, beside resident. pool names
 // per-test mocks to read as well (the exact staging's pool, stageMocks):
@@ -1442,6 +1458,17 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 			startup, err = disk.LoadBefore(firstWindowStart)
 			if err == nil {
 				loaded = append(loaded, startup...)
+			}
+		}
+		// Beside the window's own, the calls in flight when its test began:
+		// sent in the gap before it, answered at or after its start (a
+		// consumer's long poll). The window loads by request time, so
+		// they are in no window's load otherwise.
+		if from, ok := a.inFlightFrom(params); err == nil && ok {
+			var inFlight []*models.Mock
+			inFlight, err = disk.LoadInFlight(from, params.AfterTime)
+			if err == nil {
+				loaded = append(loaded, inFlight...)
 			}
 		}
 	default:
@@ -1912,7 +1939,12 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		// filter and merge them into the session pool passed to the
 		// proxy. Under strict mode this branch doesn't fire because
 		// filterByTimeStamp drops rather than promotes.
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
+		// The calls in flight when the window's test began are its own
+		// per-test mocks in the user's window mode (params.StrictMockWindow),
+		// not agentStrict's: on a windowed proxy the agent's filter is never
+		// strict, and the mock manager filters what it is handed.
+		inFlightFrom, _ := a.inFlightFrom(params)
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow)
 		filteredMocks = perTestIn
 		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		if len(promotedToSession) > 0 {

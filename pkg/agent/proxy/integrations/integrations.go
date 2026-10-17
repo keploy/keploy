@@ -449,7 +449,10 @@ type MockReader interface {
 
 	// GetPerTestMocksInWindow returns only those per-test (Lifetime ==
 	// LifetimePerTest) mocks whose Spec.ReqTimestampMock falls inside
-	// the current window [start, end]. Mocks whose Spec.ResTimestampMock
+	// the current window [start, end], and those in flight when the
+	// window's test began: sent in the gap before the window
+	// (models.WindowSchedule.GapBefore) and answered at or after start
+	// (models.InFlightEligible). Mocks whose Spec.ResTimestampMock
 	// is EARLIER than Spec.ReqTimestampMock are excluded as invalid.
 	// Response timestamps after `end` are tolerated (async straggle).
 	// If no window has been set (zero values), falls back to the full

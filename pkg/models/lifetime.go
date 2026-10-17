@@ -182,6 +182,18 @@ func (m *Mock) DeriveLifetime() {
 	m.derive(true)
 }
 
+// lifetimeOf is m's lifetime as DeriveLifetime gives it, without deriving m: a
+// mock not derived yet is derived through a copy, which no fallback count
+// counts (derive). One derived already is read as it is.
+func lifetimeOf(m *Mock) Lifetime {
+	if m.TestModeInfo.LifetimeDerived {
+		return m.TestModeInfo.Lifetime
+	}
+	c := *m
+	c.derive(false)
+	return c.TestModeInfo.Lifetime
+}
+
 // derive is DeriveLifetime for a mock not derived yet. count says whether a
 // pre-tag recording's kind fallback counts in legacyKindFallbackFires, which
 // operators read as how many such mocks a replay loaded: false for a look at

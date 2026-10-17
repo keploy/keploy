@@ -146,3 +146,62 @@ func TestWindowScheduleNilAndEmpty(t *testing.T) {
 		t.Fatal("empty schedule must behave as nil")
 	}
 }
+
+// The gap before a window runs from the latest end of the windows that start
+// before it to its start, exclusive at both ends; the first window has none
+// (what precedes it is start-up traffic), and neither has a window an earlier
+// one reaches, nor a start no window has. A call sent in a gap and answered at
+// or after the next window's start was in flight when that test began; one
+// sent and answered in the gap, one sent inside an earlier window, and one
+// sent before the gap's start are not.
+func TestWindowScheduleGapBeforeAndInFlight(t *testing.T) {
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-1", Start: at(1000), End: at(1100)},
+		{TestCase: "test-2", Start: at(2000), End: at(2100)},
+		{TestCase: "long", Start: at(3000), End: at(5000)},
+		{TestCase: "inside", Start: at(4000), End: at(4100)},
+	})
+	if from, ok := s.GapBefore(at(2000)); !ok || !from.Equal(at(1100)) {
+		t.Fatalf("gap before test-2 from %v ok=%v; want from test-1's end", from, ok)
+	}
+	for _, c := range []struct {
+		name  string
+		start time.Time
+	}{{"the first window", at(1000)}, {"a window an earlier one reaches", at(4000)}, {"a start no window has", at(2500)}} {
+		if _, ok := s.GapBefore(c.start); ok {
+			t.Fatalf("%s has a gap", c.name)
+		}
+	}
+	together := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-1", Start: at(1000), End: at(1100)},
+		{TestCase: "b", Start: at(2000), End: at(2100)},
+		{TestCase: "c", Start: at(2000), End: at(2200)},
+	})
+	if _, ok := together.GapBefore(at(2000)); ok || together.InFlightInto(at(1500), at(2050), at(2000)) {
+		t.Fatal("two windows that start together have a gap: which test a call in flight then is cannot be told")
+	}
+	var nilSched *WindowSchedule
+	if _, ok := nilSched.GapBefore(at(2000)); ok || nilSched.InFlightInto(at(1500), at(2050), at(2000)) {
+		t.Fatal("no schedule has a gap")
+	}
+	for _, c := range []struct {
+		name     string
+		req, res int
+		want     bool
+	}{
+		{"sent in the gap, answered in the window", 1500, 2050, true},
+		{"sent in the gap, answered at its start", 1500, 2000, true},
+		{"sent in the gap, answered after the window", 1500, 2500, true},
+		{"sent and answered in the gap", 1500, 1900, false},
+		{"sent at the gap's start (test-1's end)", 1100, 2050, false},
+		{"sent inside test-1", 1050, 2050, false},
+		{"sent at the window's start", 2000, 2050, false},
+	} {
+		if got := s.InFlightInto(at(c.req), at(c.res), at(2000)); got != c.want {
+			t.Errorf("%s: InFlightInto = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if s.InFlightInto(at(1500), time.Time{}, at(2000)) {
+		t.Error("a call with no answer time was in flight")
+	}
+}

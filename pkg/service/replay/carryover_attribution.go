@@ -2,6 +2,7 @@ package replay
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -130,6 +131,12 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		}
 	}
 	upsertActualTestMockMapping(mapping, running, own, tcReq, tcResp)
+	// A call in flight when the running test began (sent in the gap before
+	// it, answered after it ended) is its own, though the window filter
+	// above drops it: no request or response time of it is in the window.
+	if late := a.inFlightAnsweredLate(own, tcReq, tcResp); len(late) > 0 {
+		upsertActualTestMockMapping(mapping, running, late, time.Time{}, time.Time{})
+	}
 	if held := a.early[running]; len(held) > 0 {
 		// Zero window: no filter. These are the running test's own by the
 		// release rule, consumed while an earlier test ran.
@@ -147,6 +154,37 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		upsertActualTestMockMapping(mapping, a.sched.Window(idx).TestCase, byOwner[idx], time.Time{}, time.Time{})
 	}
 	addStartupMocks(mapping, startup)
+}
+
+// inFlightAnsweredLate is the unflagged per-test mocks of consumed that were in
+// flight when the test of window [tcReq, tcResp] began (models.WindowSchedule.
+// InFlightInto) and answered after it ended: the test's own, which the window
+// filter drops. One answered within the window the filter keeps, as it keeps
+// every DNS, session and connection mock (upsertActualTestMockMapping), so
+// none of those is listed twice. A connection failure is no test's but its
+// own window's (models.InFlightEligible).
+func (a *carryOverAttribution) inFlightAnsweredLate(consumed []models.MockState, tcReq, tcResp time.Time) []models.MockState {
+	if a == nil || a.sched.Len() == 0 || tcReq.IsZero() || tcResp.IsZero() {
+		return nil
+	}
+	var out []models.MockState
+	for _, st := range consumed {
+		if st.CarryOver || st.ReqTimestampMock == "" || st.ResTimestampMock == "" {
+			continue
+		}
+		if st.Lifetime != models.LifetimePerTest || strings.EqualFold(string(st.Kind), string(models.DNS)) || models.WindowBound(st.Kind) {
+			continue
+		}
+		req, rerr := models.ParseMockTimestamp(st.ReqTimestampMock)
+		res, serr := models.ParseMockTimestamp(st.ResTimestampMock)
+		if rerr != nil || serr != nil {
+			continue
+		}
+		if res.After(tcResp) && a.sched.InFlightInto(req, res, tcReq) {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 // addStartupMocks appends to the startup section the mocks it does not list yet.

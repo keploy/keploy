@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -471,5 +472,81 @@ func TestStagingLoadsTheCarryOverMocksTheStartupReaches(t *testing.T) {
 				t.Fatalf("after the first test the carry-over tier holds %v; want [s-crossed s-edge s-later], each reachable from test-1", got)
 			}
 		})
+	}
+}
+
+func (p *mgrProxy) InFlightFrom(start time.Time) (time.Time, bool) { return p.mm.InFlightFrom(start) }
+
+// A consumer keeps a fetch in flight between tests (a Kafka fetch, an SQS long
+// poll): the one sent in the gap after test-1 and answered inside test-2 is
+// test-2's. The agent loads it with test-2's window from its on-disk store,
+// which loads by request time, its filter keeps it per-test in the strict
+// window (the default), whether its recorder stated its lifetime (a MySQL or
+// Postgres v3 recorder) or not (a Kafka or Mongo recorder), and the mock
+// manager files it in test-2's per-test tier, not the session pool: a parser
+// that reads only the per-test tier (Mongo's data matcher) is served it, once.
+// One sent and answered in the gap is loaded for no test.
+func TestTheAgentServesACallInFlightWhenItsTestBegins(t *testing.T) {
+	base := time.Date(2026, 10, 17, 6, 56, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
+	for _, stated := range []bool{true, false} {
+		mk := func(name string, req, res int) *models.Mock {
+			m := stageMock(name, "/"+name, ms(req))
+			m.Spec.ResTimestampMock = ms(res)
+			if stated {
+				m.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
+			} else {
+				m.Kind = models.Mongo // a recorder that states no lifetime: per-test by its tag
+			}
+			m.TestModeInfo = models.TestModeInfo{}
+			m.DeriveLifetime()
+			return m
+		}
+		ws := []models.TestWindow{
+			{TestCase: "post-order-1", Start: ms(1000), End: ms(1100)},
+			{TestCase: "post-order-2", Start: ms(3344), End: ms(3505)},
+		}
+		recording := []*models.Mock{
+			mk("own-1", 1050, 1051),
+			mk("fetch-o2", 2986, 3495), // sent in the gap, answered inside post-order-2
+			mk("gap-only", 2000, 2100),
+			mk("own-2", 3400, 3401),
+		}
+		if lt := recording[1].TestModeInfo.Lifetime; lt != models.LifetimePerTest {
+			t.Fatalf("stated=%v: the fixture's fetch is %v, want per-test", stated, lt)
+		}
+		mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+		mm.ResetForReplaySession()
+		a := diskAgent(t, &mgrProxy{mm: mm}, recording...)
+		call := func(after, before time.Time, shape bool) {
+			t.Helper()
+			params := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: true}
+			if shape {
+				params.FirstRecordedTestStart, params.RecordedWindows = ws[0].Start, ws
+			}
+			if err := a.UpdateMockParams(context.Background(), params); err != nil {
+				t.Fatal(err)
+			}
+		}
+		call(models.BaseTime, time.Now(), true)
+		call(ws[0].Start, ws[0].End, false)
+		call(ws[1].Start, ws[1].End, false)
+		namesOf := func(got []*models.Mock) []string {
+			var names []string
+			for _, m := range got {
+				names = append(names, m.Name)
+			}
+			sort.Strings(names)
+			return names
+		}
+		perTest, _ := mm.GetFilteredMocks()
+		if got := namesOf(perTest); !reflect.DeepEqual(got, []string{"fetch-o2", "own-2"}) {
+			t.Fatalf("stated=%v: post-order-2's per-test tier holds %v; want its own mock and the fetch in flight when it began", stated, got)
+		}
+		session, _ := mm.GetUnFilteredMocks()
+		if got := namesOf(session); slices.Contains(got, "fetch-o2") {
+			t.Fatalf("stated=%v: the fetch in flight is in the session pool %v, served to any test and more than once", stated, got)
+		}
+		mm.Close()
 	}
 }
