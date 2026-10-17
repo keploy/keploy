@@ -5,6 +5,8 @@ package replay
 // their own window (§8).
 
 import (
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -403,5 +405,53 @@ func TestCarryOverAttributionEdges(t *testing.T) {
 	none.mapConsumed(m2, "test-2", attrAt(2000), attrAt(2100), []models.MockState{consumedAt("in", 2050, models.Deleted, true)})
 	if !mappedNames(m2, "test-2")["in"] {
 		t.Fatal("with no windows a flagged mock must be mapped as before")
+	}
+}
+
+// A call in flight when a test began (sent in the gap before it) is that
+// test's in the mapping, though answered after the test ended, where the
+// window filter alone drops it; one answered inside the window the filter
+// keeps, once. One sent and answered in the gap is mapped to no test.
+func TestCarryOverAttributionMapsACallInFlightWhenItsTestBegan(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	withRes := func(name string, req, res int) models.MockState {
+		st := consumedAt(name, req, models.Deleted, false)
+		st.ResTimestampMock = models.FormatMockTimestamp(attrAt(res))
+		return st
+	}
+	// The mapping filter keeps every DNS, session and connection mock
+	// whatever its times, so one sent in the gap and answered late is listed
+	// once, by it; a connection failure is no test's but its own window's.
+	sessionLate := withRes("session-late", 1550, 2500)
+	sessionLate.Lifetime = models.LifetimeSession
+	connLate := withRes("conn-late", 1560, 2500)
+	connLate.Lifetime = models.LifetimeConnection
+	dnsLate := withRes("dns-late", 1570, 2500)
+	dnsLate.Kind = models.DNS
+	failureLate := withRes("failure-late", 1580, 2500)
+	failureLate.Kind = models.ConnectionFailure
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	a.mapConsumed(mapping, "test-2", attrAt(2000), attrAt(2100), []models.MockState{
+		withRes("own-2", 2050, 2051),
+		withRes("fetch-late", 1500, 2500), // answered after test-2 ended
+		withRes("fetch-in", 1600, 2050),   // answered inside test-2
+		withRes("gap-only", 1700, 1800),
+		sessionLate, connLate, dnsLate, failureLate,
+	})
+	var names []string
+	for _, tc := range mapping.TestCases {
+		if tc.ID == "test-2" {
+			for _, e := range tc.Mocks {
+				names = append(names, e.Name)
+			}
+		}
+	}
+	sort.Strings(names)
+	if want := []string{"conn-late", "dns-late", "fetch-in", "fetch-late", "own-2", "session-late"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("test-2 maps %v; want %v: own-2, the two calls in flight when it began, and what the filter always keeps, each once", names, want)
 	}
 }

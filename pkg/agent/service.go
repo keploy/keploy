@@ -463,6 +463,17 @@ type CarryOverPlanner interface {
 	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
 }
 
+// InFlightPlanner is the optional extension of a proxy that knows the set's
+// recorded test windows: for the test window that starts at start, the
+// exclusive start of the gap before it. The agent loads, beside the window's
+// own mocks, the per-test mocks sent in that gap and answered at or after
+// start (models.WindowSchedule.InFlightInto): calls in flight when the test
+// began, which are its. ok is false when there is no such gap. A proxy
+// without it loads none, the pre-existing behaviour.
+type InFlightPlanner interface {
+	InFlightFrom(start time.Time) (from time.Time, ok bool)
+}
+
 // ExactServer is the optional extension of a proxy that serves each test its
 // own mocks exactly, under the proven switch (design v14 §5.2): while a test
 // is open, each of its test mocks answers at most one request, in recorded

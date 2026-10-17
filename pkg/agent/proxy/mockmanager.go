@@ -883,6 +883,15 @@ func (m *MockManager) InTestWindow(t time.Time) bool {
 	return !t.Before(m.windowStart) && !t.After(m.windowEnd)
 }
 
+// InFlightFrom is, for the test window that starts at start, the exclusive
+// start of the gap before it (models.WindowSchedule.GapBefore): the agent
+// loads, beside the window's own mocks, those sent in that gap and answered at
+// or after start, which were in flight when the test began. ok is false when
+// the replay seeded no windows, for the first test, or with no gap.
+func (m *MockManager) InFlightFrom(start time.Time) (from time.Time, ok bool) {
+	return m.testWindows.Load().GapBefore(start)
+}
+
 // InRecordedTestWindow reports whether a mock recorded at t was recorded
 // inside the window of some recorded test of the set (SeedRecordedWindows);
 // known is false when the replay seeded none (integrations.TestWindows).
@@ -939,6 +948,12 @@ func (m *MockManager) windowActiveLocked() bool {
 // and are not used for window containment — only mocks whose response
 // timestamp is EARLIER than their request timestamp are dropped as a sanity
 // check on inconsistent recordings.
+//
+// Also kept: a per-test mock in flight when the window's test began
+// (models.InFlightEligible), sent in the gap before the window
+// (models.WindowSchedule.GapBefore) and answered at or after its start. The
+// staging filed it in this window's tier (setMocksWithWindowLocked), and it is
+// this test's.
 //
 // Consumers: this method is a PUBLIC extension point on the MockMemDb
 // interface consumed by OUT-OF-REPO protocol parsers (keploy/integrations,
@@ -998,6 +1013,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 	}
 	out := make([]*models.Mock, 0, len(all))
 	var droppedOutOfWindow, droppedInvalidOrder, missingTs uint64
+	gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
 	for _, mock := range all {
 		if mock == nil {
 			continue
@@ -1024,9 +1040,13 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		// downstream calls); that's not a bleed signal. The bleed bug
 		// this window protects against manifests as REQUESTS landing
 		// outside the window — those are always from a different test.
-		if !req.Before(start) && !req.After(end) {
+		switch {
+		case !req.Before(start) && !req.After(end):
 			out = append(out, mock)
-		} else {
+		case hasGap && models.InFlightEligible(mock) && models.SentInGapAnsweredBy(req, res, gapFrom, start):
+			// In flight when the window's test began: its own.
+			out = append(out, mock)
+		default:
 			droppedOutOfWindow++
 		}
 	}
@@ -1421,6 +1441,11 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	}
 	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
 		out := make([]*models.Mock, 0, len(filtered))
+		// The recorded windows say which calls were in flight when this
+		// window's test began: those sent in the gap before it
+		// (models.WindowSchedule.GapBefore) and answered at or after its
+		// start.
+		gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
 		for _, mock := range filtered {
 			if mock == nil {
 				continue
@@ -1483,6 +1508,17 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// whole machinery exists to protect against.
 			if !firstStart.IsZero() && req.Before(firstStart) {
 				startupInit = append(startupInit, mock)
+				continue
+			}
+			// A call sent in the gap before this test and answered at or
+			// after its start was in flight when the test began: a consumer's
+			// long poll (a Kafka fetch, an SQS ReceiveMessage, a BLPOP) the
+			// app keeps outstanding between tests. It is this test's: the
+			// answer it carries is what the test waits for. Not a carry-over
+			// mock, which the carry-over tier below keeps reachable from the
+			// window it belongs to (models.InFlightEligible).
+			if hasGap && models.InFlightEligible(mock) && models.SentInGapAnsweredBy(req, res, gapFrom, start) {
+				out = append(out, mock)
 				continue
 			}
 			if carryOn && models.IsCarryOver(mock) {
@@ -2375,8 +2411,9 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // GetPerTestMocksInWindow is the unification-plan canonical name for
 // the time-windowed per-test pool. Aliases GetFilteredMocksInWindow
 // during Phase 2 migration. SetMocksWithWindow already pre-filters
-// the per-test slice by request-timestamp containment BEFORE building
-// the tree, so GetFilteredMocksInWindow's "iterate and window-check"
+// the per-test slice by request-timestamp containment (and keeps the
+// calls in flight when the window's test began) BEFORE building the
+// tree, so GetFilteredMocksInWindow's "iterate and window-check"
 // is effectively a no-op fast path; the remaining Phase-3 work is to
 // collapse this accessor into a plain tree Snapshot with no iteration
 // overhead at all.
@@ -4467,7 +4504,10 @@ func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock,
 // (models.MarksOutOfWindow: any of a RegisterCarryOver kind, those a
 // StagingRelease need declares) is being consumed while a window that does not
 // contain it is current — a server push delivered after its window, consumed
-// through MarkMockAsUsed.
+// through MarkMockAsUsed. A call in flight when the current window's test
+// began (models.InFlightEligible, sent in the gap before it and answered at
+// or after its start) is that window's, as its tier holds it: whichever door
+// consumes it, it is mapped to that test.
 func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if !models.MarksOutOfWindow(&mock) {
 		return false
@@ -4480,5 +4520,12 @@ func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 	if start.IsZero() || end.IsZero() {
 		return false
 	}
-	return req.Before(start) || req.After(end)
+	if !req.Before(start) && !req.After(end) {
+		return false
+	}
+	if from, ok := m.testWindows.Load().GapBefore(start); ok && models.InFlightEligible(&mock) &&
+		models.SentInGapAnsweredBy(req, mock.Spec.ResTimestampMock, from, start) {
+		return false
+	}
+	return true
 }

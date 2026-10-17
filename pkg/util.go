@@ -3190,7 +3190,17 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // the first test), because there is no cutoff to preserve against. Legacy callers that don't know firstWindowStart can keep
 // calling FilterPerTestAndLaxPromoted unchanged.
 func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+	return FilterPerTestAndLaxPromotedInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, time.Time{}, false)
+}
+
+// FilterPerTestAndLaxPromotedInFlightAware is FilterPerTestAndLaxPromotedTierAware
+// that also keeps in the per-test slice the per-test mocks in flight when the
+// window began (sent after inFlightFrom, the end of the gap before it, and
+// answered at or after afterTime); see filterByTimeStampInFlightAware.
+// strictWindow is the user's window mode (MockFilterParams.StrictMockWindow),
+// which decides that, whatever strict says. A zero inFlightFrom keeps none.
+func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -3454,7 +3464,29 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // it through. Third-party Proxy implementations that don't implement
 // the reader fall through to the zero-time behaviour and remain
 // functionally identical to the pre-fix blanket-drop contract.
-func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false)
+}
+
+// filterByTimeStampInFlightAware is filterByTimeStampTierAware that also keeps
+// in the per-test slice the per-test mocks in flight when the window began
+// (models.InFlightEligible): sent after inFlightFrom, the end of the gap
+// before the window (models.WindowSchedule.GapBefore), before afterTime, and
+// answered at or after it (models.SentInGapAnsweredBy). They are the window's
+// test's, as the mock manager's own window filter holds them.
+//
+// The user's window mode decides (strictWindow, MockFilterParams.
+// StrictMockWindow, through strictWindowEnabled), not strictPerCall: on a
+// windowed proxy the agent's own filter is never strict (agentStrict), and
+// the mock manager does the strict filtering, from what this slice hands it.
+// With the strict window (the default) a mock in flight is kept per-test,
+// stated lifetime or not, as the window's own mocks are. In lax mode
+// (strictMockWindow false, KEPLOY_STRICT_MOCK_WINDOW=0) one whose recorder
+// stated its lifetime is kept, since lax mode drops a stated mock out of its
+// window, and an unstated one is promoted to the session pool as every
+// unstated per-test mock out of the window is, as before. A zero inFlightFrom
+// keeps none.
+func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -3632,6 +3664,20 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
 		// to another test: an HTTP call every test may make is declared in
 		// keploy.yaml (models.SessionCallRule).
+		// In flight when the window began: sent in the gap before it and
+		// answered at or after its start (a consumer's long poll). The
+		// window's test's, as the mock manager holds it, in the user's
+		// strict window mode, and for a stated mock in lax mode too, where
+		// it would otherwise be dropped. Lax mode promotes an unstated one
+		// to the session pool below, as every unstated per-test mock out of
+		// the window.
+		if !inFlightFrom.IsZero() && (strictWindowEnabled(strictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
+			models.SentInGapAnsweredBy(p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock, inFlightFrom, afterTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
 		if strict || p.StatesLifetime() {
 			// Per-test, out-of-window. Genuine stale cross-test bleed
 			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
