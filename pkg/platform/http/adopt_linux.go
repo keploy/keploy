@@ -379,13 +379,17 @@ type member struct {
 // member starts after the stop began is not the stop's: orphaned, it is
 // adopted, a member of the next run, and ended with it. A no-op unless
 // adoptDaemons made this process a subreaper.
-func stopAdopted(logger *zap.Logger) {
+//
+// It returns why it had to kill a daemon that made no progress on its way
+// out, "" when it did not, or when the kill was the user's (Ctrl+C): a
+// shutdown that kill cut is not known.
+func stopAdopted(logger *zap.Logger) string {
 	if !adopting.Load() {
-		return
+		return ""
 	}
 	daemons := adoptedRunning(logger)
 	if len(daemons) == 0 {
-		return
+		return ""
 	}
 	end := utils.BeginDaemonStop()
 	defer end()
@@ -395,7 +399,7 @@ func stopAdopted(logger *zap.Logger) {
 			closePidfd(m.fd)
 		}
 	}()
-	stopMembers(logger, ms)
+	return stopMembers(logger, ms)
 }
 
 // adoptedRunning is this process's children that it adopted (no pidfd of its
@@ -473,7 +477,8 @@ func members(pids []int) []member {
 // stopMembers asks ms to stop, kills them once they make no progress on
 // their way out (or at once, at the press of Ctrl+C the stop offers), and
 // waits until each has exited, or is held by the kernel without progress.
-func stopMembers(logger *zap.Logger, ms []member) {
+// stallKill says why it killed for want of progress; "" when it did not.
+func stopMembers(logger *zap.Logger, ms []member) (stallKill string) {
 	pids := make([]int, 0, len(ms))
 	for _, m := range ms {
 		pids = append(pids, m.pid)
@@ -533,6 +538,7 @@ func stopMembers(logger *zap.Logger, ms []member) {
 			return
 		}
 		kill("a daemon the application left running made no progress on its way out after it was asked to stop; killing it")
+		stallKill = fmt.Sprintf("a process the application left running made no progress on its way out across %d checks after keploy asked it to stop, so keploy killed it", stopStallChecks)
 	}
 }
 
