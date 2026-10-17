@@ -34,6 +34,11 @@ func TestDeriveLifetimeTakesTheStatedLifetime(t *testing.T) {
 		{"MySQL SET stated session, though typed mocks", stated(MySQL, "mocks", MetadataLifetimeSession, "c1"), LifetimeSession},
 		{"MySQL prepare stated connection", stated(MySQL, "connection", MetadataLifetimeConnection, "c1"), LifetimeConnection},
 		{"connection stated with no connID is session", stated(MySQL, "connection", MetadataLifetimeConnection, ""), LifetimeSession},
+		// A post-record hook tagged it config over its recorder's stated
+		// per-test (enterprise's SQS config calls): the tag wins.
+		{"HTTP stated per-test, then tagged config", stated(HTTP, "config", MetadataLifetimePerTest, ""), LifetimeSession},
+		{"HTTP/2 stated per-test, then tagged config", stated(HTTP2, "config", MetadataLifetimePerTest, ""), LifetimeSession},
+		{"MySQL stated per-test, then tagged config", stated(MySQL, "config", MetadataLifetimePerTest, "c1"), LifetimeSession},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mock.DeriveLifetime()

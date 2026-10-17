@@ -39,6 +39,11 @@ func TestIsProtocolPhase(t *testing.T) {
 		{"MySQL COM_PING stated session", stated(mysqlCommand("COM_PING"), MetadataLifetimeSession), true},
 		{"HTTP stated per-test", stated(&Mock{Kind: HTTP, Spec: MockSpec{Metadata: map[string]string{"type": "HTTP_CLIENT"}}}, MetadataLifetimePerTest), false},
 		{"HTTP recordOne stated session", stated(&Mock{Kind: HTTP, Spec: MockSpec{Metadata: map[string]string{"type": "config"}}}, MetadataLifetimeSession), true},
+		// A post-record hook tagged it config over its recorder's stated
+		// per-test (enterprise's SQS config calls): reusable, so no test must
+		// make it.
+		{"HTTP stated per-test, then tagged config", stated(&Mock{Kind: HTTP, Spec: MockSpec{Metadata: map[string]string{"type": "config"}}}, MetadataLifetimePerTest), true},
+		{"Generic stated per-test, tagged config", stated(&Mock{Kind: GENERIC, Spec: MockSpec{Metadata: map[string]string{"type": "config"}}}, MetadataLifetimePerTest), false},
 		{"Postgres v3 query with its own lifetime key", stated(&Mock{Kind: PostgresV2, Spec: MockSpec{Metadata: map[string]string{"type": "mocks"}}}, "session"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

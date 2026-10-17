@@ -550,7 +550,8 @@ func (m *Mock) ReusableByStatementOnly() bool {
 
 // statedLifetime is the lifetime m's recorder stated (MetadataLifetimeKey),
 // and whether it stated a known one. A connection lifetime with no connID to
-// scope it to is served as session, as a "connection" type tag is.
+// scope it to is served as session, as a "connection" type tag is, and a
+// per-test one on a mock tagged "config" as session, as the tag is.
 //
 // Only the kinds whose recorders state it this way are read: HTTP, HTTP/2 and
 // MySQL. The Postgres v3 recorder writes the same key for its own replayer,
@@ -567,6 +568,19 @@ func statedLifetime(m *Mock) (Lifetime, bool) {
 	}
 	switch m.Spec.Metadata[MetadataLifetimeKey] {
 	case MetadataLifetimePerTest:
+		// A config mock is reusable, whatever the recorder stated. No HTTP,
+		// HTTP/2 or MySQL recorder states one per-test (each states its
+		// config mocks session), so for these kinds the pair comes only from
+		// a post-record hook that tagged a recorded exchange config after its
+		// recorder stated it per-test: enterprise's SQS hook did so to its
+		// GetQueueUrl, GetQueueAttributes, ListQueues and
+		// ChangeMessageVisibility calls, whose recordings were then served to
+		// no test but their own. The Generic recorder does state its config
+		// exchanges per-test (generic.exchangeLifetime), one reason GENERIC
+		// is not read here.
+		if m.Spec.Metadata["type"] == "config" {
+			return LifetimeSession, true
+		}
 		return LifetimePerTest, true
 	case MetadataLifetimeSession:
 		return LifetimeSession, true
