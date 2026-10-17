@@ -58,6 +58,12 @@ type Relay struct {
 	H2 func()
 	// Refused is told why a name check ended the connection. It may be nil.
 	Refused func(why string)
+	// AwaitsAnswer is told once the client has ended its side cleanly and
+	// every byte of it has gone to the destination: what is left to relay
+	// is the destination's answer, the real server's to give, which a
+	// test's end does not wait on. What it returns is called once the
+	// destination's direction ends. It may be nil.
+	AwaitsAnswer func() (release func())
 
 	// h2: the connection offered h2. Set and read by the client's direction
 	// only.
@@ -97,16 +103,24 @@ func (r *Relay) Run(ctx context.Context) error {
 	}()
 
 	err := r.forward()
+	release := func() {}
 	switch {
 	case err == nil:
 		_ = closeWrite(r.Dest)
+		// The client's side is over and all of it relayed: the rest is
+		// the destination's answer.
+		if r.AwaitsAnswer != nil {
+			release = r.AwaitsAnswer()
+		}
 	case errors.Is(err, errRefused):
 		closeBoth()
 		err = nil
 	default:
 		closeBoth()
 	}
-	if berr := <-back; err == nil && !errors.Is(berr, net.ErrClosed) {
+	berr := <-back
+	release()
+	if err == nil && !errors.Is(berr, net.ErrClosed) {
 		err = berr
 	}
 	// Both directions have ended: the connection is over, and both sockets

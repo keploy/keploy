@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
@@ -308,6 +309,14 @@ func (p *Proxy) relayReal(ctx context.Context, client net.Conn, br *bufio.Reader
 			p.realTracker.Incomplete(dstAddr, why)
 			logger.Warn("keploy ended a mock.real connection: capture_incomplete", zap.String("why", why))
 		},
+		// The app's side over, the connection waits on the real server's
+		// answer: no work of keploy's, which a test's end, and a set's
+		// end, do not wait on (integrations.MarkIdle), as a record waits
+		// on no real server. Unmarked, an app that ended its side (stopped
+		// at the run's last set, or giving up on a call) held each end's
+		// read until the watchdog gave up, while the destination stayed
+		// silent.
+		AwaitsAnswer: func() func() { return integrations.MarkIdle(ctx) },
 	}
 	if err := r.Run(ctx); err != nil && !isNetworkClosedErr(err) && !errors.Is(err, context.Canceled) {
 		logger.Debug("a mock.real connection ended with an error", zap.Error(err))

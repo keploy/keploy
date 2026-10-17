@@ -106,6 +106,11 @@ type IdleMarker interface {
 // waits on releases that hold for the wait. The holder WithRequestHolder
 // carries is also the marker: a stand-in holder that is not an IdleMarker
 // drops every mark.
+//
+// A mock.real relay marks the same once the application has ended its side
+// and all of it has gone to the real server (realdeps.Relay.AwaitsAnswer):
+// what is left is that server's answer, the dependency's time, not keploy's
+// work.
 func MarkIdle(ctx context.Context) (release func()) {
 	if m, ok := ctx.Value(requestHolderKey{}).(IdleMarker); ok && m != nil {
 		return m.MarkIdle()
