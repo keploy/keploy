@@ -230,6 +230,10 @@ func main() {
 	}()
 	<-stop.Done()
 	_ = srv.Shutdown(context.Background())
+	// SHUTDOWN_DELAY: its shutdown takes this long before it publishes.
+	if d, err := time.ParseDuration(os.Getenv("SHUTDOWN_DELAY")); err == nil {
+		time.Sleep(d)
+	}
 	done := make(chan struct{})
 	publish(broker, "shutdown"+os.Getenv("SUFFIX"), done)
 	log.Printf("shutdown published")
