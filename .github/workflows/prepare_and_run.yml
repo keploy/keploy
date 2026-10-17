@@ -655,7 +655,10 @@ jobs:
       - name: Build image (linux/amd64)
         run: |
           chmod +x dist/keploy-linux-amd64/keploy
-          docker buildx build \
+          # Retried on a registry's rate limit or a transport fault while it
+          # pulls debian:trixie-slim or fetches packages (check-image-builds.sh).
+          source ./.github/workflows/test_workflow_scripts/docker-build-retry.sh
+          docker_build_retry docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
             --file Dockerfile.runtime \
@@ -694,7 +697,10 @@ jobs:
       - name: Build image (linux/arm64)
         run: |
           chmod +x dist/keploy-linux-arm64/keploy
-          docker buildx build \
+          # Retried on a registry's rate limit or a transport fault while it
+          # pulls debian:trixie-slim or fetches packages (check-image-builds.sh).
+          source ./.github/workflows/test_workflow_scripts/docker-build-retry.sh
+          docker_build_retry docker buildx build \
             --platform linux/arm64 \
             --provenance=false \
             --file Dockerfile.runtime \

@@ -43,6 +43,10 @@ jobs:
       - name: Check image registries
         run: bash ./.github/workflows/test_workflow_scripts/check-image-registries.sh
 
+      # Every image build goes through docker_build_retry, or pulls no base.
+      - name: Check image builds
+        run: bash ./.github/workflows/test_workflow_scripts/check-image-builds.sh
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

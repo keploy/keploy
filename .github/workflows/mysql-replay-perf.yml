@@ -103,7 +103,10 @@ jobs:
         # Dockerfile.runtime expects the prebuilt binary under
         # dist/keploy-linux-<arch>/keploy (already produced above).
         run: |
-          docker buildx build \
+          # Retried on a registry's rate limit or a transport fault while it
+          # pulls debian:trixie-slim or fetches packages (check-image-builds.sh).
+          source ./.github/workflows/test_workflow_scripts/docker-build-retry.sh
+          docker_build_retry docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
             --file Dockerfile.runtime \
