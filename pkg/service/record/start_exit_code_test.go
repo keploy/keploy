@@ -442,6 +442,151 @@ func TestStart_AnAgentThatDiesUnderComposeFailsTheRecording(t *testing.T) {
 	}
 }
 
+// agentDiesAfterReadyInstr is an agent this client started that comes up and
+// then dies mid-recording, before the recording is stopped: exited is the
+// channel its process's exit lands on (AgentExit), as the client's reaper
+// sends it, and it is sent from GetIncoming, once the recording has wired
+// its streams. The app runs on: nothing of its own ends the recording.
+type agentDiesAfterReadyInstr struct {
+	*fakeInstr
+	exited  chan error
+	exitErr error
+	once    sync.Once
+}
+
+func (a *agentDiesAfterReadyInstr) AgentExit() <-chan error { return a.exited }
+
+func (a *agentDiesAfterReadyInstr) GetIncoming(ctx context.Context, o models.IncomingOptions) (<-chan *models.TestCase, error) {
+	a.once.Do(func() { a.exited <- a.exitErr })
+	return a.fakeInstr.GetIncoming(ctx, o)
+}
+
+func (a *agentDiesAfterReadyInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+// taggedExit is an agent exit tagged with a code of its own, as the agent
+// process arms it (utils/exitcodes.go): what an *exec.ExitError is to the
+// real client.
+type taggedExit struct{ code int }
+
+func (e taggedExit) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e taggedExit) ExitCode() int { return e.code }
+
+// An agent that dies after it became ready, before the recording is stopped,
+// fails the recording: with a stop reason naming the agent's exit, and with
+// the code the exit is tagged with (1 when it carries none). It used to keep
+// going with nothing captured and end 0 on the user's stop (#4790).
+func TestStart_AnAgentThatDiesAfterReadyFailsTheRecording(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		exit  error
+		want  int
+		names string
+	}{
+		{"it crashed", errors.New("exit status 2"), utils.ExitKeployError, "exit status 2"},
+		{"SIGKILL killed it", errors.New("signal: killed"), utils.ExitKeployError, "signal: killed"},
+		{"it lacked privileges", taggedExit{code: utils.ExitPrivilegeRequired}, utils.ExitPrivilegeRequired, "kernel privileges"},
+		{"the environment could not run it", taggedExit{code: utils.ExitEnvironmentUnsupported}, utils.ExitEnvironmentUnsupported, "environment lacks"},
+		{"it exited cleanly on its own", nil, utils.ExitKeployError, "it exited on its own"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instr := &agentDiesAfterReadyInstr{fakeInstr: newFakeInstr(), exited: make(chan error, 1), exitErr: tc.exit}
+			r := exitCodeRecorder(instr)
+			r.config.CommandType = string(utils.Native)
+			err, code := startForExitCode(t, context.Background(), r)
+			if code != tc.want {
+				t.Fatalf("exit code %d, want %d", code, tc.want)
+			}
+			if err == nil || !strings.Contains(err.Error(), "the keploy agent exited before the recording was stopped") || !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("Start returned %v; want the agent's exit, named (%q)", err, tc.names)
+			}
+		})
+	}
+}
+
+// agentDiesAsItStopsInstr is an agent whose death and the user's stop land
+// together: its Run stops the recording first, then reports the exit.
+type agentDiesAsItStopsInstr struct {
+	*fakeInstr
+	exited chan error
+	stop   context.CancelFunc
+}
+
+func (a *agentDiesAsItStopsInstr) AgentExit() <-chan error { return a.exited }
+
+func (a *agentDiesAsItStopsInstr) Run(context.Context, models.RunOptions) models.AppError {
+	a.stop()
+	a.exited <- errors.New("signal: killed")
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+// The agent dying as the recording is stopped is the stop, not a failure:
+// the user's Ctrl+C ends the run, and it exits 0.
+func TestStart_AnAgentThatDiesAsTheRecordingStopsIsNotAFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	instr := &agentDiesAsItStopsInstr{fakeInstr: newFakeInstr(), exited: make(chan error, 1), stop: cancel}
+	r := exitCodeRecorder(instr)
+	r.config.CommandType = string(utils.Native)
+	err, code := startForExitCode(t, ctx, r)
+	if err != nil || code != 0 {
+		t.Fatalf("Start returned %v with exit code %d, want nil and 0: the user stopped this recording", err, code)
+	}
+}
+
+// dockerRunAgentDiesInstr is a docker run recording whose app dies and whose
+// agent died with it (the app shares the agent container's PID namespace):
+// exited carries the agent's exit, sent from GetIncoming, before the app's
+// own end is read.
+type dockerRunAgentDiesInstr struct {
+	*appEndsInstr
+	exited  chan error
+	exitErr error
+	once    sync.Once
+}
+
+func (a *dockerRunAgentDiesInstr) AgentExit() <-chan error { return a.exited }
+
+func (a *dockerRunAgentDiesInstr) GetIncoming(ctx context.Context, o models.IncomingOptions) (<-chan *models.TestCase, error) {
+	a.once.Do(func() { a.exited <- a.exitErr })
+	return a.fakeInstr.GetIncoming(ctx, o)
+}
+
+// A docker run recording whose app was killed because the agent died names
+// the agent, with keploy's own code: the app's 137 is the agent's death seen
+// through the app. And an app SIGKILL killed on its own, agent alive, keeps
+// the app's own code and blame.
+func TestStart_ADockerRunAppKilledWithItsAgentBlamesTheAgent(t *testing.T) {
+	killed := models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("signal: killed"), ExitCode: 137}
+	t.Run("the agent died with it", func(t *testing.T) {
+		instr := &dockerRunAgentDiesInstr{
+			appEndsInstr: &appEndsInstr{fakeInstr: newFakeInstr(), appErr: killed},
+			exited:       make(chan error, 1),
+			exitErr:      errors.New("signal: killed"),
+		}
+		r := exitCodeRecorder(instr)
+		r.config.CommandType = string(utils.DockerRun)
+		err, code := startForExitCode(t, context.Background(), r)
+		if code != utils.ExitKeployError {
+			t.Fatalf("exit code %d, want %d: the agent's death is keploy's failure", code, utils.ExitKeployError)
+		}
+		if err == nil || !strings.Contains(err.Error(), "the keploy agent exited before the recording was stopped") {
+			t.Fatalf("Start returned %v; want the agent named, not the app's 137", err)
+		}
+	})
+	t.Run("the app was killed alone", func(t *testing.T) {
+		instr := &appEndsInstr{fakeInstr: newFakeInstr(), appErr: killed}
+		r := exitCodeRecorder(instr)
+		r.config.CommandType = string(utils.DockerRun)
+		err, code := startForExitCode(t, context.Background(), r)
+		if code != 137 || err == nil || strings.Contains(err.Error(), "keploy agent") {
+			t.Fatalf("Start returned %v with exit code %d; want the app's own 137", err, code)
+		}
+	})
+}
+
 // A mock.real keploy cannot read refuses the recording before anything runs
 // (proven switch), and ends the process non-zero, as a recording whose agent
 // cannot start does: never a green CI job that recorded nothing.
