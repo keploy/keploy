@@ -101,10 +101,28 @@ func TestReportBootProgress(t *testing.T) {
 	}
 }
 
+// recordedProbe is a work probe whose answer the test sets: the progress the
+// kernel's account of a stage's thread would show (workProbe).
+type recordedProbe struct {
+	progress bool
+	released bool
+}
+
+func (p *recordedProbe) moved() bool { return p.progress }
+func (p *recordedProbe) release()    { p.released = true }
+
 // Work in progress is a step as it begins and as it ends, and reported busy
-// while it makes progress, or cannot be seen not to.
+// while its probe sees it make progress: not once it stops, nor once it ended,
+// when its probe is let go. The probe is the test's, so this holds on every
+// platform; the platform's own (Linux: the stage's thread) is watched apart,
+// and where there is none (TestBootWorkWhoseProgressCannotBeSeenIsNotBusy) no
+// stage is busy.
 func TestBootWorkIsReportedBusy(t *testing.T) {
 	resetBoot(t)
+	probe := &recordedProbe{progress: true}
+	was := newWorkProbe
+	newWorkProbe = func() workProbe { return probe }
+	t.Cleanup(func() { newWorkProbe = was })
 	if bootBusy() {
 		t.Fatal("busy with no work in progress")
 	}
@@ -114,8 +132,13 @@ func TestBootWorkIsReportedBusy(t *testing.T) {
 		t.Fatal("the work's start is no step")
 	}
 	if !bootBusy() {
-		t.Fatal("work just begun is not busy")
+		t.Fatal("work making progress is not busy")
 	}
+	probe.progress = false
+	if bootBusy() {
+		t.Fatal("work that stopped making progress is busy")
+	}
+	probe.progress = true
 	end()
 	end()
 	if bootSeq.Load() != before+2 {
@@ -123,6 +146,9 @@ func TestBootWorkIsReportedBusy(t *testing.T) {
 	}
 	if bootBusy() {
 		t.Fatal("busy once the work ended")
+	}
+	if !probe.released {
+		t.Fatal("the work's probe was not let go as it ended")
 	}
 }
 
