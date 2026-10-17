@@ -309,3 +309,49 @@ func TestStagingWithNoDeclaredNeedReadsOnlyTheStartupBand(t *testing.T) {
 		t.Fatalf("staged %v; want only the startup band", got)
 	}
 }
+
+// destinationsProxy records what the agent seeds as the stored set's
+// recorded destinations.
+type destinationsProxy struct {
+	recordingProxy
+	seeded [][]string
+}
+
+func (p *destinationsProxy) SeedRecordedDestinations(mocks []*models.Mock) {
+	p.seeded = append(p.seeded, sortedNames(namesOf(mocks)))
+}
+
+// When a store is published (finalizeClientMocks) the agent seeds the proxy
+// with the first mock its on-disk store holds of each recorded destination:
+// the whole recording's, not only what a staging stages. A store with no
+// on-disk store seeds none, replacing the previous store's.
+func TestAStoreSeedsTheProxyWithItsRecordedDestinations(t *testing.T) {
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	at := func(name, addr string, d time.Duration) *models.Mock {
+		m := stageMock(name, "/q", stageT0.Add(d))
+		m.Kind = models.MySQL
+		m.Spec.Metadata["destAddr"] = addr
+		return m
+	}
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []*models.Mock{
+		at("db-first", "10.0.0.5:6033", time.Second),
+		at("db-later", "10.0.0.5:6033", time.Hour),
+		at("cache", "10.0.0.6:6390", time.Minute),
+	} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	p := &destinationsProxy{}
+	a := &Agent{logger: zap.NewNop(), Proxy: p}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{diskMocks: disk})
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	if want := [][]string{{"cache", "db-first"}, nil}; !reflect.DeepEqual(p.seeded, want) {
+		t.Fatalf("seeded %v; want the first mock of each destination, then none", p.seeded)
+	}
+}

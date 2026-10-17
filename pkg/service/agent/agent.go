@@ -1063,6 +1063,7 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	}
 	a.clientMocks.Store(uint64(0), storage)
 	a.seedStatementCatalog(storage)
+	a.seedRecordedDestinations(storage)
 
 	// Track the loaded count for /agent/mock/stats.
 	a.scopeMu.Lock()
@@ -1416,6 +1417,39 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 		a.logger.Info("seeded the set's statement catalog from the on-disk store: the first recording of each statement, to describe a statement the app prepares before the test that runs it, never served",
 			zap.Int("statements", len(storage.statements)),
 			zap.Int("onDisk", storage.diskMocks.Len()))
+	}
+}
+
+// seedRecordedDestinations hands the proxy the stored set's recorded
+// destinations: the first mock its on-disk store holds of each
+// (DiskMocks.LoadDestinations). A set's staging reads only what was recorded
+// before its first test, so a destination whose per-test mocks all lie inside
+// tests would be unknown to the proxy's destination rules while the app
+// starts: a non-default MySQL port would not be routed to the MySQL parser,
+// and a TLS client would not be offered h2 for a destination recorded
+// speaking HTTP/2. They are seeded once per store, when it is published, and
+// replace the previous store's; the proxy keeps them, and every staging
+// derives from them beside what it stages. A store with no on-disk store
+// seeds none: its per-test mocks are all resident, so its staging reaches
+// them. A read failure seeds none and is logged; the rules then read what is
+// staged, as before.
+func (a *Agent) seedRecordedDestinations(storage *ClientMockStorage) {
+	seeder, ok := a.Proxy.(coreAgent.RecordedDestinationsSeeder)
+	if !ok {
+		return
+	}
+	var mocks []*models.Mock
+	if storage.diskMocks != nil {
+		var err error
+		if mocks, err = storage.diskMocks.LoadDestinations(); err != nil {
+			utils.LogError(a.logger, err, "failed to read the set's recorded destinations from the on-disk store; the proxy reads them from what is staged")
+			mocks = nil
+		}
+	}
+	seeder.SeedRecordedDestinations(mocks)
+	if storage.diskMocks != nil {
+		a.logger.Debug("seeded the set's recorded destinations from the on-disk store",
+			zap.Int("destinations", len(mocks)), zap.Int("onDisk", storage.diskMocks.Len()))
 	}
 }
 
