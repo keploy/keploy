@@ -350,8 +350,11 @@ func TestInterruptProcessTreeKilledSaysWhenItKilled(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if killed != tc.killed {
-			t.Errorf("%s: killed %v, want %v", tc.name, killed, tc.killed)
+		if (killed != "") != tc.killed {
+			t.Errorf("%s: killed %q, want a kill %v", tc.name, killed, tc.killed)
+		}
+		if tc.killed && !strings.Contains(killed, "had not exited 3s later") {
+			t.Errorf("%s: the kill is said as %q, want the grace named", tc.name, killed)
 		}
 		<-reaped
 	}
