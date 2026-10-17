@@ -188,12 +188,12 @@ func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 // capture carries it, rather than dropping it as a window never read.
 //
 // The drain is running (errDrainDone set before errDrainActive, as
-// StartErrorDrain sets them) but never meets the flush marker. What ends the
-// read differs with the proven switch, so each case sets it: with the switch
-// off a bounded wait gives up on the drain; with it on nothing is bounded by
-// a clock, and the read ends when its caller gives it up, saying it could not
-// vouch for every miss (ErrUnmatchedCallsUnread). Left to the environment's
-// switch, the switch-on run waited for an event the test never sent.
+// StartErrorDrain sets them) but never meets the flush marker. Nothing is
+// bounded by a clock, with the proven switch on or off: the read ends when its
+// caller gives it up, saying it could not vouch for every miss
+// (ErrUnmatchedCallsUnread). With the switch off a two-second wait gave up on
+// the drain and the read said nothing, so a miss the drain had not routed yet
+// was read with the next test's as if it were that test's.
 func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
 	for _, proven := range []bool{false, true} {
 		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
@@ -206,21 +206,17 @@ func TestCaptureWindow_ContinueCarriesWhatAReadWindowGotLater(t *testing.T) {
 			p.errDrainDone = make(chan struct{}) // a drain that runs and never reaches the marker
 			p.errDrainActive.Store(true)
 
-			ctx := context.Background()
-			if proven {
-				// The caller gives the read up: the event that ends it.
-				given, giveUp := context.WithCancel(ctx)
-				giveUp()
-				ctx = given
-			}
+			// The caller gives the read up: the event that ends it.
+			ctx, giveUp := context.WithCancel(context.Background())
+			giveUp()
 			p.BeginTestErrorCapture()
 			p.activeTestErrors.Load().addBounded(mockMiss("POST /t1"), maxPendingMockErrors)
 			got, err := p.GetMockErrors(ctx)
 			if len(got) != 1 || got[0].ActualSummary != "POST /t1" {
 				t.Fatalf("test1 expected [POST /t1], got %+v", got)
 			}
-			if proven != errors.Is(err, models.ErrUnmatchedCallsUnread) {
-				t.Fatalf("test1's read error %v; under the switch a read that could not close its window says so, and only then", err)
+			if !errors.Is(err, models.ErrUnmatchedCallsUnread) {
+				t.Fatalf("test1's read error %v; a read that could not close its window says so", err)
 			}
 			acc := p.activeTestErrors.Load()
 			if acc == nil {

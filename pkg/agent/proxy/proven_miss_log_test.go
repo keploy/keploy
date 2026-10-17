@@ -53,3 +53,26 @@ func TestAMissIsQuietUnderTheSwitchOnly(t *testing.T) {
 		})
 	}
 }
+
+// A miss its parser already queued for its test, before answering the app
+// (an HTTP 502), comes back marked reported (models.MismatchReported): it is
+// logged as any miss is with the switch off, and returned for the connection
+// to end, but not queued a second time, where it could count against the next
+// test.
+func TestAMissItsParserReportedIsNotQueuedAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	miss := models.MismatchReported{Err: fmt.Errorf("decode: %w", models.ErrNoMockMatched)}
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	p := &Proxy{logger: logger, errChannel: make(chan error, 4)}
+	got := p.mockFailed(logger, miss)
+	if !errors.Is(got, models.ErrNoMockMatched) || !models.IsMismatchReported(got) {
+		t.Fatalf("returned %v; want the miss, still marked reported", got)
+	}
+	if n := len(p.errChannel); n != 0 {
+		t.Errorf("queued %d errors; want none: the parser queued the miss already", n)
+	}
+	if logs.FilterMessage("failed to mock the outgoing message").FilterLevelExact(zapcore.ErrorLevel).Len() != 1 {
+		t.Errorf("logged %v; want the miss's error line, as with the switch off always", logs.All())
+	}
+}

@@ -289,8 +289,8 @@ var ErrNoMockMatched = errors.New("no matching mock found")
 // comes back WITH whatever was read, so a caller that only reports misses keeps
 // them, while one that judges must treat the test's evidence as unknown: under
 // the proven switch the replayer marks the test FailureInfo.UnmatchedCallsUnread
-// and its test set is not judged. Only an agent with the proven switch on
-// reports it.
+// and its test set is not judged; with it off, FailureInfo.MissesUnattributed.
+// An agent reports it with the switch on or off.
 var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
 
 // UnreadCause is why a read of the unmatched calls was incomplete: the text

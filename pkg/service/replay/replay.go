@@ -7596,29 +7596,32 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		result.Real = read.real
 	}
 	mockErrors, err := read.calls, read.err
-	if err != nil && !provenswitch.On() {
-		// Don't swallow silently. This test's misses can't be attached, but the
-		// agent-side window is reset when the next test opens its own (which
-		// drops a window never read, and says so), so the failure can't bleed
-		// into the next test. Log it so a persistent transport problem is
-		// visible rather than reports vanishing without a trace.
-		r.logger.Debug("failed to fetch mock errors for test; skipping unmatched-call attachment",
-			zap.String("testSetID", testSetID),
-			zap.String("testCaseID", testCaseName),
-			zap.Error(err))
-		return
-	}
 	if err != nil {
-		// Under the proven switch a miss fails its test, so a test whose misses
-		// could not all be read has no verdict: it is marked, whatever was read
-		// is still attached, and its test set is not judged (see
-		// testsWithUnreadMisses).
-		markUnmatchedCallsUnread(result)
-		r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged",
+		// A test whose misses could not all be read is marked, and whatever
+		// was read is still attached. Under the proven switch a miss fails its
+		// test, so such a test has no verdict and its test set is not judged
+		// (UnmatchedCallsUnread; see testsWithUnreadMisses). With the switch
+		// off the set is judged as before, but the test is marked
+		// MissesUnattributed: a miss may be missing from it, or have been read
+		// with another test's, so nothing may take a failed difference of its
+		// set for noise (enterprise's auto-noise reads the mark). It was
+		// dropped at Debug, and a miss that went unread was then masked.
+		if provenswitch.On() {
+			markUnmatchedCallsUnread(result)
+		} else if result != nil {
+			result.FailureInfo.MissesUnattributed = true
+		}
+		fields := []zap.Field{
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCaseName),
 			zap.Int("callsRead", len(mockErrors)),
-			zap.Error(err))
+			zap.Error(err),
+		}
+		if provenswitch.On() {
+			r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged", fields...)
+		} else {
+			r.logger.Warn("could not read every call this test made that no mock answered; a miss may be missing from this test, or have been read with another test's", fields...)
+		}
 	}
 	for _, me := range mockErrors {
 		if result != nil {

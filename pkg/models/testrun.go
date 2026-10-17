@@ -208,6 +208,15 @@ type FailureInfo struct {
 	// test's evidence is unknown, so its test set is not judged. Set only under
 	// the proven switch.
 	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// MissesUnattributed says, with the proven switch off, what
+	// UnmatchedCallsUnread says under it: the calls no mock answered during
+	// this test could not all be read, so a miss of this test may be missing
+	// from it, or have been read with another test's. With the switch off a
+	// miss fails no test, so the test's verdict stands, and nothing reads this
+	// as no verdict; but nothing may take a failed difference of its test set
+	// for noise, which may be that miss's (enterprise's auto-noise learns none
+	// for the set). Set only with the switch off.
+	MissesUnattributed bool `json:"misses_unattributed,omitempty" yaml:"misses_unattributed,omitempty"`
 	// TestMocksUnread says the mocks this test consumed could not be read
 	// from keploy's agent, so whether it made every call it recorded is
 	// unknown: it has no verdict, and its test set is not judged. Set only

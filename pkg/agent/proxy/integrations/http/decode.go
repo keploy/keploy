@@ -436,20 +436,33 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
 				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
 				missErr := models.NewMockMismatchError(baseErr, report)
-				// Under the proven switch a miss fails the test that made it,
-				// so it is queued for that test before the app sees the 502:
-				// a test that ends right after reading the 502 has its miss,
-				// and the next test is never charged with it. Reported here,
-				// it is not returned again.
-				reported := provenswitch.On() && models.ReportMockMismatch(ctx, missErr)
+				// The miss is queued for the test that made it before the app
+				// sees the 502. The replay reads a test's misses once the app
+				// has answered it (proxy.GetMockErrors), and the app answers
+				// only after it has read the 502, so a test that ends as soon
+				// as it reads the 502 still has its miss, and the next test is
+				// never charged with it. That holds with the proven switch off
+				// as well. Queued after the 502, as it was there, the miss
+				// raced the app's answer: an app that answered first had its
+				// miss charged to the test after it (enterprise pipeline
+				// 11651: get-quote-1's GET /fx filed under get-rates-1, and
+				// get-quote-1's difference learned as noise).
+				reported := models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				if reported {
+				switch {
+				case reported && provenswitch.On():
+					// Reported, it is not returned again.
 					errCh <- nil
-					return
+				case reported:
+					// Returned as well, as reported: the connection ends and
+					// the miss is logged as they always were with the switch
+					// off, and it is not reported a second time.
+					errCh <- models.MismatchReported{Err: missErr}
+				default:
+					errCh <- missErr
 				}
-				errCh <- missErr
 				return
 			}
 
