@@ -1885,8 +1885,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 				return err
 			}
 			killed, err := utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
-			if killed && setEnd {
-				a.noteSetEndKill(fmt.Sprintf("keploy interrupted the application at the set's end and a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", utils.TreeInterruptGrace))
+			if killed != "" && setEnd {
+				a.noteSetEndKill("keploy interrupted the application at the set's end and " + killed)
 			}
 			return err
 		}

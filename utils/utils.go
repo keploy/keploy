@@ -923,12 +923,16 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	return err
 }
 
-// InterruptProcessTreeKilled is InterruptProcessTree, and says whether it had
-// to kill: a process group's leader had not exited TreeInterruptGrace after
-// sig, and the group was sent SIGKILL (on Windows: the forced taskkill). As
+// InterruptProcessTreeKilled is InterruptProcessTree, and says why it had to
+// kill, "" when it did not: a process group's leader had not exited
+// TreeInterruptGrace after sig, and the group was sent SIGKILL; or, on
+// Windows, the tree had not exited windowsInterruptGrace after its
+// CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
+// that the tree had exited without a kill says so too: one whose signal could
+// not be sent, whose force-kill failed, or whose state it could not read. As
 // InterruptProcessTree, it waits for each group's leader, not for the rest of
 // the group.
-func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed bool, err error) {
+func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
 	return interruptProcessTree(logger, ppid, sig)
 }
 
@@ -936,7 +940,11 @@ func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal
 // group of the tree to exit after its signal before it sends SIGKILL.
 const TreeInterruptGrace = 3 * time.Second
 
-func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) (killed bool, err error) {
+// windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
+// the tree to exit after its CTRL_BREAK before it ends it with taskkill.
+const windowsInterruptGrace = 10 * time.Second
+
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -960,17 +968,22 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 		}
 
 		// Prefer a console Ctrl+Break event so the app can exit cleanly.
+		// why is what a kill from here on is said with.
+		why := fmt.Sprintf("it had not exited %s after keploy's CTRL_BREAK (the grace keploy's stop gives it on Windows), so keploy killed it", windowsInterruptGrace)
 		if sig == syscall.SIGINT {
 			if err := SendSignal(logger, -ppid, sig); err == nil {
-				if err := waitForProcessExit(ppid, 10*time.Second, logger); err != nil {
+				if err := waitForProcessExit(ppid, windowsInterruptGrace, logger); err != nil {
 					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 				}
 				if running, err := isProcessRunning(ppid); err == nil && !running {
-					return false, nil
+					return "", nil
 				}
 			} else {
 				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
+				why = fmt.Sprintf("keploy could not send it a CTRL_BREAK (%v), so keploy killed it", err)
 			}
+		} else {
+			why = fmt.Sprintf("keploy cannot send %s on Windows, so keploy killed it", sig)
 		}
 
 		// Try graceful taskkill as a fallback (without /F).
@@ -981,16 +994,23 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 			logger.Debug("taskkill graceful succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
 		}
 
-		// Force kill as the last resort if the process tree is still alive.
-		if running, err := isProcessRunning(ppid); err != nil {
+		// Force kill as the last resort if the process tree is still alive,
+		// or its state cannot be read: either way the stop says it killed,
+		// as it cannot tell that the tree exited on its own. So does a force
+		// kill that failed.
+		running, err := isProcessRunning(ppid)
+		if err != nil {
 			logger.Debug("failed to check process state after graceful taskkill", zap.Int("pid", ppid), zap.Error(err))
-		} else if running {
+			why = fmt.Sprintf("%s; and keploy could not read whether it had exited (%v)", strings.TrimSuffix(why, ", so keploy killed it"), err) + ", so keploy killed it"
+		}
+		if running || err != nil {
+			killed = why
 			forcedCmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F")
-			if output, err := forcedCmd.CombinedOutput(); err != nil {
-				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+			if output, ferr := forcedCmd.CombinedOutput(); ferr != nil {
+				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(ferr), zap.String("output", string(output)))
+				killed = fmt.Sprintf("%s, and its taskkill /F failed (%v)", why, ferr)
 			} else {
 				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
-				killed = true
 			}
 		}
 
@@ -1014,34 +1034,48 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 		}
-		return false, nil
+		return killed, nil
 	}
 
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, groupOf, err := findChildPIDs(ppid)
+	var uniqueProcess []int
+	children, groupOf, err := processTree(ppid)
 	if err != nil {
-		return false, err
-	}
+		// The tree cannot be read: its leader's own group (keploy starts
+		// the app in a group of its own) is still interrupted, waited for
+		// and, if need be, killed, as below. Returning here sent no signal
+		// at all, and the app was killed when the command's WaitDelay ran
+		// out, unsaid. A process of the tree in a group of its own is then
+		// not interrupted.
+		logger.Warn("keploy could not read the application's process tree; it interrupts the application's own process group only",
+			zap.Int("pid", ppid), zap.Error(err))
+		uniqueProcess = []int{ppid}
+	} else {
+		children = append(children, ppid)
 
-	children = append(children, ppid)
+		logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	logger.Debug("Found child PIDs", zap.Ints("children", children))
-
-	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
-	if err != nil {
-		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
-		uniqueProcess = children
+		uniqueProcess, err = uniqueProcessGroups(children, groupOf)
+		if err != nil {
+			logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+			uniqueProcess = children
+		}
 	}
 
 	logger.Debug("Unique process groups", zap.Ints("uniqueProcess", uniqueProcess))
 
 	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
-		err := SendSignal(logger, -pid, sig)
+		err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+			// The group was not asked to stop: what ends it now (the
+			// command's WaitDelay kills it) is no exit of its own.
+			if killed == "" {
+				killed = fmt.Sprintf("its process group %d could not be signalled (%v), so keploy could not let it stop on its own", pid, err)
+			}
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
@@ -1057,7 +1091,9 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
-			killed = true
+			if killed == "" {
+				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
+			}
 			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
@@ -1067,6 +1103,13 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 	}
 	return killed, nil
 }
+
+// processTree and signalGroup are the tree interrupt's reads of the process
+// tree and its signals to a process group; a test fails them.
+var (
+	processTree = findChildPIDs
+	signalGroup = SendSignal
+)
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
