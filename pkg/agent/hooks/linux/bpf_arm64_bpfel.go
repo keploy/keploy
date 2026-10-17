@@ -35,6 +35,7 @@ const (
 	bpfMapProxyListenerMark           = "proxy_listener_mark"
 	bpfMapReadyAgentMntns             = "ready_agent_mntns"
 	bpfMapReadyCfg                    = "ready_cfg"
+	bpfMapReadyHolders                = "ready_holders"
 	bpfMapReadyIdentBuf               = "ready_ident_buf"
 	bpfMapReadyLastRestart            = "ready_last_restart"
 	bpfMapReadyListenEvents           = "ready_listen_events"
@@ -176,6 +177,7 @@ type bpfMapSpecs struct {
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	ReadyAgentMntns             *ebpf.MapSpec `ebpf:"ready_agent_mntns"`
 	ReadyCfg                    *ebpf.MapSpec `ebpf:"ready_cfg"`
+	ReadyHolders                *ebpf.MapSpec `ebpf:"ready_holders"`
 	ReadyIdentBuf               *ebpf.MapSpec `ebpf:"ready_ident_buf"`
 	ReadyLastRestart            *ebpf.MapSpec `ebpf:"ready_last_restart"`
 	ReadyListenEvents           *ebpf.MapSpec `ebpf:"ready_listen_events"`
@@ -241,6 +243,7 @@ type bpfMaps struct {
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	ReadyAgentMntns             *ebpf.Map `ebpf:"ready_agent_mntns"`
 	ReadyCfg                    *ebpf.Map `ebpf:"ready_cfg"`
+	ReadyHolders                *ebpf.Map `ebpf:"ready_holders"`
 	ReadyIdentBuf               *ebpf.Map `ebpf:"ready_ident_buf"`
 	ReadyLastRestart            *ebpf.Map `ebpf:"ready_last_restart"`
 	ReadyListenEvents           *ebpf.Map `ebpf:"ready_listen_events"`
@@ -282,6 +285,7 @@ func (m *bpfMaps) Close() error {
 		m.ProxyListenerMark,
 		m.ReadyAgentMntns,
 		m.ReadyCfg,
+		m.ReadyHolders,
 		m.ReadyIdentBuf,
 		m.ReadyLastRestart,
 		m.ReadyListenEvents,

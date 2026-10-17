@@ -270,7 +270,7 @@ func hookSpec() (*ebpf.CollectionSpec, error) {
 // the kernel allocates whole at load (an LRU hash, a ring buffer): with the
 // switch off nothing uses them, so they are loaded at their smallest, and
 // the watch costs nothing (udpwatch.go).
-var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen"}
+var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen", "ready_holders"}
 
 // shrinkUnswitchedMaps loads unswitchedMaps at their smallest when the
 // proven switch is off: one entry, or one page for a ring buffer.
