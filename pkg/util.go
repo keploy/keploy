@@ -787,6 +787,27 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
+// endAtHeaders gives a 101 (Switching Protocols) answer no body. A 101's
+// response ends at its header section, and what follows on the connection
+// belongs to the protocol it switched to (RFC 9110 §15.2.2); for a 101,
+// net/http hands back the connection itself as the body. keploy test speaks
+// no protocol a request switches to, so it closes the connection unread, as a
+// client that will not go on does. Read as the body, the next protocol's
+// bytes (an h2c tunnel's preface, a WebSocket's frames) made a replayed
+// upgrade differ from its recording, which has none, once a body of another
+// kind than the recorded one was compared (pkg/matcher/http, cfea2520e); and
+// the read lasted as long as the app kept the connection open: until it gave
+// up on its peer, or, for one that waits on it (most WebSocket servers), for
+// ever, which neither --api-timeout nor the proven switch's stall rule ends,
+// since neither closes a connection the test's request holds.
+func endAtHeaders(resp *http.Response) {
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols || resp.Body == nil {
+		return
+	}
+	_ = resp.Body.Close()
+	resp.Body = http.NoBody
+}
+
 // connClosingBody is the body of the app's answer to a test request: closed,
 // it also closes the connection the request's own client (prepareHTTPRequest
 // makes one for each request) left idle. No later request uses that client,
@@ -1105,6 +1126,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	endAtHeaders(httpResp)
 	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()
@@ -1215,6 +1237,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	endAtHeaders(httpResp)
 	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()
