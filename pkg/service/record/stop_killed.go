@@ -33,7 +33,8 @@ func noteStopKilled(to *atomic.Pointer[string], appErr models.AppError) {
 }
 
 // configForUpdate is the test-set config store's read for a rewrite: no
-// secret is read into what is written back.
+// secret is read into what is written back, and a config.yaml it cannot read
+// or parse is an error, never an empty config to write over it.
 type configForUpdate interface {
 	ReadForUpdate(ctx context.Context, testSetID string) (*models.TestSet, error)
 }
@@ -52,14 +53,16 @@ func (r *Recorder) markStopKilled(ctx context.Context, testSetID, why string) {
 			zap.String("testSet", testSetID))
 		return
 	}
-	var conf *models.TestSet
-	var err error
-	if u, ok := r.testSetConf.(configForUpdate); ok {
-		conf, err = u.ReadForUpdate(ctx, testSetID)
-	} else {
-		conf, err = r.testSetConf.Read(ctx, testSetID)
-		conf = conf.WithoutSecrets()
+	u, ok := r.testSetConf.(configForUpdate)
+	if !ok {
+		// Read cannot tell a missing config.yaml from one it could not parse,
+		// and writing would replace that one with a zero document
+		// (persistUIJoinAnnotation refuses for the same reason).
+		utils.LogError(r.logger, nil, "keploy could not mark the test-set's recording as cut by its stop's kill: its config store cannot read a config for update; a replay may fail it for a call the recording lacks",
+			zap.String("testSet", testSetID))
+		return
 	}
+	conf, err := u.ReadForUpdate(ctx, testSetID)
 	if err == nil && conf == nil {
 		conf = &models.TestSet{}
 	}
