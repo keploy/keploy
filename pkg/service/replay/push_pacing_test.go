@@ -207,6 +207,78 @@ func TestRunTestSetKeepsAndMapsMocksConsumedOutsideTheirWindow(t *testing.T) {
 	}
 }
 
+// A carry-over mock the agent flagged CarryOver, consumed before the set's
+// first test (a message the app received as it started, a publish it made
+// then), is consumed once: the agent is told it is consumed, not re-armed as a
+// readiness gate's per-test consume is, which would serve it again in every
+// test. The mapping records it in the startup section, which a mapping-mode
+// replay names in every test's call, one recorded after the first test began
+// too. The readiness gate's consume is still re-armed. (The prune keeps both,
+// as it kept them before: a re-armed consume leaves a placeholder.)
+func TestRunTestSetConsumesACarryOverMockConsumedBeforeTheFirstTestOnce(t *testing.T) {
+	h := newPartialRunHarness(t, 2, 0)
+	pinWindows(h)
+	h.replayer.config.Test.RemoveUnusedMocks = true
+	byTest := map[string][]models.MockState{
+		// The setup drain, before every window.
+		"": {
+			consumedAt("boot-poll", 500, models.Deleted, true),     // recorded before every window
+			consumedAt("crossed-send", 1500, models.Deleted, true), // in the gap after test-1
+			consumedAt("gate-select", 1050, models.Deleted, false), // test-1's, consumed by the readiness gate
+		},
+		"test-1": {consumedAt("own-1", 1060, models.Deleted, false)},
+		"test-2": {consumedAt("own-2", 2050, models.Deleted, false)},
+	}
+	byStart := map[time.Time]string{}
+	for _, tc := range h.cases {
+		byStart[tc.HTTPReq.Timestamp] = tc.Name
+	}
+	h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+		h.instr.mu.Lock()
+		after := h.instr.windowAfter
+		h.instr.mu.Unlock()
+		return byTest[byStart[after]]
+	}}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %q, want PASSED", status)
+	}
+	h.instr.mu.Lock()
+	var firstTest models.MockFilterParams
+	for _, p := range h.instr.allParams {
+		if p.AfterTime.Equal(h.cases[0].HTTPReq.Timestamp) {
+			firstTest = p
+			break
+		}
+	}
+	h.instr.mu.Unlock()
+	told := firstTest.TotalConsumedMocks
+	for _, n := range []string{"boot-poll", "crossed-send"} {
+		if st, ok := told[n]; !ok || st.Usage != models.Deleted {
+			t.Errorf("%s is not consumed for the agent (%+v): it would be served again in every test", n, st)
+		}
+	}
+	if _, ok := told["gate-select"]; ok {
+		t.Error("the readiness gate's consume was not re-armed for test-1, which owns it")
+	}
+	for _, n := range []string{"boot-poll", "crossed-send"} {
+		if _, ok := h.mocks.kept[n]; !ok {
+			t.Errorf("%s pruned: the app consumed it as it started", n)
+		}
+	}
+	m := h.mappings.last
+	if m == nil {
+		t.Fatal("no mapping written")
+	}
+	startup := map[string]bool{}
+	for _, e := range m.Startup {
+		startup[e.Name] = true
+	}
+	if !startup["boot-poll"] || !startup["crossed-send"] {
+		t.Errorf("startup section %+v; want boot-poll and crossed-send, both consumed as the app started", m.Startup)
+	}
+}
+
 // What the running test consumed is attributed by recorded window before the
 // write decides whose entries it takes: its own mocks, and a flagged mock
 // recorded in the gap after its window, are its; a flagged mock of an earlier

@@ -4330,6 +4330,11 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 	} else {
 		mm.ResetForReplaySession()
+		if opts.StartsTestSet {
+			// Another test set: what the previous set's pool was consumed
+			// of and nobody drained is that set's, never this one's.
+			mm.ArmSetFence()
+		}
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that

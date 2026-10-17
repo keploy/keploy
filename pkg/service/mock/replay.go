@@ -253,6 +253,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 3. Put the proxy in mock-serving mode with the miss policy.
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
+		// A session of its own: what an agent kept from an earlier one
+		// recorded consumed is that session's.
+		StartsTestSet:             true,
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,

@@ -220,6 +220,15 @@ type OutgoingOptions struct {
 	// own: a full record replaces the pool, a partial one never changes it
 	// (design §7.2 step 10, §7.5).
 	LearnPool bool `json:"LearnPool,omitempty"`
+	// StartsTestSet says this session starts a test set of the replay
+	// (another set, or the run's first on an agent kept from an earlier
+	// one), not a re-registration of the current set with an agent the
+	// replay took for replaced. What the agent recorded consumed and nobody
+	// drained was then consumed of the previous set's pool, under its mock
+	// names, which every set numbers afresh: the set's staging drops it
+	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
+	// TLS switches.
+	StartsTestSet bool `json:"StartsTestSet,omitempty"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial

@@ -41,6 +41,11 @@ type TreeDb struct {
 	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
 	// Built, read and dropped under mu.
 	keyed map[*integrations.MockIndex]*keyIndex
+	// bootBuilt marks a startup tier a staging built before the set's first
+	// test fired: what it serves is consumed as the app starts
+	// (MockManager.carryTaken). Set before the tree is published, read-only
+	// after.
+	bootBuilt bool
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {

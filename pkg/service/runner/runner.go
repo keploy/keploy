@@ -441,6 +441,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
+	// A set's session: what the agent recorded consumed of the previous
+	// set's pool is not this set's (models.OutgoingOptions.StartsTestSet).
+	outOpts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
