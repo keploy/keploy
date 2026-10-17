@@ -296,6 +296,33 @@ func (m *Mock) deriveLifetime(count bool) {
 	// lifetime at record time; it's a diagnostic, not an alarm. We
 	// deliberately avoid per-call logging because DeriveLifetime runs
 	// on every mock load.
+	// A prepared statement's lifecycle (COM_STMT_PREPARE, COM_STMT_CLOSE,
+	// COM_STMT_RESET) belongs to the connection it was recorded on, and a
+	// statement the app prepares when it starts is executed in any test. The
+	// MySQL recorder tags a PREPARE "connection" since #4073 (2026-04-19),
+	// which the switch above reads, and since v3.6.128 states the lifetime
+	// of all three as their connection's (statedLifetime, at the top). A
+	// recording from before says neither for CLOSE and RESET, nor, before
+	// #4073, for PREPARE: they are tagged "mocks", or untagged. The kind
+	// fallbacks below made them session mocks (lax), whose statement no
+	// EXECUTE can look up by its recorded connection, or per-test (strict,
+	// KEPLOY_STRICT_MOCK_WINDOW=1), on disk: a PREPARE the app sends at
+	// start but that was recorded at or after the first test was then
+	// staged nowhere (#4819), and was answered with a synthesized
+	// PREPARE_OK (no columns, every parameter a BLOB). Each takes the
+	// lifetime the recorder states now: its recorded connection's, or the
+	// session's when it names none.
+	if m.IsMySQLStatementLifecycle() {
+		if tag == "" && count {
+			atomic.AddUint64(&legacyKindFallbackFires, 1)
+		}
+		if m.Spec.Metadata["connID"] != "" {
+			m.TestModeInfo.Lifetime = LifetimeConnection
+			return
+		}
+		m.TestModeInfo.Lifetime = LifetimeSession
+		return
+	}
 	if tag == "" && kindsWithImplicitSessionLifetime(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimeSession
 		// Data-plane mocks promoted to session here are the ones whose repeated
@@ -499,6 +526,28 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 		return false
 	}
 	return IsMySQLSessionReusableCommandType(hdr.Type)
+}
+
+// IsMySQLStatementLifecycle reports whether m is a MySQL mock of one command
+// of a prepared statement's lifecycle (IsMySQLStatementLifecycleCommandType),
+// recorded alone.
+func (m *Mock) IsMySQLStatementLifecycle() bool {
+	if m == nil || m.Kind != MySQL || len(m.Spec.MySQLRequests) != 1 {
+		return false
+	}
+	hdr := m.Spec.MySQLRequests[0].PacketBundle.Header
+	return hdr != nil && IsMySQLStatementLifecycleCommandType(hdr.Type)
+}
+
+// IsMySQLStatementLifecycleCommandType reports whether a MySQL command type is
+// one of a prepared statement's lifecycle: COM_STMT_PREPARE, COM_STMT_CLOSE or
+// COM_STMT_RESET, whose mocks are their connection's.
+func IsMySQLStatementLifecycleCommandType(cmdType string) bool {
+	switch cmdType {
+	case "COM_STMT_PREPARE", "COM_STMT_CLOSE", "COM_STMT_RESET":
+		return true
+	}
+	return false
 }
 
 // MetadataLifetimeKey is the Spec.Metadata key in which a recorder states the

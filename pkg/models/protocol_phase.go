@@ -57,5 +57,10 @@ func (m *Mock) IsProtocolPhase() bool {
 	if m.Kind == MySQL && mysqlIsSessionReusableCommand(m) {
 		return true
 	}
+	// A prepared statement's lifecycle recorded before its lifetime was
+	// stated is its connection's (DeriveLifetime), as a stated one is.
+	if m.IsMySQLStatementLifecycle() {
+		return true
+	}
 	return sessionReusableHooks.match(m)
 }
