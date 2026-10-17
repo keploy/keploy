@@ -156,11 +156,17 @@ func (f *fakeDocker) listedLocked(ids []string) []container.Summary {
 	return out
 }
 
+// ContainerInspect answers as of when it was asked, as the list does: block
+// holds only its delivery, an answer in flight across what the test changes
+// meanwhile. (Docker's own inspect of a container another operation holds
+// waits for that operation, and answers as of its end.)
 func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error) {
 	f.mu.Lock()
 	f.calls++
 	f.inspects++
 	block := f.block[id]
+	err := f.inspectErr[id]
+	got, ok := f.containers[id]
 	f.mu.Unlock()
 	if block != nil {
 		f.entered <- id
@@ -170,13 +176,10 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container
 			return container.InspectResponse{}, ctx.Err()
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.inspectErr[id]; err != nil {
+	switch {
+	case err != nil:
 		return container.InspectResponse{}, err
-	}
-	got, ok := f.containers[id]
-	if !ok {
+	case !ok:
 		return container.InspectResponse{}, notFound{}
 	}
 	return got, nil
@@ -624,8 +627,12 @@ func TestIndexReadsContainersSideBySide(t *testing.T) {
 	if _, ok := lookup(t, r, "127.0.0.1:49002"); !ok {
 		t.Fatal("the fast container is not indexed while another read is stuck")
 	}
-	// slow dies while its read is stuck. The read still answers it running
-	// (it began before the die): only its count tells it lost.
+	// slow dies while its read is stuck: Docker records the stop before it
+	// sends the die, and lists it no more. The read still answers it running
+	// (it was asked before the die): only its count tells it lost.
+	stopped := running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")})
+	stopped.State.Running = false
+	f.set("slow", stopped)
 	f.msgs <- die("slow")
 	f.msgs <- start("fence") // applied after the die, so the die is in
 	<-applied
@@ -1996,5 +2003,53 @@ func TestSettleNeverGivesADestroyedContainerALiveOnesAddress(t *testing.T) {
 	r.Settle(t.Context())
 	if c, ok := lookup(t, r, "172.17.0.98:5432"); !ok || c.ID != "next" {
 		t.Fatalf("the live container's address after Settle = %+v, %v; want next", c, ok)
+	}
+}
+
+// A placing loop of a started container that runs only after the
+// container's die (a loaded host schedules it late) places nothing, and the
+// read that ran across the die brings nothing back: whether the daemon's
+// list no longer shows the container by then (Docker 23.0 and later record
+// the stop before they send the die; Podman's list waits for the container
+// lock its die is written under), or still shows it running, with its ports
+// (Docker before 23.0 sends the die before it records the stop).
+func TestALatePlacingOfAContainerThatDiedPlacesNothing(t *testing.T) {
+	for _, listedAfterDie := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listedAfterDie=%v", listedAfterDie), func(t *testing.T) {
+			f := newFakeDocker()
+			r, applied, placed := watchingPlaced(t, f)
+			hold := make(chan struct{})
+			r.mu.Lock()
+			r.placeStart = func(id string) {
+				if id == "slow" {
+					<-hold
+				}
+			}
+			r.mu.Unlock()
+			stuck := make(chan struct{})
+			f.mu.Lock()
+			f.block["slow"] = stuck
+			f.mu.Unlock()
+			f.set("slow", running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")}))
+			f.msgs <- start("slow")
+			<-f.entered // slow's read is in flight, as of its start
+			if !listedAfterDie {
+				stopped := running("postgres:16", "sha256:s", nil, nat.PortMap{"5432/tcp": published("0.0.0.0", "49001")})
+				stopped.State.Running = false
+				f.set("slow", stopped)
+			}
+			f.msgs <- die("slow")
+			fence(f)    // the die is in
+			close(hold) // slow's placing loop starts only now, after the die
+			for id := <-placed; id != "slow"; id = <-placed {
+			}
+			close(stuck)
+			if id := <-applied; id != "slow" {
+				t.Fatalf("applied %q, want the stuck read", id)
+			}
+			if c, ok := lookup(t, r, "127.0.0.1:49001"); ok {
+				t.Fatalf("a container that died is placed: %+v", c)
+			}
+		})
 	}
 }
