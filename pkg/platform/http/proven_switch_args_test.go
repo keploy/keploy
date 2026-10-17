@@ -160,10 +160,6 @@ func countClientRequests(a *AgentClient) *clientRequests {
 	return c
 }
 
-// noBudget is a readiness budget that never runs out, for the waits whose
-// answer is definite: what ends them is the stand-in agent, never a clock.
-const noBudget = time.Duration(math.MaxInt64)
-
 // noComposeBudget gives MakeAgentReadyForDockerCompose a readiness budget that
 // never runs out (KEPLOY_AGENT_READY_TIMEOUT is whole seconds).
 func noComposeBudget(t *testing.T) {
@@ -201,7 +197,7 @@ func TestWaitForAgentChecksTheSwitchOfTheAnswerThatFoundItReady(t *testing.T) {
 			sent := countClientRequests(a)
 			stopped := false
 			a.agentCancel = func() { stopped = true }
-			err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{AgentReadyTimeout: noBudget})
+			err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{})
 			if (err == nil) != tc.ok {
 				t.Fatalf("waitForAgent = %v, want ok=%v", err, tc.ok)
 			}
@@ -241,7 +237,7 @@ func TestWaitForAgentDoesNotAskAgainAfterTheAnswerThatFoundItReady(t *testing.T)
 				cancel(askedAgain)
 				return askedAgain
 			}
-			if err := a.waitForAgent(ctx, nil, false, models.SetupOptions{AgentReadyTimeout: noBudget}); err != nil {
+			if err := a.waitForAgent(ctx, nil, false, models.SetupOptions{}); err != nil {
 				t.Fatalf("waitForAgent = %v; the agent had answered the health check that found it ready", err)
 			}
 			if n := gone.n.Load(); n != 0 {
@@ -266,7 +262,7 @@ func TestWaitForAgentTakesTheSwitchOnlyFromAHealthyAnswer(t *testing.T) {
 	})
 	a := clientFor(agent.url)
 	sent := countClientRequests(a)
-	if err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{AgentReadyTimeout: noBudget}); err != nil {
+	if err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{}); err != nil {
 		t.Fatalf("waitForAgent = %v; the switch of a 503 is not the agent's", err)
 	}
 	if n := sent.n.Load(); n != 0 {
@@ -292,7 +288,7 @@ func TestWaitForAgentWithAnUnreadableHealthIsNotASwitchRefusal(t *testing.T) {
 					cancel(gaveUp)
 				}
 			})
-			err := clientFor(agent.url).waitForAgent(ctx, nil, false, models.SetupOptions{AgentReadyTimeout: noBudget})
+			err := clientFor(agent.url).waitForAgent(ctx, nil, false, models.SetupOptions{})
 			if !errors.Is(err, gaveUp) || errors.Is(err, provenswitch.ErrAgentSwitch) {
 				t.Fatalf("waitForAgent = %v; want the caller's cause, not a switch refusal", err)
 			}
@@ -300,20 +296,23 @@ func TestWaitForAgentWithAnUnreadableHealthIsNotASwitchRefusal(t *testing.T) {
 	}
 }
 
-// The readiness budget is what ends the wait for an agent that never answers
-// its health check, in either switch state: that is an agent that did not
-// become ready (pkg.ErrAgentNotReady, which the caller retries with a fresh
-// agent), never a switch refusal, and it is stopped rather than left running.
-// The agent never answers, so the budget, which here is spent before the
-// first check, is the only thing that can end the wait.
-func TestWaitForAgentWhoseBudgetRunsOutIsNotReady(t *testing.T) {
+// A start that stops making progress is what ends the wait for an agent that
+// never answers its health check, in either switch state: that is an agent
+// that did not become ready (pkg.ErrAgentNotReady, which the caller retries
+// with a fresh agent), never a switch refusal, and it is stopped rather than
+// left running. This one never reports its start, and its silence is given up
+// on at the first look (bootSilence, shortened).
+func TestWaitForAgentWhoseStartStopsIsNotReady(t *testing.T) {
+	look, silence := bootLook, bootSilence
+	bootLook, bootSilence = time.Millisecond, 0
+	t.Cleanup(func() { bootLook, bootSilence = look, silence })
 	for _, st := range switchStates {
 		t.Run(st.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, st.env)
 			a := clientFor(newStandIn(t, drops).url)
 			stopped := false
 			a.agentCancel = func() { stopped = true }
-			err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{AgentReadyTimeout: time.Nanosecond})
+			err := a.waitForAgent(context.Background(), nil, false, models.SetupOptions{})
 			if !errors.Is(err, pkg.ErrAgentNotReady) || errors.Is(err, provenswitch.ErrAgentSwitch) {
 				t.Fatalf("waitForAgent = %v; want pkg.ErrAgentNotReady, not a switch refusal", err)
 			}

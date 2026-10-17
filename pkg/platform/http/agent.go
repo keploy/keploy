@@ -143,7 +143,73 @@ type agentRun struct {
 	// what waits for its exit waits no more.
 	letGo     chan struct{}
 	letGoOnce sync.Once
+	// bootReport is the file a native agent reports its start's progress in
+	// (utils.BootProgressFileName, next to its teardown progress file), set
+	// before it starts; "" for a containerised one, whose report is read out
+	// of its container. bootPrompt: it is started by a sudo that may prompt
+	// for the user's password in front of it (no cached credentials, on a PTY
+	// or on the terminal sudo opens itself), which the user answers in their
+	// own time; sudoPid is that sudo's process, once started.
+	bootReport string
+	bootPrompt bool
+	sudoPid    atomic.Int64
+	// agentComm is the agent's process name as the kernel keeps it (its
+	// binary's, cut to 15 bytes), which sudoRanAgent looks for.
+	agentComm string
 }
+
+// watchBoot sets what waitForAgent watches of a native agent's start, before
+// it starts: its report, next to its teardown progress file (progress; none
+// when that is ""), whether the sudo that starts it may prompt in front of it
+// (prompts), and the name its process runs as, the binary bin's.
+func (r *agentRun) watchBoot(progress string, prompts bool, bin string) {
+	if progress != "" {
+		r.bootReport = filepath.Join(filepath.Dir(progress), utils.BootProgressFileName)
+	}
+	r.bootPrompt = prompts
+	r.agentComm = filepath.Base(bin)
+	if len(r.agentComm) > 15 { // TASK_COMM_LEN less its NUL
+		r.agentComm = r.agentComm[:15]
+	}
+}
+
+// sudoMayPrompt reports whether the sudo keploy starts a native agent with may
+// prompt for the user's password: it elevates the agent (elevates, as euid,
+// not root, needs), and without cached credentials (sudo -n otherwise). It
+// prompts on the PTY keploy gives it, or, without one, on the terminal it
+// opens itself.
+func sudoMayPrompt(elevates, sudoCached bool, euid int) bool {
+	return elevates && !sudoCached && euid != 0
+}
+
+// sudoRanAgent reports whether the sudo that starts the agent (bootPrompt) has
+// run it: its prompt, if it made one, has been answered, and the agent's
+// process runs. That is the command sudo runs (agentUtils.CommandUnderSudo),
+// once it is the agent (its process name): not a helper sudo runs while the
+// user is still at its prompt (a PAM module's).
+func (r *agentRun) sudoRanAgent(context.Context) bool {
+	sudo := r.sudoPid.Load()
+	if sudo <= 0 {
+		return false
+	}
+	pid := agentUtils.CommandUnderSudo(int(sudo))
+	if pid <= 0 {
+		return false
+	}
+	comm, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+	return err == nil && strings.TrimSpace(string(comm)) == r.agentComm
+}
+
+// newNativeAgentCommand, newNativeAgentPTYCommand, sudoCredentialsCached and
+// needsAgentPTY are how a native agent's command is made (without a PTY, and
+// on one), whether sudo has cached credentials, and whether its start needs a
+// PTY: variables for tests.
+var (
+	newNativeAgentCommand    = agentUtils.NewAgentCommand
+	newNativeAgentPTYCommand = agentUtils.NewAgentCommandForPTY
+	sudoCredentialsCached    = utils.AreSudoCredentialsCached
+	needsAgentPTY            = agentUtils.NeedsPTY
+)
 
 func newAgentRun() *agentRun { return &agentRun{gone: make(chan struct{}), letGo: make(chan struct{})} }
 
@@ -1973,10 +2039,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	sudoCached := false
 	if elevates {
 		// Cached credentials mean we can use sudo -n and skip the prompt.
-		sudoCached = utils.AreSudoCredentialsCached()
+		sudoCached = sudoCredentialsCached()
 	}
+	run.watchBoot(progress, sudoMayPrompt(elevates, sudoCached, os.Geteuid()), keployBin)
 
-	if elevates && agentUtils.NeedsPTY() && !sudoCached {
+	if elevates && needsAgentPTY() && !sudoCached {
 		err := a.startNativeAgentWithPTY(ctx, keployBin, args, grp, exited, run, progress, removeProgress)
 		if err != nil {
 			removeProgress()
@@ -1986,7 +2053,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
 	// If credentials are cached, this will use sudo -n (non-interactive)
-	cmd := agentUtils.NewAgentCommand(keployBin, args, sudoCached)
+	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -2002,6 +2069,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	pid := cmd.Process.Pid
+	run.sudoPid.Store(int64(pid))
 	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
 
 	// Reaped by a goroutine of its own, outside the group: a caller waiting on
@@ -2121,7 +2189,7 @@ func agentGoingAway(err error) bool {
 // startNativeAgentWithPTY starts the agent with PTY support for interactive input (e.g., sudo password)
 func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group, exited chan<- error, run *agentRun, progress string, removeProgress func()) error {
 	// Create command configured for PTY
-	cmd := agentUtils.NewAgentCommandForPTY(keployBin, args)
+	cmd := newNativeAgentPTYCommand(keployBin, args)
 
 	a.logger.Debug("Starting native agent with PTY for interactive input")
 
@@ -2138,6 +2206,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 	a.mu.Unlock()
 
 	pid := cmd.Process.Pid
+	run.sudoPid.Store(int64(pid))
 	a.logger.Debug("keploy agent started with PTY", zap.Int("pid", pid))
 
 	// Reaped outside the group, for the reason given in startNativeAgent.
@@ -2502,12 +2571,7 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 	// *agentContainerExit for one compose started.
 	var ee interface{ ExitCode() int }
 	if errors.As(exitErr, &ee) {
-		switch ee.ExitCode() {
-		case utils.ExitPrivilegeRequired:
-			cause = utils.ErrPrivilegeRequired
-		case utils.ExitEnvironmentUnsupported:
-			cause = utils.ErrEnvironmentUnsupported
-		}
+		cause = agentExitCause(ee.ExitCode())
 	}
 	if cause == nil {
 		if exitErr == nil {
@@ -2515,9 +2579,41 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 		}
 		return fmt.Errorf("the keploy agent exited before it became ready: %w", exitErr)
 	}
+	a.armAgentStartCause(cause, isDockerCmd)
+	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
+}
+
+// agentReportedStartFailure is Setup's error for an agent that reported its
+// start failed (utils.FailBoot) with failure, and with code, the code it exits
+// with for it: what its exit would say (agentStoppedBeforeReady), at once, and
+// also of an agent that lives on after the failure (its server's hooks, or its
+// server, failed). The specific code is armed, as for its exit.
+func (a *AgentClient) agentReportedStartFailure(code int, failure string, isDockerCmd bool) error {
+	cause := agentExitCause(code)
+	if cause == nil {
+		return fmt.Errorf("the keploy agent could not start: %s", failure)
+	}
+	a.armAgentStartCause(cause, isDockerCmd)
+	return fmt.Errorf("%w: the keploy agent could not start: %s", cause, failure)
+}
+
+// agentExitCause is the cause an agent's exit code names (cli/agent.go arms
+// it from utils.ExitCodeFor), or nil for one that names none.
+func agentExitCause(code int) error {
+	switch code {
+	case utils.ExitPrivilegeRequired:
+		return utils.ErrPrivilegeRequired
+	case utils.ExitEnvironmentUnsupported:
+		return utils.ErrEnvironmentUnsupported
+	}
+	return nil
+}
+
+// armAgentStartCause makes cause, why the agent could not start, this
+// process's own exit code, and tells the user what to do about it.
+func (a *AgentClient) armAgentStartCause(cause error, isDockerCmd bool) {
 	utils.SetExitCodeOnce(utils.ExitCodeFor(cause))
 	a.logger.Error("the keploy agent could not start", zap.Error(cause), zap.String("next_step", agentStartRemedy(cause, isDockerCmd, runtime.GOOS)))
-	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
 }
 
 // agentStartRemedy is what the user can do about an agent that could not start
@@ -2557,28 +2653,15 @@ func agentStartRemedy(cause error, isDockerCmd bool, goos string) string {
 	}
 }
 
-// agentReadyBudget is how long one bring-up of the agent may stall: the
-// daemon's answer to its version (Setup), and then the agent's readiness
-// (waitForAgent). KEPLOY_AGENT_READY_TIMEOUT, or a retry's own, overrides it.
-func agentReadyBudget(opts models.SetupOptions) time.Duration {
-	if opts.AgentReadyTimeout > 0 {
-		return opts.AgentReadyTimeout
-	}
-	return pkg.AgentReadyTimeout()
-}
-
 // waitForAgent blocks until the agent started by startAgent answers its health
 // check (nil, or a refusal wrapping provenswitch.ErrAgentSwitch when that
 // answer reports a proven switch that is not this keploy's), its process ends
-// (exited), its ready budget runs out, or ctx is cancelled.
+// (exited), it reports its start failed, its start stops making progress
+// (pkg.ErrAgentNotReady: agent_boot_watch.go), or ctx is cancelled. No clock
+// bounds the wait: a start that makes progress is waited for however slowly
+// the host runs it.
 func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isDockerCmd bool, opts models.SetupOptions) error {
-	// Wait up to the agent's own healthcheck budget for it to become ready.
-	// Under heavy CI docker-daemon contention the agent container can take
-	// well over a minute just to start (observed: a local-image `docker run`
-	// taking 126s), so a 60s wait gave up prematurely and tore down a
-	// bring-up that would have succeeded. Overridable via KEPLOY_AGENT_READY_TIMEOUT.
-	readyTimeout := agentReadyBudget(opts)
-	agentCtx, cancel := context.WithTimeout(ctx, readyTimeout)
+	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// The run this wait is for: startAgent's, made just before it.
@@ -2589,63 +2672,150 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	answers := make(chan http.Header, 1)
 	go pkg.AgentHealthTickerWithAnswer(agentCtx, a.logger, a.conf.Agent.AgentURI, answers, 1*time.Second)
 
-	// agentCtx is ctx's child, so its Done covers the caller's cancellation
-	// as well as the budget running out, and the ticker closes answers
-	// (answer == nil) on either. Which of those it was is decided below, in
-	// order, rather than by whichever case the select happens to pick when
-	// several are ready at once.
-	var answer http.Header
-	select {
-	case exitErr := <-exited:
-		return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
-	case <-agentCtx.Done():
-	case answer = <-answers:
-	}
-	if answer != nil {
-		// It answered: running (agentRun).
-		if run != nil {
-			run.ready.Store(true)
+	// What the agent reports of its start, looked at once a bootLook, one
+	// look at a time, off this goroutine: a look into a container goes
+	// through the engine's CLI, which a busy daemon answers slowly, or not at
+	// all. Each look asks first whether its process runs, then, once it does,
+	// reads its report: before, there is none to read.
+	read, running := readBootFile(""), alwaysRunning
+	switch {
+	case isDockerCmd:
+		read, running = containerBootLook(a.logger, opts.KeployContainer)
+	case run != nil:
+		read = readBootFile(run.bootReport)
+		if run.bootPrompt {
+			// sudo's prompt may be in front of it until sudo runs it: the
+			// user answers it in their own time.
+			running = run.sudoRanAgent
 		}
-		// The agent's proven switch must be this keploy's (provenswitch.
-		// CheckAgent), and it is taken from the very answer that found the
-		// agent ready, not from another request: nothing more is asked of the
-		// agent, so a run with the switch off asks it exactly what it always
-		// did, and an agent whose answer has been taken is not waited on
-		// again, whether it has since exited or stopped answering. A refusal
-		// names both sides; the agent is stopped rather than left running.
-		if err := provenswitch.CheckAgent(answer.Get(provenswitch.HealthHeader)); err != nil {
-			a.stopAgent()
-			return err
-		}
-		return nil
 	}
-	if ctx.Err() != nil {
-		// The caller's Ctrl+C -- or a goroutine in the caller's errgroup
-		// failing, which cancels ctx too. The one waiting on the agent
-		// process is such a goroutine, and it reports the exit before it
-		// fails the group, so when that is what happened the exit is already
-		// here. Otherwise the cause says which it was: ctx.Err() is "context
-		// canceled" for both, and a caller could not tell keploy failing
-		// from the user stopping it.
+	clk, release := stall.Process()
+	defer release()
+	judge := newBootJudge(clk)
+	// The judge judges once a bootLook by the latest it has seen (cur): the
+	// answer of the last look's question whether the process runs (runs), and
+	// the last report read. So a look that does not come back (a `docker cp`
+	// a wedged daemon never answers) holds up no rule: its silence is judged
+	// as any other.
+	runs := make(chan bool, 1)
+	looks := make(chan bootLookResult, 1)
+	lookNow := func() {
+		go func() {
+			r := running(agentCtx)
+			select {
+			case runs <- r:
+			case <-agentCtx.Done(): // the wait is over
+				return
+			}
+			l := bootLookResult{running: r}
+			if r {
+				l.p, l.ok = read(agentCtx)
+			}
+			select {
+			case looks <- l:
+			case <-agentCtx.Done():
+			}
+		}()
+	}
+	var cur bootLookResult
+	tick := time.NewTicker(bootLook)
+	defer tick.Stop()
+	looking := false
+	// lookSince is when (runnable time) the look out began; lookSaid, that
+	// it has been said to be out for long.
+	var lookSince time.Duration
+	lookSaid := false
+
+	for {
 		select {
 		case exitErr := <-exited:
 			return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
-		default:
+		case answer := <-answers:
+			if answer == nil {
+				// The ticker ended with ctx, which the case below decides.
+				answers = nil
+				continue
+			}
+			// It answered: running (agentRun).
+			if run != nil {
+				run.ready.Store(true)
+			}
+			// The agent's proven switch must be this keploy's (provenswitch.
+			// CheckAgent), and it is taken from the very answer that found the
+			// agent ready, not from another request: nothing more is asked of
+			// the agent, so a run with the switch off asks it exactly what it
+			// always did, and an agent whose answer has been taken is not
+			// waited on again, whether it has since exited or stopped
+			// answering. A refusal names both sides; the agent is stopped
+			// rather than left running.
+			if err := provenswitch.CheckAgent(answer.Get(provenswitch.HealthHeader)); err != nil {
+				a.stopAgent()
+				return err
+			}
+			return nil
+		case <-ctx.Done():
+			// The caller's Ctrl+C -- or a goroutine in the caller's errgroup
+			// failing, which cancels ctx too. The one waiting on the agent
+			// process is such a goroutine, and it reports the exit before it
+			// fails the group, so when that is what happened the exit is
+			// already here. Otherwise the cause says which it was: ctx.Err()
+			// is "context canceled" for both, and a caller could not tell
+			// keploy failing from the user stopping it.
+			select {
+			case exitErr := <-exited:
+				return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
+			default:
+			}
+			return context.Cause(ctx)
+		case r := <-runs:
+			cur.running = r
+		case l := <-looks:
+			looking = false
+			cur.running = l.running
+			if l.ok {
+				cur.p, cur.ok = l.p, true
+			}
+		case <-tick.C:
+			if !looking {
+				looking, lookSince, lookSaid = true, clk.Runnable(), false
+				lookNow()
+			} else if !lookSaid && clk.Runnable()-lookSince >= bootSilence {
+				// Once its first report is in, a start is judged by the
+				// agent's beats, which a look that does not come back
+				// brings no more of: said once, so a wait that seems to
+				// hang says what it waits on.
+				lookSaid = true
+				a.logger.Warn("keploy's look at the agent's start has not come back for a while; the container engine may not be answering, and keploy waits on",
+					zap.Duration("runnable_time", bootSilence), zap.Bool("in_a_container", isDockerCmd))
+			}
+			verdict, why := judge.look(cur.p, cur.ok, cur.running)
+			switch verdict {
+			case bootFailed:
+				// The agent says its start has failed, as a retry would: it
+				// is stopped (it may live on after the failure), and the run
+				// fails with that failure and the code it exits with for it.
+				if isDockerCmd {
+					a.logAgentContainerDiagnostics(opts.KeployContainer)
+				}
+				a.stopAgent()
+				return a.agentReportedStartFailure(cur.p.ExitCode, why, isDockerCmd)
+			case bootStalled:
+				// Setup's cleanup defer is not in scope yet, so without this
+				// the wedged agent and its goroutine leak, and any retry
+				// inherits the mess. The container's own logs first: the CLI
+				// otherwise shows a bare error, with nothing to root-cause
+				// from.
+				if isDockerCmd {
+					a.logAgentContainerDiagnostics(opts.KeployContainer)
+				}
+				a.stopAgent()
+				// Sentinel so the caller can retry a fresh bring-up on this
+				// nondeterministic stall without retrying deterministic
+				// failures.
+				return fmt.Errorf("%w: %s", pkg.ErrAgentNotReady, why)
+			}
 		}
-		return context.Cause(ctx)
 	}
-	// The agent never reported healthy. Setup's cleanup defer is not in
-	// scope yet, so without this the wedged agent container and its
-	// goroutine leak — and any retry inherits the mess. Dump the container's
-	// own logs first: the CLI otherwise shows the full readiness window of
-	// silence followed by a bare error, with nothing to root-cause from.
-	if isDockerCmd {
-		a.logAgentContainerDiagnostics(opts.KeployContainer)
-	}
-	a.stopAgent()
-	// Sentinel so the caller can retry a fresh bring-up on this specific,
-	// nondeterministic stall without retrying deterministic failures.
-	return fmt.Errorf("%w", pkg.ErrAgentNotReady)
 }
 
 // readAgentSwitch reads the agent's report of its proven switch from /health:
@@ -2860,21 +3030,20 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
 		// The agent container maps host.docker.internal to the Docker host
-		// (host-gateway) where the daemon resolves it (extra_hosts.go). The
-		// question has the bring-up's own budget, as waitForAgent's wait does:
-		// a daemon that does not answer it in that time would not start the
-		// agent either, and running out fails this bring-up as a stalled one
-		// (retried), rather than hanging setup with nothing said, or answering
-		// no.
-		readyBudget := agentReadyBudget(opts)
-		versionCtx, cancelVersion := context.WithTimeout(ctx, readyBudget)
+		// (host-gateway) where the daemon resolves it (extra_hosts.go). A
+		// daemon that does not answer its version would not start the agent
+		// either: the question is bounded as a stall, by keploy's own
+		// runnable time (withRunnableBound), and going unanswered fails this
+		// bring-up as a stalled one (retried), rather than hanging setup with
+		// nothing said, or answering no.
+		versionCtx, cancelVersion := withRunnableBound(ctx, daemonAnswerStall, errDaemonSilent)
 		opts.HostGateway, err = kdocker.HostGatewaySupported(versionCtx, a.dockerClient)
 		cancelVersion()
 		if err != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
 			}
-			return fmt.Errorf("%w: the Docker daemon did not answer its version within %s", pkg.ErrAgentNotReady, readyBudget)
+			return fmt.Errorf("%w: the container engine's daemon at %s did not answer its version (GET /version) for %s of keploy's runnable time: %v", pkg.ErrAgentNotReady, a.dockerClient.DaemonHost(), daemonAnswerStall, err)
 		}
 
 		var appPorts, appNetworks, appHosts []string

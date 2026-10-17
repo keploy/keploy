@@ -104,7 +104,7 @@ func waitWithin(t *testing.T, a *AgentClient, ctx context.Context, exited <-chan
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	done := make(chan error, 1)
 	go func() {
-		done <- a.waitForAgent(ctx, exited, false, models.SetupOptions{AgentReadyTimeout: time.Minute})
+		done <- a.waitForAgent(ctx, exited, false, models.SetupOptions{})
 	}()
 	select {
 	case err := <-done:
@@ -292,7 +292,7 @@ func TestTheRemedyLoggedIsTheOneForWhereTheAgentRan(t *testing.T) {
 			t.Cleanup(func() { utils.ErrCode = 0 })
 			exited := make(chan error, 1)
 			exited <- agentExit(t, tc.status)
-			if err := a.waitForAgent(context.Background(), exited, isDocker, models.SetupOptions{AgentReadyTimeout: time.Minute}); !errors.Is(err, tc.cause) {
+			if err := a.waitForAgent(context.Background(), exited, isDocker, models.SetupOptions{}); !errors.Is(err, tc.cause) {
 				t.Fatalf("status %d, docker=%v: got %v", tc.status, isDocker, err)
 			}
 			want := agentStartRemedy(tc.cause, isDocker, runtime.GOOS)

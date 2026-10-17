@@ -1307,7 +1307,9 @@ func updateCaStore(ctx context.Context) error {
 		if commandExists(cmd) {
 			commandRun = true
 			c := exec.CommandContext(ctx, cmd)
-			if _, err := c.CombinedOutput(); err != nil {
+			_, err := c.CombinedOutput()
+			utils.BootStep() // a step of the agent's start: the trust store's update is done
+			if err != nil {
 				return err
 			}
 			break
@@ -1347,6 +1349,7 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
 	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 	err := cmd.Run()
+	utils.BootStep() // a step of the agent's start: keytool's JVM is done
 	select {
 	case <-ctx.Done():
 		return false
@@ -1445,6 +1448,7 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 	cmdOutput, err := cmd.CombinedOutput()
+	utils.BootStep() // a step of the agent's start: keytool's JVM is done
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 		return err
@@ -1475,7 +1479,12 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // what preserves the previous behaviour for an elevated run.
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
 	userCmd := exec.CommandContext(ctx, "certutil", "-user", "-addstore", "-f", "ROOT", certPath)
+	// Windows asks the user, in a dialog, whether to trust a certificate added
+	// to their ROOT store, and certutil waits for the answer: the agent's
+	// start waits for the user (utils.BeginBootPrompt), however long they take.
+	answered := utils.BeginBootPrompt()
 	userOut, userErr := userCmd.CombinedOutput()
+	answered()
 	if userErr == nil {
 		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
 			zap.String("output", string(userOut)))
@@ -1486,6 +1495,7 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 
 	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
 	machineOut, machineErr := machineCmd.CombinedOutput()
+	utils.BootStep() // a step of the agent's start: certutil is done
 	if machineErr != nil {
 		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
 			zap.String("user_store_output", string(userOut)),

@@ -305,6 +305,10 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 			a.logger.Info("The agent was stopped while it was starting; stopping what it had started", zap.Error(err))
 		} else {
 			a.logger.Error("failed to hook into the app", zap.Error(err))
+			// The start has failed, here, before the teardown below, which
+			// can take long: the CLI that waits for the agent fails it at
+			// once, with the code it exits with (cli/agent.go).
+			utils.FailBoot(err)
 		}
 		// What Hook loaded or started before it failed, or before the stop
 		// that ended it, is torn down before the process exits.
@@ -314,7 +318,12 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		return err
 	}
 
-	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
+	// Hooked into the app, the proxy up. The memory guard's start reads the
+	// cgroup's files: a stage of the start (utils.BeginBootWork).
+	endGuard := utils.BeginBootWork()
+	err = memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit)
+	endGuard()
+	if err != nil {
 		a.logger.Info("Memory guard unavailable, continuing without memory-aware recording. "+
 			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
 			zap.Error(err))
@@ -789,7 +798,12 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.EbpfProxyPortOverride != 0 {
 		hookCfg.Port = coreAgent.EbpfProxyPortOverride
 	}
+	// The load can take long without a step (the kernel's verifier, on a
+	// loaded host): a stage of the start, making progress while its thread
+	// runs (utils.BeginBootWork).
+	endLoad := utils.BeginBootWork()
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
+	endLoad()
 
 	if err != nil {
 		if ctx.Err() != nil {
@@ -828,10 +842,16 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// count of the connections waiting for it (proxyconns.go).
 	a.markProxyListener()
 
+	// The proxy's start can take long without a step: its CA's install runs
+	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
+	// certutil, and the auxiliary hook loads BPF. A stage of the start, on
+	// this goroutine (utils.BeginBootWork), with steps of its own inside.
+	endProxy := utils.BeginBootWork()
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
 	})
+	endProxy()
 
 	if err != nil {
 		startErr = err

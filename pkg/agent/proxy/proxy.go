@@ -1997,6 +1997,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// falls back to the legacy PATH-keytool behaviour. See
 	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
 	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
+	utils.BootStep() // the agent's start: the CA's install is over
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and
 		// Keploy-proxied TLS will fail cert-verify for every workload
@@ -2117,11 +2118,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if err := <-readyChan; err != nil {
 		return err
 	}
+	utils.BootStep() // the agent's start: the proxy listens
 
 	// Serve DNS over TCP and UDP, and wait for both to be bound.
 	if err := p.startDNSServers(ctx, g); err != nil {
 		return err
 	}
+	utils.BootStep() // the agent's start: its DNS servers listen
 
 	if p.auxiliaryHook != nil {
 		if err := p.runAuxStart(ctx); err != nil {
