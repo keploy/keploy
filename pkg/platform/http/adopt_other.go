@@ -10,4 +10,4 @@ import "go.uber.org/zap"
 func adoptDaemons(*zap.Logger) {}
 
 // stopAdopted ends what adoptDaemons adopted: nothing here.
-func stopAdopted(*zap.Logger) {}
+func stopAdopted(*zap.Logger) string { return "" }

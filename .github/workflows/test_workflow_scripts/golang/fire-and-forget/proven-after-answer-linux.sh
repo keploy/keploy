@@ -39,6 +39,12 @@
 #      would have done as it stopped is not known): keploy test exits
 #      non-zero, and the report names the kill and the grace.
 #
+#   9. The app of 6 and 7, started in the background by its shell
+#      (`app & wait`), its shutdown taking 300 ms before it publishes: the
+#      shell dies on keploy's interrupt at once, and keploy still waits for
+#      the app, a member of the shell's process group that acts on the
+#      interrupt. A changed shutdown publish fails the set, as in 7.
+#
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
 # before the stop is the app's clock, and no case here asserts on it.
@@ -163,6 +169,17 @@ record_shutdown() {
     cd "$WORK" || exit 1
 }
 
+# APP_WRAP, when set, is how the app is started: "bg" runs it in the
+# background of its shell, which waits for it (`app & wait`).
+APP_WRAP=""
+app_cmd() {
+    if [ "$APP_WRAP" = bg ]; then
+        echo "$1 & wait"
+    else
+        echo "$1"
+    fi
+}
+
 # replay <dir> <name> <proto> [suffix] [nopublish]: keploy test of dir's
 # recording, the broker down; RC is its exit code.
 replay() {
@@ -171,7 +188,7 @@ replay() {
     REPLAY_DIR="$WORK/$dir"
     cd "$REPLAY_DIR" || exit 1
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app" \
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$(app_cmd "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app")" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
     own
@@ -234,6 +251,19 @@ yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | gr
     fail "7 (HTTP, changed shutdown publish): the report does not name the publish among the calls made after the set's last test: $(grep -n -A3 'unclaimed' "$(REPORT)" | head -12)"
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
+
+echo "== 9. the app of 7 in the background of its shell =="
+APP_ENV="SHUTDOWN_PUBLISH=1 SHUTDOWN_DELAY=300ms"
+APP_WRAP=bg
+replay shutdown bg-as-recorded http
+expect_pass "9 (in the background, the recorded shutdown publish)"
+replay shutdown bg-changed http "-changed"
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
+    fail "9 (in the background, a changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+    fail "9 (in the background, a changed shutdown publish): the report does not name the publish"
+APP_WRAP=""
 
 APP_ENV="IGNORE_INT=1"
 record_ping() {
