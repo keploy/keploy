@@ -3,11 +3,15 @@ package proxy
 import (
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -240,5 +244,136 @@ func TestACallInFlightConsumedThroughMarkMockAsUsedIsTheWindowsOwn(t *testing.T)
 	}
 	if c, ok := flagged["lookup-stale"]; ok && !c {
 		t.Fatal("a mock of test-1's window consumed in test-2 was not flagged CarryOver")
+	}
+}
+
+// statedPoll is a long poll's recording as a recorder that states lifetimes
+// writes it (per-test, models.MetadataLifetimeKey): DeriveLifetime gives it the
+// record-order cursor (ConsumeCursorSaturate). Its request was recorded at req
+// ms and its response at res ms (pms).
+func statedPoll(name, body string, req, res int) *models.Mock {
+	m := &models.Mock{Version: "api.keploy.io/v1beta1", Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata: map[string]string{"type": "HTTP_CLIENT", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+		HTTPReq: &models.HTTPReq{Method: "POST", URL: "http://queue/poll", ProtoMajor: 1, ProtoMinor: 1,
+			Header: map[string]string{"Content-Type": "application/json"}, Body: body},
+		// As recorded: the serializer recomputes a recorded Content-Length.
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: name, Header: map[string]string{"Content-Length": "0"}},
+		ReqTimestampMock: pms(req), ResTimestampMock: pms(res)}}
+	m.DeriveLifetime()
+	return m
+}
+
+// polls sends one POST /poll per body through the real HTTP integration and
+// returns what answered each, MISS for none.
+func polls(t *testing.T, mm *MockManager, bodies ...string) string {
+	t.Helper()
+	h := httpint.New(zap.NewNop())
+	got := make([]string, 0, len(bodies))
+	for _, body := range bodies {
+		raw := "POST /poll HTTP/1.1\r\nHost: queue\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+		resp, served, _ := serveOne(t, h, mm, raw)
+		if resp == nil || resp.StatusCode != http.StatusOK {
+			got = append(got, "MISS")
+			continue
+		}
+		got = append(got, string(served))
+	}
+	return strings.Join(got, ",")
+}
+
+// A call in flight when test-2 began is test-2's own, as a call of its window
+// is (MockManager.OwnedByOpenTest), with the proven switch off: a long poll
+// sent in the gap before test-2 and answered inside it, recorded per-test with
+// its lifetime stated (the stateful cursor's), is consumed once by a different
+// request (a poll the app sends with another body), not served again to the
+// next; and it takes its turn, in record order, with test-2's own recording of
+// the same request. Each answers exactly as it does placed in test-2's window.
+func TestACallInFlightIsItsTestsOwnForTheStatefulCursor(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	staged := func(t *testing.T, recording ...*models.Mock) *MockManager {
+		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.ResetForReplaySession()
+		mm.SeedStartupCutoff(winStart(1))
+		mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.SetMocksWithWindow(recording, nil, winStart(2), winEnd(2))
+		return mm
+	}
+	// sentAt is when the first poll's request was recorded: in the gap
+	// before test-2 (1100-2000), answered inside it, or inside test-2.
+	for place, sentAt := range map[string]int{"in flight": 1500, "in its window": 2010} {
+		t.Run(place+": a different poll consumes it", func(t *testing.T) {
+			mm := staged(t, statedPoll("poll", `{"id":"aaaa1111"}`, sentAt, 2050))
+			perTest, _ := mm.GetPerTestMocksInWindow()
+			if len(perTest) != 1 || !mm.OwnedByOpenTest(perTest[0]) {
+				t.Errorf("test-2's per-test pool %v, owned by the open test: want the poll, owned", perTest)
+			}
+			if got, want := polls(t, mm, `{"id":"cccc3333"}`, `{"id":"dddd4444"}`), "poll,MISS"; got != want {
+				t.Fatalf("served %s, want %s: the second poll is answered by no recording, the first consumed it", got, want)
+			}
+		})
+		t.Run(place+": it takes its turn with the test's own", func(t *testing.T) {
+			body := `{"id":"aaaa1111"}`
+			mm := staged(t, statedPoll("poll-1", body, sentAt, 2050), statedPoll("poll-2", body, 2060, 2070))
+			if got, want := polls(t, mm, body, body, body), "poll-1,poll-2,poll-2"; got != want {
+				t.Fatalf("served %s, want %s: one sequence, in record order, saturating on the last", got, want)
+			}
+		})
+	}
+}
+
+// Under the switch the learn step counts a call in flight when test-2 began as
+// test-2's own, as it counts a call of test-2's window: it answers once, so an
+// identical call after it is one more than recorded (a miss), and a call that
+// drifted from it in a value is paired with it and learned. Each answers
+// exactly as it does placed in test-2's window.
+func TestALearnStepCountsACallInFlightAsItsTestsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	batch := func(sentAt int) *models.Mock {
+		m := batchMock()
+		m.Version = "api.keploy.io/v1beta1"
+		m.Spec.Metadata = map[string]string{"type": models.HTTPClient, models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = pms(sentAt), pms(2050)
+		m.TestModeInfo = models.TestModeInfo{}
+		m.DeriveLifetime()
+		return m
+	}
+	rig := func(t *testing.T, sentAt int) (*Proxy, *MockManager) {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.ResetForReplaySession()
+		mm.SeedStartupCutoff(winStart(1))
+		mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
+		mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+		mm.SetMocksWithWindow([]*models.Mock{batch(sentAt)}, nil, winStart(2), winEnd(2))
+		mm.SetServedObserver(p.learnTracker.ServedMock)
+		p.ContinueTestErrorCapture()
+		return p, mm
+	}
+	opts := models.OutgoingOptions{Learn: true}
+	for place, sentAt := range map[string]int{"in flight": 1500, "in its window": 2010} {
+		t.Run(place+": an identical call after it is a miss", func(t *testing.T) {
+			p, mm := rig(t, sentAt)
+			call := post(`{"rid":"r-1","ids":[1,2,3]}`)
+			if code, got := r3Send(t, p, mm, opts, call); code != http.StatusOK || got != `{"ok":true,"rid":"r-1"}` {
+				t.Fatalf("the first call was answered %d %s; want the recording", code, got)
+			}
+			if code, got := r3Send(t, p, mm, opts, call); code == http.StatusOK {
+				t.Fatalf("the second, identical call was answered %d %s; want a miss: the test recorded it once", code, got)
+			}
+		})
+		t.Run(place+": a call that drifted in a value is paired and learned", func(t *testing.T) {
+			p, mm := rig(t, sentAt)
+			code, got := r3Send(t, p, mm, opts, post(`{"rid":"r-2","ids":[1,2,3]}`))
+			if code != http.StatusOK || got != `{"ok":true,"rid":"r-2"}` {
+				t.Fatalf("the drifted call was answered %d %s; want the recording, its echo rendered", code, got)
+			}
+			if st, ok := r3States(mm)["mock-7"]; !ok || st.Variables["rid"].Bind != "body.rid" {
+				t.Fatalf("the consumed state %+v (consumed %v); want rid learned at body.rid", st.Variables, ok)
+			}
+		})
 	}
 }

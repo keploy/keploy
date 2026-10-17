@@ -83,11 +83,11 @@ func TestAMockAnsweredBeforeItWasAskedIsInItsWindowOnlyUnderTheSwitch(t *testing
 	m := newMockForTest("window-inverted", start.Add(time.Second), models.LifetimePerTest)
 	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(-37 * time.Microsecond)
 	t.Setenv("KEPLOY_PROVEN", "")
-	if inRecordedWindow(m, start, start.Add(time.Minute)) {
+	if inRecordedWindow(m, start, start.Add(time.Minute), time.Time{}, false) {
 		t.Error("with the switch off the mock is in the window; the read leaves it out")
 	}
 	t.Setenv("KEPLOY_PROVEN", "1")
-	if !inRecordedWindow(m, start, start.Add(time.Minute)) {
+	if !inRecordedWindow(m, start, start.Add(time.Minute), time.Time{}, false) {
 		t.Error("under the switch the mock is in no window; the read keeps it")
 	}
 }
