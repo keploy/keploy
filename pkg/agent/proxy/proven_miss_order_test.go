@@ -30,7 +30,7 @@ func httpMiss(t *testing.T, p *Proxy) (done <-chan error) {
 	// The order itself, whatever the scheduler does: when the miss is
 	// reported, nothing may have been written to the app yet.
 	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
-		if provenswitch.On() && agentEnd.wrote.Load() {
+		if agentEnd.wrote.Load() {
 			t.Errorf("the 502 reached the app before its miss was reported")
 		}
 		p.sendMockNotFoundError(err)
@@ -66,46 +66,64 @@ func (c *writeSeen) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-// Under the proven switch an HTTP miss is queued for the test that made it
-// before the app reads its 502: a test that ends as soon as it has the 502
-// has its miss, and the next test is never charged with it. The integration
-// then returns nothing, so the miss is not reported twice.
+// An HTTP miss is queued for the test that made it before the app reads its
+// 502, with the proven switch on or off: a test that ends as soon as it has
+// the 502 has its miss, and the next test is never charged with it. With the
+// switch off the miss was queued only after the 502, from the miss the
+// integration returned, and a test that ended first had it charged to the test
+// after it (enterprise pipeline 11651: get-quote-1's GET /fx filed under
+// get-rates-1, and get-quote-1's difference then learned as noise).
+//
+// Under the switch the integration then returns nothing. With it off it
+// returns the miss marked reported, as the connection's end and its log
+// always took it, and the proxy (mockFailed) does not queue it a second time.
 func TestAnHTTPMissIsQueuedBeforeTheAppSeesIts502(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	p := startedDrainProxy(t, 100)
-	ctx := context.Background()
+	for _, on := range []bool{true, false} {
+		name := "switch off"
+		if on {
+			name = "switch on"
+		}
+		t.Run(name, func(t *testing.T) {
+			v := ""
+			if on {
+				v = "1"
+			}
+			t.Setenv(provenswitch.Env, v)
+			p := startedDrainProxy(t, 100)
+			ctx := context.Background()
 
-	p.ContinueTestErrorCapture() // test N begins
-	returned := httpMiss(t, p)
-	gotN, err := p.GetMockErrors(ctx) // test N ends: its harness read the 502
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(gotN) != 1 {
-		t.Fatalf("test N's misses at its end: %d, want its own one", len(gotN))
-	}
-	if err := <-returned; err != nil {
-		t.Fatalf("the integration returned %v after reporting the miss; it would be reported twice", err)
-	}
-
-	p.ContinueTestErrorCapture() // test N+1 begins
-	gotN1, err := p.GetMockErrors(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(gotN1) != 0 {
-		t.Fatalf("test N+1 was charged with %d miss(es) it did not make", len(gotN1))
-	}
-}
-
-// With the switch off the integration returns the miss, as it always has,
-// and the proxy reports it from there.
-func TestAnHTTPMissIsReturnedWithTheSwitchOff(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	p := startedDrainProxy(t, 100)
-	p.ContinueTestErrorCapture()
-	returned := httpMiss(t, p)
-	if err := <-returned; !errors.Is(err, httpint.ErrMockNotMatched) {
-		t.Fatalf("the integration returned %v, want the miss", err)
+			p.ContinueTestErrorCapture() // test N begins
+			returned := httpMiss(t, p)
+			// Test N ends: its harness read the 502 and the app answered.
+			// What the integration returns reaches the connection's handler
+			// only now, after the read, as it did in pipeline 11651.
+			gotN, err := p.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.ContinueTestErrorCapture() // test N+1 begins
+			ret := <-returned
+			if on {
+				if ret != nil {
+					t.Fatalf("the integration returned %v after reporting the miss; it would be reported twice", ret)
+				}
+			} else {
+				if !errors.Is(ret, httpint.ErrMockNotMatched) {
+					t.Fatalf("the integration returned %v, want the miss", ret)
+				}
+				// As the connection's handler takes it.
+				_ = p.mockFailed(zap.NewNop(), ret)
+			}
+			gotN1, err := p.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(gotN) != 1 || len(gotN1) != 0 {
+				t.Fatalf("test N read %d miss(es) and test N+1 %d; want N's one miss read with N, and none with N+1", len(gotN), len(gotN1))
+			}
+			if !on && !models.IsMismatchReported(ret) {
+				t.Errorf("the integration's miss was not marked reported; the handler would queue it again")
+			}
+		})
 	}
 }

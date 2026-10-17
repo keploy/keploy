@@ -339,8 +339,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "reason": models.ErrUnmatchedCallsUnread.Error() + ": keploy's error drain stopped before this read"},
-			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven"},
-			unwantLogs: []string{"writes what it served and missed as compose stops it"},
+			// --strict names why the read was incomplete, not a guess at it.
+			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven", "why:keploy's error drain stopped before this read"},
+			unwantLogs: []string{"writes what it served and missed as compose stops it", "check the agent logs for why it stopped"},
 		},
 		{
 			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
@@ -348,7 +349,7 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
-			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven", "why:the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

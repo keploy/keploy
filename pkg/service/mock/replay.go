@@ -639,9 +639,10 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if m.config.Mock.Strict && !missesKnown && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
-		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
-		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
+		keployFailure = errors.New("--strict could not verify this replay: the agent could not report every call no recorded mock answered")
+		m.logger.Error("replay failed under --strict: the agent could not report every call no recorded mock answered, so a clean run could not be proven",
+			zap.String("why", counts.missesUnread),
+			zap.String("next_step", "drop --strict to accept an unverified run, or remove the cause named in why and replay again"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
 	// Only a miss that counts against a test (models.UnmatchedCall.
@@ -1686,7 +1687,10 @@ type replayCounts struct {
 	consumed   int
 	missed     int
 	missedData int
-	tests      []TestReceipt
+	// missesUnread is why the read of the calls no mock answered was
+	// incomplete (models.UnreadCause), when missed is -1.
+	missesUnread string
+	tests        []TestReceipt
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
 	// learnErr is why what the learn step learned could not be written: the
@@ -1791,8 +1795,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		next := "check the agent logs for why it stopped before the run ended"
 		if fromCompose && consumedErr == nil {
 			// The agent left its account, but its read of the calls no mock
-			// answered was incomplete (the proven switch): that is what to
-			// look into.
+			// answered was incomplete: that is what to look into.
 			summary = append(summary, zap.NamedError("reason", missesErr))
 			next = "the keploy-agent container could not read every call no mock answered as compose stopped it; check its logs above for why"
 		} else if fromCompose {
@@ -1865,6 +1868,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
+		counts.missesUnread = models.UnreadCause(missesErr)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
 	for i := range counts.tests {

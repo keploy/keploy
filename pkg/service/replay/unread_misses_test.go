@@ -49,7 +49,10 @@ func failedRead() ([]models.UnmatchedCall, error) {
 
 // A test whose misses could not all be read has no verdict under the switch,
 // and neither has its set: INTERNAL_ERR, with the tests named. With the switch
-// off the run is what it was (the failure is a Debug line, the set PASSED).
+// off the verdict is what it was (the set PASSED, no test unjudged), but the
+// test is marked MissesUnattributed: a miss may be missing from it, or read
+// with another test's, and nothing may learn noise from its set. The failure
+// was a Debug line, and the miss then masked.
 func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 	for _, read := range []struct {
 		name string
@@ -67,17 +70,26 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 
 				status := h.run(t)
 
-				var unread []string
+				var unread, unattributed []string
 				for _, r := range h.report.report.Tests {
 					if r.FailureInfo.UnmatchedCallsUnread {
 						unread = append(unread, r.TestCaseID)
 					}
+					if r.FailureInfo.MissesUnattributed {
+						unattributed = append(unattributed, r.TestCaseID)
+					}
+					if len(r.VerdictUnknown()) > 0 && !on {
+						t.Errorf("switch off: %s has no verdict; with the switch off a miss fails no test, so misses read short leave its verdict", r.TestCaseID)
+					}
 				}
 				if !on {
-					if status != models.TestSetStatusPassed || len(unread) != 0 {
-						t.Fatalf("switch off: status %s, unread %v; want PASSED and none, as before", status, unread)
+					if status != models.TestSetStatusPassed || len(unread) != 0 || fmt.Sprint(unattributed) != "[test-2]" {
+						t.Fatalf("switch off: status %s, unread %v, unattributed %v; want PASSED, none unread, and test-2 marked unattributed", status, unread, unattributed)
 					}
 					return
+				}
+				if len(unattributed) != 0 {
+					t.Fatalf("under the switch the unread test is UnmatchedCallsUnread, not MissesUnattributed: %v", unattributed)
 				}
 				if status != models.TestSetStatusInternalErr {
 					t.Fatalf("status %s; a set with a test whose misses were not all read must be neither PASSED nor FAILED", status)
@@ -98,16 +110,27 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 
 // What an incomplete read did return is still attached to its test.
 func TestAttachMockErrors_KeepsWhatAnIncompleteReadReturned(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	h := newPartialRunHarness(t, 1, 0)
-	h.instr.mockErrorsFor = misses(incompleteRead)
-	result := &models.TestResult{}
-	h.replayer.attachMockErrors(t.Context(), "test-set-0", "test-1", result)
-	if !result.FailureInfo.UnmatchedCallsUnread {
-		t.Fatal("the result is not marked unread")
-	}
-	if len(result.FailureInfo.UnmatchedCalls) != 1 || result.FailureInfo.UnmatchedCalls[0].ActualSummary != "GET /read" {
-		t.Fatalf("unmatched calls %+v; the calls the read did return must be kept", result.FailureInfo.UnmatchedCalls)
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			v := ""
+			if on {
+				v = "1"
+			}
+			t.Setenv(provenswitch.Env, v)
+			h := newPartialRunHarness(t, 1, 0)
+			h.instr.mockErrorsFor = misses(incompleteRead)
+			result := &models.TestResult{}
+			h.replayer.attachMockErrors(t.Context(), "test-set-0", "test-1", result)
+			// Under the switch the test is UnmatchedCallsUnread (no verdict);
+			// with it off, MissesUnattributed (its verdict stands).
+			if result.FailureInfo.UnmatchedCallsUnread != on || result.FailureInfo.MissesUnattributed == on {
+				t.Fatalf("unread %v, unattributed %v; want unread under the switch and unattributed with it off",
+					result.FailureInfo.UnmatchedCallsUnread, result.FailureInfo.MissesUnattributed)
+			}
+			if len(result.FailureInfo.UnmatchedCalls) != 1 || result.FailureInfo.UnmatchedCalls[0].ActualSummary != "GET /read" {
+				t.Fatalf("unmatched calls %+v; the calls the read did return must be kept", result.FailureInfo.UnmatchedCalls)
+			}
+		})
 	}
 }
 
