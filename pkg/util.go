@@ -787,6 +787,25 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}, nil
 }
 
+// connClosingBody is the body of the app's answer to a test request: closed,
+// it also closes the connection the request's own client (prepareHTTPRequest
+// makes one for each request) left idle. No later request uses that client,
+// so a keep-alive connection it kept would stay open to the app for the rest
+// of keploy's run, one for each test: an app that serves each connection on
+// a thread of its own holds those threads, and one that waits for its open
+// connections as it stops (Python's ThreadingTCPServer joins each one's
+// thread on its way out) cannot stop while keploy runs.
+type connClosingBody struct {
+	io.ReadCloser
+	client *http.Client
+}
+
+func (b *connClosingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.client.CloseIdleConnections()
+	return err
+}
+
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
 // when the connection is REFUSED before the app accepts it. A refused connection
 // proves the app never received the request — zero bytes sent, zero single-use
@@ -1079,12 +1098,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()
 		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
@@ -1187,12 +1208,14 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
 	if cfg.answer != nil {
 		cfg.answer.answering()
 		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
