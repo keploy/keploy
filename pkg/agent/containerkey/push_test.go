@@ -223,22 +223,46 @@ func TestHostAddrIsTheHostsAddressesTheCLIGave(t *testing.T) {
 	}
 }
 
-// posts records what a pusher gave, and tells sent of each post.
+// posts records what a pusher gave, and tells sent of each post, and quiet
+// of each read or placing of its index that ended (quietHooks).
 type posts struct {
-	mu   sync.Mutex
-	got  []Snapshot
-	sent chan struct{}
-	err  error
+	mu    sync.Mutex
+	got   []Snapshot
+	sent  chan struct{}
+	quiet chan struct{}
+	err   error
 }
 
-func newPosts() *posts { return &posts{sent: make(chan struct{}, 64)} }
+func newPosts() *posts { return &posts{sent: make(chan struct{}, 64), quiet: make(chan struct{}, 1)} }
 
+// ended tells quiet that a read or a placing ended, without waiting.
+func (p *posts) ended(string) {
+	select {
+	case p.quiet <- struct{}{}:
+	default:
+	}
+}
+
+// quietHooks has p's index tell ps of each read and placing that ends, for
+// settle: set before the pusher's first Push, as the hooks are read without
+// a lock.
+func quietHooks(p *Pusher, ps *posts) {
+	p.idx.applied, p.idx.placeDone = ps.ended, ps.ended
+}
+
+// post records s and tells sent without waiting: the pusher posts under its
+// lock, which settle's quiescent takes, so a post blocked on a full sent
+// would hold settle forever. A full sent already wakes its reader, which
+// looks at the last list again.
 func (p *posts) post(_ context.Context, s Snapshot) error {
 	p.mu.Lock()
 	p.got = append(p.got, s)
 	err := p.err
 	p.mu.Unlock()
-	p.sent <- struct{}{}
+	select {
+	case p.sent <- struct{}{}:
+	default:
+	}
 	return err
 }
 
@@ -277,19 +301,54 @@ func settled(s Snapshot) bool {
 	return true
 }
 
-// settle waits until the agent's list is settled, and returns how many lists
-// it was given by then, with every post told.
-func settle(ps *posts) int {
-	waitPost(ps, settled)
+// settle waits until the agent's list is settled and pusher p is quiet:
+// its index has no read nor placing in flight, and p gave the agent the list
+// of every change the index counted (quiescent). It returns how many lists
+// the agent was given by then, with every post told. An empty queue of posts
+// to tell is not enough: a placing still in flight (the read that ended it
+// first) changes the index once more, and the pusher gives that list after.
+// It covers only work the index has taken up: an event the test sent is
+// waited for (waitPost on its effect) first. It waits for as long as a read
+// or a placing is held, or the agent does not take the list (owed).
+func settle(p *Pusher, ps *posts) int {
+	for ps.count() == 0 || !settled(ps.last()) || !quiescent(p) {
+		select {
+		case <-ps.sent: // a change given
+		case <-ps.quiet: // a read or a placing ended (quietHooks)
+		}
+	}
 	for len(ps.sent) > 0 {
 		<-ps.sent
 	}
 	return ps.count()
 }
 
+// quiescent reports whether p's index has no read nor placing loop in flight
+// and p gave its agent the list of every change the index counted
+// (Pusher.send's sentGen, the index's changeGen), the agent having taken it.
+// Read under p.mu, then the index's lock, as send reads them: no send is
+// half done. A pusher that answers its agent's settles (AnswerSettles) is
+// never quiet by this state: after each ask it lists the daemon
+// (dockerIndex.Settle) and gives a forced list, which none of it shows.
+func quiescent(p *Pusher) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ask != nil {
+		panic("quiescent: a pusher that answers settles (AnswerSettles) is not quiet by its state; wait for its answers instead")
+	}
+	p.idx.mu.Lock()
+	defer p.idx.mu.Unlock()
+	st := p.idx.cur
+	if st == nil || len(st.reading) > 0 || len(st.placingRun) > 0 {
+		return false
+	}
+	return p.sentGen == p.idx.changeGen && !p.owed
+}
+
 // testPusher is a pusher over f.
 func testPusher(f *fakeDocker, ps *posts) *Pusher {
 	p := NewPusher(ps.post, "")
+	quietHooks(p, ps)
 	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
 	p.idx.socketExists = func(string) bool { return true }
 	p.idx.hostAddrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("172.17.0.1")}, nil }
@@ -313,7 +372,7 @@ func TestPushGivesTheListNowAndEveryChange(t *testing.T) {
 	}
 	// Each listed container's configuration, read beside the list, is given
 	// as a change.
-	settle(ps)
+	settle(p, ps)
 	first := ps.last()
 	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
 	f.msgs <- start("new")
@@ -323,7 +382,7 @@ func TestPushGivesTheListNowAndEveryChange(t *testing.T) {
 	f.remove("pg")
 	f.msgs <- die("pg")
 	waitPost(ps, func(s Snapshot) bool { return len(s.Containers) == 3 })
-	n := settle(ps)
+	n := settle(p, ps)
 	if err := p.Push(t.Context(), nil); err != nil || ps.count() != n+1 {
 		t.Fatalf("a second Push in the session: %v, %d lists after %d", err, ps.count(), n)
 	}
@@ -395,7 +454,7 @@ func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
 	if err := p.Push(first, nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	p.mu.Lock()
 	last := p.changed
 	p.mu.Unlock()
@@ -408,7 +467,7 @@ func TestAnEndedSessionsLoopNeverTakesTheNextOnesChange(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	p.mu.Lock()
 	next := p.changed
 	p.mu.Unlock()
@@ -433,7 +492,7 @@ func TestAWatchThatFailsMidSessionIsPushed(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	f.endStream(errors.New("unexpected EOF"))
 	if s := waitPost(ps, func(s Snapshot) bool { return s.Err != "" }); len(s.Containers) != 0 {
 		t.Fatalf("after the stream ended the agent was given %+v; want the failure", s)
@@ -467,14 +526,17 @@ func TestAChangeTheAgentWasGivenIsNotGivenAgain(t *testing.T) {
 	ps := newPosts()
 	p := testPusher(f, ps)
 	applied := make(chan string, 64)
-	p.idx.applied = func(id string) { applied <- id }
+	p.idx.applied = func(id string) {
+		ps.ended(id) // settle's wakeup (quietHooks), kept
+		applied <- id
+	}
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
 		<-applied // the listed containers' configurations
 	}
-	n0 := settle(ps)
+	n0 := settle(p, ps)
 	p.mu.Lock()
 	oneChange(p)
 	tookTheChange(p)                 // the loop holds the change, and waits for p.mu
@@ -497,7 +559,10 @@ func TestAnEndedSessionsLoopGivesNothing(t *testing.T) {
 	ps := newPosts()
 	p := testPusher(f, ps)
 	applied := make(chan string, 64)
-	p.idx.applied = func(id string) { applied <- id }
+	p.idx.applied = func(id string) {
+		ps.ended(id) // settle's wakeup (quietHooks), kept
+		applied <- id
+	}
 	first, end := context.WithCancel(t.Context())
 	if err := p.Push(first, nil); err != nil {
 		t.Fatal(err)
@@ -505,7 +570,7 @@ func TestAnEndedSessionsLoopGivesNothing(t *testing.T) {
 	for range 3 {
 		<-applied // the listed containers' configurations
 	}
-	n0 := settle(ps)
+	n0 := settle(p, ps)
 	p.mu.Lock()
 	done := p.loopDone
 	oneChange(p)
@@ -711,6 +776,7 @@ func TestTheCLIListsAContainerItCouldNotReadAsRead(t *testing.T) {
 		agent.apply(s)
 		return ps.post(ctx, s)
 	}, "")
+	quietHooks(p, ps)
 	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
 	p.idx.socketExists = func(string) bool { return true }
 	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
@@ -763,7 +829,7 @@ func TestPushGivesAListTheAgentDidNotTakeAgain(t *testing.T) {
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	// The agent restarts; the next session's Push finds it not yet up.
 	ps.mu.Lock()
 	ps.err = errors.New("connection refused")
@@ -821,13 +887,14 @@ func TestTheCLIListsAContainerItIsPlacingAsBeingPlaced(t *testing.T) {
 		agent.apply(s)
 		return ps.post(ctx, s)
 	}, "")
+	quietHooks(p, ps)
 	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
 	p.idx.socketExists = func(string) bool { return true }
 	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	g := make(chan struct{})
 	read := make(chan struct{})
 	f.mu.Lock()
@@ -884,13 +951,14 @@ func TestTheCLIListsAPlacingThatFoundNothingAsEnded(t *testing.T) {
 		agent.apply(s)
 		return ps.post(ctx, s)
 	}, "")
+	quietHooks(p, ps)
 	p.idx.newAPI = func(string) (dockerAPI, error) { return f, nil }
 	p.idx.socketExists = func(string) bool { return true }
 	p.idx.hostAddrs = func() ([]netip.Addr, error) { return nil, nil }
 	if err := p.Push(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
-	settle(ps)
+	settle(p, ps)
 	g := make(chan struct{})
 	f.mu.Lock()
 	f.placeGate["quick"] = g
@@ -1149,5 +1217,48 @@ func TestTheNextSessionAsksForTheSettlesSinceTheLastAnswered(t *testing.T) {
 	}
 	if got := <-told; got != (SettleAsk{Asked: 1, Boot: agent.boot}) {
 		t.Fatalf("the next session's first ask was told of %+v, want the settle answered before", got)
+	}
+}
+
+// settle counts the agent's lists once the pusher is quiet: a placing still
+// in flight after the read that ended it (a loaded host lands it late) may
+// change the index once more, and any list it makes is counted, never given
+// after. The old helper took an empty queue of posts for quiet, and a test
+// counting lists after it saw one too many (TestPushGivesTheListNowAndEveryChange)
+// while the index counted an identical put as a change; it waits for the
+// placing loop to end whether or not its put changes anything.
+func TestSettleWaitsForAPlacingStillInFlight(t *testing.T) {
+	f := testcontainers()
+	ps := newPosts()
+	p := testPusher(f, ps)
+	placed := make(chan string, 8)
+	p.idx.placeDone = func(id string) {
+		ps.ended(id)
+		placed <- id
+	}
+	if err := p.Push(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	settle(p, ps)
+	g := make(chan struct{})
+	f.mu.Lock()
+	f.placeGate["new"] = g
+	f.mu.Unlock()
+	f.set("new", running("nginx", "sha256:n", []string{"172.17.0.9"}, nat.PortMap{}))
+	f.msgs <- start("new")
+	<-f.placeEntered // its placing is held; its read goes on, and ends it
+	waitPost(ps, func(s Snapshot) bool { return len(s.Containers) == 4 && settled(s) })
+	if quiescent(p) {
+		t.Fatal("the pusher is quiet while a placing is held")
+	}
+	go close(g) // the placing lands, late
+	n := settle(p, ps)
+	for id := <-placed; id != "new"; id = <-placed {
+	}
+	if !quiescent(p) {
+		t.Fatal("the pusher is not quiet after its placing ended")
+	}
+	if got := ps.count(); got != n {
+		t.Fatalf("settle counted %d lists, and %d came: the late placing's list was given after it", n, got)
 	}
 }
