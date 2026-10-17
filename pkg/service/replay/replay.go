@@ -4757,7 +4757,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				unclaimed = calls
 				unclaimedReason = unclaimedWhy(calls)
 				r.logUnclaimed(testSetID, calls)
-				if testSetStatus == models.TestSetStatusPassed {
+				switch {
+				case conf.RecordStopKilled != "":
+					// The recording's stop killed the app: what it did as
+					// it stopped is not in the recording, so such a call
+					// may be one the recording lacks (P101-b-k).
+					notJudged = alsoNotJudged(notJudged, "not judged: "+unclaimedReason+"; the recording's stop had to kill the application ("+conf.RecordStopKilled+"), so what it did as it stopped is not in the recording")
+					r.logger.Error("test-set is not judged: its application made calls after the set's last test that no mock answered, and its recording lacks what the application did as it stopped (the recording's stop had to kill it); the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+						zap.String("test-set", testSetID), zap.String("recording", conf.RecordStopKilled),
+						zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
+					testSetStatus = models.TestSetStatusInternalErr
+					r.markNotJudged(testSetID)
+				case testSetStatus == models.TestSetStatusPassed:
 					testSetStatus = models.TestSetStatusFailed
 				}
 			}

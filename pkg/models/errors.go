@@ -19,9 +19,10 @@ type AppError struct {
 	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
 	ExitCode int
 	// StopKilled, under the proven switch, says why keploy had to kill the
-	// application it stopped at its test set's end (ErrAppStoppedForSetEnd):
-	// it had not exited when the stop's grace ran out. "" when it exited
-	// within it, or when the stop was another's.
+	// application it stopped at its test set's end (ErrAppStoppedForSetEnd),
+	// or at a recording's end (P101-b-k): it had not exited when the stop's
+	// grace ran out. "" when it exited within it, or when the stop was
+	// another's.
 	StopKilled string
 }
 
