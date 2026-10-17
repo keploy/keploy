@@ -395,22 +395,23 @@ func TestASilentClientIsChargedOnlyForItsOwnHangUp(t *testing.T) {
 	}
 }
 
-// A Go client's http.Transport keeps the connection it dialled for a request
-// another connection served first: a spare, its handshake done, nothing sent.
-// It goes when the application stops, closed by the kernel with no
-// close_notify -- after the test it was dialled in. A hang-up like a
+// A client keeps a connection it set up for a call another connection served
+// first: a spare, its TLS handshake done, nothing sent (Go's http.Transport
+// keeps the one it dialled for a request an idle connection served before the
+// dial finished). It goes when the application stops, closed by the kernel
+// with no close_notify -- after the test it was set up in. A hang-up like a
 // rejection's, but nothing was lost: it is charged only within the scope its
 // handshake began in, and this one crossed the test's end. It was charged a
-// tls_handshake_abandoned, leaving a test not judged for every Go
-// application that leaves a spare.
+// tls_handshake_abandoned, leaving a test not judged for every Go application
+// that leaves a spare.
+//
+// The test sets the spare up itself, beside a call made on a connection of
+// its own: left to the Transport's racing a second dial against the first
+// connection's return, a loaded runner sometimes had the first connection
+// serve both calls, and no spare was ever dialled.
 func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	slowIn, slowOut := make(chan struct{}), make(chan struct{})
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/slow" {
-			close(slowIn)
-			<-slowOut
-		}
 		_, _ = io.WriteString(w, r.URL.Path)
 	}))
 	t.Cleanup(upstream.Close)
@@ -450,62 +451,43 @@ func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
 	}()
 	var mu sync.Mutex
 	var raw []net.Conn
-	secondDial := make(chan struct{})
-	dials := 0
-	handshakes := make(chan struct{}, 2)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, VerifyConnection: func(tls.ConnectionState) error {
-			handshakes <- struct{}{}
-			return nil
-		}},
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+	dial := func() (net.Conn, error) {
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err == nil {
 			mu.Lock()
-			dials++
-			second := dials == 2
+			raw = append(raw, c)
 			mu.Unlock()
-			if second {
-				<-secondDial // dialled while the first connection was busy
-			}
-			c, err := net.Dial("tcp4", ln.Addr().String())
-			if err == nil {
-				mu.Lock()
-				raw = append(raw, c)
-				mu.Unlock()
-			}
-			return c, err
-		},
+		}
+		return c, err
 	}
-	client := &http.Client{Transport: tr}
-	get := func(path string) <-chan error {
-		done := make(chan error, 1)
-		go func() {
-			res, err := client.Get("https://localhost" + path) // the proxy dials the name the client sent (SNI)
-			if err == nil {
-				_, err = io.ReadAll(res.Body)
-				_ = res.Body.Close()
-			}
-			done <- err
-		}()
-		return done
-	}
+	// The proxy dials the name the client sent (SNI).
+	clientTLS := &tls.Config{InsecureSkipVerify: true, ServerName: "localhost"}
 
 	ck := containerkey.Default
 	ck.Reset()
 	t.Cleanup(ck.Reset)
 	ck.BeginTest() // the test the application's calls are made in
-	slow := get("/slow")
-	awaitEvent(t, handshakes, "the first connection's handshake")
-	awaitEvent(t, slowIn, "the slow call at the dependency")
-	fast := get("/fast") // no idle connection: the Transport dials a second
-	close(slowOut)
-	if err := awaitEvent(t, slow, "the slow call"); err != nil {
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: clientTLS,
+		DialContext:     func(context.Context, string, string) (net.Conn, error) { return dial() },
+	}}
+	res, err := client.Get("https://localhost/call")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitEvent(t, fast, "the fast call, on the first connection now idle"); err != nil {
+	if _, err := io.ReadAll(res.Body); err != nil {
 		t.Fatal(err)
 	}
-	close(secondDial)
-	awaitEvent(t, handshakes, "the spare connection's handshake")
+	_ = res.Body.Close()
+	// The spare: set up in the test, then left idle.
+	rawSpare, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spare := tls.Client(rawSpare, clientTLS)
+	if err := spare.HandshakeContext(context.Background()); err != nil {
+		t.Fatalf("the spare's handshake: %v", err)
+	}
 	ck.EndTest()
 
 	// The application stops: the kernel closes its sockets, no close_notify.
@@ -516,7 +498,7 @@ func TestASpareIdleConnectionClosedOutsideItsTestIsNoLoss(t *testing.T) {
 	n := len(raw)
 	mu.Unlock()
 	if n != 2 {
-		t.Fatalf("%d connections dialled, want the first and the spare", n)
+		t.Fatalf("%d connections dialled, want the call's and the spare", n)
 	}
 	served.Wait()
 	for _, l := range p.losses.Snapshot() {
