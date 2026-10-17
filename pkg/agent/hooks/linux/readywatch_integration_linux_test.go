@@ -357,9 +357,15 @@ func TestUnderTheSwitchTheAgentSeesTheApplicationListen(t *testing.T) {
 	if err != nil || marked.ListenCount != st.ListenCount || len(marked.Listens) != 0 {
 		t.Fatalf("mark: %+v (%v), want the count %d, no listen", marked, err, st.ListenCount)
 	}
-	var k uint64
-	if h.objects.ReadySeen.Iterate().Next(&k, new(uint8)) {
-		t.Fatalf("after the mark ready_seen still holds %#x", k)
+	for _, m := range []*ebpf.Map{h.objects.ReadySeen, h.objects.ReadyHolders} {
+		k, v := make([]byte, m.KeySize()), make([]byte, m.ValueSize())
+		it := m.Iterate()
+		if it.Next(k, v) {
+			t.Fatalf("after the mark %s still holds %x", m, k)
+		}
+		if err := it.Err(); err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
 	}
 	// The helper ends, its socket with it: the listen is told, no longer live.
 	if c, ok := in.(io.Closer); ok {
@@ -427,5 +433,51 @@ func TestUnderTheSwitchTheAgentCountsARestartAndNamesIt(t *testing.T) {
 	marked, err := h.MarkReadiness()
 	if err != nil || marked.Progress.Restarts != st.Progress.Restarts {
 		t.Fatalf("mark: %+v (%v), want the restarts so far, %d", marked.Progress, err, st.Progress.Restarts)
+	}
+}
+
+// The mark clears ready_holders while the kernel deletes from it (a member's
+// exit), which aborts an iteration: clearMap reads again, so the mark does
+// not fail and leave the set not judged. Here a full map is churned, its
+// keys deleted and put back, as clearMap runs, twenty times.
+func TestClearingAMapItsKeysChurnInGoesOn(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Fatal("this test needs root (it creates BPF maps); run the test binary with sudo")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8192
+	for round := 0; round < 20; round++ {
+		m, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k := uint32(0); k < n; k++ {
+			if err := m.Put(k, uint64(k)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for k := uint32(0); ; k = (k + 1) % n {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = m.Delete(k)
+				_ = m.Put(k, uint64(k))
+			}
+		}()
+		err = clearMap(m)
+		close(stop)
+		<-done
+		_ = m.Close()
+		if err != nil {
+			t.Fatalf("round %d: clearMap of a map its keys churn in: %v", round, err)
+		}
 	}
 }
