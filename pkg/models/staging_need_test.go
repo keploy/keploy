@@ -17,6 +17,9 @@ func TestAStagingWithStartupNeedMarksOnlyThePerTestMocksItDeclares(t *testing.T)
 	remove := RegisterStagingNeed(kind, StagingNeed{Use: StagingWithStartup, Match: func(m *Mock) bool {
 		return m.Spec.Metadata["commandType"] == "MESSAGE" || m.Spec.Metadata["commandType"] == "SEND"
 	}})
+	// Removed however the test ends, so a failure here leaves no need
+	// registered for the next test; removing it twice is harmless.
+	t.Cleanup(remove)
 	if !IsStagedAtStaging(push) || !StagedAtStagingRegistered() {
 		t.Fatal("the declared per-test mock is not staged")
 	}

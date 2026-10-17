@@ -75,9 +75,9 @@ func RegisterStagingNeed(kind Kind, need StagingNeed) (unregister func()) {
 var stagedHooks mockPredicates
 
 // IsStagedAtStaging reports whether m is a per-test mock that a
-// StagingWithStartup need accepts: the set's staging stages it, whatever its
-// recorded time. A carry-over mock never is (StagingWithStartup). The mock's
-// lifetime must already be derived.
+// StagingWithStartup need accepts: the set's staging stages it when it was
+// recorded within the staging's window. A carry-over mock never is
+// (StagingWithStartup). The mock's lifetime must already be derived.
 func IsStagedAtStaging(m *Mock) bool {
 	return m != nil && m.TestModeInfo.Lifetime == LifetimePerTest && stagedHooks.match(m) && !IsCarryOver(m)
 }
