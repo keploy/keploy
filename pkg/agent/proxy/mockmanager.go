@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -246,6 +247,42 @@ type MockManager struct {
 	// under swapMu.
 	boundaryPending bool
 
+	// setFence marks that the reset before the next set boundary started a
+	// test set (ArmSetFence), not a re-registration of the current one: the
+	// boundary staging starts a new set generation (setGen) and drops what the
+	// previous set's pool was consumed of and nobody drained. Written under
+	// swapMu.
+	setFence bool
+
+	// setGen is the test-set generation: every staging stamps it on the mocks
+	// it pools (TestModeInfo.StagedSet), a fenced set boundary moves it, and
+	// a consume of a mock pooled under an earlier one is refused
+	// (flagMockAsUsed), so no consume of the previous set's pool, however it
+	// races the boundary, reaches this set's drain. Starts at 1 (0 stamps
+	// nothing). Moved under consumedMu.
+	setGen atomic.Uint64
+
+	// bootTaken holds the carry-over mocks (models.IsCarryOver) the app
+	// consumed as it started: from a startup tier built before any test or
+	// scope of the set fired (TreeDb.bootBuilt). Each is consumed once, and the
+	// replay never re-arms one (its baseline keeps them, a retry cycle
+	// included), but it drains such a consume only after the next staging,
+	// which reloads the startup band and the carry range and is handed it
+	// again: a staging leaves them out (withoutBootCarry), and every consume
+	// door refuses another consume of one (takeBootOnce, bootConsumed), a
+	// copy a staging filed before the consume landed included. Emptied at a
+	// fenced set boundary; RestartExactKey forgets its names. Guarded by
+	// bootTakenMu, a leaf.
+	bootTakenMu sync.Mutex
+	bootTaken   map[carryKey]struct{}
+
+	// scopeFiredThisSet is testFiredThisSet for keploy mock replay's scopes:
+	// set by a scope that opens a test, cleared at the set boundary. It
+	// stays set, unlike scopeOpen, so a startup tier a staging builds between
+	// scope tests is not the app's startup (TreeDb.bootBuilt). Written under
+	// swapMu.
+	scopeFiredThisSet bool
+
 	// cutoffSeeded parks the startup-init cutoff the replayer supplies for the
 	// NEXT set, until that set's staging call installs it.
 	//
@@ -262,7 +299,7 @@ type MockManager struct {
 
 	// recordedWindows is the current set's recorded test windows — every test
 	// of the set, selected or not — as seeded by SeedRecordedWindows. nil when
-	// the replayer sent none or no kind registered a carry-over predicate
+	// the replayer sent none or nothing registered carry-over
 	// (see SeedRecordedWindows). It changes at the same moments as the startup
 	// cutoff: parked in windowsSeeded until the set's staging call installs it.
 	// Stored under swapMu, read lock-free (RecordedWindows).
@@ -294,9 +331,10 @@ type MockManager struct {
 	// is valid for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
 
-	// carry is the carry-over tier: per-test mocks of RegisterCarryOver kinds
-	// that stay reachable outside their own window (carryover.go). Empty, and
-	// never touched, while no kind is registered. Reset at every staging call
+	// carry is the carry-over tier: carry-over mocks (models.IsCarryOver: a
+	// RegisterCarryOver kind's, a StagingRelease need's) that stay reachable
+	// outside their own window (carryover.go). Empty, and never touched, while
+	// nothing is registered. Reset at every staging call
 	// and when a pass goes back to an earlier window.
 	carry *carryOverPool
 	// carryLastStart is the window start of the last SetMocksWithWindow that
@@ -465,6 +503,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		carry:               newCarryOverPool(),
 		logger:              logger,
 	}
+	mm.setGen.Store(1)
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -599,8 +638,9 @@ func (m *MockManager) ResetForReplaySession() {
 	// the client-sent path does not degrade the same way. Not a perfect
 	// contrast: that fresh map is immediately re-seeded from a GetConsumedMocks
 	// drain, and consumedList is deliberately NOT cleared here, so when the app
-	// survives a boundary the client can inherit a trailing few names too. The
-	// difference is magnitude, not kind — and this clear closes the agent-owned
+	// survives a boundary the client could inherit a trailing few names too,
+	// until the boundary was fenced (ArmSetFence). The difference was
+	// magnitude, not kind — and this clear closes the agent-owned
 	// path's set-boundary divergence specifically. It does not claim blanket
 	// equivalence: --retry-passing-test rewinds the CLIENT's map to a baseline
 	// per retry cycle and nothing rewinds this one, which is a separate defect
@@ -624,6 +664,9 @@ func (m *MockManager) ResetForReplaySession() {
 	// consumedIndex are deliberately NOT cleared here, so the client's
 	// post-bring-up GetConsumedMocks drain still recovers everything the app
 	// consumed during bootstrap, and that is what the latched sends carry.
+	// A reset that starts another test set says so (ArmSetFence), and its
+	// boundary staging drops them instead: they were consumed of the previous
+	// set's pool.
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
@@ -1256,6 +1299,35 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// A set boundary: the first staging after ResetForReplaySession. A
 	// BaseTime staging without one is a mid-set stage (see boundaryPending).
 	setBoundary := isInitialStaging && m.boundaryPending
+	// A boundary staging that starts another test set (ArmSetFence): it
+	// starts a new set generation as it publishes the new trees, and drops
+	// what the previous set's pool was consumed of (dropPreviousSetConsumes).
+	fenced := setBoundary && m.setFence
+	if fenced {
+		m.setFence = false
+	}
+	if scope {
+		m.scopeFiredThisSet = true
+	}
+	if !fenced {
+		// A carry-over mock the app consumed as it started is not staged
+		// again, whatever this staging was handed (bootTaken). The previous
+		// set's are not this one's.
+		filtered = m.withoutBootCarry(filtered)
+	}
+	// Every mock this staging pools is of the set generation current once
+	// it is published.
+	gen := m.setGen.Load()
+	if fenced {
+		gen++
+	}
+	for _, list := range [][]*models.Mock{filtered, unfiltered, explicitStartup} {
+		for _, mk := range list {
+			if mk != nil {
+				mk.TestModeInfo.StagedSet = gen
+			}
+		}
+	}
 	if isInitialStaging {
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
@@ -1275,6 +1347,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		if m.boundaryPending {
 			m.boundaryPending = false
 			m.testFiredThisSet = false
+			m.scopeFiredThisSet = false
 			// Install this set's seeded cutoff. Zero when nothing was seeded,
 			// which is exactly the historical clear.
 			m.firstWindowStart = m.cutoffSeeded
@@ -1331,10 +1404,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// only in-window mocks.
 	filteredForTree := filtered
 	var droppedInvalid, droppedOutOfWindow uint64
-	// carryIn collects the per-test mocks of RegisterCarryOver kinds that this
+	// carryIn collects the carry-over mocks (models.IsCarryOver) that this
 	// window does not hold (loaded ahead of their window, or mapped to this
 	// test from a gap); they are offered to the carry-over tier below instead
-	// of being dropped. Nil while no kind is registered.
+	// of being dropped. Nil while nothing is registered.
 	// Carry-over also needs the recorded windows the replayer seeds at staging
 	// (SeedRecordedWindows): without them there is no release rule to hold a
 	// mock by, and a closed window's mocks are dropped as they always were.
@@ -1439,6 +1512,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
 	newStartup := NewTreeDb(customComparator)
+	newStartup.bootBuilt = !m.testFiredThisSet && !m.scopeFiredThisSet
 	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
 	// H4 round-2: use a TIER-LOCAL TestModeInfo copy as the startup tree
 	// key rather than mutating mk.TestModeInfo.ID in place. The same
@@ -1533,6 +1607,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		newStartupKeys[mk] = key
 	}
 
+	if fenced {
+		// Right before the first tree is published, so a consume of the
+		// previous pool flags before the drop or is refused after it, and a
+		// parser that is refused reads the new pool on its next try.
+		m.dropPreviousSetConsumes()
+	}
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
@@ -2709,7 +2789,20 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.stampSet(mocks)
 	m.publishFiltered(m.buildTier(mocks, true), true)
+}
+
+// stampSet stamps the current set generation on the mocks a bare tier setter
+// pools, as a staging stamps what it pools (TestModeInfo.StagedSet), so a
+// mock an earlier set's staging stamped and handed in again is this set's.
+func (m *MockManager) stampSet(mocks []*models.Mock) {
+	gen := m.setGen.Load()
+	for _, mk := range mocks {
+		if mk != nil {
+			mk.TestModeInfo.StagedSet = gen
+		}
+	}
 }
 
 // tierBuild is a filtered or unfiltered tier built from a staged slice and
@@ -2820,6 +2913,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
 	ownForStaging(&mocks)
+	m.stampSet(mocks)
 	m.publishUnfiltered(m.buildTier(mocks, false), true)
 }
 
@@ -2899,6 +2993,9 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	case exactServed:
 		return true
 	case exactRefused:
+		return false
+	}
+	if old != nil && m.stalePooled(old) {
 		return false
 	}
 	// Snapshot the legacy tree pointer safely
@@ -2993,8 +3090,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
-		}); err != nil {
-			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}, old.TestModeInfo.StagedSet); err != nil {
+			if errors.Is(err, errPreviousSet) {
+				// The previous set's pool: not this set's consume.
+				updatedGlobal = false
+			} else {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
 		}
 	}
 
@@ -3025,6 +3127,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	case exactRefused:
 		return false
 	}
+	if m.stalePooled(&mock) {
+		return false
+	}
 	m.treesMu.RLock()
 	globalTree := m.filtered
 	m.treesMu.RUnlock()
@@ -3039,7 +3144,17 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	deletedKind := flt.deleteMock(mock.TestModeInfo, mock)
 	m.treesMu.Unlock()
 
-	if deletedGlobal {
+	// consumed: the per-test tree held it and the consume counts. A
+	// carry-over mock the app consumed as it started is not consumed again
+	// (bootConsumed: a copy test-1's staging filed before that consume
+	// landed), and a mock the previous set pooled is not this set's
+	// (errPreviousSet): either leaves the tree without it and reports it not
+	// consumed, so the caller matches again against the pool.
+	consumed := deletedGlobal
+	if deletedGlobal && models.IsCarryOver(&mock) && m.bootConsumed(&mock) {
+		consumed = false
+	}
+	if consumed {
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:             mock.Name,
 			Kind:             mock.Kind,
@@ -3054,8 +3169,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
-		}); err != nil {
-			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}, mock.TestModeInfo.StagedSet); err != nil {
+			if errors.Is(err, errPreviousSet) {
+				consumed = false
+			} else {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
 		}
 	}
 
@@ -3067,7 +3186,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 		m.bumpRevisionAll()
 	}
 	if deletedGlobal {
-		return true
+		return consumed
 	}
 
 	// Not in the per-test tier. Fall back to the startup tier before reporting
@@ -3091,13 +3210,20 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	if m.deleteStartupMock(mock) {
 		return true
 	}
-	// Last, the carry-over tier (RegisterCarryOver kinds only): a mock
+	// Last, the carry-over tier (models.CarryOverKind kinds only): a mock
 	// reachable outside its own window, consumed by whichever test the
 	// application happened to publish it in. Deleted, like any consumed
 	// per-test mock, so the agent's next load filters it out; CarryOver, so
 	// the replay attributes it to its own window.
 	if models.CarryOverKind(mock.Kind) {
 		if mk, ok := m.carry.take(mock); ok {
+			// Not one the app consumed as it started, and only of this set's
+			// pool, as at the per-test door above.
+			if m.bootConsumed(mk) {
+				m.bumpRevisionKind(mk.Kind)
+				m.bumpRevisionAll()
+				return false
+			}
 			if err := m.flagMockAsUsed(models.MockState{
 				Name:             mk.Name,
 				Kind:             mk.Kind,
@@ -3113,7 +3239,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				Variables:        variablesOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
 				CarryOver:        true,
-			}); err != nil {
+			}, mk.TestModeInfo.StagedSet); err != nil {
+				if errors.Is(err, errPreviousSet) {
+					m.bumpRevisionKind(mk.Kind)
+					m.bumpRevisionAll()
+					return false
+				}
 				m.logger.Error("failed to flag carry-over mock as used", zap.Error(err))
 			}
 			m.bumpRevisionKind(mk.Kind)
@@ -3130,6 +3261,9 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	case exactServed:
 		return true
 	case exactRefused:
+		return false
+	}
+	if m.stalePooled(&mock) {
 		return false
 	}
 	m.treesMu.RLock()
@@ -3171,8 +3305,15 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
-		}); err != nil {
-			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}, mock.TestModeInfo.StagedSet); err != nil {
+			if errors.Is(err, errPreviousSet) {
+				// The previous set's pool: not this set's consume. The
+				// tree changed all the same.
+				m.bumpRevisionAll()
+				deletedGlobal = false
+			} else {
+				m.logger.Error("failed to flag mock as used", zap.Error(err))
+			}
 		}
 	}
 
@@ -3231,9 +3372,29 @@ func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 	case exactRefused:
 		return false
 	}
+	if m.stalePooled(&mock) {
+		return false
+	}
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
+	return m.deleteStartupMockFrom(tree, mock)
+}
+
+// stalePooled reports whether mk was pooled for an earlier test set
+// (TestModeInfo.StagedSet): a consume door refuses it before it touches a
+// tree, since a door that matches by name would take this set's same-named
+// mock for it.
+func (m *MockManager) stalePooled(mk *models.Mock) bool {
+	g := mk.TestModeInfo.StagedSet
+	return g != 0 && g != m.setGen.Load()
+}
+
+// deleteStartupMockFrom is deleteStartupMock on tree, the startup tier the
+// caller read: a consume that read it before a staging replaced it consumes
+// from it, and is judged by it (TreeDb.bootBuilt, the generation of the mock
+// it holds).
+func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool {
 	if tree == nil {
 		return false
 	}
@@ -3268,10 +3429,34 @@ func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 		// filtered slice the startup tier is REBUILT from. Flagging Deleted
 		// here would drop the boot mock permanently and break a driver
 		// reconnect that legitimately replays the bootstrap chain.
+		//
+		// A carry-over mock (models.IsCarryOver: a registered kind's, or a
+		// StagingRelease need's) is consumed once, wherever it is served
+		// from: a publish, or a message the app received, happens once, and
+		// the startup tier holds one only because it was recorded before the
+		// first test or loaded for the app's startup ahead of its window. It
+		// is Deleted, so the next load filters it out once the replay drained
+		// it, and CarryOver, so the replay does not re-arm it: consumed before
+		// the first test it is mapped to the startup section, later by its
+		// own window. One the app consumed as it started is consumed once:
+		// another consume of it (a copy a staging filed before the replay
+		// drained the first) is refused, and every later staging leaves it
+		// out (bootTaken).
+		usage, carried := models.Updated, m.consumedOutOfWindow(*mk)
+		if models.IsCarryOver(mk) {
+			usage, carried = models.Deleted, true
+			if tree.bootBuilt && !m.exact.fired.Load() {
+				if !m.takeBootOnce(mk) {
+					return false
+				}
+			} else if m.bootConsumed(mk) {
+				return false
+			}
+		}
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:             mk.Name,
 			Kind:             mk.Kind,
-			Usage:            models.Updated,
+			Usage:            usage,
 			IsFiltered:       mk.TestModeInfo.IsFiltered,
 			SortOrder:        mk.TestModeInfo.SortOrder,
 			Type:             mk.Spec.Metadata["type"],
@@ -3288,8 +3473,11 @@ func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
 			// as a late push through MarkMockAsUsed is: the replay keeps it
 			// whatever the running test's verdict and maps it to the
 			// startup section.
-			CarryOver: m.consumedOutOfWindow(*mk),
-		}); err != nil {
+			CarryOver: carried,
+		}, mk.TestModeInfo.StagedSet); err != nil {
+			if errors.Is(err, errPreviousSet) {
+				return false
+			}
 			m.logger.Error("failed to flag startup mock as used", zap.Error(err))
 		}
 		// Bump the global revision so any cached snapshot held by a
@@ -3359,9 +3547,10 @@ func (m *MockManager) SeedStartupCutoff(start time.Time) {
 // Consumers read it through RecordedWindows, to release traffic that the test
 // windows do not pace by themselves at the recorded window it belongs to.
 //
-// It is kept only while a kind has registered a carry-over predicate
-// (models.CarryOverRegistered): every reader is the carry-over tier or the
-// parser of a kind that paces by the windows, and such a kind registers one.
+// It is kept only while a kind has registered a carry-over predicate or a
+// StagingRelease need (models.CarryOverRegistered): every reader is the
+// carry-over tier or the parser of a kind that paces by the windows, and such
+// a kind registers one.
 // With none registered the schedule (about 92 bytes a test, for the whole set)
 // would be read by nobody, so it is not built, the staging call's windows are
 // garbage once the call returns, and no schedule is left installed or parked.
@@ -3383,7 +3572,7 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 		}
 		m.swapMu.Unlock()
 		if m.logger != nil {
-			m.logger.Debug("recorded test windows not kept: no kind registered a carry-over predicate",
+			m.logger.Debug("recorded test windows not kept: no kind registered a carry-over predicate or a StagingRelease need",
 				zap.Int("windows", len(ws)))
 		}
 		return
@@ -3475,6 +3664,9 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	case exactRefused:
 		return false
 	}
+	if m.stalePooled(&mock) {
+		return false
+	}
 	m.bumpHitCount(mock.Name, mock.Kind)
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:             mock.Name,
@@ -3499,7 +3691,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
-	}); err != nil {
+	}, mock.TestModeInfo.StagedSet); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -3757,7 +3949,17 @@ func bindsOf(spec models.MockSpec) map[string]models.MockVariables {
 // order; subsequent calls for the same name update the stored state in-place
 // without changing its position. This preserves true network call order in
 // GetConsumedMocks.
-func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
+// errPreviousSet is flagMockAsUsed refusing a consume of a mock an earlier
+// set's staging pooled (TestModeInfo.StagedSet): the consume door that asked
+// reports it not consumed.
+var errPreviousSet = errors.New("the mock was pooled for an earlier test set")
+
+// flagMockAsUsed records a consume. staged is the consumed mock's
+// TestModeInfo.StagedSet: a consume of a mock pooled under an earlier set
+// generation is refused with errPreviousSet, checked under consumedMu with
+// the record, as the fence moves the generation with its drop (zero: not
+// checked).
+func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
@@ -3766,6 +3968,10 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	}
 	inScope := mock.Lifetime == models.LifetimePerTest && m.scopeIsOpen()
 	m.consumedMu.Lock()
+	if staged != 0 && staged != m.setGen.Load() {
+		m.consumedMu.Unlock()
+		return errPreviousSet
+	}
 	// Under the proven switch what record's full round learned onto a mock
 	// is cumulative across its states: a reusable recording the learn step
 	// pairs twice keeps both pairings' variables, binds and noise, whichever
@@ -4011,6 +4217,148 @@ func (m *MockManager) fileCarryOver(oldPerTest *TreeDb, carryIn, newPerTest []*m
 	return changed
 }
 
+// ArmSetFence tells the manager that the session ResetForReplaySession just
+// reset starts a test set of the replay (models.OutgoingOptions.StartsTestSet),
+// not a re-registration of the current set with an agent the replay took for
+// replaced. The set's boundary staging then drops what was consumed before it
+// and not drained: the previous set's pool's consumes, under that set's mock
+// names, which every set numbers afresh, so a drain must never hand them to
+// this one (a Deleted mock-7 there drops this set's unrelated mock-7 from
+// every load). Until that staging installs the set's pool, whatever the app
+// consumes is still of the previous one. A re-registration arms nothing: it
+// comes before any of the set's tests, and what the app consumed as it
+// started is the set's own.
+func (m *MockManager) ArmSetFence() {
+	m.swapMu.Lock()
+	m.setFence = true
+	m.swapMu.Unlock()
+}
+
+// dropPreviousSetConsumes starts a new set generation and empties what the
+// previous set's pool was consumed of and nobody drained, at a fenced set
+// boundary (ArmSetFence), right before the staging publishes the new trees:
+// the consumes not drained yet, the agent-owned history a session that
+// outlived the reset kept adding to, and bootTaken. The generation moves
+// under consumedMu, with the drop, so a consume of the previous set's pool
+// flags before both or is refused after (flagMockAsUsed). Caller holds
+// swapMu; consumedMu and bootTakenMu are leaves.
+func (m *MockManager) dropPreviousSetConsumes() {
+	m.consumedMu.Lock()
+	m.setGen.Add(1)
+	dropped := len(m.consumedList)
+	m.consumedList = m.consumedList[:0]
+	m.consumedIndex = make(map[string]int)
+	if m.consumedPersistent != nil {
+		m.consumedPersistent = make(map[string]models.MockState)
+	}
+	m.consumedMu.Unlock()
+	m.bootTakenMu.Lock()
+	m.bootTaken = nil
+	m.bootTakenMu.Unlock()
+	if dropped > 0 && m.logger != nil {
+		m.logger.Debug("a new test set's staging dropped the consumes the previous set's pool was not drained of; they were the previous set's",
+			zap.Int("dropped", dropped))
+	}
+}
+
+// takeBootOnce records the consume of a carry-over mock the app made as it
+// started (bootTaken), and reports whether it is the first: another is
+// refused, and so is one of a mock pooled for an earlier set.
+func (m *MockManager) takeBootOnce(mk *models.Mock) bool {
+	k := carryKeyOf(mk)
+	m.bootTakenMu.Lock()
+	defer m.bootTakenMu.Unlock()
+	// One pooled for an earlier set records nothing: the fence moves the
+	// generation before it empties bootTaken.
+	if g := mk.TestModeInfo.StagedSet; g != 0 && g != m.setGen.Load() {
+		return false
+	}
+	if _, taken := m.bootTaken[k]; taken {
+		return false
+	}
+	if m.bootTaken == nil {
+		m.bootTaken = make(map[carryKey]struct{})
+	}
+	m.bootTaken[k] = struct{}{}
+	return true
+}
+
+// bootConsumed reports whether the app consumed mk, a carry-over mock, as it
+// started (bootTaken).
+func (m *MockManager) bootConsumed(mk *models.Mock) bool {
+	m.bootTakenMu.Lock()
+	defer m.bootTakenMu.Unlock()
+	_, taken := m.bootTaken[carryKeyOf(mk)]
+	return taken
+}
+
+// forgetBootTaken forgets the startup consumes of the named mocks
+// (RestartExactKey: a retried package's pool is served afresh).
+func (m *MockManager) forgetBootTaken(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	m.bootTakenMu.Lock()
+	for k := range m.bootTaken {
+		if _, ok := set[k.name]; ok {
+			delete(m.bootTaken, k)
+		}
+	}
+	m.bootTakenMu.Unlock()
+}
+
+// withoutBootCarry is mocks less the carry-over mocks the app consumed as it
+// started (bootTaken); mocks itself when there are none.
+func (m *MockManager) withoutBootCarry(mocks []*models.Mock) []*models.Mock {
+	m.bootTakenMu.Lock()
+	defer m.bootTakenMu.Unlock()
+	if len(m.bootTaken) == 0 {
+		return mocks
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, mk := range mocks {
+		if mk != nil && models.IsCarryOver(mk) {
+			if _, taken := m.bootTaken[carryKeyOf(mk)]; taken {
+				continue
+			}
+		}
+		out = append(out, mk)
+	}
+	return out
+}
+
+// stagingCarryOverRange is CarryOverLoadRange for a set's staging call, before
+// its app starts: the app's startup is the window then. A carry-over mock
+// recorded at t is reachable from it while the release window of
+// t - models.CarryOverLookahead is the startup band, before the set's first
+// recorded window: up to carryLoadHorizon of a start before every window,
+// the first window's start plus the lookahead, that end excluded. It is
+// loaded from the startup cutoff on: those recorded before the cutoff are in
+// the startup band the staging reads anyway. The cutoff and windows are the
+// set's as seeded for it (cutoffSeeded, windowsSeeded) while its staging has
+// not installed them, else the installed ones (a set staged again). ok is
+// false with no recorded windows, no cutoff, or an empty range.
+func (m *MockManager) stagingCarryOverRange() (from, to time.Time, ok bool) {
+	m.swapMu.RLock()
+	cutoff, sched := m.firstWindowStart, m.recordedWindows.Load()
+	if m.boundaryPending {
+		cutoff, sched = m.cutoffSeeded, m.windowsSeeded
+	}
+	m.swapMu.RUnlock()
+	if sched.Len() == 0 || cutoff.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	to = carryLoadHorizon(sched, models.BaseTime)
+	if to.Before(cutoff) {
+		return time.Time{}, time.Time{}, false
+	}
+	return cutoff, to, true
+}
+
 // carryLoadHorizon is the latest recorded time a registered mock can have and
 // still be reachable while the window that starts at start is current.
 func carryLoadHorizon(sched *models.WindowSchedule, start time.Time) time.Time {
@@ -4025,8 +4373,8 @@ func carryLoadHorizon(sched *models.WindowSchedule, start time.Time) time.Time {
 // representable.
 var maxRecordedTime = time.Unix(0, math.MaxInt64)
 
-// CarryOverLoadRange tells the agent which recorded-time range of registered
-// (RegisterCarryOver) per-test mocks to load, beside the window's own mocks,
+// CarryOverLoadRange tells the agent which recorded-time range of carry-over
+// mocks (models.IsCarryOver: RegisterCarryOver, a StagingRelease need) to load, beside the window's own mocks,
 // for the window that starts at start: from where the previous window's load
 // ended (or from the set's start, on the first window of a pass or when a
 // pass goes back to an earlier window) up to the latest recorded time this
@@ -4035,10 +4383,15 @@ var maxRecordedTime = time.Unix(0, math.MaxInt64)
 // ones into the carry-over tier and advances the range.
 //
 // ok is false when there is nothing to load: no registered kind, no recorded
-// windows (the replayer did not send them), a staging call, or an empty range.
+// windows (the replayer did not send them), or an empty range. A staging call
+// (start at models.BaseTime) loads what the app's startup reaches
+// (stagingCarryOverRange).
 func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool) {
-	if !models.CarryOverRegistered() || start.IsZero() || start.Equal(models.BaseTime) {
+	if !models.CarryOverRegistered() || start.IsZero() {
 		return time.Time{}, time.Time{}, false
+	}
+	if start.Equal(models.BaseTime) {
+		return m.stagingCarryOverRange()
 	}
 	sched := m.recordedWindows.Load()
 	if sched.Len() == 0 {
@@ -4062,10 +4415,11 @@ func (m *MockManager) CarryOverLoadRange(start time.Time) (from, to time.Time, o
 	return from, to, true
 }
 
-// GetCarryOverMocks returns the carry-over tier (see RegisterCarryOver) in
-// recorded order: registered per-test mocks reachable outside their own
-// window. A parser serves them after the running test's own mocks and consumes
-// them through DeleteFilteredMock. Empty while no kind is registered.
+// GetCarryOverMocks returns the carry-over tier (see RegisterCarryOver and
+// models.StagingRelease) in recorded order: carry-over mocks reachable outside
+// their own window. A parser serves them after the running test's own mocks
+// and consumes them through DeleteFilteredMock. Empty while nothing is
+// registered.
 func (m *MockManager) GetCarryOverMocks() ([]*models.Mock, error) {
 	if v := m.exactView(); v != nil {
 		return v.keep(m.carry.snapshot("")), nil
@@ -4081,11 +4435,13 @@ func (m *MockManager) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock,
 	return m.carry.snapshot(kind), nil
 }
 
-// consumedOutOfWindow reports whether a per-test mock of a RegisterCarryOver
-// kind is being consumed while a window that does not contain it is current —
-// a server push delivered after its window, consumed through MarkMockAsUsed.
+// consumedOutOfWindow reports whether a per-test mock that marks so
+// (models.MarksOutOfWindow: any of a RegisterCarryOver kind, those a
+// StagingRelease need declares) is being consumed while a window that does not
+// contain it is current — a server push delivered after its window, consumed
+// through MarkMockAsUsed.
 func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
-	if mock.TestModeInfo.Lifetime != models.LifetimePerTest || !models.CarryOverKind(mock.Kind) {
+	if !models.MarksOutOfWindow(&mock) {
 		return false
 	}
 	req := mock.Spec.ReqTimestampMock

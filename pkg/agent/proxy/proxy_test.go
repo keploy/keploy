@@ -495,7 +495,7 @@ func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
 		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
 		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
 	} {
-		if err := mm.flagMockAsUsed(st); err != nil {
+		if err := mm.flagMockAsUsed(st, 0); err != nil {
 			t.Fatalf("flagMockAsUsed: %v", err)
 		}
 	}

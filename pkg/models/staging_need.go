@@ -35,12 +35,43 @@ const (
 	// test refiles that tier to what was recorded before it, as for every
 	// staged mock: a parser that needs a declared mock later keeps it.
 	//
-	// A carry-over mock (RegisterCarryOver) is never staged so: carry-over
-	// keeps it reachable from its own release window, and staging it too
-	// would leave two copies reachable.
+	// A carry-over mock (models.IsCarryOver: RegisterCarryOver, a
+	// StagingRelease need) is never staged so: carry-over keeps it
+	// reachable from its own release window, and staging it too would leave
+	// two copies reachable.
 	//
 	// The need's Match is required.
 	StagingWithStartup StagingUse = iota + 1
+
+	// StagingRelease releases the declared mocks by their recorded window,
+	// as carry-over does (RegisterCarryOver): each is reachable from the
+	// release window of its recorded time less models.CarryOverLookahead
+	// (models.WindowSchedule: the first recorded test whose window holds
+	// it, else the latest that started before it; before every test, the
+	// app's startup) until it is consumed, and it is consumed once, from
+	// whichever tier serves it. One recorded before the first test is
+	// startup traffic; the set's staging also loads those the app's startup
+	// reaches; the agent loads the rest ahead of their window, and one left
+	// unconsumed past its window, one recorded in the gap after a test
+	// included, which no test's own window holds, moves to the carry-over
+	// tier. The parser serves the carry-over tier
+	// (GetCarryOverMocksByKind) after the running test's own mocks and
+	// consumes from it through DeleteFilteredMock, as for RegisterCarryOver.
+	//
+	// It is for a recorded message an app receives asynchronously, whose
+	// delivery at replay must follow its place in the recording rather than
+	// a test's window: a queue consumer's long poll recorded between tests
+	// is served to the poll the app makes after the test before it, and one
+	// recorded before the first test, to the app's first poll, once.
+	//
+	// Unlike RegisterCarryOver, which marks every per-test mock of its kind
+	// consumed outside the current window CarryOver, the need's Match alone
+	// decides both what the carry-over tier keeps and what such a consume
+	// marks (models.MarksOutOfWindow): the kind's other mocks are untouched,
+	// so a kind as wide as HTTP can declare a few of its mocks.
+	//
+	// The need's Match is required.
+	StagingRelease
 )
 
 // StagingNeed is one declaration of what a parser needs of a test set's
@@ -68,11 +99,16 @@ func RegisterStagingNeed(kind Kind, need StagingNeed) (unregister func()) {
 			panic(fmt.Sprintf("models.RegisterStagingNeed(%s): StagingWithStartup needs a Match", kind))
 		}
 		return stagedHooks.add(kind, need.Match)
+	case StagingRelease:
+		if need.Match == nil {
+			panic(fmt.Sprintf("models.RegisterStagingNeed(%s): StagingRelease needs a Match", kind))
+		}
+		return releaseHooks.add(kind, need.Match)
 	}
 	panic(fmt.Sprintf("models.RegisterStagingNeed(%s): unknown use %d", kind, need.Use))
 }
 
-var stagedHooks mockPredicates
+var stagedHooks, releaseHooks mockPredicates
 
 // IsStagedAtStaging reports whether m is a per-test mock that a
 // StagingWithStartup need accepts: the set's staging stages it when it was
