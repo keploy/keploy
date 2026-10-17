@@ -939,6 +939,7 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	cmd.Stderr = &out // The output we need is printed to STDERR
 
 	err := cmd.Run()
+	utils.BootStep() // a step of the agent's start: a JVM's run is over
 	if err != nil {
 		select {
 		case <-ctx.Done():
