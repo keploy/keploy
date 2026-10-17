@@ -212,6 +212,9 @@ func TestTheAppsKillIsSaidBeforeADaemonsStallKill(t *testing.T) {
 	}
 	defer stop()
 	stopCheck, stopStallChecks = 20*time.Millisecond, 10
+	budget := utils.StopStallBudget
+	utils.StopStallBudget = 300 * time.Millisecond
+	t.Cleanup(func() { utils.StopStallBudget = budget })
 	dir := t.TempDir()
 	daemonPid, ready := filepath.Join(dir, "daemon"), filepath.Join(dir, "ready")
 	client := newRunClient(fmt.Sprintf(`(setsid sh -c 'trap "" INT TERM; echo $$ > %s; exec sleep 600' &); trap "" INT; touch %s; exec sleep 600`, daemonPid, ready))
@@ -231,7 +234,7 @@ func TestTheAppsKillIsSaidBeforeADaemonsStallKill(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	cancel(models.ErrAppStoppedForSetEnd)
 	appErr := <-done
-	if !strings.Contains(appErr.StopKilled, "had not exited") || strings.Contains(appErr.StopKilled, "made no progress") {
+	if !strings.Contains(appErr.StopKilled, "after keploy interrupted it, so keploy killed it") || strings.Contains(appErr.StopKilled, "which the application left running") {
 		t.Fatalf("the run said %q; want the app's kill, and only it", appErr.StopKilled)
 	}
 	if parentIs(pid, os.Getpid()) {

@@ -34,10 +34,12 @@
 #      non-zero, the report names the call among those made after the set's
 #      last test, and c-ping, whose answer it followed, passes.
 #
-#   8. An app that ignores SIGINT: keploy's stop at the set's end kills it
-#      once the stop's grace runs out, and the set is not judged (what the app
-#      would have done as it stopped is not known): keploy test exits
-#      non-zero, and the report names the kill and the grace.
+#   8. An app that ignores SIGINT: keploy's stop at the set's end waits for
+#      its exit, and kills it once it has made no progress on its way out for
+#      the stall bound of keploy's runnable time (a minute), and the set is
+#      not judged (what the app would have done as it stopped is not known):
+#      keploy test exits non-zero, and the report names the kill and the
+#      stall.
 #
 #   9. The app of 6 and 7, started in the background by its shell
 #      (`app & wait`), its shutdown taking 5 s before it publishes, and a
@@ -52,9 +54,10 @@
 #      set is not judged: keploy test exits non-zero, and the report names
 #      the kill.
 #
-#  11. A recording whose stop had to kill the app (its shutdown takes 5 s,
-#      past the stop's 3 s grace, so its shutdown publish is not recorded):
-#      keploy record says so in the test-set's config (recordStopKilled).
+#  11. A recording whose stop had to kill the app (its shutdown never ends
+#      once it is stopping, HANG_ON_STOP, so keploy record kills it on the
+#      stall rule, and its shutdown publish is not recorded): keploy record
+#      says so in the test-set's config (recordStopKilled).
 #      A replay whose app publishes on its way out at once makes a call the
 #      recording lacks: the set is not judged, keploy test exits non-zero,
 #      and the report names the recording's kill. It is not failed for a
@@ -309,10 +312,11 @@ replay ignores as-recorded http
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
     fail "8 (an app that ignores SIGINT): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q 'so keploy killed it' ||
-    fail "8 (an app that ignores SIGINT): the report does not name the kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
+# (The report's YAML doubles an apostrophe: keploy''s.)
+grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "made no progress on its way out for .* runnable time after keploy interrupted it, so keploy killed it" ||
+    fail "8 (an app that ignores SIGINT): the report does not name the kill and the stall: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
-APP_ENV="SHUTDOWN_PUBLISH=1 SHUTDOWN_DELAY=5s"
+APP_ENV="SHUTDOWN_PUBLISH=1 HANG_ON_STOP=1"
 # record_cut <dir>: a recording of /c-ping by that app, whose stop keploy
 # record has to cut.
 record_cut() {

@@ -16,12 +16,19 @@ import (
 // before it reads what the app did after the set's last test (P101-b), so a
 // call the app makes as it stops is judged with the rest. That stop is the
 // teardown's own, the one keploy record stops the app with too: an interrupt,
-// then a grace (utils.TreeInterruptGrace for each of a native app's process
-// groups, graceBudget for a docker run app), then a kill. Record and replay
-// so give a shutdown the same grace. A kill cuts the shutdown short, and what
-// the app would have done as it stopped is then not known, so the stop says
-// when it had to kill (AppError.StopKilled), and the set's end is not judged,
-// naming the stop and its grace.
+// then a wait for the app's exit event (each of a native app's process
+// groups' leaders exiting, read on its pidfd; a docker run app's container
+// stopping: the daemon's wait, its main process's exit, its client's exit),
+// then a kill only when the app made no progress on its way out for
+// utils.StopStallBudget of keploy's runnable time (utils.WaitExitByEvents;
+// the watchdog's stall bound), or at the user's Ctrl+C, which the stop offers
+// once the run is interrupted. A starved host, keploy with it, takes as long
+// as it takes, and is no kill; an app starved alone has the stall bound to
+// show progress in. The drains wait for the stop (utils.BeginAppStop).
+// Record and replay so stop the app the same way. A kill cuts the shutdown
+// short, and what the app would have done as it stopped is then not known,
+// so the stop says when it had to kill (AppError.StopKilled), and the set's
+// end is not judged, naming the stop and why it killed.
 //
 // The stop waits for each of a native app's process groups by its leader. A
 // member that outlives its leader (the app of `app & wait`, whose shell dies
@@ -34,14 +41,16 @@ import (
 // is not waited for; and on Windows the stop waits for the tree's root only
 // (P101-b-o-2).
 //
-// The grace is still a clock. A shutdown near it is killed on a loaded host
-// and not on an idle one, so its set can be judged in one run and not in the
-// next. keploy record's stop says when it had to kill too (noteRecordKill),
-// and the recording says so in its test-set's config
-// (models.TestSet.RecordStopKilled): a replay does not judge a call its app
-// makes after the set's last test, which the cut recording may lack
-// (P101-b-k). A stop for both that waits on the app's exit, with no grace
-// clock, is pre-flip.
+// keploy record's stop says when it had to kill too (noteRecordKill), and the
+// recording says so in its test-set's config (models.TestSet.RecordStopKilled):
+// a replay does not judge a call its app makes after the set's last test,
+// which the cut recording may lack (P101-b-k).
+//
+// Off Linux there is no /proc to read an app's progress on its way out, so
+// the stop there keeps its grace (utils.TreeInterruptGrace, graceBudget, on
+// Windows windowsInterruptGrace), a clock: a shutdown near it is killed on a
+// loaded host and not on an idle one. A docker compose app's stop moves to
+// the same exit event with P101-c.
 
 // stopsForSetEnd reports whether ctx was cancelled to stop the app at its
 // test set's end (models.ErrAppStoppedForSetEnd).
