@@ -919,7 +919,7 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	_, err := interruptProcessTree(logger, ppid, sig)
+	_, _, err := interruptProcessTree(logger, ppid, sig, nil)
 	return err
 }
 
@@ -933,7 +933,27 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // InterruptProcessTree, it waits for each group's leader, not for the rest of
 // the group.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
-	return interruptProcessTree(logger, ppid, sig)
+	killed, _, err = interruptProcessTree(logger, ppid, sig, nil)
+	return killed, err
+}
+
+// Reached is a process that a signal sent to its process group reached: its
+// pid and its start time (in clock ticks after boot, as /proc/<pid>/stat
+// gives it), which together name it while it runs, and whether it ignored
+// the signal when the signal was sent.
+type Reached struct {
+	PID     int
+	Start   uint64
+	Ignores bool
+}
+
+// InterruptProcessTreeReached is InterruptProcessTreeKilled, and also says
+// which processes its signals reached: each process of a group it signalled,
+// as /proc showed that group just before its signal, and whether the process
+// ignored the signal then. A process the group gained as /proc was read is
+// not among them. Off Linux it says none.
+func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached)
 }
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
@@ -944,7 +964,9 @@ const TreeInterruptGrace = 3 * time.Second
 // the tree to exit after its CTRL_BREAK before it ends it with taskkill.
 const windowsInterruptGrace = 10 * time.Second
 
-func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
+// interruptProcessTree is the work of the three above. snapshot, when set,
+// reads which processes a group's signal is about to reach.
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached) (killed string, reached []Reached, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -976,7 +998,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 				}
 				if running, err := isProcessRunning(ppid); err == nil && !running {
-					return "", nil
+					return "", nil, nil
 				}
 			} else {
 				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
@@ -1034,7 +1056,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 		}
-		return killed, nil
+		return killed, nil, nil
 	}
 
 	// Non-windows (existing logic)
@@ -1068,6 +1090,10 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
+		var members []Reached
+		if snapshot != nil {
+			members = snapshot(pid, sig)
+		}
 		err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
@@ -1078,6 +1104,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 			continue
 		}
+		reached = append(reached, members...)
 		// Wait for this particular process to exit with a timeout of 3 seconds
 		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
 		if err != nil {
@@ -1101,7 +1128,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 		}
 	}
-	return killed, nil
+	return killed, reached, nil
 }
 
 // processTree and signalGroup are the tree interrupt's reads of the process

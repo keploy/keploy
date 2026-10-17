@@ -26,6 +26,7 @@ import (
 	mobyclient "github.com/moby/moby/client"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -123,6 +124,9 @@ type App struct {
 	// stopped is what readStoppedAgent read from the keploy-agent compose
 	// service's container after compose stopped it.
 	stopped stoppedAgent
+	// stopReached is what the latest stop of a native app reached with its
+	// interrupt, under the proven switch, until TakeStopReached takes it.
+	stopReached atomic.Pointer[[]utils.Reached]
 }
 
 func (a *App) Setup(ctx context.Context) error {
@@ -1884,7 +1888,18 @@ func (a *App) run(ctx context.Context) models.AppError {
 				}
 				return err
 			}
-			killed, err := utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
+			var killed string
+			var err error
+			if provenswitch.On() {
+				// What the interrupt reached and acts on is stopping:
+				// the stop of what the app leaves behind waits for it
+				// rather than ask it again (TakeStopReached).
+				var reached []utils.Reached
+				killed, reached, err = utils.InterruptProcessTreeReached(a.logger, cmd.Process.Pid, syscall.SIGINT)
+				a.stopReached.Store(&reached)
+			} else {
+				killed, err = utils.InterruptProcessTreeKilled(a.logger, cmd.Process.Pid, syscall.SIGINT)
+			}
 			if killed != "" && setEnd {
 				a.noteSetEndKill("keploy interrupted the application at the set's end and " + killed)
 			}

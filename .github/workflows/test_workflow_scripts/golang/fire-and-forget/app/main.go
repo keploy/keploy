@@ -2,7 +2,8 @@
 // publish to a broker that it does not wait for (fire and forget), with SUFFIX
 // appended to the message; /b-other takes 3 s; /c-ping answers at once.
 // With SHUTDOWN_PUBLISH set it publishes "shutdown" as it is stopped; with
-// IGNORE_INT set it ignores SIGINT.
+// IGNORE_INT set it ignores SIGINT; ONE_SIGNAL and HANG_ON_STOP shape how it
+// stops (below).
 //
 // PROTO says how it publishes:
 //   - http: an HTTP POST on a connection of its own (no keep-alive);
@@ -229,7 +230,18 @@ func main() {
 		}
 	}()
 	<-stop.Done()
+	// ONE_SIGNAL: once stopped, the app lets a second signal end it, as Go's
+	// signal.NotifyContext documents (its stop called): a second signal cuts
+	// its shutdown.
+	if os.Getenv("ONE_SIGNAL") != "" {
+		cancel()
+	}
 	_ = srv.Shutdown(context.Background())
+	// HANG_ON_STOP: once stopped, the app never ends, and makes no progress
+	// on its way out.
+	if os.Getenv("HANG_ON_STOP") != "" {
+		time.Sleep(24 * time.Hour)
+	}
 	// SHUTDOWN_DELAY: its shutdown takes this long before it publishes.
 	if d, err := time.ParseDuration(os.Getenv("SHUTDOWN_DELAY")); err == nil {
 		time.Sleep(d)
