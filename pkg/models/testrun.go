@@ -48,6 +48,12 @@ type TestReport struct {
 	// test that no mock answered (proven switch): a pool miss no later test
 	// takes. They fail the set; JUnit fails a case of its own with them.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// AppNotStopped, under the proven switch, says why keploy read the set's
+	// end with its application still running (a stack kept across test-sets,
+	// --keep-app-alive, an application keploy did not start): a call the
+	// application made after that read is not judged (P101-c). The set's
+	// verdict is what the read found.
+	AppNotStopped string `json:"appNotStopped,omitempty" yaml:"app_not_stopped,omitempty"`
 	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
 	// so its results carry the proven model's evidence: a report renders it
 	// from this, not from the switch of the process rendering it. Set on
