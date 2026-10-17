@@ -82,6 +82,15 @@ type CaptureLossErrReporter interface {
 	CaptureLossesErr() error
 }
 
+// ReadinessReporter is the optional extension implemented by hooks that can
+// tell, under the proven switch, whether the application listens and whether
+// its start is going on (models.AppReadiness). An error is "unknown", never
+// "not ready".
+type ReadinessReporter interface {
+	AppReadiness(since uint64) (models.AppReadiness, error)
+	MarkReadiness() (models.AppReadiness, error)
+}
+
 // ListenerCounter is what the hooks give the proxy so that the kernel counts,
 // and numbers, the connections completed to the proxy's listener.
 type ListenerCounter interface {

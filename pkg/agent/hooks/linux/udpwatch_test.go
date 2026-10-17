@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -112,5 +114,42 @@ func TestTheUDPWatchsMapsCostNothingWithoutTheSwitch(t *testing.T) {
 	}
 	if off["udp_peer_first"] != 1 || off["udp_member_addrs"] != 1 || off["udp_reply_events"] != uint32(os.Getpagesize()) {
 		t.Fatalf("with the switch off: %v, want one entry each and one page of ring", off)
+	}
+}
+
+// Every map of the proven switch's UDP and readiness watches (udp_*,
+// ready_*) the kernel allocates whole at load costs a page at most with the
+// switch off: a ring buffer one page, a preallocated hash or array a page's
+// worth of entries (64 bytes counted for each one's overhead). A map added
+// later, and not listed in unswitchedMaps, fails it.
+func TestEverySwitchOnlyMapCostsAPageAtMostWithoutTheSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	spec, err := hookSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shrinkUnswitchedMaps(spec)
+	page := os.Getpagesize()
+	checked := 0
+	for name, m := range spec.Maps {
+		if !strings.HasPrefix(name, "udp_") && !strings.HasPrefix(name, "ready_") {
+			continue
+		}
+		checked++
+		switch {
+		case m.Type == ebpf.RingBuf:
+			if int(m.MaxEntries) > page {
+				t.Errorf("%s: a ring of %d bytes with the switch off, want one page (%d)", name, m.MaxEntries, page)
+			}
+		case m.Flags&unix.BPF_F_NO_PREALLOC != 0:
+			// Allocated as it fills, and nothing fills it with the switch off.
+		default:
+			if cost := int(m.MaxEntries) * (int(m.KeySize+m.ValueSize) + 64); cost > page {
+				t.Errorf("%s: %d entries, about %d bytes allocated at load with the switch off, want a page at most (list it in unswitchedMaps)", name, m.MaxEntries, cost)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("the object has no udp_ or ready_ map")
 	}
 }

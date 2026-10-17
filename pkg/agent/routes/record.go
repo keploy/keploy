@@ -154,6 +154,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
+		// The application's listens and its start's progress, for keploy
+		// test's readiness under the proven switch (readiness.go).
+		r.Get("/app/readiness", a.HandleAppReadiness)
+		r.Post("/app/readiness/mark", a.HandleAppReadinessMark)
 		r.Get("/mock/captured", a.HandleCapturedMocks)
 		// Pollable, non-draining view of which mocks have been served. Distinct
 		// from /consumedmocks, which drains and is read once at end of run.

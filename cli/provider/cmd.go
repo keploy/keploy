@@ -1588,6 +1588,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "refusing a deleted passthrough flag")
 			return err
 		}
+		if cmd.Name() == "test" {
+			if err := refuseHealthPollTimeout(cmd); err != nil {
+				utils.LogError(c.logger, err, "refusing a deleted readiness flag")
+				return err
+			}
+		}
 
 		// Before the command type: refusing an engine does not depend on it,
 		// and the --cmd-type checks would otherwise answer a podman command
@@ -2043,6 +2049,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		dropPassthroughKeys(c.logger, c.cfg, cmd.Name())
+		if cmd.Name() == "test" {
+			dropHealthPollTimeout(c.logger, c.cfg)
+		}
 
 	case "normalize":
 		var err error
