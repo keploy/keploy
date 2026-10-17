@@ -8,6 +8,12 @@ type TestSet struct {
 	Template   map[string]interface{} `json:"template" bson:"template" yaml:"template"`
 	Secret     map[string]interface{} `json:"secret" bson:"secret" yaml:"secret,omitempty"`
 	Metadata   map[string]interface{} `json:"metadata" bson:"metadata" yaml:"metadata"`
+	// RecordStopKilled, under the proven switch, says why keploy record had
+	// to kill the application it stopped at the recording's end: what the
+	// application did as it stopped is not in the recording, so a replay
+	// that makes such a call cannot judge it (P101-b-k). Empty when the
+	// stop did not kill, and always with the switch off.
+	RecordStopKilled string `json:"record_stop_killed,omitempty" bson:"record_stop_killed,omitempty" yaml:"recordStopKilled,omitempty"`
 }
 
 // Secret interface for types that support secret configuration.
