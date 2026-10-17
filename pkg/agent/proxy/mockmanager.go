@@ -359,14 +359,6 @@ type MockManager struct {
 	closeOnce   sync.Once
 	closed      atomic.Bool
 
-	// invalidOrderWarnOnce fires the first-time Info log when
-	// SetMocksWithWindow drops a mock because its response timestamp
-	// precedes its request timestamp. Logging policy disallows Warn
-	// for this; Info is prominent enough that operators see the first
-	// hit. Subsequent drops stay at Debug level (via the per-call
-	// counter) so a pathological recording doesn't flood logs.
-	invalidOrderWarnOnce sync.Once
-
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
 	// mocks on a full scan gets memoised here so subsequent matches
@@ -971,8 +963,10 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		// serialisation bug, or corrupted recording). Drop it — keeping
 		// it would just confuse downstream scoring. Counted separately
 		// from the window-containment drops so the per-test counter
-		// and debug log can distinguish the two root causes.
-		if res.Before(req) {
+		// and debug log can distinguish the two root causes, and said of
+		// once for each such mock; never under the proven switch
+		// (pkg.LeaveOutAnsweredBeforeAsked).
+		if pkg.LeaveOutAnsweredBeforeAsked(m.logger, mock) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -1360,30 +1354,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 				out = append(out, mock)
 				continue
 			}
-			// Inconsistent recording — response before request.
-			// Info-level one-shot per manager (logging policy
-			// disallows Warn here) so operators with a clock-skewed
-			// recording see a prominent one-line message pointing at
-			// the fix; subsequent drops stay on the per-call counter
-			// + Debug summary below so a pathological recording
-			// doesn't spam logs.
-			if res.Before(req) {
+			// Inconsistent recording — response before request: left
+			// out, and said of once for each such mock, since a call it
+			// recorded is answered by another mock or by none; never
+			// under the proven switch (pkg.LeaveOutAnsweredBeforeAsked).
+			if pkg.LeaveOutAnsweredBeforeAsked(m.logger, mock) {
 				droppedInvalid++
-				if m.logger != nil {
-					mockName := mock.Name
-					req := req
-					res := res
-					m.invalidOrderWarnOnce.Do(func() {
-						m.logger.Info(
-							"mock dropped: response timestamp precedes request timestamp (inconsistent recording). "+
-								"This usually indicates clock skew at record time. Mocks with this pattern are "+
-								"dropped to avoid confusing the matcher; re-record with a synchronised clock if "+
-								"these mocks are needed. Further instances will only be counted (see Debug summary).",
-							zap.String("mock", mockName),
-							zap.Time("req", req),
-							zap.Time("res", res))
-					})
-				}
 				continue
 			}
 			// Window containment on request timestamp only. Responses
@@ -2010,13 +1986,16 @@ func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
 }
 
 // inRecordedWindow is GetFilteredMocksInWindow's test of one mock against a
-// test's recorded window: its request inside it, or no recorded times.
+// test's recorded window: its request inside it, or no recorded times. A mock
+// whose response is stamped before its request is in no window, as that read
+// leaves it out, but under the proven switch, where the read keeps it
+// (pkg.LeaveOutAnsweredBeforeAsked).
 func inRecordedWindow(mk *models.Mock, start, end time.Time) bool {
 	req, res := mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock
 	if req.IsZero() || res.IsZero() {
 		return true
 	}
-	if res.Before(req) {
+	if res.Before(req) && !provenswitch.On() {
 		return false
 	}
 	return !req.Before(start) && !req.After(end)

@@ -3542,11 +3542,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// request-timestamp the recording is inconsistent (clock skew,
 		// serialisation bug, or file corruption). Skip it — keeping such
 		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -3803,11 +3799,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			filtered = append(filtered, p)
 			continue
 		}
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
