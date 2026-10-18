@@ -78,6 +78,14 @@ type IngressProxyManager struct {
 
 	ingressHook IngressHook
 
+	// portHolder is the hooks, when they hold the application's moved ports
+	// from inside their bind (ingress_lookup.c): the manager serves what its
+	// park accepts, and registers each forwarder it starts for the lookup.
+	// nil when the hooks do not implement it or hold nothing, and the
+	// forwarder covers the window as it did before (shrunk by binding the
+	// port as soon as the bind event arrives).
+	portHolder IngressPortHolder
+
 	// relocated maps an app port whose bind the record hooks moved (keploy's
 	// ingress forwarder then holds the port) to the port the app was moved
 	// to, for each forwarder that started with a known one. Guarded by mu.
@@ -119,6 +127,9 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	}
 	// Default to the Go TCP forwarder; can be replaced via SetIngressHook.
 	pm.ingressHook = newGoTCPIngressHook(pm)
+	if holder, ok := h.(IngressPortHolder); ok {
+		pm.portHolder = holder
+	}
 	return pm
 }
 
@@ -157,6 +168,9 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 	// without the gate, each reconnect would leak another watcher.
 	pm.startOnce.Do(func() {
 		go pm.ListenForIngressEvents(ctx)
+		if park := pm.ingressPark(); park != nil {
+			go pm.serveParkedConnections(ctx, park)
+		}
 	})
 	return pm.tcChan
 }
@@ -287,6 +301,10 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
 	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
+	if parked := pm.IngressParked(); parked > 0 {
+		pm.logger.Info("keploy served calls to the application's port that arrived before its forwarder listened, by holding the port from the application's bind",
+			zap.Uint64("count", parked))
+	}
 	pm.StopAll()
 }
 
@@ -322,7 +340,24 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
 
-	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+	// When keploy holds the moved port from inside the app's bind (BPF
+	// sk_lookup), its park serves a call to it until this forwarder listens,
+	// so the order below (wait for the target, then bind) leaves no window.
+	// When it does not, nothing holds the port during that wait and a call is
+	// refused; bind it first, so the window a call is refused in is only this
+	// bind, not the whole target wait. Binding early is safe: the accept loop
+	// starts below either way, and a call that arrives before it does waits in
+	// the listen backlog.
+	held := h.pm.ingressHeld()
+	var listener net.Listener
+	var err error
+	if !held {
+		if listener, err = h.bindIngress(ctx, origAppAddr); err != nil {
+			return err
+		}
+	}
+
+	if waited, err := ingressTargetWait(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
 		if err != nil {
 			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
 				zap.String("target", newAppAddr),
@@ -337,38 +372,30 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 			zap.Uint16("orig_port", origPort))
 	}
 
-	// If the agent is already shutting down, do NOT bind the ingress listener.
-	// A forwarder bound during teardown (e.g. from a late/stale bind event whose
-	// target wait above returned context.Canceled) can outlive StopAll's snapshot
-	// and linger holding the app's port (commonly 8000), so the next record run's
-	// application fails to bind it with "address already in use" — the flaky
-	// port-8000 reuse failure. Aborting here is safe: a canceled context means no
-	// ingress traffic will be served anyway.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
-			zap.String("target", newAppAddr), zap.Error(ctxErr))
-		return ctxErr
+	if held {
+		// If the agent is already shutting down, do NOT bind the ingress listener.
+		// A forwarder bound during teardown (e.g. from a late/stale bind event whose
+		// target wait above returned context.Canceled) can outlive StopAll's snapshot
+		// and linger holding the app's port (commonly 8000), so the next record run's
+		// application fails to bind it with "address already in use" — the flaky
+		// port-8000 reuse failure. Aborting here is safe: a canceled context means no
+		// ingress traffic will be served anyway. (When not held the bind already
+		// happened above, before the wait, and its own ctx checks covered this.)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
+				zap.String("target", newAppAddr), zap.Error(ctxErr))
+			return ctxErr
+		}
+		if listener, err = h.bindIngress(ctx, origAppAddr); err != nil {
+			return err
+		}
 	}
+	tcpListener := listener.(*net.TCPListener)
 
-	// Plain TCP, never Go's default MPTCP: this is the application's own port
-	// on every interface, and the application never chose MPTCP for it.
-	listener, err := plaintcp.Listen(context.Background(), "tcp4", origAppAddr)
-	if err != nil {
-		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
-	}
-	// Close the residual race: if the context was canceled while net.Listen was
-	// binding, release the port immediately and do NOT register the forwarder —
-	// otherwise it would linger holding the port and leave a stale forwarder entry
-	// that blocks re-arming it later.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		_ = listener.Close()
-		return ctxErr
-	}
-	tcpListener, ok := listener.(*net.TCPListener)
-	if !ok {
-		listener.Close()
-		return fmt.Errorf("listener on %s was not a TCP listener", origAppAddr)
-	}
+	// Steer the moved port's connections to this forwarder, now that it
+	// listens, instead of to the park (a no-op when nothing is held). The
+	// park stops seeing the port the moment this returns.
+	h.pm.registerIngressForwarder(origPort, listener)
 
 	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
 	ctx, cancel := context.WithCancel(ctx)
@@ -419,6 +446,11 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 
 	return nil
 }
+
+// ingressTargetWait is StartIngress's wait for the app to listen on its moved
+// port (waitForIngressTargetWhenKnown); a variable so a test can see what is
+// bound when the wait begins.
+var ingressTargetWait = waitForIngressTargetWhenKnown
 
 func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
 	if newPort == 0 {
@@ -489,10 +521,37 @@ func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	delete(h.forwarders, origPort)
 	h.mu.Unlock()
 
+	// Take this forwarder out of the lookup's sockhash before closing it (a
+	// no-op when nothing is held; a closed socket leaves the sockhash by
+	// itself, so this only tidies the entry).
+	h.pm.unregisterIngressForwarder(origPort)
 	st.cancel()
 	_ = st.listener.Close()
 	<-st.done
 	return nil
+}
+
+// bindIngress binds the ingress forwarder's listener on addr: plain TCP (a Go
+// listener is MPTCP by default on a kernel with MPTCP, and the lookup's
+// sockhash cannot take an MPTCP socket), aborting if the context was canceled
+// while it bound so a late bind does not leave the port held.
+func (h *goTCPIngressHook) bindIngress(ctx context.Context, addr string) (net.Listener, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	listener, err := plaintcp.Listen(ctx, "tcp4", addr)
+	if err != nil {
+		return nil, fmt.Errorf("ingress proxy failed to listen on %s: %w", addr, err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = listener.Close()
+		return nil, ctxErr
+	}
+	if _, ok := listener.(*net.TCPListener); !ok {
+		_ = listener.Close()
+		return nil, fmt.Errorf("listener on %s was not a TCP listener", addr)
+	}
+	return listener, nil
 }
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
