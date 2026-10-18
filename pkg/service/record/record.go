@@ -621,6 +621,12 @@ type Recorder struct {
 	// write mocks the recording captured (mocksNotWritten): the recording is
 	// incomplete, and ends as failed.
 	captureLost atomic.Bool
+	// endCut, under the proven switch, is why the recording's end is cut:
+	// keploy's agent went before it had handed over what it captured (its
+	// stream ended without its end marker, or its drain stalled). The
+	// test-set's config says so, as for a stop that killed the app (P101-b-k,
+	// P101-c).
+	endCut atomic.Pointer[string]
 	// mocksLossSaid is set once mocksNotWritten has said the mock store
 	// could not write mocks the recording captured.
 	mocksLossSaid atomic.Bool
@@ -710,6 +716,7 @@ type backlogLooks struct {
 // compose or kubelet stops): frames from before the stop still coming would
 // not tell its backlog from this CLI's own lag in taking what it had sent.
 func (r *Recorder) agentEndedDrain(kind string, looks *backlogLooks) {
+	r.noteEndCut("keploy's agent ended its " + kind + " stream before it said it had handed over all it captured, so what it still held is not in the recording")
 	if !looks.Held() && !startedAgent(r.instrumentation) {
 		r.logger.Warn("the keploy agent ended its stream before it said it held nothing more: what it still held, if anything, is lost",
 			zap.String("frames", kind),
@@ -1621,6 +1628,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
+		if timedOut {
+			r.noteEndCut("keploy's drain of what the agent captured made no progress at the recording's end, so keploy gave it up, and what the agent still held is not in the recording")
+		}
 		return !timedOut
 	}
 	// Under docker compose the agent is a service of the app's own stack
@@ -1718,17 +1728,22 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
+			// Under the switch the app's stop is keploy's own and leaves the
+			// agent up (P101-c): the app is stopped first, so what it does as
+			// it stops is recorded with the rest, and the drain then takes
+			// it. Its stop says, in the app's run, whether it had to kill.
+			if s, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+				// An app that exited on its own needs no stop.
+				if _, err := s.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+					r.logger.Warn("keploy could not stop the application's container before saving what the agent captured", zap.Error(err))
+				}
+			}
 			drainComposeAgent(false)
 		}
 		windowMaps.noteStop(time.Now())
 		runAppCtxCancel()
 		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
-		}
-		// The stop had to kill the app: what it would have done as it
-		// stopped is not in this recording, and the recording says so.
-		if why := stopKilled.Load(); why != nil && recordingStarted && newTestSetID != "" {
-			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 		if !composeAgent {
 			// Read before the frames drain: the agent stays up while this
@@ -1739,6 +1754,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
+		}
+		// The stop had to kill the app, or the agent went before it had
+		// handed over what it captured: the recording's end is cut, and the
+		// recording says so.
+		why := stopKilled.Load()
+		if why == nil {
+			why = r.endCut.Load()
+		}
+		if why != nil && recordingStarted && newTestSetID != "" {
+			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
 
 		setupCtxCancel()
@@ -3336,6 +3361,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					// (whenever that came: see forwardUntilDrained), and the
 					// mappings it still held are lost.
 					if mapCtx.Err() == nil {
+						r.noteEndCut("keploy's agent ended its mapping stream before the recording had saved its mappings, so those it still held are not in the recording")
 						r.logger.Warn("the keploy agent ended its mapping stream before the recording had saved its mappings: those it still held, if any, are lost",
 							zap.String("next_step", "the agent was stopped before the recording had saved its mappings (docker compose stops it with the project, also when the app exits on its own; kubelet with its pod): stop the recording, not the app or the agent. A test left without its mapping replays with no mocks"))
 					}

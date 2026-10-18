@@ -468,6 +468,10 @@ type Replayer struct {
 	// finalAttempt: the set's attempt now running is the last one the run
 	// can give it (MaxFlakyChecks); no attempt of it comes after.
 	finalAttempt bool
+	// composeAppStopped: under the proven switch the last set's end stopped
+	// the app's container of a compose stack kept across sets, which the
+	// next set starts again (P101-c).
+	composeAppStopped bool
 	// keepAliveStop, under the proven switch, stops the application
 	// --keep-app-alive started once for the run (natively, or with docker
 	// run), waits for it, and says why it had to kill it, "" when it did not
@@ -957,6 +961,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	// This run's last set, and its final attempt, are this run's alone.
 	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
+	r.composeAppStopped = false
 	if effectiveKeepAlive {
 		// Under the proven switch the app runs under a context of its own,
 		// so the last set's end can stop it, and wait for it, before its
@@ -1875,6 +1880,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// "" when it did not. nil when keploy started none here: a reused stack
 	// (serveTest), a base path, docker compose.
 	var stopAppBeforeSetEnd func() string
+	// composeRestart, set, starts this set's compose app again, which the
+	// last set's end stopped, once the set is staged on the agent.
+	var composeRestart composeAppStopper
+	// composeHalted: the set's end found its compose app exited on its own
+	// (models.ErrAppExitedOnItsOwn): the set is APP_HALTED, and its end is
+	// not read.
+	composeHalted := false
 	// appStopKilled is that why, as the app's run returned it; read once the
 	// run has returned.
 	var appStopKilled string
@@ -2059,6 +2071,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if r.instrument && cmdType == utils.DockerCompose {
+		// Under the switch keploy stops the app's container at the set's
+		// end, its stack running on (keploy's agent among it), and reads the
+		// set's end from the live agent (P101-c), as P101-b does for an app
+		// it starts per set. A stack kept across sets has the app started
+		// again here, its pids marked afresh and its readiness waited for.
+		if stopper, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+			// The app is started again below, once this set is staged on
+			// the agent and its pids are marked (composeRestart), as compose
+			// starts the first set's app only once the agent is ready.
+			if serveTest && r.composeAppStopped {
+				composeRestart = stopper
+				r.pidMarked = false
+			}
+			stopAppBeforeSetEnd = func() string {
+				killed, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
+				r.composeAppStopped = true
+				switch {
+				case errors.Is(err, models.ErrAppExitedOnItsOwn):
+					// The app exited on its own before the set's end:
+					// the set is APP_HALTED, as compose's abort on its exit
+					// made it, and its end is not read (the halt takes the
+					// stack, keploy's agent with it, down).
+					setErrStatus(models.TestSetStatusAppHalted)
+					composeHalted = true
+					return ""
+				case err != nil:
+					return "keploy could not stop the application's container at the set's end (" + err.Error() + ")"
+				case killed != "":
+					return "keploy interrupted the application at the set's end and " + killed
+				}
+				return ""
+			}
+		}
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
@@ -2213,6 +2258,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
+		// A stack kept across sets has its app, which the last set's end
+		// stopped, started again now: this set is staged on the agent and
+		// its pids are marked, so its startup is this set's.
+		if composeRestart != nil {
+			if err := composeRestart.StartComposeApp(ctx); err != nil {
+				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
+				return models.TestSetStatusAppHalted, err
+			}
+			r.composeAppStopped = false
+		}
 
 		// Wait for the user application to become ready before firing the first test.
 		// Prefers polling Test.HealthURL when set, otherwise falls back to the fixed --delay sleep.
@@ -2234,11 +2289,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// off), serveTest will be false here and the readiness wait
 		// runs every test-set, matching the historical lifecycle.
 		// Under the proven switch every set waits for its application's
-		// readiness: a warm one is ready at the first read, and one that
-		// never got ready for the first set is not fired at for the next.
+		// readiness: a warm one is ready at the first read, one that
+		// never got ready for the first set is not fired at for the next,
+		// and a compose app keploy started again for this set is waited for,
+		// as a start (not warm: its --delay is kept).
 		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
+		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet && composeRestart == nil); !ready && why == "" {
 			return models.TestSetStatusUserAbort, context.Canceled
 		} else if !ready {
 			notReady = why
@@ -4901,6 +4958,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogsBeforeStop = r.instrumentation.GetRecentAppLogs(logCtx)
 			cancelLogs()
 			stopKilled = stopAppBeforeSetEnd()
+			if composeHalted {
+				testSetStatus = models.TestSetStatusAppHalted
+			}
 			// What the app consumed as it stopped (a shutdown call a pool
 			// mock answered) is drained now, into the set's: what the learn
 			// step learned on it is then kept with the set's (persistLearned),
@@ -4914,15 +4974,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// agent's client has no deadline of its own, and a read that does
 			// not end leaves the set not judged, never a run that does not
 			// end.
-			drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
-			consumed, err := r.hookImpl.GetConsumedMocks(drainCtx)
-			cancelDrain()
-			if err != nil {
-				consumedAtStopUnread = err
-			} else {
-				for _, m := range consumed {
-					totalConsumedMocks[m.Name] = m
-					allConsumedAcrossCycles[m.Name] = m
+			// A halted compose app took keploy's agent down with its stack:
+			// there is nothing to drain.
+			if !composeHalted {
+				drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
+				consumed, err := r.hookImpl.GetConsumedMocks(drainCtx)
+				cancelDrain()
+				if err != nil {
+					consumedAtStopUnread = err
+				} else {
+					for _, m := range consumed {
+						totalConsumedMocks[m.Name] = m
+						allConsumedAcrossCycles[m.Name] = m
+					}
 				}
 				stopDrained = true
 			}

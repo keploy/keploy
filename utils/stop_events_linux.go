@@ -35,6 +35,10 @@ import (
 // watchdog's stall bound (stall.HangBudget). A test sets it shorter.
 var StopStallBudget = stall.HangBudget
 
+// StopStallSaid is how a kill names the bound it killed on: keploy's runnable
+// time.
+func StopStallSaid() string { return StopStallBudget.String() + " of keploy's runnable time" }
+
 // ExitMark is how far processes are on their way out: how many still run,
 // with how many threads and open files, how much storage they have read and
 // written, and whether one waits on storage (an uninterruptible sleep, D).
