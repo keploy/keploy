@@ -4581,7 +4581,7 @@ func (p *Proxy) ResetStatefulCursors() {
 // Satisfies the agent's optional VariableResetter extension interface.
 func (p *Proxy) ResetVariables() {
 	if m := p.getMockManager(); m != nil {
-		m.Variables().Reset()
+		m.ResetVariables()
 	}
 }
 
@@ -4594,7 +4594,7 @@ func (p *Proxy) StartVariables(given []models.VariableBinding) bool {
 	if m == nil {
 		return false
 	}
-	m.Variables().Start(given)
+	m.StartVariables(given)
 	return true
 }
 
@@ -4602,7 +4602,7 @@ func (p *Proxy) StartVariables(given []models.VariableBinding) bool {
 // false when the proxy keeps no mock manager to hold them.
 func (p *Proxy) BoundVariables() ([]models.VariableBinding, bool) {
 	if m := p.getMockManager(); m != nil {
-		return m.Variables().Snapshot(), true
+		return m.BoundVariables(), true
 	}
 	return nil, false
 }
@@ -4651,6 +4651,16 @@ func (p *Proxy) ServeExactPool(key string, names []string) error {
 		return errNoMockManager
 	}
 	m.ServeExactPool(key, names)
+	return nil
+}
+
+// ServeExactPoolAhead implements agent.ExactAheadServer (exact.go).
+func (p *Proxy) ServeExactPoolAhead(key string, names []string, ahead []*models.Mock) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactPool(key, names, ahead...)
 	return nil
 }
 

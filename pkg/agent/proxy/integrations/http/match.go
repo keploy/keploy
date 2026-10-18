@@ -181,10 +181,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// then its scope begun) makes this attempt's binds stale, so a call
 		// checked against the previous test's mocks never binds in the next
 		// test (variables.Table.BindAll).
-		var varGen uint64
-		varTable := variableTable(mockDb)
-		if varTable != nil && provenswitch.On() {
-			varGen = varTable.Gen()
+		var scope varScope
+		if provenswitch.On() {
+			scope = readVarScope(mockDb)
 		}
 
 		// Fetch HTTP mocks from BOTH pools:
@@ -251,14 +250,13 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		if provenswitch.On() {
 			withVars, rest := splitVariableMocks(unfilteredMocks)
 			if len(withVars) > 0 {
-				table := varTable
-				hits, problem, err := h.variablePass(ctx, input, withVars, table, varGen, headerNoise, userBodyNoise, urlNoise)
+				hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
 				if err != nil {
 					return false, nil, nil, err
 				}
 				if len(hits) > 0 {
 					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
-					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb, table)
+					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
 					if err != nil {
 						return false, nil, nil, err
 					}
@@ -266,7 +264,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 						continue
 					}
 					if problem != nil {
-						if table.Gen() != varGen {
+						if scope.moved() {
 							continue // a test began meanwhile: check the call against it
 						}
 						return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: problem}, nil
@@ -292,7 +290,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 					if ok {
 						return true, served, nil, nil
 					}
-					if table != nil && table.Gen() != varGen {
+					if scope.moved() {
 						continue // a test began meanwhile: check the call against it
 					}
 					return false, nil, &matchDiag{phase: models.MatchPhaseVariable, candidates: len(comparedPool), pool: comparedPool, variable: vp}, nil

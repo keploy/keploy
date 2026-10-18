@@ -446,6 +446,13 @@ type ExactServing struct {
 	// (its mapping). Without Stage, an empty Test serves the pool again.
 	Test  string   `json:"test,omitempty"`
 	Owned []string `json:"owned,omitempty"`
+	// Ahead is, on a call that serves the pool (no Test), the mocks of the
+	// next test case's mapping that were in flight when it began: recorded
+	// in the gap before its window, answered once it had begun
+	// (models.WindowSchedule.InFlightInto). They answer between test cases,
+	// each at most once, as that test case's own: one answered then counts
+	// as answered when it opens. An agent that predates it ignores it.
+	Ahead []string `json:"ahead,omitempty"`
 }
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
