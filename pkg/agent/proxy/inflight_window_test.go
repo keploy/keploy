@@ -377,3 +377,35 @@ func TestALearnStepCountsACallInFlightAsItsTestsOwn(t *testing.T) {
 		})
 	}
 }
+
+// Under exact serving the learn step counts a test's mapped call in flight
+// when it began (recorded in the gap before its window, named on the pool
+// call before it) as the test's own once it opens, not the pool's: a call
+// that drifted from it in a value is paired with it and learned.
+func TestUnderExactServingALearnStepCountsAMappedCallInFlightAsItsTestsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := batchMock()
+	m.Version = "api.keploy.io/v1beta1"
+	m.Spec.Metadata = map[string]string{"type": models.HTTPClient, models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = pms(1500), pms(2050)
+	m.TestModeInfo = models.TestModeInfo{}
+	m.DeriveLifetime()
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows(windowsOf("test-1", "test-2"))
+	mm.SetMocksWithWindow([]*models.Mock{m}, nil, models.BaseTime, time.Now())
+	mm.SetServedObserver(p.learnTracker.ServedMock)
+	mm.ServeExactTest("test-1", nil)
+	mm.ServeExactPool(models.PoolKeyNone, nil, m)
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-2", []*models.Mock{m})
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, post(`{"rid":"r-2","ids":[1,2,3]}`))
+	if code != http.StatusOK || got != `{"ok":true,"rid":"r-2"}` {
+		t.Fatalf("the drifted call was answered %d %s; want the recording, its echo rendered", code, got)
+	}
+	if st, ok := r3States(mm)["mock-7"]; !ok || st.Variables["rid"].Bind != "body.rid" {
+		t.Fatalf("the consumed state %+v (consumed %v); want rid learned at body.rid", st.Variables, ok)
+	}
+}

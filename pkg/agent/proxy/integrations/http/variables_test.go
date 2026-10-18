@@ -1045,17 +1045,17 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	ctx := context.Background()
 	x, y := liveReq("POST", "/orders", `{"id":"x"}`), liveReq("POST", "/orders", `{"id":"y"}`)
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
-	hitsX, _, _ := h.variablePass(ctx, x, pool, &db.table, db.table.Gen(), nil, nil, nil)
-	hitsY, _, _ := h.variablePass(ctx, y, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hitsX, _, _ := h.variablePass(ctx, x, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
+	hitsY, _, _ := h.variablePass(ctx, y, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	hx, _ := h.pickHit(hitsX, db, true)
 	hy, _ := h.pickHit(hitsY, db, true)
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hx, db, &db.table); err != nil || p != nil || retry {
+	if _, p, retry, err := h.serveVariables(ctx, hx, db); err != nil || p != nil || retry {
 		t.Fatalf("x: problem %+v retry %v err %v", p, retry, err)
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hy, db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hy, db); err != nil || p != nil || !retry {
 		t.Fatalf("y's collision should be checked again, not failed: problem %+v retry %v err %v", p, retry, err)
 	}
 	ok, stub, diag := matchVar(t, h, db, y)
@@ -1075,12 +1075,12 @@ func TestVariables_AStragglerBindsNothingInTheNextTest(t *testing.T) {
 	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
 	ctx := context.Background()
 	pool, _ := splitVariableMocks(db.perTest)
-	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, liveReq("POST", "/orders", `{"id":"straggler","item":"pen"}`), pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	if len(hits) == 0 {
 		t.Fatal("the straggler should fit")
 	}
 	db.table.Reset() // the next test begins
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
 		t.Fatalf("a straggler should be checked again: problem %+v retry %v err %v", p, retry, err)
 	}
 	if got := db.table.Snapshot(); len(got) != 0 {
@@ -1103,11 +1103,11 @@ func TestVariables_AMockAnotherCallTookIsCheckedAgain(t *testing.T) {
 	}
 	pool, _ := splitVariableMocks(db.perTest)
 	read := liveReq("GET", "/orders/l1", "")
-	hits, _, _ := h.variablePass(ctx, read, pool, &db.table, db.table.Gen(), nil, nil, nil)
+	hits, _, _ := h.variablePass(ctx, read, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	if ok, _, _ := matchVar(t, h, db, read); !ok {
 		t.Fatal("the read-back should match")
 	}
-	if _, p, retry, err := h.serveVariables(ctx, hits[0], db, &db.table); err != nil || p != nil || !retry {
+	if _, p, retry, err := h.serveVariables(ctx, hits[0], db); err != nil || p != nil || !retry {
 		t.Fatalf("a mock another call took: problem %+v retry %v err %v", p, retry, err)
 	}
 	if ok, _, _ := matchVar(t, h, db, read); ok {

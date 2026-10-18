@@ -504,6 +504,15 @@ type ExactServer interface {
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
 }
 
+// ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
+// is ServeExactPool that also answers, while no test is open, the next test's
+// mocks that were in flight when it began (ahead, models.ExactServing.Ahead),
+// each at most once, as that test's: one answered so counts as answered when
+// that test opens (ServeExactTest).
+type ExactAheadServer interface {
+	ServeExactPoolAhead(key string, names []string, ahead []*models.Mock) error
+}
+
 // ExactKeyRestarter is an optional ExactServer capability: it starts a claim
 // key's calls outside every test afresh, for a test process that claims the
 // key again (a re-run is a new scope): the recordings of names, the key's
