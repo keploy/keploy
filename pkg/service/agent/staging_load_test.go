@@ -266,10 +266,18 @@ func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
 type workerExactProxy struct {
 	exactProxy
 	workers [][]string
+	// source is the recording source the staging set
+	// (coreAgent.RecordingSourceSetter).
+	source func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
 }
 
 func (p *workerExactProxy) ServeExactWorker(names []string) error {
 	p.workers = append(p.workers, append([]string{}, names...))
+	return nil
+}
+
+func (p *workerExactProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.source = src
 	return nil
 }
 
@@ -282,6 +290,12 @@ func (p *workerExactProxy) ServeExactWorker(names []string) error {
 func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	defer models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string {
+		if m.Name == "test-a" {
+			return []string{"key-of-test-a"}
+		}
+		return nil
+	})()
 	p := &workerExactProxy{}
 	a := diskAgent(t, p,
 		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
@@ -304,6 +318,28 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	}
 	if want := [][]string{{}, {"w-delete"}}; !reflect.DeepEqual(p.workers, want) {
 		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the staging, then the one placed at the set's start", p.workers, want)
+	}
+	// A miss's diagnosis reads the on-disk store through the source the
+	// staging set: the test's own recording, staged only as it opens, is
+	// there before it.
+	if p.source == nil {
+		t.Fatal("the staging set no recording source over the on-disk store")
+	}
+	var onDisk []string
+	found := false
+	if err := p.source(models.HTTP, []string{"key-of-test-a"}, func(name string, load func() (*models.Mock, error)) bool {
+		onDisk = append(onDisk, name)
+		m, err := load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found = found || m.Name == "test-a"
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("the recording source visited %v, none of them test-a's own", onDisk)
 	}
 	// The next set's staging withdraws this set's worker scope before its
 	// view goes on: none of its names is reachable in the next set.

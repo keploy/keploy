@@ -54,6 +54,11 @@ type DiskMocks struct {
 	// records (its kind and models.StatementKey), the entry of the first one
 	// recorded (LoadStatements). One entry per statement, resident.
 	statements map[string]diskEntry
+
+	// byKey names, by kind and request key (models.RequestKeys), every mock
+	// on disk under each key its parser declares, in the order Add took them
+	// (LoadKeys).
+	byKey map[string][]string
 }
 
 // diskEntry locates one on-disk mock: 48 B, held in entries and byName and in
@@ -187,6 +192,12 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		placeTsNano: models.PlaceOf(m).UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
+	for _, k := range models.RequestKeys(m) {
+		if d.byKey == nil {
+			d.byKey = make(map[string][]string)
+		}
+		d.byKey[diskKey(m.Kind, k)] = append(d.byKey[diskKey(m.Kind, k)], m.Name)
+	}
 	if models.IsCarryOver(m) {
 		d.carry = append(d.carry, e)
 	}
@@ -535,6 +546,50 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	d.mu.Unlock()
 	return d.decodeAll(sel)
 }
+
+// RangeKeys calls visit, in recorded order (request time), with each on-disk
+// mock of kind indexed under any of keys (models.RequestKeys), once each, until
+// visit returns false: its name, and load, which decodes it. Only what visit
+// loads is decoded, so a caller that filters by name first decodes none it
+// passes over: what a miss's diagnosis under exact serving reads for a
+// recording of a test not begun yet (MockManager.FindStagedNotOwnedByKeys's
+// recording source).
+func (d *DiskMocks) RangeKeys(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	type candidate struct {
+		name string
+		e    diskEntry
+	}
+	var cs []candidate
+	seen := map[string]bool{}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	for _, k := range keys {
+		for _, name := range d.byKey[diskKey(kind, k)] {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if e, ok := d.byName[name]; ok {
+				cs = append(cs, candidate{name: name, e: e})
+			}
+		}
+	}
+	d.mu.Unlock()
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].e.reqTsNano < cs[j].e.reqTsNano })
+	for _, c := range cs {
+		e := c.e
+		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// diskKey is the byKey index of kind and request key.
+func diskKey(kind models.Kind, key string) string { return string(kind) + "\x00" + key }
 
 // LoadAll returns every on-disk mock (lax mode needs the full per-test set).
 func (d *DiskMocks) LoadAll() ([]*models.Mock, error) {

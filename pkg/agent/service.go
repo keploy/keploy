@@ -500,6 +500,18 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
+// exact serving (a call that is a recording made elsewhere) can read, beside
+// what is staged, the set's recordings the agent keeps on disk: a test's own
+// are staged only as it opens, so a call made before its test would find
+// none. SetRecordingSource sets where (src visits the on-disk mocks of a kind
+// indexed under any of keys, models.RequestKeys, in recorded order, decoding
+// one only as visit loads it; nil for none). For diagnosis only: nothing it
+// reads is served.
+type RecordingSourceSetter interface {
+	SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error
+}
+
 type ExactServer interface {
 	// ServeExactTest opens test, served exactly owned: its test mocks, in
 	// recorded order. A test opened again starts with none answered.

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1453,5 +1454,68 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	}
 	if got := find("other"); got != "other" {
 		t.Errorf("the next staging did not name a recording the previous one named: %q", got)
+	}
+}
+
+// A recording of a test not begun yet, which the agent keeps on disk and the
+// trees do not hold, is named from the recording source by its request key
+// (FindStagedNotOwnedByKeys), read on each such miss and kept by nobody. The
+// source's mocks take the same filters as the trees': never the open test's
+// own, each named once; and one passed over by name (named already, the open
+// test's) is never decoded. Without keys only the trees are looked in, and a
+// session reset drops the source.
+func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
+	pool := httpCall("pool", 0, "/pool")
+	onDisk := httpCall("t2-delete", time.Second, "/delete")
+	own := httpCall("t1-own", 2*time.Second, "/delete")
+	mm := stagedManager(t, nil, []*models.Mock{pool})
+	var asked, decoded []string
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		asked = append(asked, string(kind)+" "+strings.Join(keys, ","))
+		if kind != models.HTTP || len(keys) != 1 || keys[0] != "DELETE /delete" {
+			return nil
+		}
+		for _, m := range []*models.Mock{onDisk, own} {
+			m := m
+			if !visit(m.Name, func() (*models.Mock, error) { decoded = append(decoded, m.Name); return m, nil }) {
+				break
+			}
+		}
+		return nil
+	})
+	find := func(key, name string) string {
+		var keys []string
+		if key != "" {
+			keys = []string{key}
+		}
+		return mm.FindStagedNotOwnedByKeys(models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := find("", "t2-delete"); got != "" || len(asked) != 0 {
+		t.Fatalf("with no key the source was read (%v), naming %q", asked, got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "t2-delete" {
+		t.Fatalf("a recording kept on disk was not named before its test: %q", got)
+	}
+	if got := find("DELETE /delete", "t2-delete"); got != "" {
+		t.Fatalf("a recording kept on disk was named twice: %q", got)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := find("DELETE /delete", "t1-own"); got != "" {
+		t.Fatalf("the open test's own recording was named from the source: %q", got)
+	}
+	if len(asked) != 3 {
+		t.Fatalf("the source was read %v; want once per keyed miss", asked)
+	}
+	// t2-delete was decoded once, as the first miss named it: the second
+	// miss passed it over by name (and decoded t1-own, which is not that
+	// call), and the third passed over both, named and the open test's own.
+	if want := []string{"t2-delete", "t1-own"}; !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded %v; want %v: a recording named already, or the open test's own, is passed over by name", decoded, want)
+	}
+	mm.ResetForReplaySession()
+	mm.ServeExactPool("k", nil)
+	if got := find("DELETE /delete", "t2-delete"); got != "" || len(asked) != 3 {
+		t.Fatalf("after a session reset the source was still read (%v), naming %q", asked, got)
 	}
 }
