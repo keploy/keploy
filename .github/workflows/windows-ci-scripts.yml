@@ -48,6 +48,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/windows/machine-cache.tests.ps1
 
+      - name: Test the ranged artifact download (pwsh)
+        shell: pwsh
+        run: ./.github/scripts/windows/fetch-artifact.tests.ps1
+
   # machine-cache.ps1 runs under Windows PowerShell 5.1 in the jobs that use
   # it; its cases run here under that PowerShell too, on NTFS.
   machine-cache-windows-powershell:
@@ -62,6 +66,12 @@ jobs:
           & .\.github\scripts\windows\machine-cache.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Test the ranged artifact download (Windows PowerShell)
+        shell: powershell
+        run: |
+          & .\.github\scripts\windows\fetch-artifact.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # The Windows lane's way to keploy.exe (.github/actions/windows-binary), end
   # to end under the Actions runner and Windows PowerShell 5.1, with a stand-in
   # binary: an entry that is gone costs a download, never the job. The cache
@@ -69,6 +79,10 @@ jobs:
   windows-binary-fallback:
     timeout-minutes: 10
     runs-on: windows-latest
+    # actions: read for fetch-artifact.ps1's calls to the artifact API.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
@@ -162,6 +176,21 @@ jobs:
         run: |
           New-Item -ItemType File -Path (Join-Path $env:RUNNER_TEMP 'stand-in.release') -Force | Out-Null
           if ($env:HOLDER_PID) { Wait-Process -Id $env:HOLDER_PID -ErrorAction SilentlyContinue }
+
+      # fetch-artifact.ps1 against GitHub's own artifact API and blob store
+      # (the lanes' self-hosted runners take it there; this runner is not
+      # one): the stand-in, in 8 ranges, checked against its digest.
+      - name: Fetch the stand-in as byte ranges from GitHub's artifact store
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SUM: ${{ steps.bin.outputs.sha256 }}
+        run: |
+          & .\.github\scripts\windows\fetch-artifact.ps1 -Name windows-binary-stand-in -Destination got-ranged -Parts 8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $got = (Get-FileHash -LiteralPath got-ranged\keploy.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne $env:SUM) { throw "the ranged download's keploy.exe hashes to $got, not $env:SUM" }
+          Write-Host 'ok - the stand-in came down as 8 ranges from the artifact store, whole'
 
       - name: Check that each case has the artifact's keploy.exe
         shell: powershell

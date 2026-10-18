@@ -50,8 +50,29 @@ runs:
         if ($last -notmatch '^hit=(true|false)$') { throw "machine-cache.ps1 ended with '$last', not hit=true or hit=false" }
         $last | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+    # A miss on a self-hosted runner: the artifact as byte ranges at once
+    # (fetch-artifact.ps1; one connection to GitHub's artifact store holds
+    # 2-7 Mbit/s there), checked against its SHA-256. Any other miss of that
+    # (exit 1) is the download below; bytes that twice were not the
+    # artifact's digest (exit 3) fail here.
+    - name: Fetch ${{ inputs.name }} as byte ranges (self-hosted)
+      id: ranged
+      if: steps.get.outputs.hit != 'true' && runner.environment == 'self-hosted'
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        MC_NAME: ${{ inputs.name }}
+        MC_DEST: ${{ inputs.path }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH '..\..\scripts\windows\fetch-artifact.ps1') -Name $env:MC_NAME -Destination (Join-Path $env:GITHUB_WORKSPACE $env:MC_DEST)
+        $code = $LASTEXITCODE
+        if ($code -eq 0) { 'ok=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append; exit 0 }
+        if ($code -eq 3) { exit 3 }
+        Write-Host "fetch-artifact.ps1 exited ${code}: downloading the artifact with actions/download-artifact instead"
+        exit 0
+
     - name: Download ${{ inputs.name }}
-      if: steps.get.outputs.hit != 'true'
+      if: steps.get.outputs.hit != 'true' && steps.ranged.outputs.ok != 'true'
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.name }}
