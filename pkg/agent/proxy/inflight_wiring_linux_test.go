@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -185,6 +186,88 @@ func TestAConnectionIsKeptBeforeItIsCountedAccepted(t *testing.T) {
 	// test's end waits on, and which it never keeps.
 	if k.early != 1 || k.counted != 4 {
 		t.Fatalf("%d of %d connections were counted accepted before the proxy kept them, want only its own check", k.early, k.counted)
+	}
+}
+
+// With the proven switch off, a proxy started settling reads (--settle-reads,
+// cfg.Agent.SettleReads) keeps every connection its accept hands over, from
+// the first, as the switch's does: a read of a test's misses can then tell
+// when none holds its calls. A proxy that does not settle keeps none, as
+// before.
+func TestAProxyThatSettlesReadsKeepsEveryConnectionWithTheSwitchOff(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	for _, settles := range []bool{true, false} {
+		// For a settling proxy the kernel pairs each connection after the
+		// canary with one of the application's: an unpaired one would drop
+		// its count (a NAT'd connection, dropCounting). Paired, a proxy that
+		// does not settle would keep them too (pairbytes.go), so its are not.
+		k := &keptCounter{}
+		if settles {
+			k.dst = ipv4Dest(t, "127.0.0.1:1")
+		}
+		p, stop := startListening(t, k, func(p *Proxy) { p.settleReads = settles; k.kept = keeps(p) })
+		addr := p.Listener.Addr().String()
+		for i := 0; i < 3; i++ {
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+		if err := p.WaitAccepted(context.Background(), 4); err != nil {
+			t.Fatalf("settles %v: WaitAccepted(4): %v", settles, err)
+		}
+		k.mu.Lock()
+		early, counted := k.early, k.counted
+		k.mu.Unlock()
+		stop()
+		// The proxy's own check of the count (the canary) is never kept.
+		want := 1
+		if !settles {
+			want = 4
+		}
+		if counted != 4 || early != want {
+			t.Fatalf("settles %v: %d of %d connections were not kept when counted accepted, want %d", settles, early, counted, want)
+		}
+	}
+}
+
+// A proxy decides at its start, after its canary and before it says it is
+// ready, whether the kernel counts its calls: the canary counted and the bytes
+// on its paired connections readable. One whose paired bytes cannot be read
+// is not counted, and a settling proxy that is not counted keeps no
+// connection, as before (it settles no read).
+func TestAProxyIsCountedFromItsStartOnlyWithItsPairedBytes(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	k := &keptCounter{}
+	p, stop := startListening(t, k, func(p *Proxy) { p.settleReads = true })
+	if !p.CountedFromStart() || !p.keepsConnections() || p.PairedBytesErr() != nil {
+		t.Fatalf("a counted proxy: CountedFromStart %v, keepsConnections %v, PairedBytesErr %v", p.CountedFromStart(), p.keepsConnections(), p.PairedBytesErr())
+	}
+	stop()
+
+	k = &keptCounter{}
+	p, _ = startListening(t, k, func(p *Proxy) {
+		p.settleReads = true
+		p.paired.fail(errors.New("no sock_diag here"))
+	})
+	if p.PairedBytesErr() == nil {
+		t.Fatal("PairedBytesErr does not say the paired bytes cannot be read")
+	}
+	if p.CountedFromStart() || p.keepsConnections() {
+		t.Fatalf("a proxy whose paired bytes cannot be read: CountedFromStart %v, keepsConnections %v", p.CountedFromStart(), p.keepsConnections())
+	}
+}
+
+// The proxy reads its agent's --settle-reads at its start.
+func TestAProxyTakesSettleReadsFromItsAgentsStart(t *testing.T) {
+	cfg := config.New()
+	cfg.Agent.SettleReads = true
+	if p := New(zap.NewNop(), plainDestInfo{}, cfg); !p.settleReads {
+		t.Fatal("cfg.Agent.SettleReads set, yet the proxy does not settle reads")
+	}
+	if p := New(zap.NewNop(), plainDestInfo{}, config.New()); p.settleReads {
+		t.Fatal("cfg.Agent.SettleReads unset, yet the proxy settles reads")
 	}
 }
 

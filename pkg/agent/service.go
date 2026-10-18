@@ -258,6 +258,25 @@ type PairedBytesWaiter interface {
 	PairedBytesProgress() uint64
 }
 
+// PairedBytesChecker is the proxy's account of whether it can count the bytes
+// on its paired connections: nil while it can (PairedBytesWaiter's waits can
+// be answered).
+type PairedBytesChecker interface {
+	PairedBytesErr() error
+}
+
+// CountingReporter says whether the kernel counted the calls waiting for the
+// proxy when it came up (its listener marked, its own check of the count
+// passed, and the bytes on its paired connections readable), and why, with
+// the proven switch off, they stopped being counted since (a NAT'd
+// connection), nil while they are.
+type CountingReporter interface {
+	CountedFromStart() bool
+	// CountingLost is a channel closed once there is that reason, and the
+	// reason.
+	CountingLost() (<-chan struct{}, error)
+}
+
 type AuxiliaryProxyHook interface {
 	// AfterStart runs once the proxy has started, ordered against
 	// BeforeTeardown: a teardown that comes while it runs waits for it. Where
