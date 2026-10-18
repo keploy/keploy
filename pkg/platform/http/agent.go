@@ -1814,6 +1814,27 @@ func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
 	return app.RecentLogs(ctx)
 }
 
+// StopComposeApp stops the app's container of a docker compose stack, its
+// stack (keploy's agent among it) running on, under the proven switch, and
+// says why it had to kill it (app.App.StopComposeApp, P101-c).
+func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
+	app, err := a.getApp()
+	if err != nil {
+		return "", err
+	}
+	return app.StopComposeApp(ctx)
+}
+
+// StartComposeApp starts the app's container of a docker compose stack again
+// after StopComposeApp (app.App.StartComposeApp, P101-c).
+func (a *AgentClient) StartComposeApp(ctx context.Context) error {
+	app, err := a.getApp()
+	if err != nil {
+		return err
+	}
+	return app.StartComposeApp(ctx)
+}
+
 // startAgent starts the keploy agent process and handles its lifecycle.
 //
 // The returned channel receives the agent process's exit exactly once — nil

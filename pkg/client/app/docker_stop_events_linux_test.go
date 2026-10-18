@@ -102,6 +102,28 @@ func shortStall(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { utils.StopStallBudget = budget })
 }
 
+// progressingProcess starts a process that, once it has written ready,
+// closes one of the seven files it holds every 0.8 s, then sleeps: a shutdown
+// that makes progress for some 5.6 s. (Single-digit descriptors: dash,
+// Debian's sh, takes no others.)
+func progressingProcess(t *testing.T) *exec.Cmd {
+	t.Helper()
+	const closing = `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null 9</dev/null
+touch ready
+for fd in 3 4 5 6 7 8 9; do sleep 0.8; eval "exec $fd<&-"; done
+exec sleep 600`
+	dir := t.TempDir()
+	cmd := started(t, "sh", "-c", "cd "+dir+" && "+closing)
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			return cmd
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the container's process did not start")
+		}
+	}
+}
+
 // started starts argv in a process group of its own, killed when the test
 // ends.
 func started(t *testing.T, argv ...string) *exec.Cmd {
@@ -165,23 +187,7 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 	// whose progress is no news of the container's, so the stall bound runs
 	// on the container's stop alone, and the kill comes while that other
 	// process is still closing its files.
-	// (Single-digit descriptors: dash, Debian's sh, takes no others.)
-	const closing = `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null 9</dev/null
-touch ready
-for fd in 3 4 5 6 7 8 9; do sleep 0.8; eval "exec $fd<&-"; done
-exec sleep 600`
-	progressing := func(t *testing.T) *exec.Cmd {
-		dir := t.TempDir()
-		cmd := started(t, "sh", "-c", "cd "+dir+" && "+closing)
-		for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
-			if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
-				return cmd
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("the container's process did not start")
-			}
-		}
-	}
+	progressing := progressingProcess
 	held := func(pid int) int {
 		fds, _ := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
 		return len(fds)
