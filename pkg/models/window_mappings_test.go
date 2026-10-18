@@ -283,6 +283,50 @@ func workerPlaces(m WindowMappings) []string {
 // came after the last test. A mock no test may own (a handshake) and one with
 // no recorded time are not in it, and a gap call the in-flight rule gives to
 // a test is that test's alone.
+// An idle answer (D4) is the worker scope's wherever it was recorded: inside
+// a window, in flight into one, or in a gap. Each is placed after the window
+// that began last before it, its own when it was recorded inside one; a
+// meaningful answer beside it stays where the windows put it.
+func TestDeriveWindowMappingsPutsEveryIdleAnswerInTheWorkerScope(t *testing.T) {
+	windows := []TestWindow{wmWindow("test-1", 1000, 1100), wmWindow("test-2", 2000, 2100)}
+	idle := func(name string, at int) WindowedMock {
+		m := wmMock(name, at)
+		m.Idle = true
+		return m
+	}
+	longPoll := WindowedMock{Name: "empty-long-poll", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true, Idle: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{
+		idle("empty-at-boot", 500),
+		wmMock("m-1", 1040),
+		idle("empty-in-test-1", 1050),
+		longPoll,
+		idle("empty-in-gap", 1600),
+		wmMock("m-2", 2050),
+	})
+	want := map[string][]string{"test-1": {"m-1"}, "test-2": {"m-2"}}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	wantWorker := []string{"empty-at-boot@", "empty-in-test-1@test-1", "empty-long-poll@test-1", "empty-in-gap@test-1"}
+	if w := workerPlaces(got); !reflect.DeepEqual(w, wantWorker) {
+		t.Fatalf("worker scope %v; want %v", w, wantWorker)
+	}
+}
+
+// NewWindowedMock reads a mock's answer as idle only as its parser declares
+// it (IsIdleAnswer).
+func TestNewWindowedMockReadsTheParsersIdleAnswers(t *testing.T) {
+	poll := &Mock{Name: "empty-poll", Kind: HTTP}
+	if NewWindowedMock(poll).Idle {
+		t.Fatal("a mock no parser declared idle was read as idle")
+	}
+	unregister := RegisterIdleAnswer(HTTP, func(m *Mock) bool { return m.Name == "empty-poll" })
+	defer unregister()
+	if !NewWindowedMock(poll).Idle || NewWindowedMock(&Mock{Name: "full-poll", Kind: HTTP}).Idle {
+		t.Fatal("NewWindowedMock did not read the declared idle answer as idle, or read another as idle")
+	}
+}
+
 func TestDeriveWindowMappingsPlacesWhatNoTestOwnsInTheWorkerScope(t *testing.T) {
 	windows := []TestWindow{wmWindow("test-2", 2000, 2100), wmWindow("test-1", 1000, 1100), wmWindow("test-3", 3000, 3100)}
 	inFlight := WindowedMock{Name: "fetch-in-flight", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}

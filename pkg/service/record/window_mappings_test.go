@@ -627,3 +627,24 @@ func TestWindowMappingsPlaceTheWorkerScopeOnKeptTests(t *testing.T) {
 		t.Fatalf("worker scope %v; want %v", got, want)
 	}
 }
+
+// A recorded answer its parser declares idle (models.RegisterIdleAnswer) is
+// written in the worker scope, placed after the test it was recorded in, and
+// not in that test's mapping (D4).
+func TestWindowMappingsWriteAnIdleAnswerInTheWorkerScope(t *testing.T) {
+	unregister := models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "empty-poll" })
+	defer unregister()
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addTest(winTest("test-1", 1000, 1100))
+	w.addMock(winMock("own-call", models.HTTP, "", 1040))
+	w.addMock(winMock("empty-poll", models.HTTP, "", 1050))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+
+	if len(db.batches) != 1 || len(db.batches[0]["test-1"]) != 1 || db.batches[0]["test-1"][0].Name != "own-call" {
+		t.Fatalf("test-1's mapping is %v; want only own-call", db.batches)
+	}
+	if len(db.worker) != 1 || db.worker[0].Name != "empty-poll" || db.worker[0].Place != "test-1" {
+		t.Fatalf("worker scope %+v; want empty-poll placed after test-1", db.worker)
+	}
+}
