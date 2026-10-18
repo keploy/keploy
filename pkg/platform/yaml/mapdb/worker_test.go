@@ -58,17 +58,18 @@ func TestTheWorkerScopeRoundTripsAndSurvivesTheOtherWrites(t *testing.T) {
 }
 
 // MoveToWorker bakes recordings into the worker scope: a mock a test lists
-// leaves it for the scope at the place given, with its entry; one the scope
-// lists already takes the place given; one neither lists is left alone. The
-// scope stays in recorded order, and the other tests' entries are kept. A set
-// with no mapping file moves nothing.
+// leaves it, and every other test that lists it too, for the scope at the
+// place given, with its entry; one the scope lists already takes the place
+// given; one neither lists is left alone. The scope stays in recorded order,
+// and the other tests' entries are kept. A set with no mapping file moves
+// nothing.
 func TestMoveToWorkerBakesRecordingsIntoTheWorkerScope(t *testing.T) {
 	ctx := context.Background()
 	db := New(zap.NewNop(), t.TempDir(), "mappings")
 	at := func(s int) string { return models.FormatMockTimestamp(time.Unix(1000+int64(s), 0)) }
 	if err := db.UpsertBatch(ctx, "test-set-0", map[string][]models.MockEntry{
 		"test-1": {{Name: "own-1", Kind: "Http", ReqTimestampMock: at(1)}, {Name: "delete-1", Kind: "Http", ReqTimestampMock: at(3)}},
-		"test-2": {{Name: "own-2", Kind: "Http", ReqTimestampMock: at(5)}},
+		"test-2": {{Name: "own-2", Kind: "Http", ReqTimestampMock: at(5)}, {Name: "delete-1", Kind: "Http", ReqTimestampMock: at(3)}},
 	}); err != nil {
 		t.Fatal(err)
 	}
