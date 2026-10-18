@@ -105,3 +105,110 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 		t.Fatalf("without the switch the miss is named not owned: %+v", r)
 	}
 }
+
+// keyedDb is a store that keeps its recordings on disk, as the agent's does
+// (integrations.StagedKeyFinder): its trees hold none, and a miss is offered
+// only the recordings indexed under a key it asks by (models.RequestKeys).
+// offered is every recording it offered.
+type keyedDb struct {
+	*mockMemDb
+	onDisk  []*models.Mock
+	offered *[]string
+}
+
+func (d keyedDb) FindStagedNotOwned(models.Kind, func(*models.Mock) bool) string { return "" }
+
+func (d keyedDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	asked := map[string]bool{}
+	for _, k := range keys {
+		asked[k] = true
+	}
+	for _, m := range d.onDisk {
+		under := false
+		for _, k := range models.RequestKeys(m) {
+			under = under || asked[k]
+		}
+		if m.Kind != kind || !under {
+			continue
+		}
+		*d.offered = append(*d.offered, m.Name)
+		if match(m) {
+			return m.Name
+		}
+	}
+	return ""
+}
+
+// A call that is a recording kept on disk is named from the recordings under
+// the keys it asks by (RequestKeysOf, recordedRequestKeys), whatever the
+// strict comparison tolerates: a path segment or X-Amz-Target the recording
+// learned as noise or the obfuscator redacted, keploy.yml's url or header
+// noise, the target header in another case. Only those are decoded: with no
+// keploy.yml noise on the path or target, a recording of another path,
+// method or target is never offered.
+func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
+	const host = "localhost:50001"
+	post := func(m *models.Mock, target string) *models.Mock {
+		m.Spec.HTTPReq.Method = "POST"
+		if target != "" {
+			m.Spec.HTTPReq.Header["x-amz-target"] = target
+		}
+		return m
+	}
+	postTo := func(path, target string) *req {
+		r := getTo(path, host)
+		r.method = "POST"
+		r.header.Set("X-Amz-Target", target)
+		return r
+	}
+	learned := func(m *models.Mock, field string) *models.Mock {
+		m.Spec.ReqBodyNoise = map[string][]string{field: {}}
+		return m
+	}
+	for _, tc := range []struct {
+		name          string
+		rec           *models.Mock
+		live          *req
+		header, url   []string
+		want          bool
+		offeredOthers bool
+	}{
+		{name: "the same path", rec: onHost("rec", "/orders", host), live: getTo("/orders", host), want: true},
+		{name: "another path", rec: onHost("rec", "/orders", host), live: getTo("/carts", host)},
+		{name: "a path segment learned", rec: learned(onHost("rec", "/orders/1", host), "url.path.1"), live: getTo("/orders/2", host), want: true},
+		{name: "a path learned whole", rec: learned(onHost("rec", "/orders/1", host), "url"), live: getTo("/orders/2", host), want: true},
+		{name: "a learned segment, another count", rec: learned(onHost("rec", "/orders/1", host), "url.path.1"), live: getTo("/orders/2/items", host)},
+		{name: "the target in another case", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.DeleteMessage"), want: true},
+		{name: "another target", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage")},
+		{name: "a target learned", rec: learned(post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), "header.x-amz-target"), live: postTo("/", "AmazonSQS.SendMessage"), want: true},
+		{name: "keploy.yml url noise", rec: onHost("rec", "/orders/123", host), live: getTo("/orders/456", host), url: []string{"[0-9]+"}, want: true, offeredOthers: true},
+		{name: "keploy.yml header noise on the target", rec: post(onHost("rec", "/", host), "AmazonSQS.DeleteMessage"), live: postTo("/", "AmazonSQS.SendMessage"), header: []string{"x-amz-target"}, want: true, offeredOthers: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := map[string][]string{}
+			for _, h := range tc.header {
+				hn[h] = nil
+			}
+			n := newHTTP().newStrictNoise(hn, nil, tc.url)
+			// The recordings of another path and of another method, which the
+			// call can never be: offered only when keploy.yml's noise reaches
+			// the path or target, under the shape key, if of its method and
+			// segment count.
+			others := []*models.Mock{onHost("other-path", "/elsewhere/9", host), post(onHost("other-method", tc.rec.Spec.HTTPReq.URL, host), "")}
+			if tc.rec.Spec.HTTPReq.Method == "POST" {
+				others[1].Spec.HTTPReq.Method = "PUT"
+			}
+			var offered []string
+			db := keyedDb{mockMemDb: &mockMemDb{}, onDisk: append(others, tc.rec), offered: &offered}
+			got := notOwnedRecording(context.Background(), tc.live, db, n)
+			if named := got == tc.rec; named != tc.want {
+				t.Fatalf("named %v (offered %v); want the recording named: %v", got, offered, tc.want)
+			}
+			for _, name := range offered {
+				if name == "other-method" || (name == "other-path" && !tc.offeredOthers) {
+					t.Fatalf("offered %v: a recording the call can never be was decoded", offered)
+				}
+			}
+		})
+	}
+}

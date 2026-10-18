@@ -301,6 +301,18 @@ func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.M
 
 var _ integrations.StagedFinder = (*scopedMockDb)(nil)
 
+// FindStagedNotOwnedByKeys forwards the store's
+// (integrations.StagedKeyFinder), or, from one that has none, its
+// FindStagedNotOwned.
+func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	if f, ok := s.MockMemDb.(integrations.StagedKeyFinder); ok {
+		return f.FindStagedNotOwnedByKeys(kind, keys, match)
+	}
+	return s.FindStagedNotOwned(kind, match)
+}
+
+var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)
+
 // StagedOwnerBegun forwards the store's (integrations.BegunOwnerReader);
 // false from a store that cannot tell.
 func (s *scopedMockDb) StagedOwnerBegun(name string) bool {

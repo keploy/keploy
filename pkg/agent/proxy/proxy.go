@@ -4719,6 +4719,16 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
+func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordingSource(src)
+	return nil
+}
+
 // RestartExactKey implements agent.ExactKeyRestarter (exact.go).
 func (p *Proxy) RestartExactKey(key string, names []string) error {
 	m := p.getMockManager()

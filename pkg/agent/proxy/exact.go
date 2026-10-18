@@ -136,6 +136,9 @@ type exactState struct {
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
 	begun, named stagingNames
+	// recorded is where a miss's diagnosis reads the set's recordings the
+	// trees do not hold (SetRecordingSource).
+	recorded recordingSource
 }
 
 // stagingNames is a set of mock names that belongs to one staging
@@ -335,6 +338,24 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // judging reads to bake the recording into the worker scope (S12, a2). For a
 // miss's diagnosis only: the mock is never handed out, nor served.
 func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	return m.findNotOwned(kind, nil, match)
+}
+
+// FindStagedNotOwnedByKeys is FindStagedNotOwned, looking also, when the
+// trees hold no recording that is the call, in the recordings the agent keeps
+// on disk of kind indexed under any of keys (models.RequestKeys): with the
+// on-disk store a test's own are staged only as it opens, so a call made
+// before its test would find none (integrations.StagedKeyFinder). Only those
+// keys' recordings are decoded, on each such miss, and none is kept. No keys
+// looks in the trees alone.
+func (m *MockManager) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	return m.findNotOwned(kind, keys, match)
+}
+
+var _ integrations.StagedKeyFinder = (*MockManager)(nil)
+
+// findNotOwned is FindStagedNotOwned, and with keys FindStagedNotOwnedByKeys.
+func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
 	v := m.exactView()
 	if v == nil || match == nil {
 		return ""
@@ -344,29 +365,94 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
 	found := ""
+	seen := map[string]bool{}
+	try := func(mk *models.Mock) bool {
+		if mk == nil || mk.Kind != kind || seen[mk.Name] {
+			return false
+		}
+		seen[mk.Name] = true
+		if _, own := v.index[mk.Name]; own && v.test != "" {
+			return false
+		}
+		if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) {
+			return false
+		}
+		if match(mk) && m.exact.named.claim(epoch, mk.Name) {
+			found = mk.Name
+			return true
+		}
+		return false
+	}
 	for _, t := range trees {
 		if t == nil || found != "" {
 			continue
 		}
 		t.rangeValues(func(val interface{}) bool {
-			mk, ok := val.(*models.Mock)
-			if !ok || mk == nil || mk.Kind != kind {
-				return true
-			}
-			if _, own := v.index[mk.Name]; own && v.test != "" {
-				return true
-			}
-			if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) {
-				return true
-			}
-			if match(mk) && m.exact.named.claim(epoch, mk.Name) {
-				found = mk.Name
-				return false
-			}
-			return true
+			mk, _ := val.(*models.Mock)
+			return !try(mk)
 		})
 	}
+	if found != "" || len(keys) == 0 {
+		return found
+	}
+	// The recordings kept on disk, in recorded order, each decoded only once
+	// the checks by name have passed it, and none after the first that is
+	// the call.
+	m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+		if seen[name] || m.consumedInSet(name) || m.exact.named.has(epoch, name) {
+			return true
+		}
+		if _, own := v.index[name]; own {
+			return true
+		}
+		mk, err := load()
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Debug("a miss's diagnosis could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
+			}
+			return false
+		}
+		return !try(mk)
+	})
 	return found
+}
+
+// RecordingSource visits, of the test set staged, every recorded mock of kind
+// indexed under any of keys (models.RequestKeys) that the agent keeps out of
+// the manager's trees (its on-disk store of per-test mocks), once each, in
+// recorded order, until visit returns false: its name, and load, which decodes
+// it (DiskMocks.RangeKeys). For a miss's diagnosis only
+// (FindStagedNotOwnedByKeys): what it reads is never served.
+type RecordingSource func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error
+
+// recordingSource is the manager's RecordingSource for the current staging.
+type recordingSource struct {
+	mu  sync.Mutex
+	src RecordingSource
+}
+
+// SetRecordingSource sets where a miss's diagnosis reads the staged set's
+// recordings the trees do not hold (FindStagedNotOwnedByKeys); nil for none,
+// when every one is in the trees. The agent sets it as it stages a set.
+func (m *MockManager) SetRecordingSource(src RecordingSource) {
+	m.exact.recorded.mu.Lock()
+	defer m.exact.recorded.mu.Unlock()
+	m.exact.recorded.src = src
+}
+
+// rangeRecorded visits what the recording source holds of kind under keys
+// (RecordingSource): decoded only as visit loads it, kept by nobody; nothing
+// when there is no source, or it fails.
+func (m *MockManager) rangeRecorded(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) {
+	m.exact.recorded.mu.Lock()
+	src := m.exact.recorded.src
+	m.exact.recorded.mu.Unlock()
+	if src == nil {
+		return
+	}
+	if err := src(kind, keys, visit); err != nil && m.logger != nil {
+		m.logger.Debug("a miss's diagnosis could not read the set's recordings kept on disk; it names none of them", zap.String("kind", string(kind)), zap.Error(err))
+	}
 }
 
 // consumedInSet reports whether a call of the current test set consumed the
