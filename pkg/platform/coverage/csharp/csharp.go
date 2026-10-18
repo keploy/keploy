@@ -65,7 +65,7 @@ func (cs *Csharp) PreProcess(_ bool) (string, error) {
 		return cs.cmd, fmt.Errorf("dotnet coverage tool not found at: %s", dotnetCoveragePath)
 	}
 
-	cs.cmd = strings.Replace(cs.cmd, cs.executable, fmt.Sprintf("%s collect --output target/${TESTSETID}.cobertura --output-format cobertura", cs.executable), 1)
+	cs.cmd = strings.Replace(cs.cmd, cs.executable, fmt.Sprintf("%s collect --output \"target/${TESTSETID}.cobertura\" --output-format cobertura", cs.executable), 1)
 
 	// download dotnet coverage
 	dotnetPath := filepath.Join(os.TempDir(), "dotnet")
