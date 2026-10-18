@@ -46,6 +46,10 @@ type WindowedMock struct {
 	// in the gap before a test and answered at or after its start, it is that
 	// test's.
 	InFlight bool
+	// Idle says its parser declares its recorded answer idle (IsIdleAnswer):
+	// an answer a worker's poll gets while its dependency has nothing, which
+	// no test owns wherever it was recorded.
+	Idle bool
 }
 
 // NewWindowedMock is m as the window derivation reads it.
@@ -58,6 +62,7 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		Place:    PlaceOf(m),
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
 		InFlight: InFlightEligible(m),
+		Idle:     IsIdleAnswer(m),
 	}
 }
 
@@ -80,6 +85,17 @@ func (m WindowedMock) entry() MockEntry {
 	}
 }
 
+// placedAfter is the mock as the worker scope lists it: placed after the
+// window that began last before it, ws[began-1] (began is how many of ws, in
+// start order, had begun), or at the set's start when none had.
+func (m WindowedMock) placedAfter(ws []TestWindow, began int) MockEntry {
+	e := m.entry()
+	if began > 0 {
+		e.Place = ws[began-1].TestCase
+	}
+	return e
+}
+
 // WindowMappings is a test set's mappings derived from its test windows.
 type WindowMappings struct {
 	// Tests holds one entry per test window, in window order: the test mocks
@@ -90,10 +106,10 @@ type WindowMappings struct {
 	// them owns that mock was decided by time alone.
 	Concurrent []string
 	// Worker is the set's worker scope (Mapping.Worker): the test mocks
-	// recorded while no window was open, which no test owns, in recorded
-	// order, each placed where its recording holds it (MockEntry.Place): the
-	// test whose window began last before it, or the set's start before
-	// every window.
+	// recorded while no window was open, and the idle answers wherever they
+	// were recorded, which no test owns, in recorded order, each placed where
+	// its recording holds it (MockEntry.Place): the test whose window began
+	// last before it, or the set's start before every window.
 	Worker []MockEntry
 }
 
@@ -117,6 +133,12 @@ type WindowMappings struct {
 // to no test is the set's worker scope (WindowMappings.Worker, the founder's
 // D2): the application made it on its own, and whichever window a replay
 // makes it in, no test owns it. It is placed where its recording holds it.
+//
+// So is an idle answer (WindowedMock.Idle, the founder's D4), wherever it was
+// recorded, the in-flight rule's window included: how many polls find nothing
+// is a matter of timing, not of what a test does, so no test is charged with
+// one, and the set's end does not require it either. It is placed after the
+// window that began last before it, its own when it was recorded inside one.
 //
 // A window with no Start is left out; one whose End is missing or before its
 // Start ends at its Start. Mocks that are not test mocks are skipped.
@@ -170,6 +192,11 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 		for ending.Len() > 0 && ws[ending.idx[0]].End.Before(at) {
 			heap.Pop(ending)
 		}
+		if m.Idle {
+			// An idle answer: the worker scope's, inside a window or not.
+			out.Worker = append(out.Worker, m.placedAfter(ws, next))
+			continue
+		}
 		if len(open) == 0 {
 			// The gap between two tests. A call sent here and answered at or
 			// after the next test's start was in flight when that test began
@@ -181,13 +208,8 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 				continue
 			}
 			// No test's: the worker scope's, from the place it was recorded
-			// at, after the window that began last before it (none before
-			// every window).
-			e := m.entry()
-			if next > 0 {
-				e.Place = ws[next-1].TestCase
-			}
-			out.Worker = append(out.Worker, e)
+			// at.
+			out.Worker = append(out.Worker, m.placedAfter(ws, next))
 			continue
 		}
 		owner := open[0]
