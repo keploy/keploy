@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -402,7 +403,7 @@ func (a *App) runFromContainer(ctx context.Context) models.AppError {
 	if err := a.docker.ContainerStart(ctx, a.replacementID, container.StartOptions{}); err != nil {
 		return models.AppError{AppErrorType: models.ErrCommandError, Err: fmt.Errorf("failed to start the replacement container: %w", err)}
 	}
-	a.logger.Info("your app is running under keploy", zap.String("container", a.container))
+	a.logger.Info("your app is running under keploy", zap.String("container", a.container), log.Show)
 
 	streamDone := a.streamContainerLogs(ctx)
 	// The stream is for the user's benefit only. Waiting for it UNBOUNDED would

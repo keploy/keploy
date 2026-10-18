@@ -128,6 +128,30 @@ func TestFactsWritesMarkedLinesOnceInTheirOwnFormat(t *testing.T) {
 	}
 }
 
+// An agent's warning reaches the facts console unmarked: a capture-loss
+// warning (a process the PID map refused, a call over a Unix socket, UDP to a
+// real destination) is never only in the agent's log.
+func TestFactsShowsEveryWarningAndError(t *testing.T) {
+	console, _ := quietFiles(t)
+	logger, err := ChangeColorEncoding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger = Facts(logger)
+	logger.Warn("the kernel refused a process a place in the agent's PID map target_namespace_pids")
+	logger.Error("the agent could not attach its hooks")
+	logger.Warn("hidden on purpose", Hide)
+	got := read(t, console)
+	for _, want := range []string{"\nkeploy: the kernel refused a process a place in the agent's PID map target_namespace_pids\n", "\nkeploy: the agent could not attach its hooks\n"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("console lacks %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "keploy: hidden on purpose") {
+		t.Fatalf("a hidden warning was shown: %q", got)
+	}
+}
+
 // A warning Facts shows is in the log with its level as well, so a count of
 // the log's warnings sees it; a shown fact is printed once.
 func TestFactsKeepsAShownWarningsLevelInTheLog(t *testing.T) {

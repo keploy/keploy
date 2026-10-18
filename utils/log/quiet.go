@@ -30,9 +30,14 @@ func Quieted() bool { return quiet.Load() }
 
 func SetRunFile(f *os.File) { runFile.Store(f) }
 
+// Facts is a mock-mode agent's logger: its facts (lines marked Show), and
+// its warnings and errors, are also printed as `keploy: <fact>` lines, which
+// the CLI relays from the agent's log. A warning is never only in the log: an
+// agent's warnings are what says a call went to the real dependency,
+// unrecorded and unmocked.
 func Facts(logger *zap.Logger) *zap.Logger {
 	ensureLogCfg()
-	shown := newRedactingCore(factCore{Core: newFactConsole(LogCfg.Level), min: zapcore.InvalidLevel})
+	shown := newRedactingCore(factCore{Core: newFactConsole(LogCfg.Level), min: zapcore.WarnLevel})
 	return logger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(unshown{c}, shown)
 	}))

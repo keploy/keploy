@@ -283,7 +283,7 @@ echo "recorded /price/ mocks: $MOCKS"
 # Compose stops the agent with the project, and it closes its mock stream
 # without a word that it handed over every mock: the recording is saved, and
 # keploy says it cannot confirm it whole, naming the set.
-grep "keploy cannot confirm this recording holds them all" rec.log | grep -q '"mock-set": "e2e"' ||
+grep -qF "keploy cannot confirm this recording holds them all (set e2e)" rec.log ||
   { echo "FAIL: a compose recording whose agent closed its stream unconfirmed was saved without saying so"; FAIL=1; }
 cleanup
 

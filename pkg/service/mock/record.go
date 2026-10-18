@@ -464,7 +464,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	// not be true of it.
 	sayUnconfirmed := func() {
 		if unconfirmed {
-			m.logger.Warn(composeTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
+			// With the switch off the line names the set itself: a quiet
+			// console (log.Quiet) shows no fields.
+			msg := composeTailUnconfirmed
+			if !provenswitch.On() {
+				msg += " (set " + name + ")"
+			}
+			m.logger.Warn(msg, zap.String("mock-set", name), zap.Int("mocks", mockCount),
 				zap.String("next_step", composeTailUnconfirmedNext))
 		}
 	}
