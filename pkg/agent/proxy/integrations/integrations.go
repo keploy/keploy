@@ -342,6 +342,17 @@ type StagedFinder interface {
 	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
 }
 
+// StagedKeyFinder is StagedFinder that also looks, when what is staged holds
+// no recording match accepts, in the recordings of kind the store keeps on
+// disk indexed under any of keys (models.RequestKeys): a test's own are
+// staged only as it opens, so a call made before its test would find none
+// there. Only those keys' recordings are read. A parser asks by keys every
+// recording its comparison would accept is indexed under at least one of.
+// For a miss's diagnosis only.
+type StagedKeyFinder interface {
+	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
+}
+
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:
 // whether a staged mock (one StagedFinder names) is owned by a test that has
 // begun in the current staging. A parser whose answer depends on what a test

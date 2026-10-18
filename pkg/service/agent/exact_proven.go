@@ -254,6 +254,14 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...)); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
+		// A miss on a call that is the recording of a test not begun yet
+		// (a worker's call made early) is told from the on-disk store: a
+		// test's own are staged only as it opens.
+		if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
+			if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
+				return fmt.Errorf("set the test set's recording source: %w", err)
+			}
+		}
 		a.scopeMu.Lock()
 		a.testPool = append([]string(nil), ex.Pool...)
 		a.testWorker = append([]models.MockEntry(nil), ex.Worker...)
@@ -315,6 +323,24 @@ func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) e
 		return es.ServeExactPool(models.PoolKeyNone, pool)
 	}
 	return as.ServeExactPoolAhead(models.PoolKeyNone, pool, testMocks(ahead, mocks))
+}
+
+// diskRecordingSource visits, of the set staged, the on-disk mocks of a kind
+// under request keys (DiskMocks.RangeKeys); nil when the set's mocks are all
+// resident, and so all staged in the proxy's trees.
+func (a *Agent) diskRecordingSource() func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error {
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	disk := s.diskMocks
+	s.mu.RUnlock()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeKeys
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks
