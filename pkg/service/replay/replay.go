@@ -4820,6 +4820,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// they fail the set (unclaimed_calls.go).
 	var unclaimed []models.UnmatchedCall
 	unclaimedReason := ""
+	// workerMissing: under the proven switch, the set's worker-scope calls
+	// its run reached the place of that the application never made
+	// (awaitWorkerScope).
+	var workerMissing []string
 	// appNotStopped is why the set's end was read with its app still running
 	// (P101-c), "" when keploy stopped it first.
 	appNotStopped := ""
@@ -4850,6 +4854,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// first, as the teardown tells it, so the app's shutdown errors are
 		// logged as such. Its recent logs are taken before: a container
 		// docker removes once stopped has none to give.
+		// The set's worker scope (D3): before its application is stopped,
+		// every worker-scope call its run reached the place of must have been
+		// made. A worker makes its calls in its own time, so the end waits
+		// for them, as long as the application lives and the calls keep
+		// coming; one never made fails the set below.
+		if r.exact != nil && captureOpened {
+			workerMissing = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks, func(read []models.MockState) {
+				for _, m := range read {
+					totalConsumedMocks[m.Name] = m
+					allConsumedAcrossCycles[m.Name] = m
+				}
+			})
+		}
 		// The final attempt of a run's last set stops the app --keep-app-alive
 		// keeps across sets before its end's read, as a set stops its own
 		// (P101-c): the run ends after it, and no attempt of it follows.
@@ -4965,9 +4982,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
 			}
 			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			if len(workerMissing) > 0 {
+				unclaimedReason = workerWhy(workerMissing)
+				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
+					zap.String("next_step", "if the application no longer makes these calls on its own, record the test set again"))
+				if testSetStatus == models.TestSetStatusPassed {
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
 			if own := r.setCalls.failing(); len(own) > 0 {
 				unclaimed = append(unclaimed, own...)
-				unclaimedReason = setCallsWhy(own)
+				if unclaimedReason != "" {
+					unclaimedReason += "; "
+				}
+				unclaimedReason += setCallsWhy(own)
 				r.logSetCalls(testSetID, own)
 				if testSetStatus == models.TestSetStatusPassed {
 					testSetStatus = models.TestSetStatusFailed

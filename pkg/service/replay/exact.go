@@ -3,6 +3,8 @@ package replay
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -50,6 +52,13 @@ type exactPlan struct {
 	// staging call hands it to the agent, which serves each from its place
 	// on.
 	worker []models.MockEntry
+	// idle names the worker-scope mocks whose recorded answer their parser
+	// declares idle (models.IsIdleAnswer): the set's end does not require
+	// them answered (D4).
+	idle map[string]bool
+	// begun names the test cases of the set's run that have begun: the
+	// worker-scope mocks placed after one of them are due by the set's end.
+	begun map[string]bool
 	// ownsTestMocks: some test case owns a test mock (a data-plane mock the
 	// agent holds).
 	ownsTestMocks bool
@@ -103,6 +112,37 @@ func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*m
 			p.ahead[tc.Name] = append(p.ahead[tc.Name], e.Name)
 		}
 	}
+}
+
+// begin notes that test case name of the set's run has begun.
+func (p *exactPlan) begin(name string) {
+	if p == nil {
+		return
+	}
+	if p.begun == nil {
+		p.begun = map[string]bool{}
+	}
+	p.begun[name] = true
+}
+
+// unansweredWorker is, in recorded order, the worker-scope mocks the set's
+// end requires answered and consumed does not hold: those whose place the
+// run reached (the set's start, or a test case that has begun), but for the
+// ones whose answer is idle (D3, D4).
+func (p *exactPlan) unansweredWorker(consumed map[string]models.MockState) []string {
+	if p == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range p.worker {
+		if (e.Place != "" && !p.begun[e.Place]) || p.idle[e.Name] {
+			continue
+		}
+		if _, ok := consumed[e.Name]; !ok {
+			out = append(out, e.Name)
+		}
+	}
+	return out
 }
 
 // exactServing reports whether this replay serves each test case exactly
@@ -262,12 +302,26 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 		}
 		p.owned[test] = names
 	}
+	idle := map[string]bool{}
+	for _, list := range stored {
+		for _, mk := range list {
+			if mk != nil && mk.Name != "" && models.IsIdleAnswer(mk) {
+				idle[mk.Name] = true
+			}
+		}
+	}
 	for _, e := range worker {
 		if e.Name == "" || mapped[e.Name] || !held[e.Name] {
 			continue
 		}
 		mapped[e.Name] = true
 		p.worker = append(p.worker, e)
+		if idle[e.Name] {
+			if p.idle == nil {
+				p.idle = map[string]bool{}
+			}
+			p.idle[e.Name] = true
+		}
 	}
 	seen := map[string]bool{}
 	for _, list := range stored {
@@ -285,6 +339,7 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 // serveExactTest opens test case name on the agent, served exactly its own
 // mocks; vars are the test variables its request carries.
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, vars ...models.VariableBinding) error {
+	plan.begin(name)
 	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
 		Variables: vars,
 		Exact:     &models.ExactServing{Test: name, Owned: append([]string(nil), plan.owned[name]...)},
@@ -423,4 +478,72 @@ func (r *Replayer) noteOwnsNothing(testSetID string) {
 	r.logger.Warn("under KEPLOY_PROVEN no test case of this test set owns a recorded call: its mappings.yaml, or with none its test windows, list no data-plane mock the agent holds, so every call a test case makes to a dependency misses",
 		zap.String("testSetID", testSetID),
 		zap.String("next_step", "record the test set again with this keploy (keploy record writes mappings.yaml)"))
+}
+
+// workerStallLimit is the count of wake-ups in a row, with none of the set's
+// worker-scope mocks answered, after which the set's end stops waiting for
+// them (awaitWorkerScope): the end count's watchdog's (design v14's lead
+// decision, 600). It counts wake-ups, not seconds: a starved replay starves
+// its watchdog equally, so load alone cannot trip it.
+var workerStallLimit = 600
+
+// workerWake is how the wait for the worker scope wakes: once a second. A
+// test replaces it.
+var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
+	t := time.NewTicker(time.Second)
+	return t.C, t.Stop
+}
+
+// awaitWorkerScope waits, at the set's end and before its application is
+// stopped, until every worker-scope mock the set's end requires answered has
+// answered (exactPlan.unansweredWorker; D3): a worker makes its calls in its
+// own time, after the last test as well. It reads what the agent consumed
+// meanwhile into consumed (through add), as the set's end reads it. It
+// returns those still unanswered when the run stops waiting: the set's own
+// context ends (its application exited, or the user stopped it), a read
+// fails, or none of them answers across workerStallLimit wake-ups in a row.
+// No clock decides it.
+func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState)) []string {
+	missing := plan.unansweredWorker(consumed)
+	if len(missing) == 0 {
+		return nil
+	}
+	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
+		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
+	wake, stop := workerWake(ctx)
+	defer stop()
+	stalls := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return missing
+		case <-wake:
+		}
+		read, err := r.hookImpl.GetConsumedMocks(ctx)
+		if err != nil {
+			r.logger.Warn("keploy could not read what the test set's worker scope answered; its calls still unanswered are reported as not made",
+				zap.Error(err))
+			return missing
+		}
+		add(read)
+		now := plan.unansweredWorker(consumed)
+		if len(now) == 0 {
+			return nil
+		}
+		if len(now) < len(missing) {
+			stalls = 0
+		} else {
+			stalls++
+		}
+		missing = now
+		if stalls >= workerStallLimit {
+			return missing
+		}
+	}
+}
+
+// workerWhy says what a set's end found of its worker scope: the calls its
+// recording made that the application never did.
+func workerWhy(missing []string) string {
+	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), 20)], ", "))
 }
