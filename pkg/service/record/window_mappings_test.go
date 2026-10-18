@@ -210,6 +210,14 @@ func TestStart_ProvenRecordWithoutSyncMapsEachTestFromItsWindow(t *testing.T) {
 	if got := w.batches(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mappings written: %v; want %v", got, want)
 	}
+	// What no test's window held is the set's worker scope (D2): the boot
+	// query, at the set's start.
+	w.mapping.mu.Lock()
+	worker, workers := w.mapping.worker, w.mapping.workers
+	w.mapping.mu.Unlock()
+	if workers != 1 || len(worker) != 1 || worker[0].Name != "boot-query" || worker[0].Place != "" {
+		t.Fatalf("worker scope written %d time(s): %+v; want boot-query at the set's start, once", workers, worker)
+	}
 	w.mapping.mu.Lock()
 	entry := w.mapping.batches[0]["test-2"][0]
 	w.mapping.mu.Unlock()
@@ -592,5 +600,30 @@ func TestStart_ProvenRecordChargesAnUnreadMockToItsTestCase(t *testing.T) {
 				t.Fatalf("%d WARNs for test cases, want one naming test-1, which holds the mock: %+v", len(charged), charged)
 			}
 		})
+	}
+}
+
+// The worker scope is written with its places on the test cases the recording
+// kept: a mock placed after a test case it did not keep is placed after the
+// latest kept one before it, or at the set's start when there is none, so a
+// replay of the kept test cases reaches it.
+func TestWindowMappingsPlaceTheWorkerScopeOnKeptTests(t *testing.T) {
+	db := &recMappingDB{}
+	w := &windowMappings{}
+	w.addTest(winTest("deleted-first", 1000, 1100))
+	w.addTest(winTest("kept", 2000, 2100))
+	w.addTest(winTest("deleted", 3000, 3100))
+	w.addMock(winMock("after-deleted-first", models.HTTP, "", 1500))
+	w.addMock(winMock("after-kept", models.HTTP, "", 2500))
+	w.addMock(winMock("after-deleted", models.HTTP, "", 3500))
+	w.addMock(winMock("in-kept", models.HTTP, "", 2050))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", map[string]struct{}{"deleted-first": {}, "deleted": {}}, true, 0)
+
+	got := []string{}
+	for _, e := range db.worker {
+		got = append(got, e.Name+"@"+e.Place)
+	}
+	if want := []string{"after-deleted-first@", "after-kept@kept", "after-deleted@kept"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("worker scope %v; want %v", got, want)
 	}
 }

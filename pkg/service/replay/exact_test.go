@@ -25,7 +25,7 @@ func TestNewExactPlan(t *testing.T) {
 		}
 		return out
 	}
-	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-1"}}, "test-2": {}}, m("mock-0", "mock-1"), m("mock-2", "mock-0"))
+	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-1"}}, "test-2": {}}, nil, m("mock-0", "mock-1"), m("mock-2", "mock-0"))
 	if want := map[string][]string{"test-1": {"mock-1"}, "test-2": {}}; !reflect.DeepEqual(p.owned, want) {
 		t.Fatalf("owned %v, want %v", p.owned, want)
 	}
@@ -34,17 +34,32 @@ func TestNewExactPlan(t *testing.T) {
 	}
 }
 
+// The set's worker scope is the stored mocks its section lists that no test
+// case's mapping lists and the agent holds, in the section's order with their
+// places, and none of them is the pool's.
+func TestNewExactPlanKeepsTheWorkerScopeOutOfThePool(t *testing.T) {
+	stored := []*models.Mock{{Name: "own"}, {Name: "w-boot"}, {Name: "w-late"}, {Name: "pool"}, {Name: "also-owned"}}
+	worker := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}, {Name: "also-owned"}, {Name: "not-held"}}
+	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "own"}, {Name: "also-owned"}}}, worker, stored)
+	if want := []models.MockEntry{{Name: "w-late", Place: "test-1"}, {Name: "w-boot"}}; !reflect.DeepEqual(p.worker, want) {
+		t.Fatalf("worker scope %+v, want %+v", p.worker, want)
+	}
+	if want := []string{"pool"}; !reflect.DeepEqual(p.pool, want) {
+		t.Fatalf("pool %v, want %v: a worker-scope mock is not the pool's", p.pool, want)
+	}
+}
+
 // A test case owns the stored mocks its mapping lists; one the agent does not
 // hold (a connection failure, which keploy never hands it, or one the store
 // pruned) is not asked of the agent.
 func TestAMockTheAgentDoesNotHoldIsNotAskedOfIt(t *testing.T) {
-	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-1"}, {Name: "mock-cf"}, {Name: "mock-gone"}}}, []*models.Mock{{Name: "mock-1", Kind: models.HTTP}})
+	p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-1"}, {Name: "mock-cf"}, {Name: "mock-gone"}}}, nil, []*models.Mock{{Name: "mock-1", Kind: models.HTTP}})
 	if want := map[string][]string{"test-1": {"mock-1"}}; !reflect.DeepEqual(p.owned, want) || !p.ownsTestMocks {
 		t.Fatalf("owned %v (test mocks %v), want %v", p.owned, p.ownsTestMocks, want)
 	}
 	// A mapping of handshakes and DNS lookups alone owns no test mock.
 	dns := &models.Mock{Name: "mock-2", Kind: models.DNS}
-	if p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-2"}}}, []*models.Mock{dns}); p.ownsTestMocks {
+	if p := newExactPlan(map[string][]models.MockEntry{"test-1": {{Name: "mock-2"}}}, nil, []*models.Mock{dns}); p.ownsTestMocks {
 		t.Fatal("a DNS lookup counted as a test mock")
 	}
 }
@@ -222,7 +237,7 @@ func TestNoteAheadListsATestCasesMappedCallsInFlight(t *testing.T) {
 		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(1000)}, HTTPResp: models.HTTPResp{Timestamp: at(1100)}},
 		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(2000)}, HTTPResp: models.HTTPResp{Timestamp: at(2100)}},
 	}
-	p := newExactPlan(mappings, held)
+	p := newExactPlan(mappings, nil, held)
 	p.noteAhead(mappings, cases)
 	if got := p.ahead["test-2"]; len(got) != 1 || got[0] != "fetch" {
 		t.Fatalf("test-2's calls in flight = %v; want [fetch] (own-2 is in its window, gone is not held, untimed has no time)", got)
@@ -259,7 +274,7 @@ func TestNoteAheadLeavesOutACallPlacedAtItsAnswerInTheWindow(t *testing.T) {
 		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(1000)}, HTTPResp: models.HTTPResp{Timestamp: at(1100)}},
 		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(2000)}, HTTPResp: models.HTTPResp{Timestamp: at(2100)}},
 	}
-	p := newExactPlan(mappings, []*models.Mock{held("poll", 1500, 2050, true), held("fetch", 1600, 2060, false)})
+	p := newExactPlan(mappings, nil, []*models.Mock{held("poll", 1500, 2050, true), held("fetch", 1600, 2060, false)})
 	p.noteAhead(mappings, cases)
 	if got := p.ahead["test-2"]; len(got) != 1 || got[0] != "fetch" {
 		t.Fatalf("test-2's calls in flight = %v; want [fetch]: the poll is placed at its answer, in the window", got)

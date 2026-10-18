@@ -1293,3 +1293,68 @@ func TestTheNextTestsCallInFlightBindsInItsScopeInTheGap(t *testing.T) {
 		}
 	}
 }
+
+// The set's worker scope (ServeExactWorker): a worker-scope mock the run has
+// reached the place of answers whether a test is open or not, after the open
+// test's own, and at most one request in the staging, through whichever door
+// a parser consumes it: a consume in a test spends it for the gap after and
+// the next test too. One the run has not reached the place of answers
+// nothing, in a test or out of one, until a later ServeExactWorker names it.
+func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	boot := httpCall("w-boot", time.Second, "/receive")
+	later := httpCall("w-later", 2*time.Second, "/receive")
+	pool := httpCall("pool", 3*time.Second, "/pool")
+	mm := stagedManager(t, nil, []*models.Mock{own, boot, later, pool})
+
+	// The set's start: only the boot one is reached.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", []string{"pool"})
+	sess, _ := mm.GetSessionScopedMocks()
+	equalNames(t, "before the first test", sess, "w-boot", "pool")
+
+	// A test opens: its own mock first, then the reached worker mock; the
+	// pool is not shown in a test, nor the worker mock not reached yet.
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if pt, _ := mm.GetPerTestMocksInWindow(); len(pt) == 0 || pt[0].Name != "own" {
+		t.Fatalf("in a test the test's own mock is not read first: %v", exactNames(pt))
+	}
+	sess, _ = mm.GetSessionScopedMocks()
+	if names := strings.Join(exactNames(sess), ","); strings.Contains(names, "pool") || strings.Contains(names, "w-later") || !strings.Contains(names, "w-boot") {
+		t.Fatalf("in a test the reusable read shows %v; want w-boot, and neither the pool nor w-later", names)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the reached worker mock did not answer in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock answered twice in a test: %s", got)
+	}
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock whose place the run has not reached answered: %s", got)
+	}
+
+	// T1 ends: w-later's place (after T1) is reached. w-boot, spent in T1,
+	// stays spent in the gap and the next test.
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock spent in a test answered again in the gap after: %s", got)
+	}
+	mm.ServeExactWorker([]string{"w-boot", "w-later"})
+	mm.ServeExactTest("T2", nil)
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a worker mock placed after T1 did not answer in T2: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock answered again after its one request: %s", got)
+	}
+	// The next staging answers afresh.
+	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool("k", nil)
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("the next staging's worker mock did not answer: %s", got)
+	}
+}

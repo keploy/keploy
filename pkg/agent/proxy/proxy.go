@@ -4664,6 +4664,16 @@ func (p *Proxy) ServeExactPoolAhead(key string, names []string, ahead []*models.
 	return nil
 }
 
+// ServeExactWorker implements agent.ExactWorkerServer (exact.go).
+func (p *Proxy) ServeExactWorker(names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactWorker(names)
+	return nil
+}
+
 // RestartExactKey implements agent.ExactKeyRestarter (exact.go).
 func (p *Proxy) RestartExactKey(key string, names []string) error {
 	m := p.getMockManager()
