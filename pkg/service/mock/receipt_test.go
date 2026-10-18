@@ -643,7 +643,6 @@ func TestSetupFailureRecordsTheMirroredExitCode(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			instr := newInstr(t, agentNeverUp, false, models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: runnerExit})
 			cfg := instrConfig(instr, utils.DockerCompose, "docker compose run --rm tests")
 			cfg.Path = keployDir
@@ -767,7 +766,6 @@ func TestAnInternalFailureIsNotAUserInterrupt(t *testing.T) {
 			lifetime, cmdType := agentUpFromSetup, utils.Native
 			if stage == "compose" {
 				lifetime, cmdType = agentNeverUp, utils.DockerCompose
-				t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "120")
 			}
 			base := newInstr(t, lifetime, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			cfg := instrConfig(base, cmdType, "go test ./...")
