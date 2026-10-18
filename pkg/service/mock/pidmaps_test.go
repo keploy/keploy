@@ -387,7 +387,6 @@ func TestComposeReplayReadsRefusalsFromWhatTheStoppedAgentLeft(t *testing.T) {
 		{name: "it left why its count was lost: passes", lostErr: "bad file descriptor", wantExit: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			core, logs := observer.New(zapcore.DebugLevel)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.runUntilReady = true

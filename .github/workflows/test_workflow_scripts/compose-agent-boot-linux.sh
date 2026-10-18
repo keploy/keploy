@@ -6,11 +6,12 @@
 # the start makes progress, and while the engine does not run the agent's
 # container, and ends only on a start the agent reports failed or one that has
 # stopped making progress (pkg.WatchAgentStart). A fixed budget of wall time
-# (KEPLOY_AGENT_READY_TIMEOUT, 330 s by default) gave up on a start a loaded
-# host ran slowly, and on a container the daemon held.
+# (KEPLOY_AGENT_READY_TIMEOUT, 330 s by default, since removed) gave up on a
+# start a loaded host ran slowly, and on a container the daemon held.
 #
 # Three legs, each with KEPLOY_AGENT_READY_TIMEOUT far below what the leg
-# takes, so a wait bounded by it fails the leg:
+# takes: this keploy reads no such variable, and a keploy that still did fails
+# the leg:
 #   1. starved, docker compose: the agent's container gets 2% of a CPU from its
 #      start on, so its start takes far longer than the budget while it makes
 #      progress. keploy must record the app's N calls, and exit 0 on its own

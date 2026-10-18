@@ -78,7 +78,6 @@ func TestARecordingKeployFailedIsNotAnInterrupt(t *testing.T) {
 		{"run", agentUpFromSetup, utils.Native},
 	} {
 		t.Run(tc.stage, func(t *testing.T) {
-			shortAgentBudget(t)
 			base := newInstr(t, tc.lifetime, tc.cmdType == utils.DockerCompose, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr := failsRecord{&failsGroup{composeInstr: base, stage: tc.stage}}
 			if err := recordWith(t, context.Background(), instr, base, tc.cmdType); err == nil {

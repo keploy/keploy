@@ -506,10 +506,10 @@ function Show-KeployLogFiles {
 #      swallowed the first failure and sent $sent=0 requests.
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
 # 7 minutes, not 5, because this probe races keploy's own agent-readiness
-# wait and used to lose. On the compose lane keploy waits
-# pkg.DefaultAgentReadyTimeout (330s, pkg/util.go) for the in-docker
-# keploy-agent to report healthy, and only reports the real failure after
-# that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
+# wait and used to lose. On the compose lane keploy waited a fixed 330s
+# (pkg.DefaultAgentReadyTimeout, since removed: keploy now waits while the
+# agent's start makes progress) for the in-docker keploy-agent to report
+# healthy, and only reported the real failure after that. At 5 minutes this loop gave up 30s BEFORE keploy could speak, so a
 # genuinely failed bring-up surfaced as six "Unable to connect to the
 # remote server" retries instead of the actual cause — observed on run
 # 32388095493 / job 96488562918.

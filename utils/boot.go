@@ -18,9 +18,9 @@ import (
 //
 // A CLI that starts an agent waits for it to answer its health check before it
 // goes on. It waited a fixed budget of wall time for that (330 s, or
-// KEPLOY_AGENT_READY_TIMEOUT), so a host loaded enough to run the agent slowly
-// tore down a start that was making progress, and a start that had stopped
-// making any was waited on for the whole budget. So the agent reports its
+// KEPLOY_AGENT_READY_TIMEOUT, both since removed), so a host loaded enough to
+// run the agent slowly tore down a start that was making progress, and a
+// start that had stopped making any was waited on for the whole budget. So the agent reports its
 // start's progress here (ReportBootProgressTo, ReportBootProgress), from the
 // moment its process starts until its control-plane server listens, and the
 // CLI judges by it (pkg/platform/http, bootJudge): it waits while the start
