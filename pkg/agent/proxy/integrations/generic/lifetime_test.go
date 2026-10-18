@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -144,12 +145,17 @@ func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return n
 // Under exact serving, a request no mock answers that is a later exchange of
 // a connection the open test does not own is named, with what likely happened
 // and what to do; one the test owns, a preamble, or no recorded exchange, is
-// not.
+// not, nor one merely like a recorded exchange (the per-test similarity): what
+// a miss names, keploy record's judging bakes into the worker scope.
 func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 	staged := func(name, req, stated string) *models.Mock {
 		m := exchange(name, req)
 		m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: stated}
 		return m
+	}
+	frame := make([]byte, 64)
+	for i := range frame {
+		frame[i] = byte(0x80 + i)
 	}
 	store := exactStore{
 		exact: true,
@@ -158,11 +164,19 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 			staged("mock-hello", "HELLO", models.MetadataLifetimeSession),
 			staged("mock-auth-x", "AUTH step2", models.MetadataLifetimePerTest),
 			staged("mock-get-y", "GET y", models.MetadataLifetimePerTest),
+			staged("mock-frame", util.EncodeBase64(frame), models.MetadataLifetimePerTest),
 		},
 	}
-	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", "GET y": "", "HELLO": "", "SET z": ""} {
+	// A binary request one byte off mock-frame's: within the per-test
+	// similarity, and another call.
+	like := append([]byte(nil), frame...)
+	like[len(like)-1] ^= 0x01
+	if findBinaryMatch(store.staged[3:], [][]byte{like}, 0.9) != 0 {
+		t.Fatal("the fixture's near request is not within the per-test similarity of mock-frame")
+	}
+	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", "GET y": "", "HELLO": "", "SET z": ""} {
 		if got := notOwnedExchange([][]byte{[]byte(req)}, store); got != want {
-			t.Errorf("%s: %q, want %q", req, got, want)
+			t.Errorf("%q: %q, want %q", req, got, want)
 		}
 	}
 	store.exact = false
