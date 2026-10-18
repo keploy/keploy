@@ -254,3 +254,35 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-extra-hosts-linux.sh"
+
+  # A compose app published on another host port ("N:8080"): replay sends
+  # each test to the port it was recorded on, 8080, and in Docker mode, when
+  # that port is published on exactly one host port, there instead, saying so
+  # once; published as itself it is sent as before, and published on two host
+  # ports it fails as before, saying why. Proven switch off and on.
+  compose_published_port_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: app published on another host port (docker_compose)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run published-port e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-published-port-linux.sh"

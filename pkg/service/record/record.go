@@ -612,6 +612,10 @@ type Recorder struct {
 	// it still holds (forwardUntilDrained); zero means mappingIdleGrace. A
 	// field so tests that are not about the drain need not wait it out.
 	frameQuiet time.Duration
+	// waitNotice is how often a stop that waits for the app ports'
+	// questions says so (unreachablePortWarner.wait); zero means
+	// drainProgressEvery. A field so a test need not wait it out.
+	waitNotice time.Duration
 
 	// backlogHolds counts the looks at which a frame drain kept waiting for
 	// what the agent still held from before the stop (holdForBacklog):
@@ -990,6 +994,14 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 		close(done)
 		<-exited
 	}
+}
+
+// noticeEvery is waitNotice, or drainProgressEvery.
+func (r *Recorder) noticeEvery() time.Duration {
+	if r.waitNotice > 0 {
+		return r.waitNotice
+	}
+	return drainProgressEvery
 }
 
 func (r *Recorder) frameQuietGrace() time.Duration {
@@ -1511,6 +1523,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 * immediately because no join was requested.
 	 */
 	uiJoinObserved := newUIJoinPorts()
+	// Its questions run beside the recording; the stop waits for those still
+	// out once its drains are over (the record drain's inserts start the last
+	// of them).
 	unreachablePorts := newUnreachablePortWarner(r.logger, r.instrumentation, r.config)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
@@ -1803,6 +1818,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		} else if timedOut {
 			recordDrainedCleanly = false
 		}
+		// Every drain is over: nothing still selects on utils.StopNow, which
+		// a press at this wait's offer closes, but what a drain abandoned on
+		// a stall (already counted as cut). The record drain joined the
+		// test-case consumer that asks the questions, if one ever ran (a
+		// recording that ended before it captured has none), or gave it up:
+		// the wait asks no more (it seals the warner), and what those still
+		// out find is said before the session's summary.
+		unreachablePorts.wait(r.noticeEvery())
 
 		// Every mock is now handed to the mock store: a store that writes
 		// in the background (the gob writer) writes the rest here, before

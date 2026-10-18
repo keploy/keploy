@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -783,17 +784,25 @@ func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) 
 
 // firstDialTarget is where the set's first test that says dials: an HTTP
 // test's resolved URL (with its scheme), a gRPC test's host and port.
-func firstDialTarget(testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
+func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) (scheme, host, port string, ok bool) {
 	for _, tc := range testCases {
 		if tc == nil {
 			continue
 		}
 		switch tc.Kind {
 		case models.HTTP:
-			if sc, h, p, ok := resolveProbeTarget(testCfg, tc, testSetID, logger); ok {
+			if sc, h, p, ok := resolveProbeTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
 				return sc, h, p, true
 			}
 		case models.GRPC_EXPORT:
+			// Where the test is sent (pkg.SimulateGRPC, as the replay hooks
+			// configure it): test.host for the authority's host, its app
+			// port, test.grpcPort, replaceWith, and the one host port its
+			// app port is published on.
+			authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
+			if authority == "" {
+				continue
+			}
 			h := testCfg.Host
 			if h == "" {
 				h = "localhost"
@@ -802,11 +811,14 @@ func firstDialTarget(testCfg config.Test, testCases []*models.TestCase, testSetI
 			if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
 				port = ps.Port
 			}
-			if port > 0 {
-				return "", h, strconv.Itoa(int(port)), true
+			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
+			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger)
+			if err != nil {
+				continue
 			}
-			if _, p, err := net.SplitHostPort(tc.GrpcReq.Headers.PseudoHeaders[":authority"]); err == nil && p != "" {
-				return "", h, p, true
+			target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: port, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
+			if th, tp, err := net.SplitHostPort(target); err == nil && tp != "" {
+				return "", th, tp, true
 			}
 		}
 	}
@@ -1077,10 +1089,10 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		if !started {
 			return true, ""
 		}
-		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))), ""
+		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
 	}
 	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType))}
-	scheme, host, port, ok := firstDialTarget(r.config.Test, testCases, testSetID, r.logger)
+	scheme, host, port, ok := firstDialTarget(ctx, r.config.Test, testCases, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID))
 	if ok {
 		p.scheme, p.host, p.port = scheme, host, port
 	}

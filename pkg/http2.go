@@ -682,10 +682,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Determine which port to use for test execution.
 	var err error
+	recorded := authority
 	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
 	if err != nil {
 		return nil, err
 	}
+	authority = PublishedTarget(ctx, cfg, recorded, authority, tc.AppPort, false)
 
 	// Extract method path
 	path, ok := grpcReq.Headers.PseudoHeaders[":path"]

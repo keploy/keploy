@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -823,5 +824,151 @@ func TestARefusalAtAHostPortPublishedToTheAppsPortIsReSent(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || resp.Body != "pong" {
 		t.Errorf("got %d %q, want the app's 200 pong", resp.StatusCode, resp.Body)
+	}
+}
+
+// PublishedHostPort is the one host port the app's port is published on,
+// where the host the tests go to reaches it, when host port appPort is not
+// published to it; 0 when host port appPort reaches it, or when the app's port
+// is published on several host ports or none. It cannot tell (false) outside
+// Docker mode, for a host that is not this machine's loopback, and for a
+// container it cannot inspect, that is not running, or on host networking.
+func TestPublishedHostPortIsTheOneHostPortTheAppsPortIsPublishedOn(t *testing.T) {
+	bind := func(ip, hostPort string) nat.PortBinding { return nat.PortBinding{HostIP: ip, HostPort: hostPort} }
+	for _, tc := range []struct {
+		name    string
+		ports   nat.PortMap
+		stopped bool
+		netMode string
+		cmd     utils.CmdType
+		host    string
+		appPort uint16 // 8080 unless noApp
+		noApp   bool
+		err     error
+		want    uint16
+		known   bool
+	}{
+		{name: "18080:8080", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080"), bind("::", "18080")}}, want: 18080, known: true},
+		{name: "on loopback only", ports: nat.PortMap{"8080/tcp": {bind("127.0.0.1", "18080")}}, want: 18080, known: true},
+		{name: "a docker run's -p 18080:8080", cmd: utils.DockerRun, ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}, want: 18080, known: true},
+		{name: "8080:8080", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "8080")}}, known: true},
+		{name: "8080:8080 and 18080:8080", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "8080"), bind("0.0.0.0", "18080")}}, known: true},
+		{name: "two host ports", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080"), bind("0.0.0.0", "28080")}}, known: true},
+		{name: "on an address the host does not reach", ports: nat.PortMap{"8080/tcp": {bind("192.0.2.1", "18080")}}, known: true},
+		{name: "not published", ports: nat.PortMap{"9090/tcp": {bind("0.0.0.0", "18080")}}, known: true},
+		{name: "keploy's own port", ports: nat.PortMap{"16789/tcp": {bind("127.0.0.1", "26789")}}, appPort: 16789, known: true},
+		{name: "native", cmd: utils.Native, ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+		{name: "another host", host: "10.0.0.5", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+		{name: "not running", stopped: true, ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+		{name: "host networking", netMode: "host", ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+		{name: "inspect fails", err: errors.New("daemon busy"), ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+		{name: "no app port", noApp: true, ports: nat.PortMap{"8080/tcp": {bind("0.0.0.0", "18080")}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := tc.cmd
+			if cmd == "" {
+				cmd = utils.DockerCompose
+			}
+			host := tc.host
+			if host == "" {
+				host = "localhost"
+			}
+			appPort := tc.appPort
+			switch {
+			case tc.noApp:
+				appPort = 0
+			case appPort == 0:
+				appPort = 8080
+			}
+			fake := &countingInspect{resp: agentContainer(tc.ports, !tc.stopped, tc.netMode), err: tc.err}
+			got, known := dockerAgent(cmd, fake).PublishedHostPort(context.Background(), host, appPort)
+			if got != tc.want || known != tc.known {
+				t.Fatalf("PublishedHostPort = (%d, %v), want (%d, %v)", got, known, tc.want, tc.known)
+			}
+		})
+	}
+}
+
+// slowInspect answers ContainerInspect once release is closed, or fails with
+// its context's cause when that ends first.
+type slowInspect struct {
+	kdocker.Client
+	resp    container.InspectResponse
+	release chan struct{}
+}
+
+func (f *slowInspect) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
+	select {
+	case <-f.release:
+		return f.resp, nil
+	case <-ctx.Done():
+		return container.InspectResponse{}, context.Cause(ctx)
+	}
+}
+
+// Where a test is sent rests on PublishedHostPort, so a slow daemon is waited
+// for by keploy's runnable time, not wall time: an inspect answered after far
+// more wall time than appPortCheckTimeout, while keploy could not run, still
+// names the host port; one the daemon does not answer while keploy has had
+// the whole budget to run leaves it unknown.
+func TestPublishedHostPortWaitsForASlowDaemonByRunnableTime(t *testing.T) {
+	clk := &stall.ManualClock{}
+	boundClock = clk
+	savedCheck, savedStall := appPortCheckTimeout, publishAnswerStall
+	appPortCheckTimeout, publishAnswerStall = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { boundClock, appPortCheckTimeout, publishAnswerStall = nil, savedCheck, savedStall })
+	armed := func() {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); clk.Pending() == 0; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("PublishedHostPort never armed a runnable-time bound for its inspect")
+			}
+		}
+	}
+	ports := nat.PortMap{"8080/tcp": {{HostIP: "0.0.0.0", HostPort: "18080"}}}
+	agentOf := func(f *slowInspect) *AgentClient {
+		conf := &config.Config{CommandType: string(utils.DockerCompose), KeployContainer: "keploy-v3-test"}
+		return &AgentClient{logger: zap.NewNop(), dockerClient: f, conf: conf}
+	}
+
+	slow := &slowInspect{resp: agentContainer(ports, true, ""), release: make(chan struct{})}
+	type answer struct {
+		port  uint16
+		known bool
+	}
+	got := make(chan answer, 1)
+	go func() {
+		p, k := agentOf(slow).PublishedHostPort(context.Background(), "localhost", 8080)
+		got <- answer{p, k}
+	}()
+	time.Sleep(100 * time.Millisecond) // 100x appPortCheckTimeout of wall time
+	armed()
+	clk.Pass() // that wall time passed, keploy could not run
+	close(slow.release)
+	if a := <-got; a.port != 18080 || !a.known {
+		t.Fatalf("PublishedHostPort = (%d, %v) after a slow daemon, want (18080, true)", a.port, a.known)
+	}
+
+	// A clock of its own for the second question: the first one's bound may
+	// not have let go of its timer yet (its goroutine not yet run when this
+	// one's is, as the scheduler may order them), and a timer of it still
+	// pending would be taken for this question's, the clock moved before this
+	// question's bound began.
+	clk = &stall.ManualClock{}
+	boundClock = clk
+	silent := &slowInspect{resp: agentContainer(ports, true, ""), release: make(chan struct{})}
+	go func() {
+		p, k := agentOf(silent).PublishedHostPort(context.Background(), "localhost", 8080)
+		got <- answer{p, k}
+	}()
+	armed()
+	clk.Advance(publishAnswerStall)
+	select {
+	case a := <-got:
+		if a.port != 0 || a.known {
+			t.Fatalf("PublishedHostPort = (%d, %v) from a daemon that never answered, want unknown", a.port, a.known)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("PublishedHostPort did not give up once keploy had had the whole budget to run")
 	}
 }
