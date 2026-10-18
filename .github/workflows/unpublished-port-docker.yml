@@ -50,6 +50,17 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/unpublished-port/python-docker.sh"
 
+      # The same PR binary and image record an app whose first call comes
+      # the moment it says it listens, natively and under compose: keploy
+      # holds the app's port from inside its bind (BPF sk_lookup), so the
+      # call is answered and recorded, not refused before keploy's ingress
+      # forwarder listens.
+      - name: Run the first-call-during-record check
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/record-first-call-linux.sh"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
