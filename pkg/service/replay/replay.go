@@ -436,6 +436,12 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// unattributedSets are, with the proven switch off, the test sets of this
+	// run with a test whose misses keploy could not all read
+	// (MissesUnattributed): nothing may learn noise from them, which the
+	// run's end says by name.
+	unattributedMu   sync.Mutex
+	unattributedSets map[string]bool
 	// notJudgedSets are the test sets of this run that ended not judged
 	// (markNotJudged): INTERNAL_ERR that does not end the round.
 	notJudgedMu   sync.Mutex
@@ -1342,6 +1348,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+		r.sayUnattributed()
 
 		// Print the mismatch table whenever there ARE mock mismatches — not
 		// only when the run as a whole failed. A green run with mock misses
@@ -1520,7 +1527,10 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose,
+		// A run that learns noise from its misses settles each test's calls
+		// before they are read, from the agent's start (SettleReads).
+		SettleReads: r.config.Test.LearnsNoise}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh
 	// agent; a healthy agent is set up once and the test set runs against it.
 	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, _ int) error {
@@ -7904,6 +7914,40 @@ type testMisses struct {
 	realErr  error
 }
 
+// noteUnattributed records a test set with a test whose misses keploy could
+// not all read, with the switch off (sayUnattributed).
+func (r *Replayer) noteUnattributed(testSetID string) {
+	r.unattributedMu.Lock()
+	defer r.unattributedMu.Unlock()
+	if r.unattributedSets == nil {
+		r.unattributedSets = map[string]bool{}
+	}
+	r.unattributedSets[testSetID] = true
+}
+
+// sayUnattributed names, at the run's end, the test sets with a test whose
+// misses keploy could not all read: a miss may be missing from a test of
+// theirs, or have been read with another test's, so no noise may be learned
+// from them (enterprise's auto-noise reads the tests' mark). Each such test
+// was said as it ran; this is the run's account.
+func (r *Replayer) sayUnattributed() {
+	r.unattributedMu.Lock()
+	sets := make([]string, 0, len(r.unattributedSets))
+	for id := range r.unattributedSets {
+		sets = append(sets, id)
+	}
+	r.unattributedMu.Unlock()
+	if len(sets) == 0 {
+		return
+	}
+	sort.Strings(sets)
+	msg := "keploy could not attribute every miss of these test sets to its test: a miss may be missing from one of their tests, or have been read with another's"
+	if r.config != nil && r.config.Test.LearnsNoise {
+		msg = "keploy could not attribute every miss of these test sets to its test, so no noise is learned from them"
+	}
+	r.logger.Warn(msg, zap.Int("testSets", len(sets)), zap.Strings("ids", sets))
+}
+
 // readMockErrors reads, once, the calls of the test just run that no mock
 // answered. Under the proven switch the main loop reads them before its
 // verdict, which they are part of, and attaches that read afterwards.
@@ -7945,8 +7989,11 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		// dropped at Debug, and a miss that went unread was then masked.
 		if provenswitch.On() {
 			markUnmatchedCallsUnread(result)
-		} else if result != nil {
-			result.FailureInfo.MissesUnattributed = true
+		} else {
+			if result != nil {
+				result.FailureInfo.MissesUnattributed = true
+			}
+			r.noteUnattributed(testSetID)
 		}
 		fields := []zap.Field{
 			zap.String("testSetID", testSetID),

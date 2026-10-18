@@ -908,6 +908,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.RecordRequests {
 		command = append(command, "--record-requests")
 	}
+	if opts.SettleReads {
+		command = append(command, "--settle-reads")
+	}
 	// The proven model's staging switch: the agent container is not given
 	// KEPLOY_PROVEN, so it travels as a flag.
 	command = append(command, provenswitch.AgentArgs()...)

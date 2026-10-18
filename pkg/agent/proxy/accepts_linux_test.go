@@ -14,11 +14,13 @@ import (
 
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
@@ -713,9 +715,10 @@ func TestAPairedConnectionGoesWhereItsOwnSocketSays(t *testing.T) {
 }
 
 // A connection the kernel tied to no connection of the application's (a NAT
-// between them, among the causes) is refused, a capture loss with a WARN:
-// never sent where a by-port entry says.
+// between them, among the causes) is refused under the proven switch, a
+// capture loss with a WARN: never sent where a by-port entry says.
 func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
 	wrong := namedUpstream(t, "wrong")
 	f := &fakeCounter{} // pairs none
 	cfg := config.New()
@@ -739,6 +742,144 @@ func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
 	losses := p.CaptureLosses()
 	if len(losses) != 1 || losses[0].Kind != models.CaptureLossUnpairedConn || losses[0].Count != 1 {
 		t.Fatalf("CaptureLosses = %+v, want one unpaired connection", losses)
+	}
+}
+
+// With the switch off, a connection the kernel tied to none of the
+// application's (a NAT between them) is routed by its source port, as it
+// always was, so the application's calls work: a proxy whose calls were
+// counted from its start drops to not counted, for good, says why once, and
+// its CountingLost says so (its agent then answers every later read unread);
+// one that was not counted (no sock_diag, here) pairs nothing. Neither takes
+// a capture loss: the call is routed.
+func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	for _, counted := range []bool{true, false} {
+		wrong := namedUpstream(t, "wrong")
+		f := &fakeCounter{} // pairs none
+		cfg := config.New()
+		cfg.ProxyPort = 0
+		cfg.Agent.Mode = models.MODE_RECORD // with no session yet: a call passes through
+		cfg.Agent.SettleReads = true
+		core, logs := observer.New(zap.WarnLevel)
+		p := New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, wrong)}, cfg)
+		if err := p.InitIntegrations(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		p.SetListenerCounter(f)
+		if !counted {
+			p.paired.fail(errors.New("no sock_diag here"))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		ready, done := make(chan error, 1), make(chan error, 1)
+		go func() { done <- p.Serve(ctx, ready) }()
+		if err := <-ready; err != nil {
+			t.Fatal(err)
+		}
+		if p.CountedFromStart() != counted || p.usesPairing() != counted || p.keepsConnections() != counted {
+			t.Fatalf("counted %v: CountedFromStart %v, usesPairing %v, keepsConnections %v", counted, p.CountedFromStart(), p.usesPairing(), p.keepsConnections())
+		}
+		for i := 0; i < 2; i++ {
+			if got := callThrough(t, p.Listener.Addr().String()); got != "wrong" {
+				t.Fatalf("counted %v: the NAT'd connection reached %q, want it routed by its source port (\"wrong\")", counted, got)
+			}
+		}
+		if losses := p.CaptureLosses(); len(losses) != 0 {
+			t.Fatalf("counted %v: CaptureLosses %+v, want none: the calls were routed", counted, losses)
+		}
+		lostCh, lost := p.CountingLost()
+		if counted {
+			if lost == nil || !errors.Is(lost, models.ErrProxyConnsUnsupported) {
+				t.Fatalf("counted: CountingLost %v, want why the run's calls stopped being counted", lost)
+			}
+			select {
+			case <-lostCh:
+			default:
+				t.Fatal("counted: CountingLost's channel is not closed")
+			}
+			if p.usesPairing() || p.keepsConnections() {
+				t.Fatal("counted: the proxy still pairs or keeps connections after the NAT'd one")
+			}
+			if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); n != 1 {
+				t.Fatalf("counted: %d WARNs of the NAT, want 1 for two NAT'd connections", n)
+			}
+		} else if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); lost != nil || n != 0 {
+			t.Fatalf("not counted: CountingLost %v, %d WARNs of a NAT; want neither", lost, n)
+		}
+		pairs := 0
+		p.pairs.Range(func(any, any) bool { pairs++; return true })
+		if pairs != 0 {
+			t.Fatalf("counted %v: %d pairings left in the proxy's map, want none", counted, pairs)
+		}
+		cancel()
+		<-done
+	}
+}
+
+// NAT'd connections handled at once, with the switch off, all drop the count
+// together: each is routed (dropCounting answers true for every one, none is
+// refused), the count reads dropped and never "not counted from the start"
+// meanwhile, the WARN is said once, and its channel closed once.
+func TestNATdConnectionsHandledAtOnceAllDropTheCount(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	core, logs := observer.New(zap.WarnLevel)
+	p := New(zap.New(core), fakeDestInfo{}, config.New())
+	for i := 0; i < 20000; i++ {
+		// A counted proxy again, its drop undone.
+		p.countingLost.Store(nil)
+		p.countingLostCh = make(chan struct{})
+		p.countedFromStart.Store(true)
+		_ = logs.TakeAll() // the previous round's WARN
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var refused, uncounted atomic.Int32
+		for g := 0; g < 8; g++ {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				if !p.dropCounting(c) {
+					refused.Add(1)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				if !p.CountedFromStart() {
+					uncounted.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if n := refused.Load(); n != 0 {
+			t.Fatalf("round %d: %d of 8 NAT'd connections handled at once would be refused", i, n)
+		}
+		if n := uncounted.Load(); n != 0 {
+			t.Fatalf("round %d: CountedFromStart read false %d times while the count was dropped", i, n)
+		}
+		if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); n != 1 {
+			t.Fatalf("round %d: %d WARNs, want 1", i, n)
+		}
+		ch, err := p.CountingLost()
+		if err == nil {
+			t.Fatalf("round %d: no reason after the drop", i)
+		}
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("round %d: the drop's channel is not closed", i)
+		}
 	}
 }
 

@@ -13,7 +13,9 @@ import (
 )
 
 // A test's end count (design v14 §5.2; release1-cut §5.1 item 5; verify-v14
-// M1 and M2), under the proven switch. Before a test is judged at its end, and
+// M1 and M2), under the proven switch; with it off, the same settle before a
+// read of a test's misses, for an agent started settling reads whose calls
+// are counted (Agent.settlesReads). Before a test is judged at its end, and
 // before one opens at its begin, every call the application made must be in
 // the proxy's hands, and in a replay answered:
 //
@@ -122,6 +124,18 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	// With the switch off a NAT'd connection that drops the run to not
+	// counted ends a settle in flight: the call it waits for can never
+	// settle, and the read it is for cannot vouch for every miss.
+	if lost := a.countingLostSignal(); lost != nil {
+		go func() {
+			select {
+			case <-lost:
+				cancel(a.countingLost())
+			case <-ctx.Done():
+			}
+		}()
+	}
 	// The watchdog reads the counts at every wake-up: that read is also what
 	// ends an application connection's wait when the kernel dropped its
 	// event (WaitAppConnsSettled). While the wait is for the counts, they

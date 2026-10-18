@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -141,23 +142,130 @@ func (a *Agent) WaitProxyAccepted(ctx context.Context, n uint64) error {
 }
 
 // markProxyListener hands the proxy the hooks' count of its listener, under
-// the proven switch, when the hooks can count and the proxy can take it: the
-// proxy then listens plain TCP, marks its socket before listen(), and reads
-// each accepted connection's number. Otherwise it does nothing, and the
-// proxy's listener is as it always was.
+// the proven switch or for an agent that settles its reads (settlesReads),
+// when the hooks can count and the proxy can take it: the proxy then listens
+// plain TCP, marks its socket before listen(), and reads each accepted
+// connection's number. Otherwise it does nothing, and the proxy's listener is
+// as it always was.
 func (a *Agent) markProxyListener() {
-	if !provenswitch.On() {
+	if !provenswitch.On() && !a.startedSettlingReads() {
 		return
 	}
 	h, ok := a.Hooks.(coreAgent.ProxyConnsReporter)
-	if !ok {
-		return
-	}
-	p, ok := a.Proxy.(coreAgent.ListenerCountTaker)
-	if !ok {
+	p, ok2 := a.Proxy.(coreAgent.ListenerCountTaker)
+	if !ok || !ok2 {
+		if !provenswitch.On() {
+			a.noteReadsUnsettled()
+		}
 		return
 	}
 	p.SetListenerCounter(h)
+}
+
+// latchCounting records, once the agent's proxy is up, whether the kernel
+// counted the calls waiting for the proxy when it came up: the proxy decided
+// it right after its own check of the count, before it said it was ready
+// (agent.CountingReporter). Where the hooks count and it did not (a mark the
+// kernel refused, a canary it did not count, no sock_diag), the proxy has
+// said why, with what to fix; the agent then reads each test's misses as
+// before (settlesReads).
+func (a *Agent) latchCounting() {
+	if cr, ok := a.Proxy.(coreAgent.CountingReporter); ok && cr.CountedFromStart() {
+		a.countsCalls.Store(true)
+	}
+}
+
+// noteReadsUnsettled says, for an agent started settling reads whose hooks
+// cannot count the calls waiting for its proxy (the macOS and Windows agents'),
+// that it reads each test's misses at once, as before. That is what these
+// hooks are, nothing to fix: an Info, not a warning.
+func (a *Agent) noteReadsUnsettled() {
+	if a.logger == nil || !a.startedSettlingReads() {
+		return
+	}
+	a.logger.Info("keploy's hooks here do not count the calls waiting for its proxy, so it reads each test's misses at once, as before: a miss it decides after the application answered its test may be read with a later test")
+}
+
+// lostSinceLastRead is, for a read settled with the switch off, why it cannot
+// vouch for every miss when the agent has had capture losses since the last
+// such read (CaptureLosses: the proxy's, the hooks', the PID maps'): calls it
+// could not capture, record or answer, such as an application connection
+// lost before the proxy got it, a client's TLS
+// handshake that failed, a parser that panicked, bytes the application wrote
+// that never reached the proxy. Their misses are in no read. Under the switch
+// they are charged to their test instead (markCaptureLosses). Counts that
+// cannot be read are a read that cannot vouch; hooks that count no losses at
+// all leave the read as it is, as the switch does.
+func (a *Agent) lostSinceLastRead(ctx context.Context) error {
+	losses, err := a.CaptureLosses(ctx)
+	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("keploy could not read what it failed to capture: %w", err)
+	}
+	var n uint64
+	for _, l := range losses {
+		n += l.Count
+	}
+	if prev := a.readLosses.Swap(n); n > prev {
+		return fmt.Errorf("keploy could not capture, record or answer %d of the calls it intercepted since the last read (%v)", n-prev, losses)
+	}
+	return nil
+}
+
+// countingLost is why, with the switch off, the run's calls stopped being
+// counted after the agent's start (a NAT'd connection: the proxy's
+// CountingLost), nil while they are, and always nil under the switch, which
+// refuses such a connection instead.
+func (a *Agent) countingLost() error {
+	if provenswitch.On() {
+		return nil
+	}
+	cr, ok := a.Proxy.(coreAgent.CountingReporter)
+	if !ok {
+		return nil
+	}
+	_, err := cr.CountingLost()
+	return err
+}
+
+// countingLostSignal is a channel closed once countingLost says why (never,
+// under the switch or for a proxy that does not say).
+func (a *Agent) countingLostSignal() <-chan struct{} {
+	if provenswitch.On() {
+		return nil
+	}
+	cr, ok := a.Proxy.(coreAgent.CountingReporter)
+	if !ok {
+		return nil
+	}
+	ch, _ := cr.CountingLost()
+	return ch
+}
+
+// startedSettlingReads reports whether this agent was started for a run that
+// learns noise from its misses (models.SetupOptions.SettleReads,
+// --settle-reads): with the proven switch off, its reads of a test's misses
+// settle the test's calls first, as the switch's do, which needs its
+// proxy's listener marked, and every connection kept, from its start.
+func (a *Agent) startedSettlingReads() bool {
+	return a.config != nil && a.config.Agent.SettleReads
+}
+
+// settlesReads reports whether, with the proven switch off, this agent settles
+// a read of a test's misses: it was started settling reads, and when its proxy
+// came up the kernel counted the connections completed to the proxy's
+// listener (latchCounting). Where the calls could not be counted from the
+// start (hooks that do not count them, on another platform; a mark the kernel
+// refused; a canary that failed), the read is as it always was, said once: no
+// read of this agent's could ever be settled, and refusing every one would
+// end noise learning there rather than make it right. An agent that counted
+// from the start settles every read: one that then cannot vouch for every
+// call (a count lost later, a parser that reads ahead without saying what it
+// holds) is answered unread, never read as before.
+func (a *Agent) settlesReads() bool {
+	return a.startedSettlingReads() && a.countsCalls.Load()
 }
 
 // Compile-time proof that the agent offers begin and end the count: S12's
