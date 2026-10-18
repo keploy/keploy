@@ -1370,25 +1370,42 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 // test or between tests, and a worker-scope one whose place the run has not
 // reached. It never names one the view shows (the pool between tests, a
 // reached worker mock), the open test's own, or one a call already consumed.
+// Each recording is named for one miss at most, as it answers one call at
+// most: two identical calls made elsewhere name its two recordings, in
+// recorded order, and a third names none. The next staging starts afresh.
 func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	own := httpCall("own", 0, "/orders")
 	other := httpCall("other", time.Second, "/delete")
+	inT1 := httpCall("other-in-t1", 1500*time.Millisecond, "/archive")
+	consumed := httpCall("consumed", 1700*time.Millisecond, "/notify")
 	boot := httpCall("w-boot", 2*time.Second, "/receive")
 	later := httpCall("w-later", 3*time.Second, "/receive")
 	pool := httpCall("pool", 4*time.Second, "/pool")
-	mm := stagedManager(t, nil, []*models.Mock{own, other, boot, later, pool})
+	pollA := httpCall("poll-a", 5*time.Second, "/jobs")
+	pollB := httpCall("poll-b", 6*time.Second, "/jobs")
+	all := []*models.Mock{own, other, inT1, consumed, boot, later, pool, pollA, pollB}
+	mm := stagedManager(t, nil, all)
 	find := func(name string) string {
 		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+	}
+	jobs := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
 	}
 
 	// The set's start, no test open: any test's recording is named, and the
 	// worker mock not reached; the pool and the reached worker mock are shown.
 	mm.ServeExactWorker([]string{"w-boot"})
 	mm.ServeExactPool("k", []string{"pool"})
-	for name, want := range map[string]string{"own": "own", "other": "other", "w-later": "w-later", "w-boot": "", "pool": ""} {
+	for name, want := range map[string]string{"other": "other", "w-later": "w-later", "w-boot": "", "pool": ""} {
 		if got := find(name); got != want {
 			t.Errorf("before the first test, %s: found %q, want %q", name, got, want)
 		}
+	}
+	if got := find("other"); got != "" {
+		t.Errorf("a recording already named was named for a second miss: %q", got)
+	}
+	if a, b, none := jobs(), jobs(), jobs(); a != "poll-a" || b != "poll-b" || none != "" {
+		t.Errorf("three identical calls named %q, %q, %q; want poll-a, poll-b, then none", a, b, none)
 	}
 
 	// A test open: never its own, still another test's.
@@ -1397,27 +1414,27 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	if got := find("own"); got != "" {
 		t.Errorf("in T1 its own recording was named: %q", got)
 	}
-	if got := find("other"); got != "other" {
+	if got := find("other-in-t1"); got != "other-in-t1" {
 		t.Errorf("in T1 another test's recording was not named: %q", got)
 	}
 
 	// Its owner is not a test that has begun until it begins.
-	if mm.StagedOwnerBegun("other") || !mm.StagedOwnerBegun("own") {
-		t.Errorf("owners begun: other %v, own %v; want only own's test begun", mm.StagedOwnerBegun("other"), mm.StagedOwnerBegun("own"))
+	if mm.StagedOwnerBegun("consumed") || !mm.StagedOwnerBegun("own") {
+		t.Errorf("owners begun: consumed %v, own %v; want only own's test begun", mm.StagedOwnerBegun("consumed"), mm.StagedOwnerBegun("own"))
 	}
 
 	// Another test consumes its recording: no later miss names it.
 	mm.ServeExactWorker([]string{"w-boot"})
-	mm.ServeExactTest("T2", []*models.Mock{other})
-	if !mm.StagedOwnerBegun("other") {
-		t.Error("other's test began, and its owner is not read as begun")
+	mm.ServeExactTest("T2", []*models.Mock{consumed})
+	if !mm.StagedOwnerBegun("consumed") {
+		t.Error("consumed's test began, and its owner is not read as begun")
 	}
-	if !mm.DeleteFilteredMock(*other) {
+	if !mm.DeleteFilteredMock(*consumed) {
 		t.Fatal("T2 could not consume its own recording")
 	}
 	mm.ServeExactWorker([]string{"w-boot"})
 	mm.ServeExactPool("k", []string{"pool"})
-	if got := find("other"); got != "" {
+	if got := find("consumed"); got != "" {
 		t.Errorf("a recording its test consumed was named after: %q", got)
 	}
 	// Nor one the worker scope spent.
@@ -1427,9 +1444,14 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	if got := find("w-boot"); got != "" {
 		t.Errorf("a spent worker mock was named: %q", got)
 	}
-	// The next staging begins afresh: no test of it has begun.
-	mm.SetMocksWithWindow(nil, []*models.Mock{own, other, boot, later, pool}, models.BaseTime, time.Now())
-	if mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("other") {
+	// The next staging begins afresh: no test of it has begun, and a
+	// recording named in the previous one is named again.
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", nil)
+	if mm.StagedOwnerBegun("own") || mm.StagedOwnerBegun("consumed") {
 		t.Error("a test begun in the previous staging is read as begun in the next")
+	}
+	if got := find("other"); got != "other" {
+		t.Errorf("the next staging did not name a recording the previous one named: %q", got)
 	}
 }

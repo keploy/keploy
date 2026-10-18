@@ -133,38 +133,59 @@ type exactState struct {
 	// each view installed after it shows.
 	worker atomic.Pointer[map[string]struct{}]
 	// begun is the mocks the tests begun in the current staging own
-	// (StagedOwnerBegun).
-	begun begunOwners
+	// (StagedOwnerBegun); named, those a miss's diagnosis named
+	// (FindStagedNotOwned), each once.
+	begun, named stagingNames
 }
 
-// begunOwners is, for one staging (stagingEpoch), the names of the mocks the
-// tests begun in it own (ServeExactTest's owned).
-type begunOwners struct {
+// stagingNames is a set of mock names that belongs to one staging
+// (stagingEpoch): a staging after it starts afresh.
+type stagingNames struct {
 	mu    sync.Mutex
 	epoch uint64
 	names map[string]struct{}
 }
 
-// note records owned as owned by a test begun in staging epoch.
-func (b *begunOwners) note(epoch uint64, owned []*models.Mock) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.names == nil || b.epoch != epoch {
-		b.epoch, b.names = epoch, map[string]struct{}{}
+// in is the set of staging epoch, with mu held: emptied when it was another
+// staging's.
+func (s *stagingNames) in(epoch uint64) map[string]struct{} {
+	if s.names == nil || s.epoch != epoch {
+		s.epoch, s.names = epoch, map[string]struct{}{}
 	}
-	for _, mk := range owned {
+	return s.names
+}
+
+// add puts the named mocks of mocks in the set of staging epoch.
+func (s *stagingNames) add(epoch uint64, mocks []*models.Mock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := s.in(epoch)
+	for _, mk := range mocks {
 		if mk != nil && mk.Name != "" {
-			b.names[mk.Name] = struct{}{}
+			set[mk.Name] = struct{}{}
 		}
 	}
 }
 
-// has reports whether name is owned by a test begun in staging epoch.
-func (b *begunOwners) has(epoch uint64, name string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.names[name]
-	return ok && b.epoch == epoch
+// claim puts name in the set of staging epoch, reporting whether it was not
+// there yet.
+func (s *stagingNames) claim(epoch uint64, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := s.in(epoch)
+	if _, ok := set[name]; ok {
+		return false
+	}
+	set[name] = struct{}{}
+	return true
+}
+
+// has reports whether name is in the set of staging epoch.
+func (s *stagingNames) has(epoch uint64, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.names[name]
+	return ok && s.epoch == epoch
 }
 
 // StagedOwnerBegun reports whether name, a staged mock, is owned by a test
@@ -303,7 +324,10 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // FindStagedNotOwned is, under exact serving, the name of the first mock of
 // kind staged in the manager's trees (per-test, session, startup, in that
 // order) that the open view does not show, that no call of the set has
-// consumed, and that match accepts (integrations.StagedFinder); "" for none.
+// consumed, that no earlier miss of the staging was named as, and that match
+// accepts (integrations.StagedFinder); "" for none. Each recording is named
+// for one miss at most, as it answers one call at most: two identical calls
+// made elsewhere name two recordings of it, in recorded order.
 // With a test open that is a mock the test does not own: another test's, or
 // a worker-scope mock (models.Mapping.Worker) whose place the run has not
 // reached. With none open, it is any test's. Such a miss is the call a
@@ -315,6 +339,7 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 	if v == nil || match == nil {
 		return ""
 	}
+	epoch := m.stagingEpoch.Load()
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
@@ -331,10 +356,10 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 			if _, own := v.index[mk.Name]; own && v.test != "" {
 				return true
 			}
-			if v.shows(mk) || m.consumedInSet(mk.Name) {
+			if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) {
 				return true
 			}
-			if match(mk) {
+			if match(mk) && m.exact.named.claim(epoch, mk.Name) {
 				found = mk.Name
 				return false
 			}
@@ -404,7 +429,7 @@ func (m *MockManager) ServeExactTest(test string, owned []*models.Mock) {
 		}
 		v.carried[a.owned.Name] = true
 	}
-	m.exact.begun.note(m.stagingEpoch.Load(), owned)
+	m.exact.begun.add(m.stagingEpoch.Load(), owned)
 	m.exact.fired.Store(true)
 	m.exact.last.Store(v)
 	m.installExact(v)
