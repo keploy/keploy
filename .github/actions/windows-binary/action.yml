@@ -1,0 +1,70 @@
+name: windows-binary
+description: "Put a Windows artifact's keploy.exe in a directory: copied from this machine (machine-cache.ps1) by its SHA-256, else downloaded"
+
+# The self-hosted Windows runners share one machine, which builds keploy.exe
+# and keeps it (prepare_and_run's build-windows-amd64). A copy from there takes
+# seconds; a download of the artifact took 73-480 s (runs 39021950515 to
+# 39052648438). The entry is a saving, never a dependency: whatever became of
+# it (evicted, removed or replaced while it was read, not whole, or put on
+# another machine), the get says hit=false and the artifact is downloaded, and
+# then kept for the next job. Windows CI scripts runs this action end to end
+# for an evicted entry and for one that cannot be read mid-copy.
+
+inputs:
+  name:
+    required: true
+    description: "The artifact, which is also the entry's name in the cache, e.g. build-windows"
+  sha256:
+    required: false
+    default: ''
+    description: "keploy.exe's SHA-256, as the job that built it on this machine gave it; empty: download it"
+  path:
+    required: true
+    description: "The directory, relative to the workspace, that keploy.exe lands in"
+
+outputs:
+  hit:
+    description: "true: copied from this machine; false: looked for, not there, downloaded; empty: downloaded without looking"
+    value: ${{ steps.get.outputs.hit }}
+
+runs:
+  using: composite
+  steps:
+    # A get that fails outright (a wrong call) says nothing, and so is a
+    # download too.
+    - name: Get keploy.exe from this machine
+      id: get
+      if: inputs.sha256 != ''
+      continue-on-error: true
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      env:
+        MC_NAME: ${{ inputs.name }}
+        MC_KEY: ${{ inputs.sha256 }}
+        MC_DEST: ${{ inputs.path }}
+      run: |
+        $script = Join-Path $env:GITHUB_ACTION_PATH '..\..\scripts\windows\machine-cache.ps1'
+        $dest = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:MC_DEST) 'keploy.exe'
+        $out = & $script -Get -Name $env:MC_NAME -Key $env:MC_KEY -File keploy.exe -Destination $dest
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $last = @($out)[-1]
+        if ($last -notmatch '^hit=(true|false)$') { throw "machine-cache.ps1 ended with '$last', not hit=true or hit=false" }
+        $last | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Download ${{ inputs.name }}
+      if: steps.get.outputs.hit != 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+
+    - name: Keep the downloaded keploy.exe on this machine
+      if: steps.get.outputs.hit == 'false'
+      continue-on-error: true
+      shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+      env:
+        MC_NAME: ${{ inputs.name }}
+        MC_DEST: ${{ inputs.path }}
+      run: |
+        $script = Join-Path $env:GITHUB_ACTION_PATH '..\..\scripts\windows\machine-cache.ps1'
+        & $script -Put -Name $env:MC_NAME -File (Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:MC_DEST) 'keploy.exe')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
