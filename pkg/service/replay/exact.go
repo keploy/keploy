@@ -42,6 +42,46 @@ type exactPlan struct {
 	// ownsTestMocks: some test case owns a test mock (a data-plane mock the
 	// agent holds).
 	ownsTestMocks bool
+	// ahead is, by test case, the mocks it owns that were in flight when it
+	// began: recorded in the gap before its window, answered once it had
+	// begun (models.WindowSchedule.InFlightInto, which gave it them). The
+	// replay serves them with the pool just before the test case opens
+	// (models.ExactServing.Ahead): the replayed app may ask in the gap, as
+	// it did at record.
+	ahead map[string][]string
+	// aheadNamed is the test case the latest pool call named the calls in
+	// flight of (serveExactPool's next), "" for none.
+	aheadNamed string
+}
+
+// noteAhead fills p.ahead from what each test case of cases owns: its mapped
+// mocks the agent holds whose recorded request is before the case's recorded
+// window, which a mapping gives a test only for a call in flight when it
+// began (models.DeriveWindowMappings).
+func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*models.TestCase) {
+	if p == nil {
+		return
+	}
+	for _, tc := range cases {
+		start := models.RecordedWindow(tc).Start
+		if start.IsZero() {
+			continue
+		}
+		owned := make(map[string]bool, len(p.owned[tc.Name]))
+		for _, n := range p.owned[tc.Name] {
+			owned[n] = true
+		}
+		for _, e := range mappings[tc.Name] {
+			req, err := models.ParseMockTimestamp(e.ReqTimestampMock)
+			if err != nil || req.IsZero() || !req.Before(start) || !owned[e.Name] {
+				continue
+			}
+			if p.ahead == nil {
+				p.ahead = map[string][]string{}
+			}
+			p.ahead[tc.Name] = append(p.ahead[tc.Name], e.Name)
+		}
+	}
 }
 
 // exactServing reports whether this replay serves each test case exactly
@@ -216,18 +256,75 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 	return err
 }
 
+// nextExactTest is the test case a replay loop opens after the one that just
+// ended: the first of rest it serves (a test selected, when a selection is
+// set, neither ignored nor refused). "" when none of rest is: what opens next
+// is then not known yet (another retry cycle, or the deferred streaming
+// pass), and serveExactAhead names it at its loop head.
+func nextExactTest[V any](rest []*models.TestCase, selected, ignored map[string]bool, refused map[string][]V) string {
+	for _, tc := range rest {
+		if _, ok := selected[tc.Name]; !ok && len(selected) != 0 {
+			continue
+		}
+		if ignored[tc.Name] {
+			continue
+		}
+		if len(refused[tc.Name]) > 0 {
+			continue
+		}
+		return tc.Name
+	}
+	return ""
+}
+
+// serveExactAhead names test case name's calls in flight when it began, at the
+// head of the loop that opens it, when the pool call before it did not name
+// them: what opens next was not known then (a retry cycle's first test case,
+// the streaming pass's), or the one it named did not open (a base path that
+// failed). The pool answers them until it opens. A no-op when the latest pool
+// call named them, or name has none.
+func (r *Replayer) serveExactAhead(ctx context.Context, plan *exactPlan, name string) {
+	if plan == nil || plan.aheadNamed == name || len(plan.ahead[name]) == 0 {
+		return
+	}
+	if err := r.serveExactPool(ctx, plan, name); err != nil {
+		r.logger.Debug("could not name the next test case's calls in flight when it begins; they answer once it opens",
+			zap.String("testCase", name), zap.Error(err))
+	}
+}
+
+// drainAnsweredInGap reads, as test case name opens, what the gap before it
+// answered of its calls in flight: ServeExactTest flags them consumed as it
+// opens, and they are read here, before its request is sent, so that a drain
+// after the request holds what the request consumed alone. Nothing is read
+// when the pool call before it named none of its calls (plan.aheadNamed): no
+// answer is flagged at its open.
+func (r *Replayer) drainAnsweredInGap(ctx context.Context, plan *exactPlan, name string) ([]models.MockState, error) {
+	if plan == nil || plan.aheadNamed != name || len(plan.ahead[name]) == 0 {
+		return nil, nil
+	}
+	return r.hookImpl.GetConsumedMocks(ctx)
+}
+
 // serveExactPool serves the set's pool again, once a test case's
 // consumption is read: a call the application makes between test cases is
-// the pool's.
-func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan) error {
+// the pool's, but for one of next's mocks in flight when it begins
+// (exactPlan.ahead), which answers as next's. next is the test case the
+// replay opens next, "" for none.
+func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next string) error {
 	if plan == nil {
 		return nil
 	}
-	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}})
+	// Named only once the agent has them: a test case whose naming failed
+	// is named again at its loop head (serveExactAhead).
+	plan.aheadNamed = ""
+	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...)}})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
+		return err
 	}
-	return err
+	plan.aheadNamed = next
+	return nil
 }
 
 // noteMappingAlwaysUsed says once per run that disableMapping does not apply

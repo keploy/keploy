@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -200,5 +201,56 @@ func TestUnderTheSwitchASetThatOwnsNothingSaysSo(t *testing.T) {
 	said := logs.FilterMessageSnippet("no test case of this test set owns a recorded call").All()
 	if len(said) != 1 || !strings.Contains(fmt.Sprint(said[0].ContextMap()["next_step"]), "keploy record") {
 		t.Fatalf("want one warning with the fix, got %+v", said)
+	}
+}
+
+// A test case owns, of its mapping, a call in flight when it began only as
+// one recorded before its window (models.DeriveWindowMappings gives a test
+// nothing else from before it): noteAhead lists those, of the mocks the
+// agent holds, for the pool call before it to name.
+func TestNoteAheadListsATestCasesMappedCallsInFlight(t *testing.T) {
+	at := func(ms int) time.Time { return attrAt(ms) }
+	entry := func(name string, ms int) models.MockEntry {
+		return models.MockEntry{Name: name, Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(at(ms))}
+	}
+	mappings := map[string][]models.MockEntry{
+		"test-1": {entry("own-1", 1050)},
+		"test-2": {entry("fetch", 1500), entry("own-2", 2050), entry("gone", 1600), {Name: "untimed", Kind: string(models.HTTP)}},
+	}
+	held := []*models.Mock{{Name: "own-1", Kind: models.HTTP}, {Name: "fetch", Kind: models.HTTP}, {Name: "own-2", Kind: models.HTTP}, {Name: "untimed", Kind: models.HTTP}}
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(1000)}, HTTPResp: models.HTTPResp{Timestamp: at(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: at(2000)}, HTTPResp: models.HTTPResp{Timestamp: at(2100)}},
+	}
+	p := newExactPlan(mappings, held)
+	p.noteAhead(mappings, cases)
+	if got := p.ahead["test-2"]; len(got) != 1 || got[0] != "fetch" {
+		t.Fatalf("test-2's calls in flight = %v; want [fetch] (own-2 is in its window, gone is not held, untimed has no time)", got)
+	}
+	if got := p.ahead["test-1"]; len(got) != 0 {
+		t.Fatalf("test-1's calls in flight = %v; want none", got)
+	}
+}
+
+// The pool call after a test case names the next one the loop opens: not one
+// the selection leaves out, nor an ignored or a refused one; after the loop's
+// last, the first deferred streaming test case.
+func TestNextExactTestIsTheNextOneTheLoopOpens(t *testing.T) {
+	tc := func(name string) *models.TestCase { return &models.TestCase{Name: name} }
+	rest := []*models.TestCase{tc("a"), tc("b"), tc("c"), tc("d")}
+	selected := map[string]bool{"b": true, "c": true, "d": true}
+	ignored := map[string]bool{"b": true}
+	refused := map[string][]string{"c": {"a placeholder refused"}}
+	if got := nextExactTest(rest, selected, ignored, refused); got != "d" {
+		t.Fatalf("next = %q; want d", got)
+	}
+	// After the loop's last served test case what opens next is not known
+	// yet (a retry cycle's first, the streaming pass's): serveExactAhead
+	// names it once it is.
+	if got := nextExactTest(rest[:3], selected, ignored, refused); got != "" {
+		t.Fatalf("next after the loop's last = %q; want none", got)
+	}
+	if got := nextExactTest(nil, nil, nil, refused); got != "" {
+		t.Fatalf("next of nothing = %q", got)
 	}
 }

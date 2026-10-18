@@ -367,6 +367,17 @@ type TestWindows interface {
 	SameRecordedTestWindow(a, b time.Time) (same, known bool)
 }
 
+// VariableScopes is an optional MockMemDb capability, beside VariableStore:
+// the scope a call binds test variables in, by the mock that answers it. Under
+// exact serving, between tests, the next test's calls in flight the pool view
+// answers (InAheadScope) bind in that test's scope, begun early
+// (AheadVariables); every other call, in the store's (VariableStore). A
+// matcher reads both scopes before it reads the pool, as it reads one.
+type VariableScopes interface {
+	AheadVariables() *variables.Table
+	InAheadScope(m *models.Mock) bool
+}
+
 // InFlightOwner is an optional MockMemDb capability: whether a mock was in
 // flight when the test the replay runs now began, sent in the gap before that
 // test's recorded window and answered inside it (models.SentInGapAnsweredBy),

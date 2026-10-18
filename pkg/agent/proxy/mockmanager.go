@@ -172,6 +172,12 @@ type MockManager struct {
 	// variables): reset as each test case of keploy test and each test of
 	// keploy mock replay begins. Read only under the proven switch.
 	vars variables.Table
+	// aheadVars holds what the next test's calls in flight bind, answered in
+	// the gap before it (ServeExactPool's ahead, exact serving): the next
+	// test's scope, begun early, apart from the ended test's (vars), which
+	// every other call of the gap reads and binds in. It is carried into the
+	// next test's scope as it begins (StartVariables).
+	aheadVars variables.Table
 
 	// exact is exact serving, under the proven switch (exact.go): when on,
 	// it decides what every read shows and which consume succeeds.
@@ -2107,11 +2113,17 @@ func (m *MockManager) OwnedByOpenTest(mk *models.Mock) bool {
 // InFlightIntoOpenTest reports whether mk was in flight when the open test
 // began: its request recorded outside the test's window, in the gap before it,
 // and answered inside it (inFlightAtStart), which the windowed read serves as
-// the test's own (integrations.InFlightOwner). Under exact serving the test's
-// mapping says what it owns and the manager holds no window: none is, by time.
+// the test's own (integrations.InFlightOwner). Under exact serving, where the
+// manager holds no window, it is one of the open test's mocks the pool view
+// before it served as in flight (ServeExactPool's ahead, exactView.inFlight):
+// its mapping gives it the test, and the replay named it so. No mock is with
+// no test open, in the gap itself.
 func (m *MockManager) InFlightIntoOpenTest(mk *models.Mock) bool {
-	if mk == nil || m.exactView() != nil {
+	if mk == nil {
 		return false
+	}
+	if v := m.exactView(); v != nil {
+		return v.test != "" && v.inFlight[mk.Name]
 	}
 	m.windowMu.RLock()
 	active := m.windowActiveLocked()
@@ -2202,8 +2214,63 @@ func (m *MockManager) StatementCatalog(kind models.Kind) []*models.Mock {
 
 // Variables returns the table of the test variables this replay has bound.
 // Satisfies the matchers' optional integrations.VariableStore capability.
+// Between tests it is the ended test's: a call of the gap reads and binds in
+// it, but for the next test's calls in flight (InAheadScope).
 func (m *MockManager) Variables() *variables.Table {
 	return &m.vars
+}
+
+// AheadVariables is the table the next test's calls in flight bind in, when
+// the gap before it answers them under exact serving (ServeExactPool's ahead):
+// the next test's scope, begun early, carried into it as it begins
+// (StartVariables). Satisfies integrations.VariableScopes.
+func (m *MockManager) AheadVariables() *variables.Table {
+	return &m.aheadVars
+}
+
+// InAheadScope reports whether a call mk answers binds in AheadVariables: mk
+// is one of the next test's calls in flight the pool view answers, between
+// tests under exact serving. Satisfies integrations.VariableScopes.
+func (m *MockManager) InAheadScope(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	v := m.exactView()
+	if v == nil || v.test != "" || len(v.owned) == 0 {
+		return false
+	}
+	_, ahead := v.index[mk.Name]
+	return ahead
+}
+
+// StartVariables begins a test's variables (variables.Table.Start) with the
+// values its test case's request gave bound, and, under exact serving, the
+// bindings the answers of its calls in flight made in the gap before it
+// (exactView.carried, aheadVars), after the given ones: a given value wins.
+func (m *MockManager) StartVariables(given []models.VariableBinding) {
+	var carry []models.VariableBinding
+	if v := m.exactView(); v != nil && v.test != "" && len(v.carried) > 0 {
+		for _, b := range m.aheadVars.Snapshot() {
+			if v.carried[b.Mock] {
+				carry = append(carry, b)
+			}
+		}
+	}
+	m.vars.StartCarrying(given, carry)
+	m.aheadVars.Reset()
+}
+
+// BoundVariables is the test variables the current test (or the one that just
+// ended, between tests) has bound: never what the next test's calls in flight
+// bound in the gap.
+func (m *MockManager) BoundVariables() []models.VariableBinding {
+	return m.vars.Snapshot()
+}
+
+// ResetVariables forgets every binding of the test's scope, and the gap's.
+func (m *MockManager) ResetVariables() {
+	m.vars.Reset()
+	m.aheadVars.Reset()
 }
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set

@@ -450,6 +450,7 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 		ex := *params.Exact
 		ex.Pool = slices.Clone(ex.Pool)
 		ex.Owned = slices.Clone(ex.Owned)
+		ex.Ahead = slices.Clone(ex.Ahead)
 		params.Exact = &ex
 	}
 	return params

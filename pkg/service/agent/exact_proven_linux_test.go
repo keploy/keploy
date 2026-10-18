@@ -59,6 +59,10 @@ func (p *servingProxy) ServeExactPool(key string, names []string) error {
 	p.mm.ServeExactPool(key, names)
 	return nil
 }
+func (p *servingProxy) ServeExactPoolAhead(key string, names []string, ahead []*models.Mock) error {
+	p.mm.ServeExactPool(key, names, ahead...)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil
@@ -749,6 +753,43 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 	require.Equal(t, 502, code, "a test case's mock answered between test cases")
 }
 
+// keploy test under the switch: a call in flight when test-2 began (recorded
+// in the gap before its window, answered once it had begun) is test-2's, and
+// the replayed app may ask for it in the gap, as it did at record. The pool
+// call before test-2 names it (models.ExactServing.Ahead): it answers there
+// once, and test-2 counts it as answered when it opens. A gap call made again
+// finds no mock, and so does one in test-2.
+func TestKeployTestAnswersAGapCallInFlightAsTheNextTestCases(t *testing.T) {
+	a, p := keployTestAgent(t,
+		[]*models.Mock{
+			pingMock("fetch", "/fetch", "o2", t0),
+			pingMock("own-2", "/own", "two", t0.Add(time.Second)),
+			pingMock("health", "/health", "ok", t0.Add(-time.Second)),
+		}, []string{"health"})
+	ctx := context.Background()
+
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: []string{"fetch"}}}))
+	code, body := p.call(t, "/fetch")
+	require.Equal(t, 200, code, "the call in flight when test-2 began is answered in the gap before it")
+	require.Equal(t, "o2", body)
+	code, _ = p.call(t, "/fetch")
+	require.Equal(t, 502, code, "the call in flight answered twice in the gap")
+	code, _ = p.call(t, "/health")
+	require.Equal(t, 200, code, "the pool still answers beside it")
+
+	got, _ := keployTestCase(t, a, p, "test-2", []string{"fetch", "own-2"}, "/own", "/fetch")
+	require.Equal(t, "200 two", got[0])
+	require.True(t, strings.HasPrefix(got[1], "502"), "the call in flight answered again in test-2: %s", got[1])
+	test, consumed, unconsumed, ok := p.mm.ExactTestOutcome()
+	require.True(t, ok)
+	require.Equal(t, "test-2", test)
+	require.Equal(t, []string{"fetch", "own-2"}, consumed, "the gap's answer counts as test-2's, first")
+	require.Empty(t, unconsumed)
+
+	code, _ = p.call(t, "/fetch")
+	require.Equal(t, 502, code, "a pool call that names nothing ahead answers no test case's mock")
+}
+
 // keploy test runs a test case again (a retry) afresh: each run is served
 // its own mocks from the first, and one call more than recorded is an extra
 // call in any run.
@@ -1197,5 +1238,21 @@ func TestAnEarlierTestsLateCallIsNotTheNextTests(t *testing.T) {
 			require.Equal(t, "200 b", got[0])
 			require.Contains(t, e.Reason, "GET /b to 127.0.0.1:18093 was called 2 times, recorded 1")
 		})
+	}
+}
+
+// The agent serves the pool between test cases whatever becomes of the next
+// test case's calls in flight: with no mocks loaded to read them from, the
+// pool is still served, and the test case that ended is closed, not left open.
+func TestThePoolIsServedWhenTheCallsInFlightCannotBeRead(t *testing.T) {
+	p := newServingProxy()
+	t.Cleanup(p.mm.Close)
+	a := &Agent{logger: zap.NewNop()}
+	p.mm.ServeExactTest("test-1", nil)
+	if err := a.servePoolAhead(p, []string{"pool"}, []string{"fetch"}); err != nil {
+		t.Fatalf("servePoolAhead = %v; want the pool served all the same", err)
+	}
+	if p.mm.IsTestWindowActive() {
+		t.Fatal("test-1 is still open: the pool was not served")
 	}
 }

@@ -100,16 +100,32 @@ func (t *Table) BindAll(gen uint64, bs []Binding) (bad, with Binding, stale, ok 
 // bound, under one lock: no call of the scope binds before them. A name given
 // twice keeps its first value.
 func (t *Table) Start(given []Binding) {
+	t.StartCarrying(given, nil)
+}
+
+// StartCarrying is Start, with the bindings carried also bound as the scope
+// begins, as they were made (not given): what the answers of the test's calls
+// in flight when it began bound before it, in a scope of their own. A given
+// value wins over a carried one of its name, and the first of two carried
+// ones wins.
+//
+// One lock, as Start: no call of the scope binds before them.
+func (t *Table) StartCarrying(given, carried []Binding) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.gen++
 	t.vals = nil
-	if len(given) == 0 {
+	if len(given)+len(carried) == 0 {
 		return
 	}
-	t.vals = make(map[string]Binding, len(given))
+	t.vals = make(map[string]Binding, len(given)+len(carried))
 	for _, b := range given {
 		b.Given = true
+		if _, dup := t.vals[b.Name]; !dup {
+			t.vals[b.Name] = b
+		}
+	}
+	for _, b := range carried {
 		if _, dup := t.vals[b.Name]; !dup {
 			t.vals[b.Name] = b
 		}
