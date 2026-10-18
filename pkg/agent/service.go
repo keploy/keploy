@@ -509,6 +509,16 @@ type InFlightPlanner interface {
 // the current key's pool slice answers. It is the one visibility path there:
 // the agent moves it at every begin and end, and nothing else narrows or
 // widens what a parser is served.
+// ExactWorkerServer is implemented by a proxy that serves a test set's worker
+// scope under exact serving (models.Mapping.Worker): ServeExactWorker names the
+// worker-scope mocks the set's run has reached the place of, cumulative. Each
+// view installed after it (ServeExactTest, ServeExactPool) shows them, whether
+// a test is open or not, after the open test's own; each answers at most one
+// request in the staging.
+type ExactWorkerServer interface {
+	ServeExactWorker(names []string) error
+}
+
 type ExactServer interface {
 	// ServeExactTest opens test, served exactly owned: its test mocks, in
 	// recorded order. A test opened again starts with none answered.

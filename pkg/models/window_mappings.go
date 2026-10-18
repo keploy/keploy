@@ -89,22 +89,34 @@ type WindowMappings struct {
 	// together with another test's while a test mock was recorded: which of
 	// them owns that mock was decided by time alone.
 	Concurrent []string
+	// Worker is the set's worker scope (Mapping.Worker): the test mocks
+	// recorded while no window was open, which no test owns, in recorded
+	// order, each placed where its recording holds it (MockEntry.Place): the
+	// test whose window began last before it, or the set's start before
+	// every window.
+	Worker []MockEntry
 }
 
 // DeriveWindowMappings gives each test the test mocks recorded inside its
 // window: those whose place (WindowedMock.Place: the request time, or the
 // answer's for a mock placed at its answer) is in the window's [Start, End].
 // A mock placed while no window was open belongs to no test (start-up traffic,
-// a call sent and answered between two tests), except one the in-flight rule
-// applies to (WindowedMock.InFlight) that was sent in the gap before a test
-// and answered at or after its start: it was in flight when that test began,
-// and is that test's (WindowSchedule.InFlightInto, which gives it to neither
-// of two tests that start together). A mock recorded while two windows were
+// a call sent and answered between two tests: the worker scope, below),
+// except one the in-flight rule applies to (WindowedMock.InFlight) that was
+// sent in the gap before a test and answered at or after its start: it was in
+// flight when that test began, and is that test's (WindowSchedule.InFlightInto,
+// which gives it to neither of two tests that start together). A mock recorded
+// while two windows were
 // open goes to the one that opened first: the earliest-started window that
 // contains it, the window models.WindowSchedule releases it at, and the one
 // the sync-mode mock manager gives it when it has nothing else to go by. A
 // --sync recording's mock manager attributes by request time only, so it gives
 // an in-flight call to no test.
+//
+// A test mock recorded while no window was open that the in-flight rule gives
+// to no test is the set's worker scope (WindowMappings.Worker, the founder's
+// D2): the application made it on its own, and whichever window a replay
+// makes it in, no test owns it. It is placed where its recording holds it.
 //
 // A window with no Start is left out; one whose End is missing or before its
 // Start ends at its Start. Mocks that are not test mocks are skipped.
@@ -162,11 +174,20 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			// The gap between two tests. A call sent here and answered at or
 			// after the next test's start was in flight when that test began
 			// (a consumer's long poll): that test's, as
-			// WindowSchedule.InFlightInto has it. Before the first test it
-			// is start-up traffic.
+			// WindowSchedule.InFlightInto has it. Any other is the worker
+			// scope's, the app's start included.
 			if m.InFlight && next < len(ws) && sched.InFlightInto(m.At, m.Res, ws[next].Start) {
 				out.Tests[next].Mocks = append(out.Tests[next].Mocks, m.entry())
+				continue
 			}
+			// No test's: the worker scope's, from the place it was recorded
+			// at, after the window that began last before it (none before
+			// every window).
+			e := m.entry()
+			if next > 0 {
+				e.Place = ws[next-1].TestCase
+			}
+			out.Worker = append(out.Worker, e)
 			continue
 		}
 		owner := open[0]

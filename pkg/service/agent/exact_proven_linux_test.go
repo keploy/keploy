@@ -63,6 +63,10 @@ func (p *servingProxy) ServeExactPoolAhead(key string, names []string, ahead []*
 	p.mm.ServeExactPool(key, names, ahead...)
 	return nil
 }
+func (p *servingProxy) ServeExactWorker(names []string) error {
+	p.mm.ServeExactWorker(names)
+	return nil
+}
 func (p *servingProxy) RestartExactKey(key string, names []string) error {
 	p.mm.RestartExactKey(key, names)
 	return nil
@@ -1255,4 +1259,48 @@ func TestThePoolIsServedWhenTheCallsInFlightCannotBeRead(t *testing.T) {
 	if p.mm.IsTestWindowActive() {
 		t.Fatal("test-1 is still open: the pool was not served")
 	}
+}
+
+// keploy test with a worker scope: a worker mock answers from its place in
+// the set's run on, in a test case or between them, once in the set; a test
+// case begun reaches the worker mocks placed after it, and no earlier one.
+// The worker mocks are staged with the pool, by name, and are not the
+// pool's.
+func TestKeployTestServesTheWorkerScopeFromItsPlaces(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	mocks := []*models.Mock{
+		pingMock("mock-own", "/own", "own", t0),
+		pingMock("mock-boot", "/boot", "boot", t0.Add(time.Second)),
+		pingMock("mock-late", "/late", "late", t0.Add(2*time.Second)),
+	}
+	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: time.Now(),
+		Exact: &models.ExactServing{Stage: true, Worker: []models.MockEntry{{Name: "mock-boot"}, {Name: "mock-late", Place: "test-1"}}},
+	}))
+	code, _ := p.call(t, "/late")
+	require.Equal(t, 502, code, "a worker mock answered before its place")
+	before, err := p.GetMockErrors(ctx)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+	require.Equal(t, models.MissOutsideTest, before[0].Kind, "a call before a worker mock's place is a miss outside every test")
+
+	got, misses := keployTestCase(t, a, p, "test-1", []string{"mock-own"}, "/own", "/boot", "/boot")
+	require.Equal(t, "200 own", got[0])
+	require.Equal(t, "200 boot", got[1], "a worker mock placed at the set's start answers in a test case")
+	require.True(t, strings.HasPrefix(got[2], "502"), "a worker mock answered twice: %v", got)
+	require.Len(t, misses, 1)
+	require.Equal(t, models.MissInTest, misses[0].Kind, "the worker mock's second call is a miss in the test")
+
+	// test-1 has begun: mock-late is reached, between test cases too.
+	code, body := p.call(t, "/late")
+	require.Equal(t, 200, code, "a worker mock placed after a begun test case does not answer between test cases")
+	require.Equal(t, "late", body)
+	code, _ = p.call(t, "/late")
+	require.Equal(t, 502, code, "a worker mock answered twice in the set")
+	code, _ = p.call(t, "/own")
+	require.Equal(t, 502, code, "a test case's mock answered between test cases")
 }

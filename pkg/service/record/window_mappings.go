@@ -177,10 +177,24 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
+	// The set's worker scope (D2): what no test owns, each at its place. A
+	// place whose test case the recording did not keep moves back to the
+	// latest kept test case before it (the set's start before every one), so
+	// a replay of the kept test cases reaches it.
+	worker := keptPlaces(derived, kept)
+	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
+		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",
+			zap.String("testSetID", testSetID),
+			zap.Error(err),
+			zap.String("next_step", "keploy test cannot tell which recorded calls are the set's own without mappings.yaml's worker scope; fix the error above and re-record this test set"))
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+		return
+	}
 	logger.Info("Saved the test-mock mappings derived from the test windows",
 		zap.String("testSetID", testSetID),
 		zap.Int("numTests", len(byTest)),
-		zap.Int("mappedMocks", mappedMocks))
+		zap.Int("mappedMocks", mappedMocks),
+		zap.Int("workerMocks", len(worker)))
 	if n := len(concurrent); n > 0 {
 		logger.Warn("some tests were recorded while another test's request was still open: a call recorded while two tests were open is mapped to the test whose request came first, which may not be the test that made it",
 			zap.String("testSetID", testSetID),
@@ -188,4 +202,32 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 			zap.Strings("tests", concurrent[:min(n, 20)]),
 			zap.String("next_step", "if one of these tests fails in keploy test with a call it did not make or a call no recorded mock answered, record them one request at a time"))
 	}
+}
+
+// keptPlaces is derived's worker scope with each place a test case kept
+// (kept) holds: a place whose test case is not kept moves back to the latest
+// kept test case whose window began before it, in window order, or to the
+// set's start before every one.
+func keptPlaces(derived models.WindowMappings, kept func(id string) bool) []models.MockEntry {
+	if len(derived.Worker) == 0 {
+		return nil
+	}
+	// latestKept is, by test case ID, the latest kept test case at or before
+	// it in window order.
+	latestKept := make(map[string]string, len(derived.Tests))
+	last := ""
+	for _, tc := range derived.Tests {
+		if kept(tc.ID) {
+			last = tc.ID
+		}
+		latestKept[tc.ID] = last
+	}
+	out := make([]models.MockEntry, 0, len(derived.Worker))
+	for _, e := range derived.Worker {
+		if e.Place != "" {
+			e.Place = latestKept[e.Place]
+		}
+		out = append(out, e)
+	}
+	return out
 }

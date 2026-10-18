@@ -43,7 +43,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
-	var existingStartup []models.MockEntry
+	var existingStartup, existingWorker []models.MockEntry
 	var existingSource string
 
 	// Detect whether a mappings file already exists in either format,
@@ -73,6 +73,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 			finalMappings[t.ID] = t.Mocks
 		}
 		existingStartup = existingConfig.Startup
+		existingWorker = existingConfig.Worker
 		existingSource = existingConfig.Source
 	}
 
@@ -110,6 +111,14 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.Startup = mapping.Startup
 	case len(existingStartup) > 0:
 		newMapping.Startup = existingStartup
+	}
+	// The worker scope too, replace-or-keep as the startup section: it is the
+	// set's, not a test's, and CreateMappingStructure cannot see it.
+	switch {
+	case len(mapping.Worker) > 0:
+		newMapping.Worker = mapping.Worker
+	case len(existingWorker) > 0:
+		newMapping.Worker = existingWorker
 	}
 	// Who wrote the test entries: a writer that names itself, else the
 	// file's (models.Mapping.Source).
@@ -282,6 +291,44 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		zap.Int("tests", len(byTest)))
 
 	return nil
+}
+
+// UpsertWorker writes the set's worker scope (models.Mapping.Worker), whole,
+// creating the file if absent and keeping every other section as it is: the
+// recording derives the scope whole from its test windows (D2), so what is
+// written replaces what was there. An empty scope clears it.
+func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		effFormat = db.Format
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	mapping.Worker = worker
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {

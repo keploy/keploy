@@ -24,6 +24,12 @@ import (
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
+//   - Whether a test is open or not, the set's worker-scope mocks its run
+//     has reached the place of answer (ServeExactWorker,
+//     models.Mapping.Worker): no test owns them. In a test they come after
+//     the test's own. Each answers at most one request in the staging,
+//     consumed through a delete door as a data-plane recording is outside
+//     every test (decision 31): no begin or end brings it back.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -80,6 +86,10 @@ type exactView struct {
 	inFlight map[string]bool
 	// pool is, while no test is open, the names of the pool slice served.
 	pool map[string]struct{}
+	// worker is the set's worker-scope mocks the run has reached the place
+	// of, by name, as ServeExactWorker last said when the view was
+	// installed: shown whether a test is open or not.
+	worker map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	poolKey string
 
@@ -118,6 +128,9 @@ type exactState struct {
 	// outside is what the calls made outside every test consumed in the
 	// current staging (outsideAnswers).
 	outside outsideAnswers
+	// worker is the worker scope's reachable mocks (ServeExactWorker), which
+	// each view installed after it shows.
+	worker atomic.Pointer[map[string]struct{}]
 }
 
 // outsideAnswers is the staged data-plane recordings a parser consumed
@@ -454,11 +467,28 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 	}
 }
 
+// ServeExactWorker names the set's worker-scope mocks its run has reached the
+// place of (models.Mapping.Worker), cumulative: each view installed after it
+// shows them, whether a test is open or not (agent.ExactWorkerServer). It
+// installs no view itself: the next ServeExactTest or ServeExactPool does.
+func (m *MockManager) ServeExactWorker(names []string) {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	m.exact.worker.Store(&set)
+}
+
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
+	if w := m.exact.worker.Load(); w != nil {
+		v.worker = *w
+	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
 		prev.mu.Lock()
@@ -596,8 +626,9 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 }
 
 // shows reports whether the view shows mk among the staged mocks: a
-// protocol-phase mock always; a data-plane mock only between tests, and only
-// in the pool slice served. The open test's own mocks are read from the view
+// protocol-phase mock always; a worker-scope mock the run has reached the
+// place of, whether a test is open or not; any other data-plane mock only
+// between tests, and only in the pool slice served. The open test's own mocks are read from the view
 // itself (unanswered), never from the staged trees.
 func (v *exactView) shows(mk *models.Mock) bool {
 	if mk == nil {
@@ -612,10 +643,20 @@ func (v *exactView) shows(mk *models.Mock) bool {
 	if mk.IsProtocolPhase() {
 		return true
 	}
+	if v.isWorker(mk.Name) {
+		return true
+	}
 	if v.test != "" {
 		return false
 	}
 	_, ok := v.pool[mk.Name]
+	return ok
+}
+
+// isWorker reports whether name is one of the set's worker-scope mocks the
+// view shows (ServeExactWorker).
+func (v *exactView) isWorker(name string) bool {
+	_, ok := v.worker[name]
 	return ok
 }
 
@@ -754,10 +795,18 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	if !v.shows(mk) {
 		return exactRefused
 	}
-	if !evicts {
+	// One of the worker scope's answers at most one request in the staging,
+	// as a test's own mock does in its test, through whichever door a parser
+	// consumes it: a parser that keeps a session mock it serves (HTTP's
+	// MarkMockAsUsed) spends it too.
+	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+	if !evicts && !worker {
 		return exactPass
 	}
-	if v.test == "" && !mk.IsProtocolPhase() {
+	// A data-plane recording consumed through a delete door with no test
+	// open, and one of the worker scope's whether a test is open or not, is
+	// spent for the staging: it answers at most one request in the set.
+	if (v.test == "" || worker) && !mk.IsProtocolPhase() {
 		m.prepareOutside()
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.

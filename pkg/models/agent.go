@@ -453,6 +453,14 @@ type ExactServing struct {
 	// each at most once, as that test case's own: one answered then counts
 	// as answered when it opens. An agent that predates it ignores it.
 	Ahead []string `json:"ahead,omitempty"`
+	// Worker is, on the staging call, the set's worker scope
+	// (Mapping.Worker): the mocks no test case owns, each with its place
+	// (MockEntry.Place). The agent stages them with the pool, and each
+	// answers from its place in the set's run on (once the test case it is
+	// placed after has begun; from the start for an empty place), whether a
+	// test case is open or not, after the open test case's own, at most one
+	// request in the staging.
+	Worker []MockEntry `json:"worker,omitempty"`
 }
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
