@@ -5069,6 +5069,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.markNotJudged(testSetID)
 	}
 
+	// A hook that could not read what the set's tests read (its recordings'
+	// sealed values, say) says the set could not be checked, and why
+	// (UncheckedHook). Under the proven switch a set with a verdict to give,
+	// or one not judged already (an application that never got ready among
+	// them), is not judged for it. Any other (the switch off, or a set that
+	// halted, was stopped or faulted) keeps its status, and its report gives
+	// the reason first (uncheckedFirst). Either way nothing of the run is
+	// written back to the recording: no prune, no mappings.yaml, nothing
+	// learned (below).
+	unchecked := r.hookUnchecked(testSetID)
+	uncheckedFirst := ""
+	switch {
+	case unchecked == "":
+	case provenswitch.On() && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "" || notReady != ""):
+		notJudged = alsoNotJudged(notJudged, "not judged: "+unchecked)
+		r.logger.Error("test-set is not judged: keploy could not read all its tests read, so it could not check them; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.String("reason", unchecked))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	default:
+		uncheckedFirst = unchecked
+		r.logger.Warn("keploy could not check every test of the test-set: it could not read all they read; the set keeps its status, and its report says why",
+			zap.String("test-set", testSetID),
+			zap.String("status", string(testSetStatus)),
+			zap.String("reason", unchecked))
+	}
+
 	// An application that never got ready ran no test: the set is not judged,
 	// saying why first (proven switch, readiness_proven.go).
 	if notReady != "" {
@@ -5299,8 +5327,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// set is reported, and is said per test; a prune after it keeps it
 	// (pruneKeeps). A round that could not keep it did not complete: its
 	// verdict would be about recordings that lack what it served.
+	//
+	// A round a hook says could not read all its tests read (UncheckedHook)
+	// learned on what it served unread: nothing of it is kept, and the
+	// recording stays as recorded for a round that can.
 	if r.learning() && r.instrument {
-		if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
+		if unchecked != "" {
+			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
+				zap.String("testSetID", testSetID),
+				zap.String("reason", unchecked))
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
 			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
 			testSetStatus = models.TestSetStatusInternalErr
 		}
@@ -5353,7 +5389,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy})),
+		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy}))),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -5431,6 +5467,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		appUnreachable:      appUnreachable,
 		captureIncomplete:   captureIncomplete != "" || testsLostCapture,
 		captureUnverified:   captureUnverified != "",
+		unchecked:           unchecked != "",
 		mappingStale:        len(staleMapping) > 0,
 		success:             success,
 		failure:             failure,
@@ -5617,6 +5654,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	case captureIncomplete != "" || testsLostCapture:
 		// The same for a call keploy lost (proven switch).
 		holdMappings = "keploy could not capture every call the application made, so a lost call's mock is in no test's entry"
+	case unchecked != "":
+		// A hook could not read all the set's tests read (UncheckedHook): a
+		// mock served unread may have matched no call, and is then in no
+		// test's entry.
+		holdMappings = "keploy could not read all the set's tests read, so a mock it served unread may be in no test's entry: " + unchecked
 	case !allTestsGotAVerdict:
 		holdMappings = "not every loaded test got a verdict"
 	case pidVerdict.unverified != "":
@@ -7126,6 +7168,8 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 		return false, "disabled"
 	case run.captureIncomplete:
 		return false, "capture_incomplete"
+	case run.unchecked:
+		return false, "unchecked"
 	case !run.allTestsGotAVerdict:
 		return false, "not_every_test_got_a_verdict"
 	case run.mappingStale:
@@ -7157,6 +7201,7 @@ type pruneRun struct {
 	appUnreachable             bool // anyAppConnectionError over the results read back
 	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete), or lost a call (proven switch)
 	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
+	unchecked                  bool // a hook could not read all the set's tests read (UncheckedHook)
 	mappingStale               bool // a test is not judged for a stale mapping (FailureInfo.MappingStale)
 	success, failure, obsolete int
 	preserveFailedMocks        bool
