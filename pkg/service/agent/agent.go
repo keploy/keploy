@@ -1413,6 +1413,17 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 	switch mode {
 	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
+		// Beside the mocks the mapping names, those placed at their answer
+		// that this test's window holds (models.PlaceOf), whatever the
+		// mapping lists (pkg.FilterTcsMocksMappingInWindow). A staging
+		// call's BaseTime start is no test's window: a scope's staging
+		// (stageScope) names the test's whole recording.
+		if err == nil && models.AnswerPlacedRegistered() && pkg.IsTestWindow(params.AfterTime, params.BeforeTime) {
+			var placed []*models.Mock
+			if placed, err = disk.LoadAnswerPlaced(params.AfterTime, params.BeforeTime); err == nil {
+				loaded = append(loaded, placed...)
+			}
+		}
 	case loadModeStrictWindow:
 		if cutoff, ok := stagingStartupCutoff(params); ok {
 			loaded, err = disk.LoadBefore(cutoff)
@@ -1462,8 +1473,9 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		}
 		// Beside the window's own, the calls in flight when its test began:
 		// sent in the gap before it, answered at or after its start (a
-		// consumer's long poll). The window loads by request time, so
-		// they are in no window's load otherwise.
+		// consumer's long poll). The window loads by place, which is the
+		// request time for a call the in-flight rule applies to, so they
+		// are in no window's load otherwise.
 		if from, ok := a.inFlightFrom(params); err == nil && ok {
 			var inFlight []*models.Mock
 			inFlight, err = disk.LoadInFlight(from, params.AfterTime)
@@ -1923,7 +1935,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 
 	// Apply filtering based on parameters
 	if params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping) {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMappingInWindow(ctx, a.logger, originalFiltered, params.MockMapping, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
 		// Lax-mode promotion restoration: filterByTimeStamp moves

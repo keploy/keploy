@@ -455,3 +455,65 @@ func TestCarryOverAttributionMapsACallInFlightWhenItsTestBegan(t *testing.T) {
 		t.Fatalf("test-2 maps %v; want %v: own-2, the two calls in flight when it began, and what the filter always keeps, each once", names, want)
 	}
 }
+
+// A poll placed at its answer (MockState.AnswerPlaced) is mapped by its
+// answer: one sent inside test-1 and answered inside test-2 is test-2's, and
+// one sent in the gap before test-2 and answered after test-2 ended is not
+// test-2's, as the in-flight rule would have it: its answer is in no test's
+// window. Asked as the app booted and answered in a test, it is not start-up
+// traffic.
+func TestCarryOverAttributionMapsAPollPlacedAtItsAnswerByItsAnswer(t *testing.T) {
+	cases := []*models.TestCase{
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(1000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(1100)}},
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(2000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(2100)}},
+	}
+	poll := func(name string, req, res int) models.MockState {
+		st := consumedAt(name, req, models.Deleted, false)
+		st.ResTimestampMock = models.FormatMockTimestamp(attrAt(res))
+		st.AnswerPlaced = true
+		return st
+	}
+	a := newCarryOverAttribution(cases)
+	mapping := &models.Mapping{}
+	a.mapConsumed(mapping, "test-2", attrAt(2000), attrAt(2100), []models.MockState{
+		poll("poll-b", 1050, 2050),
+		poll("poll-late", 1500, 2500),
+	})
+	var names []string
+	for _, tc := range mapping.TestCases {
+		if tc.ID == "test-2" {
+			for _, e := range tc.Mocks {
+				names = append(names, e.Name)
+			}
+		}
+	}
+	if !reflect.DeepEqual(names, []string{"poll-b"}) {
+		t.Fatalf("test-2 maps %v; want the poll answered inside it alone", names)
+	}
+	// One flagged CarryOver (consumed out of its window, its kind also
+	// registering carry-over) is mapped by its answer's window: asked in
+	// test-2, answered in test-3, consumed in test-4, it is test-3's.
+	cases4 := append(cases[:2:2],
+		&models.TestCase{Name: "test-3", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(3000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(3100)}},
+		&models.TestCase{Name: "test-4", Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: attrAt(4000)}, HTTPResp: models.HTTPResp{Timestamp: attrAt(4100)}})
+	a4 := newCarryOverAttribution(cases4)
+	m4 := &models.Mapping{}
+	for i, tc := range cases4[:3] {
+		a4.mapConsumed(m4, tc.Name, attrAt(1000*(i+1)), attrAt(1000*(i+1)+100), []models.MockState{consumedAt("own-"+tc.Name, 1000*(i+1)+50, models.Deleted, false)})
+	}
+	flagged := consumedAt("poll-3", 2020, models.Updated, true)
+	flagged.ResTimestampMock = models.FormatMockTimestamp(attrAt(3050))
+	flagged.AnswerPlaced = true
+	a4.mapConsumed(m4, "test-4", attrAt(4000), attrAt(4100), []models.MockState{flagged})
+	if !mappedNames(m4, "test-3")["poll-3"] || mappedNames(m4, "test-2")["poll-3"] {
+		t.Fatalf("the flagged poll is mapped to test-2 %v, test-3 %v; want test-3 alone, its answer's", mappedNames(m4, "test-2"), mappedNames(m4, "test-3"))
+	}
+	boot := poll("boot-poll", 500, 1050)
+	if bootAsked(boot, attrAt(1000)) {
+		t.Fatal("a poll asked as the app booted and answered in test-1 is start-up traffic")
+	}
+	boot.AnswerPlaced = false
+	if !bootAsked(boot, attrAt(1000)) {
+		t.Fatal("a call asked as the app booted is no longer start-up traffic")
+	}
+}

@@ -49,15 +49,21 @@ type exactPlan struct {
 	// (models.ExactServing.Ahead): the replayed app may ask in the gap, as
 	// it did at record.
 	ahead map[string][]string
+	// answerPlaced names the held mocks placed at their answer
+	// (models.IsAnswerPlaced): their place is their recorded answer.
+	answerPlaced map[string]bool
 	// aheadNamed is the test case the latest pool call named the calls in
 	// flight of (serveExactPool's next), "" for none.
 	aheadNamed string
 }
 
 // noteAhead fills p.ahead from what each test case of cases owns: its mapped
-// mocks the agent holds whose recorded request is before the case's recorded
-// window, which a mapping gives a test only for a call in flight when it
-// began (models.DeriveWindowMappings).
+// mocks the agent holds placed before the case's recorded window, which a
+// mapping gives a test only for a call in flight when it began
+// (models.DeriveWindowMappings). A mock's place is its recorded request, or
+// its answer for one placed at its answer (models.PlaceOf): a parser holds
+// such a call until a window brings its recording, so one answered in the
+// window is not in flight, and is not served in the gap.
 func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*models.TestCase) {
 	if p == nil {
 		return
@@ -72,8 +78,12 @@ func (p *exactPlan) noteAhead(mappings map[string][]models.MockEntry, cases []*m
 			owned[n] = true
 		}
 		for _, e := range mappings[tc.Name] {
-			req, err := models.ParseMockTimestamp(e.ReqTimestampMock)
-			if err != nil || req.IsZero() || !req.Before(start) || !owned[e.Name] {
+			at := e.ReqTimestampMock
+			if p.answerPlaced[e.Name] {
+				at = e.ResTimestampMock
+			}
+			place, err := models.ParseMockTimestamp(at)
+			if err != nil || place.IsZero() || !place.Before(start) || !owned[e.Name] {
 				continue
 			}
 			if p.ahead == nil {
@@ -210,6 +220,12 @@ func newExactPlan(mappings map[string][]models.MockEntry, stored ...[]*models.Mo
 		for _, mk := range list {
 			if mk != nil && mk.Name != "" {
 				held[mk.Name] = !mk.IsProtocolPhase()
+				if models.IsAnswerPlaced(mk) {
+					if p.answerPlaced == nil {
+						p.answerPlaced = map[string]bool{}
+					}
+					p.answerPlaced[mk.Name] = true
+				}
 			}
 		}
 	}

@@ -3277,6 +3277,41 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	return filteredMocks
 }
 
+// IsTestWindow reports whether [afterTime, beforeTime] is a test's window: a
+// staging call's starts at models.BaseTime (the set's, a scope's, an exact
+// staging's), and a call with no window has a zero bound. The mock manager
+// reads its start so (SetMocksWithWindow).
+func IsTestWindow(afterTime, beforeTime time.Time) bool {
+	return !afterTime.IsZero() && !afterTime.Equal(models.BaseTime) && !beforeTime.IsZero()
+}
+
+// FilterTcsMocksMappingInWindow is FilterTcsMocksMapping for the test window
+// [afterTime, beforeTime]: beside the per-test mocks the mapping names, the
+// ones placed at their answer (models.IsAnswerPlaced) whose place the window
+// holds (models.PlaceOf), whatever the mapping lists. A mapping lists what a
+// test consumed; one an older keploy wrote, or a --sync recording's, lists a
+// consumer's poll under the test it was sent in, by request time, and the
+// mock manager's staging keeps a mock placed at its answer only in the
+// window that holds its answer: named for the test before, it would be
+// staged by no test. With no test's window (IsTestWindow: a staging call's
+// names the test's whole recording, ExactMapping), or no kind placed at its
+// answer, it is FilterTcsMocksMapping.
+func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
+	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
+		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	}
+	names := append([]string(nil), mocksPresentInMapping...)
+	for _, mk := range m {
+		if mk == nil || !models.IsAnswerPlaced(mk) {
+			continue
+		}
+		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+			names = append(names, mk.Name)
+		}
+	}
+	return FilterTcsMocksMapping(ctx, logger, m, names)
+}
+
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
 // with its mapping membership and returns it in RECORDED order.
 //
@@ -3622,7 +3657,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 			continue
 		}
 
-		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
 		// The response may straggle past beforeTime — DB/HTTP downstream
 		// responses routinely complete a few micro-to-milliseconds after
 		// the outer test response is captured. The cross-test bleed bug
@@ -3635,11 +3670,14 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		//
 		// Only per-test-lifetime mocks reach this predicate — session/
 		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// pool. A perTest-lifetime mock placed inside
 		// [afterTime, beforeTime] lands in the per-test pool; outside
 		// the window it falls through to the strict/lax out-of-window
 		// handling below.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
@@ -3671,7 +3709,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		// them to the tier built for exactly that is what both modes intend.
 		// A zero firstWindowStart still means "no cutoff yet" and falls through
 		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
@@ -3889,8 +3927,11 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// PerTest: window containment on request timestamp.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// PerTest: window containment by place (models.PlaceOf).
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filtered = append(filtered, p)
@@ -3904,7 +3945,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		// test-called today, but fixing one of two identical functions would
 		// guarantee the bug returns the moment the three-tier path is wired for
 		// postgres v3 / mysql.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			startup = append(startup, p)
 			preservedStartup++
