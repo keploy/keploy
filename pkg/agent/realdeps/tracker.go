@@ -316,6 +316,20 @@ func (t *Tracker) Sent(id int64, dest string) {
 	t.usedLocked(dest)
 }
 
+// SentLive is Sent for a call the live handler serves: a caller's call to a
+// listener its own process started, which keploy mock's request capture
+// records as a test case itself. The open test uses dest, and no use point
+// is kept: that test case is the call, not a use its handler made, and
+// UsedDuring would name dest in the test case's own REAL list (its body's
+// reads fall inside its window).
+func (t *Tracker) SentLive(id int64, dest string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.open {
+		t.useLocked(dest).conns[id] = struct{}{}
+	}
+}
+
 // Answered notes that dest answered a connection: it is reached, as by a dial
 // that connected (a pooled connection dialled before the last read reaches
 // it again only when it answers, not when bytes are written to it).

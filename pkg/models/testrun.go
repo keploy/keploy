@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,24 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
+	// UnclaimedCalls are the calls the set's application made outside every
+	// test that no mock answered (proven switch): after its last test, a pool
+	// miss no later test takes, and before its first, as it started
+	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
+	// own with them.
+	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// AppNotStopped, under the proven switch, says why keploy read the set's
+	// end with its application still running (a stack kept across test-sets,
+	// --keep-app-alive, an application keploy did not start): a call the
+	// application made after that read is not judged (P101-c). The set's
+	// verdict is what the read found.
+	AppNotStopped string `json:"appNotStopped,omitempty" yaml:"app_not_stopped,omitempty"`
+	// Proven says the set was run under the proven switch (KEPLOY_PROVEN=1),
+	// so its results carry the proven model's evidence: a report renders it
+	// from this, not from the switch of the process rendering it. Set on
+	// every report a set run under the switch writes; absent for a set run
+	// without it.
+	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -197,6 +216,15 @@ type FailureInfo struct {
 	// test's evidence is unknown, so its test set is not judged. Set only under
 	// the proven switch.
 	UnmatchedCallsUnread bool `json:"unmatched_calls_unread,omitempty" yaml:"unmatched_calls_unread,omitempty"`
+	// MissesUnattributed says, with the proven switch off, what
+	// UnmatchedCallsUnread says under it: the calls no mock answered during
+	// this test could not all be read, so a miss of this test may be missing
+	// from it, or have been read with another test's. With the switch off a
+	// miss fails no test, so the test's verdict stands, and nothing reads this
+	// as no verdict; but nothing may take a failed difference of its test set
+	// for noise, which may be that miss's (enterprise's auto-noise learns none
+	// for the set). Set only with the switch off.
+	MissesUnattributed bool `json:"misses_unattributed,omitempty" yaml:"misses_unattributed,omitempty"`
 	// TestMocksUnread says the mocks this test consumed could not be read
 	// from keploy's agent, so whether it made every call it recorded is
 	// unknown: it has no verdict, and its test set is not judged. Set only
@@ -234,6 +262,104 @@ type FailureInfo struct {
 	// could not be read, at the test's end or at its set's mark): the test
 	// has no verdict, and its set is not judged.
 	CaptureUnread bool `json:"capture_unread,omitempty" yaml:"capture_unread,omitempty"`
+	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
+	// all that the application did while this test or one before it ran
+	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
+	// see): the test has no verdict (NotJudged), and its set is not judged.
+	// Never a failure.
+	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
+	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
+	// not read to its end: the app kept it open on keepalives, past its
+	// recording (every recorded frame, or message, came, then a keepalive
+	// beyond the recorded ones), or short of it (two keepalives in a row
+	// and nothing of the rest between them) (row W1). The test has no
+	// verdict, and its set is not judged. Never a pass, and a failure only
+	// on what came.
+	StreamHeldOpen string `json:"stream_held_open,omitempty" yaml:"stream_held_open,omitempty"`
+	// AnswerStalled says, under KEPLOY_PROVEN=1 with no apiTimeout of the
+	// user's, what the stall rule waited for when it ended the test's
+	// exchange before the app's answer began, or part-way through an answer
+	// that is not streamed: the app took none of the request, or not all of
+	// it, or sent nothing back for the rule's grace of keploy's runnable time
+	// (pkg.AnswerStallGrace, rule 15). Nothing was compared: the row is
+	// built as a test with no answer is (FAILED), and the test has no
+	// verdict all the same (VerdictUnknown), nor has its set.
+	AnswerStalled string `json:"answer_stalled,omitempty" yaml:"answer_stalled,omitempty"`
+	// MappingStale says why an OBSOLETE test has no verdict: it answered
+	// differently from its recording while the dependency calls it made
+	// diverged from what its recorded mapping lists (a recorded mock of its
+	// mapping left unconsumed, or a mock outside it consumed). keploy cannot
+	// tell a regression from a stale mapping then, so the test is not
+	// judged, and neither is its set: never the silent pass an OBSOLETE once
+	// was (false-pass row 0). Set with the proven switch off, the only place
+	// a wrong answer is demoted.
+	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
+}
+
+// MappingStaleRemedy is what to do about a test whose recorded mapping
+// diverged from what it consumed (FailureInfo.MappingStale).
+const MappingStaleRemedy = "re-record the test-set, or run keploy test with --disable-mapping --update-test-mapping to replay it by recorded time and write its mapping afresh"
+
+// NotJudged is why the test has no verdict, whatever its status says: what
+// keploy could not read or check of it (UnmatchedCallsUnread,
+// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
+// capture at all (CannotCapture, decision 20), one reason each.
+// Empty for a judged test. Each is set only under the proven switch, so a
+// result written without it is never unjudged, but for MappingStale, which is
+// set with it off, the only place a wrong answer is demoted to OBSOLETE.
+func (fi FailureInfo) NotJudged() []string {
+	var why []string
+	if fi.UnmatchedCallsUnread {
+		why = append(why, "keploy could not read every call it made that no recorded mock answered")
+	}
+	if fi.TestMocksUnread {
+		why = append(why, "keploy could not read which of its recorded calls it made")
+	}
+	if fi.VariablesUnchecked != "" {
+		why = append(why, "keploy could not check what it captured against its dependency calls: "+fi.VariablesUnchecked)
+	}
+	if fi.CaptureUnread {
+		why = append(why, "keploy could not read whether its agent captured every call while it ran")
+	}
+	if len(fi.CannotCapture) > 0 {
+		why = append(why, strings.TrimPrefix(fi.CannotCapture.NotJudgedText(), "not judged: "))
+	}
+	if fi.StreamHeldOpen != "" {
+		why = append(why, fi.StreamHeldOpen)
+	}
+	if fi.AnswerStalled != "" {
+		why = append(why, fi.AnswerStalled)
+	}
+	if fi.MappingStale != "" {
+		why = append(why, fi.MappingStale)
+	}
+	return why
+}
+
+// VerdictUnknown is why the test has no verdict although its row reads as
+// one (FailureInfo.NotJudged): empty for a judged test, for a FAILED one
+// (what could not be read can only add to why it failed) unless nothing was
+// compared because the stall rule ended its answer (AnswerStalled), and for
+// one keploy skipped (IGNORED, which says it has no verdict). MappingStale
+// counts on an OBSOLETE row only. JUnit and the NDJSON mark a test by this one
+// predicate.
+func (r TestResult) VerdictUnknown() []string {
+	if r.Status == TestStatusIgnored {
+		return nil
+	}
+	if r.Status == TestStatusFailed && r.FailureInfo.AnswerStalled == "" {
+		return nil
+	}
+	// A FAILED row whose answer the stall rule ended (AnswerStalled) was
+	// compared with nothing: its FAILED says no answer came, not that one
+	// differed.
+	fi := r.FailureInfo
+	if r.Status != TestStatusObsolete {
+		// MappingStale is a demoted wrong answer's: a row a hook relabelled
+		// since says its own verdict.
+		fi.MappingStale = ""
+	}
+	return fi.NotJudged()
 }
 
 // UnconsumedMock is a test mock a test did not consume
@@ -317,10 +443,46 @@ type UnmatchedCall struct {
 	// extra call, how many times the test recorded that call.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// BeforeSet says, under the proven switch, that the call was made before
+	// its test set's first test began, with no test's window open: the
+	// application's startup. Its Kind is MissOutsideTest. It is the set's,
+	// no test's: the replay fails the set with it, naming the call, and
+	// charges no test (the read of the set's first test carries it).
+	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
+	// a recording the test does not own.
+	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// RecordedIn names, under the proven switch, the other test of the set
+	// that owns the recording a NotOwned call is (ClosestMock): the call is
+	// likely one that test recorded, such as a later exchange of a connection
+	// it opened, whose handshake was recorded there.
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Reason is why the call missed, in judging's words (design v14 §5.3,
+	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
+	// record's full round, where the learn step runs, gives one; empty
+	// everywhere else.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
+
+// The reasons a miss of record's full round carries (UnmatchedCall.Reason),
+// as the learn step decides them (package matcher/learn).
+const (
+	// MissRequestChanged: a recorded call had the request's method,
+	// destination and shape, but the request differs from it in a way the
+	// learn step does not learn (a field added or removed, a type changed, a
+	// value several recorded calls explain equally, a value that flows from an
+	// earlier call when nothing can follow it).
+	MissRequestChanged = "request_changed"
+	// MissUnstableOrder: the closest recorded call holds an array the request
+	// sent with the recorded elements in another order (the order rule).
+	MissUnstableOrder = "unstable_order"
+	// MissUnmockedCall: no recorded call has the request's method,
+	// destination and shape.
+	MissUnmockedCall = "unmocked_call"
+)
 
 // MockOutcome is the end of a mock replay as the agent saw it: the mocks it
 // served and the outgoing calls that matched none of them -- what
@@ -414,6 +576,18 @@ const (
 	TestSetStatusIgnored      TestSetStatus = "IGNORED"
 	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
+
+// SetEnd is how keploy test ended one run of a test set (each attempt, when
+// maxFlakyChecks or --must-pass runs it again): the status the run ended it
+// with, and why, as the set's final report's FailureReason says, or the error
+// that ended the set before such a report was written. A set can end neither PASSED nor FAILED
+// with only passing results (the app halted after some tests passed, or
+// keploy could not judge the set), and FAILED with none failing (a capture
+// loss after its last test): its results alone do not say how it ended.
+type SetEnd struct {
+	Status TestSetStatus `json:"status" yaml:"status"`
+	Why    string        `json:"why,omitempty" yaml:"why,omitempty"`
+}
 
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	switch s {

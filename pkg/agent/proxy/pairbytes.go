@@ -36,6 +36,11 @@ type pairedConn struct {
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
 	atClose atomic.Pointer[proxySide]
+	// noSession: the proxy serves it with no session (serveWithoutSession):
+	// it closes it unanswered, or passes it through, and records and mocks
+	// nothing on it by design, so nothing the application wrote to it is a
+	// capture loss, and no bytes wait holds it.
+	noSession atomic.Bool
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
@@ -55,16 +60,22 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 }
 
 // closing notes, once the proxy begins closing conn, what its side had
-// received: the wait's answer for it from then on.
-func (s *pairedConns) closing(conn net.Conn) {
+// received: the wait's answer for it from then on. It returns conn's paired
+// connection (nil for one it does not keep, or whose close was noted) and how
+// many bytes its socket holds unread, read after its side: the close tosses
+// them with a reset (tcp_close), bytes the application wrote that its side
+// counts received and the proxy never read.
+func (s *pairedConns) closing(conn net.Conn) (*pairedConn, int, error) {
 	s.mu.Lock()
 	pc := s.byConn[conn]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
-		return
+		return nil, 0, nil
 	}
 	ps := readProxySide(pc.conn)
 	pc.atClose.Store(&ps)
+	unread, err := readUnread(pc.conn)
+	return pc, unread, err
 }
 
 // pairedConns are the paired connections the proxy holds, under the proven
@@ -140,7 +151,8 @@ func (s *pairedConns) wakeLocked() {
 }
 
 // upTo is every connection held whose application connection is numbered
-// 1..n, or, when there is one, why they cannot be waited on: a wait that
+// 1..n, but for one the proxy serves with no session (noSession), which no
+// wait holds, or, when there is one, why they cannot be waited on: a wait that
 // holds none has nothing to tell (a kernel whose sock_diag gives no byte
 // counts fails only the waits that would read them).
 func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
@@ -148,7 +160,7 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 	defer s.mu.Unlock()
 	var out []*pairedConn
 	for _, pc := range s.byConn {
-		if pc.appSeq <= n {
+		if pc.appSeq <= n && !pc.noSession.Load() {
 			out = append(out, pc)
 		}
 	}
@@ -158,7 +170,22 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 	return out, nil
 }
 
-// changes is closed at the next removal or failure: take it before looking.
+// servedWithoutSession notes that the proxy serves conn with no session
+// (pairedConn.noSession), and wakes the waits: one that took conn before the
+// mark is released by it (pairReached), with no read or close of conn's to
+// wake it when the proxy passes conn through. A connection it does not keep is
+// ignored.
+func (s *pairedConns) servedWithoutSession(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc := s.byConn[conn]; pc != nil {
+		pc.noSession.Store(true)
+		s.wakeLocked()
+	}
+}
+
+// changes is closed at the next removal, failure or connection served with no
+// session: take it before looking.
 func (s *pairedConns) changes() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()

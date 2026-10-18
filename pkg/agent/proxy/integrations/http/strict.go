@@ -56,6 +56,11 @@ type destination struct {
 	// recording: withheld live, ambiguous or unreadable in the recording.
 	container bool
 	key       string
+	// legacy is, live, the container's key of the legacy form
+	// (containerkey.LegacyKeyFromContext), which a mock recorded before
+	// secrets were left out of fingerprints names it by: compared with
+	// (containerkey.SameKey), never shown.
+	legacy string
 }
 
 // liveDestKey carries, on a request's context, its destination as decode
@@ -81,7 +86,7 @@ func liveDestination(ctx context.Context, input *req) destination {
 	d := destination{}
 	switch key, st := containerkey.StateFromContext(ctx); st {
 	case containerkey.Keyed:
-		d.container, d.key = true, key
+		d.container, d.key, d.legacy = true, key, containerkey.LegacyKeyFromContext(ctx)
 	case containerkey.Withheld:
 		d.container = true
 	}
@@ -129,7 +134,7 @@ func sameDestination(live, rec destination) bool {
 	case rec.container && rec.key == "":
 		return false
 	case live.container && rec.container:
-		return live.key != "" && live.key == rec.key && sameVirtualHost(live.host, rec.host)
+		return live.key != "" && containerkey.SameKey(rec.key, live.key, live.legacy) && sameVirtualHost(live.host, rec.host)
 	}
 	return live.host == rec.host
 }
@@ -169,7 +174,7 @@ func destinationDiff(live destination, m *models.Mock) []models.MockFieldDiff {
 	}
 	// The container differs: the recording's names none by its key, or both
 	// reached one and their keys differ (or the live one's names none).
-	if rec.container && (rec.key == "" || live.container && live.key != rec.key) {
+	if rec.container && (rec.key == "" || live.container && !containerkey.SameKey(rec.key, live.key, live.legacy)) {
 		expected, actual := rec.key, live.key
 		if expected == "" {
 			expected = "a container the recording does not name by its configuration (another configured the same answered its scope, or its configuration was not read)"
@@ -207,27 +212,11 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // report says was compared.
 func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
 	live := liveDestination(ctx, input)
-	var fits []*models.Mock
-	var closest *models.Mock
-	var closestDiffs []strictField
-	routeMatched := false
-	for _, m := range pool {
-		if ctx.Err() != nil {
-			return nil, nil, false, ctx.Err()
-		}
-		d := strictDiff(input, live, m, n)
-		if len(d) == 0 {
-			fits = append(fits, m)
-			continue
-		}
-		// The closest recording: one of the same route (method, destination,
-		// path) first, then the one with the fewest differences, the first in
-		// the pool's order on a tie.
-		route := routeMatches(d)
-		if closest == nil || (route && !routeMatched) || (route == routeMatched && len(d) < len(closestDiffs)) {
-			closest, closestDiffs, routeMatched = m, d, route
-		}
+	fits, near, err := strictCompare(ctx, input, live, pool, n)
+	if err != nil {
+		return nil, nil, false, err
 	}
+	closest, closestDiffs, routeMatched := near.mock, near.diffs, near.route
 	if len(fits) == 0 {
 		phase := models.MatchPhaseStrict
 		if !routeMatched {
@@ -251,6 +240,44 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		commit()
 	}
 	return served, nil, false, nil
+}
+
+// nearest is a recording the strict comparison found closest to a call: the
+// fields in which it differs, and whether it is of the call's route.
+type nearest struct {
+	mock  *models.Mock
+	diffs []strictField
+	route bool
+}
+
+// closerThan reports whether c is a closer recording than o: one of the same
+// route (method, destination, path) first, then the one with the fewer
+// differences. On a tie it is not, so the first one compared stays closest.
+func (c nearest) closerThan(o nearest) bool {
+	if o.mock == nil {
+		return c.mock != nil
+	}
+	return c.mock != nil && ((c.route && !o.route) || (c.route == o.route && len(c.diffs) < len(o.diffs)))
+}
+
+// strictCompare compares the live request with each recording of pool, in
+// order (strictDiff): fits are those that are this very call, and near is
+// the closest of the others (closerThan), its mock nil when there is none.
+func strictCompare(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) (fits []*models.Mock, near nearest, err error) {
+	for _, m := range pool {
+		if ctx.Err() != nil {
+			return nil, nearest{}, ctx.Err()
+		}
+		d := strictDiff(input, live, m, n)
+		if len(d) == 0 {
+			fits = append(fits, m)
+			continue
+		}
+		if c := (nearest{mock: m, diffs: d, route: routeMatches(d)}); c.closerThan(near) {
+			near = c
+		}
+	}
+	return fits, near, nil
 }
 
 // routeMatches reports whether a recording that differs by diffs is of the

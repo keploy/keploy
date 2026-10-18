@@ -31,10 +31,9 @@ func realAgent(t *testing.T, status int, answer any) (*AgentClient, *[]string, *
 	}))
 	t.Cleanup(srv.Close)
 	return &AgentClient{
-		logger:     zap.NewNop(),
-		client:     *srv.Client(),
-		hookClient: *srv.Client(),
-		conf:       &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
+		logger: zap.NewNop(),
+		client: *srv.Client(),
+		conf:   &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
 	}, &paths, &bodies
 }
 

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	yaml "gopkg.in/yaml.v3"
@@ -405,6 +406,9 @@ func TestPgtypeYAMLDispatch_AllDispatchedRoundTrip(t *testing.T) {
 		{"TID", pgtype.TID{Valid: true}},
 		{"TSVector", pgtype.TSVector{Valid: true}},
 		{"Range", pgtype.Range[any]{Valid: true}},
+		// A tsrange's, tstzrange's or daterange's bounds are written as
+		// !!timestamp scalars, which a range's gate must take.
+		{"RangeOfTimestamps", pgtype.Range[any]{Lower: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), LowerType: pgtype.Inclusive, UpperType: pgtype.Unbounded, Valid: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

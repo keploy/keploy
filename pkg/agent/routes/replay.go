@@ -86,8 +86,8 @@ func (a *Agent) GetMockErrors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// An incomplete read still hands back what was read, as the body every
-	// client decodes, and says it is incomplete in a header (only an agent with
-	// the proven switch on reads incompletely: see Proxy.GetMockErrors).
+	// client decodes, and says it is incomplete in a header (see
+	// Proxy.GetMockErrors), with the proven switch on or off.
 	if err != nil {
 		w.Header().Set(models.UnmatchedCallsUnreadHeader, headerSafe(err.Error()))
 	}

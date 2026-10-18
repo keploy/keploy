@@ -147,6 +147,9 @@ type prReportDB struct {
 	onRead     func()
 	readErr    error
 	dropOnRead string
+	// dupOnRead returns the named test's result twice, as a store that kept
+	// an earlier cycle's row beside the last one does.
+	dupOnRead string
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
@@ -159,6 +162,9 @@ func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]mode
 	out := make([]models.TestResult, 0, len(f.results))
 	for _, r := range f.results {
 		if r.TestCaseID != f.dropOnRead {
+			out = append(out, r)
+		}
+		if r.TestCaseID == f.dupOnRead {
 			out = append(out, r)
 		}
 	}

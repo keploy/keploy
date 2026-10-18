@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -297,7 +298,7 @@ func TestTeeSpillsOnChannelFull(t *testing.T) {
 		// window, which is time the process could run: on a starved host
 		// many times its length in wall time. The harness bounds teardown in
 		// wall time, so the window runs on an injected clock.
-		stallClock: newFakeStallClock(onTime),
+		stallClock: &stall.ManualClock{Step: stall.OnTime},
 	})
 
 	// Send many small chunks while NOT draining the FakeConn — this used to

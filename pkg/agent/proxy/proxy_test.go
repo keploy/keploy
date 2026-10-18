@@ -495,7 +495,7 @@ func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
 		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
 		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
 	} {
-		if err := mm.flagMockAsUsed(st); err != nil {
+		if err := mm.flagMockAsUsed(st, 0); err != nil {
 			t.Fatalf("flagMockAsUsed: %v", err)
 		}
 	}
@@ -901,9 +901,9 @@ func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 
-			bindContainerKeys(ctx)
 			cfg := config.New()
 			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			p.bindContainerKeys(ctx)
 			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 			sessions := map[string]func(){
 				"Record": func() {

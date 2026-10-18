@@ -25,4 +25,10 @@ type TestSetMocks struct {
 	// whose name is not known is not listed. A mapping entry, or the name of a
 	// mock appended to the set, can still refer to one.
 	Skipped map[string]Kind
+	// SkippedWindowed is the documents of Skipped whose request time could be
+	// read, as test windows see them (NewWindowedMock of their name, kind,
+	// metadata and times, async-egress ones not test mocks): a test owns, from
+	// its window, a recorded call this keploy cannot serve, and is judged for
+	// it. A store that reads gob files lists none.
+	SkippedWindowed []WindowedMock
 }

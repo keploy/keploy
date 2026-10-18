@@ -125,6 +125,9 @@ func (c ConsumeMode) String() string {
 //     its Metadata["type"] tag.
 //
 // Precedence (applied top-to-bottom; first match wins):
+//  0. A window-bound kind (a connection failure) → LifetimePerTest; a mock
+//     whose recorder stated its lifetime (MetadataLifetimeKey) → as stated,
+//     and none of the rules below applies to it.
 //  1. Kind == MySQL AND first request is a connection-alive command
 //     with an input-independent response (COM_PING, COM_STATISTICS,
 //     COM_DEBUG, COM_RESET_CONNECTION) → LifetimeSession. Applied
@@ -138,6 +141,11 @@ func (c ConsumeMode) String() string {
 //  2. Spec.Metadata["type"] == "config"       → LifetimeSession
 //  3. Spec.Metadata["type"] == "connection"   → LifetimeConnection
 //     (requires non-empty connID; falls back to Session if missing).
+//     3a. Kind == MySQL AND the mock's one request is a prepared statement's
+//     lifecycle (COM_STMT_PREPARE, COM_STMT_CLOSE, COM_STMT_RESET), tagged
+//     anything else or untagged → LifetimeConnection (Session with no
+//     connID), as its recorder states it now. An untagged one increments
+//     legacyKindFallbackFires, as rule 4 would have.
 //  4. Untagged (tag == "") + kind in the legacy always-session list →
 //     LifetimeSession. Increments legacyKindFallbackFires ONCE per
 //     mock so the Phase-4 deletion gate can be measured accurately.
@@ -154,6 +162,11 @@ func (c ConsumeMode) String() string {
 // recorders began tagging explicitly. The counter is the operator-
 // visible signal (surfaced at replay completion); per-call logging is
 // deliberately avoided because DeriveLifetime runs on every mock load.
+//
+// Last, a call declared shared (SetSessionCalls, keploy.yaml sessionCalls)
+// that its recorder stated per-test is session: every test may be served it.
+// A mock recorded before lifetimes were stated keeps the lifetime the rules
+// above give it, declared or not.
 func (m *Mock) DeriveLifetime() {
 	// Idempotent short-circuit. LifetimeDerived is distinct from the
 	// Lifetime field itself because LifetimePerTest IS the zero value
@@ -169,11 +182,31 @@ func (m *Mock) DeriveLifetime() {
 	m.derive(true)
 }
 
+// lifetimeOf is m's lifetime as DeriveLifetime gives it, without deriving m: a
+// mock not derived yet is derived through a copy, which no fallback count
+// counts (derive). One derived already is read as it is.
+func lifetimeOf(m *Mock) Lifetime {
+	if m.TestModeInfo.LifetimeDerived {
+		return m.TestModeInfo.Lifetime
+	}
+	c := *m
+	c.derive(false)
+	return c.TestModeInfo.Lifetime
+}
+
 // derive is DeriveLifetime for a mock not derived yet. count says whether a
 // pre-tag recording's kind fallback counts in legacyKindFallbackFires, which
 // operators read as how many such mocks a replay loaded: false for a look at
 // a mock that is not loaded to be served (StatefulSequenceKey).
 func (m *Mock) derive(count bool) {
+	m.deriveLifetime(count)
+	if m.TestModeInfo.Lifetime == LifetimePerTest && m.StatesLifetime() && declaredSessionCall(m) {
+		m.TestModeInfo.Lifetime = LifetimeSession
+	}
+}
+
+// deriveLifetime is derive without the declared session calls.
+func (m *Mock) deriveLifetime(count bool) {
 	defer func() { m.TestModeInfo.LifetimeDerived = true }()
 
 	// A window-bound kind (a connection failure) is per-test whatever its tag,
@@ -182,6 +215,27 @@ func (m *Mock) derive(count bool) {
 	// First, so no later rule can promote it.
 	if WindowBound(m.Kind) {
 		m.TestModeInfo.Lifetime = LifetimePerTest
+		return
+	}
+
+	// A recorder that states each mock's lifetime itself (MetadataLifetimeKey)
+	// is authoritative: none of the rules below, written for recordings that
+	// predate it, applies. In particular the kind fallbacks (rules 4 and 5),
+	// which make every HTTP, HTTP/2, MySQL and Generic data mock reusable
+	// across tests, do not: a data mock it states per-test is served to its
+	// own test only.
+	//
+	// A stated per-test HTTP mock is still the data of a stateful dependency
+	// whose repeated identical requests advance through their recorded
+	// responses (a counter, a created-then-read row): it keeps the
+	// cursor+saturate consumption, within the pool of the test it was
+	// recorded in. The lifetime decides which test may be served a
+	// recording; the cursor decides how its repeats are served.
+	if lt, ok := statedLifetime(m); ok {
+		m.TestModeInfo.Lifetime = lt
+		if lt == LifetimePerTest && m.Kind == HTTP {
+			m.TestModeInfo.Consume = ConsumeCursorSaturate
+		}
 		return
 	}
 
@@ -230,6 +284,34 @@ func (m *Mock) derive(count bool) {
 		// reusable, just not connection-scoped) rather than
 		// promoting it to per-test (which would be consumed on
 		// first match and break replay for the paired execute).
+		if m.Spec.Metadata["connID"] != "" {
+			m.TestModeInfo.Lifetime = LifetimeConnection
+			return
+		}
+		m.TestModeInfo.Lifetime = LifetimeSession
+		return
+	}
+	// A prepared statement's lifecycle (COM_STMT_PREPARE, COM_STMT_CLOSE,
+	// COM_STMT_RESET) belongs to the connection it was recorded on, and a
+	// statement the app prepares when it starts is executed in any test. The
+	// MySQL recorder tags a PREPARE "connection" since #4073 (2026-04-19),
+	// which the switch above reads, and since v3.6.128 states the lifetime
+	// of all three as their connection's (statedLifetime, at the top). A
+	// recording from before says neither for CLOSE and RESET, nor, before
+	// #4073, for PREPARE: they are tagged "mocks", or untagged. The kind
+	// fallbacks below made a PREPARE a session mock (untagged, or "mocks"
+	// under lax), whose statement no EXECUTE can look up by its recorded
+	// connection, or a per-test one ("mocks" under the strict window,
+	// KEPLOY_STRICT_MOCK_WINDOW=1), on disk: one the app sends at start
+	// but that was recorded at or after the first test was then staged
+	// nowhere (#4819), and was answered with a synthesized PREPARE_OK (no
+	// columns, every parameter a BLOB). Each takes the lifetime the
+	// recorder states now: its recorded connection's, or the session's
+	// when it names none (rule 3a).
+	if m.IsMySQLStatementLifecycle() {
+		if tag == "" && count {
+			atomic.AddUint64(&legacyKindFallbackFires, 1)
+		}
 		if m.Spec.Metadata["connID"] != "" {
 			m.TestModeInfo.Lifetime = LifetimeConnection
 			return
@@ -379,16 +461,19 @@ var laxKindFallbackDisabledCache = func() bool {
 
 // legacyKindFallbackFires counts how many times DeriveLifetime has fallen
 // back to kind-based inference because a recording lacked an explicit
-// Metadata["type"] tag. Exposed via LegacyKindFallbackFires() for
-// telemetry — when this stays at zero for a full release cycle, the kind
-// fallback (and the compat branch that reads it) can be deleted.
+// Metadata["type"] tag: rule 4's session inference, and rule 3a's
+// connection inference for an untagged MySQL statement's lifecycle. Exposed
+// via LegacyKindFallbackFires() for telemetry — when this stays at zero for
+// a full release cycle, the kind fallback (and the compat branch that reads
+// it) can be deleted.
 var legacyKindFallbackFires uint64
 
 // LegacyKindFallbackFires returns the number of times DeriveLifetime
-// inferred LifetimeSession from mock.Kind because Spec.Metadata["type"]
-// was missing/empty, not because an explicit tag resolved to session.
-// Non-zero values mean untagged mocks reached the kind-based
-// inference branch. Interpretation:
+// inferred a lifetime from mock.Kind because Spec.Metadata["type"] was
+// missing/empty, not because an explicit tag resolved it: LifetimeSession
+// by kind (rule 4), or LifetimeConnection for an untagged MySQL statement's
+// lifecycle (rule 3a). Non-zero values mean untagged mocks reached the
+// kind-based inference branch. Interpretation:
 //   - For Kinds whose recorder does NOT yet classify lifetime at
 //     record time (currently HTTP and Generic), non-zero is EXPECTED
 //     even for newly recorded sessions — those recorders do not emit
@@ -462,6 +547,129 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 		return false
 	}
 	return IsMySQLSessionReusableCommandType(hdr.Type)
+}
+
+// IsMySQLStatementLifecycle reports whether m is a MySQL mock of one command
+// of a prepared statement's lifecycle (IsMySQLStatementLifecycleCommandType),
+// recorded alone.
+func (m *Mock) IsMySQLStatementLifecycle() bool {
+	if m == nil || m.Kind != MySQL || len(m.Spec.MySQLRequests) != 1 {
+		return false
+	}
+	hdr := m.Spec.MySQLRequests[0].PacketBundle.Header
+	return hdr != nil && IsMySQLStatementLifecycleCommandType(hdr.Type)
+}
+
+// IsMySQLStatementLifecycleCommandType reports whether a MySQL command type is
+// one of a prepared statement's lifecycle: COM_STMT_PREPARE, COM_STMT_CLOSE or
+// COM_STMT_RESET, whose mocks are their connection's.
+func IsMySQLStatementLifecycleCommandType(cmdType string) bool {
+	switch cmdType {
+	case "COM_STMT_PREPARE", "COM_STMT_CLOSE", "COM_STMT_RESET":
+		return true
+	}
+	return false
+}
+
+// MetadataLifetimeKey is the Spec.Metadata key in which a recorder states the
+// lifetime of each mock it records, with one of the MetadataLifetime* values.
+// A mock that carries it was recorded by a recorder that classifies every mock
+// it records, and DeriveLifetime takes its value as given (statedLifetime);
+// a mock without it predates that recorder, and keeps the classification it
+// always had. The key is additive: Spec.Metadata["type"] keeps the value
+// older replayers read.
+const MetadataLifetimeKey = "lifetime"
+
+// The values of MetadataLifetimeKey.
+const (
+	// MetadataLifetimePerTest: data of the test it was recorded in.
+	MetadataLifetimePerTest = "perTest"
+	// MetadataLifetimeSession: reusable in every test (handshakes, auth,
+	// connection-independent shared traffic).
+	MetadataLifetimeSession = "session"
+	// MetadataLifetimeConnection: reusable on the connection it was recorded
+	// on (Spec.Metadata["connID"]), as a prepared statement is.
+	MetadataLifetimeConnection = "connection"
+)
+
+// MetadataBodyDigestsKey is the Spec.Metadata key under which the HTTP
+// recorder notes which of a response's digest headers (an ETag, Content-MD5,
+// a Digest, an AWS checksum) its body matched as the server sent it
+// (bodydigest.Note). A replay recomputes exactly those over the body it sends
+// (bodydigest.Apply): a body obfuscation or encryption rewrote, or keploy
+// compresses again, is not the one the server computed them over, and a
+// client that checks one refuses the response.
+const MetadataBodyDigestsKey = "bodyDigests"
+
+// StatesLifetime reports whether m's recorder stated its lifetime
+// (MetadataLifetimeKey) with a value DeriveLifetime takes as given.
+func (m *Mock) StatesLifetime() bool {
+	_, ok := statedLifetime(m)
+	return ok
+}
+
+// ReusableByStatementOnly reports whether m is session or connection lifetime
+// only because its recorder stated so (MetadataLifetimeKey), where its type
+// tag and its command would make it per-test: a MySQL SET, BEGIN or COMMIT,
+// or a prepared statement's CLOSE or RESET, tagged "mocks". A recording
+// attributes such a mock as it did before lifetimes were stated (owned by the
+// test whose window holds it, mapped to that test, pruned with a duplicate
+// request's); the statement decides how a replay serves it.
+func (m *Mock) ReusableByStatementOnly() bool {
+	lt, ok := statedLifetime(m)
+	if !ok || lt == LifetimePerTest {
+		return false
+	}
+	switch m.Spec.Metadata["type"] {
+	case "config", "connection":
+		return false
+	}
+	return !(m.Kind == MySQL && mysqlIsSessionReusableCommand(m))
+}
+
+// statedLifetime is the lifetime m's recorder stated (MetadataLifetimeKey),
+// and whether it stated a known one. A connection lifetime with no connID to
+// scope it to is served as session, as a "connection" type tag is, and a
+// per-test one on a mock tagged "config" as session, as the tag is.
+//
+// Only the kinds whose recorders state it this way are read: HTTP, HTTP/2 and
+// MySQL. The Postgres v3 recorder writes the same key for its own replayer,
+// which reads it to build its tiers, and DeriveLifetime derives a Postgres
+// mock from its type tag, as it always did.
+func statedLifetime(m *Mock) (Lifetime, bool) {
+	if m.Spec.Metadata == nil {
+		return LifetimePerTest, false
+	}
+	switch m.Kind {
+	case HTTP, HTTP2, MySQL:
+	default:
+		return LifetimePerTest, false
+	}
+	switch m.Spec.Metadata[MetadataLifetimeKey] {
+	case MetadataLifetimePerTest:
+		// A config mock is reusable, whatever the recorder stated. No HTTP,
+		// HTTP/2 or MySQL recorder states one per-test (each states its
+		// config mocks session), so for these kinds the pair comes only from
+		// a post-record hook that tagged a recorded exchange config after its
+		// recorder stated it per-test: enterprise's SQS hook did so to its
+		// GetQueueUrl, GetQueueAttributes, ListQueues and
+		// ChangeMessageVisibility calls, whose recordings were then served to
+		// no test but their own. The Generic recorder does state its config
+		// exchanges per-test (generic.exchangeLifetime), one reason GENERIC
+		// is not read here.
+		if m.Spec.Metadata["type"] == "config" {
+			return LifetimeSession, true
+		}
+		return LifetimePerTest, true
+	case MetadataLifetimeSession:
+		return LifetimeSession, true
+	case MetadataLifetimeConnection:
+		if m.Spec.Metadata["connID"] != "" {
+			return LifetimeConnection, true
+		}
+		return LifetimeSession, true
+	}
+	return LifetimePerTest, false
 }
 
 // IsMySQLSessionReusableCommandType reports whether a MySQL command

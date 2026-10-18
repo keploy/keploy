@@ -1,6 +1,13 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
+    inputs:
+      # The build-windows keploy.exe's SHA-256, by which the job takes it from
+      # this machine's cache (machine-cache.ps1); empty: download it.
+      windows_binary_sha256:
+        type: string
+        required: false
+        default: ''
 
 # NO workflow-level concurrency group here on purpose.
 #
@@ -197,11 +204,16 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\setup-git-isolation.ps1"
 
-      # --- CLI binaries (same as before) ---
-      - name: Download Record Binary (${{ matrix.config.record_src }})
-        uses: actions/download-artifact@v4
+      # --- CLI binaries ---
+      # keploy.exe is built on this same machine (build-windows-amd64), which
+      # keeps it: copied from there by the SHA-256 that job hands on, or, when
+      # it is not there, downloaded (.github/actions/windows-binary). The
+      # record and replay binaries are the same artifact, so this is once.
+      - name: Get the record binary (${{ matrix.config.record_src }})
+        uses: ./.github/actions/windows-binary
         with:
           name: ${{ matrix.config.record_src }}
+          sha256: ${{ matrix.config.record_src == 'build-windows' && inputs.windows_binary_sha256 || '' }}
           path: record-bin
 
       - name: Install Record Binary
@@ -214,6 +226,7 @@ jobs:
           echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
+        if: matrix.config.replay_src != matrix.config.record_src
         uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.config.replay_src }}
@@ -224,7 +237,11 @@ jobs:
         shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"' 
         run: |
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
-          Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          if ("${{ matrix.config.replay_src }}" -eq "${{ matrix.config.record_src }}") {
+            Copy-Item -Path ".\bin\keploy-record.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          } else {
+            Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          }
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
       - id: image

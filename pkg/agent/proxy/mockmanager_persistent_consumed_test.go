@@ -39,10 +39,10 @@ func TestGetPersistentConsumed_EqualsClientAccumulation(t *testing.T) {
 	}
 
 	// Testcase 1: consume A (updated) and B (deleted).
-	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 1}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 1}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed A: %v", err)
 	}
-	if err := mm.flagMockAsUsed(models.MockState{Name: "B", Kind: models.MySQL, Usage: models.Deleted, IsFiltered: false, SortOrder: 2}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "B", Kind: models.MySQL, Usage: models.Deleted, IsFiltered: false, SortOrder: 2}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed B: %v", err)
 	}
 	accumulate()
@@ -50,10 +50,10 @@ func TestGetPersistentConsumed_EqualsClientAccumulation(t *testing.T) {
 	// Testcase 2: A's state CHANGES to deleted; consume C (updated). The latest
 	// state per name is what filterOutDeleted reads, so this transition is the
 	// load-bearing case.
-	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.MySQL, Usage: models.Deleted, IsFiltered: true, SortOrder: 3}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.MySQL, Usage: models.Deleted, IsFiltered: true, SortOrder: 3}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed A2: %v", err)
 	}
-	if err := mm.flagMockAsUsed(models.MockState{Name: "C", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 4}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "C", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 4}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed C: %v", err)
 	}
 	accumulate()
@@ -86,7 +86,7 @@ func TestGetPersistentConsumed_NotDrained(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	if err := mm.flagMockAsUsed(models.MockState{Name: "X", Kind: models.MySQL, Usage: models.Deleted}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "X", Kind: models.MySQL, Usage: models.Deleted}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed: %v", err)
 	}
 	_ = mm.GetConsumedMocks() // drains consumedList
@@ -116,12 +116,12 @@ func TestPersistentConsumed_ClearedAtTestSetBoundary(t *testing.T) {
 	// mock it matches by name. So a clear that only swept Deleted entries would
 	// still stamp set 0's ordering onto set 1's mock-2 — quieter than the drop,
 	// and worse on a stateful protocol.
-	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed: %v", err)
 	}
 	if err := mm.flagMockAsUsed(models.MockState{
 		Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed: %v", err)
 	}
 	if p := mm.GetPersistentConsumed(); len(p) != 2 {
@@ -145,7 +145,7 @@ func TestPersistentConsumed_SurvivesDrainsWithinASet(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 
-	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted}, 0); err != nil {
 		t.Fatalf("flagMockAsUsed: %v", err)
 	}
 	_ = mm.GetConsumedMocks()
@@ -159,7 +159,7 @@ func TestPersistentConsumed_SurvivesDrainsWithinASet(t *testing.T) {
 // A mock served twice keeps the time it was first served, so a client attributes it to the test that used it first.
 func TestConsumedMockKeepsItsFirstServedTime(t *testing.T) {
 	mm := NewMockManager(nil, nil, zap.NewNop())
-	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Updated}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Updated}, 0); err != nil {
 		t.Fatal(err)
 	}
 	first := mm.consumedList[0].Timestamp
@@ -167,7 +167,7 @@ func TestConsumedMockKeepsItsFirstServedTime(t *testing.T) {
 		t.Fatal("a served mock must carry the time it was served")
 	}
 	time.Sleep(2 * time.Millisecond)
-	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Deleted}); err != nil {
+	if err := mm.flagMockAsUsed(models.MockState{Name: "A", Kind: models.HTTP, Usage: models.Deleted}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := mm.consumedList[0]; got.Timestamp != first || got.Usage != models.Deleted {

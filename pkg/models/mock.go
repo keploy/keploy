@@ -288,6 +288,13 @@ type TestModeInfo struct {
 	// consume of a copy an earlier view served (a previous attempt of the
 	// same test) is refused. Runtime-only, like the fields above.
 	ServedIn uint64 `json:"-" bson:"-"`
+
+	// StagedSet is the agent's test-set generation whose staging pooled the
+	// mock (MockManager.ArmSetFence); zero on a mock no staging pooled. A
+	// consume of a mock pooled for an earlier set (a consume racing the next
+	// set's staging) is refused: it was of that set's pool, under that set's
+	// mock names. Runtime-only, like the fields above.
+	StagedSet uint64 `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
@@ -405,6 +412,17 @@ type MockSpec struct {
 	// a top-level `variables:` block like noise; nil for a call that holds
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+
+	// learned and learnedBinds are, on a mock the learn step of record's
+	// full round just paired (agent side, in memory), the variables it
+	// learned on the mock and those it learned that are bound at an earlier
+	// mock of the same test (by that mock's name). They ride out on the
+	// consumed mock's state (MockState.Variables, MockState.Binds), and are
+	// never encoded (unexported: no gob, JSON or YAML of a mock carries
+	// them) nor served: a reused mock the learn step paired is the same
+	// recording to the next call.
+	learned      MockVariables
+	learnedBinds map[string]MockVariables
 
 	// Async, when non-nil, marks this mock as async-egress and carries the
 	// engine's bookkeeping (lane, order, anchor, poll/duration) in its own
@@ -623,6 +641,19 @@ type PostgresV3QuerySpec struct {
 	BindValues  PostgresV3Cells `json:"bindValues,omitempty" yaml:"bindValues,omitempty" bson:"bind_values,omitempty"`
 	BindFormats []int           `json:"bindFormats,omitempty" yaml:"bindFormats,omitempty" bson:"bind_formats,omitempty"`
 
+	// Literals holds the constants an extended-protocol statement carries
+	// in its SQL text (the SQL its Parse sent), in their order there, as
+	// their text values; a NULL constant is a NULL cell. SQLNormalized has
+	// them as $N placeholders and SQLAstHash ignores them, so without
+	// Literals a recording cannot say which values it was made for: a
+	// statement built by string concatenation (pgjdbc's Statement, which
+	// pgjdbc sends over the extended protocol) recorded for
+	// name = 'alice' would match a replay for name = 'carol'. Nil for a
+	// statement with no constants, and for a simple-Query invocation,
+	// whose constants are its BindValues; a recording made before the
+	// field existed has none either.
+	Literals PostgresV3Cells `json:"literals,omitempty" yaml:"literals,omitempty" bson:"literals,omitempty"`
+
 	// ResultFormats — per-column format codes the client requested at
 	// Bind time (via the Bind packet's ResultFormatCodes field).
 	// Semantics match PG wire: len=0 means "all text", len=1 means
@@ -678,6 +709,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState  string                 `yaml:"precedingTxState,omitempty"`
 		BindValues        PostgresV3Cells        `yaml:"bindValues,omitempty"`
 		BindFormats       []int                  `yaml:"bindFormats,omitempty"`
+		Literals          PostgresV3Cells        `yaml:"literals,omitempty"`
 		ResultFormats     []int                  `yaml:"resultFormats,omitempty"`
 		Response          *PostgresV3Response    `yaml:"response,omitempty"`
 		SideEffects       *PostgresV3SideEffects `yaml:"sideEffects,omitempty"`
@@ -694,6 +726,7 @@ func (q PostgresV3QuerySpec) MarshalYAML() (any, error) {
 		PrecedingTxState:  q.PrecedingTxState,
 		BindValues:        q.BindValues,
 		BindFormats:       q.BindFormats,
+		Literals:          q.Literals,
 		ResultFormats:     q.ResultFormats,
 		Response:          q.Response,
 		SideEffects:       q.SideEffects,
@@ -1015,6 +1048,22 @@ type MockState struct {
 	// window's test, and kept from the prune whatever the running test's
 	// verdict — instead of to the test that happened to be running.
 	CarryOver bool `json:"carryOver,omitempty"`
+	// DataPlane says the mock is a test mock (not Mock.IsProtocolPhase)
+	// though its Type says otherwise: a Generic exchange its recorder stated
+	// per-test keeps the type "config". Under the proven switch its
+	// consumption counts toward its test's. An agent that predates it reports
+	// none, and a newer replay then finds such a test mock unconsumed: the
+	// agent and the CLI are one keploy.
+	DataPlane bool `json:"dataPlane,omitempty"`
+	// Variables carries the mock's variables (MockSpec.Variables) back from
+	// the agent under the proven switch, as ReqBodyNoise carries its learned
+	// noise: those the learn step of record's full round learned on it are
+	// written onto the recording.
+	Variables MockVariables `json:"variables,omitempty"`
+	// Binds are the variables the learn step learned, while answering this
+	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
+	// by that mock's name: the replay writes them onto that mock.
+	Binds map[string]MockVariables `json:"binds,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1221,3 +1270,17 @@ func (m *Mock) DeepCopy() *Mock {
 
 	return &c
 }
+
+// SetLearned records on s, in memory only, the variables the learn step
+// learned on its mock (vars) and those bound at earlier mocks (binds): see
+// MockSpec.learned.
+func (s *MockSpec) SetLearned(vars MockVariables, binds map[string]MockVariables) {
+	s.learned, s.learnedBinds = vars, binds
+}
+
+// Learned is the variables the learn step learned on s's mock (SetLearned).
+func (s *MockSpec) Learned() MockVariables { return s.learned }
+
+// LearnedBinds is the variables the learn step learned while answering s's
+// mock that are bound at an earlier mock, by its name (SetLearned).
+func (s *MockSpec) LearnedBinds() map[string]MockVariables { return s.learnedBinds }

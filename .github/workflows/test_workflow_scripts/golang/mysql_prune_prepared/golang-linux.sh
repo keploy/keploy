@@ -12,9 +12,10 @@
 #      then two more, one with a key already used (ERR 1062, 500), and reads.
 #   1b. On a copy of the recording, the damage the old prune left: every
 #      PREPARE but the first of each query deleted, and the queries the
-#      recorder now keeps on EXECUTEs removed (a recording made before it
-#      did). That set cannot be repaired from its mocks: keploy test must
-#      fail, say why, and serve no test another test's EXECUTE.
+#      recorder now keeps on EXECUTEs, and the lifetime tags, removed (a
+#      recording made before either). That set cannot be repaired from its
+#      mocks: keploy test must fail, say why, and serve no test another
+#      test's EXECUTE.
 #   2. keploy test --remove-unused-mocks (the prune auto-replay runs): every
 #      test passes. A live PREPARE is answered by the first recorded PREPARE
 #      of its SQL, so the other copies go unconsumed, and the prune used to
@@ -182,15 +183,19 @@ orphans() {
 count() { mysql_rows "$1" | awk -F'\t' -v t="$2" '$3 == t' | wc -l; }
 
 # old_prune <mocks.yaml>: the damage an older keploy's prune left (#4810) on
-# a recording made before EXECUTEs kept their query: every PREPARE but the
-# first recorded of each query deleted, and the stored queries removed.
+# a recording made before EXECUTEs kept their query and before recorders
+# stated each mock's lifetime: every PREPARE but the first recorded of each
+# query deleted, and the stored queries and the lifetime tags
+# (spec.metadata.lifetime) removed. An older keploy that rewrites a newer
+# recording drops both too, as fields it does not know.
 old_prune() {
     local drop
     drop=$(yq -N 'select(.kind == "MySQL" and .spec.requests[0].header.packet_type == "COM_STMT_PREPARE") | [.name, .spec.requests[0].message.query] | @tsv' "$1" |
         awk -F'\t' 'NF == 2 && seen[$2]++ {print $1}' | paste -sd, -)
     [ -n "$drop" ] || { echo "::error::no repeated PREPARE to delete in $1"; return 1; }
     DROP="$drop" yq -i 'select(.name as $n | (strenv(DROP) | split(",") | any_c(. == $n)) | not)' "$1" &&
-        yq -i 'del(.spec.requests[].meta.query)' "$1"
+        yq -i 'del(.spec.requests[].meta.query)' "$1" &&
+        yq -i 'del(.spec.metadata.lifetime)' "$1"
 }
 
 # served_across <report>: the COM_STMT_EXECUTE mocks a test consumed that

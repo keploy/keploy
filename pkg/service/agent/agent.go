@@ -50,6 +50,10 @@ type ClientMockStorage struct {
 	// is a test mock (data-plane): one is a recorded call its test is judged
 	// for (refusedOf).
 	refused map[string]bool
+	// statements is the set's statement catalog, read from diskMocks once
+	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
+	// the store is published (seedStatementCatalog); nil with no on-disk store.
+	statements []*models.Mock
 }
 
 type Agent struct {
@@ -301,6 +305,10 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 			a.logger.Info("The agent was stopped while it was starting; stopping what it had started", zap.Error(err))
 		} else {
 			a.logger.Error("failed to hook into the app", zap.Error(err))
+			// The start has failed, here, before the teardown below, which
+			// can take long: the CLI that waits for the agent fails it at
+			// once, with the code it exits with (cli/agent.go).
+			utils.FailBoot(err)
 		}
 		// What Hook loaded or started before it failed, or before the stop
 		// that ended it, is torn down before the process exits.
@@ -310,7 +318,12 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		return err
 	}
 
-	if err := memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit); err != nil {
+	// Hooked into the app, the proxy up. The memory guard's start reads the
+	// cgroup's files: a stage of the start (utils.BeginBootWork).
+	endGuard := utils.BeginBootWork()
+	err = memoryguard.Start(ctx, a.logger, a.config.Agent.IsDocker, a.config.Agent.MemoryLimit)
+	endGuard()
+	if err != nil {
 		a.logger.Info("Memory guard unavailable, continuing without memory-aware recording. "+
 			"Ensure cgroup filesystem is mounted in the container or set --memory-limit=0 to disable.",
 			zap.Error(err))
@@ -785,7 +798,12 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if coreAgent.EbpfProxyPortOverride != 0 {
 		hookCfg.Port = coreAgent.EbpfProxyPortOverride
 	}
+	// The load can take long without a step (the kernel's verifier, on a
+	// loaded host): a stage of the start, making progress while its thread
+	// runs (utils.BeginBootWork).
+	endLoad := utils.BeginBootWork()
 	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
+	endLoad()
 
 	if err != nil {
 		if ctx.Err() != nil {
@@ -824,10 +842,16 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	// count of the connections waiting for it (proxyconns.go).
 	a.markProxyListener()
 
+	// The proxy's start can take long without a step: its CA's install runs
+	// keytool, update-ca-certificates (whose Java hook starts a JVM) and
+	// certutil, and the auxiliary hook loads BPF. A stage of the start, on
+	// this goroutine (utils.BeginBootWork), with steps of its own inside.
+	endProxy := utils.BeginBootWork()
 	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
 	})
+	endProxy()
 
 	if err != nil {
 		startErr = err
@@ -1058,6 +1082,8 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 		}
 	}
 	a.clientMocks.Store(uint64(0), storage)
+	a.seedStatementCatalog(storage)
+	a.seedRecordedDestinations(storage)
 
 	// Track the loaded count for /agent/mock/stats.
 	a.scopeMu.Lock()
@@ -1181,6 +1207,11 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	}
 	if disk != nil {
 		disk.Finalize()
+		statements, err := disk.LoadStatements()
+		if err != nil {
+			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
+		}
+		storage.statements = statements
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int("spilledResponses", disk.SpilledResponses()),
@@ -1324,18 +1355,103 @@ func effectiveFirstWindowStart(isWindowedProxy bool, readerVal, afterTime time.T
 	return afterTime
 }
 
-func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time) ([]*models.Mock, error) {
+// inFlightFrom is, for a test window's call, the exclusive start of the gap
+// before the window, from the proxy's recorded windows
+// (coreAgent.InFlightPlanner): the calls sent after it and answered at or
+// after the window's start are the window's test's. ok is false for a
+// staging call, with no planner, or with no such gap.
+func (a *Agent) inFlightFrom(params models.MockFilterParams) (time.Time, bool) {
+	if params.AfterTime.IsZero() || params.AfterTime.Equal(models.BaseTime) || params.BeforeTime.IsZero() {
+		return time.Time{}, false
+	}
+	planner, ok := a.Proxy.(coreAgent.InFlightPlanner)
+	if !ok {
+		return time.Time{}, false
+	}
+	return planner.InFlightFrom(params.AfterTime)
+}
+
+// loadPerTestMocks reads, from the on-disk store disk, the per-test mocks
+// params' load mode (perTestLoadMode) asks for, beside resident. pool names
+// per-test mocks to read as well (the exact staging's pool, stageMocks):
+// those the mode's own load has not read already, nor holds resident, so
+// none is decoded twice. The staging call says how many it read (poolMocks).
+func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMocks, params models.MockFilterParams, firstWindowStart time.Time, pool ...string) ([]*models.Mock, error) {
 	if disk == nil {
 		return resident, nil
 	}
 
 	var loaded []*models.Mock
 	var err error
+	// readPool reads the pool's mocks that neither resident nor loaded holds.
+	poolRead := false
+	readPool := func() ([]*models.Mock, error) {
+		poolRead = true
+		if len(pool) == 0 {
+			return nil, nil
+		}
+		have := make(map[string]struct{}, len(resident)+len(loaded))
+		for _, list := range [][]*models.Mock{resident, loaded} {
+			for _, m := range list {
+				if m != nil {
+					have[m.Name] = struct{}{}
+				}
+			}
+		}
+		want := make([]string, 0, len(pool))
+		for _, n := range pool {
+			if _, ok := have[n]; !ok {
+				want = append(want, n)
+			}
+		}
+		if len(want) == 0 {
+			return nil, nil
+		}
+		return disk.LoadByNames(want)
+	}
 	mode := perTestLoadMode(params)
 	switch mode {
 	case loadModeMapping:
 		loaded, err = disk.LoadByNames(params.MockMapping)
 	case loadModeStrictWindow:
+		if cutoff, ok := stagingStartupCutoff(params); ok {
+			loaded, err = disk.LoadBefore(cutoff)
+			if err != nil {
+				break
+			}
+			startup := len(loaded)
+			// Beside the startup band, the mocks a parser declares it
+			// needs staged within the staging's window
+			// (models.StagingWithStartup): a server push it files when
+			// the set is staged and releases at its own test window. They
+			// are read from the band's cutoff to the end of the
+			// staging's window, so the two never overlap.
+			declared := 0
+			if models.StagedAtStagingRegistered() {
+				var staged []*models.Mock
+				staged, err = disk.LoadStaged(cutoff, params.BeforeTime)
+				if err != nil {
+					break
+				}
+				loaded = append(loaded, staged...)
+				declared = len(staged)
+			}
+			// And the exact staging's pool (stageMocks), what the band and
+			// the declared mocks have not read already.
+			var poolMocks []*models.Mock
+			poolMocks, err = readPool()
+			if err != nil {
+				break
+			}
+			loaded = append(loaded, poolMocks...)
+			a.logger.Info("staged the set's app-startup mocks from the on-disk store; each test reads its own when it runs",
+				zap.Int("startupMocks", startup),
+				zap.Int("declaredMocks", declared),
+				zap.Int("poolMocks", len(poolMocks)),
+				zap.Int("onDisk", disk.Len()),
+				zap.String("firstRecordedTest", cutoff.UTC().Format(time.RFC3339Nano)))
+			break
+		}
 		loaded, err = disk.LoadWindow(params.AfterTime, params.BeforeTime)
 		if err == nil && !firstWindowStart.IsZero() {
 			var startup []*models.Mock
@@ -1344,8 +1460,25 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 				loaded = append(loaded, startup...)
 			}
 		}
+		// Beside the window's own, the calls in flight when its test began:
+		// sent in the gap before it, answered at or after its start (a
+		// consumer's long poll). The window loads by request time, so
+		// they are in no window's load otherwise.
+		if from, ok := a.inFlightFrom(params); err == nil && ok {
+			var inFlight []*models.Mock
+			inFlight, err = disk.LoadInFlight(from, params.AfterTime)
+			if err == nil {
+				loaded = append(loaded, inFlight...)
+			}
+		}
 	default:
 		loaded, err = disk.LoadAll()
+	}
+	if err == nil && !poolRead {
+		var poolMocks []*models.Mock
+		if poolMocks, err = readPool(); err == nil {
+			loaded = append(loaded, poolMocks...)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -1355,6 +1488,87 @@ func (a *Agent) loadPerTestMocks(resident []*models.Mock, disk *proxyPkg.DiskMoc
 		zap.Int("loadedFromDisk", len(loaded)),
 		zap.Int("residentIneligible", len(resident)))
 	return dedupByName(resident, loaded), nil
+}
+
+// seedStatementCatalog hands the proxy the stored set's statement catalog
+// (storage.statements): the first recorded mock of each statement its on-disk
+// store holds. An app may prepare at start the statements it runs only inside
+// tests, and the set's staging reads only the mocks recorded before the first
+// test (stagingStartupCutoff): the parser answers those prepares from the
+// catalog, describe-only, never serving it. It is seeded once per store, when
+// the store is published, so no test's call and no scope staging reads it
+// again, and a store with no on-disk store (whose per-test mocks are all
+// resident, so the staging reaches them) replaces the previous set's catalog
+// with none. A proxy that cannot take it is not seeded.
+func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
+	seeder, ok := a.Proxy.(coreAgent.StatementCatalogSeeder)
+	if !ok {
+		return
+	}
+	seeder.SeedStatementCatalog(storage.statements)
+	if storage.diskMocks != nil {
+		a.logger.Info("seeded the set's statement catalog from the on-disk store: the first recording of each statement, to describe a statement the app prepares before the test that runs it, never served",
+			zap.Int("statements", len(storage.statements)),
+			zap.Int("onDisk", storage.diskMocks.Len()))
+	}
+}
+
+// seedRecordedDestinations hands the proxy the stored set's recorded
+// destinations: the first mock its on-disk store holds of each
+// (DiskMocks.LoadDestinations). A set's staging reads only what was recorded
+// before its first test, so a destination whose per-test mocks all lie inside
+// tests would be unknown to the proxy's destination rules while the app
+// starts: a non-default MySQL port would not be routed to the MySQL parser,
+// and a TLS client would not be offered h2 for a destination recorded
+// speaking HTTP/2. They are seeded once per store, when it is published, and
+// replace the previous store's; the proxy keeps them, and every staging
+// derives from them beside what it stages. A store with no on-disk store
+// seeds none: its per-test mocks are all resident, so its staging reaches
+// them. A read failure seeds none and is logged; the rules then read what is
+// staged, as before.
+func (a *Agent) seedRecordedDestinations(storage *ClientMockStorage) {
+	seeder, ok := a.Proxy.(coreAgent.RecordedDestinationsSeeder)
+	if !ok {
+		return
+	}
+	var mocks []*models.Mock
+	if storage.diskMocks != nil {
+		var err error
+		if mocks, err = storage.diskMocks.LoadDestinations(); err != nil {
+			utils.LogError(a.logger, err, "failed to read the set's recorded destinations from the on-disk store; the proxy reads them from what is staged")
+			mocks = nil
+		}
+	}
+	seeder.SeedRecordedDestinations(mocks)
+	if storage.diskMocks != nil {
+		a.logger.Debug("seeded the set's recorded destinations from the on-disk store",
+			zap.Int("destinations", len(mocks)), zap.Int("onDisk", storage.diskMocks.Len()))
+	}
+}
+
+// stagingStartupCutoff returns where a set's staging call stops reading the
+// on-disk store, and whether the call is one.
+//
+// The replayer stages a set before the app starts, with the window BaseTime to
+// now (replay.go's SendMockFilterParamsToAgent at set-up, on retry and for a
+// replacement agent). The proxy files everything it is staged with then as
+// app-startup traffic, and the set's first test refiles it to what was recorded
+// before that test (MockManager.setMocksWithWindowLocked). Reading the window
+// itself therefore brought the whole recording into memory only to stage it as
+// startup traffic, and a long recording OOM-killed the agent before its app
+// started. The startup traffic is what was recorded before the set's earliest
+// recorded test, which the staging call carries. Beside it the call stages
+// the mocks a parser declares it needs staged within the call's window
+// (models.StagingWithStartup, DiskMocks.LoadStaged), and only those, from the
+// cutoff to the end of the call's window.
+//
+// A set whose tests carry no request time has no such test, so its staging
+// call reads the window it names.
+func stagingStartupCutoff(params models.MockFilterParams) (time.Time, bool) {
+	if !params.AfterTime.Equal(models.BaseTime) || params.FirstRecordedTestStart.IsZero() {
+		return time.Time{}, false
+	}
+	return params.FirstRecordedTestStart, true
 }
 
 const (
@@ -1385,17 +1599,19 @@ func perTestLoadMode(params models.MockFilterParams) string {
 	return loadModeLaxAll
 }
 
-// loadCarryOverLookahead loads the per-test mocks of RegisterCarryOver kinds
-// that the proxy's carry-over tier needs for this window beyond the window's
-// own mocks: the range CarryOverLoadRange names, which starts where the previous
-// window's load ended and reaches models.CarryOverLookahead past what this
-// window releases. They go to the proxy in the filtered slice, and the manager
-// files the out-of-window ones into the carry-over tier.
+// loadCarryOverLookahead loads the carry-over mocks (models.IsCarryOver: a
+// RegisterCarryOver kind's, a StagingRelease need's) that the proxy's
+// carry-over tier needs for this window beyond the window's own mocks: the
+// range CarryOverLoadRange names, which starts where the previous window's
+// load ended and reaches models.CarryOverLookahead past what this window
+// releases, or, for the set's staging, what the app's startup reaches. They go
+// to the proxy in the filtered slice, and the manager files the out-of-window
+// ones into the carry-over tier.
 //
 // Only for the windowed disk loads (strict-window, mapping). The lax load
 // already holds every mock, and its filter makes the out-of-window ones session
-// mocks; nothing loads when no kind registered a carry-over predicate, the
-// proxy has no planner, or there is no disk store.
+// mocks; nothing loads when no kind registered a carry-over predicate or a
+// StagingRelease need, the proxy has no planner, or there is no disk store.
 func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.MockFilterParams) ([]*models.Mock, error) {
 	if disk == nil || !models.CarryOverRegistered() || perTestLoadMode(params) == loadModeLaxAll {
 		return nil, nil
@@ -1508,7 +1724,14 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if params.Exact != nil && provenswitch.On() {
 		return a.serveKeployTestExactly(ctx, params)
 	}
-	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params)
+	return a.stageMocks(ctx, params, nil)
+}
+
+// stageMocks stages on the proxy what UpdateMockParams stages for params, and
+// with it the per-test mocks named alsoLoad that the on-disk store holds,
+// whatever params' own load reads (mocksForParams).
+func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string) error {
+	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params, alsoLoad...)
 	if err != nil {
 		return err
 	}
@@ -1536,7 +1759,9 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 // and the session tier, filtered as params ask. It also applies what the
 // staging call carries beside the pool (the startup cutoff, the recorded
 // windows, the stateful cursors' reset), as UpdateMockParams always has.
-func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams) ([]*models.Mock, []*models.Mock, error) {
+// alsoLoad names per-test mocks the on-disk store holds to read as well,
+// beside what params' own load reads.
+func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterParams, alsoLoad ...string) ([]*models.Mock, []*models.Mock, error) {
 	// Seed the startup-init cutoff from the set's earliest RECORDED test before
 	// anything else touches the window. Without it the cutoff follows whichever
 	// test fires FIRST, so a --test-sets selection, an ignored test or the
@@ -1602,7 +1827,10 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 					"timestamp falls outside the outer test window will be dropped rather than promoted "+
 					"across tests. If your replays start reporting missing mocks after an upgrade, this "+
 					"is likely why. To opt out: set KEPLOY_STRICT_MOCK_WINDOW=0 in the environment, OR "+
-					"test.strictMockWindow: false in keploy.yaml.",
+					"test.strictMockWindow: false in keploy.yaml. A recording whose recorder stated each "+
+					"mock's lifetime (spec.metadata.lifetime) serves each test its own calls in every mode: "+
+					"declare an HTTP call every test may make in keploy.yaml (sessionCalls), or record the "+
+					"test set again.",
 				zap.Bool("viaPerCallFlag", params.StrictMockWindow),
 				zap.Bool("viaEnvOverride", !params.StrictMockWindow && strictEnabled),
 				zap.String("escape_hatch_env", "KEPLOY_STRICT_MOCK_WINDOW=0"),
@@ -1664,7 +1892,7 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	firstWindowStart = effectiveFirstWindowStart(isWindowedProxy, firstWindowStart, params.AfterTime)
 
 	// Load only what the filter will keep for this call (see loadPerTestMocks).
-	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart)
+	originalFiltered, err := a.loadPerTestMocks(residentFiltered, disk, params, firstWindowStart, alsoLoad...)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load this test's per-test mocks from the agent's on-disk store; the temp file may be unreadable or the pool was superseded mid-test")
 		return nil, nil, err
@@ -1711,7 +1939,12 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 		// filter and merge them into the session pool passed to the
 		// proxy. Under strict mode this branch doesn't fire because
 		// filterByTimeStamp drops rather than promotes.
-		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedTierAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
+		// The calls in flight when the window's test began are its own
+		// per-test mocks in the user's window mode (params.StrictMockWindow),
+		// not agentStrict's: on a windowed proxy the agent's filter is never
+		// strict, and the mock manager filters what it is handed.
+		inFlightFrom, _ := a.inFlightFrom(params)
+		perTestIn, promotedToSession := pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart, inFlightFrom, params.StrictMockWindow)
 		filteredMocks = perTestIn
 		unfilteredMocks = pkg.FilterConfigMocksTierAware(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime, agentStrict, firstWindowStart)
 		if len(promotedToSession) > 0 {

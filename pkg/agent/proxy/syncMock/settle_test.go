@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // fakeWatermark settles a test case once its pod's position has passed its
@@ -73,14 +74,14 @@ func TestTestCaseHold_BoundsReleaseAndSaySo(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	w := &fakeWatermark{at: map[string]time.Time{}}
 	h := NewTestCaseHold(w, time.Minute, 1<<20)
-	now := t0
-	h.now = func() time.Time { return now }
+	clk := &stall.ManualClock{}
+	h.clk, h.hold = clk, nil
 	h.Add(heldTC("old", t0), "", "a")
-	now = now.Add(59 * time.Second)
+	clk.Advance(59 * time.Second)
 	if got := h.Release(); len(got) != 0 {
 		t.Fatalf("released %v inside the time bound", names(got))
 	}
-	now = now.Add(time.Second)
+	clk.Advance(time.Second)
 	got := h.Release()
 	if len(got) != 1 || !got[0].Unsettled {
 		t.Fatalf("released %+v at the time bound, want it marked unsettled", got)
@@ -120,6 +121,7 @@ func TestSyncMockManager_Watermark(t *testing.T) {
 // locks; one delivered is not.
 func TestSyncMockManager_OnDropIsToldOfEveryDrop(t *testing.T) {
 	m := New(nil)
+	stalledOutClock(m)
 	var dropped []string
 	m.OnDrop(func(mk *models.Mock) {
 		// Outside outChanMu: the hook can use the manager.
@@ -131,6 +133,7 @@ func TestSyncMockManager_OnDropIsToldOfEveryDrop(t *testing.T) {
 	m.SetOutputChannel(ch)
 	m.sendToOutChan(&models.Mock{Name: "delivered"})
 	m.sendToOutChan(&models.Mock{Name: "over-budget"})
+	waitOutQueue(t, m)
 	if len(dropped) != 2 || dropped[0] != "no-channel" || dropped[1] != "over-budget" {
 		t.Fatalf("told of %v, want [no-channel over-budget]", dropped)
 	}
@@ -186,7 +189,9 @@ func TestTestCaseHold_WaitsForItsFence(t *testing.T) {
 // the window asked about, and not one outside it.
 func TestSyncMockManager_PendingIn(t *testing.T) {
 	m := New(nil)
-	out := make(chan *models.Mock) // nothing reads it: a send waits out its budget
+	out := make(chan *models.Mock) // nothing reads it: a send is queued, then given up
+	clk := &stall.ManualClock{}
+	m.outClock, m.outStall = clk, time.Second
 	m.SetOutputChannel(out)
 	m.SetFirstRequestSignaled() // mocks are buffered for their window
 	t0 := time.Unix(2000, 0)
@@ -226,7 +231,13 @@ func TestSyncMockManager_PendingIn(t *testing.T) {
 	if m.PendingIn(t0.Add(time.Hour), t0.Add(2*time.Hour)) {
 		t.Fatal("a mock on its way out holds another window: a full channel would hold back every test case")
 	}
-	<-done
+	<-done // the resolve does not wait on the consumer
+	if !m.PendingIn(t0.Add(-time.Second), t0.Add(time.Second)) {
+		t.Fatal("a mock queued for a consumer that has not taken it is not pending in its window")
+	}
+	waitClockPending(t, clk)
+	clk.Advance(time.Second) // the consumer took nothing for the bound: given up
+	waitOutQueue(t, m)
 	if m.PendingIn(t0.Add(-time.Second), t0.Add(time.Second)) {
 		t.Fatal("pending after its send ended")
 	}
@@ -264,10 +275,10 @@ func TestTestCaseHold_SaysWhatHeldWhatItLetGo(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	w := &explainedWatermark{}
 	h := NewTestCaseHold(w, time.Minute, 1<<20)
-	now := t0
-	h.now = func() time.Time { return now }
+	clk := &stall.ManualClock{}
+	h.clk, h.hold = clk, nil
 	h.Add(heldTC("behind", t0), "", "a")
-	now = now.Add(time.Minute)
+	clk.Advance(time.Minute)
 	got := h.Release()
 	if len(got) != 1 || !got[0].Unsettled || got[0].HeldBy == nil || got[0].HeldBy.String() != "pod a is behind" {
 		t.Fatalf("released %+v, want it unsettled and held by its pod", got)
@@ -279,7 +290,7 @@ func TestTestCaseHold_SaysWhatHeldWhatItLetGo(t *testing.T) {
 	if got := h.Release(); len(got) != 0 {
 		t.Fatalf("released %v before its fence was passed", names(got))
 	}
-	now = now.Add(time.Minute)
+	clk.Advance(time.Minute)
 	got = h.Release()
 	if len(got) != 1 || got[0].HeldBy == nil || got[0].HeldBy.String() != "fence 7" {
 		t.Fatalf("released %+v, want it held by fence 7", got)

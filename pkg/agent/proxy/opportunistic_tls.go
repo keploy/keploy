@@ -393,12 +393,9 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// Client-facing handshake. HandleTLSConnection's inner
 	// tls.Config has KeyLogWriter wired into the package-level
 	// fanout sink, so the master secret for this side is logged.
-	tlsClient, _, err := pTls.HandleTLSConnection(ctx, p.logger, wrappedSrc, backdate)
+	tlsClient, _, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr), p.logger, wrappedSrc, backdate)
 	if err != nil {
-		if ctx.Err() == nil {
-			p.losses.Add(models.CaptureLossTLSAbort, "to "+dstAddr)
-		}
-		return fmt.Errorf("client-side handshake: %w", err)
+		return fmt.Errorf("client-side handshake: %w", pTls.HandshakeCause(err))
 	}
 	defer tlsClient.Close()
 

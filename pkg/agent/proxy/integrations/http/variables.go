@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/bodydigest"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -356,16 +357,63 @@ type varHit struct {
 	// only.
 	binds []variables.Binding
 	local map[string]variables.Binding
-	// gen is the table's scope the call was checked in (variables.Table.Gen).
-	gen uint64
+	// table is the scope the call was checked in (varScope.of), and gen that
+	// table's scope then (variables.Table.Gen): its binds land there.
+	table *variables.Table
+	gen   uint64
+}
+
+// varScope is the scopes a call's variables are checked in, each read before
+// the pool was (varScope.of): the store's table (integrations.VariableStore),
+// and, under exact serving between tests, the next test's, which its calls in
+// flight the pool view answers bind in (integrations.VariableScopes).
+type varScope struct {
+	table    *variables.Table
+	gen      uint64
+	ahead    *variables.Table
+	aheadGen uint64
+	inAhead  func(*models.Mock) bool
+}
+
+// readVarScope reads the scopes of mockDb, before the pool is read: a scope
+// that begins after makes the binds of a call checked in it stale
+// (variables.Table.BindAll).
+func readVarScope(mockDb integrations.MockMemDb) varScope {
+	var s varScope
+	s.table = variableTable(mockDb)
+	if s.table != nil {
+		s.gen = s.table.Gen()
+	}
+	if vs, ok := mockDb.(integrations.VariableScopes); ok {
+		s.ahead, s.inAhead = vs.AheadVariables(), vs.InAheadScope
+		if s.ahead != nil {
+			s.aheadGen = s.ahead.Gen()
+		}
+	}
+	return s
+}
+
+// of is the table a call m answers binds in, and its scope when read.
+func (s varScope) of(m *models.Mock) (*variables.Table, uint64) {
+	if s.ahead != nil && s.inAhead != nil && s.inAhead(m) {
+		return s.ahead, s.aheadGen
+	}
+	return s.table, s.gen
+}
+
+// moved reports whether a scope read began another since: the call is
+// checked again against it.
+func (s varScope) moved() bool {
+	return s.table != nil && s.table.Gen() != s.gen || s.ahead != nil && s.ahead.Gen() != s.aheadGen
 }
 
 // variablePass returns the mocks of pool (in its order) that the live call
 // fits and whose variables hold, and otherwise the evidence of the first that
 // fits but whose variables do not hold, if any.
 //
-// gen is the variables' scope the caller read before it fetched pool.
-func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, table *variables.Table, gen uint64, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
+// scope is the variables' scopes the caller read before it fetched pool: each
+// mock is checked in the one a call it answers binds in.
+func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock, scope varScope, headerNoise, userBodyNoise map[string][]string, urlNoise []string) ([]*varHit, *varProblem, error) {
 	live := liveView(input)
 	var hits []*varHit
 	var first *varProblem
@@ -373,10 +421,11 @@ func (h *HTTP) variablePass(ctx context.Context, input *req, pool []*models.Mock
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
+		table, gen := scope.of(m)
 		hit, problem := h.fitVariables(ctx, input, live, m, table, headerNoise, userBodyNoise, urlNoise)
 		switch {
 		case hit != nil:
-			hit.gen = gen
+			hit.table, hit.gen = table, gen
 			hits = append(hits, hit)
 		case problem != nil && (first == nil || (first.kind == "" && problem.kind != "")):
 			// A value that differs is better evidence than a declaration
@@ -419,6 +468,13 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if bad != "" {
 		return refuse(bad)
 	}
+	// Learned noise at a SigV4 Authorization or a presigned URL's signing
+	// parameters is put back below; the parts the strict matcher compares
+	// by grammar must hold first (founder decision 25), or the call is the
+	// strict matcher's to decide.
+	if !sigV4PartsHold(recordedParts(m), liveParts(ctx, input)) {
+		return nil, nil
+	}
 
 	// The variables' places, read on both sides; then the recorded values put
 	// back into the live call.
@@ -449,6 +505,36 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				return nil, nil
 			}
 			liveAt[vp.place.String()] = l
+		}
+	}
+
+	// What the learn step learned as noise at one exact place of this call
+	// (a path segment, a query value, a header value, one element of an
+	// array) is not compared either: its recorded value is put back there
+	// too, the place's presence and JSON type still required.
+	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
+	for k := range m.Spec.ReqBodyNoise {
+		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
+		if !ok {
+			continue // a body path in the matcher's dialect: the body noise
+		}
+		place, err := variables.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if _, isVar := liveAt[place.String()]; isVar {
+			continue
+		}
+		r, ok := rec.read(place)
+		if !ok {
+			continue
+		}
+		l, ok := live.read(place)
+		if !ok || l.body && l.kind != r.kind {
+			return nil, nil
+		}
+		if asRecorded, ok = asRecorded.putBack(place, r); !ok {
+			return nil, nil
 		}
 	}
 
@@ -661,16 +747,16 @@ func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMo
 // values meanwhile (the next check sees that, and either another recording
 // answers the call or the call is a miss with that evidence), or another
 // connection took the mock first. Nothing is consumed before the binds hold.
-func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb, table *variables.Table) (served *models.Mock, problem *varProblem, retry bool, err error) {
+func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	rendered, problem := h.renderAnswers(loaded, hit, table)
+	rendered, problem := h.renderAnswers(loaded, hit, hit.table)
 	if problem != nil {
 		return nil, problem, false, nil
 	}
-	if _, _, _, ok := table.BindAll(hit.gen, hit.binds); !ok {
+	if _, _, _, ok := hit.table.BindAll(hit.gen, hit.binds); !ok {
 		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
@@ -745,6 +831,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 	if !ok {
 		return nil, &varProblem{mock: served.Name, why: "two of its answer places overlap", next: "re-record the test"}
 	}
+	note := served.Spec.Metadata[models.MetadataBodyDigestsKey]
 	if body != resp.Body {
 		for k, v := range resp.Header {
 			lk := strings.ToLower(k)
@@ -753,6 +840,12 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 			}
 			if of, ok := bodydigest.Form(lk, v, resp.Body); ok {
 				header[k] = of(body)
+				continue
+			}
+			if bodydigest.Noted(note, lk) {
+				// Recorded over the body as its server sent it (encoded): the
+				// serializer recomputes it over the bytes sent
+				// (buildMockResponseBytes).
 				continue
 			}
 			h.Logger.Warn("a variable changed the body of a recorded answer, and keploy serves this header as recorded: it cannot tell how the value was computed",
@@ -764,6 +857,20 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 	rc.Body = body
 	rc.Header = header
 	out.Spec.HTTPResp = &rc
+	// A digest header a variable set holds the variable's value, which the
+	// serializer must not recompute over the body.
+	if trimmed := bodydigest.Without(note, changed); trimmed != note {
+		meta := make(map[string]string, len(served.Spec.Metadata))
+		for k, v := range served.Spec.Metadata {
+			meta[k] = v
+		}
+		if trimmed == "" {
+			delete(meta, models.MetadataBodyDigestsKey)
+		} else {
+			meta[models.MetadataBodyDigestsKey] = trimmed
+		}
+		out.Spec.Metadata = meta
+	}
 	return out, nil
 }
 

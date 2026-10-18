@@ -140,6 +140,10 @@ type ScopeEvidence struct {
 	// Incomplete is capture_incomplete evidence of class e (design v14 §3.2,
 	// §4): a connection keploy could neither capture nor relay as real.
 	Incomplete []CaptureIncomplete `json:"incomplete,omitempty" yaml:"incomplete,omitempty"`
+	// CannotCapture is what keploy cannot capture at all that the application
+	// did while this test or one before it ran (decision 20: a call over a
+	// Unix socket): the test has no verdict. Never a failure.
+	CannotCapture CaptureLosses `json:"cannotCapture,omitempty" yaml:"cannotCapture,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Unread: keploy could not read everything the test did (its misses,
@@ -174,7 +178,7 @@ func IDPart(s string) bool {
 
 // Empty reports whether there is no evidence.
 func (e *ScopeEvidence) Empty() bool {
-	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0)
+	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
 }
 
 // TestID is a test's ID on the wire (design v14 §6.2):

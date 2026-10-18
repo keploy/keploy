@@ -9,6 +9,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -96,6 +97,20 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
 	}
 	return true, nil
+}
+
+// restartKey starts key's calls outside every test afresh on the proxy
+// (coreAgent.ExactKeyRestarter), when the proxy can: one that cannot keeps
+// what they consumed.
+func (a *Agent) restartKey(key string) error {
+	r, ok := a.Proxy.(coreAgent.ExactKeyRestarter)
+	if !ok {
+		return nil
+	}
+	a.provenMu.Lock()
+	names := append([]string(nil), a.proven.pool[key]...)
+	a.provenMu.Unlock()
+	return r.RestartExactKey(key, names)
 }
 
 // serveTestExactly opens test id under exact serving: its test mocks, the
@@ -218,7 +233,15 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
 			r.ResetStatefulCursors()
 		}
-		if err := a.UpdateMockParams(ctx, staging); err != nil {
+		// The pool's per-test mocks are staged with the set's startup
+		// traffic: the staging call reads, of the on-disk store, only what
+		// was recorded before the set's first test (stagingStartupCutoff),
+		// and each test reads its own as it opens (ServeExactTest). A call
+		// recorded while no test was open, between tests or after the last
+		// one, is the pool's, served by name from the staged mocks; were it
+		// not staged, its replay would find no mock. The pool is what no
+		// test owns, never the whole recording.
+		if err := a.stageMocks(ctx, staging, ex.Pool); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
 		a.scopeMu.Lock()
@@ -239,11 +262,32 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.scopeMu.Lock()
 		pool := append([]string(nil), a.testPool...)
 		a.scopeMu.Unlock()
-		if err := es.ServeExactPool(models.PoolKeyNone, pool); err != nil {
+		if err := a.servePoolAhead(es, pool, ex.Ahead); err != nil {
 			return err
 		}
 		return unknown
 	}
+}
+
+// servePoolAhead serves the set's pool between test cases and, beside it, the
+// next test case's mocks that were in flight when it began (ahead,
+// models.ExactServing.Ahead), each answering once as that test case's, when
+// the proxy can (coreAgent.ExactAheadServer). A proxy that cannot serves the
+// pool alone, as before: those calls answer only once their test case opens.
+func (a *Agent) servePoolAhead(es coreAgent.ExactServer, pool, ahead []string) error {
+	as, ok := es.(coreAgent.ExactAheadServer)
+	if len(ahead) == 0 || !ok {
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+	mocks, err := a.mocksByName(ahead)
+	if err != nil {
+		// The pool is served all the same: the test case that ended is
+		// over, and its consumption is read next. The next test case's
+		// calls in flight answer once it opens.
+		utils.LogError(a.logger, err, "could not read the next test case's calls in flight when it begins; they answer only once it opens")
+		return es.ServeExactPool(models.PoolKeyNone, pool)
+	}
+	return as.ServeExactPoolAhead(models.PoolKeyNone, pool, testMocks(ahead, mocks))
 }
 
 // realDestinations is implemented by a proxy that relays the run's mock.real

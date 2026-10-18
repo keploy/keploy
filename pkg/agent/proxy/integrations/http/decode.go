@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -32,8 +33,8 @@ var ErrMockNotMatched = models.ErrNoMockMatched
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
-		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
+		defer pUtil.RecoverInto(h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -322,7 +323,40 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			var (
+				ok    bool
+				stub  *models.Mock
+				diag  *matchDiag
+				lmiss *learnMiss
+			)
+			switch {
+			case provenswitch.On() && opts.Learn:
+				// Record's full round: the learn step decides every request
+				// (design v14 §7.2).
+				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				ok = stub != nil
+			default:
+				// Under the switch a replay first honours what the learn step
+				// learned onto the recording; anything else goes on to the
+				// matcher as before.
+				proven := provenswitch.On()
+				if proven {
+					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					ok = stub != nil
+				}
+				if !ok && err == nil {
+					// Under the switch the learn step of record's full round
+					// is the one request-noise learner, and what it learned is
+					// always followed (design v14 §7.2 step 10; U18): no other
+					// replay learns noise, and a learned correlation is never
+					// switched off.
+					detect, correlate := opts.NoiseDetection(), !opts.DisableMockCorrelation
+					if proven {
+						detect, correlate = false, true
+					}
+					ok, stub, diag, err = h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+				}
+			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -333,10 +367,31 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
-				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				if lmiss == nil && provenswitch.On() {
+					// A call that came with an array in another order is
+					// unstable_order in every round, not only the full one.
+					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+				}
+				if lmiss != nil {
+					diag = lmiss.diag()
+				}
 				// Under exact serving: one call more than the test recorded?
-				if n := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation); n > 0 && report != nil {
+				// Any other miss is diagnosed against the test's answered
+				// recordings too (answeredDiag): they are in no read now.
+				// Both read the request's destination as it came (reqCtx): a
+				// reading now would be a use of its connection's container in
+				// the scope open now, the next test's once a test ended.
+				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				if n == 0 && lmiss == nil {
+					// (A learn-step miss names the candidate it refused.)
+					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
+				}
+				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
+				}
+				if lmiss != nil {
+					lmiss.explain(report)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
@@ -382,20 +437,33 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
 				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
 				missErr := models.NewMockMismatchError(baseErr, report)
-				// Under the proven switch a miss fails the test that made it,
-				// so it is queued for that test before the app sees the 502:
-				// a test that ends right after reading the 502 has its miss,
-				// and the next test is never charged with it. Reported here,
-				// it is not returned again.
-				reported := provenswitch.On() && models.ReportMockMismatch(ctx, missErr)
+				// The miss is queued for the test that made it before the app
+				// sees the 502. The replay reads a test's misses once the app
+				// has answered it (proxy.GetMockErrors), and the app answers
+				// only after it has read the 502, so a test that ends as soon
+				// as it reads the 502 still has its miss, and the next test is
+				// never charged with it. That holds with the proven switch off
+				// as well. Queued after the 502, as it was there, the miss
+				// raced the app's answer: an app that answered first had its
+				// miss charged to the test after it (enterprise pipeline
+				// 11651: get-quote-1's GET /fx filed under get-rates-1, and
+				// get-quote-1's difference learned as noise).
+				reported := models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				if reported {
+				switch {
+				case reported && provenswitch.On():
+					// Reported, it is not returned again.
 					errCh <- nil
-					return
+				case reported:
+					// Returned as well, as reported: the connection ends and
+					// the miss is logged as they always were with the switch
+					// off, and it is not reported a second time.
+					errCh <- models.MismatchReported{Err: missErr}
+				default:
+					errCh <- missErr
 				}
-				errCh <- missErr
 				return
 			}
 
@@ -500,6 +568,11 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	} else {
 		respBody = body
 	}
+	// The digests the recorded body matched as its server sent it, over the
+	// bytes sent now (models.MetadataBodyDigestsKey): obfuscation, encryption
+	// and a variable rewrite a body, and keploy's compressor is not the
+	// server's. Those it did not match are sent as recorded.
+	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
 	var headers string
 	for key, values := range header {
 		if key == "Content-Length" {

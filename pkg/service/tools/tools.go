@@ -16,12 +16,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
 	"go.keploy.io/server/v3/utils"
@@ -828,14 +830,43 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 
 func (t *Tools) Templatize(ctx context.Context) error {
 
+	all, err := t.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		utils.LogError(t.logger, err, "failed to get all test sets")
+		return err
+	}
 	testSets := t.config.Templatize.TestSets
 	if len(testSets) == 0 {
-		all, err := t.testDB.GetAllTestSetIDs(ctx)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to get all test sets")
+		testSets = all
+	}
+	// A named set that is not recorded was skipped as empty: -t
+	// "test-set-1,test-set-3" templatized test-set-1 alone and exited 0. It
+	// is refused, naming it, under the proven switch and, with the switch
+	// off, when the command line named it; with the switch off, one
+	// keploy.yml's templatize.testSets inherited is left out with a warning
+	// naming it, as keploy test leaves one out (Replayer.selectTestSets).
+	var unknown, known []string
+	for _, name := range testSets {
+		if slices.Contains(all, name) {
+			known = append(known, name)
+		} else {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		if provenswitch.On() || t.config.Templatize.TestSetsFromCommandLine {
+			err := fmt.Errorf("the test set(s) %s named for keploy templatize are not recorded", strings.Join(unknown, ", "))
+			utils.LogError(t.logger, err, "keploy templatize names a test set that is not recorded, so it templatizes none",
+				zap.Strings("notRecorded", unknown),
+				zap.Strings("recorded", all),
+				zap.String("next_step", "name only recorded test sets in -t/--testsets (comma-separated) or in templatize.testSets in keploy.yml"))
 			return err
 		}
-		testSets = all
+		t.logger.Warn("keploy.yml's templatize.testSets names a test set that is not recorded, so keploy templatize leaves it out",
+			zap.Strings("notRecorded", unknown),
+			zap.Strings("recorded", all),
+			zap.String("next_step", "remove the set from templatize.testSets in keploy.yml, or record it with keploy record; named with -t, or with the proven switch on, a set that is not recorded fails the run"))
+		testSets = known
 	}
 
 	if len(testSets) == 0 {

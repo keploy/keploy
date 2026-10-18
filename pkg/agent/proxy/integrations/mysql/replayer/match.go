@@ -347,9 +347,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	winStart, winEnd := mockDb.CurrentTestWindow()
 	windowActive := !winStart.IsZero() && !winEnd.IsZero()
 	// mockInCurrentWindow reports whether a mock's recorded request timestamp
-	// lies within the active outer-test window. When no window is active
-	// (initial staging / between tests) every mock is treated as in-window
-	// so behaviour matches the pre-fix path.
+	// lies within the active outer-test window, or the mock was in flight
+	// when the window's test began (sent in the gap before it and answered
+	// inside it: integrations.InFlightOwner), which the windowed read serves
+	// as the test's own. When no window is active (initial staging / between
+	// tests) every mock is treated as in-window so behaviour matches the
+	// pre-fix path.
 	mockInCurrentWindow := func(mk *models.Mock) bool {
 		if !windowActive {
 			return true
@@ -358,7 +361,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if req.IsZero() {
 			return true
 		}
-		return !req.Before(winStart) && !req.After(winEnd)
+		if !req.Before(winStart) && !req.After(winEnd) {
+			return true
+		}
+		return integrations.InFlightIntoOpenTest(mockDb, mk)
 	}
 
 	// pool is the full merged pool, filled on first need. When the in-window
@@ -824,16 +830,34 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 	}
 
+	// liveStatementParams is how many of a live COM_STMT_EXECUTE's
+	// parameters are its statement's own (its PREPARE_OK's num_params), the
+	// rest being query attributes (executeAttributesFrom); -1 when not known.
+	// liveBodyParams is how many of them its strict body holds: all of
+	// them when its statement reads its attributes (readsQueryAttributes).
+	liveStatementParams, liveBodyParams, liveStmtQuery := -1, -1, ""
+	if act, _ := req.Message.(*mysql.StmtExecutePacket); act != nil && decodeCtx != nil {
+		if prep := decodeCtx.PreparedStatements[act.StatementID]; prep != nil {
+			liveStatementParams = int(prep.NumParams)
+		}
+		liveStmtQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[act.StatementID])
+		liveBodyParams = liveStatementParams
+		if readsQueryAttributes(liveStmtQuery) {
+			liveBodyParams = len(act.Parameters)
+		}
+	}
+
 	// Canonical JSON body of the live request for the schema-noise engine.
 	// liveBodyOK is false for packets with no drift-capable body (utility
 	// commands, CLOSE/RESET) — the engine no-ops for those.
-	liveBody, liveBodyOK := mysqlRequestBodyJSON(&req.PacketBundle)
+	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveBodyParams)
 
 	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
 	// rejection diagnostics (count / closest mock / field-level diffs) the
 	// mismatch report renders on a miss.
-	gate := newStrictGate(noiseEngine, logger, req.Header.Type, liveBody, liveBodyOK, userBodyNoise)
+	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveBody, liveBodyOK, userBodyNoise)
+	gate.liveQuery, gate.liveParams = liveStmtQuery, liveStatementParams
 
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
@@ -966,6 +990,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// The live statement's facts, derived on the first comparison and reused for
 	// every other candidate (see liveQuery). The live identity is liveStatement.
 	live := liveQuery{identity: liveStatement}
+	// liveLegacy is the same for the live statement as a keploy that did not
+	// read query attributes' names read it (mysql.QueryPacket's LegacyQuery),
+	// for the COM_QUERYs such a keploy recorded (legacyRecordedQuery).
+	var liveLegacy liveQuery
 
 	// evaluated keeps what each candidate's comparison returned during the
 	// in-window pass, so the full scan that follows a fruitless one reuses it
@@ -992,7 +1020,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if ev, seen := evaluated[key]; seen {
 			return ev.ok, ev.score, ev.recorded
 		}
-		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, &live, getQuery)
+		lq := &live
+		// A COM_QUERY an older keploy recorded with its query attributes
+		// read out of step is compared with the live one read the same way.
+		if exp, _ := recorded.Message.(*mysql.QueryPacket); legacyRecordedQuery(exp) {
+			if act, _ := req.Message.(*mysql.QueryPacket); readsLegacy(act) {
+				if !liveLegacy.ready {
+					liveLegacy.fill(act.LegacyQuery)
+				}
+				lq = &liveLegacy
+			}
+		}
+		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
 		if evaluated != nil {
 			evaluated[key] = evalResult{ok: ok, score: c, recorded: id}
 		}
@@ -1161,8 +1200,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					ev, seen := evaluated[key]
 					if !seen {
 						// remove this log and if block
-						if actMsg != nil {
-							logger.Debug("Trying to match the mock with com-stmt-execute request", zap.String("mock_name", mock.Name), zap.Any("Req", actMsg))
+						if ce := logger.Check(zap.DebugLevel, "Trying to match the mock with com-stmt-execute request"); ce != nil && actMsg != nil {
+							ce.Write(zap.String("mock_name", mock.Name), zap.Any("Req", executeForLog(actMsg)))
 						}
 
 						var expectedQuery, actualQuery string
@@ -1179,15 +1218,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 
 						logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 
-						ev.ok, ev.score, ev.queryExact = matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, mock.Name, util.NewNoiseChecker(mock.Noise))
+						ev.ok, ev.score, ev.queryExact = matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
 						ev.recorded = expectedQuery
 						if evaluated != nil {
 							evaluated[key] = ev
 						}
 					}
 					expectedQuery := ev.recorded
+					gate.recordedQuery(mock, expectedQuery)
 					if expectedQuery == "" && windowActive && mockInCurrentWindow(mock) &&
-						sameParameterShape(expMsg, actMsg) && !slices.Contains(unknownStatements, mock) {
+						sameParameterShape(expMsg, actMsg, liveStatementParams) && !slices.Contains(unknownStatements, mock) {
 						unknownStatements = append(unknownStatements, mock)
 					}
 
@@ -1795,8 +1835,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// (utility commands). The learn is carried out on fresh copies inside
 	// updateMock, never on the shared pooled mock.
 	var detectedNoise map[string][]string
-	if liveBodyOK {
-		detectedNoise, _ = noiseEngine.Detect(matchedMock, liveBody, userBodyNoise)
+	if liveBodyOK && noiseEngine.DetectionEnabled() {
+		if body, ok := gate.bodyFor(matchedMock); ok {
+			// The recording as strict compares it (strictGate.recordedBody),
+			// so what is learned is what a strict replay then excuses.
+			recorded, recordedOK := gate.recordedBody(matchedMock)
+			detectedNoise, _ = noiseEngine.DetectRecorded(matchedMock, recorded, recordedOK, body, executeBodyNoise(userBodyNoise, matchedMock, &req.PacketBundle))
+		}
 		if len(detectedNoise) > 0 {
 			paths := make([]string, 0, len(detectedNoise))
 			for p := range detectedNoise {
@@ -2162,22 +2207,224 @@ func preparePacketText(packet mysql.PacketBundle) string {
 	return msg.Query
 }
 
-// sameParameterShape reports whether a recorded COM_STMT_EXECUTE (expected)
-// may have run the live one's statement (actual), as far as their bound
-// parameters show: as many, and each of the same type wherever both are
-// bound to a value (a NULL is sent with a type of its own) and both packets
-// carry their types (new_params_bind_flag; without it the decoder fills in a
-// default type, see DecodeStmtExecute).
-func sameParameterShape(expected, actual *mysql.StmtExecutePacket) bool {
-	if expected == nil || actual == nil || expected.ParameterCount != actual.ParameterCount ||
-		len(expected.Parameters) != len(actual.Parameters) {
+// maskedAttributeValue stands for a query attribute's value in the debug log
+// (executeForLog), the mismatch summary (formatExecParams) and a strict
+// miss's field diffs (maskAttributeDiffs).
+const maskedAttributeValue = "[masked]"
+
+// executeForLog is a COM_STMT_EXECUTE as the debug log shows it: its query
+// attributes' values (its parameters sent with a name; a statement's own are
+// sent unnamed) masked. The client names an attribute (a password, a
+// tenant's token), and what redacts a log goes by what a value looks like,
+// not by such a name: one only its name says is a secret was logged in the
+// clear.
+func executeForLog(p *mysql.StmtExecutePacket) *mysql.StmtExecutePacket {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Parameters = slices.Clone(p.Parameters)
+	for i := range c.Parameters {
+		if c.Parameters[i].Name != "" && c.Parameters[i].Value != nil {
+			c.Parameters[i].Value = maskedAttributeValue
+		}
+	}
+	return &c
+}
+
+// typesSentByBoth reports whether both COM_STMT_EXECUTEs carry their
+// parameters' types, unsigned flags and names on the wire
+// (new_params_bind_flag 1). A packet sent without them carries none: its
+// decoded ones are filled in, the statement's last sent types (or
+// FieldTypeString where none is known, see DecodeStmtExecute), and a released
+// recorder stored FieldTypeString for every one. Filled-in types are no
+// evidence either way, so they are compared only when both packets sent
+// theirs. The ones a flag-0 packet stands for were compared on the
+// statement's EXECUTE that sent them.
+func typesSentByBoth(expected, actual *mysql.StmtExecutePacket) bool {
+	return expected != nil && actual != nil && expected.NewParamsBindFlag == 1 && actual.NewParamsBindFlag == 1
+}
+
+// legacyRecorded reports whether a recorded COM_STMT_EXECUTE is one sent
+// without its types that a keploy older than the one reading such a packet
+// with its statement's types recorded: it typed every parameter
+// FieldTypeString, and read every value as a string
+// (mysql.StmtExecutePacket's LegacyParameters). One this keploy recorded
+// carries the statement's types, so it is legacyRecorded only when every
+// type was a string's, whose values both read alike.
+func legacyRecorded(p *mysql.StmtExecutePacket) bool {
+	if p == nil || p.NewParamsBindFlag == 1 || len(p.Parameters) == 0 {
 		return false
 	}
-	if expected.NewParamsBindFlag != 1 || actual.NewParamsBindFlag != 1 {
+	for _, param := range p.Parameters {
+		if param.Type != uint16(mysql.FieldTypeString) || param.Unsigned || param.Name != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// legacyRecordedQuery reports whether a recorded COM_QUERY carrying query
+// attributes is one a keploy older than the one reading their names recorded
+// (mysql.QueryPacket's LegacyQuery): it read no name. The protocol sends one
+// with every attribute, so this keploy records them.
+func legacyRecordedQuery(p *mysql.QueryPacket) bool {
+	if p == nil || len(p.Parameters) == 0 {
+		return false
+	}
+	for _, param := range p.Parameters {
+		if param.Name != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// readsLegacy reports whether a live COM_QUERY is compared with a recording
+// legacyRecordedQuery holds as an older keploy read it (its LegacyQuery): that
+// keploy could read it, and it names an attribute, so this keploy would have
+// recorded the name. A live one naming none (an attribute named "") is read as
+// this keploy reads it: a recording of it holds no name either way.
+func readsLegacy(act *mysql.QueryPacket) bool {
+	if act == nil || act.LegacyQuery == "" {
+		return false
+	}
+	for _, p := range act.Parameters {
+		if p.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyRecordedMock is legacyRecorded, or legacyRecordedQuery, for a mock's
+// one request.
+func legacyRecordedMock(m *models.Mock) bool {
+	if m == nil || len(m.Spec.MySQLRequests) != 1 {
+		return false
+	}
+	switch exp := m.Spec.MySQLRequests[0].Message.(type) {
+	case *mysql.StmtExecutePacket:
+		return legacyRecorded(exp)
+	case *mysql.QueryPacket:
+		return legacyRecordedQuery(exp)
+	}
+	return false
+}
+
+// executeAttributesFrom is the index of the first of a COM_STMT_EXECUTE's
+// parameters that is a query attribute, not one of its statement's own: the
+// server takes the first num_params (the statement's PREPARE_OK's) as the
+// statement's and the rest as attributes, each sent with its name.
+// statementParams is that count when known (a live packet's statement, or a
+// recording of the same statement), -1 when not (a recording read back): a
+// client sends its statement's own parameters unnamed (Connector/J), so such
+// a packet's attributes are its trailing run of named parameters. A packet
+// whose statement's own are named too is split before them: compared with a
+// live one split by its count, its parameters differ, never match as fewer.
+// A packet sent without types (new_params_bind_flag 0) sends no names, and of
+// attributes only a NULL, the same on every call: it is not split.
+func executeAttributesFrom(p *mysql.StmtExecutePacket, statementParams int) int {
+	if p.NewParamsBindFlag != 1 {
+		return len(p.Parameters)
+	}
+	if statementParams >= 0 {
+		return min(statementParams, len(p.Parameters))
+	}
+	from := len(p.Parameters)
+	for from > 0 && p.Parameters[from-1].Name != "" {
+		from--
+	}
+	return from
+}
+
+// recordedAttributesFrom is executeAttributesFrom for a recorded
+// COM_STMT_EXECUTE compared with a live one (live) whose statement has
+// liveParams parameters of its own (-1 when not known). A recording of the
+// same statement (sameStatement: the same query) has as many. Of another, or
+// one whose query is not known, the trailing run of named parameters is
+// taken for its attributes only when it leaves as many as the live
+// statement's and is named as the live packet's attributes are: a client
+// that names its statement's own too leaves fewer, or, for a live statement
+// with none, leaves none and splits off its statement's own, named as no
+// attribute the live packet sent. The recording is then not split at all
+// (its attributes compared, so it matches no live EXECUTE whose attributes
+// differ), never compared on fewer.
+func recordedAttributesFrom(p, live *mysql.StmtExecutePacket, sameStatement bool, liveParams int) int {
+	if p.NewParamsBindFlag != 1 {
+		return len(p.Parameters)
+	}
+	if liveParams >= 0 && sameStatement {
+		return min(liveParams, len(p.Parameters))
+	}
+	from := executeAttributesFrom(p, -1)
+	if liveParams < 0 {
+		return from
+	}
+	if from != liveParams || live == nil || !sameNames(p.Parameters[from:], live.Parameters[executeAttributesFrom(live, liveParams):]) {
+		return len(p.Parameters)
+	}
+	return from
+}
+
+// sameNames reports whether a and b are as many parameters, named alike in
+// order.
+func sameNames(a, b []mysql.Parameter) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name {
+			return false
+		}
+	}
+	return true
+}
+
+// executeOwnParameters is p's parameters that are its statement's own, its
+// query attributes left out (executeAttributesFrom).
+func executeOwnParameters(p *mysql.StmtExecutePacket, statementParams int) []mysql.Parameter {
+	return p.Parameters[:executeAttributesFrom(p, statementParams)]
+}
+
+// allNamed reports whether every one of params was sent with a name.
+func allNamed(params []mysql.Parameter) bool {
+	for _, p := range params {
+		if p.Name == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// sameParameterShape reports whether a recorded COM_STMT_EXECUTE (expected)
+// may have run the live one's statement (actual), as far as their bound
+// parameters show: as many of the statement's own (executeAttributesFrom;
+// liveStatementParams is the live statement's count, -1 when not known), and
+// each of the same type wherever both are bound to a value (a NULL is sent
+// with a type of its own) and both packets sent their types
+// (typesSentByBoth).
+func sameParameterShape(expected, actual *mysql.StmtExecutePacket, liveStatementParams int) bool {
+	if expected == nil || actual == nil {
+		return false
+	}
+	exp := expected.Parameters[:recordedAttributesFrom(expected, actual, false, liveStatementParams)]
+	act := executeOwnParameters(actual, liveStatementParams)
+	if len(exp) > len(act) && allNamed(exp[len(act):]) {
+		// Not split (recordedAttributesFrom), and its parameters past the
+		// live statement's count all named: a client that names its
+		// statement's own too may have sent the live statement's first,
+		// its attributes after them.
+		exp = exp[:len(act)]
+	}
+	if len(exp) != len(act) {
+		return false
+	}
+	if !typesSentByBoth(expected, actual) {
 		return true
 	}
-	for i := range expected.Parameters {
-		e, a := expected.Parameters[i], actual.Parameters[i]
+	for i := range exp {
+		e, a := exp[i], act[i]
 		if e.Value != nil && a.Value != nil && e.Type != a.Type {
 			return false
 		}
@@ -2199,7 +2446,7 @@ func sameParameterShape(expected, actual *mysql.StmtExecutePacket) bool {
 // a definitive param-exact match, the next UNCONSUMED per-test mock for the
 // same query (in recorded order) is served, so an INSERT-then-SELECT read-back
 // of a replay-generated id returns the row that was read back at record time.
-func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string, nc *util.NoiseChecker) (bool, int, bool) {
+func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, liveStatementParams int, mockName string, nc *util.NoiseChecker) (bool, int, bool) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -2239,17 +2486,34 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		matchCount++
 	}
 
-	// Match the parameters
+	// Match the parameters: their types, unsigned flags and names only when
+	// both packets sent them (typesSentByBoth). The statement's own: its
+	// query attributes (executeAttributesFrom) are compared only when the
+	// statement reads them (readsQueryAttributes), as a COM_QUERY's are
+	// (mysqlRequestBodyJSON). A client sends ones that differ on every call
+	// (Connector/J 8.1+, the caller's OpenTelemetry traceparent), so compared,
+	// no EXECUTE of a traced statement ever matched its recording.
+	// A recording is split as recordedAttributesFrom says: by the live
+	// statement's count when it recorded the same statement (the same
+	// query).
+	expParams, actParams := expectedMessage.Parameters, actualMessage.Parameters
+	if !readsQueryAttributes(expectedQuery) && !readsQueryAttributes(actualQuery) {
+		e := sqlStatementIdentity(expectedQuery)
+		same := e != "" && strings.EqualFold(e, sqlStatementIdentity(actualQuery))
+		expParams = expectedMessage.Parameters[:recordedAttributesFrom(expectedMessage, actualMessage, same, liveStatementParams)]
+		actParams = executeOwnParameters(actualMessage, liveStatementParams)
+	}
+	typesSent := typesSentByBoth(expectedMessage, actualMessage)
 	var totalMatchedParams int
 	var allParamsMatched bool
-	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
-		for i := range expectedMessage.Parameters {
-			ep := expectedMessage.Parameters[i]
-			ap := actualMessage.Parameters[i]
+	if len(expParams) == len(actParams) {
+		for i := range expParams {
+			ep := expParams[i]
+			ap := actParams[i]
 
-			typeEqual := ep.Type == ap.Type
-			nameEqual := ep.Name == ap.Name
-			unsignedEqual := ep.Unsigned == ap.Unsigned
+			typeEqual := !typesSent || ep.Type == ap.Type
+			nameEqual := !typesSent || ep.Name == ap.Name
+			unsignedEqual := !typesSent || ep.Unsigned == ap.Unsigned
 			valueEqual := false
 			if unsignedEqual { // initial check to avoid comparing signed vs unsigned values
 				valueEqual = paramValueEqual(ep.Value, ap.Value, nc)
@@ -2261,9 +2525,30 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		}
 
 		// All parameters matched
-		if len(expectedMessage.Parameters) == totalMatchedParams {
+		if len(expParams) == totalMatchedParams {
 			allParamsMatched = true
 			logger.Debug("all parameters matched", zap.String("mock-name", mockName))
+		}
+
+		// An older keploy recorded a packet sent without types as it read
+		// it: every value a string (legacyRecorded), a small integer's
+		// bytes of garbage. Its replayer read the live packet the same way,
+		// and so this one does for such a recording (LegacyParameters).
+		if !allParamsMatched && legacyRecorded(expectedMessage) && len(actualMessage.LegacyParameters) == len(expectedMessage.Parameters) {
+			legacy := 0
+			for i, ep := range expectedMessage.Parameters {
+				if paramValueEqual(ep.Value, actualMessage.LegacyParameters[i].Value, nc) {
+					legacy++
+				}
+			}
+			if legacy > totalMatchedParams {
+				matchCount += legacy - totalMatchedParams
+				totalMatchedParams = legacy
+				if legacy == len(expectedMessage.Parameters) {
+					allParamsMatched = true
+					logger.Debug("all parameters matched as an older keploy read them", zap.String("mock-name", mockName))
+				}
+			}
 		}
 	}
 

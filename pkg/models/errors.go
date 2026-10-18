@@ -18,7 +18,20 @@ type AppError struct {
 	// The mock record/replay flows propagate this as keploy's own exit code
 	// so a wrapped `pytest`/`go test` failure fails the keploy process too.
 	ExitCode int
+	// StopKilled, under the proven switch, says why keploy had to kill the
+	// application it stopped at its test set's end (ErrAppStoppedForSetEnd),
+	// or at a recording's end (P101-b-k): it had not exited when the stop's
+	// grace ran out. "" when it exited within it, or when the stop was
+	// another's.
+	StopKilled string
 }
+
+// ErrAppStoppedForSetEnd is the cause keploy cancels an application's run
+// with when, under the proven switch, it stops the app at its test set's end
+// to read what the app did after the set's last test once it has exited
+// (P101-b). The app's runner stops it as its teardown does, and says in
+// AppError.StopKilled whether that had to kill it.
+var ErrAppStoppedForSetEnd = errors.New("keploy stopped the application at its test set's end")
 
 type AppErrorType string
 
@@ -82,7 +95,27 @@ const (
 	// value than the one the variable was bound to this run, used it before
 	// the call that binds it, or the mock declares a place keploy cannot follow.
 	MatchPhaseVariable = "variable_mismatch"
+	// MatchPhaseNoRequest: the client sent nothing. It waited for its server
+	// to speak first, nothing answered it, and it closed the connection: no
+	// call was made, so the miss is reported for its next step and fails no
+	// test by itself (a dependency's TCP health check closes the same way).
+	MatchPhaseNoRequest = "no_request"
 )
+
+// CountsAgainstTest reports whether a miss is evidence against the test it was
+// made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
+// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way).
+// Every verdict, count and evidence line that judges misses reads this.
+func (c UnmatchedCall) CountsAgainstTest() bool {
+	return !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+}
+
+// CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
+// is made from, for the places that hold the report and not the call.
+func (r *MockMismatchReport) CountsAgainstTest() bool {
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase}.CountsAgainstTest()
+}
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
 // They answer a question the match cascade cannot: did any of the mocks this
@@ -234,6 +267,14 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// NotOwned says, under the proven switch, the call is ClosestMock, a
+	// recording the open test does not own (byte for byte, or at the per-test
+	// similarity): likely one another test recorded, which the replay names
+	// (UnmatchedCall.RecordedIn).
+	NotOwned bool
+	// Reason is why the call missed, when the learn step decided it
+	// (UnmatchedCall.Reason): only in record's full round.
+	Reason string
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
@@ -249,8 +290,8 @@ var ErrNoMockMatched = errors.New("no matching mock found")
 // comes back WITH whatever was read, so a caller that only reports misses keeps
 // them, while one that judges must treat the test's evidence as unknown: under
 // the proven switch the replayer marks the test FailureInfo.UnmatchedCallsUnread
-// and its test set is not judged. Only an agent with the proven switch on
-// reports it.
+// and its test set is not judged; with it off, FailureInfo.MissesUnattributed.
+// An agent reports it with the switch on or off.
 var ErrUnmatchedCallsUnread = errors.New("the unmatched calls of this test could not all be read")
 
 // UnreadCause is why a read of the unmatched calls was incomplete: the text

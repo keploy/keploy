@@ -19,7 +19,17 @@ import (
 // longDataParams names the parameters whose value was streamed ahead with
 // COM_STMT_SEND_LONG_DATA and is therefore ABSENT from this packet, even
 // though the null bitmap reports them as non-NULL. May be nil.
-func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32, longDataParams map[uint16]bool) (*mysql.StmtExecutePacket, error) {
+//
+// boundTypes are the types (Type and Unsigned) of the statement's
+// placeholders, from its last COM_STMT_EXECUTE on this connection that sent
+// them (new_params_bind_flag 1); nil when none did. An EXECUTE with the flag 0
+// sends no types, nor names: the server reads its values with those types,
+// and so does this decoder. A client sends the flag 0 when the types did not
+// change since, e.g. Connector/J re-executing a server-prepared statement
+// without rebinding it, or Connector/J 5.1 rebinding it with the same types.
+// A query attribute has no type to reuse: on the flag 0 the server takes only
+// a NULL one.
+func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32, longDataParams map[uint16]bool, boundTypes []mysql.Parameter) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
 		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}
@@ -95,8 +105,15 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 			packet.ParameterCount = int(paramCount)
 		}
 
-		if packet.ParameterCount <= 0 {
+		if packet.ParameterCount == 0 {
 			return packet, nil
+		}
+		// A count whose NULL bitmap the packet cannot hold is malformed: near
+		// MaxInt64, (count+7)/8 below overflows negative and the slice panics,
+		// and past MaxInt64 the count converts negative.
+		if packet.ParameterCount < 0 || packet.ParameterCount > 8*(len(data)-pos) {
+			logger.Error("unexpected end of data for the parameter count", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_count", packet.ParameterCount))
+			return nil, io.ErrUnexpectedEOF
 		}
 
 		// Read Parameters only if there are any
@@ -142,7 +159,8 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 						return nil, io.ErrUnexpectedEOF
 					}
 					pos += n
-					if pos+int(nameLen) > len(data) {
+					// Compared unconverted, as a value's length below.
+					if nameLen > uint64(len(data)-pos) {
 						logger.Error("unexpected end of data while reading parameter_name string", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i), zap.Uint64("name_length", nameLen))
 						return nil, io.ErrUnexpectedEOF
 					}
@@ -153,12 +171,26 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				}
 			}
 		} else {
-			// When NewParamsBindFlag is 0, we reuse the previous parameter types
-			// For now, we'll set a default type for all parameters
+			// No types on the wire: the statement's last EXECUTE that sent
+			// them gives them (see boundTypes). A value's width depends on
+			// its type, so a value with no known type cannot be read (see
+			// below). Reading every value as a string read a 4-byte INT's
+			// first byte as a string length: the EXECUTE failed to decode,
+			// and its exchange was left out of the recording, or decoded to
+			// garbage.
 			for i := 0; i < packet.ParameterCount; i++ {
-				packet.Parameters[i].Type = uint16(mysql.FieldTypeString) // Default type
-				packet.Parameters[i].Unsigned = false
+				if i >= len(boundTypes) {
+					// Only a NULL or long data may follow, or the read fails.
+					packet.Parameters[i].Type = uint16(mysql.FieldTypeString)
+					continue
+				}
+				packet.Parameters[i].Type = boundTypes[i].Type
+				packet.Parameters[i].Unsigned = boundTypes[i].Unsigned
 			}
+		}
+
+		if packet.NewParamsBindFlag != 1 {
+			packet.LegacyParameters = legacyParameters(data[pos:], packet, longDataParams)
 		}
 
 		// Read Parameter Values
@@ -183,6 +215,13 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				continue
 			}
 
+			if packet.NewParamsBindFlag != 1 && i >= len(boundTypes) {
+				if len(boundTypes) == 0 {
+					return nil, fmt.Errorf("COM_STMT_EXECUTE of statement %d sends no parameter types (new_params_bind_flag 0), and no earlier EXECUTE of it on this connection sent them", packet.StatementID)
+				}
+				return nil, fmt.Errorf("COM_STMT_EXECUTE of statement %d sends no parameter types (new_params_bind_flag 0), and a value for its parameter %d, past the %d its placeholders' types are known for", packet.StatementID, i, len(boundTypes))
+			}
+
 			if pos >= len(data) {
 				logger.Error("unexpected end of data while reading parameter value", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i))
 				return nil, io.ErrUnexpectedEOF
@@ -197,7 +236,9 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				// Read the length of the parameter value
 				length, _, n := utils.ReadLengthEncodedInteger(data[pos:])
 				pos += n
-				if pos+int(length) > len(data) {
+				// Compared unconverted: a malformed length past MaxInt64
+				// turns negative as an int, and the slice below panics.
+				if length > uint64(len(data)-pos) {
 					logger.Error("unexpected end of data while reading length-encoded parameter value", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i), zap.Uint64("length", length))
 					return nil, io.ErrUnexpectedEOF
 				}
@@ -310,4 +351,43 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 		}
 	}
 	return packet, nil
+}
+
+// legacyParameters reads values, the parameter values of packet, an EXECUTE
+// sent without its types, as a keploy older than the one that reads such a
+// packet with its statement's types did (mysql.StmtExecutePacket's
+// LegacyParameters): every value that is not NULL nor long data as a
+// length-encoded string, kept as it is when ASCII and base64 otherwise, typed
+// FieldTypeString. Nil when that read fails, as it failed then.
+func legacyParameters(values []byte, packet *mysql.StmtExecutePacket, longDataParams map[uint16]bool) []mysql.Parameter {
+	params := make([]mysql.Parameter, packet.ParameterCount)
+	pos := 0
+	for i := range params {
+		params[i].Type = uint16(mysql.FieldTypeString)
+		if byteIndex := i / 8; byteIndex < len(packet.NullBitmap) && packet.NullBitmap[byteIndex]&(1<<(i%8)) != 0 {
+			continue
+		}
+		if longDataParams[uint16(i)] {
+			continue
+		}
+		if pos >= len(values) {
+			return nil
+		}
+		length, _, n := utils.ReadLengthEncodedInteger(values[pos:])
+		pos += n
+		// Compared unconverted: misread bytes can announce a length past
+		// MaxInt64, which int() makes negative and the slice below panics on.
+		// That keploy panicked there, and recorded nothing.
+		if length > uint64(len(values)-pos) {
+			return nil
+		}
+		v := values[pos : pos+int(length)]
+		if intUtil.IsASCII(string(v)) {
+			params[i].Value = string(v)
+		} else {
+			params[i].Value = intUtil.EncodeBase64(v)
+		}
+		pos += int(length)
+	}
+	return params
 }

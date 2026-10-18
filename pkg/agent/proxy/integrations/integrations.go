@@ -293,6 +293,22 @@ type MockCursor interface {
 	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
+// StatementCatalog is an optional MockMemDb capability: the stored set's
+// statement catalog, the first recorded mock of each statement
+// (models.StatementKey) among the per-test mocks the agent keeps on disk, by
+// kind, in recorded order. The agent seeds it once, when the set's mocks are
+// stored. A client may prepare at app start a statement it runs only inside
+// tests, whose mocks the startup staging does not load: a parser answers that
+// prepare (a PostgreSQL Describe's row shape) from the catalog when no mock it
+// may serve holds the statement. The catalog is describe-only: a parser never
+// serves one of its mocks as a call's answer, nor consumes it, and never
+// changes one (the mocks are shared). The agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it: a wrapper that drops it leaves
+// a prepare at app start without the statement's shape.
+type StatementCatalog interface {
+	StatementCatalog(kind models.Kind) []*models.Mock
+}
+
 // VariableStore is an optional MockMemDb capability: the table of the test
 // variables the replay has bound (package variables), which a matcher reads
 // to follow a mock's declared variable places under the proven switch. The
@@ -313,6 +329,82 @@ type VariableStore interface {
 // one it never recorded. A matcher must only read them: they answer nothing.
 type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
+}
+
+// StagedFinder is an optional MockMemDb extension under exact serving (the
+// proven switch): the name of a staged mock of kind, which the open test does
+// not own, for which match reports true, whatever the open view shows; "" for
+// none, or with no test open. For a miss's diagnosis only: the mock is never
+// handed out, nor served.
+type StagedFinder interface {
+	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
+// StagedReader is an optional MockMemDb capability: every mock staged in the
+// store (its per-test, session and start-up tiers), whatever the open view
+// shows and whether or not it was served. For the learn step's earlier places
+// only (design v14 §7.2 step 6: a value the recording held before a call is
+// one the call's value may have flowed from, served or not): such a mock is
+// never handed out, nor served.
+type StagedReader interface {
+	StagedMocks() []*models.Mock
+}
+
+// TestWindows is an optional MockMemDb capability: where the request time of
+// a recorded mock falls among the replay's test windows. The learn step tells
+// the open test's own mocks, the pool's and other tests' apart by it where
+// the store's tiers cannot (a reusable HTTP mock of any test is in the
+// session tier).
+type TestWindows interface {
+	// InTestWindow reports whether t is inside the window of the test the
+	// replay runs now.
+	InTestWindow(t time.Time) bool
+	// InRecordedTestWindow reports whether t is inside the window of some
+	// recorded test of the set; known is false when the replay sent none.
+	InRecordedTestWindow(t time.Time) (inside, known bool)
+	// SameRecordedTestWindow reports whether a and b are inside one recorded
+	// test's window; known is false when the replay sent none.
+	SameRecordedTestWindow(a, b time.Time) (same, known bool)
+}
+
+// VariableScopes is an optional MockMemDb capability, beside VariableStore:
+// the scope a call binds test variables in, by the mock that answers it. Under
+// exact serving, between tests, the next test's calls in flight the pool view
+// answers (InAheadScope) bind in that test's scope, begun early
+// (AheadVariables); every other call, in the store's (VariableStore). A
+// matcher reads both scopes before it reads the pool, as it reads one.
+type VariableScopes interface {
+	AheadVariables() *variables.Table
+	InAheadScope(m *models.Mock) bool
+}
+
+// InFlightOwner is an optional MockMemDb capability: whether a mock was in
+// flight when the test the replay runs now began, sent in the gap before that
+// test's recorded window and answered inside it (models.SentInGapAnsweredBy),
+// which the store serves as that test's own (GetPerTestMocksInWindow). Its
+// request was recorded outside every recorded test's window, and it is still
+// no start-up or between-tests call of the pool's: the learn step counts it
+// the open test's (TestWindows alone, by its request time, cannot).
+type InFlightOwner interface {
+	InFlightIntoOpenTest(m *models.Mock) bool
+}
+
+// InFlightIntoOpenTest reports whether db says m was in flight when the open
+// test began (InFlightOwner); false for a db that cannot tell.
+func InFlightIntoOpenTest(db MockMemDb, m *models.Mock) bool {
+	o, ok := db.(InFlightOwner)
+	return ok && o.InFlightIntoOpenTest(m)
+}
+
+// TestOwnership is an optional MockMemDb capability: whether a mock is one of
+// the open test's own, which its mapping lists, rather than the pool's. A view
+// that scopes the pool to a test (`keploy mock replay`'s) knows; known is
+// false when no test is open in it, and a store that is no such view does
+// not implement it: there a test's own mocks are its per-test tier. The learn
+// step pairs the open test's own mocks, and the pool's only in a full record
+// (design v14 §7.2 step 10).
+type TestOwnership interface {
+	OwnedByTest(m *models.Mock) (owned, known bool)
 }
 
 // SessionWindowReader is an optional MockMemDb extension: the GetSessionMocks
@@ -386,7 +478,10 @@ type MockReader interface {
 
 	// GetPerTestMocksInWindow returns only those per-test (Lifetime ==
 	// LifetimePerTest) mocks whose Spec.ReqTimestampMock falls inside
-	// the current window [start, end]. Mocks whose Spec.ResTimestampMock
+	// the current window [start, end], and those in flight when the
+	// window's test began: sent in the gap before the window
+	// (models.WindowSchedule.GapBefore) and answered at or after start
+	// (models.InFlightEligible). Mocks whose Spec.ResTimestampMock
 	// is EARLIER than Spec.ReqTimestampMock are excluded as invalid.
 	// Response timestamps after `end` are tolerated (async straggle).
 	// If no window has been set (zero values), falls back to the full

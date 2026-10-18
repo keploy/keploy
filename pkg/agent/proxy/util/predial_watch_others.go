@@ -16,3 +16,6 @@ func ReceivedNothing(net.Conn) bool { return false }
 
 // Waiting cannot look here: it reports nothing waiting.
 func Waiting(net.Conn) (data, closed bool) { return false, false }
+
+// ArrivedNothing cannot tell here: known is false.
+func ArrivedNothing(net.Conn) (nothing, known bool) { return false, false }

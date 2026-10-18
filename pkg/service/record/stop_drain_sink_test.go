@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	agenthttp "go.keploy.io/server/v3/pkg/platform/http"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -813,50 +817,63 @@ func TestDrain_AnAgentThatEndsItsStreamWhileItHoldsMoreIsALoss(t *testing.T) {
 			}
 		}
 	})
-	// Natively the drains start only once the app is stopped, well after the
-	// recording's stop began: a stream that ends in between ended after the
-	// stop.
-	t.Run("after the stop began, before the drain", func(t *testing.T) {
-		f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
-		core, logs := observer.New(zapcore.WarnLevel)
-		r := &Recorder{logger: zap.New(core), instrumentation: &backlogAgent{fakeInstr: f}, config: &config.Config{}, frameQuiet: time.Hour}
-		g, gctx := errgroup.WithContext(context.Background())
-		ctx, cancel := context.WithCancel(gctx)
-		defer cancel()
-		ctx = context.WithValue(ctx, models.ErrGroupKey, g)
-		frames, err := r.GetTestAndMockChans(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer frames.Abandon()
-		go func() {
-			for range frames.Incoming {
+	// The agent's end can come before the recording knows it is stopping (a
+	// Ctrl+C that reached the agent first), or with no stop at all (it was
+	// killed, or crashed): it ended its stream without its marker all the
+	// same, and is judged so. It was taken for a stream that ended while the
+	// recording ran, and said to be no loss at all.
+	t.Run("before the recording knows it is stopping", func(t *testing.T) {
+		for _, owned := range []bool{false, true} {
+			f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+			var inst Instrumentation = &backlogAgent{fakeInstr: f}
+			if owned {
+				inst = ownedAgent{inst.(*backlogAgent)}
 			}
-		}()
-		r.stopping.Store(true) // Start's teardown began; ctx is cancelled later
-		close(f.outgoing)
-		drained := make(chan struct{})
-		go func() {
-			defer close(drained)
-			for range frames.Outgoing {
+			core, logs := observer.New(zapcore.WarnLevel)
+			r := &Recorder{logger: zap.New(core), instrumentation: inst, config: &config.Config{}, frameQuiet: time.Hour}
+			g, gctx := errgroup.WithContext(context.Background())
+			ctx, cancel := context.WithCancel(gctx)
+			ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+			frames, err := r.GetTestAndMockChans(ctx)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}()
-		select {
-		case <-drained:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the mock drain did not end with its stream")
+			go func() {
+				for range frames.Incoming {
+				}
+			}()
+			close(f.outgoing) // the agent ends its stream; no stop has come
+			drained := make(chan struct{})
+			go func() {
+				defer close(drained)
+				for range frames.Outgoing {
+				}
+			}()
+			select {
+			case <-drained: // the mock drain ended with its stream, before any stop
+			case <-time.After(30 * time.Second):
+				t.Fatal("the mock drain did not end with its stream")
+			}
+			mocks := logs.FilterField(zap.String("frames", "mocks"))
+			errs := mocks.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("before it confirmed it had handed over").Len()
+			warns := mocks.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its stream before it said").Len()
+			if owned && (errs != 1 || !r.captureLost.Load()) {
+				t.Errorf("an agent this client started ended its stream before the stop without its marker, and the recording was not failed: %v", logs.All())
+			}
+			if !owned && (warns != 1 || r.captureLost.Load()) {
+				t.Errorf("an agent this client did not start ended its stream before the stop without its marker, and it was not one WARN: %v", logs.All())
+			}
+			frames.Abandon()
+			cancel()
+			close(f.incoming)
 		}
-		if logs.FilterMessageSnippet("ended its stream before it said").FilterLevelExact(zapcore.WarnLevel).FilterField(zap.String("frames", "mocks")).Len() != 1 {
-			t.Fatalf("an agent ending its stream after the stop began was not said at WARN: %v", logs.All())
-		}
-		close(f.incoming)
 	})
-	// A stream that ends while the recording runs is not one ended after the
-	// stop.
-	t.Run("while the recording runs", func(t *testing.T) {
-		f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+	// An agent that ends its stream with its marker said it sent all it had:
+	// whenever that came, nothing is lost and nothing is said.
+	t.Run("with its marker, before the stop", func(t *testing.T) {
+		e := newEndingAgent()
 		core, logs := observer.New(zapcore.WarnLevel)
-		r := &Recorder{logger: zap.New(core), instrumentation: &backlogAgent{fakeInstr: f}, config: &config.Config{}, frameQuiet: time.Hour}
+		r := &Recorder{logger: zap.New(core), instrumentation: ownedEnder{e}, config: &config.Config{}, frameQuiet: time.Hour}
 		g, gctx := errgroup.WithContext(context.Background())
 		ctx, cancel := context.WithCancel(gctx)
 		defer cancel()
@@ -870,7 +887,7 @@ func TestDrain_AnAgentThatEndsItsStreamWhileItHoldsMoreIsALoss(t *testing.T) {
 			for range frames.Incoming {
 			}
 		}()
-		close(f.outgoing)
+		e.end(models.MockStream, func() { close(e.outgoing) })
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
@@ -880,14 +897,20 @@ func TestDrain_AnAgentThatEndsItsStreamWhileItHoldsMoreIsALoss(t *testing.T) {
 		select {
 		case <-drained:
 		case <-time.After(30 * time.Second):
-			t.Fatal("the mock drain did not end with its stream")
+			t.Fatal("the mock drain did not end at its marker")
 		}
 		if r.captureLost.Load() || logs.FilterMessageSnippet("ended its stream").Len() != 0 {
-			t.Fatalf("a stream that ended while the recording ran was taken for one ended after the stop: %v", logs.All())
+			t.Fatalf("a stream the agent ended with its marker was taken for a loss: %v", logs.All())
 		}
-		close(f.incoming)
+		close(e.incoming)
 	})
 }
+
+// ownedEnder is an agent that ends its streams with a marker on request
+// (endingAgent), and that this client started (StartedAgent).
+type ownedEnder struct{ *endingAgent }
+
+func (ownedEnder) StartedAgent() bool { return true }
 
 // drainMarkInstr records whether each frame stream was opened on a context
 // marked to drain after the stop (models.WithDrainsAfterStop).
@@ -986,10 +1009,71 @@ func TestAgentEndedDrain_SaysWhetherTheLossIsCertain(t *testing.T) {
 	}
 }
 
-// The agent ending its mapping stream after the stop, before the drain ended
-// it, is said at WARN: the mappings it still held are lost, and the tests they
-// belong to replay with no mocks. While the recording runs it is not.
-func TestDrain_AnAgentThatEndsItsMappingStreamAfterTheStopIsSaid(t *testing.T) {
+// An agent with no mapping stream (no /mappings route: one from before keploy
+// #3715, which its client says at WARN as version skew) is not said to have
+// ended its mapping stream with mappings lost: there is none to end. Its
+// client handed the recorder a channel closed at once, which read as the
+// agent ending the stream as the recording started.
+func TestDrain_AnAgentWithNoMappingStreamIsNotSaidToHaveEndedIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/incoming"):
+			w.Header().Set("Content-Type", "multipart/mixed; boundary=b")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case strings.HasSuffix(r.URL.Path, "/outgoing"):
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	defer srv.CloseClientConnections()
+	c := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{SetupOptions: models.SetupOptions{AgentURI: srv.URL + "/agent"}}})
+	core, logs := observer.New(zapcore.WarnLevel)
+	r := &Recorder{logger: zap.New(core), instrumentation: c, config: &config.Config{}, frameQuiet: time.Hour}
+	g, gctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(gctx)
+	defer cancel()
+	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	frames, err := r.GetTestAndMockChans(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frames.Abandon()
+	go func() {
+		for range frames.Incoming {
+		}
+	}()
+	go func() {
+		for range frames.Outgoing {
+		}
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range frames.Mappings {
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the mapping forwarder did not end")
+	}
+	if n := logs.FilterMessageSnippet("ended its mapping stream").Len(); n != 0 {
+		t.Fatalf("an agent without a /mappings route, with no stop, was said to have ended its mapping stream with mappings lost: %v", logs.All())
+	}
+}
+
+// The agent ending its mapping stream without its marker, before the
+// recording was done with it, is said at WARN: the mappings it still held are
+// lost, and the tests they belong to replay with no mocks. After the stop and
+// before it alike: an end that came before the recording knew it was stopping
+// was not said at all.
+func TestDrain_AnAgentThatEndsItsMappingStreamIsSaid(t *testing.T) {
 	for _, stopped := range []bool{true, false} {
 		f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
 		core, logs := observer.New(zapcore.WarnLevel)
@@ -1009,8 +1093,10 @@ func TestDrain_AnAgentThatEndsItsMappingStreamAfterTheStopIsSaid(t *testing.T) {
 			for range frames.Outgoing {
 			}
 		}()
-		r.stopping.Store(stopped) // the recording's stop began, or not
-		close(f.mappings)         // the agent ends the stream
+		if stopped {
+			cancel() // the recording's stop
+		}
+		close(f.mappings) // the agent ends the stream
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
@@ -1022,12 +1108,8 @@ func TestDrain_AnAgentThatEndsItsMappingStreamAfterTheStopIsSaid(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatal("the mapping forwarder did not end with its stream")
 		}
-		said := logs.FilterMessageSnippet("ended its mapping stream").FilterLevelExact(zapcore.WarnLevel).Len()
-		if stopped && said != 1 {
-			t.Fatalf("an agent ending its mapping stream after the stop was not said once at WARN: %v", logs.All())
-		}
-		if !stopped && said != 0 {
-			t.Fatalf("a mapping stream that ended while the recording ran was taken for one ended after the stop: %v", logs.All())
+		if said := logs.FilterMessageSnippet("ended its mapping stream").FilterLevelExact(zapcore.WarnLevel).Len(); said != 1 {
+			t.Fatalf("stopped %v: an agent ending its mapping stream without its marker was not said once at WARN: %v", stopped, logs.All())
 		}
 		frames.Abandon()
 		cancel()
@@ -1133,7 +1215,9 @@ func TestDrain_WhatEndsTheStreamAfterALookDecidesTheVerdict(t *testing.T) {
 				close(f.outgoing)
 			})
 			utils.ResetInterruptedAgain()
-			if logs.FilterMessageSnippet("ended its stream").Len() != 0 {
+			// The mock drain's: the test-case stream gatedMockDrain ends
+			// before the stop is said too (an end without its marker).
+			if logs.FilterField(zap.String("frames", "mocks")).FilterMessageSnippet("ended its stream").Len() != 0 {
 				t.Fatalf("run %d: a second interrupt was taken for the agent going away: %v", i, logs.All())
 			}
 			if !r.captureLost.Load() {

@@ -3,8 +3,10 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -52,6 +54,18 @@ func standInContainersAgent(t *testing.T, takes bool) (url string, asked *atomic
 	return srv.URL + "/agent", asked, got
 }
 
+// withNoDockerDaemon points the container lists this test's pushers give at a
+// Docker daemon that is not there, for a test that counts the lists an agent is
+// given. A pusher gives its agent every change to the daemon's containers as
+// it happens (containerkey.Pusher), so on a host whose Docker starts and stops
+// containers while the test runs (a CI runner's), the lists such a test counts
+// would include changes it does not control: 3 or 4 lists where the session
+// starts gave 2. With no daemon, a list says so, and nothing changes.
+func withNoDockerDaemon(t *testing.T) {
+	t.Helper()
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(t.TempDir(), "docker.sock"))
+}
+
 // Under the proven switch a client gives an agent that takes container lists
 // the list before its session starts: synchronously, so the list is there
 // when the session request goes. It asks each agent once whether it takes
@@ -93,6 +107,7 @@ func TestPushContainersGivesATakingAgentItsList(t *testing.T) {
 // that agent's own container out, gives it its lists.
 func TestAPusherGivesItsListsToItsOwnAgent(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	withNoDockerDaemon(t)
 	uri, _, got := standInContainersAgent(t, true)
 	t.Cleanup(func() { containerPushers.Delete(uri) })
 	other, _, gotOther := standInContainersAgent(t, true)
@@ -152,6 +167,7 @@ func TestPostContainersReportsARefusal(t *testing.T) {
 // an agent compose started again, before its session is made again.
 func TestEverySessionStartGivesTheListFirst(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	withNoDockerDaemon(t)
 	client, agent := newRestartingClient(t, true)
 	uri := client.conf.Agent.AgentURI
 	t.Cleanup(func() { containerPushers.Delete(uri) })
@@ -241,5 +257,50 @@ func TestAnAgentOlderThanContainerKeysIsSaidOnce(t *testing.T) {
 	a.pushContainers(t.Context())
 	if n := logs.FilterMessageSnippet("predates container keys").Len(); n != 1 {
 		t.Fatalf("an older agent was said %d times, want once: %v", n, logs.All())
+	}
+}
+
+// The CLI's ask for its agent's next settle reads the agent's answer; an
+// agent with no such route (one that predates settles) or that reads Docker
+// itself gives ErrNoSettles, so the pusher stops asking; anything else is
+// an error, asked again.
+func TestAskSettleReadsTheAgentsAnswer(t *testing.T) {
+	var status atomic.Int32
+	var query atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/containers/settle" {
+			http.NotFound(w, r)
+			return
+		}
+		query.Store(r.URL.RawQuery)
+		if code := int(status.Load()); code != http.StatusOK {
+			http.Error(w, "no", code)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(containerkey.SettleAsk{Asked: 3, Boot: "b1"})
+	}))
+	t.Cleanup(srv.Close)
+	a := New(zap.NewNop(), nil, &config.Config{})
+	uri := srv.URL + "/agent"
+	status.Store(http.StatusOK)
+	got, err := a.askSettle(t.Context(), uri, "b0", 2)
+	if err != nil || got != (containerkey.SettleAsk{Asked: 3, Boot: "b1"}) {
+		t.Fatalf("askSettle = %+v, %v", got, err)
+	}
+	if q := query.Load().(string); q != "after=2&boot=b0" {
+		t.Fatalf("asked with %q", q)
+	}
+	for _, code := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict} {
+		status.Store(int32(code))
+		if _, err := a.askSettle(t.Context(), uri, "", 0); !errors.Is(err, containerkey.ErrNoSettles) {
+			t.Fatalf("an agent answering %d gave %v, want ErrNoSettles", code, err)
+		}
+	}
+	status.Store(http.StatusInternalServerError)
+	if _, err := a.askSettle(t.Context(), uri, "", 0); err == nil || errors.Is(err, containerkey.ErrNoSettles) {
+		t.Fatalf("an agent answering 500 gave %v, want an error to ask again on", err)
+	}
+	if _, err := a.askSettle(t.Context(), srv.URL+"/old", "", 0); !errors.Is(err, containerkey.ErrNoSettles) {
+		t.Fatalf("an agent with no settle route gave %v", err)
 	}
 }

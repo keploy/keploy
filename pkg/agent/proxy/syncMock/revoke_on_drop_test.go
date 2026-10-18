@@ -181,8 +181,8 @@ func TestRevokeUndeliverableReQueues(t *testing.T) {
 // TestRevokeConcurrentDrainCloseNoDeadlock is case (d): it drives drops through
 // the REAL send path so a writer goroutine actually holds outChanMu.RLock and
 // THEN takes droppedMu (inside recordDroppedTC) — the exact ordering the drain
-// must never invert. A saturated, never-drained capacity-1 outChan forces every
-// sendToOutChanOwned to the send-budget drop; drainPendingRevokes (snapshot
+// must never invert. A saturated, never-drained capacity-1 outChan has every
+// send queued and given up (stalledOutClock); drainPendingRevokes (snapshot
 // under droppedMu, RELEASE, then trySendControlFrame's outChanMu.RLock) and a
 // racing CloseOutChan (outChanMu.Lock) run concurrently. Under -race this must
 // stay clean and must NOT deadlock — had someone held droppedMu across the send,
@@ -191,13 +191,14 @@ func TestRevokeUndeliverableReQueues(t *testing.T) {
 func TestRevokeConcurrentDrainCloseNoDeadlock(t *testing.T) {
 	t.Parallel()
 
-	// Capacity-1, primed full, NEVER drained: every sendToOutChanOwned exhausts
-	// its send budget and drops, so the writer holds outChanMu.RLock across the
-	// select and then takes droppedMu inside recordDroppedTC.
+	// Capacity-1, primed full, NEVER drained: every send queues and its
+	// drainer gives it up (stalledOutClock), taking droppedMu inside
+	// recordDroppedTC; a send after the close takes it under outChanMu.RLock.
 	ch := make(chan *models.Mock, 1)
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 	mgr.SetRevokeCapable(true)
 	ch <- &models.Mock{} // prime full
@@ -210,9 +211,8 @@ func TestRevokeConcurrentDrainCloseNoDeadlock(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			// Real send path: outChanMu.RLock held across the select, then
-			// recordDroppedTC (droppedMu) on the budget drop.
-			mgr.sendToOutChanOwned(&models.Mock{}, fmt.Sprintf("owner-%d", id))
+			// Real send path: recordDroppedTC (droppedMu) on the drop.
+			sendOwnedAndWait(t, mgr, &models.Mock{}, fmt.Sprintf("owner-%d", id))
 		}(i)
 	}
 	for i := 0; i < drainers; i++ {
@@ -241,7 +241,7 @@ func TestRevokeConcurrentDrainCloseNoDeadlock(t *testing.T) {
 	select {
 	case <-waitDone:
 	case <-time.After(30 * time.Second):
-		t.Fatal("concurrent sendToOutChanOwned + drainPendingRevokes + CloseOutChan deadlocked")
+		t.Fatal("concurrent send + drainPendingRevokes + CloseOutChan deadlocked")
 	}
 
 	// A final post-close drain must be safe (trySendControlFrame sees the

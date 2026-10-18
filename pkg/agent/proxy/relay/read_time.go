@@ -1,10 +1,13 @@
 package relay
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
 	"sync/atomic"
 	"time"
+
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 )
 
 type readTimeProvider interface {
@@ -82,6 +85,11 @@ func (c *readTrackingConn) CloseWrite() error {
 	}
 	return cw.CloseWrite()
 }
+
+// HoldTLSLayer passes the TLS layer served over c to the connection under it
+// that the proxy closes with care (pTls.TLSLayerHolder): c exposes no
+// NetConn, which other walks of the wrappers would then follow.
+func (c *readTrackingConn) HoldTLSLayer(l *tls.Conn) { pTls.PassTLSLayer(c.Conn, l) }
 
 func (c *readTrackingConn) LastReadTime() time.Time {
 	n := c.lastReadNano.Load()

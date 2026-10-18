@@ -4,19 +4,19 @@
 # /etc/ssl/certs/ca-certificates.crt (provided by the `ca-certificates`
 # package).
 #
-# DEBIAN_IMAGE / GOLANG_IMAGE can be overridden at build time for runners
-# that already have a specific tag cached (CI rate-limit friendly).
+# DEBIAN_IMAGE / GOLANG_IMAGE can be overridden at build time
+# (`--build-arg`; docker-compose.yml forwards $GOLANG_IMAGE / $DEBIAN_IMAGE).
 #
-# Default to ECR Public mirrors of the official Docker Hub images: they expose
-# the same `library/<name>:<tag>` tags but are hosted behind AWS CloudFront
-# rather than Docker Hub, so CI runs aren't subject to Docker Hub's
-# unauthenticated pull-rate-limits. Callers can still override with
-# `--build-arg GOLANG_IMAGE=…` (the docker-compose.yml forwards the
-# $GOLANG_IMAGE / $DEBIAN_IMAGE environment variables through, so CI runners
-# with a locally cached `golang:1.27-bookworm` can use the cache directly).
+# Docker Hub's official images (the keploy image is built from the same
+# debian:trixie-slim); GitHub-hosted runners are not held to Docker Hub's
+# pull limits, by an agreement between GitHub and Docker. run.sh pulls both
+# first, through docker-build-retry.sh's retry, so the build finds them
+# local. Not ECR Public: its anonymous quota is per source IP, and GitHub's
+# runners share theirs, so a job on an IP whose quota others have spent gets
+# 429 "toomanyrequests: Data limit exceeded" (check-image-registries.sh).
 
-ARG GOLANG_IMAGE=public.ecr.aws/docker/library/golang:1.27-bookworm
-ARG DEBIAN_IMAGE=public.ecr.aws/docker/library/debian:trixie-slim
+ARG GOLANG_IMAGE=golang:1.27-bookworm
+ARG DEBIAN_IMAGE=debian:trixie-slim
 
 # BuildKit populates TARGETOS / TARGETARCH automatically based on the
 # effective build platform (--platform flag or host). We declare them as

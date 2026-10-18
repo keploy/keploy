@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -455,5 +456,281 @@ func TestStart_AnUnreadableMockRealFailsTheRun(t *testing.T) {
 	}
 	if code == 0 {
 		t.Fatal("a recording keploy refused for its mock.real exits 0")
+	}
+}
+
+// closingMockDB is a mock store that writes in the background and is closed
+// to write the rest (as the gob writer is): closeErr is what Close says.
+type closingMockDB struct {
+	recMockDB
+	closeErr error
+	mu       sync.Mutex
+	closes   int
+}
+
+func (d *closingMockDB) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closes++
+	return d.closeErr
+}
+
+// storeClosedHooks notes whether the mock store was closed by the time the
+// end-of-recording hook ran.
+type storeClosedHooks struct {
+	BaseRecordHooks
+	store        *closingMockDB
+	ran          bool
+	closesAtHook int
+}
+
+func (h *storeClosedHooks) AfterRecordingComplete(context.Context, *RecordingCompleteContext) error {
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	h.ran, h.closesAtHook = true, h.store.closes
+	return nil
+}
+
+// A mock store that could not write mocks the recording captured (its
+// writer stuck on a slow disk) leaves the recording incomplete: the run
+// fails, as for any capture loss. It used to be a log line at the very end,
+// and the run exited 0. The store writes the rest before the end-of-recording
+// hook reads the mock file; one that could not skips the hook.
+func TestStart_MocksTheStoreCouldNotWriteFailTheRecording(t *testing.T) {
+	for name, tc := range map[string]struct {
+		closeErr error
+		want     int
+	}{
+		"written":     {nil, 0},
+		"not written": {fmt.Errorf("%w: the gob mock writer made no progress", models.ErrMocksNotWritten), utils.ExitKeployError},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := exitCodeRecorder(&interruptAtFramesInstr{fakeInstr: newFakeInstr(), interrupt: cancel})
+			store := &closingMockDB{recMockDB: recMockDB{unencodable: map[string]bool{}}, closeErr: tc.closeErr}
+			r.mockDB = store
+			hooks := &storeClosedHooks{store: store}
+			r.hooks = hooks
+			err, code := startForExitCode(t, ctx, r)
+			if err != nil || code != tc.want {
+				t.Fatalf("Start returned %v with exit code %d, want nil and %d", err, code, tc.want)
+			}
+			if store.closes == 0 {
+				t.Fatal("the mock store was never closed")
+			}
+			if lost := r.captureLost.Load(); lost != (tc.closeErr != nil) {
+				t.Fatalf("the recording is incomplete: %v, want %v", lost, tc.closeErr != nil)
+			}
+			// The summary, said before the deferred cleanup, says so.
+			tel := r.telemetry.(*recTelemetry)
+			wantStatus := map[bool]string{false: "completed", true: "incomplete"}[tc.closeErr != nil]
+			if !tel.sessionRecorded || tel.sessionStatus != wantStatus {
+				t.Fatalf("the session summary (said: %v) says %q, want %q", tel.sessionRecorded, tel.sessionStatus, wantStatus)
+			}
+			// The agent lost nothing: the reason is the store's loss alone.
+			if want := "mocks the recording captured were not written to the mock file"; tc.closeErr != nil && tel.sessionReason != want {
+				t.Fatalf("the session summary's reason is %q, want %q", tel.sessionReason, want)
+			}
+			if tc.closeErr == nil && (!hooks.ran || hooks.closesAtHook == 0) {
+				t.Fatalf("the end-of-recording hook ran: %v, with the store closed %d times; want it run after the store wrote the rest", hooks.ran, hooks.closesAtHook)
+			}
+			if tc.closeErr != nil && hooks.ran {
+				t.Fatal("the end-of-recording hook ran over a mock file the store could not finish")
+			}
+		})
+	}
+}
+
+// A loss the deferred cleanup finds (the store closed only there, as on a
+// record drain that did not join) fails the run too, after the summary.
+func TestStart_AMockLossTheCleanupFindsFailsTheRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := exitCodeRecorder(&interruptAtFramesInstr{fakeInstr: newFakeInstr(), interrupt: cancel})
+	r.RegisterCleanup(func() error {
+		return fmt.Errorf("%w: the gob mock writer made no progress", models.ErrMocksNotWritten)
+	})
+	err, code := startForExitCode(t, ctx, r)
+	if err != nil || code != utils.ExitKeployError {
+		t.Fatalf("Start returned %v with exit code %d, want nil and %d", err, code, utils.ExitKeployError)
+	}
+}
+
+// stuckAtStopInstr is an agent that, once the user's Ctrl+C has landed, says
+// it still holds what it captured before the stop (BacklogBefore) and never
+// moves on it: each frame drain stalls on that backlog (holdForBacklog), a
+// loss of the agent's, whatever the scheduling.
+type stuckAtStopInstr struct{ *interruptAtFramesInstr }
+
+func (*stuckAtStopInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+}
+
+// A recording that lost both what the agent held and mocks the store could
+// not write says both in its summary: neither loss hides the other.
+func TestStart_TheSummaryNamesTheAgentsLossAndTheStores(t *testing.T) {
+	const agents = "the agent's captures from before the stop were not all handed over"
+	for name, tc := range map[string]struct {
+		closeErr error
+		want     string
+	}{
+		"the store wrote":         {nil, agents},
+		"the store did not write": {fmt.Errorf("%w: the gob mock writer made no progress", models.ErrMocksNotWritten), agents + ", and mocks the recording captured were not written to the mock file"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := exitCodeRecorder(&stuckAtStopInstr{&interruptAtFramesInstr{fakeInstr: newFakeInstr(), interrupt: cancel}})
+			r.mockDB = &closingMockDB{recMockDB: recMockDB{unencodable: map[string]bool{}}, closeErr: tc.closeErr}
+			err, code := startForExitCode(t, ctx, r)
+			if err != nil || code != utils.ExitKeployError {
+				t.Fatalf("Start returned %v with exit code %d, want nil and %d", err, code, utils.ExitKeployError)
+			}
+			tel := r.telemetry.(*recTelemetry)
+			if tel.sessionStatus != "incomplete" || tel.sessionReason != tc.want {
+				t.Fatalf("the session summary says %q (%q), want %q (%q)", tel.sessionStatus, tel.sessionReason, "incomplete", tc.want)
+			}
+		})
+	}
+}
+
+// The gob store is a mockStoreWriter: without it, the stop closes it as a
+// plain io.Closer, silently, with no second-interrupt escape.
+var _ mockStoreWriter = (*mockdb.MockYaml)(nil)
+
+// slowStore is a mock store that writes in the background and never
+// finishes until it is told to stop.
+type slowStore struct {
+	recMockDB
+	left uint64
+}
+
+func (s *slowStore) CloseUnless(stop <-chan struct{}) error {
+	<-stop
+	return fmt.Errorf("%w: the stop was asked to end now", models.ErrMocksNotWritten)
+}
+
+func (s *slowStore) MocksLeft() uint64 { return s.left }
+
+// Writing the mock store's rest has no fixed bound, so the stop says how
+// many mocks are left and, once it has said so, a second interrupt ends it:
+// the rest is not written, and is not waited for again at the cleanup.
+func TestCloseMockStore_SaysWhatIsLeftAndASecondInterruptEndsIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	core, logs := observer.New(zapcore.InfoLevel)
+	r := &Recorder{logger: zap.New(core), mockDB: &slowStore{recMockDB: recMockDB{unencodable: map[string]bool{}}, left: 7}}
+	utils.MarkInterrupted() // the stop
+	done := make(chan error, 1)
+	go func() { done <- r.closeMockStore(r.mockDB, 20*time.Millisecond) }()
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never offers
+	for logs.FilterMessageSnippet("press Ctrl+C again").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the stop never offered to end the writing: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	said := logs.FilterMessageSnippet("Still writing the recording's mocks").All()
+	if len(said) == 0 || said[0].ContextMap()["mocksLeft"] != uint64(7) {
+		t.Fatalf("the stop said %v, want how many mocks are left (7)", said)
+	}
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the user's press after the offer did not end the writing")
+	}
+	if err := <-done; !errors.Is(err, models.ErrMocksNotWritten) {
+		t.Fatalf("closeMockStore returned %v, want models.ErrMocksNotWritten", err)
+	}
+	if !r.mockWriteStopped.Load() {
+		t.Fatal("the cleanup would wait for the writing the user stopped")
+	}
+}
+
+// closingWriter is a closingMockDB that writes in the background
+// (mockStoreWriter), as the gob store does: waits counts the closes that
+// waited for it (CloseUnless); closes, those that did not.
+type closingWriter struct {
+	closingMockDB
+	waits int
+}
+
+func (w *closingWriter) CloseUnless(<-chan struct{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.waits++
+	return w.closeErr
+}
+
+func (w *closingWriter) MocksLeft() uint64 { return 0 }
+
+// The cleanup closes the mock store, which writes what it still holds,
+// unless the user stopped that writing at a second interrupt. A store that
+// writes in the background, the one a second interrupt stops, is waited for.
+func TestMockStoreCleanup_DoesNotWaitForWritingTheUserStopped(t *testing.T) {
+	for stopped, want := range map[bool]int{false: 1, true: 0} {
+		store := &closingMockDB{recMockDB: recMockDB{unencodable: map[string]bool{}}}
+		r := &Recorder{logger: zap.NewNop()}
+		r.mockWriteStopped.Store(stopped)
+		if err := r.mockStoreCleanup(store)(); err != nil {
+			t.Fatal(err)
+		}
+		if store.closes != want {
+			t.Errorf("stopped by the user: %v; the cleanup closed the store %d times, want %d", stopped, store.closes, want)
+		}
+		w := &closingWriter{closingMockDB: closingMockDB{recMockDB: recMockDB{unencodable: map[string]bool{}}}}
+		r = &Recorder{logger: zap.NewNop()}
+		r.mockWriteStopped.Store(stopped)
+		if err := r.mockStoreCleanup(w)(); err != nil {
+			t.Fatal(err)
+		}
+		if w.waits != want || w.closes != 0 {
+			t.Errorf("stopped by the user: %v; the cleanup waited for the writer %d times and closed it without waiting %d times, want %d and 0", stopped, w.waits, w.closes, want)
+		}
+	}
+}
+
+// slowClosingStore is a slowStore that must be closed by being waited for
+// (CloseUnless): Close says it was not.
+type slowClosingStore struct{ slowStore }
+
+var errClosedUnwaited = errors.New("the cleanup closed a background writer without saying what is left")
+
+func (s *slowClosingStore) Close() error { return errClosedUnwaited }
+
+// The cleanup writes what a drain that did not join left to the store as the
+// stop's early close does: it says what is left, and a second interrupt ends
+// it.
+func TestMockStoreCleanup_SaysWhatIsLeftAndASecondInterruptEndsIt(t *testing.T) {
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	core, logs := observer.New(zapcore.InfoLevel)
+	store := &slowClosingStore{slowStore{recMockDB: recMockDB{unencodable: map[string]bool{}}, left: 9}}
+	r := &Recorder{logger: zap.New(core)}
+	utils.MarkInterrupted() // the stop
+	done := make(chan error, 1)
+	go func() { done <- r.mockStoreCleanup(store)() }()
+	deadline := time.Now().Add(30 * time.Second) // bounds only a cleanup that never offers
+	for logs.FilterMessageSnippet("press Ctrl+C again").Len() == 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("the cleanup ended (%v) without offering to end the writing: %v", err, logs.All())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the cleanup never offered to end the writing: %v", logs.All())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	said := logs.FilterMessageSnippet("Still writing the recording's mocks").All()
+	if len(said) == 0 || said[0].ContextMap()["mocksLeft"] != uint64(9) {
+		t.Fatalf("the cleanup said %v, want how many mocks are left (9)", said)
+	}
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the user's press after the offer did not end the writing")
+	}
+	if err := <-done; !errors.Is(err, models.ErrMocksNotWritten) {
+		t.Fatalf("the cleanup returned %v, want models.ErrMocksNotWritten", err)
 	}
 }

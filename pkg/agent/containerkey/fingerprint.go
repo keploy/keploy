@@ -115,7 +115,40 @@ func isRunLabel(k string) bool {
 // environment variable or label the creator set to the image's own value is
 // the image's. The command and entrypoint count only where they are not the
 // image's.
+//
+// No secret's value counts (redactSecrets): a recording holds the
+// fingerprint, and one a password's value changed was an offline oracle for
+// it -- hash a guess with the rest of the configuration, compare. A secret's
+// presence still counts. So two containers that differ only in a secret
+// share a fingerprint: where both answer one scope their key is ambiguous,
+// withheld, and a call to either is a miss, never answered with the other's
+// recording. Across runs, a container whose only change is a secret's value
+// (CI's password where the recording had a developer's) is the recording's.
+// The fingerprint carries its form ("s" before the hash), which
+// TestTheFingerprintsFormIsPinned pins: a change of what is redacted needs a
+// form of its own. Recordings made before carry the legacy one
+// (legacyFingerprint), which each of their mocks is compared with (SameKey).
 func Fingerprint(c Config) string {
+	sum := sha256.Sum256(append([]byte("containerkey-fingerprint-s\x00"), configJSON(redactSecrets(c))...))
+	return fingerprintForm + hex.EncodeToString(sum[:])[:fingerprintLen]
+}
+
+// fingerprintForm marks a fingerprint Fingerprint gives, apart from the
+// legacy ones (legacyFingerprint), twelve hex digits alone.
+const fingerprintForm = "s"
+
+// legacyFingerprint is the fingerprint recordings made before Fingerprint
+// left secrets out carry: the configuration's values as they are, secrets
+// included. It is only ever compared with a mock of such a recording
+// (SameKey), never written, logged or shown in a miss.
+func legacyFingerprint(c Config) string {
+	sum := sha256.Sum256(configJSON(c))
+	return hex.EncodeToString(sum[:])[:fingerprintLen]
+}
+
+// configJSON is what a fingerprint hashes of c: its own environment,
+// command, entrypoint and labels, apart from its image's and a run's.
+func configJSON(c Config) []byte {
 	env := slices.Clone(c.Env)
 	podman := slices.Contains(c.Env, podmanEnv)
 	env = slices.DeleteFunc(env, func(e string) bool {
@@ -150,12 +183,21 @@ func Fingerprint(c Config) string {
 		Entrypoint []string    `json:"entrypoint"`
 		Labels     [][2]string `json:"labels"`
 	}{env, own(c.Cmd, c.Image.Cmd), own(c.Entrypoint, c.Image.Entrypoint), labels})
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])[:fingerprintLen]
+	return b
 }
 
-// isFingerprint reports whether s is a fingerprint Fingerprint gives.
+// isFingerprint reports whether s is a fingerprint Fingerprint gives, or a
+// legacy one (isLegacyFingerprint).
 func isFingerprint(s string) bool {
+	rest, ok := strings.CutPrefix(s, fingerprintForm)
+	return (ok && isHexFingerprint(rest)) || isLegacyFingerprint(s)
+}
+
+// isLegacyFingerprint reports whether s is a fingerprint of the legacy form
+// (legacyFingerprint): a recording made before secrets were left out.
+func isLegacyFingerprint(s string) bool { return isHexFingerprint(s) }
+
+func isHexFingerprint(s string) bool {
 	if len(s) != fingerprintLen {
 		return false
 	}

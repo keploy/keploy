@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -637,5 +639,173 @@ func TestGetTestAndMockChans_ComposeForwarderLeavesAHandedTestCaseToItsConsumer(
 				seen[n] = true
 			}
 		})
+	}
+}
+
+// stoppingComposeAgent is a compose stack whose agent says, once compose stops
+// it with the project (the app exited on its own), that a stop reached it and
+// it waits for this recording to drain its streams (WatchAgentStop): the stack
+// goes down only once the agent has gone, which it does once the recording's
+// drain is through. Run returns when the test lets the stack go down.
+type stoppingComposeAgent struct {
+	*endingAgent
+	stopping  chan struct{}
+	watched   atomic.Bool
+	noticed   atomic.Int32 // streams opened asking the agent for its word
+	stackDown chan struct{}
+	running   atomic.Bool
+	// ending is closed once the recording, its drain through, sees the
+	// agent to its end (EndComposeAgent), which returns once the agent has
+	// gone with the stack.
+	ending chan struct{}
+	// released: EndComposeAgent was told a drain was given up.
+	released atomic.Bool
+}
+
+func (s *stoppingComposeAgent) EndComposeAgent(release bool) {
+	s.released.Store(release)
+	close(s.ending)
+	<-s.stackDown
+}
+
+func (s *stoppingComposeAgent) WatchAgentStop(context.Context) <-chan struct{} {
+	s.watched.Store(true)
+	return s.stopping
+}
+
+func (s *stoppingComposeAgent) notice(ctx context.Context) {
+	if models.AgentStopNotice(ctx) {
+		s.noticed.Add(1)
+	}
+}
+
+func (s *stoppingComposeAgent) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+	s.notice(ctx)
+	return s.endingAgent.GetIncoming(ctx, opts)
+}
+
+func (s *stoppingComposeAgent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+	s.notice(ctx)
+	return s.endingAgent.GetOutgoing(ctx, opts)
+}
+
+func (s *stoppingComposeAgent) GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error) {
+	s.notice(ctx)
+	return s.endingAgent.GetMappings(ctx, opts)
+}
+
+func (s *stoppingComposeAgent) Run(context.Context, models.RunOptions) models.AppError {
+	s.running.Store(true)
+	<-s.stackDown
+	s.running.Store(false)
+	// The app exited 0 on its own, and compose took the project down.
+	return models.AppError{AppErrorType: models.ErrAppStopped}
+}
+
+// Under docker compose an app that exits on its own makes compose stop the
+// project, keploy's agent with it, before keploy's stop: the agent then waits
+// for this recording, and says so. The recording drains it to its end markers
+// at once, with the stack still up, and saves everything the agent captured.
+// It drained only once compose had taken the stack, and the agent, down: what
+// the agent still held was lost, the agent's streams ending without their
+// markers. Drained, the agent is seen to its end (EndComposeAgent): a wedged
+// one is killed, not waited for until compose's grace.
+func TestStart_AComposeAgentThatSaysItIsStoppingIsDrainedWhileTheStackIsUp(t *testing.T) {
+	agent := &stoppingComposeAgent{endingAgent: newEndingAgent(), stopping: make(chan struct{}), stackDown: make(chan struct{}), ending: make(chan struct{})}
+	f := agent.fakeInstr
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the compose agent's health check
+	}))
+	defer health.Close()
+	cfg := &config.Config{}
+	cfg.CommandType = string(utils.DockerCompose)
+	cfg.Agent.AgentURI = health.URL
+	testDB, mockDB := &recTestDB{}, &recMockDB{unencodable: map[string]bool{}}
+	core, logs := observer.New(zap.WarnLevel)
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          testDB,
+		mockDB:          mockDB,
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: agent,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          cfg,
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+
+	captured := time.Now()
+	for _, send := range []func() bool{
+		func() bool {
+			select {
+			case f.incoming <- tcAt("test-1", captured):
+				return true
+			case <-time.After(30 * time.Second):
+				return false
+			}
+		},
+		func() bool {
+			select {
+			case f.outgoing <- mockAt("mock-1", captured):
+				return true
+			case <-time.After(30 * time.Second):
+				return false
+			}
+		},
+	} {
+		if !send() {
+			t.Fatal("a frame the agent captured was never taken")
+		}
+	}
+	// Compose stops the agent: it holds nothing more from before, and waits.
+	agent.clear.Store(true)
+	close(agent.stopping)
+	select {
+	case <-agent.asked:
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("the recording did not drain the agent that said compose is stopping it: it waits for the stack to go down, which waits for the agent")
+	}
+	if !agent.running.Load() {
+		t.Fatal("the stack was down before the drain")
+	}
+	agent.end(models.TestCaseStream, func() { close(f.incoming) })
+	agent.end(models.MockStream, func() { close(f.outgoing) })
+	agent.end(models.MappingStream, func() { close(f.mappings) })
+	// Drained, the recording sees the agent to its end: it does not wait for
+	// compose's grace, which waits on the agent.
+	select {
+	case <-agent.ending:
+	case <-time.After(60 * time.Second): // only turns a hang into a failure
+		t.Fatal("the recording did not see the drained agent to its end")
+	}
+	if agent.released.Load() {
+		t.Fatal("a drain read to its markers told the agent to stop waiting for it")
+	}
+	close(agent.stackDown)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	testDB.mu.Lock()
+	tests := append([]string(nil), testDB.inserted...)
+	testDB.mu.Unlock()
+	mockDB.mu.Lock()
+	mocks := len(mockDB.inserted)
+	mockDB.mu.Unlock()
+	if len(tests) != 1 || mocks != 1 {
+		t.Fatalf("saved test cases %v and %d mocks, want test-1 and its mock", tests, mocks)
+	}
+	if lost := logs.FilterMessageSnippet("ended its").All(); len(lost) > 0 {
+		t.Fatalf("a stream ended without its marker: %v", lost)
+	}
+	if n := agent.noticed.Load(); !agent.watched.Load() || n != 3 {
+		t.Fatalf("watched %v, %d of 3 streams asked for the agent's word of a stop", agent.watched.Load(), n)
 	}
 }

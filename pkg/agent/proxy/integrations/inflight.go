@@ -79,6 +79,45 @@ func MarkUnknown(ctx context.Context, protocol string) (release func()) {
 	return func() {}
 }
 
+// IdleMarker is a connection whose parser can say that, for a while, it waits
+// out an answer the dependency held idle.
+type IdleMarker interface {
+	// MarkIdle marks it so until release, called once (later calls do
+	// nothing).
+	MarkIdle() (release func())
+}
+
+// MarkIdle says that, until release, the parser of ctx's connection waits out
+// the time the dependency held a request idle before it answered: a long poll
+// that has caught up with the recording, whose answer is that nothing came
+// (an SQS ReceiveMessage that finds no message, a Kafka Fetch with nothing
+// recorded to fetch, waiting out its MaxWait). The wait is the dependency's
+// time, not keploy's work, so a test's end does not wait for it: while marked,
+// the connection's handler counts as waiting for the application, as one
+// blocked reading does. Without the proven switch, or for a connection the
+// proxy does not keep, it marks nothing.
+//
+// The parser marks once it has chosen the answer and consumed what answers
+// with it, and releases the mark before it writes the answer: from the release
+// to its next read its handler is not blocked reading, so a test's end waits
+// for the answer as for any other. The mark covers only the handler: bytes the
+// application sent meanwhile, and a request the parser holds (HoldRequest),
+// still keep the connection pending, so a parser that holds the request it
+// waits on releases that hold for the wait. The holder WithRequestHolder
+// carries is also the marker: a stand-in holder that is not an IdleMarker
+// drops every mark.
+//
+// A mock.real relay marks the same once the application has ended its side
+// and all of it has gone to the real server (realdeps.Relay.AwaitsAnswer):
+// what is left is that server's answer, the dependency's time, not keploy's
+// work.
+func MarkIdle(ctx context.Context) (release func()) {
+	if m, ok := ctx.Value(requestHolderKey{}).(IdleMarker); ok && m != nil {
+		return m.MarkIdle()
+	}
+	return func() {}
+}
+
 // RequestHolding is the optional capability of a parser that marks every
 // request it holds (HoldRequest). The proxy type-asserts the parser it
 // serves a connection with, as it does GapResyncCapable.

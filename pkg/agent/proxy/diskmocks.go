@@ -27,16 +27,37 @@ type DiskMocks struct {
 	logger   *zap.Logger
 	closed   bool
 
-	// carry indexes the entries of RegisterCarryOver kinds (models.IsCarryOver
-	// at Add), sorted with entries, so the lookahead load reads only them.
-	// Empty while no kind is registered.
+	// carry indexes the carry-over entries (models.IsCarryOver at Add: a
+	// RegisterCarryOver kind's, a StagingRelease need's), sorted with
+	// entries, so the lookahead load reads only them. Empty while nothing is
+	// registered.
 	carry []diskEntry
+
+	// staged indexes the entries a models.StagingWithStartup need declares
+	// (models.IsStagedAtStaging at Add), sorted with entries, so the set's
+	// staging call reads only them beside the startup band (LoadStaged).
+	// Empty while no kind declares one.
+	staged []diskEntry
+
+	// destinations is, for each recorded destination a mock on disk reached
+	// (destinationKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination, resident.
+	destinations map[string]diskEntry
+
+	// statements is the statement catalog: for each statement a mock on disk
+	// records (its kind and models.StatementKey), the entry of the first one
+	// recorded (LoadStatements). One entry per statement, resident.
+	statements map[string]diskEntry
 }
 
-// diskEntry locates one on-disk mock (~56 B resident). For spilled HTTP/Mongo
-// mocks the response is a separate blob at respOff/respLen; respOff -1 = inline.
+// diskEntry locates one on-disk mock: 48 B, held in entries and byName and in
+// each index that lists the mock (carry, staged, destinations, statements).
+// For spilled HTTP/Mongo mocks the response is a separate blob at
+// respOff/respLen; respOff -1 = inline.
 type diskEntry struct {
 	reqTsNano int64
+	// resTsNano is the response time, for the in-flight load (LoadInFlight).
+	resTsNano int64
 	off       int64
 	length    int
 	respOff   int64
@@ -151,11 +172,32 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if err != nil {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
-	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), off: off, length: n, respOff: respOff, respLen: respLen}
+	e := diskEntry{reqTsNano: m.Spec.ReqTimestampMock.UnixNano(), resTsNano: m.Spec.ResTimestampMock.UnixNano(),
+		off: off, length: n, respOff: respOff, respLen: respLen}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
 	if models.IsCarryOver(m) {
 		d.carry = append(d.carry, e)
+	}
+	if models.IsStagedAtStaging(m) {
+		d.staged = append(d.staged, e)
+	}
+	if k := destinationKey(m); k != "" {
+		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.destinations == nil {
+				d.destinations = make(map[string]diskEntry)
+			}
+			d.destinations[k] = e
+		}
+	}
+	if k := models.StatementKey(m); k != "" {
+		key := string(m.Kind) + "\x00" + k
+		if first, ok := d.statements[key]; !ok || e.reqTsNano < first.reqTsNano {
+			if d.statements == nil {
+				d.statements = make(map[string]diskEntry)
+			}
+			d.statements[key] = e
+		}
 	}
 	d.finalize = false
 	return nil
@@ -181,6 +223,7 @@ func (d *DiskMocks) Finalize() {
 	}
 	sort.Slice(d.entries, func(i, j int) bool { return d.entries[i].reqTsNano < d.entries[j].reqTsNano })
 	sort.Slice(d.carry, func(i, j int) bool { return d.carry[i].reqTsNano < d.carry[j].reqTsNano })
+	sort.Slice(d.staged, func(i, j int) bool { return d.staged[i].reqTsNano < d.staged[j].reqTsNano })
 	d.finalize = true
 }
 
@@ -265,7 +308,48 @@ func (d *DiskMocks) LoadWindow(start, end time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
-// LoadCarryOver returns the mocks of RegisterCarryOver kinds with request
+// LoadInFlight returns the mocks in flight at at that were sent after from:
+// request time in (from, at), response time at or after at
+// (models.SentInGapAnsweredBy), that the in-flight rule applies to
+// (models.InFlightEligible). For a test window starting at at, with from the
+// end of the gap before it (models.WindowSchedule.GapBefore), they are the
+// calls in flight when the test began. A mock with no response time is not
+// one. It scans the entries by request time, from from to at, and decodes
+// only those answered at or after at.
+func (d *DiskMocks) LoadInFlight(from, at time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), at.UnixNano()
+	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano > lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.entries) && d.entries[i].reqTsNano < hi; i++ {
+		if e := d.entries[i]; e.resTsNano >= hi && e.resTsNano > 0 {
+			sel = append(sel, e)
+		}
+	}
+	d.mu.Unlock()
+	decoded, err := d.decodeAll(sel)
+	if err != nil {
+		return nil, err
+	}
+	out := decoded[:0]
+	for _, m := range decoded {
+		if models.InFlightEligible(m) && models.SentInGapAnsweredBy(m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock, from, at) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// LoadCarryOver returns the carry-over mocks (models.IsCarryOver) with request
 // timestamp in [from, to] (inclusive), for the agent's lookahead load of the
 // carry-over tier. It reads only those entries, whatever else the range holds.
 func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
@@ -289,6 +373,32 @@ func (d *DiskMocks) LoadCarryOver(from, to time.Time) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
+// LoadStaged returns, in recorded order, the mocks a
+// models.StagingWithStartup need declares with request timestamp in
+// [from, to] (inclusive): what the set's staging call stages beside the
+// startup band (LoadBefore), from the band's cutoff to the end of the
+// staging's window. It reads only those entries.
+func (d *DiskMocks) LoadStaged(from, to time.Time) ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if !d.finalize {
+		d.mu.Unlock()
+		d.Finalize()
+		d.mu.Lock()
+	}
+	lo, hi := from.UnixNano(), to.UnixNano()
+	i := sort.Search(len(d.staged), func(k int) bool { return d.staged[k].reqTsNano >= lo })
+	sel := make([]diskEntry, 0)
+	for ; i < len(d.staged) && d.staged[i].reqTsNano <= hi; i++ {
+		sel = append(sel, d.staged[i])
+	}
+	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
 // LoadBefore returns mocks with request timestamp strictly before t — the
 // startup band routed to the startup tree; loaded once, kept resident by caller.
 func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
@@ -306,6 +416,56 @@ func (d *DiskMocks) LoadBefore(t time.Time) ([]*models.Mock, error) {
 	i := sort.Search(len(d.entries), func(k int) bool { return d.entries[k].reqTsNano >= cut })
 	sel := append([]diskEntry(nil), d.entries[:i]...)
 	d.mu.Unlock()
+	return d.decodeAll(sel)
+}
+
+// LoadStatements returns the statement catalog: for each statement the mocks
+// on disk record (models.StatementKey), the first one recorded, in recorded
+// order. A client may prepare a statement at app start that its recordings hold
+// only inside tests, which the startup band (LoadBefore) does not reach: the
+// agent reads these once, when the set is stored, and seeds them on the proxy
+// describe-only, so a parser can answer the prepare and never serves them.
+func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.statements))
+	for _, e := range d.statements {
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	sort.Slice(sel, func(i, j int) bool {
+		if sel[i].reqTsNano != sel[j].reqTsNano {
+			return sel[i].reqTsNano < sel[j].reqTsNano
+		}
+		return sel[i].off < sel[j].off
+	})
+	return d.decodeAll(sel)
+}
+
+// LoadDestinations returns, in recorded order, the first mock on disk of
+// each recorded destination (destinationKey): what the recording says of its
+// destinations, bounded by how many it reached, for the proxy's destination
+// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	sel := make([]diskEntry, 0, len(d.destinations))
+	for _, e := range d.destinations {
+		sel = append(sel, e)
+	}
+	d.mu.Unlock()
+	sort.Slice(sel, func(i, j int) bool {
+		if sel[i].reqTsNano != sel[j].reqTsNano {
+			return sel[i].reqTsNano < sel[j].reqTsNano
+		}
+		return sel[i].off < sel[j].off
+	})
 	return d.decodeAll(sel)
 }
 

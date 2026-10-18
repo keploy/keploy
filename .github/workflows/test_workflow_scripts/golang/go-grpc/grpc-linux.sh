@@ -49,26 +49,28 @@ cleanup() {
     pkill -9 -f keploy || true
     pkill -9 -f grpc-server || true
     pkill -9 -f grpc-client || true
+    rm -rf "${HEALTH:-}"
     echo "Cleanup complete."
 }
 trap cleanup EXIT
+
+# log_errors LOG: prints the lines of LOG this lane fails on, an ERROR (but
+# the non-critical "Unsupported DNS query type") or a data race, and succeeds
+# if there are any. check_for_errors fails a finished log on them, and the
+# waits below (await_ready) a log still being written.
+log_errors() {
+  [ -f "$1" ] || return 1
+  awk '(/ERROR/ && !/Unsupported DNS query type/) || /WARNING: DATA RACE/ { print; found = 1 } END { exit !found }' "$1"
+}
 
 # Checks a log file for critical errors or data races
 check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
-  if [ -f "$logfile" ]; then
-    # This command finds lines with "ERROR" but excludes the non-critical "Unsupported DNS query type" error.
-    if awk '/ERROR/ && !/Unsupported DNS query type/ { exit 0 } END { exit 1 }' "$logfile"; then
-        echo "Error found in $logfile"
-        cat "$logfile"
-        exit 1
-    fi
-    if grep -q "WARNING: DATA RACE" "$logfile"; then
-      echo "Race condition detected in $logfile"
-      cat "$logfile"
-      exit 1
-    fi
+  if log_errors "$logfile" >/dev/null; then
+    echo "Error or race condition found in $logfile"
+    cat "$logfile"
+    exit 1
   fi
   echo "No critical errors found in $logfile."
 }
@@ -114,45 +116,74 @@ check_test_report() {
     return 0
 }
 
-# Sends HTTP requests to the client to trigger gRPC calls
-send_requests() {
-    echo "Waiting for application's HTTP server to start..."
-    for i in {1..10}; do
-        if curl --fail --silent --show-error --max-time 5 -o /dev/null -X GET http://127.0.0.1:8080/health; then
-            echo "Application is ready. Sending requests..."
-            # 1. POST request
-            curl --fail --silent --show-error --max-time 5 -X POST http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"name": "test-user", "email": "test@gmail.com", "age": 20}'
-            # 2. GET request
-            curl --fail --silent --show-error --max-time 5 -X GET http://127.0.0.1:8080/users
-            # 3. PUT request
-            curl --fail --silent --show-error --max-time 5 -X PUT http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1, "name": "test-user-updated", "email": "test@gmail.com", "age": 20}'
-            # 4. DELETE request
-            curl --fail --silent --show-error --max-time 5 -X DELETE http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1}'
-            echo "Requests sent."
-            return 0
-        fi
-        echo "App not ready, retrying in 3 seconds..."
-        sleep 3
-    done
-    echo "Application failed to start on port 8080."
-    exit 1
+port_open() { (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
+HEALTH=$(mktemp -d)
+# health_answered: /health answered, or failed other than by a refused
+# connection (curl exit 7). Only a refusal means the app is not up yet; what
+# it says once it is up is final.
+health_answered() {
+    health_rc=0
+    health_code=$(curl --silent --show-error --max-time 5 -o "$HEALTH/body" -w '%{http_code}' \
+        http://127.0.0.1:8080/health 2>"$HEALTH/err") || health_rc=$?
+    [ "$health_rc" != 7 ]
 }
 
-wait_for_port() {
-    local port=$1
-    echo "Waiting for port $port to be open..."
-    for i in {1..15}; do
-        if (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
-            echo "Port $port is open."
-            return 0
-        fi
-        echo "Port $port not yet open, retrying in 2 seconds..."
-        sleep 2
-    done
-    echo "Timed out waiting for port $port."
-    ss -ltnp || true
-    exit 1
+# send_requests PIDS LOG: waits for the HTTP driver to answer /health (it
+# calls the gRPC server, so it answers once the whole chain does), then sends
+# the four requests. The wait lasts as long as PIDS live and LOG shows
+# progress and no error (await_ready): in record mode the app starts only
+# once keploy's agent is ready, which on a loaded runner takes as long as
+# loading its eBPF programs does. Ten tries three seconds apart gave up while
+# it still was (pipeline 11579: "Application failed to start on port 8080").
+# Its first answer decides: retrying an unhealthy one fed the wait its own
+# progress (each /health the server sees is a line in its log).
+send_requests() {
+    local pids=$1 log=$2
+    echo "Waiting for application's HTTP server to start..."
+    await_ready "the app's :8080" "$pids" "$log" log_errors health_answered || exit 1
+    if [ "$health_rc" != 0 ] || [ "${health_code:0:1}" != 2 ]; then
+        echo "::error::the app's /health answered HTTP ${health_code:-none} (curl exit $health_rc): $(cat "$HEALTH/body" "$HEALTH/err" 2>/dev/null)"
+        exit 1
+    fi
+    echo "Application is ready. Sending requests..."
+    # 1. POST request
+    curl --fail --silent --show-error --max-time 5 -X POST http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"name": "test-user", "email": "test@gmail.com", "age": 20}'
+    # 2. GET request
+    curl --fail --silent --show-error --max-time 5 -X GET http://127.0.0.1:8080/users
+    # 3. PUT request
+    curl --fail --silent --show-error --max-time 5 -X PUT http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1, "name": "test-user-updated", "email": "test@gmail.com", "age": 20}'
+    # 4. DELETE request
+    curl --fail --silent --show-error --max-time 5 -X DELETE http://127.0.0.1:8080/users -H "Content-Type: application/json" -d '{"id": 1}'
+    echo "Requests sent."
 }
+
+# wait_for_port PORT PIDS LOG: until PORT accepts a connection, for as long as
+# PIDS (what opens it) live and LOG shows progress and no error.
+wait_for_port() {
+    local port=$1 pids=$2 log=$3
+    echo "Waiting for port $port to be open..."
+    if ! await_ready "port $port" "$pids" "$log" log_errors port_open "$port"; then
+        ss -ltnp || true
+        exit 1
+    fi
+}
+
+# wait_captured LOG PIDS SLUG[:N]...: until keploy's recording (LOG) says it
+# captured each test case the requests made, by name (log_captured), rather
+# than a fixed sleep before it is stopped.
+wait_captured() {
+    local log=$1 pids=$2
+    shift 2
+    if ! await_ready "keploy's capture of $*" "$pids" "$log" log_errors log_captured "$log" "$@"; then
+        echo "::error::$log names no capture of: $(log_missing "$log" "$@")"
+        exit 1
+    fi
+}
+# What send_requests makes keploy capture: in incoming mode, the gRPC calls
+# the driver makes (its /health calls GetUsers too); in outgoing mode, the
+# HTTP requests themselves.
+INCOMING_CAPTURES="grpc-userservice-getusers:2 grpc-userservice-createuser grpc-userservice-updateuser grpc-userservice-deleteuser"
+OUTGOING_CAPTURES="get-health post-users get-users put-users delete-users"
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
@@ -181,20 +212,21 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
-    ./grpc-client &> client_incoming.log &
-    client_pid=$!
     "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
     # tee ends once keploy and everything it started (the agent, the app)
     # have exited: they all write to it.
     rec_pid=$!
     rec_keploy=$(jobs -p %%) # the pipeline's keploy
-    wait_for_port 50051
+    wait_for_port 50051 "$rec_pid" record_incoming.log
+    # The driver once the server is up: started first, its gRPC channel was
+    # in reconnect backoff when the server came, and its first calls failed.
+    ./grpc-client &> client_incoming.log &
+    client_pid=$!
 
-    sleep 5
-    
-    send_requests
-    sleep 15 # Allow time for traces to be recorded
-    
+    send_requests "$client_pid $rec_pid" record_incoming.log
+    # shellcheck disable=SC2086 # a list of names
+    wait_captured record_incoming.log "$rec_pid" $INCOMING_CAPTURES
+
     kill_keploy_process
     # Wait for the recording to end, not for a fixed time: keploy drains
     # what it captured before it exits, and that takes as long as the
@@ -211,16 +243,17 @@ if [ "$MODE" = "incoming" ]; then
         # Wait for it to exit, not for a fixed time: the next one binds :8080.
         kill "$client_pid" 2>/dev/null || true
         wait "$client_pid" 2>/dev/null || true
-        ./grpc-client &> client_incoming_json.log &
         "$RECORD_BIN" record --storage-format json -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming_json.log &
         # tee ends once keploy and everything it started (the agent, the app)
         # have exited: they all write to it.
         rec_pid=$!
         rec_keploy=$(jobs -p %%) # the pipeline's keploy
-        wait_for_port 50051
-        sleep 5
-        send_requests
-        sleep 15
+        wait_for_port 50051 "$rec_pid" record_incoming_json.log
+        ./grpc-client &> client_incoming_json.log &
+        client_pid=$!
+        send_requests "$client_pid $rec_pid" record_incoming_json.log
+        # shellcheck disable=SC2086
+        wait_captured record_incoming_json.log "$rec_pid" $INCOMING_CAPTURES
         kill_keploy_process
         # Wait for the recording to end, not for a fixed time: keploy drains
         # what it captured before it exits, and that takes as long as the
@@ -256,15 +289,16 @@ elif [ "$MODE" = "outgoing" ]; then
     # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
     ./grpc-server &> server_outgoing.log &
     server_pid=$!
-    wait_for_port 50051
+    wait_for_port 50051 "$server_pid" server_outgoing.log
     "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
     # tee ends once keploy and everything it started (the agent, the app)
     # have exited: they all write to it.
     rec_pid=$!
     rec_keploy=$(jobs -p %%) # the pipeline's keploy
 
-    send_requests
-    sleep 15 # Allow time for traces to be recorded
+    send_requests "$rec_pid $server_pid" record_outgoing.log
+    # shellcheck disable=SC2086
+    wait_captured record_outgoing.log "$rec_pid" $OUTGOING_CAPTURES
 
     kill_keploy_process
     # Wait for the recording to end, not for a fixed time: keploy drains
@@ -285,14 +319,16 @@ elif [ "$MODE" = "outgoing" ]; then
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
         ./grpc-server &> server_outgoing_json.log &
-        wait_for_port 50051
+        server_pid=$!
+        wait_for_port 50051 "$server_pid" server_outgoing_json.log
         "$RECORD_BIN" record --storage-format json -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing_json.log &
         # tee ends once keploy and everything it started (the agent, the app)
         # have exited: they all write to it.
         rec_pid=$!
         rec_keploy=$(jobs -p %%) # the pipeline's keploy
-        send_requests
-        sleep 15
+        send_requests "$rec_pid $server_pid" record_outgoing_json.log
+        # shellcheck disable=SC2086
+        wait_captured record_outgoing_json.log "$rec_pid" $OUTGOING_CAPTURES
         kill_keploy_process
         # Wait for the recording to end, not for a fixed time: keploy drains
         # what it captured before it exits, and that takes as long as the

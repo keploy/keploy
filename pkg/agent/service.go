@@ -66,6 +66,31 @@ type CaptureLossReporter interface {
 	CaptureLosses() models.CaptureLosses
 }
 
+// CaptureLossDrainer is the optional extension implemented by hooks whose
+// counts of capture losses are fed by reports the kernel makes: before a read
+// of them, DrainCaptureLosses waits until every report made before it has
+// been counted, so a call the application made before the read is in it.
+type CaptureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
+// CaptureLossErrReporter is the optional extension implemented by hooks whose
+// count of a capture loss could not start (under the proven switch): while
+// CaptureLossesErr is not nil, what it would count is unknown, never 0, and
+// the agent reads no capture losses.
+type CaptureLossErrReporter interface {
+	CaptureLossesErr() error
+}
+
+// ReadinessReporter is the optional extension implemented by hooks that can
+// tell, under the proven switch, whether the application listens and whether
+// its start is going on (models.AppReadiness). An error is "unknown", never
+// "not ready".
+type ReadinessReporter interface {
+	AppReadiness(since uint64) (models.AppReadiness, error)
+	MarkReadiness() (models.AppReadiness, error)
+}
+
 // ListenerCounter is what the hooks give the proxy so that the kernel counts,
 // and numbers, the connections completed to the proxy's listener.
 type ListenerCounter interface {
@@ -376,6 +401,28 @@ type StartupCutoffSeeder interface {
 	SeedStartupCutoff(start time.Time)
 }
 
+// StatementCatalogSeeder is the optional extension implemented by proxies whose
+// mock manager can hold the stored set's statement catalog (the first recorded
+// mock of each statement the agent keeps on disk), describe-only, for the
+// parsers' integrations.StatementCatalog capability. Optional in the same style
+// as StartupCutoffSeeder: an agent whose proxy lacks it does not seed, and a
+// statement prepared at app start that its recordings hold only inside tests
+// is then described from what the parser may serve, as before.
+type StatementCatalogSeeder interface {
+	SeedStatementCatalog(mocks []*models.Mock)
+}
+
+// RecordedDestinationsSeeder is the optional extension implemented by proxies
+// whose destination rules (the MySQL ports, the loopback ports a recording
+// reached, the destinations recorded speaking HTTP/2) can be told the stored
+// set's recorded destinations: the first mock of each that the agent keeps
+// on disk. Optional in the same style as StatementCatalogSeeder: an agent
+// whose proxy lacks it does not seed, and those rules then read only what is
+// staged, as before.
+type RecordedDestinationsSeeder interface {
+	SeedRecordedDestinations(mocks []*models.Mock)
+}
+
 // RecordedWindowsSeeder is the optional extension implemented by proxies whose
 // mock manager can be told the recorded window of every test of the set being
 // staged (models.MockFilterParams.RecordedWindows). Optional in the same style
@@ -425,6 +472,17 @@ type CarryOverPlanner interface {
 	CarryOverLoadRange(start time.Time) (from, to time.Time, ok bool)
 }
 
+// InFlightPlanner is the optional extension of a proxy that knows the set's
+// recorded test windows: for the test window that starts at start, the
+// exclusive start of the gap before it. The agent loads, beside the window's
+// own mocks, the per-test mocks sent in that gap and answered at or after
+// start (models.WindowSchedule.InFlightInto): calls in flight when the test
+// began, which are its. ok is false when there is no such gap. A proxy
+// without it loads none, the pre-existing behaviour.
+type InFlightPlanner interface {
+	InFlightFrom(start time.Time) (from time.Time, ok bool)
+}
+
 // ExactServer is the optional extension of a proxy that serves each test its
 // own mocks exactly, under the proven switch (design v14 §5.2): while a test
 // is open, each of its test mocks answers at most one request, in recorded
@@ -444,6 +502,24 @@ type ExactServer interface {
 	// not (in recorded order); final once the test stops being served. ok is
 	// false when exact serving is off.
 	ExactTestOutcome() (test string, consumed, unconsumed []string, ok bool)
+}
+
+// ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
+// is ServeExactPool that also answers, while no test is open, the next test's
+// mocks that were in flight when it began (ahead, models.ExactServing.Ahead),
+// each at most once, as that test's: one answered so counts as answered when
+// that test opens (ServeExactTest).
+type ExactAheadServer interface {
+	ServeExactPoolAhead(key string, names []string, ahead []*models.Mock) error
+}
+
+// ExactKeyRestarter is an optional ExactServer capability: it starts a claim
+// key's calls outside every test afresh, for a test process that claims the
+// key again (a re-run is a new scope): the recordings of names, the key's
+// pool slice, consumed outside every test answer again, and the key's
+// stateful cursors start over.
+type ExactKeyRestarter interface {
+	RestartExactKey(key string, names []string) error
 }
 
 // ScopeStager is an optional Proxy capability: it stages the pool of a test

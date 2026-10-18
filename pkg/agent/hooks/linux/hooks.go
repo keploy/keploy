@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -64,6 +65,17 @@ type Hooks struct {
 	app     appConnState
 	appOnce sync.Once
 	appMu   sync.Mutex
+	// unix is the AF_UNIX connect report (unixconn.go), under unixMu.
+	unixMu sync.Mutex
+	unix   *unixConn
+	// udp is the proven switch's UDP watch (udpwatch.go), under udpMu; nil
+	// with the switch off.
+	udpMu sync.Mutex
+	udp   *udpWatch
+	// ready is the proven switch's readiness watch (readywatch.go), under
+	// readyMu; nil with the switch off.
+	readyMu sync.Mutex
+	ready   *readyWatch
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -120,6 +132,10 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		watchPIDMapRefusals(ctx, h.logger, h.pidMapCounts, pidMapPollInterval)
 		return nil
 	})
+
+	// The application's AF_UNIX connects to sockets no member of it owns
+	// (unixconn.go): calls keploy's proxy never sees.
+	h.startUnixConn(ctx)
 
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
@@ -240,7 +256,34 @@ func hookSpec() (*ebpf.CollectionSpec, error) {
 			prog.AttachType = p.aType
 		}
 	}
+	shrinkUnswitchedMaps(spec)
 	return spec, nil
+}
+
+// unswitchedMaps are the maps only the proven switch's UDP and readiness
+// watches use, which
+// the kernel allocates whole at load (an LRU hash, a ring buffer): with the
+// switch off nothing uses them, so they are loaded at their smallest, and
+// the watch costs nothing (udpwatch.go).
+var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen"}
+
+// shrinkUnswitchedMaps loads unswitchedMaps at their smallest when the
+// proven switch is off: one entry, or one page for a ring buffer.
+func shrinkUnswitchedMaps(spec *ebpf.CollectionSpec) {
+	if provenswitch.On() {
+		return
+	}
+	for _, name := range unswitchedMaps {
+		m, ok := spec.Maps[name]
+		if !ok {
+			continue
+		}
+		if m.Type == ebpf.RingBuf {
+			m.MaxEntries = uint32(os.Getpagesize())
+		} else {
+			m.MaxEntries = 1
+		}
+	}
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -543,6 +586,24 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if h.kernelPortAlloc {
 		agentInfo.Flags |= structs.FlagKernelPortAlloc
 	}
+	// Under the proven switch, the application's non-DNS UDP is watched for
+	// replies, and QUIC refused (udpwatch.go).
+	udpFlags, err := h.startProvenUDP(cGroupPath)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to start the proven switch's UDP watch")
+		return err
+	}
+	agentInfo.Flags &^= structs.FlagProvenUDP
+	agentInfo.Flags |= udpFlags
+	// Under the proven switch, the application's listens and the progress
+	// of its start, for keploy test's readiness (readywatch.go).
+	readyFlags, err := h.startProvenReady(cGroupPath, opts.IsDocker, opts.Mode)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to start the proven switch's readiness watch")
+		return err
+	}
+	agentInfo.Flags &^= structs.FlagProvenReady
+	agentInfo.Flags |= readyFlags
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
@@ -559,6 +620,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
+	}
+
+	// With the flag set: the kernel records the agent's own mount namespace
+	// (its container), so what runs in its container is not the application's progress
+	// (readywatch.go). Failing, the watch says so at each read.
+	h.readyMu.Lock()
+	ready := h.ready
+	h.readyMu.Unlock()
+	if ready != nil {
+		if err := ready.selfRegistered(); err != nil {
+			h.logger.Warn("the readiness watch could not record the agent's own mount namespace; keploy test cannot tell whether the application is ready", zap.Error(err))
+		}
 	}
 
 	return nil
@@ -658,6 +731,22 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockops != nil {
 		h.sockops.Close()
 	}
+
+	// The UDP watch reads the objects' ring buffer: closed before them.
+	// The watch stays, failed: a read after the hooks unloaded is unknown,
+	// never 0.
+	h.udpMu.Lock()
+	if h.udp != nil {
+		h.udp.fail(errors.New("the UDP watch was closed with the hooks"))
+		h.udp.close()
+	}
+	h.udpMu.Unlock()
+	h.readyMu.Lock()
+	if h.ready != nil {
+		h.ready.fail(errors.New("the readiness watch was closed with the hooks"))
+		h.ready.close()
+	}
+	h.readyMu.Unlock()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()

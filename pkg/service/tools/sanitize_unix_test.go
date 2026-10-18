@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gopkg.in/yaml.v3"
@@ -366,8 +367,14 @@ func TestSanitize_FailsWhenATestSetIsLeftUnsanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	tools := &Tools{logger: zap.NewNop(), config: &config.Config{Test: config.Test{SelectedTests: map[string][]string{"test-set-0": nil}}}}
+	core, logs := observer.New(zap.ErrorLevel)
+	tools := &Tools{logger: zap.New(core), testDB: testdb.New(zap.NewNop(), keploy), config: &config.Config{Test: config.Test{SelectedTests: map[string][]string{"test-set-0": nil}}}}
 	if err := tools.Sanitize(context.Background()); err == nil || !strings.Contains(err.Error(), "test-set-0") {
 		t.Errorf("Sanitize = %v; want an error naming test-set-0", err)
+	}
+	// Left unsanitized by its tests, not refused or lost before them: each of
+	// those names test-set-0 too.
+	if n := logs.FilterMessage("Sanitize failed for test set").Len(); n != 1 {
+		t.Errorf("test-set-0 failed %d time(s) in SanitizeTestSetDir, want 1: %v", n, logs.All())
 	}
 }

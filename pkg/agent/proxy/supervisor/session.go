@@ -608,8 +608,8 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //     before calling mgr.AddMock. If ctx was already cancelled,
 //     EmitMock returns ctx.Err() without touching the manager. If ctx
 //     cancels AFTER the AddMock call starts, AddMock runs to completion
-//     (buffers the mock, or blocks in its own bounded sendToOutChan
-//     up to sendBudget) and EmitMock returns nil. AddMock may also
+//     (buffers the mock, or hands it to the manager's out queue, which
+//     never blocks it) and EmitMock returns nil. AddMock may also
 //     drop the mock under backpressure/memory-pause without signalling
 //     the caller — the drop is recorded on the manager's drop counter
 //     instead. This is a deliberate asymmetry: the syncMock manager
@@ -639,8 +639,8 @@ func (s *Session) EmitMock(m *models.Mock) error {
 //
 //   - SyncMock path: skip the s.Ctx pre-check and call mgr.AddMock
 //     unconditionally. AddMock owns its own lifecycle (memory-pause,
-//     drop accounting, sendBudget) and remains the right place to
-//     enforce shutdown-time backpressure.
+//     drop accounting, its out queue's bounds) and remains the right
+//     place to enforce shutdown-time backpressure.
 //
 //   - Direct-channel path: replace the select-against-ctx with a
 //     non-blocking best-effort send. If the channel is full at
@@ -654,6 +654,17 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 	return s.emitMockCore(m, true)
+}
+
+// MockHeld tells the session its parser holds a mock it made instead of
+// emitting it now, to emit it once it knows what the mock is: the parser has
+// consumed the input, so the session's pending work is cleared
+// (OnPendingCleared), as an emitted mock clears it. Work left pending through
+// the next idle spell is taken for a hung parser. Nil-safe.
+func (s *Session) MockHeld() {
+	if s != nil && s.OnPendingCleared != nil {
+		s.OnPendingCleared()
+	}
 }
 
 func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
@@ -681,6 +692,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if m.ConnectionID == "" && s.ClientConnID != "" {
 		m.ConnectionID = s.ClientConnID
 	}
+
+	// A mock its parser stamped answered before it was asked is left out of
+	// the replay: said here, as it is recorded (warnAnsweredBeforeAsked).
+	s.warnAnsweredBeforeAsked(m)
 
 	// Enforce per-session ReqTimestampMock monotonicity (I5). In
 	// debug builds, a regression panics the test so parser bugs
@@ -720,12 +735,11 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s.RouteMocksViaSyncMock {
 		mgr := s.manager()
 		// Best-effort ctx probe. mgr.AddMock doesn't observe
-		// s.Ctx — it takes its own mutex and may sit
-		// in sendToOutChan up to the manager's internal
-		// sendBudget without signalling cancellation back to
-		// us. A pre-check at least catches the "already
-		// cancelled" case so we don't spend mgr.AddMock's
-		// bounded wait on work the parser already abandoned.
+		// s.Ctx — it takes its own mutex and hands the mock
+		// on without signalling cancellation back to us. A
+		// pre-check at least catches the "already cancelled"
+		// case so we don't spend mgr.AddMock's work on a mock
+		// the parser already abandoned.
 		// Post-call cancellation during mgr.AddMock's send is
 		// documented as a semantic difference from the
 		// direct-channel branch (see the EmitMock doc comment
@@ -1245,6 +1259,48 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 		req = clamped
 	}
 	s.lastReqTimestamp = req
+}
+
+// AnsweredBeforeAskedMsg is the warning EmitMock logs for a mock its parser
+// stamped answered before it was asked (warnAnsweredBeforeAsked).
+const AnsweredBeforeAskedMsg = "a parser recorded a mock answered before it was asked: it stamped the mock's response before its request"
+
+// answeredBeforeAskedWarnEvery is how often warnAnsweredBeforeAsked's WARN
+// may be logged for each kind.
+const answeredBeforeAskedWarnEvery = 10 * time.Second
+
+// answeredBeforeAskedWarns limits warnAnsweredBeforeAsked's WARN,
+// process-wide, keyed by the mock's kind: a parser that stamps its requests
+// from the wrong clock does it on every connection.
+var answeredBeforeAskedWarns = NewWarnLimiters(answeredBeforeAskedWarnEvery)
+
+// warnAnsweredBeforeAsked says, as m is recorded, that its parser stamped it
+// answered before it was asked: its response time before its request time. A
+// correct parser never does: its request is read before its answer is
+// written. The stamps are the parser's (enforceReqMonotonic, which runs after,
+// says of an inversion it makes itself). What it costs depends on the replay:
+// one without the proven switch leaves a per-test mock like this out
+// (pkg.LeaveOutAnsweredBeforeAsked), so a call it recorded is answered by
+// another mock or by none, and said only there it is found as a miss, a
+// recording later, far from the parser that stamped it.
+func (s *Session) warnAnsweredBeforeAsked(m *models.Mock) {
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	if s.Logger == nil || req.IsZero() || res.IsZero() || !res.Before(req) {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("mockName", m.Name),
+		zap.String("kind", string(m.Kind)), zap.Time("reqTimestampMock", req), zap.Time("resTimestampMock", res),
+		zap.Duration("answeredBeforeAskedBy", req.Sub(res))}
+	ok, held := answeredBeforeAskedWarns.Allow(string(m.Kind))
+	if !ok {
+		s.Logger.Debug(AnsweredBeforeAskedMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(AnsweredBeforeAskedMsg, append(fields, zap.String("next_step",
+		"this kind's recorder stamped the request after its answer, a keploy bug: report it with this line. A replay without KEPLOY_PROVEN leaves a per-test mock like this out, and answers the call it recorded with another mock or with none"))...)
 }
 
 // debugMonotonic, when true, causes enforceReqMonotonic to panic on

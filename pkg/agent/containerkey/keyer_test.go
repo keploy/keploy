@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -556,6 +559,147 @@ func TestKeyerStampsAnUnreadContainerWithoutAKey(t *testing.T) {
 	}
 }
 
+// A connection named under the ID of an earlier, closed one (an ID its
+// capture reuses) is named by its own destination only: one the index does
+// not place takes nothing of the earlier one's container, and one it does
+// replaces it, without the earlier one's place among the closed, which would
+// let it go first.
+func TestKeyerNamesAReusedConnectionIDAfresh(t *testing.T) {
+	k := NewKeyer(newFake())
+	_ = name(t, k, "tls-7", "127.0.0.1:40004") // redis
+	k.Forget("tls-7")
+	if got := stamped(k, "tls-7"); got != keyRedis {
+		t.Fatalf("a closed connection's late mock was stamped %q, want redis's", got)
+	}
+	_ = name(t, k, "tls-7", "93.184.216.34:443") // no container
+	if got := stamped(k, "tls-7"); got != "" {
+		t.Fatalf("a connection to no container, under a reused ID, was stamped %q", got)
+	}
+	if key, st := use(k, "tls-7"); st != NotContainer || key != "" {
+		t.Fatalf("its use = %q, %v", key, st)
+	}
+	k.Forget("tls-7")
+	if len(k.closed) != 0 || len(k.conns) != 0 {
+		t.Fatalf("held %d connections, %d closed, want none", len(k.conns), len(k.closed))
+	}
+	_ = name(t, k, "tls-7", "127.0.0.1:40004")
+	k.Forget("tls-7")
+	_ = name(t, k, "tls-7", "") // a destination its caller does not know
+	if got := stamped(k, "tls-7"); got != "" {
+		t.Fatalf("a connection of no known destination, under a reused ID, was stamped %q", got)
+	}
+	_ = name(t, k, "tls-7", "127.0.0.1:40004")
+	k.Forget("tls-7")
+	_ = name(t, k, "tls-7", "127.0.0.1:40002") // pgA
+	if got := stamped(k, "tls-7"); got != keyDefault {
+		t.Fatalf("a reused ID now to postgres was stamped %q", got)
+	}
+	if len(k.closed) != 0 {
+		t.Fatalf("the earlier connection is still among the closed: %v", k.closed)
+	}
+}
+
+// A reused ID whose earlier connection the index had not placed, and which
+// was never closed (a capture that names a stream again under its ID before
+// the earlier one's close), takes nothing of that connection's look-up
+// again: the index placing a container at the earlier destination since
+// names nothing for the connection now under the ID.
+func TestKeyerNamesAReusedConnectionIDAfreshWhileTheEarlierIsUnplaced(t *testing.T) {
+	f := newFake()
+	k := NewKeyer(f)
+	_ = name(t, k, "tls-8", "127.0.0.1:40080") // no container there yet
+	f.mu.Lock()
+	f.at["127.0.0.1:40080"] = redis // placed since
+	f.mu.Unlock()
+	_ = name(t, k, "tls-8", "93.184.216.34:443") // no container
+	if got := stamped(k, "tls-8"); got != "" {
+		t.Fatalf("a connection to no container, under a reused ID, was stamped %q", got)
+	}
+}
+
+// A look-up again in flight when its ID is named again names the uses that
+// waited on it, and only them: a capture that routes one connection afresh
+// under its own ID (a JSSE stream recorded again from its next request) does
+// not lose the container its first use is placing, and one that hands the ID
+// to another connection keeps that connection's container for the ID.
+func TestKeyerALookUpInFlightNamesItsOwnUsesWhenItsIDIsNamedAgain(t *testing.T) {
+	for _, c := range []struct {
+		name, again, wantID string
+	}{
+		{"the same connection", "127.0.0.1:40090", keyDefault},
+		{"another connection", "127.0.0.1:40004", keyRedis},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			read := make(chan struct{})
+			f.reads = map[string]chan struct{}{"r": read}
+			f.awaitedCh = make(chan struct{}, 4)
+			k := NewKeyer(f)
+			_ = name(t, k, "tls-9", "127.0.0.1:40090") // its container is being placed
+			type res struct {
+				key string
+				st  State
+			}
+			first := make(chan res, 1)
+			go func() {
+				key, st := use(k, "tls-9")
+				first <- res{key, st}
+			}()
+			<-f.awaitedCh // the first use waits on the look-up again
+			f.mu.Lock()
+			f.at["127.0.0.1:40090"] = pgA // placed now
+			f.mu.Unlock()
+			_ = name(t, k, "tls-9", c.again)
+			close(read)
+			if a := <-first; a.st != Keyed || a.key != keyDefault {
+				t.Fatalf("the use in flight = %q, %v, want the container its look-up placed", a.key, a.st)
+			}
+			if got := stamped(k, "tls-9"); got != c.wantID {
+				t.Fatalf("after the look-up, the ID is stamped %q, want %q", got, c.wantID)
+			}
+		})
+	}
+}
+
+// An ID named twice before either is forgotten (a connection routed afresh
+// under its own ID, each route naming and forgetting it) is closed at its last
+// Forget only: the first route's close neither puts the one still open among
+// the closed, where enough later closes take its container while it is open,
+// nor drops its look-up again.
+func TestKeyerClosesAnIDNamedTwiceAtItsLastForget(t *testing.T) {
+	t.Run("placed", func(t *testing.T) {
+		k := NewKeyer(newFake())
+		_ = name(t, k, "tls-5", "127.0.0.1:40004")
+		_ = name(t, k, "tls-5", "127.0.0.1:40004") // routed afresh
+		k.Forget("tls-5")                          // the first route's close
+		for i := 0; i < keptClosed+1; i++ {
+			id := strconv.Itoa(i)
+			_ = name(t, k, id, "127.0.0.1:40002")
+			k.Forget(id)
+		}
+		if key, st := use(k, "tls-5"); st != Keyed || key != keyRedis {
+			t.Fatalf("the route still open = %q, %v, want redis's", key, st)
+		}
+		k.Forget("tls-5")
+		if got := stamped(k, "tls-5"); got != keyRedis {
+			t.Fatalf("its late mock was stamped %q, want redis's", got)
+		}
+	})
+	t.Run("unplaced", func(t *testing.T) {
+		f := newFake()
+		k := NewKeyer(f)
+		_ = name(t, k, "tls-6", "127.0.0.1:40096") // no container there yet
+		_ = name(t, k, "tls-6", "127.0.0.1:40096") // routed afresh
+		k.Forget("tls-6")
+		f.mu.Lock()
+		f.at["127.0.0.1:40096"] = pgA // placed since
+		f.mu.Unlock()
+		if key, st := use(k, "tls-6"); st != Keyed || key != keyDefault {
+			t.Fatalf("the route still open = %q, %v, want the container its look-up again places", key, st)
+		}
+	})
+}
+
 // Only the closed connections a late mock may still need are kept.
 func TestKeyerKeepsABoundedNumberOfClosedConnections(t *testing.T) {
 	k := NewKeyer(newFake())
@@ -1002,4 +1146,303 @@ func TestParseAddrPortReadsEveryFormTheProxyWrites(t *testing.T) {
 			t.Fatalf("ParseAddrPort(%q) read it", bad)
 		}
 	}
+}
+
+// KeyFromContext says what a connection's destination is without counting a
+// use of it: a container asked about is not one of two configured the same
+// in the scope.
+func TestKeyFromContextCountsNoUse(t *testing.T) {
+	k := NewKeyer(newFake())
+	_ = name(t, k, "a", "127.0.0.1:40002")
+	_ = name(t, k, "twin", "127.0.0.1:40005")
+	k.BeginTest()
+	defer k.EndTest()
+	if key, isContainer, keyed := KeyFromContext(WithConn(context.Background(), k, "twin")); !keyed || !isContainer || key != keyDefault {
+		t.Fatalf("KeyFromContext = %q, %v, %v; want %q, true, true", key, isContainer, keyed, keyDefault)
+	}
+	if key, st := use(k, "a"); st != Keyed || key != keyDefault {
+		t.Fatalf("a use after the twin was only asked about = %q, %v; want Keyed", key, st)
+	}
+}
+
+// Whether the test set the agent was given was recorded naming containers is
+// read from its whole tally: a stamp of any mock counts, a container whose
+// key could not be read among them; the next set's tally replaces it.
+func TestRecordingNamesContainersFollowsTheTestSet(t *testing.T) {
+	k := NewKeyer(newFake())
+	ctx := WithConn(context.Background(), k, "c")
+	if RecordingNamesContainers(ctx) {
+		t.Fatal("named before any test set was given")
+	}
+	var named RecordedTally
+	named.Add(&models.Mock{Spec: models.MockSpec{Metadata: map[string]string{InstanceKey: "i1"}}})
+	k.SetRecorded(&named)
+	if !RecordingNamesContainers(ctx) {
+		t.Fatal("a set with a container stamp (its key unread) is not named")
+	}
+	k.SetRecorded(&RecordedTally{})
+	if RecordingNamesContainers(ctx) {
+		t.Fatal("the previous set's stamp outlived its replacement")
+	}
+	if RecordingNamesContainers(context.Background()) {
+		t.Fatal("named with no keyer in ctx")
+	}
+}
+
+// Scope names the scope in effect -- the open test's, or the run's outside
+// tests -- by an id no other scope of the keyer's has had, a session's Reset
+// included: a new one at a test's begin, at its end (the gap until the
+// next), at a claim and at a reset, and the same one in between.
+func TestScopeNamesEachScopeOnce(t *testing.T) {
+	k := NewKeyer(newFake())
+	seen := map[uint64]bool{}
+	fresh := func(what string) uint64 {
+		t.Helper()
+		n := k.Scope()
+		if seen[n] {
+			t.Fatalf("%s: scope %d, one an earlier scope had", what, n)
+		}
+		seen[n] = true
+		if k.Scope() != n {
+			t.Fatalf("%s: the scope changed with nothing begun or ended", what)
+		}
+		return n
+	}
+	fresh("the run's start")
+	k.BeginTest()
+	fresh("a test")
+	k.BeginTest() // a test begun over an open one replaces it
+	fresh("the next test")
+	k.EndTest()
+	fresh("the gap after a test")
+	k.BeginInstance()
+	fresh("a claim")
+	k.BeginTest()
+	fresh("a test after the claim")
+	k.Reset()
+	fresh("a session's reset")
+	k.BeginTest()
+	fresh("the next session's test")
+}
+
+// A container Docker started before a connection to it was accepted is
+// named at the connection's first use, though the index has not taken its
+// start event by then (the event stream lags the daemon: a busy host): the
+// first use waits for a list of the daemon asked after the accept, never for
+// the event. The same container's key holds when its event comes after.
+func TestKeyerNamesAContainerWhoseStartTheIndexHasNotTaken(t *testing.T) {
+	f := newFakeDocker()
+	r, applied, placed := watchingPlaced(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	// Docker started it, and it answers on its published port; its start
+	// event has not reached the index.
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{"5432/tcp": published("0.0.0.0", "49400")}))
+	if c, _, ok := k.Name(zap.NewNop(), "c1", "127.0.0.1:49400"); ok {
+		t.Fatalf("the index placed %+v before it took the start", c)
+	}
+	want := "container:postgres:5432@" + fpEmpty
+	if key, st := use(k, "c1"); st != Keyed || key != want {
+		t.Fatalf("the first use = %q, %v; want %q, Keyed: the container Docker started before the accept", key, st, want)
+	}
+	f.msgs <- start("tc") // the event comes at last
+	if id := <-placed; id != "tc" {
+		t.Fatalf("placed %s", id)
+	}
+	for range 2 { // Settle's read of its configuration, and the event's
+		if id := <-applied; id != "tc" {
+			t.Fatalf("read %s", id)
+		}
+	}
+	if c, key, ok := k.Name(zap.NewNop(), "c2", "127.0.0.1:49400"); !ok || key != want || c.ID != "tc" {
+		t.Fatalf("after the event Name = %+v, %q, %v", c, key, ok)
+	}
+}
+
+// Only a first use that finds nothing placed lists the daemon: a connection
+// the index placed at its accept, or by its first use (the start event came
+// between), lists nothing; one to where no container is (a service on the
+// host) costs its first use one list, and is no container's.
+func TestKeyerListsTheDaemonOnlyForAFirstUseThatFindsNothing(t *testing.T) {
+	f := testcontainers()
+	r, applied, placed := watchingPlaced(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	before := listsOf(f)
+	_ = name(t, k, "pg", "127.0.0.1:49153") // placed at the accept
+	if _, st := use(k, "pg"); st != Keyed {
+		t.Fatalf("the placed connection's use = %v", st)
+	}
+	f.set("late", running("redis:7", "sha256:r", []string{"172.17.0.8"}, nat.PortMap{}))
+	_ = name(t, k, "late", "172.17.0.8:6379")
+	f.msgs <- start("late") // placed between the accept and the first use
+	if id := <-placed; id != "late" {
+		t.Fatalf("placed %s", id)
+	}
+	<-applied
+	if _, st := use(k, "late"); st != Keyed {
+		t.Fatalf("the late connection's use = %v", st)
+	}
+	if n := listsOf(f) - before; n != 0 {
+		t.Fatalf("%d lists for connections the index placed", n)
+	}
+	_ = name(t, k, "native", "127.0.0.1:5999")
+	for range 2 {
+		if _, st := use(k, "native"); st != NotContainer {
+			t.Fatalf("a host service's use = %v", st)
+		}
+	}
+	if n := listsOf(f) - before; n != 1 {
+		t.Fatalf("%d lists for a connection no container is at, want its first use's one", n)
+	}
+}
+
+// A first use whose context ends while the list of the daemon it waits for
+// is out returns, no container's: the list holds no call longer than the
+// call's own context.
+func TestKeyerFirstUseEndsWithItsContextWhileTheListIsOut(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	k := NewKeyer(r)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.mu.Lock()
+	f.listGate = gate // the list never comes
+	f.mu.Unlock()
+	_ = name(t, k, "c1", "127.0.0.1:5999")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, st := StateFromContext(WithConn(ctx, k, "c1")); st != NotContainer {
+		t.Fatalf("the use = %v", st)
+	}
+}
+
+// A use of a connection whose container's read stalled (the daemon did not
+// answer it for the stall window, in time keploy could run) neither waits
+// nor names it: it is withheld, the mock is stamped with no key, and each
+// use is told (OnUnread), naming the container, so its test is not judged.
+func TestKeyerTellsOfEachUseWhoseContainersReadStalled(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	r.mu.Lock()
+	r.stallClock = &stall.ManualClock{Step: stall.OnTime} // keploy runs all the while
+	r.mu.Unlock()
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	k := NewKeyer(r)
+	var mu sync.Mutex
+	var told []string
+	k.OnUnread(func(what string) {
+		mu.Lock()
+		defer mu.Unlock()
+		told = append(told, what)
+	})
+	_ = name(t, k, "c1", "172.17.0.7:5432")
+	if key, st := use(k, "c1"); st != Withheld || key != "" {
+		t.Fatalf("a use of the stalled container = %q, %v; want Withheld", key, st)
+	}
+	if got := stamped(k, "c1"); got != "" {
+		t.Fatalf("a mock of it was stamped %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 2 {
+		t.Fatalf("told %d uses, want 2: %q", len(told), told)
+	}
+	for _, w := range told {
+		if !strings.HasPrefix(w, "container ") || !strings.Contains(w, "postgres:16") {
+			t.Fatalf("told %q, want the container named", w)
+		}
+	}
+}
+
+// A probe that decides by a connection's key (the MySQL detection probe)
+// reads its key and then its legacy key (KeyFromContext, then
+// LegacyKeyFromContext): one use, told once, whose container's read stalled.
+func TestAProbeOfAContainerWhoseReadStalledIsToldOnce(t *testing.T) {
+	f := newFakeDocker()
+	r, _ := watching(t, f, "10.0.0.5")
+	r.mu.Lock()
+	r.stallClock = &stall.ManualClock{Step: stall.OnTime} // keploy runs all the while
+	r.mu.Unlock()
+	held := make(chan struct{})
+	defer close(held)
+	f.mu.Lock()
+	f.block["tc"] = held
+	f.mu.Unlock()
+	f.set("tc", running("postgres:16", "sha256:feed", []string{"172.17.0.7"}, nat.PortMap{}))
+	f.msgs <- start("tc")
+	<-f.entered
+	k := NewKeyer(r)
+	var told []string
+	k.OnUnread(func(what string) { told = append(told, what) })
+	_ = name(t, k, "c1", "172.17.0.7:5432")
+	ctx := WithConn(context.Background(), k, "c1")
+	if key, isContainer, keyed := KeyFromContext(ctx); key != "" || !isContainer || !keyed {
+		t.Fatalf("KeyFromContext = %q, %v, %v; want no key, of a container", key, isContainer, keyed)
+	}
+	if legacy := LegacyKeyFromContext(ctx); legacy != "" {
+		t.Fatalf("LegacyKeyFromContext = %q", legacy)
+	}
+	if len(told) != 1 {
+		t.Fatalf("told %d times for one probe, want 1: %q", len(told), told)
+	}
+}
+
+// A mock stamped after the scope its request was sent in ended, its
+// container's read stalled, is marked (UnreadKey) and told with that
+// scope's id, not the scope open at the stamp: a record charges its own
+// test with it. A mock of a container whose key is in is neither.
+func TestKeyerMarksAnUnreadMockForTheScopeItsRequestWasSentIn(t *testing.T) {
+	f := newFake()
+	k := NewKeyer(stalling{f})
+	var told []string
+	var scopes []uint64
+	k.OnUnreadMock(func(scope uint64, what string) {
+		scopes = append(scopes, scope)
+		told = append(told, what)
+	})
+	k.BeginTest()
+	first := k.Scope()
+	sent := time.Now()
+	_ = name(t, k, "c1", "127.0.0.1:40050") // the stalled container
+	_ = name(t, k, "c2", "127.0.0.1:40002") // pgA, its key in
+	k.EndTest()
+	k.BeginTest() // the next test is open as the stall resolves
+	m := &models.Mock{ConnectionID: "c1", Spec: models.MockSpec{ReqTimestampMock: sent}}
+	k.Stamp(m)
+	if m.Spec.Metadata[UnreadKey] != "container held (postgres:16)" || m.Spec.Metadata[MetadataKey] != "" {
+		t.Fatalf("stamped %v, want it marked unread, with no key", m.Spec.Metadata)
+	}
+	keyed := &models.Mock{ConnectionID: "c2", Spec: models.MockSpec{ReqTimestampMock: sent}}
+	k.Stamp(keyed)
+	if keyed.Spec.Metadata[UnreadKey] != "" {
+		t.Fatalf("a mock whose key is in was marked: %v", keyed.Spec.Metadata)
+	}
+	if len(scopes) != 1 || scopes[0] != first || told[0] != "container held (postgres:16)" {
+		t.Fatalf("told %v %q, want the first test's scope %d once", scopes, told, first)
+	}
+}
+
+// stalling is the fake index with the container at 127.0.0.1:40050 one
+// whose read stalled.
+type stalling struct{ *fakeIndex }
+
+func (s stalling) Lookup(dst netip.AddrPort) (Container, bool, error) {
+	if dst.String() == "127.0.0.1:40050" {
+		return Container{ID: "held", Image: "postgres:16", Port: 5432}, true, nil
+	}
+	return s.fakeIndex.Lookup(dst)
+}
+
+func (s stalling) FingerprintsOrStall(ctx context.Context, id string) (string, string, bool, string) {
+	if id == "held" {
+		return "", "", false, "held (postgres:16)"
+	}
+	fp, ok := s.fakeIndex.Fingerprint(ctx, id)
+	return fp, "", ok, ""
 }

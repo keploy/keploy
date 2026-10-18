@@ -190,3 +190,79 @@ func TestRecordedWindow(t *testing.T) {
 		t.Fatalf("nil test case: %+v", w)
 	}
 }
+
+// A call sent in the gap before a test and answered at or after its start (a
+// consumer's long poll) was in flight when that test began, and is its own,
+// first in its list; one sent and answered in the gap, one sent before the
+// first test, and one the in-flight rule does not apply to (a carry-over or
+// window-bound mock, a session mock: WindowedMock.InFlight) belong to no test.
+func TestDeriveWindowMappingsGivesAnInFlightGapCallToItsTest(t *testing.T) {
+	windows := []TestWindow{wmWindow("test-1", 1000, 1100), wmWindow("test-2", 2000, 2100)}
+	inFlight := WindowedMock{Name: "fetch-o2", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}
+	lateAnswer := WindowedMock{Name: "fetch-late", Kind: HTTP, At: wmAt(1600), Res: wmAt(2500), TestMock: true, InFlight: true}
+	atStart := WindowedMock{Name: "answered-at-start", Kind: HTTP, At: wmAt(1650), Res: wmAt(2000), TestMock: true, InFlight: true}
+	atGapStart := WindowedMock{Name: "sent-at-gap-start", Kind: HTTP, At: wmAt(1100), Res: wmAt(2050), TestMock: true, InFlight: true}
+	beforeStart := WindowedMock{Name: "answered-before-start", Kind: HTTP, At: wmAt(1660), Res: wmAt(1999), TestMock: true, InFlight: true}
+	bootInFlight := WindowedMock{Name: "boot-fetch", Kind: HTTP, At: wmAt(500), Res: wmAt(1050), TestMock: true, InFlight: true}
+	notEligible := WindowedMock{Name: "carry-or-failure", Kind: ConnectionFailure, At: wmAt(1550), Res: wmAt(2050), TestMock: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{
+		wmMock("own-1", 1050), atGapStart, inFlight, notEligible, lateAnswer, atStart, beforeStart,
+		wmMock("gap", 1700), bootInFlight, wmMock("own-2", 2010),
+	})
+	want := map[string][]string{
+		"test-1": {"own-1", "sent-at-gap-start"},
+		"test-2": {"fetch-o2", "fetch-late", "answered-at-start", "own-2"},
+	}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+}
+
+// Two tests that start at the same instant: which of them a call in flight
+// then belongs to cannot be told by the start the agent knows a window by, so
+// neither gets it (WindowSchedule.GapBefore), as the mock manager serves it to
+// neither.
+func TestDeriveWindowMappingsGivesAnInFlightCallToNeitherOfTwoTestsThatStartTogether(t *testing.T) {
+	windows := []TestWindow{wmWindow("a", 1000, 1100), wmWindow("b", 2000, 2100), wmWindow("c", 2000, 2200)}
+	inFlight := WindowedMock{Name: "fetch", Kind: HTTP, At: wmAt(1500), Res: wmAt(2050), TestMock: true, InFlight: true}
+	got := DeriveWindowMappings(windows, []WindowedMock{inFlight, wmMock("own-b", 2010)})
+	want := map[string][]string{"a": {}, "b": {"own-b"}, "c": {}}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	if from, ok := NewWindowSchedule(windows).GapBefore(wmAt(2000)); ok {
+		t.Fatalf("GapBefore(the shared start) = %v, true; want no gap", from)
+	}
+}
+
+// NewWindowedMock applies the in-flight rule to a per-test data mock only: not
+// to a connection failure, nor to a session mock, whether its lifetime was
+// derived already or is read from its recording.
+func TestNewWindowedMockSaysWhetherTheInFlightRuleApplies(t *testing.T) {
+	stated := func(kind Kind, lifetime string, derived bool) *Mock {
+		m := &Mock{Name: "m", Kind: kind, Spec: MockSpec{Metadata: map[string]string{MetadataLifetimeKey: lifetime, "type": "mocks"},
+			ReqTimestampMock: wmAt(1), ResTimestampMock: wmAt(2)}}
+		if derived {
+			m.DeriveLifetime()
+		}
+		return m
+	}
+	for _, c := range []struct {
+		m    *Mock
+		want bool
+	}{
+		{stated(HTTP, MetadataLifetimePerTest, false), true},
+		{stated(HTTP, MetadataLifetimePerTest, true), true},
+		{stated(HTTP, MetadataLifetimeSession, false), false},
+		{stated(HTTP, MetadataLifetimeSession, true), false},
+		{stated(ConnectionFailure, MetadataLifetimePerTest, false), false},
+	} {
+		derivedBefore := c.m.TestModeInfo.LifetimeDerived
+		if got := NewWindowedMock(c.m).InFlight; got != c.want {
+			t.Errorf("%s %v (derived %v): InFlight %v, want %v", c.m.Kind, c.m.Spec.Metadata, derivedBefore, got, c.want)
+		}
+		if c.m.TestModeInfo.LifetimeDerived != derivedBefore {
+			t.Errorf("NewWindowedMock derived the mock's own lifetime")
+		}
+	}
+}

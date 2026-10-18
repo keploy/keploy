@@ -319,6 +319,13 @@ type Owned struct {
 // conflates the two reads an unreportable agent as a replaced one.
 var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
 
+// ErrNoMappingStream is what GetMappings returns for an agent that predates
+// test-mock mappings (keploy #3715): it has no /mappings route, so there is no
+// mapping stream at all, and a recording goes on without one. It is not a
+// failure, and not a stream the agent ended: a recorder that takes it for
+// either says a loss that never happened.
+var ErrNoMappingStream = errors.New("this keploy agent has no mapping stream")
+
 // ErrScopeGateUnsupported is returned for an agent that cannot gate which
 // tests run (one that predates POST /agent/replay/gate).
 var ErrScopeGateUnsupported = errors.New("agent cannot gate which tests run")
@@ -439,6 +446,13 @@ type ExactServing struct {
 	// (its mapping). Without Stage, an empty Test serves the pool again.
 	Test  string   `json:"test,omitempty"`
 	Owned []string `json:"owned,omitempty"`
+	// Ahead is, on a call that serves the pool (no Test), the mocks of the
+	// next test case's mapping that were in flight when it began: recorded
+	// in the gap before its window, answered once it had begun
+	// (models.WindowSchedule.InFlightInto). They answer between test cases,
+	// each at most once, as that test case's own: one answered then counts
+	// as answered when it opens. An agent that predates it ignores it.
+	Ahead []string `json:"ahead,omitempty"`
 }
 
 // BeginsTestVariables reports whether, under the proven switch, the agent
@@ -469,6 +483,41 @@ const (
 // the header reads it as before. Only an agent with the proven switch on sends
 // it.
 const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
+
+// AgentInstanceHeader is the response header in which an agent names the
+// process that answers: an id the agent draws once, as its process starts.
+// What a test set is judged on (the calls no mock answered, what its tests
+// consumed, what keploy could not capture) is held in that process's memory,
+// and an agent started again in its place (kubelet restarting a crashed
+// sidecar, docker restarting a container) answers at the same address with
+// none of it. Two answers that name different processes say that happened
+// between them. Only an agent with the proven switch on sends it.
+const AgentInstanceHeader = "X-Keploy-Agent-Instance"
+
+// AgentReplacement is an agent process answering where another answered
+// before it: First, the process that answered first since a watch began
+// (AgentInstanceWatch), and Next, the first other one that answered after it.
+type AgentReplacement struct {
+	First string
+	Next  string
+}
+
+// AgentInstanceWatch watches which agent process answers a client's agent
+// address (AgentInstanceHeader): from when it begins, the first process to
+// answer is the one the watch keeps to, and any other that answers after it
+// replaced it.
+type AgentInstanceWatch interface {
+	// Replacement reports the first process that answered after the one the
+	// watch keeps to, and whether one did.
+	Replacement() (AgentReplacement, bool)
+	// Accept says the process that answers now was set up again in full
+	// before the application ran against it (the docker compose bring-up's
+	// retry): nothing the watch keeps to was on the process it replaced, and
+	// the watch keeps to this one from now on.
+	Accept()
+	// Stop ends the watch.
+	Stop()
+}
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
@@ -673,5 +722,38 @@ func WithDrainsAfterStop(ctx context.Context) context.Context {
 // DrainsAfterStop reports whether ctx was marked with WithDrainsAfterStop.
 func DrainsAfterStop(ctx context.Context) bool {
 	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
+	return v
+}
+
+// DrainsOnAgentStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it once the agent says a stop signal reached
+// it (StopNoticePath), and closes it then: something else stops this agent
+// (docker compose, with the app's project, also when the app exits on its
+// own), and the client is not told otherwise before the agent goes. A stop
+// signal the agent gets while such a stream has carried a frame, or the
+// agent holds one for it, waits for the stream to close, as for a
+// DrainsAfterStopHeader stream: the client, told, drains what the agent
+// captured before the stop. An agent with nothing to hand over does not wait.
+// `keploy record` sends it under docker compose, and watches StopNoticePath.
+const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
+
+// StopNoticePath is the agent route (GET) a recording's client of an agent
+// something else stops waits on (DrainsOnAgentStopHeader): it answers 204 once
+// a stop signal has reached the agent and the agent waits for the client to
+// drain its streams. 404 from an agent that predates it.
+const StopNoticePath = "/record/stopping"
+
+type agentStopNoticeKey struct{}
+
+// WithAgentStopNotice marks the agent frame streams opened on ctx as ones
+// their client drains when the agent says a stop reached it
+// (DrainsOnAgentStopHeader): the client watches StopNoticePath meanwhile.
+func WithAgentStopNotice(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentStopNoticeKey{}, true)
+}
+
+// AgentStopNotice reports whether ctx was marked with WithAgentStopNotice.
+func AgentStopNotice(ctx context.Context) bool {
+	v, _ := ctx.Value(agentStopNoticeKey{}).(bool)
 	return v
 }

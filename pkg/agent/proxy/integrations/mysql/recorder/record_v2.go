@@ -2316,12 +2316,40 @@ func nextPacket(ctx context.Context, logger *zap.Logger, sess *supervisor.Sessio
 	return readResponsePacket(ctx, logger, sess, seq, part)
 }
 
+// answeredWhenRead is when an exchange whose command's bytes were read at
+// reqTs was answered, its response's bytes read at resTs: no earlier than
+// reqTs. What orders a connection's two directions is the capture's
+// numbering (fakeconn.Chunk.ConnSeq), which the recorder reads a response
+// after its command by, never the chunks' times: a producer stamps each
+// direction as it reads it, and its stamps need not agree with that order, so
+// a response's chunk can carry a time before its command's. A mock stamped so
+// is answered before it was asked: a replay without
+// KEPLOY_PROVEN leaves it out, and the session says so as it records it. The
+// stamps follow the order the bytes were read in, as the end of an exchange
+// the command loop keeps (lastEnd) does. The handshake's mocks are stamped
+// from the server's stream alone, which has one order.
+func answeredWhenRead(reqTs, resTs time.Time) time.Time {
+	return later(reqTs, resTs)
+}
+
 // emitMockV2 builds a models.Mock matching the legacy recordMock shape
 // (metadata, kind, spec) and hands it to the supervisor Session via
 // EmitMock so the session's post-record hook chain and incomplete-mock
 // gate run consistently. Timestamps come from chunk ReadAt stamps; the
-// legacy path's time.Now() use is deliberately NOT replicated here.
+// legacy path's time.Now() use is deliberately NOT replicated here. They
+// follow the order the exchange's bytes were read in (answeredWhenRead).
 func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.Request, responses []mysql.Response, mockType, reqOp, respOp string, reqTs, resTs time.Time) {
+	if at := answeredWhenRead(reqTs, resTs); !at.Equal(resTs) {
+		// Said, so a stamping bug that inverts a mock stays findable: the
+		// session's warning of a mock answered before it was asked no longer
+		// fires for one this moves.
+		if sess.Logger != nil {
+			sess.Logger.Debug("V2: a response stamped before its command was read is stamped answered when the command was read",
+				zap.String("connID", sess.ClientConnID), zap.String("command", reqOp),
+				zap.Time("commandRead", reqTs), zap.Time("responseStamped", resTs))
+		}
+		resTs = at
+	}
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  reqOp,
@@ -2332,17 +2360,11 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 		meta["destAddr"] = sess.Opts.DstCfg.Addr
 	}
 
-	lifetime := models.LifetimePerTest
-	switch mockType {
-	case "config":
-		lifetime = models.LifetimeSession
-	case "connection":
-		lifetime = models.LifetimeConnection
-	default:
-		if models.IsMySQLSessionReusableCommandType(reqOp) {
-			lifetime = models.LifetimeSession
-		}
-	}
+	// The lifetime the mock is stated (statedLifetime), beside the type tag,
+	// and stamped in memory.
+	stated := statedLifetime(mockType, reqOp, requests)
+	meta[models.MetadataLifetimeKey] = stated
+	lifetime := lifetimeOf(stated, meta["connID"])
 	m := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,

@@ -339,8 +339,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "reason": models.ErrUnmatchedCallsUnread.Error() + ": keploy's error drain stopped before this read"},
-			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven"},
-			unwantLogs: []string{"writes what it served and missed as compose stops it"},
+			// --strict names why the read was incomplete, not a guess at it.
+			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven", "why:keploy's error drain stopped before this read"},
+			unwantLogs: []string{"writes what it served and missed as compose stops it", "check the agent logs for why it stopped"},
 		},
 		{
 			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
@@ -348,7 +349,7 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
-			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven", "why:the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -469,5 +470,53 @@ func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
 	defer instr.mu.Unlock()
 	if len(instr.stored) != 0 {
 		t.Errorf("the agent was sent %d connection failures; it is sent what is counted as loaded, none", len(instr.stored))
+	}
+}
+
+// Each miss is told with the next step its matcher gave it, which knows what
+// would fix it (a MySQL endpoint that moved names the port to list in
+// mysqlPorts, and re-recording would not help it); only a miss that carries
+// none is told to record the call. A connection whose client sent nothing is
+// said to have made no call.
+func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
+	const listPort = "if 172.17.0.1:3307 is MySQL, add 3307 to mysqlPorts in keploy.yml"
+	misses := []models.UnmatchedCall{
+		{Protocol: "MySQL", ActualSummary: "connection phase: server greeting", Destination: "172.17.0.1:3307",
+			MatchPhase: models.MatchPhaseNoRequest, NextSteps: listPort},
+		{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "dep:80", MatchPhase: models.MatchPhaseBody,
+			NextSteps: "Only values drifted (body.id)."},
+		{Protocol: "Generic", ActualSummary: "bytes", Destination: "dep:9000"},
+	}
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	instr.mockErrors = misses
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.Native, "pytest -q")).Replay(context.Background()); err != nil {
+		t.Fatalf("Replay returned an unexpected error: %v", err)
+	}
+	var told []map[string]any
+	var messages []string
+	for _, e := range logs.All() {
+		if f := e.ContextMap(); f["destination"] != nil && f["next_step"] != nil {
+			told = append(told, f)
+			messages = append(messages, e.Message)
+		}
+	}
+	if len(told) != len(misses) {
+		t.Fatalf("%d misses were told, want %d: %v", len(told), len(misses), messages)
+	}
+	for i, want := range []string{listPort, "Only values drifted (body.id).", "record this call with --on-miss record, or re-record the set"} {
+		if got := told[i]["next_step"]; got != want {
+			t.Errorf("miss %d (%v): next step %q, want %q", i, told[i]["destination"], got, want)
+		}
+	}
+	if !strings.Contains(messages[0], "nothing sent") || strings.Contains(messages[0], "outgoing call") {
+		t.Errorf("the connection that sent nothing is told as %q", messages[0])
+	}
+	if messages[1] != "no recorded mock matched an outgoing call" {
+		t.Errorf("a call that missed is told as %q", messages[1])
 	}
 }

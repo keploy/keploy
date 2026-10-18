@@ -65,6 +65,13 @@ const (
 	ScopeKey    = "containerScope"
 )
 
+// UnreadKey is the mock metadata field that says the mock's container could
+// not be named because the Docker daemon did not answer keploy's read of its
+// configuration (the container, named for a message): the mock's own test
+// is not judged, whenever the read stalled (a record charges it by the mock,
+// not by when the stall came).
+const UnreadKey = models.ContainerUnreadMetadata
+
 // prefix starts every key, and every `container:` entry of mock.real.
 const prefix = "container:"
 
@@ -81,6 +88,10 @@ type Container struct {
 	// Fingerprint names the container's own configuration (Fingerprint); ""
 	// until the index has read it.
 	Fingerprint string
+	// Legacy is its fingerprint of the legacy form (legacyFingerprint), which
+	// a replay of a recording made before secrets were left out compares
+	// with; never written.
+	Legacy string
 }
 
 // Key is a parsed container key.
@@ -108,6 +119,16 @@ func KeyOf(c Container) (Key, bool) {
 		return Key{}, false
 	}
 	return Key{Repo: Repository(c.Image), Port: c.Port, Fingerprint: c.Fingerprint}, true
+}
+
+// legacyKeyOf is c's key of the legacy form, as a recording made before
+// secrets were left out names it (legacyFingerprint); ok is false while its
+// configuration is unread.
+func legacyKeyOf(c Container) (Key, bool) {
+	if c.Legacy == "" {
+		return Key{}, false
+	}
+	return Key{Repo: Repository(c.Image), Port: c.Port, Fingerprint: c.Legacy}, true
 }
 
 // String is the key as recordings and matchers carry it.

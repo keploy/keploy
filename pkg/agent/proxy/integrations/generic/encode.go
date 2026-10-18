@@ -244,13 +244,44 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
 	reqTimestampMock := models.CapturedReqTime(ctx)
 	var resTimestampMock time.Time
+	// exchanges counts the connection's exchanges flushed so far
+	// (exchangeLifetime).
+	exchanges := 0
+	emit := func(m *models.Mock) {
+		if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
+			mgr.AddMock(m)
+		}
+	}
+	// hold is the connection's first exchange, and those after it, while the
+	// test that owns its request may own the whole connection (preambleHold).
+	// lastAt is the connection's latest chunk time.
+	var hold *preambleHold
+	var lastAt time.Time
+	// A parser that leaves holding (a panic the supervisor recovers) takes
+	// its hold off the stop's count: what it held is lost with it, and the
+	// stop is not to wait on it forever.
+	defer func() {
+		if hold != nil {
+			hold.handedOn()
+		}
+	}()
+	release := func(wholly bool) {
+		if hold == nil {
+			return
+		}
+		hold.handOn(wholly, emit)
+		hold = nil
+	}
 
 	flushMock := func() {
 		if len(genericRequests) == 0 || len(genericResponses) == 0 {
 			return
 		}
+		n := exchanges
+		exchanges++
 		metadata := make(map[string]string)
 		metadata["type"] = "config"
+		metadata[models.MetadataLifetimeKey] = exchangeLifetime(n)
 		if connID, ok := ctx.Value(models.ClientConnectionIDKey).(string); ok {
 			metadata["connID"] = connID
 		}
@@ -277,17 +308,58 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				LifetimeDerived: true,
 			},
 		}
-		if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
-			mgr.AddMock(mock)
+		switch {
+		case hold != nil:
+			hold.add(mock)
+			if hold.outlived() {
+				release(false)
+			}
+		case n == 0:
+			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt); hold == nil {
+				emit(mock)
+			} else if hold.outlived() {
+				release(false)
+			}
+		default:
+			emit(mock)
 		}
 		genericRequests = nil
 		genericResponses = nil
 	}
 
+	// saw records a chunk at at, and releases a held first exchange once the
+	// connection has outlived the test that owns it.
+	saw := func(at time.Time) {
+		if at.After(lastAt) {
+			lastAt = at
+		}
+		if hold != nil {
+			hold.saw(at)
+			if hold.outlived() {
+				release(false)
+			}
+		}
+	}
+
 	for clientCh != nil || destCh != nil {
+		var changes, stopping <-chan struct{}
+		if hold != nil {
+			changes, stopping = hold.changes(), hold.stopping
+		}
 		select {
+		case <-changes:
+			hold.refresh()
+			if hold.outlived() {
+				release(false)
+			}
+		case <-stopping:
+			// The recording's stop has begun: decided with what is known.
+			release(hold.wholly())
 		case <-ctx.Done():
 			flushMock()
+			if hold != nil {
+				release(hold.wholly())
+			}
 			return
 		case buf, ok := <-clientCh:
 			if !ok {
@@ -313,6 +385,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 			}
 			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
 			prevChunkWasReq = true
+			saw(models.CapturedReqTime(ctx))
 
 		case buf, ok := <-destCh:
 			if !ok {
@@ -321,6 +394,7 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 			}
 			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
 			resTimestampMock = models.CapturedRespTime(ctx)
+			saw(resTimestampMock)
 
 			// Flush the moment the first response chunk for an
 			// outstanding request arrives. This makes the mock visible
@@ -338,6 +412,12 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 		}
 	}
 	flushMock()
+	// The connection has ended: its held first exchange is the test's when
+	// its whole lay inside it, known once the test's answer is.
+	if hold != nil {
+		hold.settle(ctx)
+		release(hold.wholly())
+	}
 }
 
 func encodePayload(buf []byte, origin models.OriginType) models.Payload {

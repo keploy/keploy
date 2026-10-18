@@ -226,6 +226,9 @@ func (p *Proxy) recordViaSupervisor(
 	relayCfg := relay.Config{
 		Logger:        logger,
 		OnCaptureLoss: p.losses.Add,
+		// A client-side upgrade's failed handshake is charged as any
+		// client-side handshake with the proxy, not as starttls_failed.
+		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
 		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
 		// captured once per connection: the relay calls the returned fn with
 		// no options in hand. With the flag unset this is the historic
@@ -324,7 +327,9 @@ func (p *Proxy) recordViaSupervisor(
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
 	// FakeConns so the parser's reads unblock on abort.
 	relayDone := make(chan error, 1)
-	relayCtx, relayCancel := context.WithCancel(ctx)
+	// A client-side TLS upgrade the relay makes is charged as every
+	// client-side handshake is (clientTLS), to this connection's destination.
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn)))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 

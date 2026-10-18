@@ -146,9 +146,9 @@ const vetoTemplateFailure = "the test case failed on a template variable's place
 // variable's place (failed): FAILED, and its set fails, whatever its mock set
 // did. A diverged mock set demotes any other failure to OBSOLETE unless
 // --strict-failure is set or --assert-dependencies finds a dependency of the
-// test case missing (resolveTestOutcome), and an OBSOLETE test case leaves
-// its set passing;
-// a template failure is never hidden that way. The log line then names why
+// test case missing (resolveTestOutcome), and an OBSOLETE test case is not
+// judged (FailureInfo.MappingStale); a template failure is never hidden that
+// way. The log line then names why
 // it stays FAILED, as it names a veto flag.
 func keepTemplateFailure(o testOutcome, failed bool) testOutcome {
 	if !failed || o.Status != models.TestStatusObsolete {
@@ -311,7 +311,7 @@ func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.Chec
 		literal := "write " + p.Placeholder.Key + "'s recorded value in place of the placeholder (as the test case was recorded)"
 		var why string
 		switch entry := r.noiseCovering(p, tc, global); {
-		case r.config.Test.SchemaMatch:
+		case r.schemaMatch():
 			why = "this use is inside an array and test.ignoreOrdering is on, and --schema-match compares no value, so " + untied + "; run this set without --schema-match, turn ignoreOrdering off for it, or " + literal
 		case entry != "":
 			why = "this use is inside an array and test.ignoreOrdering is on, and the noise entry " + entry + " covers its place, so " + untied + "; remove that noise entry (the variable is asserted anyway), turn ignoreOrdering off for this set, or " + literal
@@ -657,7 +657,9 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		Tests:         results,
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
+		Proven:        provenswitch.On(),
 	}
+	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
 		return true, err

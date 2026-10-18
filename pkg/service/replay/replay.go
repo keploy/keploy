@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -203,6 +204,15 @@ type runShape struct {
 	// its recordings list that its run never reached, or that never
 	// answered. Empty otherwise.
 	realWhy string
+	// unclaimedWhy is why the calls the application made after the set's
+	// last test that no mock answered fail it (unclaimedCalls). Empty
+	// otherwise.
+	unclaimedWhy string
+	// staleWhy names the tests of a set with a verdict of its own (FAILED,
+	// a partial run's APP_FAULT) that are not judged for a stale mapping
+	// (FailureInfo.MappingStale). Empty otherwise: a set not judged says it
+	// in notJudged.
+	staleWhy string
 }
 
 const partialRunReason = "replay stopped before every test ran - the tests missing from the totals were not " +
@@ -219,6 +229,19 @@ func withUnverifiedNote(base string, shape runShape) string {
 }
 
 func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
+	reason := describeTestSetVerdict(status, testCaseResults, shape)
+	switch {
+	case shape.staleWhy == "":
+		return reason
+	case reason == "":
+		return shape.staleWhy
+	}
+	return reason + "; " + shape.staleWhy
+}
+
+// describeTestSetVerdict is describeTestSetFailure less the tests a set with a
+// verdict of its own does not judge for a stale mapping (runShape.staleWhy).
+func describeTestSetVerdict(status models.TestSetStatus, testCaseResults []models.TestResult, shape runShape) string {
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 		// A run that stopped part-way gets its own wording, but ONLY when this
@@ -249,7 +272,10 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 		if shape.stoppedEarly {
 			return partialRunReason
 		}
-		return shape.realWhy
+		if shape.realWhy != "" && shape.unclaimedWhy != "" {
+			return shape.realWhy + "; " + shape.unclaimedWhy
+		}
+		return shape.realWhy + shape.unclaimedWhy
 	case models.TestSetStatusInternalErr:
 		if shape.notJudged != "" {
 			return withUnverifiedNote(shape.notJudged, shape)
@@ -362,6 +388,10 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 		}
 		r.realPushed.Store(true)
 	}
+	// A set boundary, unlike the repair's re-registration: what the agent
+	// recorded consumed and nobody drained is the previous set's, which the
+	// set's staging drops (models.OutgoingOptions.StartsTestSet).
+	opts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
 	}
@@ -410,6 +440,9 @@ type Replayer struct {
 	// (markNotJudged): INTERNAL_ERR that does not end the round.
 	notJudgedMu   sync.Mutex
 	notJudgedSets map[string]bool
+	// neverReadySets are those of them not judged because their application
+	// never got ready (proven switch): they ran no test, and have no results.
+	neverReadySets map[string]bool
 
 	logger          *zap.Logger
 	testDB          TestDB
@@ -426,6 +459,15 @@ type Replayer struct {
 	realPushed     atomic.Bool
 	isLastTestSet  bool
 	isLastTestCase bool
+	// finalAttempt: the set's attempt now running is the last one the run
+	// can give it (MaxFlakyChecks); no attempt of it comes after.
+	finalAttempt bool
+	// keepAliveStop, under the proven switch, stops the application
+	// --keep-app-alive started once for the run (natively, or with docker
+	// run), waits for it, and says why it had to kill it, "" when it did not
+	// (P101-c). The last set's final attempt calls it before its end's read.
+	// nil otherwise.
+	keepAliveStop func() string
 
 	// exact is the set being replayed's exact serving, under the proven
 	// switch (exact.go); nil otherwise.
@@ -433,6 +475,19 @@ type Replayer struct {
 	// ignoredSaid holds the settings said ignored under the switch
 	// (noteIgnored), each once per run.
 	ignoredSaid sync.Map
+
+	// readySince is the agent's count of listens read before this set's
+	// application was started anew (markReadiness), under the proven switch;
+	// nil when none was read, readySinceErr when it could not be.
+	readySince    *readyMark
+	readySinceErr string
+	// readyStalledAt is where the last set's wait called the application
+	// stalled; nil once it got ready.
+	readyStalledAt *progressMark
+	// badHealthURLSaid says an invalid --health-url once a run.
+	badHealthURLSaid sync.Once
+	// readyTally is provenReadiness.tally for the sets' waits: tests only.
+	readyTally *readTally
 
 	// isFirstTestSet mirrors isLastTestSet — true while the test-set
 	// about to run is the first one of the current replay run. Read
@@ -509,6 +564,19 @@ type Replayer struct {
 	lossMarked   bool
 	lossLast     models.CaptureLosses
 	lossLastRead bool
+	// lossRunBase is the run's first capture-loss mark, from which what
+	// keploy cannot capture at all is counted for the whole run (decision
+	// 20: a Unix-socket connection outlives the test set it was opened in).
+	lossRunBase    models.CaptureLosses
+	lossRunBaseSet bool
+	// setEnd is how the final report of the test set RunTestSet is running
+	// ends it, once it has one (noteSetEnd): the status it says, and why
+	// (tellSetEnd). Reset before each run of a set.
+	setEnd *models.SetEnd
+	// setCalls are the calls of the set RunTestSet is running that no mock
+	// answered and that are the set's, no test's (proven switch): those made
+	// before its first test (before_set_calls.go).
+	setCalls setCalls
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -695,8 +763,6 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.logger.Info("Test Sets to be Replayed", zap.Strings("testSets", testSetIDs))
-
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
@@ -707,6 +773,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		stopReason = "no test sets found"
 		return fmt.Errorf("%s", errMsg)
 	}
+
+	// The test sets this run replays, refused before anything starts when
+	// one it is asked for is not recorded.
+	selectedSets, err := r.selectTestSets(testSetIDs)
+	if err != nil {
+		stopReason = "a selected test set is not recorded"
+		return err
+	}
+	r.logger.Info("Test Sets to be Replayed", zap.Strings("testSets", selectedSets))
 
 	// The base path is read once, here, before any test is sent anywhere: one
 	// keploy cannot read is put in no test's URL, and leaves every test going
@@ -823,6 +898,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// are counted from here. A compose agent comes up with its project, in
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
+	r.lossRunBase, r.lossRunBaseSet = nil, false
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
 	}
@@ -871,10 +947,19 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// code is carried by utils.ErrCode rather than by Start's return value.
 	var keepAliveAppErr atomic.Pointer[models.AppError]
 
+	// This run's last set, and its final attempt, are this run's alone.
+	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
 	if effectiveKeepAlive {
+		// Under the proven switch the app runs under a context of its own,
+		// so the last set's end can stop it, and wait for it, before its
+		// read (P101-c), as a set stops the app it started (P101-b).
+		kaCtx, stopKeepAlive, keepAliveRan := keepAliveStopper(ctx, cmdType)
+		r.keepAliveStop = stopKeepAlive
 		g.Go(func() error {
+			var appErr models.AppError
+			defer func() { keepAliveRan(appErr) }()
 			defer utils.Recover(r.logger)
-			appErr := r.RunApplication(ctx, models.RunOptions{
+			appErr = r.RunApplication(kaCtx, models.RunOptions{
 				AppCommand: r.config.Command,
 			})
 			// Two outcomes that are NOT failures from the replay's
@@ -918,19 +1003,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	var testSets []string
 	runDomainSet := telemetry.NewDomainSet()
 	r.runDomainSet = runDomainSet
-	for _, testSetID := range testSetIDs {
-		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
-			continue
-		}
-		testSets = append(testSets, testSetID)
-	}
-	if len(testSets) == 0 {
-		testSets = testSetIDs
-	}
-
-	// Sort the testsets.
-	natsort.Sort(testSets)
-	testSets = r.applyTestSetOrder(testSets)
+	testSets = selectedSets
 	// cmdType is hoisted above the one-shot RunApplication block; the
 	// original assignment that lived here is removed to keep a single
 	// canonical declaration.
@@ -1029,7 +1102,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
+			r.setEnd = nil
+			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
+			r.tellSetEnd(testSet, testSetStatus, err)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					return err
@@ -1096,11 +1172,18 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				if abortTestRun {
 					break
 				}
+			} else if provenswitch.On() {
+				// An IGNORED set has nothing a flaky check could find, and a
+				// set IGNORED under the switch ran its app to find none of its
+				// tests had a verdict: another attempt only runs it again.
+				// (Without the switch an IGNORED set is one the run skips
+				// whole, which starts nothing.)
+				break
 			}
 
 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
 			if err != nil {
-				if testSetStatus != models.TestSetStatusNoTestsToRun {
+				if r.saysResultsUnread(testSetStatus, testSet) {
 					utils.LogError(r.logger, err, "failed to get testcase results")
 				}
 				break
@@ -1207,6 +1290,23 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 	}
+	// A run none of whose tests got a verdict (every test set, or every test,
+	// ignored or quarantined) verified nothing, so it does not pass, as a run
+	// with no tests to run does not. With the switch on or off: its exit code
+	// was 0. A run that failed already says why.
+	r.completeTestReportMu.RLock()
+	judged := r.totalTestPassed + r.totalTestFailed + r.totalTestObsolete
+	r.completeTestReportMu.RUnlock()
+	// verifiedNothing: the run fails for this alone, so no mock difference
+	// failed it, and its mismatch table (the misses of tests that got no
+	// verdict) is not shown as if one had.
+	verifiedNothing := false
+	if testRunResult && judged == 0 {
+		testRunResult, verifiedNothing = false, true
+		r.logger.Error("no test ran or got a verdict: every test set, or every test, of this run was ignored, so it verified nothing; the run fails",
+			zap.Strings("test_sets", testSets),
+			zap.String("next_step", "take a test set or test out of test.ignoredTests (or out of quarantine), or run only the test sets that should run with --test-sets"))
+	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -1252,18 +1352,21 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// response by design (the app keeps working), so on a fully passing
 		// run they are routine, not actionable — without this filter every
 		// healthy run with app-startup DNS chatter would print the table.
+		// So are connections that sent nothing (models.MatchPhaseNoRequest):
+		// no call was made, and the warning names their port once per
+		// endpoint; a health check would otherwise add a row per connection.
 		mismatchRows := r.mockMismatchFailures.GetFailures()
 		if testRunResult {
 			actionable := make([]TestFailure, 0, len(mismatchRows))
 			for _, f := range mismatchRows {
-				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.Protocol == "DNS" {
+				if f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && !f.MismatchReport.CountsAgainstTest() {
 					continue
 				}
 				actionable = append(actionable, f)
 			}
 			mismatchRows = actionable
 		}
-		if len(mismatchRows) > 0 && !r.config.DisableMapping {
+		if len(mismatchRows) > 0 && !r.config.DisableMapping && !verifiedNothing {
 			failuresByTestSet := make(map[string]bool)
 			for _, failure := range mismatchRows {
 				failuresByTestSet[failure.TestSetID] = true
@@ -1305,7 +1408,17 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 
 		//executing afterTestRun hook, executed after running all the test-sets
 		if !r.afterTestRunCalled {
-			err = r.hookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+			// Under docker compose without a kept stack, the agent is part
+			// of each set's stack and goes down with it, so the last set
+			// listed calls this hook while its agent is up (RunTestSet).
+			// One that ran nothing (ignored, empty, or ended early) leaves
+			// no agent to answer here: the run's hooks still run, all but
+			// the agent's (withoutAgent).
+			hookCtx := ctx
+			if cmdType == utils.DockerCompose && r.instrument && !effectiveKeepAlive {
+				hookCtx = withoutAgent(ctx)
+			}
+			err = r.hookImpl.AfterTestRun(hookCtx, testRunID, testSets, coverageData)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to execute after test run hook")
 			}
@@ -1410,14 +1523,8 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose}
 	// Retry only a stalled agent bring-up (pkg.ErrAgentNotReady) with a fresh
 	// agent; a healthy agent is set up once and the test set runs against it.
-	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, attempt int) error {
-		o := setupOpts
-		if attempt > 1 {
-			// The first attempt keeps the full slow-start budget; a retry's fresh
-			// agent is ready in a second or two, so cut a wedged retry short.
-			o.AgentReadyTimeout = 120 * time.Second
-		}
-		return r.instrumentation.Setup(c, r.config.Command, o)
+	err := pkg.RetryAgentSetup(ctx, r.logger, func(c context.Context, _ int) error {
+		return r.instrumentation.Setup(c, r.config.Command, setupOpts)
 	})
 	if err != nil {
 		stopReason := "failed setting up the environment"
@@ -1533,6 +1640,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
 
+	// Under the proven switch the set is judged only if one agent process
+	// answered for all of it (watchAgent): the watch begins before anything
+	// of the set is staged on the agent, and is read after the set's last
+	// read of it.
+	agentWatch := r.watchAgent()
+	if agentWatch != nil {
+		defer agentWatch.Stop()
+	}
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -1540,6 +1656,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	startTime := time.Now()
 	pruneBefore := startTime.UTC()
+	// notReady is why the set's application never got ready, under the
+	// proven switch (readiness_proven.go): the set runs no test and is not
+	// judged.
+	notReady := ""
 
 	// exitLoopChan is never closed. The test loops below are its only readers,
 	// and they have finished by the time the deferred drain runs; its writers
@@ -1594,7 +1714,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored:   0,
 			TimeTaken: time.Since(startTime).String(),
 			CmdUsed:   r.config.Test.CmdUsed,
+			Proven:    provenswitch.On(),
 		}
+		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
@@ -1613,6 +1735,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored:   len(testCases),
 			TimeTaken: timeTaken.String(),
 			CmdUsed:   r.config.Test.CmdUsed,
+			Proven:    provenswitch.On(),
 		}
 		// Under the proven switch the report names each skipped test, with its
 		// reason, instead of counting them.
@@ -1628,6 +1751,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testReport.Ignored = len(rows)
 		}
 
+		r.noteSetEnd(testReport)
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
@@ -1732,6 +1856,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer testSetStatusByErrChanMu.RUnlock()
 		return lastAppErr
 	}
+	// stopAppBeforeSetEnd, under the proven switch, stops the application
+	// keploy started for this set as the set's teardown does (an interrupt,
+	// the runner's grace, then a kill) and waits for it to exit (P101-b). It
+	// returns why the runner had to kill it (pkg/client/app setend_stop.go),
+	// "" when it did not. nil when keploy started none here: a reused stack
+	// (serveTest), a base path, docker compose.
+	var stopAppBeforeSetEnd func() string
+	// appStopKilled is that why, as the app's run returned it; read once the
+	// run has returned.
+	var appStopKilled string
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -1804,10 +1938,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// whose test windows say what each test case owns once its mocks are
 		// read (windowOwnership).
 		var fromWindows bool
+		// windowsWhy: why the test windows say what each test case owns.
+		var windowsWhy string
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
-			if expectedTestMockMappings, err = r.provenMappings(ctx, testSetID); err != nil {
+			if expectedTestMockMappings, windowsWhy, err = r.provenMappings(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
 			useMappingBased = true
@@ -1858,12 +1994,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil, nil, err
 		}
 		if fromWindows {
-			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, filtered, unfiltered)
+			expectedTestMockMappings = r.windowOwnership(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
 		mockLookup = lookup
 		addKinds(filtered)
 		addKinds(unfiltered)
-		addSkippedKinds(skipped)
+		addSkippedKinds(skipped.kinds)
 		if filtered == nil && unfiltered == nil {
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
@@ -1896,6 +2032,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		perTestRegion = pkg.PerTestRegion(filtered)
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, filtered, unfiltered)
+			r.exact.noteAhead(expectedTestMockMappings, testCases)
 			r.noteOwnsNothing(testSetID)
 		}
 		return filtered, unfiltered, nil
@@ -2004,11 +2141,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		}
@@ -2030,7 +2170,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2073,10 +2213,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// one-shot spawn was suppressed (cmdType == Empty / instrument
 		// off), serveTest will be false here and the readiness wait
 		// runs every test-set, matching the historical lifecycle.
-		if serveTest && !r.isFirstTestSet {
+		// Under the proven switch every set waits for its application's
+		// readiness: a warm one is ready at the first read, and one that
+		// never got ready for the first set is not fired at for the next.
+		if !waitsForApp(serveTest, r.isFirstTestSet) {
 			r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-		} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
+		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
 			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
 		}
 
 		// The compose bring-up retry (pkg/client/app) can leave keploy's agent
@@ -2089,7 +2234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases); err != nil {
+			totalConsumedMocks, useMappingBased, testCases, agentWatch); err != nil {
 			return models.TestSetStatusFailed, err
 		}
 	}
@@ -2135,11 +2280,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			DisableAutoHeaderNoise:    r.config.Test.DisableAutoHeaderNoise,
 			MockNoiseDetection:        r.config.Test.NoiseDetection(),
 			MockNoiseStrict:           r.config.Test.NoiseStrict(),
+			Learn:                     r.learning(),
+			LearnPool:                 r.learningPool(),
 			DisableStatefulMocks:      r.statefulMocksDisabled(),
 			DisableMockCorrelation:    r.config.Test.DisableMockCorrelation,
 			MysqlPorts:                r.config.MysqlPorts,
 			DisableMysqlAutoDetect:    r.config.DisableMysqlAutoDetect,
 			DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
+			DisablePgTimeSliceCohort:  r.config.DisablePgTimeSliceCohort,
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		})
@@ -2151,18 +2299,50 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShapeOf(testCases))
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases))
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
 
 		if r.instrument {
 			if !serveTest {
+				// Under the proven switch the app runs under a context of its
+				// own, so the set's end can stop it, and wait for it, before
+				// it reads what the app did after its last test (P101-b). A
+				// stop of it is the app's run ending (ErrCtxCanceled), never a
+				// halt or an abort of the set.
+				//
+				// The stop's cause (models.ErrAppStoppedForSetEnd) has the app's
+				// runner say, in the run's StopKilled, whether its stop had to
+				// kill the app.
+				appCtx := runTestSetCtx
+				var appExited chan struct{}
+				if provenswitch.On() {
+					var stopApp context.CancelCauseFunc
+					appCtx, stopApp = context.WithCancelCause(runTestSetCtx)
+					appExited = make(chan struct{})
+					stopAppBeforeSetEnd = func() string {
+						stopApp(models.ErrAppStoppedForSetEnd)
+						select {
+						case <-appExited:
+							return appStopKilled
+						case <-runTestSetCtx.Done():
+							return ""
+						}
+					}
+				}
+				// Under the proven switch: the listens the agent saw before
+				// this set's application starts are not this one's.
+				r.markReadiness(runTestSetCtx)
 				runTestSetErrGrp.Go(func() error {
+					if appExited != nil {
+						defer close(appExited)
+					}
 					defer utils.Recover(r.logger)
-					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
+					appErr = r.RunApplication(appCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
+					appStopKilled = appErr.StopKilled
 					if appErr != (models.AppError{}) {
 						setLastAppErr(appErr)
 					}
@@ -2208,12 +2388,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// effectiveKeepAlive predicate) — identical to the compose
 			// branch above — so the readiness skip arms only when the
 			// one-shot spawn actually fired.
-			if serveTest && !r.isFirstTestSet {
+			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
-			} else if !waitForAppReady(runTestSetCtx, r.logger, r.config, resolveTestSetProbeTarget(runTestSetCtx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation))) {
+			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
 				return models.TestSetStatusUserAbort, context.Canceled
+			} else if !ready {
+				notReady = why
 			}
 
+		} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, false, false); !ready && why == "" {
+			// An application keploy did not start (no command): under the
+			// proven switch the first test's address must take a connect.
+			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
+		}
+	}
+	// A base path replays against an application already running: under the
+	// proven switch, the first test's address must take a connect first.
+	if r.noAgent {
+		if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, false, false); !ready && why == "" {
+			return models.TestSetStatusUserAbort, context.Canceled
+		} else if !ready {
+			notReady = why
 		}
 	}
 
@@ -2238,6 +2435,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Status:    string(models.TestStatusRunning),
 		TimeTaken: time.Since(startTime).String(),
 		CmdUsed:   r.config.Test.CmdUsed,
+		Proven:    provenswitch.On(),
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -2248,6 +2446,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// var to exit the loop
 	var exitLoop bool
+	// An application that never got ready runs no test (proven switch): the
+	// set is not judged, below.
+	if notReady != "" {
+		exitLoop = true
+		testSetStatus = models.TestSetStatusInternalErr
+	}
 	// endedPartWay reports whether the context of a run with no agent has
 	// ended before its tests did, and the status the set ends with if so:
 	// USER_ABORT when its user stopped it, INTERNAL_ERR for anything else (a
@@ -2270,6 +2474,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// window: every later test's window carries in the misses made since the
 	// previous one closed (openTestErrorCapture).
 	var captureOpened bool
+	// What the previous set's application missed before its first test is
+	// not this set's.
+	r.setCalls.reset()
 	// var to store the error in the loop
 	var loopErr error
 	// Add secret files to .gitignore if they exist
@@ -2336,7 +2543,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// never-rewound consumedPersistent, which the CLI does not touch, so the
 	// gate-consumption bug is not yet fixed there (that path is OFF by default;
 	// closing it needs an agent-side "un-flag consumed" primitive).
-	startupConsumed, rearmedConsumed := partitionInitialConsumed(consumedMocks)
+	// A carry-over mock consumed before the first test (the agent flags it
+	// CarryOver: a registered kind's, or a StagingRelease need's, such as a
+	// message the app received as it started, or a publish it made then) is
+	// consumed once. It is not re-armed below as a readiness gate's consume
+	// is, which would serve it again in every test: it is kept, and recorded
+	// in the startup section, whatever window its recorded time is released
+	// in. The app consumed it before any test; a mapping-mode replay names
+	// the startup section in every test's call (MergeStartupMockNames), and
+	// a fetch of the mapped mocks brings the agent only what a section
+	// lists. (The set's staging reaches it by its recorded time.)
+	carried, initialConsumed := splitCarriedConsumed(consumedMocks)
+	startupConsumed, rearmedConsumed := partitionInitialConsumed(initialConsumed)
+	startupConsumed = append(startupConsumed, carried...)
 	for _, m := range startupConsumed {
 		totalConsumedMocks[m.Name] = m
 		passingTotalConsumedMocks[m.Name] = m
@@ -2371,9 +2590,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// That absence is invisible on the timestamp path, which reloads them via
 	// disk.LoadBefore(firstWindowStart), but fatal on the mapping path, which
 	// loads strictly by name. Writing them here is what lets the reader hand
-	// them back for every test. Only the reusable tier is written — a per-test
-	// mock re-armed above belongs to its own test's section, not to startup.
-	setStartupMocks(actualTestMockMappings, startupConsumed)
+	// them back for every test. The reusable tier is written, the carry-over
+	// mocks consumed as the app started, and the re-armed per-test mocks
+	// requested before the first test (a boot consumer's fetches: the app's
+	// startup traffic, whatever their lifetime; bootBandOf), wherever their
+	// answer came at record: a replay serves such a fetch as the app starts,
+	// as this one was.
+	// A per-test mock re-armed above that was recorded in a test's window (a
+	// readiness gate's) belongs to its own test's section, not to startup.
+	setupBoot := bootBandOf(rearmedConsumed, models.NewWindowSchedule(recordedTestWindows(testCases)), firstRecordedTestStart(testCases), "")
+	setStartupMocks(actualTestMockMappings, append(append([]models.MockState(nil), startupConsumed...), setupBoot...))
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -2422,9 +2648,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// variablesUnjudged names the tests whose captures could not be checked
 	// against what their dependency calls carried (proven switch): a
 	// keploy-side fault, so the set is not judged (testVariables);
-	// variablesWhy is the first reason.
+	// variablesWhy is each one's reason. Both are scoped to a test's last
+	// run, as consumedUnread is.
 	var variablesUnjudged []string
-	variablesWhy := ""
+	variablesWhy := map[string]string{}
 	variablesWarned := false
 	// consumptionUnread names every test, in any cycle and with the switch on or
 	// off, for which a read of what it consumed failed: what it consumed is not
@@ -2455,8 +2682,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// A run that started no application (an agent already up, no -c) has
 	// not marked the capture losses its tests count from: its first test set
-	// marks them here, before its first test (proven switch).
+	// marks them here, before its first test (proven switch). Its application
+	// is up already, and may have opened a Unix-socket connection that every
+	// test rides on (decision 20): what keploy cannot capture at all is
+	// counted from the hooks' load, as the agent counts it, not from here.
 	if provenswitch.On() && !r.lossMarked {
+		if !r.lossRunBaseSet {
+			r.lossRunBase, r.lossRunBaseSet = nil, true
+		}
 		r.markCaptureLosses(runTestSetCtx)
 	}
 
@@ -2508,6 +2741,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// push, a carry-over publish) are kept and mapped by their own window, not
 	// by the running test; see carryOverAttribution.
 	carryAttr := newCarryOverAttribution(testCases)
+	carryAttr.bootListed = len(setupBoot) > 0
 	// stoppedEarly records that a cycle exited before every test it intended to
 	// run had produced a verdict. The counters cannot express this on their own:
 	// `success` is ASSIGNED per cycle while `failure`/`obsolete` accumulate, and
@@ -2523,6 +2757,36 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if pkg.IsAppNoAnswer(err) {
 			noAnswerTests = append(noAnswerTests, name)
 		}
+	}
+	// drainBeforeFiling reads, under the proven switch, what a test that
+	// ends early (no answer, or one judged on its start) consumed, before its
+	// row is filed: its calls are its own, not the next test's, whose drain
+	// would read them otherwise. Without the switch an early row files as it
+	// always did.
+	//
+	// answeredInGap and gapReadErr are what the gap before it answered of its
+	// calls in flight, read as it opened under exact serving
+	// (drainAnsweredInGap), and that read's failure: they are its own too.
+	drainBeforeFiling := func(ctx context.Context, name string, answeredInGap []models.MockState, gapReadErr error) {
+		if !provenswitch.On() || !r.instrument {
+			return
+		}
+		early, err := r.hookImpl.GetConsumedMocks(ctx)
+		if err == nil {
+			err = gapReadErr
+		}
+		if err != nil {
+			for _, m := range answeredInGap {
+				totalConsumedMocks[m.Name] = m
+			}
+			consumptionUnread = appendOnce(consumptionUnread, name)
+			return
+		}
+		early = append(answeredInGap, early...)
+		for _, m := range early {
+			totalConsumedMocks[m.Name] = m
+		}
+		noteConsumers(consumers, name, early)
 	}
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
@@ -2617,6 +2881,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
+			// Exact serving: this test case opens next, unless it is refused
+			// below. When the pool call before it did not name its calls in
+			// flight (a retry cycle's first test case, or the one it named did
+			// not open), they are named now, before its hooks run, and the pool
+			// answers them until it opens (serveExactAhead).
+			if len(refusedTests[testCase.Name]) == 0 {
+				r.serveExactAhead(runTestSetCtx, r.exact, testCase.Name)
+			}
+
 			// Run pre-test mutation hook once per test case (not on retries) to
 			// avoid compounding side effects from in-place mutations.
 			if replay == 0 {
@@ -2693,6 +2966,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				break
 			}
+			// Exact serving: what the gap answered of this test case's calls in
+			// flight was flagged consumed as it opened. It is read now, before
+			// its request is sent, so that a drain after the request (the
+			// transport-reset re-send gate, retryResetOnce) holds the request's
+			// consumption alone; it is the test case's, read with the rest.
+			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, testCase.Name)
 
 			// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
@@ -2740,13 +3019,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			// A gRPC stream the app kept open on keepalives
+			// (pkg.ErrStreamHeldOpen): past its recording, every recorded
+			// message having come, or short of it (pkg.ErrStreamStalled,
+			// whose rest SimulateGRPC took from the recording). What came is
+			// compared, with the recorded trailers the app never sent, and
+			// the test has no verdict (FailureInfo.StreamHeldOpen, row W1).
+			var heldOpen string
+			if loopErr != nil && errors.Is(loopErr, pkg.ErrStreamHeldOpen) {
+				if g, ok := resp.(*models.GrpcResp); ok && g != nil {
+					g.Trailers = sent.GrpcResp.Trailers
+					heldOpen, loopErr = loopErr.Error(), nil
+				}
+			}
+
 			// The test case has its answer, or none: it ends here. Under exact
 			// serving the agent serves the pool from now, so what is read next
 			// is final, and a call the application makes from here, a late
 			// asynchronous call of this test case's included, is the pool's.
 			// (Waiting for the test case's calls still in flight comes with
 			// the end count, stacked on the proxy's connection counter.)
-			exactEndErr := r.serveExactPool(runTestSetCtx, r.exact)
+			exactEndErr := r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(testsToRun[idx+1:], selectedTests, ignoredTests, refusedTests))
 
 			if loopErr != nil {
 				if status, ended := endedPartWay(); ended {
@@ -2755,12 +3048,36 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			if loopErr != nil && pkg.AnswerBegan(loopErr) && resp != nil {
+				// An answer that began (its status and headers, gRPC
+				// metadata) and then nothing of its body: its start is judged
+				// first, apart from the template and capture path. A start
+				// that differs is a judged failure; only one that matches
+				// fails closed, not judged, below.
+				if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, noAnswerView(tmplRun, &sent), resp, testSetID, started); differs {
+					sayStartJudged(r.logger, testCase.Name, loopErr)
+					noteNoAnswer(testCase.Name, loopErr)
+					drainBeforeFiling(runTestSetCtx, testCase.Name, answeredInGap, gapReadErr)
+					currentFailures++
+					testSetStatus = models.TestSetStatusFailed
+					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, testCaseResult)
+					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					if loopErr != nil {
+						utils.LogError(r.logger, loopErr, "failed to insert test case result for an answer judged on its start")
+						break
+					}
+					continue
+				}
+			}
+
 			if loopErr != nil {
-				utils.LogError(r.logger, loopErr, "failed to simulate request")
+				sayNoAnswer(r.logger, testCase.Name, loopErr, "failed to simulate request")
 				noteNoAnswer(testCase.Name, loopErr)
+				drainBeforeFiling(runTestSetCtx, testCase.Name, answeredInGap, gapReadErr)
 				currentFailures++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(noAnswerView(tmplRun, &sent), testSetID, started, loopErr)
+				markAnswerStalled(testCaseResult, loopErr)
 				// Finalize the capture window even on this early exit, so a miss
 				// during this (failed) test attaches here and isn't carried to
 				// the next test or lost.
@@ -2783,6 +3100,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err == nil && exactEndErr != nil {
 					err = exactEndErr
+				}
+				if err == nil && gapReadErr != nil {
+					err = gapReadErr
+				}
+				if err == nil && len(answeredInGap) > 0 {
+					consumedMocks = append(answeredInGap, consumedMocks...)
 				}
 				instrumentConsumedFetchErr = err
 				if err != nil {
@@ -2887,6 +3210,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testMocksUnread := testMocksUnknown(r.instrument && useMappingBased && isMappingEnabled, len(filteredExpectedNames), instrumentConsumedFetchErr)
 			if testMocksUnread {
 				consumedUnread = appendOnce(consumedUnread, testCase.Name)
+			} else {
+				// Scoped to the test's last run, whose row is the one kept
+				// (finalTestCaseResults): a --retry-passing cycle that read
+				// what it consumed clears an earlier cycle's unread read.
+				consumedUnread = slices.DeleteFunc(consumedUnread, func(n string) bool { return n == testCase.Name })
 			}
 
 			mockSetMismatch := false
@@ -2943,32 +3271,49 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under the proven switch strict failure is always on, so a test
 			// whose mock set diverged is never demoted: its response diff is the
 			// explanation of its FAILED verdict and must be printed
-			// (assertTestMocks is on under the switch).
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, r.assertTestMocks())
+			// (assertTestMocks is on under the switch). --strict-failure keeps
+			// it FAILED too (resolveTestOutcome), so its diff is printed.
+			// Every failed answer's diff is printed: a wrong answer demoted to
+			// OBSOLETE is not judged and fails the run (FailureInfo.MappingStale),
+			// so what differed is what its user reads before re-recording.
+			emitFailureLogs := true
 
-			// Under the proven switch this test's misses are read now, once,
-			// with its response in, so the verdict, the result line, the
-			// counters and the retry list all hold a miss. Every result written
-			// for this test below attaches this read (attachMisses): a second
-			// read would find the agent's channel drained.
-			var earlyMisses *testMisses
+			// This test's misses are read now, once, with its response in, so
+			// the verdict can hold a miss. Every result written for this test
+			// below attaches this read (attachMisses): a second read would find
+			// the agent's channel drained. Under the proven switch a miss fails
+			// the test, so the result line, the counters and the retry list all
+			// hold it (earlyMissed); with the switch off a miss keeps a test
+			// whose mock set diverged from being demoted to OBSOLETE (missed):
+			// it got no answer to a call, which is no sign its recording is out
+			// of date, and the demotion would turn its failure into a green run.
+			read := r.readMockErrors(runTestSetCtx)
+			missed := dataPlaneMisses(read.calls)
 			earlyMissed := 0
 			if provenswitch.On() {
-				read := r.readMockErrors(runTestSetCtx)
-				earlyMisses, earlyMissed = &read, dataPlaneMisses(read.calls)
+				earlyMissed = missed
 			}
 			attachMisses := func(res *models.TestResult) {
-				if earlyMisses == nil {
-					r.attachMockErrors(runTestSetCtx, testSetID, testCase.Name, res)
-					return
+				r.attachReadMockErrors(read, testSetID, testCase.Name, res)
+				if provenswitch.On() {
+					missCategory(res)
 				}
-				r.attachReadMockErrors(*earlyMisses, testSetID, testCase.Name, res)
-				missCategory(res)
 			}
+			// Under the proven switch a test keploy's agent lost a call of (or
+			// of a test before it) fails, as one with a miss does: read with
+			// its misses, before the comparison, so the verdict holds it.
+			lostCapture := read.failsOnCaptureLoss()
 			// The switch fails this test whatever its answer says when a call
-			// of it got no recorded answer or a recorded call of it was not
-			// made: a comparison that matches prints no pass line for it.
-			failedOnItsOwn := earlyMissed > 0 || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
+			// of it got no recorded answer, was not captured, or a recorded
+			// call of it was not made: a comparison that matches prints no
+			// pass line for it.
+			failedOnItsOwn := earlyMissed > 0 || lostCapture || (provenswitch.On() && mockSetMismatch && r.assertTestMocks())
+			// A matching answer does not pass a test the verdict fails anyway:
+			// one the switch fails on its own, or one --assert-dependencies (or
+			// a strict mock noise) fails for its diverged mock set with the
+			// switch off. Its comparison prints no pass line; it is compared as
+			// before.
+			noPassLine := failedOnItsOwn || resolveTestOutcome(true, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure()).Status != models.TestStatusPassed
 
 			switch testCase.Kind {
 			case models.HTTP:
@@ -3000,13 +3345,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				templateFailures = append(templateFailures, varFailures...)
 				if unjudged != "" {
 					variablesUnjudged = appendOnce(variablesUnjudged, testCase.Name)
-					if variablesWhy == "" {
-						variablesWhy = unjudged
-					}
+					variablesWhy[testCase.Name] = unjudged
 					variablesUnchecked = unjudged
+				} else {
+					// A --retry-passing-test cycle that checked it clears an
+					// earlier cycle's unchecked run (its row is the last's).
+					variablesUnjudged = slices.DeleteFunc(variablesUnjudged, func(n string) bool { return n == testCase.Name })
+					delete(variablesWhy, testCase.Name)
 				}
 				opts := resolved.opts
-				if failedOnItsOwn || len(varFailures) > 0 {
+				if noPassLine || len(varFailures) > 0 {
 					// The test case has failed on its own: no pass line.
 					opts = append(opts, httpMatcher.WithoutPassLine())
 				}
@@ -3082,7 +3430,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// is read first, so a test case it fails never prints the
 				// comparison's pass line.
 				templateFailures = reportFailures(r.grpcTemplateFailures(tmplRun, &tmplCheck, &sent, grpcResp, testSetID))
-				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || failedOnItsOwn)
+				testPass, testResult = r.compareGRPCResp(grpcExpected, &respCopy, testSetID, emitFailureLogs, len(templateFailures) > 0 || noPassLine)
 				if len(templateFailures) > 0 {
 					testPass = false
 					markTemplateFailures(testResult)
@@ -3122,9 +3470,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//     making an outgoing call the recording says it makes. The
 			//     response can still match — a deterministic dependency, a
 			//     cached value, a swallowed error — so the response check
-			//     alone cannot catch it, and today the test is silently
-			//     demoted to OBSOLETE with the run still exiting 0
-			//     (keploy-consumer-design-v2.md §5, false-pass row 0).
+			//     alone cannot catch it, and today such a test passes. (One
+			//     whose response failed too is demoted to OBSOLETE, which
+			//     leaves it and its set not judged: false-pass row 0 of
+			//     keploy-consumer-design-v2.md §5, closed.)
 			//     DEFAULT OFF: every existing suite with a drifting mock pool
 			//     would flip red on upgrade otherwise. The DepResult rows are
 			//     written and rendered either way, so with the knob off the
@@ -3149,6 +3498,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testcase", testCase.Name),
 					zap.String("testset", testSetID),
 					zap.Int("unmatchedCalls", earlyMissed))
+			} else if missed > 0 && outcome.Status == models.TestStatusObsolete {
+				outcome = failOnMisses(outcome)
+				r.logger.Error("mock mapping mismatch detected; marking testcase as FAILED, not obsolete: calls it made got no recorded answer, and the report lists each under unmatched_calls",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.String("reason", vetoUnmatchedCallSwitchOff),
+					zap.Int("unmatchedCalls", missed))
+			}
+			// A test that lost a call fails in this cycle, as one with a miss
+			// does, so the result line, the counters and the retry list hold
+			// it: a --retry-passing-test cycle runs only the tests that
+			// passed, and one that ran it again and lost nothing passed it.
+			// Said whatever else failed it, as a miss is: a lost call may be
+			// why its answer is wrong.
+			if lostCapture {
+				outcome = failOnCaptureLoss(outcome)
+				r.logger.Error("keploy's agent could not capture every call while this test or a test before it ran; failing testcase (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID))
 			}
 			switch outcome.Log {
 			case mismatchLogSchemaNoiseReject:
@@ -3391,6 +3759,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						// No verdict either: what it captured was not checked.
 						testCaseResult.FailureInfo.VariablesUnchecked = variablesUnchecked
 					}
+					if heldOpen != "" {
+						// No verdict: the app kept its stream open past the
+						// recording.
+						testCaseResult.FailureInfo.StreamHeldOpen = heldOpen
+					}
 					attachMisses(testCaseResult)
 					// Build the {expected, actual} mock set for THIS test case.
 					// See buildExpectedMockInfos / buildActualMockInfos at the
@@ -3494,6 +3867,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							ActualMocks:   actualMockInfos,
 						}
 					}
+					// A wrong answer demoted to OBSOLETE has no verdict
+					// (FailureInfo.MappingStale), and its set has none.
+					if testStatus == models.TestStatusObsolete {
+						testCaseResult.FailureInfo.MappingStale = mappingStaleReason
+					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
 					// The verdict is settled here, after the retry loop. See
 					// TestCaseReporter for why this is the only per-case
@@ -3550,7 +3928,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		failure += currentFailures
 		success = currentSuccess
 		obsolete += currentObsolete
-		if currentFailures == 0 || replay == 2 {
+		// The passing tests run again only after a cycle a test failed in,
+		// and not once a loss has tainted the set (proven switch): a test
+		// this cycle ran clean, before the loss, would be charged the loss in
+		// the next one, and that row would be its verdict.
+		if currentFailures == 0 || replay == 2 || r.captureTaintsTheSet() {
 			success = currentSuccess
 			for k, v := range currentPassingMocks {
 				passingTotalConsumedMocks[k] = v
@@ -3628,6 +4010,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 
+			// Exact serving: as the main loop names its test case's calls in
+			// flight (the pass's first, or after one that did not open).
+			if len(refusedTests[tc.Name]) == 0 {
+				r.serveExactAhead(runTestSetCtx, r.exact, tc.Name)
+			}
+
 			// Run pre-test mutation before computing the mock window so that
 			// any timestamp fields decrypted by the mutator feed into the filter.
 			// Streaming Phase 2 has no retry loop so the replay==0 guard used
@@ -3694,6 +4082,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				loopErr = err
 				break
 			}
+			// Exact serving: as the main loop reads what the gap answered.
+			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, tc.Name)
 
 			// Execute: SimulateRequest returns once response headers arrive;
 			// for streaming cases the body reader is drained later by
@@ -3709,6 +4099,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What the stream delivered, kept only when a recorded frame
 			// holds a use (streamTemplateFailures).
 			var received *bytes.Buffer
+			// Why the stream was not read to its end, when the app kept it
+			// open on keepalives, past its recording or short of it
+			// (pkg.ErrStreamHeldOpen, row W1).
+			var streamHeldOpen string
 
 			// Mirror the non-streaming reset-resend: a docker userland-proxy reset on
 			// a freshly-accepted host-port conn under CI load never reached the app
@@ -3735,11 +4129,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if simErr != nil {
-				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
+				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
+				drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, simErr)
+				markAnswerStalled(testCaseResult, simErr)
 				r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -3763,6 +4159,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var streamConsumedErr error
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
+				if err == nil && gapReadErr != nil {
+					err = gapReadErr
+				}
+				if err == nil && len(answeredInGap) > 0 {
+					consumedMocks = append(answeredInGap, consumedMocks...)
+				}
 				if err != nil {
 					streamConsumedErr = err
 					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
@@ -3779,7 +4181,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mockSetMismatch := false
 			hasExpectedMocks := len(expectedMocks) > 0
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
 			}
 			// NOTE: with the proven switch off models.Result.DepResult is
 			// deliberately NOT populated on the deferred streaming path, for
@@ -3793,9 +4195,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// written (attachStreamDepResults), from the filtered list the
 			// streamed test's own verdict reads.
 			//
-			// Under the switch a diverged mock set demotes nothing, so the
-			// diff of a failed answer is printed as the main loop prints it.
-			emitFailureLogs := shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
+			// Under the switch, or --strict-failure, a diverged mock set
+			// demotes nothing, so the diff of a failed answer is printed as
+			// the main loop prints it.
+			// Every failed answer's diff is printed, as on the regular path.
+			emitFailureLogs := true
 
 			if !ok {
 				// Handle streaming response type
@@ -3824,6 +4228,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if closeErr := streamResp.Reader.Close(); closeErr != nil {
 						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
 					}
+					if errors.Is(streamErr, pkg.ErrStreamHeldOpen) {
+						// The app kept the stream open on keepalives, past
+						// its recording or short of it: compared as far as
+						// it came, and the test has no verdict (row W1).
+						streamHeldOpen, streamErr = streamErr.Error(), nil
+					}
+					if pkg.AnswerBegan(streamErr) {
+						// Its status and headers came, and nothing of the
+						// stream: judged on them first, apart from the
+						// template and capture path. A start that differs is
+						// a judged failure; only one that matches fails
+						// closed, not judged, below.
+						start := &models.HTTPResp{StatusCode: streamResp.StatusCode, StatusMessage: streamResp.StatusMessage, Header: streamResp.Header}
+						if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, expectedStream, start, testSetID, started); differs {
+							sayStartJudged(r.logger, tc.Name, streamErr)
+							noteNoAnswer(tc.Name, streamErr)
+							drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
+							failure++
+							testSetStatus = models.TestSetStatusFailed
+							r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
+							loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+							if loopErr != nil {
+								utils.LogError(r.logger, loopErr, "failed to save a streaming test result judged on its start")
+								break
+							}
+							continue
+						}
+					}
 
 					if streamErr != nil {
 						if status, ended := endedPartWay(); ended {
@@ -3833,11 +4265,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 
 					if streamErr != nil {
-						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						if errors.Is(streamErr, pkg.ErrAnswerStalled) {
+							// Nothing of the stream came, the app keeping
+							// it open (the stall rule, or its keepalives):
+							// not judged, failing closed (ruling a).
+							sayNoAnswer(r.logger, tc.Name, streamErr, "failed to read streaming response")
+						} else {
+							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						}
 						noteNoAnswer(tc.Name, streamErr)
+						drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, streamErr)
+						markAnswerStalled(testCaseResult, streamErr)
 						r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 						if loopErr != nil {
@@ -3894,7 +4335,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under exact serving the agent serves the pool from now, so the
 			// drain below reads all of the test case's consumption, and a
 			// call the application makes from here is the pool's.
-			if err := r.serveExactPool(runTestSetCtx, r.exact); err != nil && streamConsumedErr == nil {
+			rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
+			for _, s := range streamingTests[i+1:] {
+				rest = append(rest, s.testCase)
+			}
+			if err := r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(rest, nil, nil, refusedTests)); err != nil && streamConsumedErr == nil {
 				streamConsumedErr = err
 			}
 
@@ -3923,13 +4368,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Re-evaluate mismatch now that consumedMocks covers the full
 			// test case (pre-stream + in-stream). If CompareHTTPStream
 			// already forced emitFailureLogs=false on a streaming body
-			// mismatch, keep it suppressed — don't un-suppress just because
-			// the mock set still looks like a subset.
+			// mismatch, it stays suppressed: that mismatch was logged.
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(consumedMocks, reusableMockNames), expectedMocks)
-				if !hadStreamingMismatch {
-					emitFailureLogs = shouldEmitFailureLogs(mockSetMismatch, provenswitch.On())
-				}
+				mockSetMismatch = !isMockSubsetWithConfig(streamAssertedConsumption(carryAttr.withoutStartupTraffic(consumedMocks, startupMockNames, tc.Name), reusableMockNames), expectedMocks)
 			}
 
 			// Each use place is asserted on its own: the headers', and each
@@ -3974,35 +4415,44 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testset", testSetID),
 					zap.Strings("unconsumedMocks", namesOf(streamUnconsumed)))
 			}
-			// Its misses too, read once, now, and attached below.
-			var streamMisses *testMisses
+			// Its misses too, read once, now, and attached below. Under the
+			// proven switch a miss fails the test (streamMissed); with it off a
+			// miss keeps a test whose mock set diverged from being demoted to
+			// OBSOLETE (streamCallsMissed), as in the request-response path.
+			streamRead := r.readMockErrors(runTestSetCtx)
+			streamCallsMissed := dataPlaneMisses(streamRead.calls)
 			streamMissed := 0
 			if provenswitch.On() {
-				read := r.readMockErrors(runTestSetCtx)
-				streamMisses = &read
-				if streamMissed = dataPlaneMisses(read.calls); streamMissed > 0 && !mockSetMismatch {
+				if streamMissed = streamCallsMissed; streamMissed > 0 && !mockSetMismatch {
 					r.logger.Error("calls this streaming test made got no recorded answer; failing it (KEPLOY_PROVEN=1); the report lists each under unmatched_calls",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
 						zap.Int("unmatchedCalls", streamMissed))
 				}
 			}
+			// And what keploy's agent could not capture while it ran (or a
+			// test before it did): under the proven switch that fails it too.
+			// Said here unless the mock-set mismatch line below says it (once).
+			streamLostCapture := streamRead.failsOnCaptureLoss()
+			if streamLostCapture && !mockSetMismatch {
+				r.logger.Error("keploy's agent could not capture every call while this streaming test or a test before it ran; failing it (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
+					zap.String("testcase", tc.Name),
+					zap.String("testset", testSetID))
+			}
 			// Every result written for this test below attaches that read.
 			attachStreamMisses := func(res *models.TestResult) {
-				if streamMisses == nil {
-					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, res)
-					return
+				r.attachReadMockErrors(streamRead, testSetID, tc.Name, res)
+				if provenswitch.On() {
+					missCategory(res)
 				}
-				r.attachReadMockErrors(*streamMisses, testSetID, tc.Name, res)
-				missCategory(res)
 			}
 			streamTemplateFailures := reportFailures(r.streamTemplateFailures(tmplRun, &tmplCheck, &sent, streamReceived, streamComplete, httpResp, testSetID))
 			var streamOpts []httpMatcher.MatchOption
-			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 {
+			if len(streamTemplateFailures) > 0 || len(streamUnconsumed) > 0 || streamMissed > 0 || streamLostCapture {
 				streamOpts = append(streamOpts, httpMatcher.WithoutPassLine())
 			}
 			testPass, testResult := r.compareHTTPResp(expectedStream, httpResp, testSetID, emitFailureLogs, streamOpts...)
-			if len(streamUnconsumed) > 0 || streamMissed > 0 {
+			if len(streamUnconsumed) > 0 || streamMissed > 0 || streamLostCapture {
 				testPass = false
 			}
 			if testResult == nil {
@@ -4077,10 +4527,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if len(streamUnconsumed) > 0 || streamMissed > 0 {
+				} else if len(streamUnconsumed) > 0 || streamCallsMissed > 0 || streamLostCapture {
 					reason := vetoUnconsumedTestMock
-					if len(streamUnconsumed) == 0 {
+					switch {
+					case len(streamUnconsumed) > 0:
+					case streamCallsMissed > 0 && provenswitch.On():
 						reason = vetoUnmatchedCall
+					case streamCallsMissed > 0:
+						reason = vetoUnmatchedCallSwitchOff
+					default:
+						reason = vetoCaptureLoss
 					}
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
@@ -4089,14 +4545,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
-				} else if provenswitch.On() {
-					// Under the switch a failed answer is FAILED whatever the
-					// mock set did: the set's other consumption (a session-tier
-					// mock it shares) is no reason to re-record it.
+				} else if r.strictFailure() {
+					// Under the switch, or --strict-failure, a failed answer is
+					// FAILED whatever the mock set did (the verdict below): the
+					// set's other consumption (a session-tier mock it shares) is
+					// no reason to re-record it.
 					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking it as FAILED",
 						zap.String("testcase", tc.Name),
 						zap.String("testset", testSetID),
-						zap.String("reason", provenswitch.Env+"=1"),
+						zap.String("reason", vetoFlagName(false, true)),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
 					r.mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
@@ -4139,7 +4596,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamMissed == 0 {
+			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamCallsMissed == 0 {
 				// A template failure is never demoted to OBSOLETE, nor is a
 				// test that left one of its test mocks unconsumed, or one a
 				// call of which got no recorded answer, nor, under the proven
@@ -4197,6 +4654,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// category, and the unconsumed test mocks by name. The inputs
 				// are the ones that verdict read.
 				testCaseResult.FailureInfo.TestMocksUnread = streamTestMocksUnread
+				testCaseResult.FailureInfo.StreamHeldOpen = streamHeldOpen
+				if testStatus == models.TestStatusObsolete {
+					testCaseResult.FailureInfo.MappingStale = mappingStaleReason
+				}
 				if provenswitch.On() {
 					attachStreamDepResults(testCaseResult, testStatus, expectedTestMockMappings[tc.Name], consumedMocks, streamArmed && streamConsumedErr == nil, reusableMockNames, mockKindByName, mockLookup)
 				}
@@ -4267,14 +4728,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	// The prune's connection-error rule reads these back: unreadable or short of
-	// the verdicts, they cannot vouch for anything (fail closed).
-	scoredResults := 0
+	// the verdicts, they cannot vouch for anything (fail closed). They are
+	// counted by test, as the verdicts count them (verdictCounts): a test
+	// with two rows (an earlier cycle's and its last) is one test, so its
+	// second row cannot stand in for another test's lost one.
+	scoredTests := make(map[string]struct{}, len(testCaseResults))
 	for _, tr := range testCaseResults {
 		if tr.Status != models.TestStatusIgnored {
-			scoredResults++
+			scoredTests[tr.TestCaseID] = struct{}{}
 		}
 	}
-	resultsComplete := resultsErr == nil && scoredResults >= success+failure+obsolete
+	resultsComplete := resultsErr == nil && len(scoredTests) >= success+failure+obsolete
 
 	// Under the proven switch an unconsumed test mock a sibling consumed is
 	// named with that sibling.
@@ -4282,6 +4746,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.logger.Warn("tests failed for a recorded call that a sibling test made instead: the order the shared mock pool served them in can decide this until each test's consumption is exact (KEPLOY_PROVEN=1); each is named under unconsumed_mocks.consumed_by",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", pairs))
+	}
+	// Under the proven switch a call no mock answered whose closest
+	// recording another test owns is named with that test: likely a call it
+	// recorded, such as a later exchange of a connection it opened (a
+	// Generic connection's handshake is recorded in the test that opened it).
+	if named := markRecordedIn(testCaseResults, r.exact.ownersOf()); len(named) > 0 {
+		r.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under unmatched_calls.recorded_in",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
 	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
@@ -4293,7 +4767,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Strings("tests", missed))
 	}
 	// Read before any hook runs, as the evidence floor reads it: a loss while
-	// a test ran holds the prune and mappings.yaml below.
+	// a test ran holds the prune and mappings.yaml below. The loop failed
+	// each test it charged a loss already (lostCapture, streamLostCapture);
+	// failTestsWithCaptureLoss finds one only if a path wrote a result
+	// without that verdict, and adds CAPTURE_INCOMPLETE to each.
 	testsLostCapture := anyTestLostCapture(testCaseResults)
 	if tainted := failTestsWithCaptureLoss(testCaseResults); len(tainted) > 0 {
 		r.logger.Error("tests failed: keploy's agent could not capture every call while they or a test before them ran (KEPLOY_PROVEN=1); the report says what under capture_incomplete",
@@ -4319,12 +4796,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// otherwise the loop's status stands. A set whose tests' consumption could
 	// not all be read has no verdict at all.
 	notJudged := ""
+	// appLogsBeforeStop is what the app logged last, read before the set's
+	// end stopped it (stopAppBeforeSetEnd), for a report that carries logs.
+	appLogsBeforeStop := ""
+	// consumedAtStopUnread is why what the app consumed as the set's end
+	// stopped it could not be read.
+	var consumedAtStopUnread error
+	// stopKilled is why the set's end had to kill the app it stopped: its
+	// shutdown is then not known, and the set is not judged.
+	stopKilled := ""
 	// realRun is what the set's run saw of mock.real beyond its test cases;
 	// realListed the destinations the recordings of the test cases that ran
 	// list; realWhy why they fail the set (proven switch).
 	var realRun *models.RealRun
 	var realListed []string
 	realWhy, realUncaptured := "", ""
+	// unclaimed are the calls the application made after the set's last test
+	// that no mock answered (proven switch): no later test takes them, so
+	// they fail the set (unclaimed_calls.go).
+	var unclaimed []models.UnmatchedCall
+	unclaimedReason := ""
+	// appNotStopped is why the set's end was read with its app still running
+	// (P101-c), "" when keploy stopped it first.
+	appNotStopped := ""
 	if provenswitch.On() {
 		var held []string
 		scored := len(testCaseResults)
@@ -4343,6 +4837,74 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		tally := tallyFromVerdicts(setTally{success, failure, obsolete, ignored, testSetStatus}, testCaseResults, resultsComplete)
 		success, failure, obsolete, ignored, testSetStatus = tally.success, tally.failure, tally.obsolete, tally.ignored, tally.status
+		// The app keploy started for this set is stopped, and waited for,
+		// before the set's end reads what it did after its last test (what
+		// it reached of mock.real, the calls no mock answered, what keploy
+		// could not capture): a call it makes only as it is stopped (a
+		// publish its shutdown flushes, a write on its way out) is then read
+		// with them, not left for no one to judge (P101-b). The agent is told
+		// first, as the teardown tells it, so the app's shutdown errors are
+		// logged as such. Its recent logs are taken before: a container
+		// docker removes once stopped has none to give.
+		// The final attempt of a run's last set stops the app --keep-app-alive
+		// keeps across sets before its end's read, as a set stops its own
+		// (P101-c): the run ends after it, and no attempt of it follows.
+		if stopAppBeforeSetEnd == nil && serveTest && r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil {
+			stopAppBeforeSetEnd = r.keepAliveStop
+		}
+		if stopAppBeforeSetEnd != nil {
+			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+			notifyCancel()
+			logCtx, cancelLogs := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+			appLogsBeforeStop = r.instrumentation.GetRecentAppLogs(logCtx)
+			cancelLogs()
+			stopKilled = stopAppBeforeSetEnd()
+			// What the app consumed as it stopped (a shutdown call a pool
+			// mock answered) is drained now, into the set's: what the learn
+			// step learned on it is then kept with the set's (persistLearned),
+			// and the next set's first read does not take it, by its name,
+			// for one of its own.
+			//
+			// Not on the set's context: the app watcher cancels it once an
+			// app that exited on its own is recorded, and what that app
+			// consumed is the set's all the same. On the run's, which the
+			// user's stop cancels, and bounded (setEndDrainBudget): the
+			// agent's client has no deadline of its own, and a read that does
+			// not end leaves the set not judged, never a run that does not
+			// end.
+			drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
+			consumed, err := r.hookImpl.GetConsumedMocks(drainCtx)
+			cancelDrain()
+			if err != nil {
+				consumedAtStopUnread = err
+			} else {
+				for _, m := range consumed {
+					totalConsumedMocks[m.Name] = m
+					allConsumedAcrossCycles[m.Name] = m
+				}
+			}
+		}
+		// stoppedByUser records, once the run's user has stopped it (Ctrl+C,
+		// SIGTERM), that the set is USER_ABORT, and reports it. The app
+		// watcher records the same, but on a goroutine of its own, after the
+		// reads below may already have failed for the stop: one the stop cut
+		// short is the stop's, never a set whose calls could not be read.
+		//
+		// The run's context, not the set's: the app watcher cancels the set's
+		// once it has recorded how the app ended, and that is no user's stop.
+		stoppedByUser := func() bool {
+			if !stoppedByItsUser(ctx) {
+				return false
+			}
+			if testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed {
+				testSetStatus = models.TestSetStatusUserAbort
+			}
+			return true
+		}
+		stoppedByUser()
 		// mock.real (design v14 §4, §8.2): what the set's run reached, and
 		// what keploy could not capture outside its test cases.
 		var realErr error
@@ -4374,6 +4936,74 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// below: it fails the set, holds the prune, and fails JUnit.
 			realUncaptured = models.RealUncapturedLosses(realRun.Incomplete).Text()
 		}
+		// A call made after the set's last test that no mock answered is a
+		// pool miss no later test takes: it fails the set, named. A read that
+		// cannot vouch for every such call leaves the set unjudged. Only a
+		// set with a verdict to give is read: one that stopped otherwise
+		// (the app halted, the user aborted, keploy failed) keeps its status.
+		// And only once a test of it opened its window: before that, what
+		// the agent holds is the app's startup, which the first test's read
+		// hands over as the set's. A call made then that no mock answered
+		// fails the set too, named, and no test (before_set_calls.go).
+		//
+		// A stop that came after the loop (the app exited, the user
+		// stopped the run) is not in testSetStatus yet: resolveTestSetStatus
+		// below takes it from getErrStatus. Such a set is not read, and a
+		// read that fails because the set was stopped meanwhile (its ctx is
+		// cancelled) is the stop's, not the read's: the stop is its status,
+		// as before, and it is not marked not judged, which would also keep
+		// the run going (abortAfterTestSet) past an app that exited.
+		_, stoppedBefore := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil)
+		if captureOpened && !stoppedBefore && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
+			if stopAppBeforeSetEnd == nil {
+				appNotStopped = whyAppNotStopped(cmdType, serveTest)
+				r.logger.Warn("keploy reads the set's end with its application still running: a call it makes after this read is not judged ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
+			}
+			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			if own := r.setCalls.failing(); len(own) > 0 {
+				unclaimed = append(unclaimed, own...)
+				unclaimedReason = setCallsWhy(own)
+				r.logSetCalls(testSetID, own)
+				if testSetStatus == models.TestSetStatusPassed {
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
+			if len(calls) > 0 {
+				unclaimed = append(unclaimed, calls...)
+				if unclaimedReason != "" {
+					unclaimedReason += "; "
+				}
+				unclaimedReason += unclaimedWhy(calls)
+				r.logUnclaimed(testSetID, calls)
+				switch {
+				case conf.RecordStopKilled != "":
+					// The recording's stop killed the app: what it did as
+					// it stopped is not in the recording, so such a call
+					// may be one the recording lacks (P101-b-k).
+					notJudged = alsoNotJudged(notJudged, "not judged: "+unclaimedReason+"; the recording's stop had to kill the application ("+conf.RecordStopKilled+"), so what it did as it stopped is not in the recording")
+					r.logger.Error("test-set is not judged: its application made calls after the set's last test that no mock answered, and its recording lacks what the application did as it stopped (the recording's stop had to kill it); the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+						zap.String("test-set", testSetID), zap.String("recording", conf.RecordStopKilled),
+						zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
+					testSetStatus = models.TestSetStatusInternalErr
+					r.markNotJudged(testSetID)
+				case testSetStatus == models.TestSetStatusPassed:
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
+			if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); unclaimedErr != nil && runTestSetCtx.Err() != nil && (stopped || stoppedByUser()) {
+				r.logger.Debug("the read of the calls made after the set's last test was cut short by the set's stop; the stop is its status",
+					zap.String("test-set", testSetID), zap.Error(unclaimedErr))
+				unclaimedErr = nil
+			}
+			if unclaimedErr != nil {
+				notJudged = alsoNotJudged(notJudged, "keploy could not read every call the application made after the set's last test that no mock answered: "+unclaimedErr.Error())
+				r.logger.Error("test-set is not judged: keploy could not read every call its application made after its last test; the run goes on to the next test-set",
+					zap.String("test-set", testSetID), zap.Int("callsRead", len(calls)), zap.Error(unclaimedErr))
+				testSetStatus = models.TestSetStatusInternalErr
+				r.markNotJudged(testSetID)
+			}
+		}
 		if len(consumedUnread) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed) {
 			notJudged = consumedUnreadReason(consumedUnread)
 			r.logger.Error("test-set is not judged: what some of its tests consumed could not be read from keploy's agent; the run goes on to the next test-set",
@@ -4383,8 +5013,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Not judged, not broken: the round goes on (abortAfterTestSet).
 			r.markNotJudged(testSetID)
 		}
+		// The set's end had to kill the app it stopped (it had not exited
+		// when the stop's grace ran out): what the app would have done as
+		// it stopped is not known, so neither is the set's verdict.
+		if stopKilled != "" && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			notJudged = alsoNotJudged(notJudged, "not judged: "+stopKilled+", and what it would have done as it stopped is not known")
+			r.logger.Error("test-set is not judged: keploy had to kill the application it stopped at the set's end; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID), zap.String("reason", stopKilled),
+				zap.String("next_step", "make the application exit promptly on SIGINT (a shutdown that waits on something slow or that never comes, a handler that ignores it), then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		}
+		// What the app consumed as the set's end stopped it could not be
+		// read: what was learned on it cannot be vouched for. A set that
+		// stopped otherwise (the app halted, the user aborted) keeps that
+		// status, as the read of its calls after the last test does.
+		if _, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); consumedAtStopUnread != nil && !stopped && !stoppedByUser() &&
+			(testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			notJudged = alsoNotJudged(notJudged, "not judged: keploy could not read from its agent what the application consumed as the set's end stopped it: "+consumedAtStopUnread.Error())
+			r.logger.Error("test-set is not judged: keploy could not read what its application consumed as it was stopped at the set's end; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID), zap.Error(consumedAtStopUnread),
+				zap.String("next_step", "check the agent's log for why the read failed, then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		}
 		if len(variablesUnjudged) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
-			notJudged = alsoNotJudged(notJudged, variablesUnjudgedReason(variablesUnjudged, variablesWhy))
+			notJudged = alsoNotJudged(notJudged, variablesUnjudgedReason(variablesUnjudged, variablesWhy[variablesUnjudged[0]]))
 			r.logger.Error("test-set is not judged: keploy could not check what some of its tests captured against what their dependency calls carried; the run goes on to the next test-set",
 				zap.String("test-set", testSetID),
 				zap.Strings("tests", variablesUnjudged))
@@ -4432,12 +5086,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// read as either (proven switch). A set already not judged for what its
 	// tests consumed says both.
 	// So has one whose capture could not be told (proven switch).
+	if uncapturable, lost := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		what := lost.NotJudgedText()
+		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
+		r.logger.Error("test-set is not judged: the application called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached, while some of its tests ran ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", uncapturable),
+			zap.String("reason", what),
+			zap.String("next_step", lost.NotJudgedRemedy()+", then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
 	if unreadCapture := testsWithUnreadCapture(testCaseResults); len(unreadCapture) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		notJudged = alsoNotJudged(notJudged, unreadCaptureReason(unreadCapture))
 		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call while some of its tests ran; the run goes on to the next test-set",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", unreadCapture),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
+	if heldOpen := testsWithStreamsHeldOpen(testCaseResults); len(heldOpen) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		// A test whose app kept its stream open on keepalives, past the
+		// recording or short of it, has no verdict, so neither has its
+		// set (row W1).
+		notJudged = alsoNotJudged(notJudged, streamsHeldOpenReason(heldOpen))
+		r.logger.Error("test-set is not judged: the app kept its stream open on keepalives in some of its tests, past the end of its recording or with the rest of it not coming; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", heldOpen),
+			zap.String("next_step", streamsHeldOpenRemedy+", then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	}
+	if stalledAnswers := testsWithStalledAnswers(testCaseResults); len(stalledAnswers) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		// A test whose exchange ended with nothing of its answer to
+		// compare has no verdict, so neither has its set (rule 15).
+		notJudged = alsoNotJudged(notJudged, stalledAnswersReason(stalledAnswers))
+		r.logger.Error("test-set is not judged: the app never answered some of its tests, sent nothing past an answer's headers, or never took a whole request, before keploy's stall bound passed or its keepalives showed it stalled; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.Strings("tests", stalledAnswers),
+			zap.String("next_step", stalledAnswersRemedy+", then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
 	}
@@ -4450,6 +5138,51 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("next_step", "check the agent's log for why the read was incomplete, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
+	}
+
+	// A hook that could not read what the set's tests read (its recordings'
+	// sealed values, say) says the set could not be checked, and why
+	// (UncheckedHook). Under the proven switch a set with a verdict to give,
+	// or one not judged already (an application that never got ready among
+	// them), is not judged for it. Any other (the switch off, or a set that
+	// halted, was stopped or faulted) keeps its status, and its report gives
+	// the reason first (uncheckedFirst). Either way nothing of the run is
+	// written back to the recording: no prune, no mappings.yaml, nothing
+	// learned (below).
+	unchecked := r.hookUnchecked(testSetID)
+	uncheckedFirst := ""
+	switch {
+	case unchecked == "":
+	case provenswitch.On() && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "" || notReady != ""):
+		notJudged = alsoNotJudged(notJudged, "not judged: "+unchecked)
+		r.logger.Error("test-set is not judged: keploy could not read all its tests read, so it could not check them; the run goes on to the next test-set",
+			zap.String("test-set", testSetID),
+			zap.String("reason", unchecked))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+	default:
+		uncheckedFirst = unchecked
+		r.logger.Warn("keploy could not check every test of the test-set: it could not read all they read; the set keeps its status, and its report says why",
+			zap.String("test-set", testSetID),
+			zap.String("status", string(testSetStatus)),
+			zap.String("reason", unchecked))
+	}
+
+	// An application that never got ready ran no test: the set is not judged,
+	// saying why first (proven switch, readiness_proven.go).
+	if notReady != "" {
+		if notJudged == "" {
+			notJudged = "not judged: " + notReady
+		} else {
+			notJudged = "not judged: " + notReady + "; " + notJudged
+		}
+		r.logger.Error("test-set is not judged: its application never got ready, so keploy fired none of its tests; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.String("reason", notReady),
+			zap.String("next_step", "start the application so that it listens where the set's first test dials (or answers its --health-url), see its logs in this report for why it did not, then run the test-set again"))
+		testSetStatus = models.TestSetStatusInternalErr
+		r.markNotJudged(testSetID)
+		r.markNeverReady(testSetID)
 	}
 
 	appFailure := getLastAppErr()
@@ -4558,7 +5291,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
 	// next test set's tests count from here.
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
-	for _, t := range []string{late.Text(), realUncaptured} {
+	// A call keploy cannot capture at all (decision 20) is no loss of what it
+	// saw: below, it leaves the set without a verdict, never failed.
+	lateJudged, lateNotJudged := late.Split()
+	for _, t := range []string{lateJudged.Text(), realUncaptured} {
 		if t == "" {
 			continue
 		}
@@ -4571,8 +5307,65 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if lateErr != nil && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = models.CaptureLossesUnverified(lateErr)
 	}
+	// A call keploy cannot capture at all after the set's last test
+	// (decision 20): the set has no verdict, as one whose count is lost.
+	if t := lateNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = t
+	}
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
+	}
+
+	// A wrong answer demoted to OBSOLETE (switch off) has no verdict
+	// (FailureInfo.MappingStale). A set that would read PASSED for it has
+	// none either: never the silent pass it was (false-pass row 0). One that
+	// has a verdict of its own keeps it, and its reason names the tests not
+	// judged: a FAILED test failed whatever another's mapping says, a set that
+	// stopped part-way (APP_FAULT, above) says so first, and so does one whose
+	// calls reached a real dependency (captureIncomplete, just above). Placed
+	// after those, so none is replaced by a remedy that re-records over it.
+	staleMapping := testsWithStaleMapping(testCaseResults)
+	staleWhy, staleOnly := "", ""
+	if len(staleMapping) > 0 {
+		if testSetStatus == models.TestSetStatusPassed || notJudged != "" {
+			why := staleMappingReason(staleMapping)
+			if notJudged == "" {
+				staleOnly = why
+			}
+			notJudged = alsoNotJudged(notJudged, why)
+			r.logger.Error("test-set is not judged: some of its tests answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", staleMapping),
+				zap.String("next_step", models.MappingStaleRemedy))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		} else {
+			staleWhy = staleMappingNote(staleMapping)
+			r.logger.Error("some tests of the test-set are not judged: they answered differently from their recording while the dependency calls they made diverged from their recorded mapping, so keploy cannot tell a regression from a stale mapping; the set keeps its own status",
+				zap.String("test-set", testSetID),
+				zap.String("status", string(testSetStatus)),
+				zap.Strings("tests", staleMapping),
+				zap.String("next_step", models.MappingStaleRemedy))
+		}
+	}
+	// Under the proven switch the set is judged only if one agent process
+	// answered for all of it (watchAgent). Read here, after the set's last
+	// read of its agent (the losses after its last test, above): an agent
+	// started again in its place answered those reads holding none of what
+	// the one before saw, so the set has no verdict, as one whose evidence
+	// could not be read. Before the capture check below, which then does not
+	// take the set for unjudged on its capture count alone.
+	if agentWatch != nil && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+		if rep, replaced := agentWatch.Replacement(); replaced {
+			notJudged = alsoNotJudged(notJudged, agentReplacedReason(rep))
+			r.logger.Error("test-set is not judged: keploy's agent was started again while the test-set ran, and what the agent before saw is lost; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+				zap.String("test-set", testSetID),
+				zap.String("agentProcess", rep.First),
+				zap.String("startedAgainAs", rep.Next),
+				zap.String("next_step", "find why the agent restarted (its container's restart count, an OOM kill, its log), then run the test-set again"))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		}
 	}
 	// Under the proven switch a set whose capture could not be verified has
 	// no verdict, as one whose evidence could not be read: neither PASSED nor
@@ -4601,6 +5394,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	case captureUnverified != "":
 		captureVerification = &models.CaptureVerification{Status: models.CaptureUnverifiedStatus, Reason: captureUnverified}
 	}
+	// What record's full round learned goes onto the recording before the
+	// set is reported, and is said per test; a prune after it keeps it
+	// (pruneKeeps). A round that could not keep it did not complete: its
+	// verdict would be about recordings that lack what it served.
+	//
+	// A round a hook says could not read all its tests read (UncheckedHook)
+	// learned on what it served unread: nothing of it is kept, and the
+	// recording stays as recorded for a round that can.
+	if r.learning() && r.instrument {
+		if unchecked != "" {
+			r.logger.Warn("keploy did not keep what this full round of the record learned: it could not read all the set's tests read, so what it learned may be about values it could not read",
+				zap.String("testSetID", testSetID),
+				zap.String("reason", unchecked))
+		} else if err := r.persistLearned(runTestSetCtx, testSetID, allConsumedAcrossCycles, actualTestMockMappings); err != nil {
+			utils.LogError(r.logger, err, "keploy did not complete the full round of this record: what its learn step learned was not kept", zap.String("testSetID", testSetID))
+			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
 	// Under the proven switch a set none of whose tests got a verdict, its
 	// tests IGNORED, verified nothing, and is IGNORED, as a set the run skips
 	// whole is, not PASSED. Last, so a status that says more (FAILED, not
@@ -4613,7 +5425,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusIgnored
 	}
 
-	if !shouldIncludeAppLogs(testSetStatus) {
+	// A set not judged only for a stale mapping is no application's fault:
+	// its report carries no application logs.
+	if !shouldIncludeAppLogs(testSetStatus) || (staleOnly != "" && notJudged == staleOnly) {
 		appLogs = ""
 	} else if appLogs == "" {
 		// Was gated on APP_HALTED, which made the fallback unreachable for every
@@ -4623,9 +5437,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// app never spoke — persisted a report whose own reason says "check
 		// application logs in the app_logs field" next to an empty app_logs field.
 		// shouldIncludeAppLogs already decides who gets logs; let it decide alone.
-		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
-		defer cancel()
-		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+		//
+		// Under the proven switch the set's end stopped the app keploy
+		// started before this, and took its logs then: docker removes the
+		// container it ran in once it stops.
+		if appLogsBeforeStop != "" {
+			appLogs = appLogsBeforeStop
+		} else {
+			logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+			defer cancel()
+			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+		}
 	}
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
@@ -4638,7 +5460,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Ignored:       ignored,
 		Tests:         testCaseResults,
 		TimeTaken:     timeTaken.String(),
-		FailureReason: withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy})),
+		FailureReason: withUnchecked(uncheckedFirst, withCaptureIncomplete(captureIncomplete, describeTestSetFailure(testSetStatus, testCaseResults, runShape{stoppedEarly: stoppedEarly, downgradedFromPassed: partialRunDowngrade, notJudged: notJudged, realWhy: realWhy, unclaimedWhy: unclaimedReason, staleWhy: staleWhy}))),
 		AppLogs:       appLogs,
 		HighRisk:      riskHigh,
 		MediumRisk:    riskMed,
@@ -4649,7 +5471,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Real:                realRun,
 		RealListed:          realListed,
 		RealFailure:         realWhy,
+		UnclaimedCalls:      unclaimed,
+		AppNotStopped:       appNotStopped,
+		Proven:              provenswitch.On(),
 	}
+	r.noteSetEnd(testReport)
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
 	reportCtx := context.WithoutCancel(runTestSetCtx)
@@ -4699,8 +5525,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	pruneEnabled := r.removeUnusedMocks() && r.instrument
 	// INTERNAL_ERR: keploy lost part of the run, e.g. a result insert. Not
 	// a set that is INTERNAL_ERR only for a capture count that could not be
-	// read (under the proven switch, above): that is capture_unverified.
-	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged
+	// read (under the proven switch, above): that is capture_unverified. Nor
+	// one not judged only for a stale mapping: that is mapping_stale.
+	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged && (staleOnly == "" || notJudged != staleOnly)
 	// Read once: the prune and the mappings hold below decide on the same value.
 	appUnreachable := anyAppConnectionError(testCaseResults)
 	prune, pruneRefusal := shouldPrune(r.removeUnusedMocks(), r.instrument, pruneRun{
@@ -4711,6 +5538,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		appUnreachable:      appUnreachable,
 		captureIncomplete:   captureIncomplete != "" || testsLostCapture,
 		captureUnverified:   captureUnverified != "",
+		unchecked:           unchecked != "",
+		mappingStale:        len(staleMapping) > 0,
 		success:             success,
 		failure:             failure,
 		obsolete:            obsolete,
@@ -4759,7 +5588,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
-	} else if r.config.Test.NoiseDetection() && r.instrument {
+	} else if r.config.Test.NoiseDetection() && r.instrument && !provenswitch.On() {
+		// (Under the proven switch only record's full round writes what was
+		// learned, above: a replay in CI writes no recording.)
 		// --schema-noise-detection without --remove-unused-mocks: the learned
 		// req_body_noise used to ride only inside UpdateMocks (the pruning
 		// path), so detection alone learned noise and threw it away at exit.
@@ -4854,6 +5685,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
+	markWrittenByKeployTest(mappingDoc)
+	// Whether a boot consumer's fetch was caught by the set's setup drain or
+	// by a test's drain is timing: a startup section holding the app's
+	// startup traffic is written in recorded order, so two runs write it
+	// alike. One with none is written as before.
+	if carryAttr.bootListed {
+		sortByRecordedTime(mappingDoc.Startup)
+	}
 	if len(passing) == 0 {
 		// The boot traffic belongs to no test, and a run where no test passed
 		// vouches for it no more than for the tests: the section on disk stays.
@@ -4886,6 +5725,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	case captureIncomplete != "" || testsLostCapture:
 		// The same for a call keploy lost (proven switch).
 		holdMappings = "keploy could not capture every call the application made, so a lost call's mock is in no test's entry"
+	case unchecked != "":
+		// A hook could not read all the set's tests read (UncheckedHook): a
+		// mock served unread may have matched no call, and is then in no
+		// test's entry.
+		holdMappings = "keploy could not read all the set's tests read, so a mock it served unread may be in no test's entry: " + unchecked
 	case !allTestsGotAVerdict:
 		holdMappings = "not every loaded test got a verdict"
 	case pidVerdict.unverified != "":
@@ -5182,15 +6026,15 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 //
 // The lookup is built here, before AfterGetMocks may change the mocks in place
 // (a mutator decrypts them, for one), so it describes them as they are on disk.
-// skipped is the documents the store's decoders skipped, by name, with their
-// kinds (models.TestSetMocks.Skipped); nil from a store that reads one pool per
+// skipped is the documents the store's decoders skipped (models.TestSetMocks
+// Skipped and SkippedWindowed); none from a store that reads one pool per
 // call.
-func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped map[string]models.Kind, err error) {
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
 	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
 	if !ok {
 		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, skippedDocs{}, err
 		}
 		allSession := unfiltered
 		if len(mocksThatHaveMappings) > 0 {
@@ -5201,13 +6045,21 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 				allSession = nil
 			}
 		}
-		return filtered, unfiltered, newMockLookup(filtered, allSession), nil, nil
+		return filtered, unfiltered, newMockLookup(filtered, allSession), skippedDocs{}, nil
 	}
 	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, skippedDocs{}, err
 	}
-	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), set.Skipped, nil
+	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+}
+
+// skippedDocs is the documents of a set's mock file the store's decoders
+// skipped: their kinds by name, and those whose request time could be read as
+// test windows see them (models.TestSetMocks).
+type skippedDocs struct {
+	kinds    map[string]models.Kind
+	windowed []models.WindowedMock
 }
 
 // readMockLookup reads the report's mock lookup for a test set whose mocks
@@ -5280,19 +6132,29 @@ func (r *Replayer) consumedForAgent(total map[string]models.MockState, region ma
 }
 
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
-// in the set. testDB returns cases sorted by request timestamp, so it is the
-// first one's; a case with no request time contributes nothing rather than
-// pinning the cutoff to the zero time.
+// in the set, of any kind that opens a window (models.RecordedWindow: an HTTP
+// or a gRPC test case). It is the earliest of them all, not the first
+// case's: an HTTP case's request time was all that was read once, so a set of
+// gRPC cases had no cutoff (its staging read the whole recording), and a set
+// whose first test was a gRPC one cut at its first HTTP test, too late. A case
+// of neither kind counts its HTTP request time, as every case did before. A
+// case with no request time contributes nothing rather than pinning the
+// cutoff to the zero time.
 func firstRecordedTestStart(testCases []*models.TestCase) time.Time {
+	var first time.Time
 	for _, tc := range testCases {
 		if tc == nil {
 			continue
 		}
-		if ts := tc.HTTPReq.Timestamp; !ts.IsZero() {
-			return ts
+		ts := models.RecordedWindow(tc).Start
+		if ts.IsZero() && tc.Kind != models.HTTP && tc.Kind != models.GRPC_EXPORT {
+			ts = tc.HTTPReq.Timestamp
+		}
+		if !ts.IsZero() && (first.IsZero() || ts.Before(first)) {
+			first = ts
 		}
 	}
-	return time.Time{}
+	return first
 }
 
 // recordedSetShape is what the staging call tells the agent about the set's
@@ -5314,6 +6176,30 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 		firstTestStart: firstRecordedTestStart(testCases),
 		windows:        recordedTestWindows(testCases),
 	}
+}
+
+// recordedSetShape is the shape a staging call sends for testSetID: that of its
+// test cases, with the first test moved back to the earliest test the set ever
+// recorded when the TestDB keeps it (RecordedStartReader). The agent stages
+// what was recorded before that test as the app's startup traffic, and every
+// test of the run reads the same startup mocks, so a late first test would
+// hand them most of the recording.
+func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
+	shape := recordedSetShapeOf(testCases)
+	reader, ok := r.testDB.(RecordedStartReader)
+	if !ok {
+		return shape
+	}
+	recorded, err := reader.RecordedFirstTestStart(ctx, testSetID)
+	if err != nil {
+		r.logger.Warn("could not read when the test set's first test was recorded; its startup traffic is taken from the test cases it holds now",
+			zap.String("testSetID", testSetID), zap.Error(err))
+		return shape
+	}
+	if !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
+		shape.firstTestStart = recorded
+	}
+	return shape
 }
 
 // recordedTestWindows returns the window each recorded test opens on the agent
@@ -5496,7 +6382,13 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // The whole repair runs under agentRepairTimeout, and from the moment a
 // replacement is detected every later filter-params send carries the CLI's own
 // consumption history (see agentHistoryIncompleteForRun).
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
+//
+// agentWatch, under the proven switch, is the set's watch of the agent's
+// process (watchAgent). Once the replacement is set up again it keeps to the
+// replacement: the app never ran against the agent it replaced (compose's
+// retry runs only while the app's container was never started), so none of
+// the set's evidence was on that one.
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, agentWatch models.AgentInstanceWatch) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -5566,7 +6458,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	if err := r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, recordedSetShapeOf(testCases)); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases)); err != nil {
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at the filter params: %w", testSetID, err)
 	}
 	// Same soft-fail as the setup call site: a readiness-file write that fails
@@ -5577,6 +6469,9 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 			return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and the new one cannot be run against: %w", err)
 		}
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+	}
+	if agentWatch != nil {
+		agentWatch.Accept()
 	}
 
 	confirmed, err := r.probeMockStats(ctx)
@@ -5616,13 +6511,30 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return r.compareHTTPResp(tc, actualResponse, testSetID, emitFailureLogs)
 }
 
+// schemaMatch reports whether a response is compared by its body's schema
+// alone (test.schemaMatch, --schema-match). Never under the proven switch,
+// where every response body is compared (design v14 U18: the setting is
+// deleted at the flip): a schema match passes a value that changed, a field
+// that was added and a reorder of same-shaped elements, so a response that
+// differs would pass. The setting is then ignored, said once.
+func (r *Replayer) schemaMatch() bool {
+	if !r.config.Test.SchemaMatch {
+		return false
+	}
+	if provenswitch.On() {
+		r.noteIgnored("schemaMatch (--schema-match)", "every response body is compared, value by value")
+		return false
+	}
+	return true
+}
+
 // compareHTTPResp is CompareHTTPResp with the matcher's options added.
 func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
-	if r.config.Test.SchemaMatch {
+	if r.schemaMatch() {
 		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
@@ -5639,7 +6551,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
-	if r.config.Test.SchemaMatch {
+	if r.schemaMatch() {
 		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger, opts...)
 		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 		return pass, result
@@ -5648,6 +6560,9 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false, opts...)
 		if pass {
+			// The quiet pre-match prints nothing, its pass line included:
+			// print it here, as Match does when it emits its logs.
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
 		}
@@ -5657,6 +6572,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 		// and calling the helper here as well as below would log the skip twice
 		// for the same test case.
 		if !r.additiveAutoPassOff() && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			httpMatcher.PrintPassLine(tc, r.logger, opts...)
 			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
 		}
@@ -6298,6 +7214,10 @@ func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
 //     stall): the mock recorded for it was consumed by nobody either.
 //   - not_every_test_got_a_verdict: a subset or stopped run. The tests it did
 //     not score consumed nothing, and only mappings.yaml protects their mocks.
+//   - mapping_stale: a test answered wrong while its calls diverged from its
+//     recorded mapping (FailureInfo.MappingStale). What it consumed is no
+//     verdict's, and the mapped mock it left unconsumed may be what a
+//     re-record shows it still needs.
 //   - internal_error: keploy lost part of the run, such as a result insert.
 //   - results_unreadable: the results the rules below read are missing or short.
 //   - no_answer: a request consumed nothing for want of an answer.
@@ -6319,8 +7239,12 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 		return false, "disabled"
 	case run.captureIncomplete:
 		return false, "capture_incomplete"
+	case run.unchecked:
+		return false, "unchecked"
 	case !run.allTestsGotAVerdict:
 		return false, "not_every_test_got_a_verdict"
+	case run.mappingStale:
+		return false, "mapping_stale"
 	case run.internalErr:
 		return false, "internal_error"
 	case !run.resultsComplete:
@@ -6348,6 +7272,8 @@ type pruneRun struct {
 	appUnreachable             bool // anyAppConnectionError over the results read back
 	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete), or lost a call (proven switch)
 	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
+	unchecked                  bool // a hook could not read all the set's tests read (UncheckedHook)
+	mappingStale               bool // a test is not judged for a stale mapping (FailureInfo.MappingStale)
 	success, failure, obsolete int
 	preserveFailedMocks        bool
 }
@@ -6388,7 +7314,9 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID, true)
+		// The test case has failed on its own (no answer): what its
+		// assertions say of the stand-in is printed, never a pass line.
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID, true, httpMatcher.WithoutPassLine())
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -6533,19 +7461,85 @@ func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
 		utils.LogError(r.logger, err, "failed to get all test set ids")
 		return nil, fmt.Errorf("failed to get test set ids")
 	}
+	return r.selectTestSets(testSetIDs)
+}
 
-	var testSets []string
-	for _, testSetID := range testSetIDs {
-		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
+// selectTestSets is the recorded test sets (testSetIDs) a run replays: those
+// test.selectedTests names (-t/--test-sets, or keploy.yml), or every one when
+// it names none, in their natural order and then the configured one.
+//
+// A name that is no recorded test set was dropped silently: -t
+// "test-set-1,test-set-3" replayed test-set-1 alone and passed, and a
+// selection naming no recorded set at all replayed every set. Now it is
+// refused, naming it, under the proven switch and, with the switch off,
+// whenever the selection is the command line's own
+// (Test.SelectedFromCommandLine). With the switch off, a name keploy.yml's
+// test.selectedTests inherited is still left out, with a Warn naming it, so a
+// stale keploy.yml does not turn a run that passed red on upgrade; when it
+// leaves no name, every set is replayed, as before.
+//
+// keploy.yml's test.selectedTests arrives with its keys lowercased (viper
+// reads every key so: {MySet: []} is {myset: []}), so a name that is no
+// recorded set's, but one recorded set's alone in another case, names that
+// set, and the selection is keyed by it again, as the replay reads it per set.
+func (r *Replayer) selectTestSets(testSetIDs []string) ([]string, error) {
+	recorded := make(map[string]bool, len(testSetIDs))
+	folded := make(map[string][]string, len(testSetIDs))
+	for _, id := range testSetIDs {
+		recorded[id] = true
+		folded[strings.ToLower(id)] = append(folded[strings.ToLower(id)], id)
+	}
+	selected := r.config.Test.SelectedTests
+	keyed := make(map[string][]string, len(selected))
+	var unknown []string
+	for name, cases := range selected {
+		if recorded[name] {
+			keyed[name] = cases
+		}
+	}
+	for name, cases := range selected {
+		if recorded[name] {
 			continue
 		}
-		testSets = append(testSets, testSetID)
+		ids := folded[strings.ToLower(name)]
+		if len(ids) != 1 {
+			unknown = append(unknown, name)
+			continue
+		}
+		if _, named := keyed[ids[0]]; !named {
+			keyed[ids[0]] = cases
+		}
 	}
-	if len(testSets) == 0 {
-		testSets = testSetIDs
+	if len(unknown) > 0 {
+		natsort.Sort(unknown)
+		known := slices.Clone(testSetIDs)
+		natsort.Sort(known)
+		if provenswitch.On() || r.config.Test.SelectedFromCommandLine {
+			err := fmt.Errorf("the test set(s) %s named for this run are not recorded", strings.Join(unknown, ", "))
+			utils.LogError(r.logger, err, "the run names a test set that is not recorded, so it replays none",
+				zap.Strings("notRecorded", unknown),
+				zap.Strings("recorded", known),
+				zap.String("next_step", "name only recorded test sets in -t/--test-sets (comma-separated) or in test.selectedTests in keploy.yml, or record the missing ones with keploy record"))
+			return nil, err
+		}
+		left := "the rest of the selection is replayed"
+		if len(keyed) == 0 {
+			left = "it names no recorded set, so every recorded set is replayed, as with no selection"
+		}
+		r.logger.Warn("keploy.yml's test.selectedTests names a test set that is not recorded, so this run leaves it out: "+left,
+			zap.Strings("notRecorded", unknown),
+			zap.Strings("recorded", known),
+			zap.String("next_step", "remove the set from test.selectedTests in keploy.yml, or record it with keploy record; named with -t, or with the proven switch on, a set that is not recorded fails the run"))
 	}
-
-	// Sort the testsets.
+	if len(selected) > 0 {
+		r.config.Test.SelectedTests = keyed
+	}
+	var testSets []string
+	for _, id := range testSetIDs {
+		if _, ok := r.config.Test.SelectedTests[id]; ok || len(r.config.Test.SelectedTests) == 0 {
+			testSets = append(testSets, id)
+		}
+	}
 	natsort.Sort(testSets)
 	return r.applyTestSetOrder(testSets), nil
 }
@@ -6906,8 +7900,9 @@ type testMisses struct {
 	err   error
 	asked bool
 	// lost and lostErr are, under the proven switch, what the agent could not
-	// capture since the test set began (testCaptureLosses), and why that
-	// could not be told.
+	// capture that the test is charged (testCaptureLosses: a taint since the
+	// test set began, a failed TLS handshake since the previous test), and
+	// why that could not be told.
 	lost    models.CaptureLosses
 	lostErr error
 	// real are the test's REAL rows, under the proven switch with a
@@ -6928,6 +7923,9 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
+	// What was missed before the set's first test is the set's, not this
+	// test's (before_set_calls.go).
+	calls = r.setCalls.take(calls)
 	read := testMisses{calls: calls, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
@@ -6945,29 +7943,32 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		result.Real = read.real
 	}
 	mockErrors, err := read.calls, read.err
-	if err != nil && !provenswitch.On() {
-		// Don't swallow silently. This test's misses can't be attached, but the
-		// agent-side window is reset when the next test opens its own (which
-		// drops a window never read, and says so), so the failure can't bleed
-		// into the next test. Log it so a persistent transport problem is
-		// visible rather than reports vanishing without a trace.
-		r.logger.Debug("failed to fetch mock errors for test; skipping unmatched-call attachment",
-			zap.String("testSetID", testSetID),
-			zap.String("testCaseID", testCaseName),
-			zap.Error(err))
-		return
-	}
 	if err != nil {
-		// Under the proven switch a miss fails its test, so a test whose misses
-		// could not all be read has no verdict: it is marked, whatever was read
-		// is still attached, and its test set is not judged (see
-		// testsWithUnreadMisses).
-		markUnmatchedCallsUnread(result)
-		r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged",
+		// A test whose misses could not all be read is marked, and whatever
+		// was read is still attached. Under the proven switch a miss fails its
+		// test, so such a test has no verdict and its test set is not judged
+		// (UnmatchedCallsUnread; see testsWithUnreadMisses). With the switch
+		// off the set is judged as before, but the test is marked
+		// MissesUnattributed: a miss may be missing from it, or have been read
+		// with another test's, so nothing may take a failed difference of its
+		// set for noise (enterprise's auto-noise reads the mark). It was
+		// dropped at Debug, and a miss that went unread was then masked.
+		if provenswitch.On() {
+			markUnmatchedCallsUnread(result)
+		} else if result != nil {
+			result.FailureInfo.MissesUnattributed = true
+		}
+		fields := []zap.Field{
 			zap.String("testSetID", testSetID),
 			zap.String("testCaseID", testCaseName),
 			zap.Int("callsRead", len(mockErrors)),
-			zap.Error(err))
+			zap.Error(err),
+		}
+		if provenswitch.On() {
+			r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged", fields...)
+		} else {
+			r.logger.Warn("could not read every call this test made that no mock answered; a miss may be missing from this test, or have been read with another test's", fields...)
+		}
 	}
 	for _, me := range mockErrors {
 		if result != nil {
@@ -6985,7 +7986,9 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		r.logger.Error("could not tell whether keploy's agent captured every call while this test ran; its test set is not judged",
 			zap.String("testSetID", testSetID), zap.String("testCaseID", testCaseName), zap.Error(read.lostErr))
 	case len(read.lost) > 0 && result != nil:
-		result.FailureInfo.CaptureIncomplete = read.lost
+		// A call keploy cannot capture at all (decision 20) leaves the test
+		// without a verdict; any other loss fails it.
+		result.FailureInfo.CaptureIncomplete, result.FailureInfo.CannotCapture = read.lost.Split()
 	}
 	// The connections keploy could neither capture nor relay as real while
 	// the test ran: capture incomplete, as a loss is, so the test fails with
@@ -7169,6 +8172,8 @@ func isReusableTierState(s models.MockState) bool {
 // The tier is decided by isReusableTierState on the recorder-derived
 // Lifetime/type carried through GetConsumedMocks.
 func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []models.MockState) {
+	// The carry-over mocks the agent flagged are split off before
+	// (splitCarriedConsumed): consumed once, never re-armed.
 	for _, m := range consumed {
 		if isReusableTierState(m) {
 			startup = append(startup, m)
@@ -7177,6 +8182,20 @@ func partitionInitialConsumed(consumed []models.MockState) (startup, rearm []mod
 		}
 	}
 	return startup, rearm
+}
+
+// splitCarriedConsumed splits the mocks consumed before a set's first test into
+// those the agent flagged CarryOver (a carry-over mock, consumed once) and the
+// rest, which partitionInitialConsumed sorts.
+func splitCarriedConsumed(consumed []models.MockState) (carried, rest []models.MockState) {
+	for _, m := range consumed {
+		if m.CarryOver {
+			carried = append(carried, m)
+			continue
+		}
+		rest = append(rest, m)
+	}
+	return carried, rest
 }
 
 func isMockSubset(actual []string, expected []string) bool {

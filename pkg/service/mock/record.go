@@ -198,6 +198,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	// after it: a restore puts the previous set back, or removes a fresh one.
 	var recordTests []models.ScopeWindow
 	var recordReal *models.RealRun
+	// recordNotJudged is what the recording lacks because keploy cannot
+	// capture it at all (decision 20), for whatever judges the recording.
+	var recordNotJudged models.CaptureLosses
+	// recordLosses is, for a judged record, what the agent could not capture
+	// that no test was charged with: judging fails the run on it, as on
+	// recordLossesUnread, why that could not be read.
+	var recordLosses models.CaptureLosses
+	var recordLossesUnread string
 	recordJudged := false
 	defer func() {
 		// Only a build that judges the record reads these results; written
@@ -206,6 +214,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
+				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
 			}, recordTests)
 		}
 	}()
@@ -285,6 +294,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	if agentHolds {
 		captureCtx = models.WithDrainsAfterStop(captureCtx)
 	}
+	// This round's streams end by the agent's markers when it can
+	// (round_end.go): its token names them to the agent.
+	round := newRoundEnd(m.instrumentation)
+	captureCtx = round.on(captureCtx)
 	outgoing, err := m.instrumentation.GetOutgoing(captureCtx, models.OutgoingOptions{
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
@@ -439,9 +452,19 @@ func (m *mockService) Record(ctx context.Context) error {
 	// be a race. This returns as soon as the agent stops sending.
 	drainStart := time.Now()
 	drainFrom.Store(drainStart.UnixNano())
-	lost := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
+	lost, unconfirmed := m.drainTrailingMocks(consumerDone, drainStart, agentHolds, func() (uint64, bool) {
 		return uint64(heldSeen.Load() + heldDone.Load() + casesSeen.Load()), heldBusy.Load()
-	}, func() uint64 { return uint64(heldSeen.Load()) }, recordDrainWords)
+	}, func() uint64 { return uint64(heldSeen.Load()) }, recordDrainWords, round)
+	// sayUnconfirmed is said once the recording is saved, and only then: a
+	// recording that is not kept (the tests failed, nothing was captured,
+	// the agent died) promotes nothing, and "the recording is saved" would
+	// not be true of it.
+	sayUnconfirmed := func() {
+		if unconfirmed {
+			m.logger.Warn(composeTailUnconfirmed, zap.String("mock-set", name), zap.Int("mocks", mockCount),
+				zap.String("next_step", composeTailUnconfirmedNext))
+		}
+	}
 	// 8a's count, read while the recording's stream is still open: an agent
 	// that is being stopped too (a stop sent to it, a container stop) holds
 	// its HTTP server only while a recording's streams are open, and once
@@ -449,7 +472,33 @@ func (m *mockService) Record(ctx context.Context) error {
 	// keep a recording that is short of an untracked process's calls.
 	pidCheck := m.pidMapRefusedDuring(persistCtx, pidBase, "record")
 	// So is what else it could not capture (under the proven switch).
-	lostLosses, lostErr := m.captureLossesDuring(persistCtx, lossesBase)
+	lostAll, lostErr := m.captureLossesDuring(persistCtx, lossesBase)
+	// A record that is judged keeps what it captured whatever the agent
+	// could not capture (design v14 §7.5): each test's window carries what
+	// was lost while it ran or before it (a loss charges the test open when
+	// it happened and every later one), so judging keeps the previous
+	// recording of each test charged with one, and commits the new one of
+	// each clean test. What no test was charged with (a loss after the last
+	// test) is the run's, read after the windows (runLosses below), for
+	// judging to fail the run on. Before, one loss dropped the whole set,
+	// clean tests too, with no per-test file written.
+	judgedRecord := provenswitch.On() && recordsJudged.Load()
+	// 8'. The agent said it holds nothing more from before the run ended, and
+	//     that it can end its streams: it puts on each what it still has,
+	//     then its marker, and the round ends there, every mock it captured
+	//     before the run ended read and saved -- not when the stream is ended
+	//     here, which loses a mock still on its way (clear is not delivered).
+	//     After 8a's reads above, which need the streams open. A stream that
+	//     closes before its marker, from an agent only this client stops,
+	//     leaves the round incomplete (lost).
+	if !lost && round.endsByMarkers() {
+		streams := []roundStream{{kind: models.MockStream, done: consumerDone}}
+		if capture != nil {
+			streams = append(streams, roundStream{kind: models.TestCaseStream, done: capture.done})
+		}
+		strict := agentHolds && startedAgent(m.instrumentation)
+		lost = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
+	}
 	stopCapture()
 	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
 		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
@@ -464,9 +513,14 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     green wherever the agent tracks every process, the missing calls
 	//     reaching the real dependency. So it is not kept, however the run
 	//     ended, and the run fails: the runner's own code first, keploy's 1
-	//     when the runner passed or was stopped.
+	//     when the runner passed or was stopped. A record that is judged is
+	//     kept: the refusal is on the windows of the tests charged with it,
+	//     and judging keeps their previous recordings (judgedRecord above).
 	//     (Read above, before the stream closed.)
-	if refused := pidCheck.refused; pidCheck.known && refused.Any() {
+	if refused := pidCheck.refused; pidCheck.known && refused.Any() && judgedRecord {
+		m.logger.Error("the agent could not track every process the test command ran, so their calls were not recorded: the tests charged with it keep their previous recordings in judging",
+			append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", refused.CaptureIncomplete()))...)
+	} else if pidCheck.known && refused.Any() {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
@@ -484,8 +538,15 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	// Under the proven switch, any other loss of capture during the run:
 	// the recording misses what was lost, so it is not kept either.
-	//     (Read above, before the stream closed.)
-	if t := lostLosses.Text(); t != "" {
+	//     (Read above, before the stream closed.) A call keploy cannot
+	//     capture at all (decision 20) does not discard the recording: it is
+	//     said below.
+	lostLosses, lostNotJudged := lostAll.Split()
+	recordNotJudged = lostNotJudged
+	if t := lostLosses.Text(); t != "" && judgedRecord {
+		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t))
+	} else if t != "" {
 		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
@@ -520,6 +581,14 @@ func (m *mockService) Record(ctx context.Context) error {
 			zap.String("next_step", "re-record the mock set"))
 		return err
 	}
+	// 8b'. The test command called what keploy cannot capture at all: the
+	//      recording lacks those calls, and a replay of it would make them
+	//      for real. Kept, not vouched for in silence.
+	if t := lostNotJudged.NotJudgedText(); t != "" {
+		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
+	}
 	// 8b. The agent counts, but its count could not be read: nothing shows a
 	//     process went untracked, and nothing shows none did. The recording
 	//     is kept -- a lost read is no evidence against it, and record has no
@@ -548,6 +617,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			return nil
 		}
 		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		sayUnconfirmed()
 		return nil
 	}
 	// Not the user: the agent died under the test command. What was captured
@@ -593,6 +663,31 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, rerr, stopReason, zap.String("mock-set", name),
 				zap.String("next_step", "check the agent's log, then record again"))
 			return fmt.Errorf("%s: %w", stopReason, rerr)
+		}
+		// What the agent could not capture that no test was charged with:
+		// read after the windows, whose read ends, failed, a test whose
+		// process went away and charges it, so only what came after every
+		// test's end is left.
+		if judgedRecord {
+			judgedLost, _ := lostAll.Split()
+			var refused models.PIDMapRefusals
+			if pidCheck.known {
+				refused = pidCheck.refused
+			}
+			var unread error
+			if recordLosses, unread = m.runLosses(ctx, lossesBase, judgedLost, lostErr, refused); unread != nil {
+				recordLossesUnread = unread.Error()
+			}
+			if t := recordLosses.Text(); t != "" {
+				m.logger.Error("keploy could not capture every call the test command made after its last test: no recording holds what those calls carried, so judging fails the run ("+provenswitch.Env+"=1)",
+					zap.String("mock-set", name), zap.String("reason", t),
+					zap.String("next_step", "fix what the reason names, then record again"))
+			}
+			if recordLossesUnread != "" {
+				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
+					zap.String("mock-set", name), zap.String("reason", recordLossesUnread),
+					zap.String("next_step", "check the agent's log for why its count could not be read, then record again"))
+			}
 		}
 	} else if m.mappingDB != nil {
 		windows = m.agentWindows(persistCtx)
@@ -650,6 +745,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
 			return fmt.Errorf("%s: %w", stopReason, err)
 		}
+		sayUnconfirmed()
 	}
 	if keep && m.mappingDB != nil {
 		if len(windows) > 0 {
@@ -1169,8 +1265,12 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // (mocksSeen counts those) for mockDrainQuiet and the agent says it holds
 // nothing more (clear), or the stream ended by itself. Clear is not
 // delivered: a mock the agent had handed on and this client had not received
-// yet when the stream is ended is lost unseen (models.BacklogClear); the
-// quiet before the drain asks has almost always let it through.
+// yet is still on its way. From an agent that ends its streams on request,
+// the clear is noted on round (roundEnd.endsByMarkers), and the caller then
+// reads the streams to the agent's markers (endRound), so that mock is read;
+// with any other agent, a stream ended once this returns loses it unseen
+// (models.BacklogClear), which the quiet before the drain asks has almost
+// always let through.
 // It is bounded by progress, not by a deadline: an agent still handing over a
 // backlog is waited for however long that takes, and so is one the user
 // interrupted (Ctrl+C stops the recording, not the handing over of what was
@@ -1186,7 +1286,11 @@ func containing(windows []models.ScopeWindow, at time.Time) string {
 // keploy reaches keploy a second time from sudo, as the first does. A drain
 // the user ends so did not get what the agent still held: it is lost (said
 // with words.gaveUp).
-func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords) (lost bool) {
+//
+// unconfirmed is true when it ended because an agent that does not hold its
+// stream for the drain (docker compose stops it with the project) closed it:
+// nothing then says the caller has all it captured, nor that it does not.
+func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time.Time, agentHolds bool, held func() (progress uint64, busy bool), arrived func() uint64, words drainWords, round *roundEnd) (lost, unconfirmed bool) {
 	quiet := time.NewTimer(mockDrainQuiet)
 	defer quiet.Stop()
 	notice := utils.NewStopNowNotice(mockDrainNotice)
@@ -1213,14 +1317,17 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				// stream as it gives the drain up: the user's stop.
 				select {
 				case <-utils.StopNow():
-					return m.stoppedNow(words)
+					return m.stoppedNow(words), false
 				default:
-					return m.agentEndedDrain(&looks, arrived() == lookedAt)
+					return m.agentEndedDrain(&looks, arrived() == lookedAt), false
 				}
 			}
-			return false
+			// The agent gave no word that it had handed over all it had:
+			// its stream just closed. What this caller saves cannot be
+			// confirmed whole: the caller says so if it saves it.
+			return false, true
 		case <-utils.StopNow():
-			return m.stoppedNow(words)
+			return m.stoppedNow(words), false
 		case <-notices.C:
 			msg := words.saving
 			if notice.Next() {
@@ -1243,7 +1350,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 			// (holdForBacklog).
 			lookedBefore := lookedAt
 			lookedAt = arrived()
-			wait, gaveUp := m.holdForBacklog(from, &looks, now)
+			wait, gaveUp := m.holdForBacklog(from, &looks, now, round, words)
 			if looks.LastGone() {
 				// A look the agent was gone for says nothing of what it
 				// held: what came since counts from the one before.
@@ -1253,7 +1360,7 @@ func (m *mockService) drainTrailingMocks(consumerDone <-chan struct{}, from time
 				quiet.Reset(mockDrainQuiet)
 				continue
 			}
-			return gaveUp
+			return gaveUp, false
 		}
 	}
 }
@@ -1268,6 +1375,15 @@ type drainWords struct {
 	stopNow string
 	// gaveUp and nextStep are said at WARN when the user ends it so.
 	gaveUp, nextStep string
+	// Once the agent said "clear", the round ends on its markers (endRound):
+	// endedEarly is the next step when an agent that only this client stops
+	// left before them (the run fails); notTheAgent when one something else
+	// stops did (said at WARN); endedHere when the streams were ended here
+	// all the same, a frame on its way lost.
+	endedEarly, notTheAgent, endedHere string
+	// stalled and stalledNext are said at ERROR when the agent made no
+	// progress through what it said it still held (holdForBacklog).
+	stalled, stalledNext string
 }
 
 // recordDrainWords are keploy mock record's: a recording ended before it has
@@ -1277,7 +1393,23 @@ var recordDrainWords = drainWords{
 	stopNow:  "press Ctrl+C again to stop now: this recording is then not saved, and the existing mock set is kept",
 	gaveUp:   "stopped saving the mocks the agent captured before the run ended, at a second interrupt",
 	nextStep: "this recording was not saved; the existing mock set is kept. Re-record it",
+
+	endedEarly:  "the agent was stopped or crashed before the recording had read all it had; the run ends as failed and the existing mock set is kept. Do not stop the agent separately from the recording; re-record",
+	notTheAgent: "stop the recording, not the agent: the recording ends the agent's streams once it has saved what the agent captured",
+	endedHere:   "a mock may be missing from this recording; if a replay of it misses a call, record it again",
+
+	stalled:     "stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
+	stalledNext: "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more",
 }
+
+// composeTailUnconfirmed, with its next step, is said at WARN once keploy mock
+// record has saved a recording whose drain was unconfirmed
+// (drainTrailingMocks): under docker compose the agent goes with the project,
+// and nothing says the recording holds every mock it captured.
+const (
+	composeTailUnconfirmed     = "the keploy agent closed its mock stream as docker compose stopped it with the project, without saying it had handed over every mock it captured: keploy cannot confirm this recording holds them all"
+	composeTailUnconfirmedNext = "the recording is saved; replay the set to check it: under --on-miss fail (the default) a call it is missing fails the replay. Or record the test command natively (keploy mock record -c \"<test command>\"), where keploy confirms it"
+)
 
 // replayDrainWords are keploy mock replay's: it collects the requests the
 // agent captured, for the run's report. A run short of them is not judged
@@ -1287,6 +1419,13 @@ var replayDrainWords = drainWords{
 	stopNow:  "press Ctrl+C again to stop now: this run then ends unjudged, as one stopped before it finished",
 	gaveUp:   "stopped collecting the requests the agent captured before the run ended, at a second interrupt",
 	nextStep: "this run ends unjudged, as one stopped before it finished; the last run's receipt is kept. Run it again",
+
+	endedEarly:  "the agent was stopped or crashed before keploy had read every request it captured; the run fails as keploy's, not the suite's. Do not stop the agent separately from the replay; run it again",
+	notTheAgent: "stop the replay, not the agent: the replay ends the agent's streams once it has read what the agent captured",
+	endedHere:   "a request may be missing from what this run compared; if one is reported missing, run it again",
+
+	stalled:     "stopped waiting for the keploy agent to hand over the requests it captured before the run ended: it made no progress",
+	stalledNext: "the run fails as keploy's, not the suite's, short of the requests the agent still held. Run it again; if the agent was starved of CPU, give it more",
 }
 
 // stoppedNow is drainTrailingMocks ended by the user's second interrupt
@@ -1371,21 +1510,23 @@ const mockDrainStallLooks = 180
 // the drain's own progress so far. A wait that sees no progress for
 // mockDrainStallLooks looks ends with an error that says what the agent still
 // held, and the run fails (a Keploy-side exit code, never over the runner's
-// own).
-func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks, frames uint64) (wait, gaveUp bool) {
+// own), in its caller's words. round (nil: none) notes whether the answer
+// lets the round end on the agent's markers (roundEnd.clear).
+func (m *mockService) holdForBacklog(before time.Time, looks *utils.BacklogLooks, frames uint64, round *roundEnd, words drainWords) (wait, gaveUp bool) {
 	br, ok := m.instrumentation.(backlogReader)
 	if !ok {
 		return false, false
 	}
 	b, err := br.BacklogBefore(context.Background(), before)
+	round.clear(b, err)
 	wait, gaveUp = looks.Look(b, err, frames)
 	if gaveUp {
-		m.logger.Error("stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
+		m.logger.Error(words.stalled,
 			zap.Stringer("agent_says", b.Verdict),
 			zap.String("waiting_on", b.WaitingOn),
 			zap.Int("looks_without_progress", looks.Stalled()),
 			zap.NamedError("last_look_error", err),
-			zap.String("next_step", "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more"))
+			zap.String("next_step", words.stalledNext))
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return false, true
 	}

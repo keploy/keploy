@@ -9,12 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
 // Default knobs. Callers can override via Config.
 const (
-	defaultHangBudget = 60 * time.Second
+	defaultHangBudget = stall.HangBudget
 	defaultMemCap     = 8 * 1024 * 1024 // 8 MiB
 	// minHangTick bounds how often the watchdog checks its budget so
 	// very short HangBudgets (used in tests) do not cause a ridiculous
@@ -31,8 +32,16 @@ type Config struct {
 
 	// HangBudget is the maximum time the supervisor tolerates no
 	// progress (no BumpActivity call) while there is pending work
-	// before declaring the parser hung. Default 60s.
+	// before declaring the parser hung. Default 60s. It is time the
+	// process could run (Clock), not wall time: a parser starved of CPU
+	// (an overloaded host, a CPU-throttled container, a frozen one) is
+	// not hung, and its stall counts only as fast as it gets to run.
 	HangBudget time.Duration
+
+	// Clock measures HangBudget (utils/stall); nil is the process's own
+	// runnable clock, held while there is pending work to measure (see
+	// watchdogLoop). Tests set it.
+	Clock stall.Clock
 
 	// MemCap is the per-connection byte cap on parser-owned buffers.
 	// Enforced by callers via MarkMemCapExceeded; exposed here as
@@ -67,11 +76,15 @@ type Supervisor struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	// Activity bookkeeping. lastProgressNano holds a UnixNano stamp
-	// updated on every BumpActivity call. pending toggles whether
-	// the watchdog is armed.
-	lastProgressNano atomic.Int64
-	pending          atomic.Bool
+	// Activity bookkeeping. lastProgress holds the clock's runnable
+	// time (ns) at the latest BumpActivity call. pending toggles
+	// whether the watchdog is armed.
+	clk stall.Clock
+	// holdClk holds the process clock (stall.Hold) while the watchdog has
+	// pending work to measure; nil for a Config's Clock.
+	holdClk      func() (release func())
+	lastProgress atomic.Int64
+	pending      atomic.Bool
 
 	// Abort path: hung is closed by the watchdog when the activity
 	// budget is exceeded while pending work is outstanding.
@@ -132,33 +145,32 @@ func New(cfg Config) *Supervisor {
 		cfg.MemCap = defaultMemCap
 	}
 
+	clk := cfg.Clock
+	var holdClk func() func()
+	if clk == nil {
+		clk, holdClk = stall.ProcessClock(), holdProcessClock
+	}
 	rootCtx, cancel := context.WithCancel(context.Background())
 	s := &Supervisor{
 		cfg:        cfg,
 		rootCtx:    rootCtx,
 		rootCancel: cancel,
+		clk:        clk,
+		holdClk:    holdClk,
 		hungCh:     make(chan struct{}),
 		wdStop:     make(chan struct{}),
 		wdDone:     make(chan struct{}),
 	}
-	s.lastProgressNano.Store(time.Now().UnixNano())
+	s.BumpActivity()
 	go s.watchdogLoop()
 	return s
 }
 
 // BumpActivity is called by the relay whenever a chunk is forwarded
 // to a FakeConn or an Ack is delivered. It resets the watchdog
-// timer. Cheap; a single atomic store.
+// timer. Cheap: an atomic load of the clock and a store.
 func (s *Supervisor) BumpActivity() {
-	s.bumpActivityAt(time.Now())
-}
-
-// bumpActivityAt records progress as of now. Split out from BumpActivity so
-// the watchdog's reset behaviour can be exercised against a synthetic clock
-// (see TestHangResetOnActivity) instead of racing two wall-clock timers under
-// load, which is inherently flaky.
-func (s *Supervisor) bumpActivityAt(now time.Time) {
-	s.lastProgressNano.Store(now.UnixNano())
+	s.lastProgress.Store(int64(s.clk.Runnable()))
 }
 
 // MarkPendingWork indicates an in-flight request is awaiting a
@@ -443,12 +455,11 @@ func (s *Supervisor) Close() {
 	<-s.wdDone
 }
 
-// hangExceeded reports whether the no-progress budget has been exceeded as of
-// now, given the current pending/suspended/activity state. It is the single
-// decision the watchdog makes on each tick, factored out so the reset
-// behaviour can be verified deterministically against a synthetic clock (see
-// TestHangResetOnActivity) rather than by racing two wall-clock timers.
-func (s *Supervisor) hangExceeded(now time.Time) bool {
+// hangExceeded reports whether the no-progress budget has been exceeded, in
+// the time the process could run since the latest activity, given the current
+// pending/suspended state. It is the single decision the watchdog makes on
+// each tick.
+func (s *Supervisor) hangExceeded() bool {
 	if !s.pending.Load() {
 		return false
 	}
@@ -457,37 +468,58 @@ func (s *Supervisor) hangExceeded(now time.Time) bool {
 	if s.suspended.Load() {
 		return false
 	}
-	last := s.lastProgressNano.Load()
-	if last == 0 {
-		return false
-	}
-	return now.Sub(time.Unix(0, last)) > s.cfg.HangBudget
+	return s.clk.Runnable()-time.Duration(s.lastProgress.Load()) > s.cfg.HangBudget
 }
 
-// watchdogLoop polls the activity clock. Closes hungCh when budget
-// exceeded while pending work is outstanding.
+// watchdogLoop looks at the activity clock every tick of wall time (a
+// quarter of the budget). Closes hungCh when the budget is exceeded while
+// pending work is outstanding. A timer re-armed after each look: how late it
+// fires does not matter, the clock says how long the process could run.
+//
+// The process clock is sampled only while held, so the loop holds it only
+// while there is pending work to measure: an idle connection, the most of a
+// pooled one's life, costs no sampling. Held from the first look that finds
+// the work pending, the budget is measured from then, at most a tick after
+// the work arrived when nothing else held the clock.
 func (s *Supervisor) watchdogLoop() {
 	defer close(s.wdDone)
+	var release func()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 
 	tick := s.cfg.HangBudget / 4
 	if tick < minHangTick {
 		tick = minHangTick
 	}
-	t := time.NewTicker(tick)
-	defer t.Stop()
-
 	for {
+		if s.holdClk != nil {
+			switch armed := s.pending.Load() && !s.suspended.Load(); {
+			case armed && release == nil:
+				release = s.holdClk()
+			case !armed && release != nil:
+				release()
+				release = nil
+			}
+		}
+		c, stop := s.clk.After(tick)
 		select {
 		case <-s.wdStop:
+			stop()
 			return
-		case <-t.C:
-			if s.hangExceeded(time.Now()) {
+		case <-c:
+			if s.hangExceeded() {
 				s.hungOnce.Do(func() { close(s.hungCh) })
 				return
 			}
 		}
 	}
 }
+
+// holdProcessClock holds the process clock (stall.Hold); tests count it.
+var holdProcessClock = stall.Hold
 
 // wrapPanic converts a recovered panic value into an error suitable
 // for Result.Err. If the value is already an error, we preserve it

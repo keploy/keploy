@@ -573,6 +573,7 @@ type recTelemetry struct {
 	sessionTestCount int64
 	sessionRecorded  bool
 	sessionStatus    string
+	sessionReason    string
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -585,12 +586,13 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
 func (tl *recTelemetry) RecordedTestAndMocks()        {}
-func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, _ string) {
+func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.sessionTestCount = testCount
 	tl.sessionRecorded = true
 	tl.sessionStatus = status
+	tl.sessionReason = reason
 }
 
 type recTestSetConf struct{}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -346,5 +348,30 @@ func TestRecord_AfterMockInsertGetsTheDocumentInMocksYAML(t *testing.T) {
 	want := append([]byte(utils.GetVersionAsComment()), bytes.Join(hooks.docs, []byte("---\n"))...)
 	if !bytes.Equal(want, file) {
 		t.Fatalf("the documents AfterMockInsert got are not what is in mocks.yaml\ngot:\n%s\nmocks.yaml:\n%s", want, file)
+	}
+}
+
+// Under the proven switch keploy mock record refuses every docker command
+// before anything starts, in a build that judges records too. The compose
+// close path (drainTrailingMocks, agentHolds false) only says it cannot
+// confirm the recording whole and charges no capture loss because of this:
+// were a compose record let through under the switch, a recording short of
+// its tail would be promoted with no test charged. The instrumentation and
+// the mock DB are nil here: anything the record touched would panic.
+func TestARecordUnderTheSwitchRefusesEveryDockerCommandBeforeAnythingStarts(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, judged := range []bool{false, true} {
+		if judged {
+			JudgeRecords()
+			t.Cleanup(func() { recordsJudged.Store(false) })
+		}
+		for _, kind := range []utils.CmdType{utils.DockerCompose, utils.DockerRun, utils.DockerStart, utils.FromContainer} {
+			cfg := &config.Config{CommandType: string(kind), Command: "docker compose up"}
+			cfg.Mock.Name = "e2e"
+			err := New(zap.NewNop(), nil, nil, nil, nil, nil, cfg).Record(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "runs the test command natively in this release") {
+				t.Fatalf("judged %v: a %s record under the switch was not refused before it started: %v", judged, kind, err)
+			}
+		}
 	}
 }

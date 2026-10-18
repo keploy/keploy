@@ -20,10 +20,10 @@ const perTestSequencePrefix = "perTest\x00"
 // HTTP mock DeriveLifetime gives the record-order cursor
 // (ConsumeCursorSaturate). Recordings with the same key are one sequence: the
 // same method, URL and body (byte-exact), and the same lifetime class:
-// per-test recordings form their own sequences, apart from reusable ones
-// (IsPerTestSequenceKey). (No recording is both per-test and on the cursor
-// until recorders state per-test lifetimes for HTTP; cursorPick splits the
-// classes from then.)
+// per-test recordings (a recorder that states lifetimes writes them) form
+// their own sequences, apart from reusable ones (IsPerTestSequenceKey); a
+// replay further narrows a per-test sequence to the open test's own
+// recordings, or to those no open test owns.
 //
 // It is not the identity of every walk. Under the proven switch the strict
 // and variable passes (strictCursorPick, pickHit) walk every cursor recording

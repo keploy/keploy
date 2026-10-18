@@ -12,6 +12,11 @@ import (
 
 const MappingKind = "TestMocksMapping"
 
+// MappingSourceKeployTest is the Mapping.Source of a mappings.yaml keploy test
+// wrote: what a replay's passing tests consumed, not what each test recorded.
+// Under the proven switch it does not say what a test owns.
+const MappingSourceKeployTest = "keploy test"
+
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
 	Name             string `json:"name" yaml:"name" bson:"name"`
@@ -80,6 +85,12 @@ type Mapping struct {
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
 	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
+	// Source is the keploy command that wrote the file's test entries, when
+	// it is not keploy record: MappingSourceKeployTest. A writer that names
+	// none keeps the file's, keploy record's writes included. Empty in a file
+	// only keploy record wrote, in one keploy test wrote before it said so,
+	// and in one a cloud store handed back (which keeps no source).
+	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
 }
 
 type BootSpec struct {

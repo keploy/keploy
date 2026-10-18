@@ -799,3 +799,143 @@ func TestHandleIncoming_ATestCaseHeldBehindOthersIsPendingAtOnce(t *testing.T) {
 	}
 	close(tcs)
 }
+
+// A request of the application's in flight across a recording's stop (an
+// attached app goes on as a recording stops) is no request of the session the
+// agent serves next. Once its recording has ended, by its incoming stream's
+// end or the next session's attach, whichever comes first, the request is
+// given up (syncmgr.EndStoppedRecording): it is not kept, and its verdict is no
+// loss, whenever it comes, also when the hold's budget gave it up while the
+// last recording drained.
+func TestHandleIncoming_ARequestInFlightAcrossTheStopIsNoRequestOfTheNextSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// streamEnds: the request's recording is a session whose stream ends,
+		// and the verdict comes between the two sessions; otherwise the next
+		// session attaches while nothing ended the last one, and the verdict
+		// comes in it.
+		streamEnds, budget bool
+	}{
+		{"its recording's stream ends, then its verdict", true, false},
+		{"its recording's stream ends, then its verdict, given up by the hold's budget", true, true},
+		{"the next session attaches first, then its verdict", false, false},
+		{"the next session attaches first, then its verdict, given up by the hold's budget", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := syncmgr.Get()
+			t.Cleanup(func() {
+				// A new recording's holds session, then none: the stop's ask
+				// below is not left stopping the next test's holds.
+				mgr.SetOutputChannel(make(chan *models.Mock))
+				mgr.SetOutputChannel(nil)
+			})
+			leftOut := mgr.KeptRequestsLeftOut()
+			var stale *syncmgr.Window
+			kept := true
+			if tc.streamEnds {
+				incomingSessionSummary(t, func() { stale = inFlightAcrossTheStop(t, tc.budget) }, true)
+				kept = stale.Keep()
+			} else {
+				stale = inFlightAcrossTheStop(t, tc.budget)
+			}
+			t.Cleanup(stale.Close)
+			summary, warns := incomingSessionSummary(t, func() {
+				if !tc.streamEnds {
+					kept = stale.Keep()
+				}
+			}, true)
+			if kept {
+				t.Fatal("a request in flight across the last recording's stop was kept")
+			}
+			if n := mgr.KeptRequestsLeftOut() - leftOut; summary["tcs_left_out_in_flight"] != uint64(0) || len(warns) != 0 || n != 0 {
+				t.Fatalf("a request of the last recording was counted as a loss: tcs_left_out_in_flight = %v, %d warnings, %d left out",
+					summary["tcs_left_out_in_flight"], len(warns), n)
+			}
+		})
+	}
+}
+
+// inFlightAcrossTheStop opens a request's window on the global manager, past
+// the startup window, and has the recording's stop ask what is pending: the
+// request is in flight across the stop. budget: the hold's budget then gives it
+// up, as the drain's traffic passes it.
+func inFlightAcrossTheStop(t *testing.T, budget bool) *syncmgr.Window {
+	t.Helper()
+	mgr := syncmgr.Get()
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false) // past the startup window: no mock is rescued as boot traffic
+	}
+	start := time.Now().Add(-time.Minute)
+	w := mgr.OpenWindow(start, nil)
+	mgr.BacklogBefore(time.Now())
+	if budget {
+		body := strings.Repeat("b", int(syncmgr.MaxHeldBytes/16))
+		for i := 0; i <= 16; i++ {
+			mgr.AddMock(&models.Mock{Kind: models.HTTP,
+				Spec:         models.MockSpec{ReqTimestampMock: start.Add(time.Duration(i) * time.Microsecond), HTTPResp: &models.HTTPResp{Body: body}},
+				TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
+		}
+		n := time.Now()
+		mgr.ResolveRange(n, n, "", true, false) // stale: held for it, past the budget
+	}
+	return w
+}
+
+// A test case of a request the stop of a recording that has ended found in
+// flight (one resolved as that recording ended, or captured as its window was
+// given up, which that recording's stream no longer took) is left out of the
+// next session: it is no request of it. A test case of any other request is
+// the next session's, and is streamed; and the session after that leaves
+// nothing out for that stop.
+func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
+	mgr := syncmgr.Get()
+	t.Cleanup(func() {
+		mgr.SetOutputChannel(make(chan *models.Mock))
+		mgr.SetOutputChannel(nil)
+	})
+	inFlightSince := time.Now().Add(-time.Second)
+	w := mgr.OpenWindow(inFlightSince, nil) // in flight across the stop
+	t.Cleanup(w.Close)
+	resolvedSince := inFlightSince.Add(time.Microsecond)
+	r := mgr.OpenWindow(resolvedSince, nil) // in flight across the stop, resolved before the end
+	mgr.BacklogBefore(time.Now())
+	if !w.Claim() { // being resolved as the recording ends: left to its resolve
+		t.Fatal("fixture: the window was given up")
+	}
+	r.Keep()
+	mgr.ResolveKept(r, resolvedSince, time.Now(), "", false) // its response came after the stop
+	r.Close()
+	mgr.EndStoppedRecording() // that recording's stream has ended
+
+	tc := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.HTTP,
+			HTTPReq:  models.HTTPReq{Method: "GET", URL: "http://app/" + name, Timestamp: at},
+			HTTPResp: models.HTTPResp{StatusCode: 200, Timestamp: at.Add(time.Millisecond)}}
+	}
+	session := func(cases ...*models.TestCase) []string {
+		t.Helper()
+		tcs := make(chan *models.TestCase, len(cases))
+		a := &Agent{logger: zap.NewNop(), svc: incomingSvc{tc: tcs}}
+		srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+		defer srv.Close()
+		body, _ := json.Marshal(models.IncomingReq{})
+		resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		for _, c := range cases {
+			tcs <- c
+		}
+		close(tcs)
+		return streamedNames(t, resp)
+	}
+	if got := session(tc("of-the-ended-recording", inFlightSince), tc("resolved-before-the-end", resolvedSince), tc("of-this-session", inFlightSince.Add(time.Millisecond))); len(got) != 1 || got[0] != "of-this-session" {
+		t.Fatalf("streamed %v, want only the test case of no request the last recording's stop found", got)
+	}
+	if got := session(tc("the-same-time-later", inFlightSince)); len(got) != 1 {
+		t.Fatalf("the session after it streamed %v: it still left out what the last recording's stop found", got)
+	}
+}

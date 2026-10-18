@@ -247,7 +247,7 @@ func TestTheDrainsReadEachStreamToTheAgentsMarker(t *testing.T) {
 			// Each drain says it read its stream to the marker: what the
 			// lanes check, in keploy's own log.
 			for _, frames := range []string{"test cases", "mocks", "mappings"} {
-				said := logs.FilterMessage(streamEndedLog).FilterField(zap.String("frames", frames)).Len()
+				said := logs.FilterMessage(StreamEndedLog).FilterField(zap.String("frames", frames)).Len()
 				if said != 1 {
 					t.Fatalf("the %s drain said %d times that it read its stream to the agent's marker, want once", frames, said)
 				}

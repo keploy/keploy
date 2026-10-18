@@ -4,10 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -85,20 +90,143 @@ func preferH2From(ctx context.Context) bool {
 	return v
 }
 
+// TLSLayerHolder is a connection whose close the proxy reads before it
+// happens (pkg/agent/proxy's trackedConn): handed the TLS layer the proxy
+// serves over it, its close reads through that layer what its socket still
+// holds unread. A TLS client's close_notify, which carries no call, and data
+// look alike to the socket's own count of unread bytes -- TLS 1.3 encrypts
+// the alert -- and only the layer tells them apart.
+type TLSLayerHolder interface {
+	HoldTLSLayer(*tls.Conn)
+}
+
+// PassTLSLayer hands tlsConn to the first connection under conn that holds
+// one (TLSLayerHolder), through the wrappers between (their NetConn, or
+// Unwrap), if there is one. A wrapper that exposes neither passes it on
+// itself by holding it (the relay's).
+func PassTLSLayer(conn net.Conn, tlsConn *tls.Conn) {
+	c := conn
+	for i := 0; c != nil && i < 16; i++ { // a wrapper chain, never a cycle
+		if h, ok := c.(TLSLayerHolder); ok {
+			h.HoldTLSLayer(tlsConn)
+			return
+		}
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
+			return
+		}
+	}
+}
+
+// IsClientGiveUp reports whether err, from the proxy's side of a client-side
+// TLS handshake (HandleTLSConnection), is the client leaving without a word:
+// it closed or reset its connection -- its own cancel, a request timeout, its
+// stop -- and made no call keploy failed to capture. Every other failure lost
+// its call: a certificate alert keploy read (Go, Java, rustls), one it could
+// not (OpenSSL sends its TLS 1.3 alert in plaintext, which crypto/tls reads
+// as "bad record MAC"), any other alert, a ClientHello keploy's server
+// refused, a certificate keploy could not make. A client that rejects
+// keploy's certificate by closing without an alert (Node.js) reads as a give
+// up too: nothing on the wire tells the two apart.
+func IsClientGiveUp(err error) bool {
+	// neterr: syscall's ECONNRESET and EPIPE never match on Windows, whose
+	// sockets give Winsock's codes.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) || neterr.IsConnAborted(err)
+}
+
+// HandshakeError is a client-side handshake with keploy's proxy that failed
+// (HandleTLSConnection's error): Err, and whether keploy had produced the
+// certificate it answers the client with, so the client had it, or was being
+// sent it, when the handshake failed.
+type HandshakeError struct {
+	Err             error
+	CertificateSent bool
+}
+
+func (e *HandshakeError) Error() string { return e.Err.Error() }
+
+func (e *HandshakeError) Unwrap() error { return e.Err }
+
+// CertificateSent reports whether err, from HandleTLSConnection, failed once
+// keploy had sent the client its certificate (HandshakeError): a client that
+// hangs up then, without a word, may have rejected it -- Node.js does so --
+// or given up, and nothing on the wire tells the two apart. One that hung up
+// before rejected nothing.
+func CertificateSent(err error) bool {
+	var he *HandshakeError
+	return errors.As(err, &he) && he.CertificateSent
+}
+
+// HandshakeCause is the handshake's own error under a HandshakeError: what
+// a caller that tells errors apart by identity (io.EOF) compares.
+func HandshakeCause(err error) error {
+	var he *HandshakeError
+	if errors.As(err, &he) {
+		return he.Err
+	}
+	return err
+}
+
+// ClientEvents is told what a client-side TLS handshake keploy's TLS server
+// (HandleTLSConnection) makes under a context carrying it (WithClientEvents)
+// comes to: its beginning (HandshakeBegin); its failure (HandshakeFailed,
+// with HandleTLSConnection's error); and, the handshake done, the client's
+// hang-up having sent nothing since (SilentHangUp, with the read's error:
+// under the proven switch, which reads the client a record at a time until
+// then). Every path that makes such a
+// handshake -- handleConnection, the opportunistic upgrade, the relay's, the
+// MySQL replayer's, a record upgrader's -- hands its context one, so what a
+// handshake loses is charged one way.
+type ClientEvents interface {
+	HandshakeBegin()
+	HandshakeFailed(err error)
+	SilentHangUp(err error)
+}
+
+// clientEventsKey carries WithClientEvents's events.
+type clientEventsKey struct{}
+
+// WithClientEvents is ctx carrying ev, which HandleTLSConnection tells of each
+// client-side handshake made under ctx: a path makes the handshake, or has an
+// integration make it, without the error or the hang-up coming back up
+// through it.
+func WithClientEvents(ctx context.Context, ev ClientEvents) context.Context {
+	return context.WithValue(ctx, clientEventsKey{}, ev)
+}
+
+// clientEventsFrom is ctx's ClientEvents, or nil.
+func clientEventsFrom(ctx context.Context) ClientEvents {
+	ev, _ := ctx.Value(clientEventsKey{}).(ClientEvents)
+	return ev
+}
+
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
 	// by SetupCAForApp before the proxy serves; getActiveCA lazily mints an
 	// ephemeral one for callers that reach here without SetupCAForApp.
+	ev := clientEventsFrom(ctx)
+	if ev != nil {
+		ev.HandshakeBegin()
+	}
 	ca := getActiveCA(logger)
 	if ca == nil {
 		err := fmt.Errorf("no MITM CA available for this run")
 		utils.LogError(logger, err, "Failed to obtain the signing CA")
+		if ev != nil {
+			ev.HandshakeFailed(err)
+		}
 		return nil, false, err
 	}
 	caPrivKey := ca.signer
 	caCertParsed := ca.cert
 
+	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
@@ -108,7 +236,13 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					cert, err := CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+					if err == nil {
+						// crypto/tls sends it next, in the server's
+						// first flight.
+						certSent.Store(true)
+					}
+					return cert, err
 				},
 				ClientAuth: tls.RequestClientCert,
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -120,15 +254,38 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 		},
 	}
 
-	// Wrap the TCP conn with TLS
-	tlsConn := tls.Server(conn, config)
+	// Wrap the TCP conn with TLS. Under the proven switch, over a conn that
+	// hands crypto/tls a record at a time until the client's first byte
+	// after the handshake, so that whether it sent any is known
+	// (SilentSinceHandshake); without it, as before.
+	var records *recordConn
+	under := conn
+	if provenswitch.On() {
+		records = newRecordConn(conn)
+		under = records
+	}
+	tlsConn := tls.Server(under, config)
 
 	// Perform the handshake
 	err := tlsConn.Handshake()
 	if err != nil {
 		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
-		return nil, false, err
+		herr := &HandshakeError{Err: err, CertificateSent: certSent.Load()}
+		if ev != nil {
+			ev.HandshakeFailed(herr)
+		}
+		return nil, false, herr
 	}
+	if records != nil {
+		if ev != nil {
+			records.silent = ev.SilentHangUp
+		}
+		records.handshakeDone()
+	}
+
+	// The connection the proxy closes with care is handed the layer: its
+	// close reads through it what its socket still holds (TLSLayerHolder).
+	PassTLSLayer(conn, tlsConn)
 
 	// 4. (Optional) Check what kind of connection happened
 	// You can log this to verify if the client actually used mTLS or just standard TLS
