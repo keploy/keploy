@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +11,31 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 )
+
+func TestCopyDirContentsCopiesFilesAndExcludesBackups(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "nested"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(src, ".backup", "old"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "nested", "child.txt"), []byte("child"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, ".backup", "old", "ignored.txt"), []byte("ignored"), 0644))
+
+	replayer := &Replayer{}
+	require.NoError(t, replayer.copyDirContents(src, dst))
+
+	rootContents, err := os.ReadFile(filepath.Join(dst, "root.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "root", string(rootContents))
+
+	childContents, err := os.ReadFile(filepath.Join(dst, "nested", "child.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "child", string(childContents))
+
+	_, err = os.Stat(filepath.Join(dst, ".backup"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
 
 func TestCloneGlobalNoise_DeepCopy_324(t *testing.T) {
 	src := config.GlobalNoise{
