@@ -388,7 +388,8 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 }
 
 // placeWorker applies one of MoveToWorker's moves to mapping, reporting
-// whether it found the mock.
+// whether it found the mock. A mock several test cases list leaves every one
+// of their lists: listed by one, it would still be that test's at replay.
 func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	for i := range mapping.Worker {
 		if mapping.Worker[i].Name == mv.Name {
@@ -396,20 +397,29 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			return true
 		}
 	}
+	var entry *models.MockEntry
 	for i := range mapping.TestCases {
-		mocks := mapping.TestCases[i].Mocks
-		for j := range mocks {
-			if mocks[j].Name != mv.Name {
+		kept := mapping.TestCases[i].Mocks[:0:0]
+		for _, e := range mapping.TestCases[i].Mocks {
+			if e.Name != mv.Name {
+				kept = append(kept, e)
 				continue
 			}
-			e := mocks[j]
-			e.Place = mv.Place
-			mapping.TestCases[i].Mocks = append(mocks[:j:j], mocks[j+1:]...)
-			mapping.Worker = append(mapping.Worker, e)
-			return true
+			if entry == nil {
+				e := e
+				entry = &e
+			}
+		}
+		if len(kept) != len(mapping.TestCases[i].Mocks) {
+			mapping.TestCases[i].Mocks = kept
 		}
 	}
-	return false
+	if entry == nil {
+		return false
+	}
+	entry.Place = mv.Place
+	mapping.Worker = append(mapping.Worker, *entry)
+	return true
 }
 
 // workerAt is when a worker-scope entry's request was recorded, for its
