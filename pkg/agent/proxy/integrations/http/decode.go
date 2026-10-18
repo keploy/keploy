@@ -390,7 +390,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				}
-				if lmiss != nil {
+				// A call that is a recording made elsewhere (another test's,
+				// or a worker-scope one not reached yet) is named as that
+				// recording: it did not change, so no learn-step reason
+				// explains it.
+				var elsewhere *models.Mock
+				if n == 0 && report != nil && provenswitch.On() {
+					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+				}
+				if elsewhere != nil {
+					markNotOwned(report, elsewhere)
+				} else if lmiss != nil {
 					lmiss.explain(report)
 				}
 				if report != nil {

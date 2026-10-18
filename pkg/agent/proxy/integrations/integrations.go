@@ -332,12 +332,24 @@ type ExactConsumedReader interface {
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the
-// proven switch): the name of a staged mock of kind, which the open test does
-// not own, for which match reports true, whatever the open view shows; "" for
-// none, or with no test open. For a miss's diagnosis only: the mock is never
-// handed out, nor served.
+// proven switch): the name of a staged mock of kind that the open view does
+// not show and no call of the set consumed, for which match reports true: a
+// recording another test owns, or a worker-scope one not reached yet; "" for
+// none. A parser names it on a miss (MockMismatchReport.NotOwned): the call
+// is that recording, made where it was not recorded. For a miss's diagnosis
+// only: the mock is never handed out, nor served.
 type StagedFinder interface {
 	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+}
+
+// BegunOwnerReader is an optional MockMemDb extension under exact serving:
+// whether a staged mock (one StagedFinder names) is owned by a test that has
+// begun in the current staging. A parser whose answer depends on what a test
+// caused (an SQS poll, whose message a test sent) reads it to tell a call made
+// after that test, which is the recording made later than recorded, from one
+// made before it, which rightly finds nothing.
+type BegunOwnerReader interface {
+	StagedOwnerBegun(name string) bool
 }
 
 // StagedReader is an optional MockMemDb capability: every mock staged in the
