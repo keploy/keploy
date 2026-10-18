@@ -280,15 +280,21 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimeSession)
 	cfg := exactMock("cfg", time.Second, models.LifetimeSession)
 	cfg.Spec.Metadata = map[string]string{"type": "config"}
-	mm := stagedManager(t, nil, []*models.Mock{a, cfg})
+	w := exactMock("w", 2*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{a, cfg, w})
+	mm.ServeExactWorker([]string{"w"})
 	mm.ServeExactPool("-", []string{"a"})
 	mm.ServeExactTest("T", []*models.Mock{a})
 	mm.ResetForReplaySession()
 	if test, _, _, ok := mm.ExactTestOutcome(); !ok || test != "" {
 		t.Fatalf("the previous session's test is still read: %q %v", test, ok)
 	}
+	// Its worker scope goes too, from this view and every one after it.
 	sess, _ := mm.GetSessionMocks()
 	equalNames(t, "after the reset", sess, "cfg")
+	mm.ServeExactPool("-", nil)
+	sess, _ = mm.GetSessionMocks()
+	equalNames(t, "a view installed after the reset", sess, "cfg")
 	if mm.WindowSnapshot().FirstTestFired || mm.WindowSnapshot().Active {
 		t.Fatal("the next session starts with a test fired or open")
 	}

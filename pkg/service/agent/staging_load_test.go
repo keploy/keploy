@@ -261,6 +261,63 @@ func TestTheExactStagingStagesThePoolsMocksFromDisk(t *testing.T) {
 	}
 }
 
+// workerExactProxy is an exactProxy with a worker scope
+// (coreAgent.ExactWorkerServer): it keeps each reachable list it is told.
+type workerExactProxy struct {
+	exactProxy
+	workers [][]string
+}
+
+func (p *workerExactProxy) ServeExactWorker(names []string) error {
+	p.workers = append(p.workers, append([]string{}, names...))
+	return nil
+}
+
+// Under the proven switch the set's exact staging stages the worker scope's
+// mocks (models.Mapping.Worker) by name from the on-disk store, as it does the
+// pool's: a worker call recorded after the set's first test is in no startup
+// band, and unstaged, it would miss wherever the replay made it. Before the
+// staging lands, the previous set's worker scope is withdrawn: names are
+// unique only within a set.
+func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+	p := &workerExactProxy{}
+	a := diskAgent(t, p,
+		stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+		stageMock("test-a", "/q", stageT0.Add(time.Second)),
+		stageMock("w-delete", "/delete", stageT0.Add(30*time.Second)),
+		stageMock("w-poll", "/poll", stageT0.Add(time.Hour)))
+	err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             stageT0.Add(2 * time.Hour),
+		FirstRecordedTestStart: stageT0,
+		StrictMockWindow:       true,
+		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"},
+			Worker: []models.MockEntry{{Name: "w-delete"}, {Name: "w-poll", Place: "test-a"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sortedNames(p.windowed[0][0]), []string{"boot-config", "w-delete", "w-poll"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the exact staging staged %v; want the startup mock and the worker scope's %v, and no test's own", got, want)
+	}
+	if want := [][]string{{}, {"w-delete"}}; !reflect.DeepEqual(p.workers, want) {
+		t.Fatalf("the proxy was told the worker scopes %v; want %v: none before the staging, then the one placed at the set's start", p.workers, want)
+	}
+	// The next set's staging withdraws this set's worker scope before its
+	// view goes on: none of its names is reachable in the next set.
+	if err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+		AfterTime: models.BaseTime, BeforeTime: stageT0.Add(2 * time.Hour), FirstRecordedTestStart: stageT0, StrictMockWindow: true,
+		Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.workers[2:]; !reflect.DeepEqual(got, [][]string{{}, {}}) {
+		t.Fatalf("the next set's staging told the proxy %v; want the previous set's worker scope withdrawn", got)
+	}
+}
+
 // A set's staging call also stages, beside the startup band, the per-test
 // mocks a parser declares it needs staged whatever their recorded time
 // (models.StagingWithStartup): here the pushes of a broker kind, one

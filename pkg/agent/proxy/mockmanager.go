@@ -613,6 +613,9 @@ func (m *MockManager) ResetForReplaySession() {
 	// previous session answers an application kept alive across them.
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
+	// Nor any of its worker scope (models.Mapping.Worker): names are unique
+	// only within a set, and the next set names its own.
+	m.exact.worker.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}

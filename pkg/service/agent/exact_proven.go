@@ -226,7 +226,14 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// staged mock is ever served outside it, and none still staged from
 		// the previous set answers under one of this set's pool names
 		// (names are unique only within a set). The set's pool is served
-		// once its mocks are in.
+		// once its mocks are in. The previous set's worker scope goes for
+		// the same reason, before that view is installed.
+		a.scopeMu.Lock()
+		a.testWorker, a.testBegun = nil, nil
+		a.scopeMu.Unlock()
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
+		}
 		if err := es.ServeExactPool(models.PoolKeyNone, nil); err != nil {
 			return err
 		}

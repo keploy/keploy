@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -32,6 +33,38 @@ type windowMappings struct {
 	// mocks holds only the test mocks: a protocol-phase or async-lane mock
 	// is no test's, and a recording can make millions of them.
 	mocks []models.WindowedMock
+	// stopAt is when keploy record began stopping the application (a stop
+	// signal, the record timer), zero while it has not: a worker-scope mock
+	// recorded from then on is the application's shutdown's
+	// (MockEntry.AtStop).
+	stopAt time.Time
+}
+
+// noteStop records that keploy record began stopping the application at at;
+// the earliest such moment is kept.
+func (w *windowMappings) noteStop(at time.Time) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.stopAt.IsZero() || at.Before(w.stopAt) {
+		w.stopAt = at
+	}
+	w.mu.Unlock()
+}
+
+// markAtStop marks, of the worker scope, each mock recorded once keploy
+// record had begun stopping the application (stopAt): its shutdown's calls,
+// which a replay requires only once it has stopped the application.
+func markAtStop(worker []models.MockEntry, stopAt time.Time) {
+	if stopAt.IsZero() {
+		return
+	}
+	for i := range worker {
+		if at, err := models.ParseMockTimestamp(worker[i].ReqTimestampMock); err == nil && !at.IsZero() && !at.Before(stopAt) {
+			worker[i].AtStop = true
+		}
+	}
 }
 
 // lostTestPrefix starts the window name of a test case the recording failed
@@ -143,6 +176,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// it as it is, without a copy.
 	w.mu.Lock()
 	derived := models.DeriveWindowMappings(w.tests, w.mocks)
+	stopAt := w.stopAt
 	w.mu.Unlock()
 	kept := func(id string) bool {
 		_, gone := deleted[id]
@@ -182,6 +216,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// latest kept test case before it (the set's start before every one), so
 	// a replay of the kept test cases reaches it.
 	worker := keptPlaces(derived, kept)
+	markAtStop(worker, stopAt)
 	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
 		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",
 			zap.String("testSetID", testSetID),
