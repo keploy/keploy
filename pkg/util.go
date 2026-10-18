@@ -388,6 +388,12 @@ type SimulationConfig struct {
 	// never be reached at fails the test at once, saying why, instead of
 	// being re-sent as an app still starting.
 	AppPortReachability AppPortReachability
+	// PublishedPort, when non-nil, is the host port a test for the app's port
+	// appPort goes to from host in place of appPort, or 0 to send it to
+	// appPort (PublishedTarget): in Docker mode, the one host port the app's
+	// port is published on when host port appPort is not published to it
+	// (AppPortPublishing).
+	PublishedPort func(ctx context.Context, host string, appPort uint16) uint16
 	// StallGrace and StallClock are the stall rule on the exchange when
 	// Unbounded, under the proven switch (answerWatch): its grace
 	// (AnswerStallGrace when 0) and the runnable clock it is measured on
@@ -423,6 +429,90 @@ type AppPortReachability interface {
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
 	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
+}
+
+// AppPortPublishing is implemented by an instrumentation that can tell, in
+// Docker mode, which host port reaches the app's port a test was recorded on
+// when host port appPort does not: a compose file publishing "18080:8080"
+// makes the app's port 8080 the host's 18080, and the client that was
+// recorded called 18080. Replay sends each test from the host to the port it
+// was recorded on (app_port, over the URL's: an app serving on several ports
+// gets each test on its own), and nothing answers there.
+type AppPortPublishing interface {
+	// PublishedHostPort is the one host port, on an address host reaches,
+	// the app's port appPort is published on, when host port appPort is not
+	// published to it. It is 0 when host port appPort reaches it, and when
+	// appPort is published on several host ports or none: the test then goes
+	// where it was recorded, as without it. known is false when it cannot
+	// tell (not Docker mode, a host not this machine's loopback, a container
+	// that cannot be inspected or is not running, host networking).
+	PublishedHostPort(ctx context.Context, host string, appPort uint16) (port uint16, known bool)
+}
+
+// PublishedTarget is target, as ResolveTestTarget made it from original for a
+// test recorded on the app's port appPort, sent instead to the host port
+// cfg.PublishedPort names: in Docker mode, the one host port the app's port is
+// published on when host port appPort is not published to it. It applies only
+// when target is that app port and nothing the user set chose this test's
+// port (ConfigPort, a replaceWith URL that matches original and names a
+// port, a replaceWith port mapping of appPort, TargetFromURL), since a port
+// the user chose is where they mean the test to go. A replacement or mapping
+// that does not apply to this test, or one that changes only its host or
+// path, does not stop it. Otherwise target is returned as it is.
+func PublishedTarget(ctx context.Context, cfg SimulationConfig, original, target string, appPort uint16, isHTTP bool) string {
+	if cfg.PublishedPort == nil || appPort == 0 || cfg.ConfigPort != 0 || cfg.TargetFromURL {
+		return target
+	}
+	if _, mapped := cfg.PortMappings[uint32(appPort)]; mapped {
+		return target
+	}
+	if _, replacement, ok := urlReplacement(original, cfg.URLReplacements); ok && replacementNamesPort(replacement, isHTTP) {
+		return target
+	}
+	var u *url.URL
+	var host, port string
+	if isHTTP {
+		var err error
+		if u, err = url.Parse(target); err != nil {
+			return target
+		}
+		host, port = u.Hostname(), u.Port()
+	} else {
+		var err error
+		if host, port, err = net.SplitHostPort(target); err != nil {
+			return target
+		}
+	}
+	if port != strconv.Itoa(int(appPort)) {
+		return target
+	}
+	p := cfg.PublishedPort(ctx, host, appPort)
+	if p == 0 || p == appPort {
+		return target
+	}
+	hostPort := net.JoinHostPort(host, strconv.Itoa(int(p)))
+	if !isHTTP {
+		return hostPort
+	}
+	u.Host = hostPort
+	return u.String()
+}
+
+// replacementNamesPort says a replaceWith value names a port of its own (a
+// "host:port", with or without the scheme), which then decides the port its
+// tests go to (ResolveTestTarget's replacementHasPort).
+//
+// ResolveTestTarget asks it of the replacement it applies (urlReplacement).
+func replacementNamesPort(replacement string, isHTTP bool) bool {
+	checkStr := replacement
+	if isHTTP {
+		if strings.HasPrefix(replacement, "http://") {
+			checkStr = strings.TrimPrefix(replacement, "http://")
+		} else if strings.HasPrefix(replacement, "https://") {
+			checkStr = strings.TrimPrefix(replacement, "https://")
+		}
+	}
+	return hasExplicitPort(checkStr)
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -700,6 +790,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	if err != nil {
 		return nil, err
 	}
+	testURL = PublishedTarget(ctx, cfg, tc.HTTPReq.URL, testURL, appPort, true)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -4392,6 +4483,25 @@ func hasExplicitPort(hostStr string) bool {
 	return false
 }
 
+// urlReplacement is the replaceWith URL entry that applies to target: of those
+// whose substring target contains, the one with the longest substring (the
+// most specific), then the lowest. One entry, chosen the same way wherever it
+// is asked: ResolveTestTarget applies it, and PublishedTarget leaves a test
+// it sends to a port of its own where it is. (A map's order is random: taking
+// the first entry that matched applied a different one from run to run when
+// several did.)
+func urlReplacement(target string, urlReplacements map[string]string) (substr, replacement string, ok bool) {
+	for s, r := range urlReplacements {
+		if !strings.Contains(target, s) {
+			continue
+		}
+		if !ok || len(s) > len(substr) || (len(s) == len(substr) && s < substr) {
+			substr, replacement, ok = s, r, true
+		}
+	}
+	return substr, replacement, ok
+}
+
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
 // by applying replacement logic and precedence rules.
 //
@@ -4406,34 +4516,16 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	replacementMatched := false
 
 	// Step 1: Check replaceWith URL
-	if len(urlReplacements) > 0 {
-		for substr, replacement := range urlReplacements {
-			if strings.Contains(finalTarget, substr) {
-				replacementMatched = true
-				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
-
-				// Check if the replacement value explicitly defines a port.
-				checkStr := replacement
-				if isHTTP {
-					if strings.HasPrefix(replacement, "http://") {
-						checkStr = strings.TrimPrefix(replacement, "http://")
-					} else if strings.HasPrefix(replacement, "https://") {
-						checkStr = strings.TrimPrefix(replacement, "https://")
-					}
-				}
-
-				if hasExplicitPort(checkStr) {
-					replacementHasPort = true
-				}
-
-				logger.Debug("Applied replaceWith substitution",
-					zap.String("find", substr),
-					zap.String("replace", replacement),
-					zap.String("result_target", finalTarget),
-					zap.Bool("replacement_has_port", replacementHasPort))
-				break
-			}
-		}
+	if substr, replacement, ok := urlReplacement(finalTarget, urlReplacements); ok {
+		replacementMatched = true
+		finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+		// Whether the replacement value explicitly defines a port.
+		replacementHasPort = replacementNamesPort(replacement, isHTTP)
+		logger.Debug("Applied replaceWith substitution",
+			zap.String("find", substr),
+			zap.String("replace", replacement),
+			zap.String("result_target", finalTarget),
+			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
 	// If URL replacement set a port and there are no port mappings, we are done

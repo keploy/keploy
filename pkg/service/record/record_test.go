@@ -2342,8 +2342,306 @@ func TestStart_WarnsOnceForATestCaseRecordedOnAnUnreachablePort(t *testing.T) {
 
 	instr.mu.Lock()
 	defer instr.mu.Unlock()
-	assert.Equal(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
+	assert.ElementsMatch(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
 		"each port is checked once, at the address replay will send its tests to by default: the port they were recorded on")
+}
+
+// slowUnpublishedInstr is unpublishedInstr whose question about port 8096
+// is answered only once release closes.
+type slowUnpublishedInstr struct {
+	*unpublishedInstr
+	release chan struct{}
+}
+
+func (s *slowUnpublishedInstr) UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string {
+	if port == 8096 {
+		<-s.release
+	}
+	return s.unpublishedInstr.UnreachableAppPort(ctx, host, port, appPort)
+}
+
+// A question about an app port that the docker daemon is slow to answer holds
+// no test case up, and the stop waits for it, saying so, before Start ends:
+// its warning is not lost.
+func TestStart_SavesWhileAPortQuestionIsOutAndWaitsForIt(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	const reason = "it is not published on the host; add -p 8096:8096"
+	instr := &slowUnpublishedInstr{
+		unpublishedInstr: &unpublishedInstr{blockingInstr: &blockingInstr{f}, unpublished: map[uint16]string{8096: reason}},
+		release:          make(chan struct{}),
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	tele := &summaryTelemetry{recTelemetry: &recTelemetry{}, logs: logs, snippet: "port 8096 cannot be replayed"}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          namingTestDB{testDB},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       tele,
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		waitNotice:      5 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	for _, tc := range []*models.TestCase{
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+		{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/health"}},
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+	} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder stopped consuming test cases at %s", tc.HTTPReq.URL)
+		}
+	}
+	require.Eventually(t, func() bool {
+		testDB.mu.Lock()
+		defer testDB.mu.Unlock()
+		return len(testDB.inserted) == 3
+	}, 10*time.Second, 5*time.Millisecond, "a question about port 8096 held up saving the test cases")
+
+	cancel()
+	close(f.outgoing)
+	close(f.incoming)
+	close(f.mappings)
+	deadline := time.Now().Add(60 * time.Second) // bounds only a stop that never says it waits
+	for logs.FilterMessageSnippet("Still checking whether the test cases recorded on the app's port(s) can be replayed").Len() == 0 {
+		select {
+		case <-done:
+			t.Fatalf("Start ended while the question about port 8096 was out: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never said it waits for the question about port 8096")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(instr.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	warned := logs.FilterMessageSnippet("port 8096 cannot be replayed").All()
+	require.Len(t, warned, 1, "the warning for port 8096 came after Start ended, or not at all: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+	assert.Equal(t, "test-1", warned[0].ContextMap()["first testcase on the port"])
+	require.True(t, tele.sessionRecorded, "no session summary")
+	require.True(t, tele.saidBefore, "the warning for port 8096 came after the session's summary")
+}
+
+// summaryTelemetry is recTelemetry that notes whether a line holding snippet
+// was logged before the session's summary (RecordSessionCompleted).
+type summaryTelemetry struct {
+	*recTelemetry
+	logs       *observer.ObservedLogs
+	snippet    string
+	saidBefore bool
+}
+
+func (s *summaryTelemetry) RecordSessionCompleted(testCount int64, mocks int64, ms int64, status string, reason string) {
+	s.saidBefore = s.logs.FilterMessageSnippet(s.snippet).Len() > 0
+	s.recTelemetry.RecordSessionCompleted(testCount, mocks, ms, status, reason)
+}
+
+// heldPortInstr is an agent that, from the stop on, hands over the mocks it
+// captured before it (heldAgent), and whose question about the app's port
+// 8096 the docker daemon answers only as its context ends.
+type heldPortInstr struct {
+	*heldAgent
+	asked chan struct{}
+	once  sync.Once
+}
+
+func (h *heldPortInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+func (h *heldPortInstr) UnreachableAppPort(ctx context.Context, _ string, _, _ uint16) string {
+	h.once.Do(func() { close(h.asked) })
+	<-ctx.Done()
+	return ""
+}
+
+// The stop waits for the app ports' questions only once its drains are over:
+// a press at that wait's offer closes utils.StopNow, which the frame drains
+// give up at, so a wait standing it while they save would lose what the agent
+// held. Here the agent hands over its mocks after the stop, and the user
+// presses at the port wait's offer: every mock is saved, the recording is
+// complete, and the press ends the wait.
+func TestStart_APressAtThePortWaitLosesNothingTheDrainsSave(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	stoppedOnce(t)
+	const held = 300
+	agent := &heldAgent{fakeInstr: &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase)},
+		held: held, at: time.Now(), started: make(chan struct{})}
+	instr := &heldPortInstr{heldAgent: agent, asked: make(chan struct{})}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          namingTestDB{testDB},
+		mockDB:          mockDB,
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      time.Hour, // the drains end as the streams do, not on a quiet
+		waitNotice:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case agent.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recorder never consumed the test case")
+	}
+	soon(t, instr.asked, "the question about port 8096")
+	cancel() // the stop
+	close(agent.incoming)
+	close(agent.mappings)
+	close(agent.started) // the agent hands over what it held
+	logged(t, logs, "can be replayed from the host; press Ctrl+C again")
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the press did not answer the port wait's offer")
+	}
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	mockDB.mu.Lock()
+	got := len(mockDB.inserted)
+	mockDB.mu.Unlock()
+	switch {
+	case got != held && r.captureLost.Load():
+		t.Fatalf("saved %d of the %d mocks the agent held, and the recording is cut: the port wait's press gave a drain up", got, held)
+	case got != held:
+		t.Fatalf("saved %d of the %d mocks the agent held, the recording not cut: a drain ended without them", got, held)
+	case r.captureLost.Load() || utils.ErrCode == utils.ExitKeployError:
+		t.Fatalf("every mock saved, but the recording is cut (exit %d)", utils.ErrCode)
+	}
+}
+
+// lateInsertInstr is an agent whose question about the app's port 8096 the
+// docker daemon answers, with reason, only once release closes, and that
+// says when the stop stops it (setupEnded: its setup's context ends).
+type lateInsertInstr struct {
+	*blockingInstr
+	reason     string
+	release    chan struct{}
+	setupEnded chan struct{}
+}
+
+func (l *lateInsertInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	go func() { <-ctx.Done(); close(l.setupEnded) }()
+	return nil
+}
+
+func (l *lateInsertInstr) UnreachableAppPort(ctx context.Context, _ string, port, _ uint16) string {
+	if port != 8096 {
+		return ""
+	}
+	select {
+	case <-l.release:
+		return l.reason
+	case <-ctx.Done():
+		return ""
+	}
+}
+
+// slowInsertDB saves a test case on port 8096 only once the stop has stopped
+// the agent: after the frame drains, before the record drain is over.
+type slowInsertDB struct {
+	namingTestDB
+	until <-chan struct{}
+}
+
+func (s slowInsertDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, log bool) error {
+	if tc.AppPort == 8096 {
+		<-s.until
+	}
+	return s.namingTestDB.InsertTestCase(ctx, tc, set, log)
+}
+
+// A test case handed over in the stop's frame drain but saved only after it
+// (a slow insert) asks its question then: the record drain joins the
+// test-case consumer that saves it before the stop's wait for the questions
+// begins, so that one too is waited for, and its warning comes before Start
+// ends.
+func TestStart_AQuestionAskedAsTheRecordDrainSavesIsWaitedFor(t *testing.T) {
+	f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+	const reason = "it is not published on the host; add -p 8096:8096"
+	instr := &lateInsertInstr{blockingInstr: &blockingInstr{f}, reason: reason, release: make(chan struct{}), setupEnded: make(chan struct{})}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          slowInsertDB{namingTestDB: namingTestDB{testDB}, until: instr.setupEnded},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      time.Hour, // the drains end as the streams do
+		waitNotice:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case f.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/health"}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+	before := time.Now()
+	cancel() // the stop
+	select { // captured before the stop, handed over as it stops
+	case f.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo", Timestamp: before}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stop's drain never took the test case")
+	}
+	close(f.incoming)
+	close(f.outgoing)
+	close(f.mappings)
+	deadline := time.Now().Add(60 * time.Second) // bounds only a stop that never waits for the question
+	for logs.FilterMessageSnippet("Still checking whether the test cases recorded on the app's port(s) can be replayed").Len() == 0 {
+		select {
+		case <-done:
+			t.Fatalf("Start ended under the question about port 8096: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never waited for the question about port 8096")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(instr.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	require.Len(t, logs.FilterMessageSnippet("port 8096 cannot be replayed").All(), 1, "the warning for port 8096 came after Start ended, or not at all")
 }
 
 // stuckBacklogInstr is an agent that, once the recording stops, says it still
@@ -2560,5 +2858,48 @@ func TestStart_AnInterruptThatStoppedTheSetupEndsTheRun(t *testing.T) {
 	}
 	if inst.captured.Load() {
 		t.Fatal("the recording went on to capture with an agent the interrupt had stopped")
+	}
+}
+
+// reachingSetupFails is an agent that never comes up, and that can answer
+// whether an app port is reachable (as AgentClient always can).
+type reachingSetupFails struct{ *setupFailsInstr }
+
+func (reachingSetupFails) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return ""
+}
+
+// reachingInterruptedSetup is interruptedSetupInstr that can answer whether
+// an app port is reachable.
+type reachingInterruptedSetup struct{ *interruptedSetupInstr }
+
+func (reachingInterruptedSetup) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return ""
+}
+
+// A recording that ends before it captured (its agent never came up, or the
+// user's Ctrl+C stopped its setup) has no test-case consumer to ask about
+// app ports: the stop's wait for their questions does not wait for one, with
+// an instrumentation that can answer them as with one that cannot.
+func TestStart_ARecordingThatEndsBeforeItCapturesDoesNotWaitForPortQuestions(t *testing.T) {
+	r := exitCodeRecorder(reachingSetupFails{&setupFailsInstr{fakeInstr: newFakeInstr(), err: errors.New("the keploy agent could not start")}})
+	done := make(chan struct{})
+	go func() { _, _ = startForExitCode(t, context.Background(), r); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second): // bounds only a stop that never ends
+		t.Fatal("Start did not return after its agent could not start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst := reachingInterruptedSetup{&interruptedSetupInstr{fakeInstr: newFakeInstr(), interrupt: cancel}}
+	r = exitCodeRecorder(inst)
+	finished := make(chan error, 1)
+	go func() { finished <- r.Start(ctx) }()
+	select {
+	case <-finished:
+	case <-time.After(60 * time.Second): // bounds only a stop that never ends
+		t.Fatal("Start did not return after its setup was interrupted")
 	}
 }
