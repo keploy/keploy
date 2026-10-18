@@ -63,6 +63,17 @@
 #      and the report names the recording's kill. It is not failed for a
 #      call that record's grace cut (P101-b-k).
 #
+# A call made before the set's FIRST test, as the app starts, is no test's
+# either (F2): the first test's read hands it over as the set's, and the set's
+# end fails the set with it. With STARTUP_PUBLISH set the app publishes
+# "startup" before it listens; its recording is /c-ping:
+#
+#  12. HTTP, the recorded startup publish: every test passes.
+#  13. HTTP, a changed startup publish: the set fails, keploy test exits
+#      non-zero, the report names the call among those made before the set's
+#      first test, and c-ping passes. It was dropped with a warning, and the
+#      set passed.
+#
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
 # before the stop is the app's clock, and no case here asserts on it.
@@ -196,6 +207,31 @@ app_cmd() {
     else
         echo "$1"
     fi
+}
+
+# record_startup <dir>: a recording of /c-ping by the app that publishes
+# "startup" as it starts, before it listens (STARTUP_PUBLISH), over HTTP.
+record_startup() {
+    local dir="$1"
+    mkdir -p "$dir" && cd "$dir" || exit 1
+    ../ff-broker >broker.log 2>&1 &
+    BROKER_PID=$!
+    wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
+    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+        --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
+    REC_PID=$!
+    wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
+    curl -s "http://127.0.0.1:$APP/c-ping" >/dev/null
+    wait_tests 1 "$REC_PID" || fail "$dir: keploy record wrote $(test_files) test cases, want 1"
+    stop_pid "$REC_PID"
+    REC_PID=""
+    kill "$BROKER_PID" 2>/dev/null
+    wait "$BROKER_PID" 2>/dev/null
+    BROKER_PID=""
+    own
+    grep -q "startup published" record.log || fail "$dir: the app did not publish as it started under keploy record"
+    grep -q "startup" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the startup publish was not recorded"
+    cd "$WORK" || exit 1
 }
 
 # replay <dir> <name> <proto> [suffix] [nopublish]: keploy test of dir's
@@ -352,6 +388,24 @@ fi
 # The report's YAML doubles an apostrophe, so the check reads past one.
 grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "stop had to kill the application (keploy stopped the application at the recording" ||
     fail "11 (a recording cut by its stop): the report does not name the recording's kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
+
+APP_ENV="STARTUP_PUBLISH=1"
+record_startup startup
+echo "== 12. HTTP, the recorded startup publish =="
+replay startup as-recorded http
+expect_pass "12 (HTTP, startup publish as recorded)"
+echo "== 13. HTTP, a changed startup publish =="
+replay startup changed http "-changed"
+if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
+    fail "13 (HTTP, changed startup publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
+fi
+yq -r '.unclaimed_calls[]? | select(.before_set == true) | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+    fail "13 (HTTP, changed startup publish): the report does not name the publish among the calls made before the set's first test: $(grep -n -A4 'unclaimed' "$(REPORT)" | head -14)"
+# The report's yaml doubles the quote in "set's": match around it.
+grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "before the set.*first test" ||
+    fail "13 (HTTP, changed startup publish): the reason does not say the call was made before the set's first test: $(grep -m1 '^failure_reason:' "$(REPORT)")"
+[ "$(test_status get-c-ping-1)" = PASSED ] ||
+    fail "13 (HTTP, changed startup publish): c-ping did not pass ($(test_status get-c-ping-1))"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "::error::$FAIL check(s) failed"
