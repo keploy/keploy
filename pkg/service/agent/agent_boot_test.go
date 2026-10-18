@@ -53,7 +53,10 @@ func TestSetupReportsAFailedStartBeforeItsTeardown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), utils.BootProgressFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	// The reporter writes into the test's temp dir until it has seen ctx end:
+	// it is waited for before that dir is removed.
+	reported := utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	t.Cleanup(func() { cancel(); <-reported })
 	stage := newHeldStage(t)
 	err := fmt.Errorf("%w: failed to set memlock rlimit: %w", utils.ErrPrivilegeRequired, syscall.EPERM)
 	a := &Agent{logger: zap.NewNop(), Hooks: failsHeld{err: err, stage: stage}, config: &config.Config{}}
@@ -134,7 +137,10 @@ func TestTheProxysStartIsReportedBusyWhileItWorks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), utils.BootProgressFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	// The reporter writes into the test's temp dir until it has seen ctx end:
+	// it is waited for before that dir is removed.
+	reported := utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	t.Cleanup(func() { cancel(); <-reported })
 	proxy := &spinningProxy{release: make(chan struct{})}
 	a := &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}, Proxy: proxy, config: &config.Config{}}
 	grp, gctx := errgroup.WithContext(ctx)
