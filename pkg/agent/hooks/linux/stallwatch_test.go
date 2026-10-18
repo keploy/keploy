@@ -10,8 +10,6 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
-
-	"go.keploy.io/server/v3/pkg"
 )
 
 func newObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
@@ -147,21 +145,6 @@ func TestWatchStallEscalatesFromWarnToError(t *testing.T) {
 	all := logs.All()
 	if len(all) > 0 && all[0].Level != zap.WarnLevel {
 		t.Errorf("the FIRST report must be WARN; got %v", all[0].Level)
-	}
-}
-
-// A genuinely wedged agent must still produce an ERROR before keploy gives up
-// waiting for it, or the escalation is unreachable in practice and the ERROR
-// signal is lost. Reports tick at first, then every repeat, so the first tick at
-// or past stallErrorAfter is what has to land inside the ready budget.
-func TestStallErrorLandsBeforeTheAgentReadyBudget(t *testing.T) {
-	firstErrorAt := stallFirstReport
-	for firstErrorAt < stallErrorAfter {
-		firstErrorAt += stallRepeatReport
-	}
-	if firstErrorAt >= pkg.DefaultAgentReadyTimeout {
-		t.Fatalf("the first ERROR lands at %v, at or past the %v agent-ready budget: a wedged agent would be given up on before it ever reported ERROR",
-			firstErrorAt, pkg.DefaultAgentReadyTimeout)
 	}
 }
 

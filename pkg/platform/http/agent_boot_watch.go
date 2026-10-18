@@ -21,10 +21,10 @@ import (
 // AN AGENT'S START IS GIVEN UP ON ONLY ONCE IT HAS STOPPED MAKING PROGRESS.
 //
 // keploy waits for the agent it started to answer its health check. It waited
-// a fixed budget of wall time for that (330 s, KEPLOY_AGENT_READY_TIMEOUT), so a
-// host loaded enough to run the agent slowly lost a start that was making
-// progress, and a start that had stopped making any was waited on for the
-// whole budget before a retry began again from scratch. The agent now reports
+// a fixed budget of wall time for that (330 s, KEPLOY_AGENT_READY_TIMEOUT, both
+// since removed), so a host loaded enough to run the agent slowly lost a start
+// that was making progress, and a start that had stopped making any was waited
+// on for the whole budget before a retry began again from scratch. The agent now reports
 // its start's progress (utils.ReportBootProgress), and keploy waits while that
 // shows progress (waitForAgent, bootJudge, which judges once a bootLook by the
 // latest of what it has seen):

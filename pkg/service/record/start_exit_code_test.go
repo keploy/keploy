@@ -346,7 +346,6 @@ func (c *composeDiesInstr) ComposeAgentFailure() error {
 func TestStart_AComposeProjectThatStopsBeforeTheAgentIsReadyFailsAtOnce(t *testing.T) {
 	// A budget the run must not wait out: the test fails on the reason if it
 	// does.
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", "60")
 	closed, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -3,11 +3,9 @@ package http
 import (
 	"context"
 	"errors"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -158,13 +156,6 @@ func countClientRequests(a *AgentClient) *clientRequests {
 	c := &clientRequests{base: base}
 	a.client.Transport = c
 	return c
-}
-
-// noComposeBudget gives MakeAgentReadyForDockerCompose a readiness budget that
-// never runs out (KEPLOY_AGENT_READY_TIMEOUT is whole seconds).
-func noComposeBudget(t *testing.T) {
-	t.Helper()
-	t.Setenv("KEPLOY_AGENT_READY_TIMEOUT", strconv.Itoa(math.MaxInt32))
 }
 
 // switchStates is the switch off and on, as KEPLOY_PROVEN values.
@@ -333,7 +324,6 @@ func TestWaitForAgentWhoseStartStopsIsNotReady(t *testing.T) {
 // a definite answer; a second read of /health gives up at once, on its count,
 // rather than leaving a regression to the readiness budget.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "")
 	for _, tc := range []struct {
 		name   string
@@ -371,7 +361,6 @@ func TestMakeAgentReadyForDockerComposeWithTheSwitchOffIsAsBefore(t *testing.T) 
 // the count); one whose health check answers 503 once and then reports the
 // switch on is released after that read.
 func TestMakeAgentReadyForDockerComposeWithTheSwitchOnWaitsForAReadableSwitch(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "1")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -406,7 +395,6 @@ func TestMakeAgentReadyForDockerComposeWithTheSwitchOnWaitsForAReadableSwitch(t 
 // told to release the app: a disagreeing agent is refused and never released;
 // an agreeing one is released as before.
 func TestMakeAgentReadyForDockerComposeChecksTheSwitchFirst(t *testing.T) {
-	noComposeBudget(t)
 	t.Setenv(provenswitch.Env, "1")
 	bad := newStandInAgent(t, "off", http.StatusOK)
 	err := clientFor(bad.url).MakeAgentReadyForDockerCompose(context.Background())
