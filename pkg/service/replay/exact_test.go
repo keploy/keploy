@@ -303,3 +303,119 @@ func TestNextExactTestIsTheNextOneTheLoopOpens(t *testing.T) {
 		t.Fatalf("next of nothing = %q", got)
 	}
 }
+
+// consumedReads hands out, read by read, what the agent consumed meanwhile.
+type consumedReads struct {
+	prHooks
+	reads chan []models.MockState
+}
+
+func (c consumedReads) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	select {
+	case r := <-c.reads:
+		return r, nil
+	default:
+		return nil, nil
+	}
+}
+
+// The set's end requires answered every worker-scope mock its run reached the
+// place of (D3): one placed at the set's start, and one placed after a test
+// case that began. One placed after a test case that never began, and one
+// whose answer its parser declares idle (D4), are not required; nor is one
+// consumed already.
+func TestTheSetsEndRequiresTheWorkerScopeItsRunReached(t *testing.T) {
+	poll := &models.Mock{Name: "w-empty-poll", Kind: models.HTTP}
+	unregister := models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-empty-poll" })
+	t.Cleanup(unregister)
+	stored := []*models.Mock{{Name: "w-boot"}, {Name: "w-after-1"}, {Name: "w-after-2"}, poll, {Name: "w-done"}}
+	p := newExactPlan(nil, []models.MockEntry{
+		{Name: "w-boot"}, {Name: "w-after-1", Place: "test-1"}, {Name: "w-after-2", Place: "test-2"},
+		{Name: "w-empty-poll"}, {Name: "w-done"},
+	}, stored)
+	consumed := map[string]models.MockState{"w-done": {Name: "w-done"}}
+	if got := p.unansweredWorker(consumed); !reflect.DeepEqual(got, []string{"w-boot"}) {
+		t.Fatalf("before any test: %v; want [w-boot]", got)
+	}
+	p.begin("test-1")
+	if got := p.unansweredWorker(consumed); !reflect.DeepEqual(got, []string{"w-boot", "w-after-1"}) {
+		t.Fatalf("after test-1 began: %v; want [w-boot w-after-1]", got)
+	}
+}
+
+// The set's end waits for the worker scope as long as its calls keep coming:
+// it reads what the agent consumed at each wake-up, and returns once every
+// required one has answered. One that never answers ends the wait after
+// workerStallLimit wake-ups in a row with nothing answered, and is reported.
+// The set's own context ending (its application exited) ends the wait at
+// once. No clock decides it: the test drives the wake-ups.
+func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
+	prevLimit, prevWake := workerStallLimit, workerWake
+	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
+	workerStallLimit = 3
+	wakes := make(chan time.Time)
+	workerWake = func(context.Context) (<-chan time.Time, func()) { return wakes, func() {} }
+	plan := func() *exactPlan {
+		return newExactPlan(nil, []models.MockEntry{{Name: "w-1"}, {Name: "w-2"}}, []*models.Mock{{Name: "w-1"}, {Name: "w-2"}})
+	}
+	run := func(r *Replayer, ctx context.Context, p *exactPlan, consumed map[string]models.MockState) <-chan []string {
+		out := make(chan []string, 1)
+		go func() {
+			out <- r.awaitWorkerScope(ctx, p, consumed, func(read []models.MockState) {
+				for _, m := range read {
+					consumed[m.Name] = m
+				}
+			})
+		}()
+		return out
+	}
+
+	t.Run("every call made", func(t *testing.T) {
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		done := run(r, context.Background(), plan(), map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-1"}}
+		wakes <- time.Time{} // w-1 answers
+		wakes <- time.Time{} // a slow worker: nothing this time, under the limit
+		reads <- []models.MockState{{Name: "w-2"}}
+		for {
+			select {
+			case wakes <- time.Time{}:
+			case missing := <-done:
+				if len(missing) != 0 {
+					t.Fatalf("every call was made, yet %v were reported", missing)
+				}
+				return
+			}
+		}
+	})
+	t.Run("a call never made", func(t *testing.T) {
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		done := run(r, context.Background(), plan(), map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-1"}}
+		wakes <- time.Time{} // w-1 answers: progress
+		for i := 0; i < 3; i++ {
+			wakes <- time.Time{}
+		}
+		if missing := <-done; !reflect.DeepEqual(missing, []string{"w-2"}) {
+			t.Fatalf("reported %v; want [w-2]", missing)
+		}
+	})
+	t.Run("the application exits", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := run(r, ctx, plan(), map[string]models.MockState{})
+		cancel()
+		if missing := <-done; !reflect.DeepEqual(missing, []string{"w-1", "w-2"}) {
+			t.Fatalf("reported %v; want [w-1 w-2]", missing)
+		}
+	})
+	t.Run("nothing required", func(t *testing.T) {
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
+		consumed := map[string]models.MockState{"w-1": {}, "w-2": {}}
+		if missing := <-run(r, context.Background(), plan(), consumed); missing != nil {
+			t.Fatalf("reported %v with every call made", missing)
+		}
+	})
+}
