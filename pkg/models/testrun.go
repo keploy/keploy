@@ -44,9 +44,11 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
-	// UnclaimedCalls are the calls the set's application made after its last
-	// test that no mock answered (proven switch): a pool miss no later test
-	// takes. They fail the set; JUnit fails a case of its own with them.
+	// UnclaimedCalls are the calls the set's application made outside every
+	// test that no mock answered (proven switch): after its last test, a pool
+	// miss no later test takes, and before its first, as it started
+	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
+	// own with them.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
@@ -441,6 +443,12 @@ type UnmatchedCall struct {
 	// extra call, how many times the test recorded that call.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	// BeforeSet says, under the proven switch, that the call was made before
+	// its test set's first test began, with no test's window open: the
+	// application's startup. Its Kind is MissOutsideTest. It is the set's,
+	// no test's: the replay fails the set with it, naming the call, and
+	// charges no test (the read of the set's first test carries it).
+	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

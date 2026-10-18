@@ -573,6 +573,10 @@ type Replayer struct {
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd). Reset before each run of a set.
 	setEnd *models.SetEnd
+	// setCalls are the calls of the set RunTestSet is running that no mock
+	// answered and that are the set's, no test's (proven switch): those made
+	// before its first test (before_set_calls.go).
+	setCalls setCalls
 }
 
 // GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
@@ -2459,6 +2463,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// window: every later test's window carries in the misses made since the
 	// previous one closed (openTestErrorCapture).
 	var captureOpened bool
+	// What the previous set's application missed before its first test is
+	// not this set's.
+	r.setCalls.reset()
 	// var to store the error in the loop
 	var loopErr error
 	// Add secret files to .gitignore if they exist
@@ -4857,8 +4864,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// set with a verdict to give is read: one that stopped otherwise
 		// (the app halted, the user aborted, keploy failed) keeps its status.
 		// And only once a test of it opened its window: before that, what
-		// the agent holds is the app's startup, which is no test's (the
-		// first test's window discards it).
+		// the agent holds is the app's startup, which the first test's read
+		// hands over as the set's. A call made then that no mock answered
+		// fails the set too, named, and no test (before_set_calls.go).
 		//
 		// A stop that came after the loop (the app exited, the user
 		// stopped the run) is not in testSetStatus yet: resolveTestSetStatus
@@ -4875,9 +4883,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("test-set", testSetID), zap.String("reason", appNotStopped))
 			}
 			calls, unclaimedErr := r.unclaimedCalls(runTestSetCtx)
+			if own := r.setCalls.failing(); len(own) > 0 {
+				unclaimed = append(unclaimed, own...)
+				unclaimedReason = setCallsWhy(own)
+				r.logSetCalls(testSetID, own)
+				if testSetStatus == models.TestSetStatusPassed {
+					testSetStatus = models.TestSetStatusFailed
+				}
+			}
 			if len(calls) > 0 {
-				unclaimed = calls
-				unclaimedReason = unclaimedWhy(calls)
+				unclaimed = append(unclaimed, calls...)
+				if unclaimedReason != "" {
+					unclaimedReason += "; "
+				}
+				unclaimedReason += unclaimedWhy(calls)
 				r.logUnclaimed(testSetID, calls)
 				switch {
 				case conf.RecordStopKilled != "":
@@ -7774,6 +7793,9 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
+	// What was missed before the set's first test is the set's, not this
+	// test's (before_set_calls.go).
+	calls = r.setCalls.take(calls)
 	read := testMisses{calls: calls, err: err, asked: true}
 	if provenswitch.On() {
 		read.lost, read.lostErr = r.testCaptureLosses(ctx)
