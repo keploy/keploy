@@ -37,8 +37,8 @@ func exactOpened(h *prRun) []string {
 // the switch: keploy record derives one only under it) owns what its test
 // windows held: each test case the calls recorded inside its own window, as
 // keploy record derives mappings.yaml under the switch. A call recorded
-// outside every window is the pool's. Each test case is judged for what it
-// owns; nothing is written to mappings.yaml.
+// outside every window is the set's worker scope (D2), not the pool's. Each
+// test case is judged for what it owns; nothing is written to mappings.yaml.
 func TestUnderTheSwitchASetWithNoMappingsOwnsWhatItsWindowsHeld(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -54,6 +54,7 @@ func TestUnderTheSwitchASetWithNoMappingsOwnsWhatItsWindowsHeld(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSwitch(t, true)
+			fastWorkerWait(t)
 			h := newPartialRunHarness(t, 2, 0)
 			pinWindows(h)
 			core, logs := observer.New(zap.InfoLevel)
@@ -65,16 +66,8 @@ func TestUnderTheSwitchASetWithNoMappingsOwnsWhatItsWindowsHeld(t *testing.T) {
 			if want := []string{"test-1:mock-a", "test-2:mock-b"}; !reflect.DeepEqual(exactOpened(h), want) {
 				t.Fatalf("opened %v, want %v", exactOpened(h), want)
 			}
-			h.instr.mu.Lock()
-			var pool []string
-			for _, p := range h.instr.allParams {
-				if p.Exact != nil && p.Exact.Stage {
-					pool = p.Exact.Pool
-				}
-			}
-			h.instr.mu.Unlock()
-			if want := []string{"mock-boot"}; !reflect.DeepEqual(pool, want) {
-				t.Fatalf("pool %v, want %v", pool, want)
+			if pool, worker := stagedPoolAndWorker(h); len(pool) != 0 || !reflect.DeepEqual(worker, []string{"mock-boot@"}) {
+				t.Fatalf("pool %v and worker scope %v; want no pool and mock-boot in the worker scope at the set's start", pool, worker)
 			}
 			for test, want := range tc.results {
 				if got := statusOf(t, h, test); got != want {
@@ -221,6 +214,7 @@ func TestUnderTheSwitchAMappingKeployRecordWroteIsTrusted(t *testing.T) {
 // test-1's, neither test-2's nor the pool's.
 func TestUnderTheSwitchWindowOwnershipReadsBothPoolsAndEveryTestCase(t *testing.T) {
 	setSwitch(t, true)
+	fastWorkerWait(t)
 	h := newPartialRunHarness(t, 2, 0)
 	pinWindows(h)
 	h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": {"test-2"}}
@@ -232,16 +226,38 @@ func TestUnderTheSwitchWindowOwnershipReadsBothPoolsAndEveryTestCase(t *testing.
 	if want := []string{"test-2:mock-b"}; !reflect.DeepEqual(exactOpened(h), want) {
 		t.Fatalf("opened %v, want %v", exactOpened(h), want)
 	}
+	if pool, worker := stagedPoolAndWorker(h); len(pool) != 0 || !reflect.DeepEqual(worker, []string{"mock-boot@"}) {
+		t.Fatalf("pool %v and worker scope %v; want no pool and mock-boot in the worker scope at the set's start: test-1's call is test-1's", pool, worker)
+	}
+}
+
+// stagedPoolAndWorker is the set's staging call's pool and worker scope
+// (models.ExactServing), each worker entry "name@place".
+func stagedPoolAndWorker(h *prRun) (pool, worker []string) {
 	h.instr.mu.Lock()
-	var pool []string
+	defer h.instr.mu.Unlock()
 	for _, p := range h.instr.allParams {
 		if p.Exact != nil && p.Exact.Stage {
-			pool = p.Exact.Pool
+			pool, worker = p.Exact.Pool, nil
+			for _, e := range p.Exact.Worker {
+				worker = append(worker, e.Name+"@"+e.Place)
+			}
 		}
 	}
-	h.instr.mu.Unlock()
-	if want := []string{"mock-boot"}; !reflect.DeepEqual(pool, want) {
-		t.Fatalf("pool %v, want %v: test-1's call is test-1's", pool, want)
+	return pool, worker
+}
+
+// fastWorkerWait makes the set's end's wait for its worker scope
+// (awaitWorkerScope) give up at its first wake-up with nothing answered, and
+// wake at once: a harness's application makes no call of its own.
+func fastWorkerWait(t *testing.T) {
+	t.Helper()
+	prevLimit, prevWake := workerStallLimit, workerWake
+	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
+	workerStallLimit = 1
+	workerWake = func(context.Context) (<-chan time.Time, func()) {
+		tk := time.NewTicker(time.Millisecond)
+		return tk.C, tk.Stop
 	}
 }
 
@@ -312,5 +328,41 @@ func TestMarkRecordedInNamesTheTestThatOwnsTheRecording(t *testing.T) {
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if calls[0].RecordedIn != "test-1" || calls[1].RecordedIn != "" || calls[2].RecordedIn != "" || calls[3].RecordedIn != "" || len(named) != 1 {
 		t.Fatalf("recorded_in %q %q %q %q, named %v", calls[0].RecordedIn, calls[1].RecordedIn, calls[2].RecordedIn, calls[3].RecordedIn, named)
+	}
+}
+
+// The set's worker scope is the set's to make (D3): a set whose application
+// made its boot call, the worker scope's, in a test passes; one whose
+// application never made it fails, though every test passed, naming the call.
+func TestUnderTheSwitchTheSetFailsWhenItsWorkerScopeIsNotMade(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		made map[string][]models.MockState
+		want models.TestSetStatus
+	}{
+		{"the boot call made in a test", map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010), mongoAt("mock-boot", 500)}}, models.TestSetStatusPassed},
+		{"the boot call never made", map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}}, models.TestSetStatusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			mappingFile(t, h, nil)
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, tc.made)}
+			if got := h.run(t); got != tc.want {
+				t.Fatalf("set %s, want %s", got, tc.want)
+			}
+			if got := statusOf(t, h, "test-1"); got != models.TestStatusPassed {
+				t.Fatalf("test-1: %s, want PASSED: the worker scope is no test's", got)
+			}
+			named := len(logs.FilterMessageSnippet("never made 1 of the calls the test set's worker scope recorded").All())
+			if want := map[models.TestSetStatus]int{models.TestSetStatusPassed: 0, models.TestSetStatusFailed: 1}[tc.want]; named != want {
+				t.Fatalf("named the missing worker call %d time(s), want %d", named, want)
+			}
+		})
 	}
 }
