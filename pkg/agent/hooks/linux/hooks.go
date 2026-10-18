@@ -105,6 +105,12 @@ type Hooks struct {
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
+
+	// ingress holds the application's moved ports from inside their bind
+	// (ingressport.go), under ingressMu; nil when the kernel has no sk_lookup
+	// or a step failed, and keploy forwards as it did before.
+	ingressMu sync.Mutex
+	ingress   *ingressHold
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -437,6 +443,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 				return err
 			}
 			h.logger.Warn("the ingress hooks did not attach; the app's incoming requests will not be recorded as test cases", zap.Error(err))
+		} else {
+			// The bind hooks now move the app's bind inside bind(2) and write
+			// app_port_info. Hold the moved ports from that moment, so a call
+			// to one before keploy's forwarder listens is served, not refused.
+			h.startIngressHold(ctx)
 		}
 	}
 
@@ -747,6 +758,15 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		h.ready.close()
 	}
 	h.readyMu.Unlock()
+
+	// The ingress hold's program and park go before the objects it shares
+	// app_port_info with (ctx.Done already closes it; this is the backstop).
+	h.ingressMu.Lock()
+	if h.ingress != nil {
+		h.ingress.close()
+		h.ingress = nil
+	}
+	h.ingressMu.Unlock()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
