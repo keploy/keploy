@@ -17,12 +17,26 @@ type SetEndHook interface {
 	SetEnd(testSetID string, end models.SetEnd)
 }
 
+// SetCallsHook is an optional TestHooks extension, under the proven switch:
+// it is told, with each run of each test set's end (SetEndHook's moment), the
+// calls no mock answered that the set's end charged to the set, no test: made
+// before its first test, or after its last (the final report's
+// UnclaimedCalls); none when there were none. Each carries what its parser
+// found of it, as a test's own misses do in its result
+// (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake a
+// recording made elsewhere into the worker scope (design v14 S12, a2). It is
+// a notification: it changes nothing the replayer does.
+type SetCallsHook interface {
+	SetCalls(testSetID string, calls []models.UnmatchedCall)
+}
+
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
 // it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
 // a set with no test case to run, a set ignored whole, a set refused when it
 // loaded) notes it before writing it.
 func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
+	r.setEndCalls = rep.UnclaimedCalls
 }
 
 // tellSetEnd tells the hooks, when they take it (SetEndHook), how a run of
@@ -31,6 +45,13 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 // ended it first: one before any final report, or the failure to write the
 // one at the set's end, which ends the set INTERNAL_ERR whatever it said.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
+	if h, ok := r.hookImpl.(SetCallsHook); ok {
+		var calls []models.UnmatchedCall
+		if noted := r.setEnd; noted != nil && noted.Status == status {
+			calls = append(calls, r.setEndCalls...)
+		}
+		h.SetCalls(testSetID, calls)
+	}
 	h, ok := r.hookImpl.(SetEndHook)
 	if !ok {
 		return

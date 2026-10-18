@@ -457,3 +457,52 @@ func TestASetAHookCheckedKeepsItsReport(t *testing.T) {
 		t.Fatalf("UpdateMocks calls = %d, want 1: a hook that says nothing holds no prune", got)
 	}
 }
+
+// setCallsRecorder is the run's own hooks with SetCallsHook: what record's
+// judging is told of the calls each set's end charged to the set.
+type setCallsRecorder struct {
+	TestHooks
+	mu   sync.Mutex
+	told [][]models.UnmatchedCall
+}
+
+func (h *setCallsRecorder) SetCalls(_ string, calls []models.UnmatchedCall) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.told = append(h.told, calls)
+}
+
+func (h *setCallsRecorder) last() []models.UnmatchedCall {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.told[len(h.told)-1]
+}
+
+// Under the proven switch the calls the set's end charged to the set, made
+// before its first test and after its last, are told to a SetCallsHook with
+// the set's end, each as its parser reported it, so record's judging can read
+// one that is a recording made elsewhere (S12, a2). A set's end whose report
+// does not say the status it ended with tells none.
+func TestTheCallsChargedToTheSetAreToldToTheHooks(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	before := func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "DELETE /msg", Destination: "sqs:4566",
+			Kind: models.MissOutsideTest, BeforeSet: true, ClosestMock: "mock-6", NotOwned: true}}, nil
+	}
+	h.instr.mockErrorsFor = misses(before, nil, afterLast)
+	rec := &setCallsRecorder{TestHooks: h.replayer.GetTestHooks()}
+	h.replayer.SetTestHooks(rec)
+
+	status := h.run(t)
+	h.replayer.tellSetEnd("test-set-0", status, nil)
+	got := rec.last()
+	if len(got) != 2 || got[0].ClosestMock != "mock-6" || !got[0].NotOwned || !got[0].BeforeSet || got[1].ActualSummary != "POST /publish" {
+		t.Fatalf("told %+v; want the delete made before the set, named as mock-6, and the publish after the last test", got)
+	}
+
+	h.replayer.tellSetEnd("test-set-0", models.TestSetStatusInternalErr, errors.New("the report could not be written"))
+	if got := rec.last(); got != nil {
+		t.Fatalf("a set's end its report does not say told %+v", got)
+	}
+}

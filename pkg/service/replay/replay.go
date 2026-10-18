@@ -577,8 +577,10 @@ type Replayer struct {
 	lossRunBaseSet bool
 	// setEnd is how the final report of the test set RunTestSet is running
 	// ends it, once it has one (noteSetEnd): the status it says, and why
-	// (tellSetEnd). Reset before each run of a set.
-	setEnd *models.SetEnd
+	// (tellSetEnd); setEndCalls, the calls it charged to the set
+	// (SetCallsHook). Reset before each run of a set.
+	setEnd      *models.SetEnd
+	setEndCalls []models.UnmatchedCall
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
@@ -1108,7 +1110,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
-			r.setEnd = nil
+			r.setEnd, r.setEndCalls = nil, nil
 			r.finalAttempt = noAttemptFollows(attempt, r.config.Test)
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, effectiveKeepAlive)
 			r.tellSetEnd(testSet, testSetStatus, err)
