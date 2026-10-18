@@ -2493,3 +2493,218 @@ func TestFilterByTimeStampTierAware_StatedPerTestIsNeverPromoted(t *testing.T) {
 		})
 	}
 }
+
+// portServer is an HTTP server on 127.0.0.1 that answers each request with
+// its own port, and that port.
+func portServer(t *testing.T) (*httptest.Server, uint16) {
+	t.Helper()
+	var port uint16
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, port)
+	}))
+	t.Cleanup(srv.Close)
+	port = uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
+	return srv, port
+}
+
+// portTest is a GET of url recorded on the app's port appPort.
+func portTest(url string, appPort uint16) *models.TestCase {
+	return &models.TestCase{Name: "test-1", Kind: models.HTTP, AppPort: appPort,
+		HTTPReq: models.HTTPReq{Method: "GET", URL: url, Header: map[string]string{}}}
+}
+
+// A test goes to the port it was recorded on (app_port), over its URL's
+// port: an app serving on two ports (HTTP on one, SSE on another) gets each
+// test on its own (#3680). Nothing here publishes anything, as on a native
+// replay: no PublishedPort.
+func TestATestGoesToTheAppPortItWasRecordedOn(t *testing.T) {
+	a, pa := portServer(t)
+	_, pb := portServer(t)
+	for _, tc := range []struct {
+		url     string
+		appPort uint16
+		want    uint16
+	}{
+		{a.URL + "/x", pb, pb},
+		{a.URL + "/x", pa, pa},
+		{fmt.Sprintf("http://127.0.0.1:%d/x", pb), pa, pa},
+		{a.URL + "/x", 0, pa}, // no app_port: the URL's
+	} {
+		resp, err := SimulateHTTP(context.Background(), portTest(tc.url, tc.appPort), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5})
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprint(tc.want), resp.Body, "url %s, app_port %d", tc.url, tc.appPort)
+	}
+}
+
+// refusedPort is a port on 127.0.0.1 nothing listens on.
+func refusedPort(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	require.NoError(t, ln.Close())
+	return port
+}
+
+// unreachableAt says every address is one the app can never be reached at,
+// so a refused test fails at once, saying so.
+type unreachableAt struct{}
+
+func (unreachableAt) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return "it is published on host port 18080 instead"
+}
+
+// A test recorded on an app port that the host reaches only through one other
+// host port goes to that host port, which PublishedPort names; without it, it
+// goes to its app port and fails, saying why. A port the user set
+// (ConfigPort) is where it goes, and PublishedPort is not asked.
+func TestATestOfAnAppPortPublishedOnOneHostPortGoesThere(t *testing.T) {
+	srv, hostPort := portServer(t)
+	appPort := refusedPort(t)
+	tc := func() *models.TestCase { return portTest(srv.URL+"/x", appPort) }
+
+	_, err := SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}})
+	require.True(t, IsUnreachableAppPort(err), "without PublishedPort the test goes to its app port: %v", err)
+	require.Contains(t, err.Error(), "it is published on host port 18080 instead")
+
+	var asked []string
+	published := func(_ context.Context, host string, port uint16) uint16 {
+		asked = append(asked, fmt.Sprintf("%s %d", host, port))
+		if port == appPort {
+			return hostPort
+		}
+		return 0
+	}
+	resp, err := SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}, PublishedPort: published})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprint(hostPort), resp.Body)
+	require.Equal(t, []string{fmt.Sprintf("127.0.0.1 %d", appPort)}, asked)
+
+	asked = nil
+	resp, err = SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, ConfigPort: uint32(hostPort), PublishedPort: published})
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprint(hostPort), resp.Body)
+	require.Empty(t, asked, "a port the user set is not redirected")
+
+	// A replaceWith that matches the recorded URL and names the port is the
+	// user's choice too: asked of the recorded URL, which the resolved one
+	// no longer contains.
+	recorded := strings.TrimPrefix(srv.URL, "http://")
+	_, err = SimulateHTTP(context.Background(), tc(), "test-set-0", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{},
+		URLReplacements: map[string]string{recorded: fmt.Sprintf("localhost:%d", appPort)}, PublishedPort: published})
+	require.True(t, IsUnreachableAppPort(err), "a matching replaceWith naming the port sent the test to the published port: %v", err)
+}
+
+// PublishedTarget moves a target to the host port PublishedPort names only
+// when it is the test's app port and nothing the user set moved this test: a
+// replaceWith URL or port map that does not apply to it does not stop it.
+func TestPublishedTargetMovesOnlyAnUnmovedAppPort(t *testing.T) {
+	to18080 := func(_ context.Context, _ string, appPort uint16) uint16 {
+		if appPort == 8080 {
+			return 18080
+		}
+		return 0
+	}
+	none := func(context.Context, string, uint16) uint16 { return 0 }
+	for _, tc := range []struct {
+		name     string
+		cfg      SimulationConfig
+		original string // the recorded URL or authority; "" means target
+		target   string
+		appPort  uint16
+		isHTTP   bool
+		want     string
+	}{
+		{"http, published elsewhere", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:8080/x?q=1", 8080, true, "http://localhost:18080/x?q=1"},
+		{"http, IPv6 loopback", SimulationConfig{PublishedPort: to18080}, "", "http://[::1]:8080/x", 8080, true, "http://[::1]:18080/x"},
+		{"grpc authority", SimulationConfig{PublishedPort: to18080}, "", "localhost:8080", 8080, false, "localhost:18080"},
+		{"published as itself, several, or none", SimulationConfig{PublishedPort: none}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"nothing to ask (native)", SimulationConfig{}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"no app port", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:8080/x", 0, true, "http://localhost:8080/x"},
+		{"target is not the app port", SimulationConfig{PublishedPort: to18080}, "", "http://localhost:9090/x", 8080, true, "http://localhost:9090/x"},
+		{"test.port", SimulationConfig{PublishedPort: to18080, ConfigPort: 8080}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"a replaceWith URL that matches the test and names a port", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"localhost:8080": "127.0.0.1:8080"}}, "http://localhost:8080/x", "http://127.0.0.1:8080/x", 8080, true, "http://127.0.0.1:8080/x"},
+		{"one with its scheme", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"http://localhost:8080": "http://127.0.0.1:8080"}}, "http://localhost:8080/x", "http://127.0.0.1:8080/x", 8080, true, "http://127.0.0.1:8080/x"},
+		{"a replaceWith URL that matches the test and changes only its path", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"/x": "/y"}}, "http://localhost:8080/x", "http://localhost:8080/y", 8080, true, "http://localhost:18080/y"},
+		{"a replaceWith URL that does not match the test", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"staging.internal:9": "localhost:9"}}, "http://localhost:8080/x", "http://localhost:8080/x", 8080, true, "http://localhost:18080/x"},
+		{"a gRPC replaceWith that matches the authority", SimulationConfig{PublishedPort: to18080, URLReplacements: map[string]string{"api:8080": "localhost:8080"}}, "api:8080", "localhost:8080", 8080, false, "localhost:8080"},
+		{"a port map of the app port", SimulationConfig{PublishedPort: to18080, PortMappings: map[uint32]uint32{8080: 8080}}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+		{"a port map of another port", SimulationConfig{PublishedPort: to18080, PortMappings: map[uint32]uint32{9090: 9191}}, "", "http://localhost:8080/x", 8080, true, "http://localhost:18080/x"},
+		{"the URL names the app", SimulationConfig{PublishedPort: to18080, TargetFromURL: true}, "", "http://localhost:8080/x", 8080, true, "http://localhost:8080/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.original
+			if original == "" {
+				original = tc.target
+			}
+			require.Equal(t, tc.want, PublishedTarget(context.Background(), tc.cfg, original, tc.target, tc.appPort, tc.isHTTP))
+		})
+	}
+}
+
+// Whether a replaceWith value names a port, as both resolvers ask it: after
+// the scheme, for HTTP; a path after the host names none.
+func TestReplacementNamesPort(t *testing.T) {
+	for _, tc := range []struct {
+		replacement string
+		isHTTP      bool
+		want        bool
+	}{
+		{"app.internal:9090", true, true},
+		{"http://app.internal:9090", true, true},
+		{"https://app.internal:8443", true, true},
+		{"https://app.internal", true, false},
+		{"http://app.internal", true, false},
+		{"[::1]:8080", false, true},
+		{"[::1]", false, false},
+		{"app.internal:8080/path", true, false},
+		{"app.internal", false, false},
+	} {
+		if got := replacementNamesPort(tc.replacement, tc.isHTTP); got != tc.want {
+			t.Errorf("replacementNamesPort(%q, %v) = %v, want %v", tc.replacement, tc.isHTTP, got, tc.want)
+		}
+	}
+}
+
+// When several replaceWith URL entries match a test, one is applied, the
+// most specific, on every run, and PublishedTarget decides by that same one:
+// it leaves the test where that entry sends it when the entry names a port,
+// and moves it when the entry names none.
+func TestSeveralMatchingReplacementsApplyTheMostSpecific(t *testing.T) {
+	to18080 := func(_ context.Context, _ string, appPort uint16) uint16 {
+		if appPort == 8080 {
+			return 18080
+		}
+		return 0
+	}
+	const recorded = "http://localhost:8080/x"
+	for _, tc := range []struct {
+		name      string
+		urls      map[string]string
+		resolved  string
+		published string
+	}{
+		{"the most specific names a port", map[string]string{"localhost": "app.internal", "localhost:8080": "127.0.0.1:8080"},
+			"http://127.0.0.1:8080/x", "http://127.0.0.1:8080/x"},
+		{"the most specific names none", map[string]string{"localhost": "127.0.0.1:9090", "localhost:8080/x": "localhost:8080/y"},
+			"http://localhost:8080/y", "http://localhost:18080/y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < 64; i++ { // a map's order differs from range to range
+				got, err := ResolveTestTarget(recorded, tc.urls, nil, "", 8080, 0, true, zap.NewNop())
+				require.NoError(t, err)
+				require.Equal(t, tc.resolved, got)
+				require.Equal(t, tc.published, PublishedTarget(context.Background(), SimulationConfig{PublishedPort: to18080, URLReplacements: tc.urls}, recorded, got, 8080, true))
+			}
+		})
+	}
+}
+
+// A replaceWith value with its scheme that names a port keeps that port: the
+// scheme is not taken for a host, and the test's app port does not override
+// it.
+func TestAReplacementWithItsSchemeKeepsItsPort(t *testing.T) {
+	got, err := ResolveTestTarget("http://localhost:8080/x", map[string]string{"http://localhost:8080": "http://127.0.0.1:9090"}, nil, "", 8080, 0, true, zap.NewNop())
+	require.NoError(t, err)
+	require.Equal(t, "http://127.0.0.1:9090/x", got)
+}
