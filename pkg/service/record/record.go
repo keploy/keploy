@@ -2850,7 +2850,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	ctx = models.WithStreamEndToken(ctx, ends.token)
 
 	incomingOpts := models.IncomingOptions{
-		Filters: r.config.Record.Filters,
+		Filters:             r.config.Record.Filters,
+		IncludeStaticAssets: r.config.Record.IncludeStaticAssets,
 	}
 
 	// Create channels to receive incoming and outgoing data.
