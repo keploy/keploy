@@ -371,7 +371,10 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 			return false
 		}
 		seen[mk.Name] = true
-		if _, own := v.index[mk.Name]; own && v.test != "" {
+		// The view's own: the open test's, or, in a pool view, the next
+		// test's calls in flight (ServeExactPool's ahead), answered in the
+		// gap as that test's and flagged consumed only once it opens.
+		if _, own := v.index[mk.Name]; own {
 			return false
 		}
 		if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) {

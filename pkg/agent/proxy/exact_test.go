@@ -1519,3 +1519,25 @@ func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 		t.Fatalf("after a session reset the source was still read (%v), naming %q", asked, got)
 	}
 }
+
+// A pool view's ahead (the next test's call in flight, ServeExactPool) is the
+// view's own: answered in the gap as that test's, it is flagged consumed only
+// once that test opens. An identical second call in the gap is an extra call,
+// and never names it as a recording made elsewhere, answered or not.
+func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
+	ahead := httpCall("t2-fetch", time.Second, "/fetch")
+	mm := stagedManager(t, nil, []*models.Mock{ahead})
+	mm.ServeExactPool("k", nil, ahead)
+	named := func() string {
+		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
+	}
+	if got := named(); got != "" {
+		t.Fatalf("before it answered, the next test's call in flight was named as made elsewhere: %q", got)
+	}
+	if got := pollFirst(t, mm, "t2-fetch"); got != "t2-fetch" {
+		t.Fatalf("the call in flight did not answer in the gap: %s", got)
+	}
+	if got := named(); got != "" {
+		t.Fatalf("an identical second call in the gap named the next test's call in flight %q, which answered here already", got)
+	}
+}
